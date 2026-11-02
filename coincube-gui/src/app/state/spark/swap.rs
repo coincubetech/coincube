@@ -103,6 +103,9 @@ pub struct SparkSwap {
     /// Identity of the latest estimate or swap request. Any edit bumps it,
     /// so an answer to an older request is dropped.
     request: u64,
+    /// The swap's result arrived while another page was showing, so the
+    /// user hasn't seen it: the next visit shows it instead of a new form.
+    result_unseen: bool,
 }
 
 impl SparkSwap {
@@ -118,6 +121,7 @@ impl SparkSwap {
             limits: None,
             phase: SwapPhase::Details { error: None },
             request: 0,
+            result_unseen: false,
         }
     }
 
@@ -132,6 +136,14 @@ impl SparkSwap {
     #[cfg(test)]
     pub(crate) fn set_phase_for_tests(&mut self, phase: SwapPhase) {
         self.phase = phase;
+    }
+
+    /// Put the panel where `Confirm` leaves it and return that request.
+    #[cfg(test)]
+    pub(crate) fn start_swapping_for_tests(&mut self, ok: PrepareSwapOk) -> u64 {
+        self.request += 1;
+        self.phase = SwapPhase::Swapping(Box::new(ok));
+        self.request
     }
 
     pub(crate) fn amount_input_for_view(&self) -> &str {
@@ -269,6 +281,19 @@ impl SparkSwap {
         )
     }
 
+    /// The app's entry point: every Swap message reaches this panel whether
+    /// or not it is showing, so a swap's answer is never lost to navigation.
+    /// `on_screen` says whether the Swap page is the current one.
+    pub(crate) fn deliver(&mut self, message: SparkSwapMessage, on_screen: bool) -> Task<Message> {
+        let answer = matches!(message, SparkSwapMessage::Swapped { .. });
+        let swapping = matches!(self.phase, SwapPhase::Swapping(_));
+        let task = self.on_message(message);
+        if answer && swapping && !matches!(self.phase, SwapPhase::Swapping(_)) {
+            self.result_unseen = !on_screen;
+        }
+        task
+    }
+
     pub(crate) fn on_message(&mut self, message: SparkSwapMessage) -> Task<Message> {
         match message {
             SparkSwapMessage::AmountEdited(input) => {
@@ -400,6 +425,7 @@ impl SparkSwap {
                     self.amount_input.clear();
                     self.max = false;
                     self.phase = SwapPhase::Details { error: None };
+                    self.result_unseen = false;
                     self.request += 1;
                     return Task::batch([self.fetch_balance(), self.fetch_limits()]);
                 }
@@ -437,7 +463,7 @@ impl State for SparkSwap {
         message: Message,
     ) -> Task<Message> {
         match message {
-            Message::View(view::Message::SparkSwap(message)) => self.on_message(message),
+            Message::View(view::Message::SparkSwap(message)) => self.deliver(message, true),
             _ => Task::none(),
         }
     }
@@ -447,10 +473,13 @@ impl State for SparkSwap {
         _daemon: Option<Arc<dyn crate::daemon::Daemon + Sync + Send>>,
         _wallet: Option<Arc<crate::app::wallet::Wallet>>,
     ) -> Task<Message> {
-        // Coming back after a finished swap starts a new one. A swap still
-        // waiting for its answer, or one whose outcome is unknown, stays on
+        // Coming back after a finished swap the user has seen starts a new
+        // one. A result that arrived while they were away, a swap still
+        // waiting for its answer, or one whose outcome is unknown stays on
         // screen until the user moves on from it.
-        if matches!(self.phase, SwapPhase::Swapped(_) | SwapPhase::Refused(_)) {
+        if matches!(self.phase, SwapPhase::Swapped(_) | SwapPhase::Refused(_))
+            && !std::mem::take(&mut self.result_unseen)
+        {
             self.amount_input.clear();
             self.max = false;
             self.phase = SwapPhase::Details { error: None };
@@ -459,7 +488,10 @@ impl State for SparkSwap {
             // A quote left on screen while away may have expired: ask again.
             self.phase = SwapPhase::Details { error: None };
         }
-        self.request += 1;
+        // The swap in flight keeps its request, so its answer still lands.
+        if !matches!(self.phase, SwapPhase::Swapping(_)) {
+            self.request += 1;
+        }
         Task::batch([self.fetch_balance(), self.fetch_limits()])
     }
 }
@@ -801,6 +833,79 @@ mod tests {
         // Leaving and coming back keeps it on screen.
         drop(swap.reload(None, None));
         assert!(matches!(swap.phase, SwapPhase::Unknown(_)));
+    }
+
+    #[test]
+    fn a_swap_answer_survives_leaving_and_coming_back() {
+        let done = || {
+            SwapAttempt::Done(SwapOk {
+                swap_id: "swap".into(),
+                status: SwapStatus::Completed,
+            })
+        };
+
+        // Away and back while the swap is out: its answer still lands.
+        let mut swap = loaded(2_000_000, 0);
+        let request = swap.start_swapping_for_tests(quote(WalletAsset::Bitcoin, 100_000));
+        drop(swap.reload(None, None));
+        assert!(matches!(swap.phase, SwapPhase::Swapping(_)));
+        drop(swap.deliver(
+            SparkSwapMessage::Swapped {
+                request,
+                result: done(),
+            },
+            true,
+        ));
+        assert!(
+            matches!(swap.phase, SwapPhase::Swapped(_)),
+            "the in-flight request survives a reload"
+        );
+
+        // The answer arrives while another page shows: the next visit shows
+        // it, and the visit after that starts a new swap.
+        let mut swap = loaded(2_000_000, 0);
+        let request = swap.start_swapping_for_tests(quote(WalletAsset::Bitcoin, 100_000));
+        drop(swap.deliver(
+            SparkSwapMessage::Swapped {
+                request,
+                result: done(),
+            },
+            false,
+        ));
+        assert!(matches!(swap.phase, SwapPhase::Swapped(_)));
+        drop(swap.reload(None, None));
+        assert!(
+            matches!(swap.phase, SwapPhase::Swapped(_)),
+            "unseen result kept"
+        );
+        drop(swap.reload(None, None));
+        assert!(matches!(swap.phase, SwapPhase::Details { error: None }));
+
+        // A refusal that arrives away is kept the same way.
+        let mut swap = loaded(2_000_000, 0);
+        let request = swap.start_swapping_for_tests(quote(WalletAsset::Bitcoin, 100_000));
+        drop(swap.deliver(
+            SparkSwapMessage::Swapped {
+                request,
+                result: SwapAttempt::Refused("handle expired".into()),
+            },
+            false,
+        ));
+        drop(swap.reload(None, None));
+        assert!(matches!(swap.phase, SwapPhase::Refused(_)));
+
+        // Seen on screen: leaving and coming back starts a new swap.
+        let mut swap = loaded(2_000_000, 0);
+        let request = swap.start_swapping_for_tests(quote(WalletAsset::Bitcoin, 100_000));
+        drop(swap.deliver(
+            SparkSwapMessage::Swapped {
+                request,
+                result: done(),
+            },
+            true,
+        ));
+        drop(swap.reload(None, None));
+        assert!(matches!(swap.phase, SwapPhase::Details { error: None }));
     }
 
     #[test]
