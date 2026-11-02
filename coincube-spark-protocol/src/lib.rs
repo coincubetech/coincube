@@ -2696,6 +2696,7 @@ mod tests {
             prepare: legacy_prepare(),
             pay_from: WalletAsset::Usdb,
             conversion: Some(Box::new(quote())),
+            token_payment: None,
         };
         assert_eq!(
             response_json(1, OkPayload::PrepareSendFrom(ok)),
@@ -2726,6 +2727,7 @@ mod tests {
                 prepare: legacy_prepare(),
                 pay_from: WalletAsset::Usdb,
                 conversion: Some(Box::new(quote())),
+                token_payment: None,
             }))
         else {
             panic!("expected prepare_send_from");
@@ -2743,11 +2745,62 @@ mod tests {
             },
             pay_from: WalletAsset::Bitcoin,
             conversion: None,
+            token_payment: None,
         })
         .expect("serialize");
         assert!(value.get("conversion").is_none(), "{value}");
+        assert!(value.get("token_payment").is_none(), "{value}");
         let back: PrepareSendFromOk = serde_json::from_value(value).expect("parse");
         assert!(back.conversion.is_none());
+        assert!(back.token_payment.is_none());
+    }
+
+    /// A USDB invoice paid from USDB carries its USDB figures, denominated,
+    /// beside zero sats; a bridge older than the field reads as `None`.
+    #[test]
+    fn a_token_payment_has_exact_wire_shape_and_round_trips() {
+        let usdb = |amount| AssetAmount {
+            asset: WalletAsset::Usdb,
+            amount,
+        };
+        let token_payment = TokenPayment {
+            amount: usdb(2_500_000),
+            fee: usdb(1_200),
+        };
+        let ok = PrepareSendFromOk {
+            prepare: PrepareSendOk {
+                amount_sat: 0,
+                fee_sat: 0,
+                method: "SparkInvoice".into(),
+                ..legacy_prepare()
+            },
+            pay_from: WalletAsset::Usdb,
+            conversion: None,
+            token_payment: Some(token_payment),
+        };
+        let value = serde_json::to_value(&ok).expect("serialize");
+        assert_eq!(
+            value["token_payment"],
+            json!({
+                "amount": { "asset": "usdb", "amount": "2500000" },
+                "fee": { "asset": "usdb", "amount": "1200" }
+            })
+        );
+        let back: PrepareSendFromOk = serde_json::from_value(value.clone()).expect("parse");
+        assert_eq!(back.token_payment, Some(token_payment));
+
+        let mut legacy = value;
+        legacy
+            .as_object_mut()
+            .expect("object")
+            .remove("token_payment");
+        let back: PrepareSendFromOk = serde_json::from_value(legacy).expect("parse");
+        assert!(back.token_payment.is_none());
+
+        // `usdb_invoice` defaults to false from an older bridge.
+        let parsed: ParseInputOk =
+            serde_json::from_value(json!({ "kind": "spark_invoice" })).expect("parse");
+        assert!(!parsed.usdb_invoice);
     }
 
     #[test]
