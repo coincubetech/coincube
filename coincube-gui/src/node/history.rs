@@ -830,6 +830,7 @@ pub async fn bootstrap_step(
     let _lease = HistoryLease::acquire(dir)?;
     let mut job: Recovery = read_json(path)?.ok_or("Missing recovery progress")?;
     job.validate(binding)?;
+    let before = job.download_next;
     let result:Result<(),String>=async {
         let info=rpc.check_chain(network).await?;
         if info["automatic_pruning"].as_bool()!=Some(false) || info["pruned"].as_bool()!=Some(true) {return Err("Restart the managed node with recovery pruning controls".into());}
@@ -854,7 +855,8 @@ pub async fn bootstrap_step(
         write_json(path, &job)?;
         return if paused { Err(error) } else { Ok(job) };
     }
-    if job.transient_failures > 0 {
+    // Only a step that fetched something ends a run of node failures.
+    if job.transient_failures > 0 && job.download_next != before {
         job.transient_failures = 0;
         job.last_error = None;
     }
@@ -875,6 +877,7 @@ pub async fn recover_step(
     if matches!(recovery.phase, Phase::Paused | Phase::Cancelled) {
         return Ok(recovery);
     }
+    let before = (recovery.next, recovery.blocks.len());
     let result: Result<(),String> = async {
         let info = rpc.check_chain(network).await?;
         if rpc.block_hash(recovery.target).await? != recovery.target_hash {
@@ -930,8 +933,15 @@ pub async fn recover_step(
         write_json(path, &recovery)?;
         return if paused { Err(error) } else { Ok(recovery) };
     }
-    recovery.last_error = None;
-    recovery.transient_failures = 0;
+    // A step that only found a scan still running, or a block not yet
+    // delivered, made no progress: it must not reset the failure count, or a
+    // scan that always outlives its RPC deadline would retry forever.
+    let advanced = (recovery.next, recovery.blocks.len()) != before
+        || matches!(recovery.phase, Phase::Reconciling | Phase::Complete);
+    if advanced || recovery.transient_failures == 0 {
+        recovery.last_error = None;
+        recovery.transient_failures = 0;
+    }
     write_json(path, &recovery)?;
     Ok(recovery)
 }
@@ -1131,9 +1141,13 @@ pub async fn plan_coin_scans(
         } else if unspent.is_null() {
             let found = match outspends {
                 Some(source) => match fetch_outspend(source, coin.outpoint).await {
-                    Ok(Some((spent_at, block))) if spent_at >= height => {
-                        (rpc.block_hash(spent_at).await? == block).then_some(spent_at)
-                    }
+                    // The provider's height can be past the local tip or wrong;
+                    // either way the coin falls back to a full scan.
+                    Ok(Some((spent_at, block))) if spent_at >= height => rpc
+                        .block_hash(spent_at)
+                        .await
+                        .is_ok_and(|local| local == block)
+                        .then_some(spent_at),
                     _ => None,
                 },
                 None => None,
@@ -1741,6 +1755,67 @@ mod tests {
         assert_eq!(job.transient_failures, 1);
         assert!(job.last_error.unwrap().contains("Retrying"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_scan_still_running_does_not_reset_the_failure_count() {
+        let server = MockServer::start_async().await;
+        response(
+            &server,
+            "getblockhash",
+            json!(genesis().block_hash().to_string()),
+        )
+        .await;
+        response(&server,"getblockchaininfo",json!({"pruned":true,"automatic_pruning":false,"initialblockdownload":false,"blocks":0,"pruneheight":999})).await;
+        response(
+            &server,
+            "getwalletinfo",
+            json!({"scanning":{"duration":130,"progress":0.5}}),
+        )
+        .await;
+        let dir = directory();
+        let path = recovery_path(&dir, "fixture");
+        let mut job = Recovery::new(binding(), 0, 0, genesis().block_hash()).unwrap();
+        job.phase = Phase::Scanning;
+        job.transient_failures = 3;
+        job.last_error = Some("Cannot reach local node for rescanblockchain. Retrying…".into());
+        write_json(&path, &job).unwrap();
+        let job = recover_step(&rpc(&server).await, Network::Regtest, &binding(), &path)
+            .await
+            .unwrap();
+        assert_eq!(job.transient_failures, 3);
+        assert!(job.last_error.is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_outspend_past_the_local_tip_falls_back_instead_of_failing() {
+        let funding = genesis().txdata[0].compute_txid();
+        let server = MockServer::start_async().await;
+        // Registered first, so it wins over the generic getblockhash below.
+        server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .json_body_partial(r#"{"method":"getblockhash"}"#)
+                    .body_contains("\"params\":[7]");
+                then.status(500).json_body(json!({"id":"history","error":{"code":-8,"message":"Block height out of range"}}));
+            })
+            .await;
+        spent_coin_node(&server).await;
+        let esplora = MockServer::start_async().await;
+        esplora
+            .mock_async(|when, then| {
+                when.method(GET).path(format!("/tx/{funding}/outspend/0"));
+                then.status(200).json_body(json!({"spent":true,"status":{"confirmed":true,"block_height":7,"block_hash":genesis().block_hash().to_string()}}));
+            })
+            .await;
+        let config: EsploraConfig =
+            serde_json::from_value(json!({"addr":esplora.base_url()})).unwrap();
+        let plan = plan_coin_scans(&rpc(&server).await, &[coin(None)], Some(&config))
+            .await
+            .unwrap();
+        assert!(plan.blocks.is_empty());
+        assert_eq!(plan.floor.map(|(height, _)| height), Some(0));
     }
 
     #[tokio::test]
