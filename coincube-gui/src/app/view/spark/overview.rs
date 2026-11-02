@@ -1,26 +1,25 @@
 //! View renderer for [`crate::app::state::spark::overview::SparkOverview`].
 //!
-//! Mirrors the Liquid overview layout almost exactly:
-//! - Unified portfolio card with a total balance header + one asset row
-//!   for BTC. No USDt (that's a Liquid-only asset) and no
-//!   L-BTC branding — Spark runs on real Bitcoin.
-//! - Recent transactions use the same compact row as the other landings.
-//! - A "Stable" badge on the balance when the SDK reports an active
-//!   Stable Balance token.
+//! The Spark wallet page (Tenshu v175 W2, board `P-Spark`):
+//! - "Total balance", then one asset row per balance: Bitcoin, and US
+//!   Dollar while the wallet holds USDB ([`spark_assets`]).
+//! - "Recent activity", mounted by App from Activity.
+//! - The Lightning Address block. The Stable Balance control lives in
+//!   Settings › Spark › Balances & conversion.
 
 use coincube_core::miniscript::bitcoin::Amount;
 
 use crate::app::wallets::DomainPaymentStatus;
-use coincube_ui::component::text::Text;
+use coincube_ui::component::tenshu::{asset_row, AmountVisibility, BalanceValue, Figure};
 use coincube_ui::{
-    color,
     component::{amount::*, button, text::*},
     theme,
+    theme::tenshu::size,
     widget::*,
 };
 use iced::{
-    widget::{container, Column, Container, Row},
-    Alignment, Background, Length,
+    widget::{Column, Container, Row},
+    Alignment, Length,
 };
 
 use crate::app::settings::display::DisplayMode;
@@ -114,10 +113,6 @@ pub struct SparkOverviewView<'a> {
     pub fiat_converter: Option<FiatAmountConverter>,
     pub bitcoin_unit: BitcoinDisplayUnit,
     pub show_direction_badges: bool,
-    /// Phase 6: `true` when the SDK reports an active Stable Balance
-    /// token. Rendered as a small "Stable" badge next to the balance
-    /// header.
-    pub stable_balance_active: Option<bool>,
     /// Reference BTC/USD price used to fold USDB into the unified
     /// portfolio total at the current rate. `None` skips the fold —
     /// matches the Liquid panel's USDt behaviour.
@@ -192,76 +187,27 @@ pub fn spark_landing_address<'a>(
     row.map(crate::app::view::Message::ConnectCube)
 }
 
-/// Context below Spark's recent activity. The address form is supplied by the
-/// Connect owner so its validation, confirmation, and account gate stay shared.
+/// Context below Spark's recent activity: the Lightning Address block. The
+/// address form is supplied by the Connect owner so its validation,
+/// confirmation, and account gate stay shared.
 pub fn spark_landing_context<'a>(
     address: Element<'a, crate::app::view::Message>,
-    active: Option<bool>,
-    saving: bool,
-    availability: SparkLandingAvailability,
-    cube_id: &str,
 ) -> Element<'a, crate::app::view::Message> {
-    use crate::app::view::{Message, SparkOverviewMessage};
-
-    let status = stable_balance_status_text(availability, active, saving);
-    let label = match active {
-        Some(true) => "Stable Balance · On on this device",
-        Some(false) => "Stable Balance · Off on this device",
-        None => "Stable Balance",
-    };
-    let toggle = coincube_ui::component::tenshu::toggle(
-        landing_control_id(cube_id, "Spark", "stable-balance-toggle"),
-        active.unwrap_or(false),
-        Message::FocusAction,
-    )
-    .on_toggle_maybe(
-        (availability == SparkLandingAvailability::Ready && !saving && active.is_some()).then_some(
-            |enabled| Message::SparkOverview(SparkOverviewMessage::ToggleStableBalance(enabled)),
-        ),
-    );
-    let stable = Container::new(
-        Column::new()
-            .spacing(8)
-            .push(
-                Row::new()
-                    .spacing(12)
-                    .align_y(Alignment::Center)
-                    .push(
-                        Column::new()
-                            .spacing(4)
-                            .width(Length::Fill)
-                            .push(h4_bold(label))
-                            .push(text("Keep a portion of your Bitcoin balance pegged to USD. Set per device; not restored with the seed. No guaranteed peg.")
-                                .size(P2_SIZE).style(theme::text::secondary)),
-                    )
-                    .push(toggle),
-            )
-            .push_maybe(status.map(|copy| text(copy).size(P2_SIZE).style(theme::text::secondary))),
-    )
-    .padding(20)
-    .width(Length::Fill)
-    .style(crate::app::view::shared::landing::landing_card_style);
-
-    Column::new()
-        .spacing(16)
-        .padding([16, 16])
-        .push(address)
-        .push(stable)
-        .into()
+    Column::new().padding([16, 16]).push(address).into()
 }
 
-pub(crate) fn stable_balance_status_text(
-    availability: SparkLandingAvailability,
-    active: Option<bool>,
-    saving: bool,
-) -> Option<&'static str> {
-    match (availability, saving, active) {
-        (SparkLandingAvailability::Unavailable, _, _) => Some("Spark is unavailable"),
-        (_, true, _) => Some("Saving…"),
-        (SparkLandingAvailability::Refreshing, _, _) => Some("Refreshing…"),
-        (SparkLandingAvailability::Ready, _, None) => Some("Stable Balance setting is unknown"),
-        (SparkLandingAvailability::Ready, _, Some(_)) => None,
-    }
+/// The balances the Spark page lists, in order. Bitcoin always, unless the
+/// wallet holds only USDB; US Dollar while it holds any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SparkAsset {
+    Bitcoin,
+    UsDollar,
+}
+
+pub fn spark_assets(balance_sats: u64, usdb_units: u64) -> Vec<SparkAsset> {
+    let bitcoin = (balance_sats > 0 || usdb_units == 0).then_some(SparkAsset::Bitcoin);
+    let us_dollar = (usdb_units > 0).then_some(SparkAsset::UsDollar);
+    bitcoin.into_iter().chain(us_dollar).collect()
 }
 
 impl<'a> SparkOverviewView<'a> {
@@ -291,7 +237,6 @@ impl<'a> SparkOverviewView<'a> {
                 self.fiat_converter,
                 self.bitcoin_unit,
                 self.show_direction_badges,
-                self.stable_balance_active,
                 self.display_mode,
                 self.mask_amounts,
                 self.cube_id,
@@ -310,7 +255,6 @@ fn connected_view<'a>(
     fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: BitcoinDisplayUnit,
     _show_direction_badges: bool,
-    stable_balance_active: Option<bool>,
     display_mode: DisplayMode,
     mask_amounts: bool,
     cube_id: &str,
@@ -352,8 +296,7 @@ fn connected_view<'a>(
             Row::new()
                 .spacing(8)
                 .align_y(Alignment::Center)
-                .push(h4_bold("Balance"))
-                .push_maybe((stable_balance_active == Some(true)).then(stable_badge)),
+                .push(h4_bold("Total balance")),
         )
         .push(if mask_amounts {
             amount_cell::<SparkOverviewMessage>(AmountCell::masked(), AmountTier::Card)
@@ -383,99 +326,106 @@ fn connected_view<'a>(
             .into()
         });
 
-    // Show raw BTC alongside raw USDB. The combined header is only a
-    // current-rate display estimate when a dedicated BTC/USD quote exists;
-    // the send route keeps the SDK's own spending behavior.
-    let btc_row_amount = Amount::from_sat(balance_sats);
-    let btc_row_fiat = fiat_converter.as_ref().map(|c| c.convert(btc_row_amount));
-
-    let btc_fiat_str = btc_row_fiat
-        .as_ref()
-        .map(|f| format!("{} {}", f.to_formatted_string(), f.currency()))
-        .unwrap_or_default();
-    let btc_row = Row::new()
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .push(coincube_ui::image::asset_network_logo::<SparkOverviewMessage>("btc", "spark", 40.0))
-        .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-        .push(amount_cell::<SparkOverviewMessage>(
-            if mask_amounts {
-                AmountCell::masked()
-            } else {
-                AmountCell::shown(
-                    format!(
-                        "{} {}",
-                        btc_row_amount.to_formatted_string_with_unit(bitcoin_unit),
-                        bitcoin_unit.label()
-                    ),
-                    (!btc_fiat_str.is_empty()).then_some(btc_fiat_str),
-                )
-            },
-            AmountTier::Row,
-        ))
-        .push(iced::widget::Space::new().width(Length::Fill))
-        .push(
+    // Each balance in its own unit: the total above is a current-rate
+    // estimate only when a dedicated BTC/USD quote exists.
+    let visibility = if mask_amounts {
+        AmountVisibility::Hidden
+    } else {
+        AmountVisibility::Shown
+    };
+    let usdb_units = stable_balance.map_or(0, |sb| sb.balance);
+    let send_receive = |asset: &str, send: SparkOverviewMessage, receive: SparkOverviewMessage| {
+        vec![
             landing_button(
-                landing_control_id(cube_id, "Spark", "send-btc"),
+                landing_control_id(cube_id, "Spark", &format!("send-{asset}")),
                 "Send",
                 None,
                 SparkOverviewMessage::FocusAction,
-                Some(SparkOverviewMessage::SendBtc),
+                Some(send),
                 theme::button::primary,
             )
-            .width(Length::Fixed(90.0)),
-        )
-        .push(
+            .width(Length::Fixed(90.0))
+            .into(),
             landing_button(
-                landing_control_id(cube_id, "Spark", "receive-btc"),
+                landing_control_id(cube_id, "Spark", &format!("receive-{asset}")),
                 "Receive",
                 None,
                 SparkOverviewMessage::FocusAction,
-                Some(SparkOverviewMessage::ReceiveBtc),
+                Some(receive),
                 theme::button::orange_outline,
             )
-            .width(Length::Fixed(90.0)),
-        );
-
-    let usdb_row = stable_balance.as_ref().map(|sb| {
-        use crate::app::breez_spark::assets::format_token_display;
-        Row::new()
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .push(text("USDB").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-            .push(amount_cell::<SparkOverviewMessage>(
-                if mask_amounts {
-                    AmountCell::masked()
-                } else {
-                    AmountCell::shown(
-                        format!("{} USDB", format_token_display(sb.balance, sb.decimals)),
-                        None,
-                    )
-                },
-                AmountTier::Row,
-            ))
-    });
+            .width(Length::Fixed(90.0))
+            .into(),
+        ]
+    };
+    let mut rows = Column::new();
+    for asset in spark_assets(balance_sats, usdb_units) {
+        rows = rows.push(match asset {
+            SparkAsset::Bitcoin => {
+                let amount = Amount::from_sat(balance_sats);
+                let primary = Figure::new(amount.to_formatted_string_with_unit(bitcoin_unit))
+                    .unit(bitcoin_unit.label());
+                let secondary = fiat_converter
+                    .as_ref()
+                    .map(|c| c.convert(amount))
+                    .map(|f| Figure::new(f.to_formatted_string()).unit(f.currency().to_string()));
+                asset_row(
+                    coincube_ui::image::asset_network_logo::<SparkOverviewMessage>(
+                        "btc",
+                        "spark",
+                        size::COIN,
+                    ),
+                    "Bitcoin",
+                    if balance_sats == 0 {
+                        BalanceValue::Zero { primary, secondary }
+                    } else {
+                        BalanceValue::Known { primary, secondary }
+                    },
+                    visibility,
+                    send_receive(
+                        "btc",
+                        SparkOverviewMessage::SendBtc,
+                        SparkOverviewMessage::ReceiveBtc,
+                    ),
+                )
+            }
+            SparkAsset::UsDollar => {
+                use crate::app::breez_spark::assets::format_token_display;
+                let decimals = stable_balance.map_or(0, |sb| sb.decimals);
+                let primary = Figure::new(format_token_display(usdb_units, decimals)).unit("USDB");
+                // ≈ sats only at a dedicated BTC/USD quote.
+                let secondary = reference_price.map(|_| {
+                    Figure::new(format!(
+                        "≈ {}",
+                        Amount::from_sat(usdb_as_sats).to_formatted_string_with_unit(bitcoin_unit)
+                    ))
+                    .unit(bitcoin_unit.label())
+                });
+                asset_row(
+                    coincube_ui::image::asset_logo("usdb")
+                        .width(Length::Fixed(size::COIN))
+                        .height(Length::Fixed(size::COIN)),
+                    "US Dollar",
+                    BalanceValue::Known { primary, secondary },
+                    visibility,
+                    // Paying from US Dollar is S4u; until then both open
+                    // Spark's Send and Receive. Receive explains that
+                    // payments arrive as bitcoin.
+                    send_receive(
+                        "usdb",
+                        SparkOverviewMessage::SendBtc,
+                        SparkOverviewMessage::ReceiveBtc,
+                    ),
+                )
+            }
+        });
+    }
     let balance_section = landing_balance_section(
         Column::new()
             .spacing(16)
             .push(total_col)
             .push(iced::widget::rule::horizontal(1))
-            .push(btc_row)
-            .push_maybe(usdb_row)
-            .push_maybe((stable_balance_active.is_none()).then(|| {
-                text("Stable Balance setting is still unknown")
-                    .size(P2_SIZE)
-                    .style(theme::text::secondary)
-            }))
-            .push_maybe(
-                (stable_balance_active == Some(false)
-                    && stable_balance.as_ref().is_some_and(|sb| sb.balance > 0))
-                .then(|| {
-                    text("USDB is held while Stable Balance is off. Use the toggle below.")
-                        .size(P2_SIZE)
-                        .style(theme::text::warning)
-                }),
-            ),
+            .push(rows),
     );
 
     content = content.push(balance_section);
@@ -527,27 +477,6 @@ fn row_display_amount(tx: &SparkRecentTransaction) -> Amount {
     }
 }
 
-fn stable_badge<'a>() -> Element<'a, SparkOverviewMessage> {
-    Container::new(
-        text("Stable")
-            .size(11)
-            .style(|_: &theme::Theme| iced::widget::text::Style {
-                color: Some(color::ORANGE),
-            }),
-    )
-    .padding([2, 8])
-    .style(|_: &theme::Theme| container::Style {
-        background: Some(Background::Color(color::TRANSPARENT)),
-        border: iced::Border {
-            color: color::ORANGE,
-            width: 1.0,
-            radius: 10.0.into(),
-        },
-        ..Default::default()
-    })
-    .into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,9 +510,14 @@ mod tests {
         connect.lightning_address = Some(LightningAddress {
             lightning_address: Some("sats@coincube.io".into()),
         });
+        // Both balances, so the US Dollar row shows (W2).
         let snapshot = SparkBalanceSnapshot {
             balance_sats: 25_053,
-            stable_balance: None,
+            stable_balance: Some(coincube_spark_protocol::StableBalanceSnapshot {
+                balance: 12_400_000,
+                decimals: 6,
+                ticker: "USDB".into(),
+            }),
         };
         let menu = Menu::Spark(SparkSubMenu::Overview);
         // Enough "Recent activity" for the page to scroll under its head.
@@ -630,10 +564,8 @@ mod tests {
                         &menu,
                         cache,
                         move || {
-                            view::wallet_page_head(
+                            crate::app::state::spark::overview::SparkOverview::page_head_for_tests(
                                 cache,
-                                "Spark",
-                                cache.wallet_names.spark.as_deref(),
                             )
                         },
                         move || {
@@ -642,8 +574,7 @@ mod tests {
                                     synthetic_overview(
                                         SparkStatus::Connected(snapshot.clone()),
                                         &[],
-                                        Some(true),
-                                        None,
+                                        Some(80_000.0),
                                         None,
                                     )
                                     .map(view::Message::SparkOverview),
@@ -659,13 +590,7 @@ mod tests {
                                     ))
                                     .padding([0, 16]),
                                 )
-                                .push(spark_landing_context(
-                                    spark_landing_address(connect),
-                                    Some(true),
-                                    false,
-                                    SparkLandingAvailability::Ready,
-                                    "synthetic-cube",
-                                ))
+                                .push(spark_landing_context(spark_landing_address(connect)))
                                 .into()
                         },
                         || None,
@@ -676,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn spark_landing_mounts_address_confirmation_and_stable_pending_states() {
+    fn spark_landing_mounts_the_address_and_its_confirmation() {
         let mut connect = ConnectCubePanel::new(
             None,
             "synthetic-cube".into(),
@@ -710,19 +635,12 @@ mod tests {
                             synthetic_overview(
                                 SparkStatus::Connected(snapshot.clone()),
                                 &[],
-                                Some(true),
                                 None,
                                 None,
                             )
                             .map(view::Message::SparkOverview),
                         )
-                        .push(spark_landing_context(
-                            address,
-                            Some(true),
-                            false,
-                            SparkLandingAvailability::Ready,
-                            "synthetic-cube",
-                        ))
+                        .push(spark_landing_context(address))
                         .into(),
                     size,
                     appearance,
@@ -730,93 +648,13 @@ mod tests {
                 );
                 assert!(mounted.contains("sats@coincube.io"));
                 assert!(mounted.contains("Receive to a readable address"));
-                assert!(mounted.contains("Stable Balance · On on this device"));
-                assert!(mounted.has_focus(landing_control_id(
+                // The Stable Balance control moved to Settings (W2).
+                assert!(!mounted.contains("Stable Balance"));
+                assert!(!mounted.has_focus(landing_control_id(
                     "synthetic-cube",
                     "Spark",
                     "stable-balance-toggle"
                 )));
-                let section = capture::inspect(
-                    "spark-context-scrolled-section-on",
-                    spark_landing_context(
-                        spark_landing_address(&connect),
-                        Some(true),
-                        false,
-                        SparkLandingAvailability::Ready,
-                        "synthetic-cube",
-                    ),
-                    size,
-                    appearance,
-                    theme,
-                );
-                assert!(section.contains("Stable Balance · On on this device"));
-                assert!(section.contains("Receive to a readable address"));
-                let off_section = capture::inspect(
-                    "spark-context-scrolled-section-off",
-                    spark_landing_context(
-                        spark_landing_address(&connect),
-                        Some(false),
-                        false,
-                        SparkLandingAvailability::Ready,
-                        "synthetic-cube",
-                    ),
-                    size,
-                    appearance,
-                    theme,
-                );
-                assert!(off_section.contains("Stable Balance · Off on this device"));
-                for (availability, expected, scenario) in [
-                    (
-                        SparkLandingAvailability::Refreshing,
-                        "Refreshing…",
-                        "spark-context-scrolled-section-refreshing",
-                    ),
-                    (
-                        SparkLandingAvailability::Unavailable,
-                        "Spark is unavailable",
-                        "spark-context-scrolled-section-unavailable",
-                    ),
-                ] {
-                    let state = capture::inspect(
-                        scenario,
-                        spark_landing_context(
-                            spark_landing_address(&connect),
-                            Some(true),
-                            false,
-                            availability,
-                            "synthetic-cube",
-                        ),
-                        size,
-                        appearance,
-                        theme,
-                    );
-                    assert!(state.contains(expected));
-                    assert!(!state.has_focus(landing_control_id(
-                        "synthetic-cube",
-                        "Spark",
-                        "stable-balance-toggle"
-                    )));
-                }
-                for pointer in [false, true] {
-                    let emitted = capture::activate(
-                        spark_landing_context(
-                            spark_landing_address(&connect),
-                            Some(true),
-                            false,
-                            SparkLandingAvailability::Ready,
-                            "synthetic-cube",
-                        ),
-                        landing_control_id("synthetic-cube", "Spark", "stable-balance-toggle"),
-                        size,
-                        pointer,
-                    );
-                    assert!(emitted.iter().any(|message| matches!(
-                        message,
-                        view::Message::SparkOverview(SparkOverviewMessage::ToggleStableBalance(
-                            false
-                        ))
-                    )));
-                }
                 for control in ["ln-copy", "ln-change"] {
                     assert!(mounted.has_focus(landing_control_id(
                         "synthetic-cube",
@@ -842,19 +680,12 @@ mod tests {
                 connect.ln_change_confirm_pending = Some("newname".into());
                 let editing = capture::inspect(
                     "spark-context-address-editing",
-                    spark_landing_context(
-                        spark_landing_address(&connect),
-                        Some(true),
-                        true,
-                        SparkLandingAvailability::Ready,
-                        "synthetic-cube",
-                    ),
+                    spark_landing_context(spark_landing_address(&connect)),
                     size,
                     appearance,
                     theme,
                 );
                 assert!(editing.contains("Change your Lightning Address"));
-                assert!(editing.contains("Saving…"));
                 let confirmation = capture::inspect(
                     "spark-context-address-confirmation",
                     lightning_address_confirmation(&connect)
@@ -910,19 +741,12 @@ mod tests {
                         synthetic_overview(
                             SparkStatus::Connected(snapshot.clone()),
                             &[],
-                            Some(true),
                             None,
                             None,
                         )
                         .map(view::Message::SparkOverview),
                     )
-                    .push(spark_landing_context(
-                        spark_landing_address(&connect),
-                        Some(true),
-                        false,
-                        SparkLandingAvailability::Ready,
-                        "synthetic-cube",
-                    ));
+                    .push(spark_landing_context(spark_landing_address(&connect)));
                 let page = iced::widget::scrollable(body)
                     .width(Length::Fill)
                     .height(Length::Fill);
@@ -1144,7 +968,6 @@ mod tests {
     fn synthetic_overview<'a>(
         status: SparkStatus,
         rows: &'a [SparkRecentTransaction],
-        active: Option<bool>,
         price: Option<f64>,
         last_error: Option<&'a str>,
     ) -> Element<'a, SparkOverviewMessage> {
@@ -1156,7 +979,6 @@ mod tests {
             fiat_converter: None,
             bitcoin_unit: BitcoinDisplayUnit::Sats,
             show_direction_badges: true,
-            stable_balance_active: active,
             btc_usd_price: price,
             display_mode: DisplayMode::BitcoinNative,
             mask_amounts: false,
@@ -1193,7 +1015,6 @@ mod tests {
                 fiat_converter: None,
                 bitcoin_unit: BitcoinDisplayUnit::Sats,
                 show_direction_badges: true,
-                stable_balance_active: Some(true),
                 btc_usd_price: Some(50_000.0),
                 display_mode: DisplayMode::BitcoinNative,
                 mask_amounts: true,
@@ -1204,7 +1025,7 @@ mod tests {
             theme::Theme::dark(),
         );
         assert!(mounted.contains("••••••"));
-        for amount in ["12,345,678", "98,765,432", "2.50 USDB"] {
+        for amount in ["12,345,678", "98,765,432", "2.50"] {
             assert!(!mounted.contains(amount), "hidden Spark amount {}", amount);
         }
     }
@@ -1248,7 +1069,6 @@ mod tests {
                     synthetic_overview(
                         SparkStatus::Connected(snapshot.clone()),
                         &rows,
-                        Some(true),
                         Some(50_000.0),
                         None,
                     ),
@@ -1258,8 +1078,20 @@ mod tests {
                 );
                 // "Recent activity" is Activity's, mounted by App.
                 assert!(!normal.contains("Last transactions"));
-                assert!(normal.contains("2.50 USDB"));
-                for control in ["flip-balance", "send-btc", "receive-btc"] {
+                assert!(normal.contains("Total balance"));
+                for label in ["Bitcoin", "US Dollar", "2.50", "USDB"] {
+                    assert!(normal.contains(label), "{}", label);
+                }
+                // 2.50 USDB at 50,000 USD/BTC is 5,000 sats.
+                assert!(normal.contains("≈ 5,000"));
+                assert!(!normal.contains("Stable"));
+                for control in [
+                    "flip-balance",
+                    "send-btc",
+                    "receive-btc",
+                    "send-usdb",
+                    "receive-usdb",
+                ] {
                     assert!(normal.has_focus(landing_control_id(
                         "synthetic-cube",
                         "Spark",
@@ -1271,7 +1103,6 @@ mod tests {
                     synthetic_overview(
                         SparkStatus::Connected(snapshot.clone()),
                         &rows,
-                        Some(false),
                         None,
                         Some("bridge refresh failed"),
                     ),
@@ -1279,28 +1110,14 @@ mod tests {
                     appearance,
                     theme,
                 );
-                assert!(missing_quote.contains("2.50 USDB"));
+                assert!(missing_quote.contains("US Dollar"));
+                assert!(!missing_quote.contains("≈"), "no sats without a quote");
                 assert!(missing_quote.contains("needs a BTC/USD quote"));
-                assert!(missing_quote.contains("held while Stable Balance is off"));
-                assert!(missing_quote.contains("Use the toggle below."));
                 assert!(missing_quote.contains("Last known balance"));
-                let unknown_setting = capture::inspect(
-                    "spark-setting-unknown-loaded-empty",
-                    synthetic_overview(
-                        SparkStatus::Connected(snapshot.clone()),
-                        &[],
-                        None,
-                        Some(50_000.0),
-                        None,
-                    ),
-                    outer,
-                    appearance,
-                    theme,
-                );
-                assert!(unknown_setting.contains("setting is still unknown"));
+                assert!(!missing_quote.contains("Stable"));
                 let unavailable = capture::inspect(
                     "spark-bridge-unavailable",
-                    synthetic_overview(SparkStatus::Unavailable, &[], None, None, None),
+                    synthetic_overview(SparkStatus::Unavailable, &[], None, None),
                     outer,
                     appearance,
                     theme,
@@ -1308,5 +1125,16 @@ mod tests {
                 assert!(unavailable.contains("not configured"));
             }
         }
+    }
+
+    /// Bitcoin always, unless the wallet holds only USDB; US Dollar while it
+    /// holds any.
+    #[test]
+    fn spark_lists_a_row_per_balance_it_holds() {
+        use SparkAsset::*;
+        assert_eq!(spark_assets(0, 0), [Bitcoin], "an empty wallet");
+        assert_eq!(spark_assets(25_053, 0), [Bitcoin]);
+        assert_eq!(spark_assets(25_053, 2_500_000), [Bitcoin, UsDollar]);
+        assert_eq!(spark_assets(0, 2_500_000), [UsDollar], "USDB only");
     }
 }
