@@ -341,12 +341,18 @@ pub enum Method {
     /// the request and drops it, where it would silently ignore an unknown
     /// `pay_from` field and prepare a bitcoin send instead.
     ///
-    /// Refuses a Spark invoice that requests a token, with
+    /// A Spark invoice that requests the wallet's USDB token, paid from
+    /// [`WalletAsset::Usdb`], is paid straight from the USDB balance: the
+    /// invoice must name its amount, `amount_sat` is ignored, and the
+    /// preview carries [`PrepareSendFromOk::token_payment`]. Paid from
+    /// bitcoin, it is refused with [`ErrorKind::BadRequest`].
+    ///
+    /// Refuses a Spark invoice that requests any other token, with
     /// [`ErrorKind::BadRequest`] and before preparing anything (and refuses
-    /// a token leg the prepare returns, as from a BIP-21 URI carrying such an
-    /// invoice). Paying one spends that token directly, which neither
-    /// `pay_from` describes. So every token leg this method prepares is a
-    /// conversion; see [`PrepareSendFromOk::conversion`].
+    /// a token leg the ordinary prepare returns, as from a BIP-21 URI
+    /// carrying a token invoice). Paying one spends that token directly,
+    /// which neither `pay_from` describes. So every other token leg this
+    /// method prepares is a conversion; see [`PrepareSendFromOk::conversion`].
     PrepareSendFrom(PrepareSendFromParams),
     /// [`Method::PrepareLnurlPay`] with an explicit balance to pay from: the
     /// LNURL / Lightning-address twin of [`Method::PrepareSendFrom`], and a
@@ -740,8 +746,8 @@ pub struct SwapParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareSendFromParams {
-    /// Same as [`PrepareSendParams::input`], except that a Spark invoice
-    /// requesting a token is refused (see [`Method::PrepareSendFrom`]).
+    /// Same as [`PrepareSendParams::input`], except for a Spark invoice
+    /// requesting a token (see [`Method::PrepareSendFrom`]).
     pub input: String,
     /// Same as [`PrepareSendParams::amount_sat`].
     #[serde(default)]
@@ -1048,10 +1054,11 @@ pub struct PrepareSendFromOk {
     ///
     /// - paying from USDB always attaches one; paying from bitcoin attaches
     ///   one only to cover a shortfall;
-    /// - a conversion is the only token leg these methods prepare, because
-    ///   [`Method::PrepareSendFrom`] refuses a token invoice and LNURL has
-    ///   none. So `prepare.has_token_leg` is exactly
-    ///   `Some(conversion.is_some())`.
+    /// - apart from a USDB invoice paid from USDB ([`Self::token_payment`]),
+    ///   a conversion is the only token leg these methods prepare, because
+    ///   [`Method::PrepareSendFrom`] refuses every other token invoice and
+    ///   LNURL has none. So `prepare.has_token_leg` is exactly
+    ///   `Some(conversion.is_some() || token_payment.is_some())`.
     ///
     /// The gui client rejects a response that breaks either rule, including
     /// a token leg with no conversion: Review would show a bitcoin payment
@@ -1060,6 +1067,27 @@ pub struct PrepareSendFromOk {
     /// Boxed for the same reason as [`PrepareSendOk::cross_chain`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversion: Option<Box<ConversionQuote>>,
+    /// The token the send itself moves, when it is not bitcoin: a Spark
+    /// invoice that asks for USDB ([`ParseInputOk::usdb_invoice`]), paid
+    /// straight from the USDB balance with no conversion.
+    ///
+    /// For such a send `prepare.amount_sat` and `prepare.fee_sat` are `0`:
+    /// the SDK's figures are token base units, and this carries them with
+    /// their denomination instead. `prepare.has_token_leg` is `Some(true)`
+    /// and [`Self::conversion`] is `None`. The gui client accepts a token leg
+    /// without a conversion only in that shape, paying from USDB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_payment: Option<TokenPayment>,
+}
+
+/// A send that moves a token directly, as [`PrepareSendFromOk::token_payment`]
+/// reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenPayment {
+    /// What the recipient is paid: the invoice's own amount.
+    pub amount: AssetAmount,
+    /// The SDK's fee for the transfer, in the same token.
+    pub fee: AssetAmount,
 }
 
 /// Snapshot of the wallet's USDB (Stable Balance) holding. Mirrors the
@@ -1257,6 +1285,17 @@ pub struct ParseInputOk {
     /// prepare so the gui doesn't need to round-trip it.
     #[serde(default)]
     pub lnurl_address: Option<String>,
+    /// For a Spark invoice: whether it asks to be paid in the wallet's USDB
+    /// token. Such an invoice is paid from the USDB balance, with no amount
+    /// from the gui: the invoice names its own, in token base units, which
+    /// the sats-typed [`Self::amount_sat`] can't carry. `false` for every
+    /// other input, including an invoice asking for any other token, which
+    /// the bridge refuses.
+    ///
+    /// `false` from a bridge older than the field, so the gui sends the
+    /// invoice down the ordinary path, where the bridge refuses it.
+    #[serde(default)]
+    pub usdb_invoice: bool,
 }
 
 /// Preview returned by [`Method::PrepareSend`]. The `handle` is a bridge
@@ -2657,6 +2696,7 @@ mod tests {
             prepare: legacy_prepare(),
             pay_from: WalletAsset::Usdb,
             conversion: Some(Box::new(quote())),
+            token_payment: None,
         };
         assert_eq!(
             response_json(1, OkPayload::PrepareSendFrom(ok)),
@@ -2687,6 +2727,7 @@ mod tests {
                 prepare: legacy_prepare(),
                 pay_from: WalletAsset::Usdb,
                 conversion: Some(Box::new(quote())),
+                token_payment: None,
             }))
         else {
             panic!("expected prepare_send_from");
@@ -2704,11 +2745,62 @@ mod tests {
             },
             pay_from: WalletAsset::Bitcoin,
             conversion: None,
+            token_payment: None,
         })
         .expect("serialize");
         assert!(value.get("conversion").is_none(), "{value}");
+        assert!(value.get("token_payment").is_none(), "{value}");
         let back: PrepareSendFromOk = serde_json::from_value(value).expect("parse");
         assert!(back.conversion.is_none());
+        assert!(back.token_payment.is_none());
+    }
+
+    /// A USDB invoice paid from USDB carries its USDB figures, denominated,
+    /// beside zero sats; a bridge older than the field reads as `None`.
+    #[test]
+    fn a_token_payment_has_exact_wire_shape_and_round_trips() {
+        let usdb = |amount| AssetAmount {
+            asset: WalletAsset::Usdb,
+            amount,
+        };
+        let token_payment = TokenPayment {
+            amount: usdb(2_500_000),
+            fee: usdb(1_200),
+        };
+        let ok = PrepareSendFromOk {
+            prepare: PrepareSendOk {
+                amount_sat: 0,
+                fee_sat: 0,
+                method: "SparkInvoice".into(),
+                ..legacy_prepare()
+            },
+            pay_from: WalletAsset::Usdb,
+            conversion: None,
+            token_payment: Some(token_payment),
+        };
+        let value = serde_json::to_value(&ok).expect("serialize");
+        assert_eq!(
+            value["token_payment"],
+            json!({
+                "amount": { "asset": "usdb", "amount": "2500000" },
+                "fee": { "asset": "usdb", "amount": "1200" }
+            })
+        );
+        let back: PrepareSendFromOk = serde_json::from_value(value.clone()).expect("parse");
+        assert_eq!(back.token_payment, Some(token_payment));
+
+        let mut legacy = value;
+        legacy
+            .as_object_mut()
+            .expect("object")
+            .remove("token_payment");
+        let back: PrepareSendFromOk = serde_json::from_value(legacy).expect("parse");
+        assert!(back.token_payment.is_none());
+
+        // `usdb_invoice` defaults to false from an older bridge.
+        let parsed: ParseInputOk =
+            serde_json::from_value(json!({ "kind": "spark_invoice" })).expect("parse");
+        assert!(!parsed.usdb_invoice);
     }
 
     #[test]

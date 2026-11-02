@@ -54,7 +54,7 @@ use coincube_spark_protocol::{
     PrepareSendFromParams, PrepareSendOk, PrepareSendParams, PrepareSwapOk, PrepareSwapParams,
     ReceiveBolt11Params, ReceiveOnchainParams, ReceivePaymentOk, RegisterLightningAddressParams,
     Request, Response, ResponseResult, SendPaymentOk, SendPaymentParams, SetAutoConvertParams,
-    SetStableBalanceParams, SwapAmount, SwapOk, SwapParams, WalletAsset,
+    SetStableBalanceParams, SwapAmount, SwapOk, SwapParams, TokenPayment, WalletAsset,
     CONVERSION_MAX_SLIPPAGE_BPS,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1388,13 +1388,16 @@ fn check_limits(limits: &ConversionLimits, from: WalletAsset) -> Result<(), Stri
 
 /// Check a pay-from preview against the balance it was asked to pay from,
 /// and that it discloses any conversion it carries. The rules are on
-/// [`PrepareSendFromOk::conversion`].
+/// [`PrepareSendFromOk::conversion`] and [`PrepareSendFromOk::token_payment`].
 fn check_send_from(ok: &PrepareSendFromOk, pay_from: WalletAsset) -> Result<(), String> {
     if ok.pay_from != pay_from {
         return Err(format!(
             "prepared from {:?}, asked to pay from {pay_from:?}",
             ok.pay_from
         ));
+    }
+    if let Some(payment) = &ok.token_payment {
+        return check_token_payment(ok, payment);
     }
     // A conversion is the only token leg these methods prepare, so the two
     // come together.
@@ -1413,6 +1416,38 @@ fn check_send_from(ok: &PrepareSendFromOk, pay_from: WalletAsset) -> Result<(), 
         (_, Some(_)) => Err("a conversion without a token leg".to_string()),
         (None, None) => Err("no token-leg flag".to_string()),
     }
+}
+
+/// Check the one token leg a pay-from preview may carry without a
+/// conversion: a USDB invoice paid from USDB, with its figures in USDB and
+/// none in sats, so Review can't show token base units as a bitcoin payment.
+fn check_token_payment(ok: &PrepareSendFromOk, payment: &TokenPayment) -> Result<(), String> {
+    if ok.pay_from != WalletAsset::Usdb {
+        return Err(format!("a token payment from {:?}", ok.pay_from));
+    }
+    if ok.conversion.is_some() {
+        return Err("a token payment with a conversion".to_string());
+    }
+    // The retry guard reads this: the bridge drops the idempotency key.
+    if ok.prepare.has_token_leg != Some(true) {
+        return Err("a token payment without a token leg".to_string());
+    }
+    if ok.prepare.method != "SparkInvoice" || ok.prepare.cross_chain.is_some() {
+        return Err(format!("a token payment by {}", ok.prepare.method));
+    }
+    if payment.amount.asset != WalletAsset::Usdb || payment.fee.asset != WalletAsset::Usdb {
+        return Err(format!(
+            "a token payment of {:?} with a fee in {:?}, expected Usdb",
+            payment.amount.asset, payment.fee.asset
+        ));
+    }
+    if payment.amount.amount == 0 {
+        return Err("a token payment of nothing".to_string());
+    }
+    if ok.prepare.amount_sat != 0 || ok.prepare.fee_sat != 0 {
+        return Err("a token payment with sats figures".to_string());
+    }
+    Ok(())
 }
 
 // Drop is implemented on `SparkClientInner` (not `SparkClient`)
@@ -2274,7 +2309,69 @@ mod p0_contract_tests {
             },
             pay_from,
             conversion: conversion.map(Box::new),
+            token_payment: None,
         }
+    }
+
+    /// The preview the bridge returns for a USDB invoice paid from USDB.
+    fn usdb_invoice_from_usdb() -> PrepareSendFromOk {
+        let mut ok = send_from(WalletAsset::Usdb, Some(true), None);
+        ok.prepare.amount_sat = 0;
+        ok.prepare.fee_sat = 0;
+        ok.prepare.method = "SparkInvoice".to_string();
+        ok.token_payment = Some(TokenPayment {
+            amount: amount(WalletAsset::Usdb, 2_500_000),
+            fee: amount(WalletAsset::Usdb, 0),
+        });
+        ok
+    }
+
+    #[test]
+    fn a_token_leg_without_a_conversion_is_only_a_usdb_invoice_from_usdb() {
+        use WalletAsset::{Bitcoin, Usdb};
+
+        let ok = usdb_invoice_from_usdb();
+        assert_eq!(check_send_from(&ok, Usdb), Ok(()));
+        // Without its USDB figures it is the token leg Review can't show.
+        let mut undisclosed = ok.clone();
+        undisclosed.token_payment = None;
+        assert!(check_send_from(&undisclosed, Usdb)
+            .expect_err("undisclosed")
+            .contains("token leg without a conversion"));
+
+        type Mutation = (&'static str, fn(&mut PrepareSendFromOk));
+        let mutations: [Mutation; 9] = [
+            ("token payment from Bitcoin", |ok| ok.pay_from = Bitcoin),
+            ("with a conversion", |ok| {
+                ok.conversion = Some(Box::new(quote(Usdb)))
+            }),
+            ("without a token leg", |ok| {
+                ok.prepare.has_token_leg = Some(false)
+            }),
+            ("without a token leg", |ok| ok.prepare.has_token_leg = None),
+            ("by Bolt11Invoice", |ok| {
+                ok.prepare.method = "Bolt11Invoice".to_string()
+            }),
+            ("expected Usdb", |ok| {
+                ok.token_payment.as_mut().expect("payment").amount.asset = Bitcoin
+            }),
+            ("expected Usdb", |ok| {
+                ok.token_payment.as_mut().expect("payment").fee.asset = Bitcoin
+            }),
+            ("of nothing", |ok| {
+                ok.token_payment.as_mut().expect("payment").amount.amount = 0
+            }),
+            ("sats figures", |ok| ok.prepare.amount_sat = 2_500_000),
+        ];
+        for (why, mutate) in mutations {
+            let mut bad = usdb_invoice_from_usdb();
+            mutate(&mut bad);
+            let asked = bad.pay_from;
+            let err = check_send_from(&bad, asked).expect_err(why);
+            assert!(err.contains(why), "{}: {}", why, err);
+        }
+        // Asked to pay from bitcoin, a USDB-paid preview is refused first.
+        assert!(check_send_from(&ok, Bitcoin).is_err());
     }
 
     #[test]

@@ -66,6 +66,9 @@ pub struct SparkSendView<'a> {
     /// What the prepared preview pays from, and the conversion funding it.
     pub paid_from: coincube_spark_protocol::WalletAsset,
     pub conversion: Option<&'a coincube_spark_protocol::ConversionQuote>,
+    /// The USDB a prepared USDB invoice payment moves. Review's amounts are
+    /// then in USDB: its preview's sats figures are zero.
+    pub token_payment: Option<&'a coincube_spark_protocol::TokenPayment>,
     /// Line under the Amount field when the entered amount exceeds the
     /// bitcoin balance and USDB will cover the rest — see
     /// `state::spark::send::usdb_conversion_hint`.
@@ -411,6 +414,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
     let theme_mode = view.theme_mode;
     let paid_from = view.paid_from;
     let conversion = view.conversion;
+    let token_payment = view.token_payment;
     let usdb_decimals = view.balances.stable.map_or(6, |usdb| usdb.decimals);
     use crate::app::view::SparkSendMessage;
     use coincube_ui::component::amount::format_u64_as_string;
@@ -694,12 +698,10 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                             crate::app::view::spark::swap::price_change(quote.max_slippage_bps),
                         )
                     }))
-                    .push(kv_row("Amount", format!("{} sats", ok.amount_sat)))
-                    .push(kv_row("Fee", format!("{} sats", ok.fee_sat)))
-                    .push(kv_row(
-                        "Total",
-                        format!("{} sats", ok.amount_sat.saturating_add(ok.fee_sat)),
-                    ))
+                    .extend(
+                        review_amounts(ok, token_payment, usdb_decimals)
+                            .map(|(label, value)| kv_row(label, value)),
+                    )
                     .push_maybe(recipient_lookup_eligible.then(|| {
                         recipient_status_row(recipient_checks_enabled, recipient_identities)
                     }))
@@ -1001,6 +1003,44 @@ fn pay_from_label(asset: coincube_spark_protocol::WalletAsset) -> &'static str {
         coincube_spark_protocol::WalletAsset::Bitcoin => "Bitcoin",
         coincube_spark_protocol::WalletAsset::Usdb => "US Dollar",
     }
+}
+
+/// Review's Amount, Fee and Total. In sats, except for a USDB invoice paid
+/// from USDB, whose figures are USDB and whose sats are zero.
+fn review_amounts(
+    ok: &coincube_spark_protocol::PrepareSendOk,
+    token_payment: Option<&coincube_spark_protocol::TokenPayment>,
+    usdb_decimals: u32,
+) -> [(&'static str, String); 3] {
+    match token_payment {
+        Some(payment) => {
+            let (amount, fee) = (payment.amount.amount, payment.fee.amount);
+            [
+                ("Amount", usdb_amount_line(amount, usdb_decimals)),
+                ("Fee", usdb_amount_line(fee, usdb_decimals)),
+                (
+                    "Total",
+                    usdb_amount_line(amount.saturating_add(fee), usdb_decimals),
+                ),
+            ]
+        }
+        None => [
+            ("Amount", format!("{} sats", ok.amount_sat)),
+            ("Fee", format!("{} sats", ok.fee_sat)),
+            (
+                "Total",
+                format!("{} sats", ok.amount_sat.saturating_add(ok.fee_sat)),
+            ),
+        ],
+    }
+}
+
+/// A USDB amount in token base units, for display: "2.50 USDB".
+pub fn usdb_amount_line(amount: u128, usdb_decimals: u32) -> String {
+    format!(
+        "{} USDB",
+        crate::app::breez_spark::assets::format_token_display_u128(amount, usdb_decimals)
+    )
 }
 
 /// Review's Conversion row: "12.40 USDB → 15,003 sats".
@@ -1633,6 +1673,7 @@ mod tests {
         pay_from: coincube_spark_protocol::WalletAsset,
         usdb_unavailable: Option<&'static str>,
         conversion: Option<coincube_spark_protocol::ConversionQuote>,
+        token_payment: Option<coincube_spark_protocol::TokenPayment>,
     }
 
     impl Fixture {
@@ -1667,6 +1708,7 @@ mod tests {
                 pay_from: coincube_spark_protocol::WalletAsset::Bitcoin,
                 usdb_unavailable: Some("You have no USDB."),
                 conversion: None,
+                token_payment: None,
             }
         }
 
@@ -1737,6 +1779,7 @@ mod tests {
                 usdb_unavailable: self.usdb_unavailable,
                 paid_from: self.pay_from,
                 conversion: self.conversion.as_ref(),
+                token_payment: self.token_payment.as_ref(),
                 bitcoin_unit: self.unit,
                 reference_btc_usd_price: None,
                 show_direction_badges: false,
@@ -2464,6 +2507,41 @@ mod tests {
         let probe = harness.probe();
         assert!(probe.contains("12.40 USDB → 15,003 sats"));
         assert!(probe.contains("Conversion fee") && probe.contains("Max price change"));
+    }
+
+    /// A USDB invoice paid from USDB: Review's figures are in USDB, it is
+    /// paid from US Dollar, and there is no conversion to show.
+    #[test]
+    fn review_of_a_usdb_invoice_shows_usdb_and_no_conversion() {
+        use coincube_spark_protocol::{AssetAmount, TokenPayment, WalletAsset};
+        let menu = spark_send_menu();
+        let mut review = Fixture::ordinary_prepared();
+        review.target = SparkSendTarget::Spark;
+        review.recipient_lookup_eligible = false;
+        review.pay_from = WalletAsset::Usdb;
+        if let SparkSendPhase::Prepared(ok) = &mut review.phase {
+            ok.method = "SparkInvoice".to_owned();
+            ok.amount_sat = 0;
+            ok.fee_sat = 0;
+            ok.has_token_leg = Some(true);
+        }
+        let usdb = |amount| AssetAmount {
+            asset: WalletAsset::Usdb,
+            amount,
+        };
+        review.token_payment = Some(TokenPayment {
+            amount: usdb(2_500_000),
+            fee: usdb(10_000),
+        });
+        let cache = review.cache();
+        let mut harness = Harness::new(screen(&review, &menu, &cache, false), FULL_HEIGHT);
+        let probe = harness.probe();
+        assert!(probe.contains("Paid from") && probe.contains("US Dollar"));
+        assert!(probe.contains("2.50 USDB"), "amount in USDB");
+        assert!(probe.contains("0.01 USDB"), "fee in USDB");
+        assert!(probe.contains("2.51 USDB"), "total in USDB");
+        assert!(!probe.contains(" sats"), "no figure reads as sats");
+        assert!(!probe.contains("Conversion") && !probe.contains("Max price change"));
     }
 
     #[test]
