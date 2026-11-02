@@ -6409,6 +6409,7 @@ mod tests {
         home.remote_cubes = vec![
             remote("kit", "Kit only", true, true, false, false),
             remote("phone", "Phone only", false, false, true, true),
+            remote("vault", "Vault only", false, false, true, false),
         ];
         let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
         for target in [
@@ -6452,8 +6453,10 @@ mod tests {
             "{:?}",
             pressed
         );
-        // A Kit-only Cube is not on the phone path.
+        // A Kit-only Cube, and a phone backup that restores only a Vault,
+        // are not on the phone path.
         assert!(press_in_journey(&home, "tenshu.restore:phone:kit").is_empty());
+        assert!(press_in_journey(&home, "tenshu.restore:phone:vault").is_empty());
         // The Overview and Close leave it.
         let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
         assert!(home.restore_hub && !home.restore_phone);

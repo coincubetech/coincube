@@ -2633,20 +2633,46 @@ impl ImportedBitcoinPanel {
         let mut content = Column::new()
             .spacing(16)
             .push(h3(format!("{} is ready", cache.cube_name)));
+        let ready = self.is_ready();
         if let Some((script, threshold, _)) = summary {
             content = content.push(
                 p1_regular(format!(
-                    "Imported wallet · {} · {script} · {threshold}. Receive, Activity and Tools work on it in this Cube. To spend, sign with your original wallet or hardware device.",
-                    crate::home::restore_frame::network_name(self.chain())
+                    "Imported wallet · {} · {script} · {threshold}. {} To spend, sign with your original wallet or hardware device.",
+                    crate::home::restore_frame::network_name(self.chain()),
+                    if ready {
+                        "Receive, Activity and Tools work on it in this Cube."
+                    } else {
+                        "Receive, Activity and Tools work on it once the history scan completes."
+                    },
                 ))
                 .style(theme::text::secondary),
             );
         }
+        let stalled = matches!(
+            ScanDisplay::from_info(self.info.as_ref(), self.sync_failed),
+            ScanDisplay::Retrying | ScanDisplay::NeedsAttention
+        );
         content
-            .push(p1_regular(if self.is_ready() {
+            .push(p1_regular(if ready {
                 "Balance and history: from the completed scan"
+            } else if stalled {
+                "Balance and history: the scan stopped before it finished. Retry it here or from the Vault page."
             } else {
                 "Balance and history: the scan is still running. They appear in the Vault when it finishes."
+            }))
+            .push_maybe((!ready && stalled).then(|| {
+                button::secondary(
+                    None,
+                    if self.sync_requesting {
+                        "Retrying…"
+                    } else {
+                        self.synchronization_action_label()
+                    },
+                )
+                .width(iced::Length::Shrink)
+                .on_press_maybe((!self.busy && !self.sync_requesting).then_some(
+                    view::Message::ImportedBitcoin(ImportMessage::RetrySynchronization),
+                ))
             }))
             .push(p1_regular(
                 "Recovery Kit: update it from Cube settings to include this wallet",
@@ -4543,6 +4569,26 @@ mod tests {
             ],
             &["Continue", "Close"],
         );
+
+        // A stopped scan says so on Done and offers its retry there.
+        panel.sync_failed = true;
+        let stalled = rendered_labels(panel.journey_view(&cache, false)).await;
+        assert_labels(
+            &stalled,
+            &[
+                "Balance and history: the scan stopped before it finished. Retry it here or from the Vault page.",
+                panel.synchronization_action_label(),
+            ],
+            &["Balance and history: the scan is still running. They appear in the Vault when it finishes."],
+        );
+        assert!(
+            stalled
+                .iter()
+                .any(|text| text.contains("once the history scan completes")),
+            "{:?}",
+            stalled
+        );
+        panel.sync_failed = false;
 
         // The finished scan reaches Done on its own.
         panel.scan_continued = false;

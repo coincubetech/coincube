@@ -2744,6 +2744,9 @@ pub(super) fn layout<'a>(
         return Column::new()
             .spacing(24)
             .max_width(800)
+            .push(email.map(|email| {
+                p2_regular(format!("Signed in as {email}")).style(theme::text::secondary)
+            }))
             .push((title != path_title).then(|| h3(title)))
             .push(content)
             .push(back)

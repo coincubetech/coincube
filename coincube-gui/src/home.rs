@@ -6105,8 +6105,13 @@ impl Home {
         let phones: Vec<&RemoteCube> = self
             .remote_cubes
             .iter()
+            // A descriptor-only phone recovery restores a Vault into an
+            // existing Cube, not a Cube; the Overview's rows still offer it.
             .filter(|cube| {
-                !self.network.is_blake2b() && cube.network == network && cube.phone_recoverable
+                !self.network.is_blake2b()
+                    && cube.network == network
+                    && cube.phone_recoverable
+                    && cube.phone_full_cube
             })
             .collect();
         if phones.is_empty() {
