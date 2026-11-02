@@ -1490,15 +1490,20 @@ pub fn wallet_settings<'a>(
         ))
         .push(page::saved_line(updated));
 
-    let pair_row = page::row("Pair with Keychain").description(if vault.is_some() {
-        "Same Wi-Fi. No Connect account needed."
+    // A Vault without a Keychain key has no Keychain tab to open.
+    let pairable = vault.is_some() && !cache.vault_lacks_keychain_key;
+    let pair_row = page::row("Keychain").description(if pairable {
+        "Pair a phone holding this Vault's Keychain key. Same Wi-Fi. No Connect account needed."
+    } else if vault.is_some() {
+        "Unavailable: this Vault has no Keychain key. One can only be added when a Vault is \
+         created."
     } else {
         "Unavailable: this wallet has no Keychain-eligible key in Tenshu."
     });
-    let pair_row = if vault.is_some() {
+    let pair_row = if pairable {
         pair_row.control(page::button(
             VAULT_PAIR_ID,
-            "Open Pair with Keychain",
+            "Open Keychain",
             Some(Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
                 crate::app::menu::SettingsOption::LocalSigning,
             ))))),

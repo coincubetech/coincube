@@ -3358,6 +3358,7 @@ impl App {
         cache.fiat_chain = cube_settings.network;
         cache.has_vault = wallet.supports_inheritance();
         cache.has_imported_bitcoin = wallet.is_imported();
+        cache.vault_lacks_keychain_key = wallet.lacks_keychain_key();
         cache.wallet_names = cache::WalletNames::new(&cube_settings, Some(&wallet));
         if cache.fiat_chain.is_blake2b() {
             cache.clear_btcb2_fiat();
@@ -6144,6 +6145,7 @@ impl App {
         self.daemon = Some(daemon.clone());
         self.cache.has_vault = false;
         self.cache.has_imported_bitcoin = true;
+        self.cache.vault_lacks_keychain_key = false;
         self.panels.global_home.imported_installed = true;
         self.panels.global_home.imported_balance = panel.authoritative_balance();
         let mut tasks = Vec::new();
@@ -8520,6 +8522,7 @@ impl App {
                     .reload(&self.datadir, &self.cube_settings);
                 self.cache.has_vault = wallet.supports_inheritance();
                 self.cache.has_imported_bitcoin = wallet.is_imported();
+                self.cache.vault_lacks_keychain_key = wallet.lacks_keychain_key();
 
                 // A Vault attached mid-session never passes through `App::new`,
                 // so run the same identity backfill here — otherwise a Vault

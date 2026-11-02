@@ -288,7 +288,7 @@ fn vault_settings_items(imported: bool) -> Vec<SubItem> {
             },
         ),
         SubItem::new(
-            "Pair with Keychain",
+            "Keychain",
             phone_icon,
             Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning))),
             |m| {

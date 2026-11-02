@@ -626,14 +626,14 @@ mod tests {
         let empty = render(&state);
         assert!(empty.contains("This Vault has no Keychain key"));
         for gone in ["Key for the phone", "Pair a phone", "Paired phones"] {
-            assert!(!empty.contains(gone), "{gone}");
+            assert!(!empty.contains(gone), "{}", gone);
         }
 
         state.vault_keys = vec![key(Some("My iPhone"), true)];
         let pairable = render(&state);
         assert!(!pairable.contains("This Vault has no Keychain key"));
         for shown in ["Key for the phone", "Pair a phone", "Paired phones"] {
-            assert!(pairable.contains(shown), "{shown}");
+            assert!(pairable.contains(shown), "{}", shown);
         }
     }
 
