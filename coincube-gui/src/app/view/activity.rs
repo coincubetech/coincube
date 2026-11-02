@@ -518,8 +518,43 @@ impl Entry {
             }
             _ => None,
         };
+        // A BTC ⇄ USDB conversion (S3): a received row with one is the
+        // conversion itself (a swap, an auto-convert, or the refund of one);
+        // a sent row with one is a send that a conversion funded.
+        let conversion = details.conversion.as_ref();
+        let converted = conversion.filter(|_| received);
+        let (rail, fallback_title, status) = match converted {
+            Some(conversion) => {
+                use coincube_spark_protocol::SwapStatus;
+                let to_usdb = payment.token_amount.is_some();
+                let title = match conversion.status {
+                    SwapStatus::RefundNeeded | SwapStatus::Refunded => "Swap refund",
+                    _ if to_usdb => "Converted to USDB",
+                    _ => "Converted to bitcoin",
+                };
+                let status = match conversion.status {
+                    SwapStatus::Completed => StatusFilter::Confirmed,
+                    SwapStatus::Pending => StatusFilter::Pending,
+                    SwapStatus::Failed | SwapStatus::RefundNeeded | SwapStatus::Refunded => {
+                        StatusFilter::Failed
+                    }
+                };
+                ("Spark · BTC ⇄ USDB", title.to_owned(), status)
+            }
+            None => (rail, fallback_title, status),
+        };
         let description = non_empty(payment.description.as_deref());
         let mut facts = Vec::new();
+        if let Some(amounts) = conversion.and_then(|conversion| conversion.amounts) {
+            facts.push((
+                if received {
+                    "Conversion"
+                } else {
+                    "Paid from USDB"
+                },
+                conversion_amounts(amounts, payment.token_decimals.unwrap_or(6)),
+            ));
+        }
         if let Some(invoice) = &invoice {
             facts.push(("Invoice", short_identifier(invoice)));
         }
@@ -541,13 +576,18 @@ impl Entry {
             timestamp: payment.timestamp,
             direction,
             status,
-            status_label: match status {
-                StatusFilter::Confirmed => "Confirmed",
-                StatusFilter::Failed => "Failed",
-                _ => "Pending",
+            status_label: match converted.map(|conversion| conversion.status) {
+                Some(coincube_spark_protocol::SwapStatus::RefundNeeded) => "Refunding",
+                Some(coincube_spark_protocol::SwapStatus::Refunded) => "Refunded",
+                _ => match status {
+                    StatusFilter::Confirmed => "Confirmed",
+                    StatusFilter::Failed => "Failed",
+                    _ => "Pending",
+                },
             }
             .into(),
-            status_note: (status == StatusFilter::Confirmed).then_some(status_note),
+            status_note: (status == StatusFilter::Confirmed && converted.is_none())
+                .then_some(status_note),
             title: description.unwrap_or(fallback_title),
             amount,
             unit,
@@ -2401,6 +2441,27 @@ fn render_at_width<'a>(
     .into()
 }
 
+/// Both sides of a conversion: "12.40 USDB → 15,003 sats".
+fn conversion_amounts(
+    amounts: coincube_spark_protocol::ConversionAmounts,
+    usdb_decimals: u32,
+) -> String {
+    let side = |amount: coincube_spark_protocol::AssetAmount| match amount.asset {
+        coincube_spark_protocol::WalletAsset::Usdb => format!(
+            "{} USDB",
+            crate::app::breez_spark::assets::format_token_display_u128(
+                amount.amount,
+                usdb_decimals
+            )
+        ),
+        coincube_spark_protocol::WalletAsset::Bitcoin => format!(
+            "{} sats",
+            crate::app::breez_spark::assets::format_token_display_u128(amount.amount, 0)
+        ),
+    };
+    format!("{} → {}", side(amounts.from), side(amounts.to))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2452,6 +2513,90 @@ mod tests {
             description: Some("Coffee".into()),
             details: Default::default(),
         }
+    }
+
+    fn conversion_row(
+        token_amount: Option<u64>,
+        status: coincube_spark_protocol::SwapStatus,
+        direction: &str,
+    ) -> PaymentSummary {
+        use coincube_spark_protocol::{
+            AssetAmount, ConversionAmounts, PaymentConversionSummary, PaymentDetailSummary,
+            WalletAsset,
+        };
+        PaymentSummary {
+            id: "swap-1".into(),
+            amount_sat: 15_003,
+            fees_sat: 0,
+            token_amount,
+            token_decimals: token_amount.map(|_| 6),
+            token_ticker: token_amount.map(|_| "USDB".into()),
+            timestamp: 1_760_000_000,
+            status: "completed".into(),
+            direction: direction.into(),
+            method: if token_amount.is_some() {
+                "token"
+            } else {
+                "spark"
+            }
+            .into(),
+            description: None,
+            details: PaymentDetailSummary {
+                conversion: Some(PaymentConversionSummary {
+                    status,
+                    amounts: Some(ConversionAmounts {
+                        from: AssetAmount {
+                            asset: WalletAsset::Usdb,
+                            amount: 12_400_000,
+                        },
+                        to: AssetAmount {
+                            asset: WalletAsset::Bitcoin,
+                            amount: 15_003,
+                        },
+                    }),
+                }),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// S3: a swap, an auto-convert or its refund is its own row, named by
+    /// what it produced, with both sides of the conversion in its details.
+    #[test]
+    fn conversions_are_their_own_activity_rows() {
+        use coincube_spark_protocol::SwapStatus;
+        let to_btc = Entry::spark(conversion_row(None, SwapStatus::Completed, "receive"));
+        assert_eq!(to_btc.title, "Converted to bitcoin");
+        assert_eq!(to_btc.rail, "Spark · BTC ⇄ USDB");
+        assert_eq!(to_btc.status, StatusFilter::Confirmed);
+        let facts = &to_btc.rail_details.as_ref().unwrap().1;
+        assert!(facts.contains(&("Conversion", "12.40 USDB → 15,003 sats".to_owned())));
+
+        let to_usdb = Entry::spark(conversion_row(
+            Some(12_400_000),
+            SwapStatus::Completed,
+            "receive",
+        ));
+        assert_eq!(to_usdb.title, "Converted to USDB");
+
+        let pending = Entry::spark(conversion_row(None, SwapStatus::Pending, "receive"));
+        assert_eq!(pending.status, StatusFilter::Pending);
+        let refunding = Entry::spark(conversion_row(None, SwapStatus::RefundNeeded, "receive"));
+        assert_eq!(
+            (refunding.title.as_str(), refunding.status_label.as_str()),
+            ("Swap refund", "Refunding")
+        );
+        let refunded = Entry::spark(conversion_row(None, SwapStatus::Refunded, "receive"));
+        assert_eq!(
+            (refunded.status, refunded.status_label.as_str()),
+            (StatusFilter::Failed, "Refunded")
+        );
+
+        // A send a conversion funded keeps its own row and names the source.
+        let funded = Entry::spark(conversion_row(None, SwapStatus::Completed, "send"));
+        assert_eq!(funded.title, "Sent on Spark");
+        let facts = &funded.rail_details.as_ref().unwrap().1;
+        assert!(facts.contains(&("Paid from USDB", "12.40 USDB → 15,003 sats".to_owned())));
     }
 
     #[test]
