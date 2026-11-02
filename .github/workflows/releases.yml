@@ -99,6 +99,13 @@ jobs:
           version=$(cargo metadata --no-deps --format-version 1 | jaq -r '.packages[] | select(.name=="coincube-gui") | .version')
           echo "COINCUBE_VERSION=$version" >> $GITHUB_ENV
 
+      - name: Require release tag to match app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          test "$GITHUB_REF_NAME" = "v$COINCUBE_VERSION" \
+            || { echo "release tag $GITHUB_REF_NAME does not match Cargo version $COINCUBE_VERSION"; exit 1; }
+
       # The Spark bridge is a separate workspace with a separate lock and a
       # separate target dir, and its dep graph (breez-sdk-spark, boltz-client,
       # alloy) is expensive to build from scratch. Cache it alongside the root
@@ -622,6 +629,8 @@ jobs:
           RELEASE_VERSION: ${{ needs.checksums.outputs.version }}
         run: |
           set -euo pipefail
+          test "$GITHUB_REF_NAME" = "v$RELEASE_VERSION" \
+            || { echo "release tag $GITHUB_REF_NAME does not match Cargo version $RELEASE_VERSION"; exit 1; }
           expected_fingerprint=ED4D0D710103D6252854681367F9701BF0D2DAF4
           actual_fingerprint=$(gpg --batch --show-keys --with-colons docs/security/coincube-release-public.asc \
             | awk -F: '$1 == "fpr" { print $10; exit }')
