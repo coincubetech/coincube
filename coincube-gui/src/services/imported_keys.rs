@@ -49,6 +49,7 @@ use crate::{
 };
 
 pub(crate) mod checkpoint;
+pub(crate) mod restore;
 
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const LEGACY_MANIFEST_BYTES: usize = 16_384;
@@ -107,6 +108,21 @@ struct Manifest {
     records: Vec<LocalKeyRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     checkpoint: Option<checkpoint::Journal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restored: Option<RestoredCheckpoint>,
+}
+
+/// Authenticated by the device-only inventory anchor together with exact
+/// record IDs and revisions. `ready` is committed only after the public
+/// wallet installation and a second server freshness check succeed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoredCheckpoint {
+    cube_id: u64,
+    generation: u64,
+    commitment: String,
+    source_inventory_generation: u64,
+    ready: bool,
 }
 
 struct RepositoryGuard {
@@ -212,6 +228,7 @@ impl<'a> LocalKeyRepository<'a> {
             policy_hash: hex::encode(self.policy_hash),
             records,
             checkpoint: None,
+            restored: None,
         }
     }
 
@@ -1300,10 +1317,27 @@ impl<'a> LocalKeyRepository<'a> {
         if serde_json::to_vec(&manifest).ok().as_deref() != Some(bytes.as_slice()) {
             return Err("Imported key manifest has a noncanonical or duplicate field.".into());
         }
-        if manifest.checkpoint.is_none() && bytes.len() > LEGACY_MANIFEST_BYTES {
+        if manifest.checkpoint.is_none()
+            && manifest.restored.is_none()
+            && bytes.len() > LEGACY_MANIFEST_BYTES
+        {
             return Err("Legacy imported key manifest is oversized.".into());
         }
         checkpoint::validate_journal(self, &manifest)?;
+        if manifest.restored.as_ref().is_some_and(|binding| {
+            manifest.checkpoint.is_some()
+                || manifest.records.is_empty()
+                || binding.cube_id == 0
+                || binding.generation == 0
+                || binding.source_inventory_generation == 0
+                || binding.commitment.len() != 64
+                || !binding
+                    .commitment
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }) {
+            return Err("Invalid restored imported checkpoint binding.".into());
+        }
         let expected = self.manifest(manifest.records.clone());
         if manifest.version != expected.version
             || manifest.cube_id != expected.cube_id
@@ -1649,15 +1683,31 @@ impl<'a> LocalKeyRepository<'a> {
         &self,
         record_id: Uuid,
         expected_revision: Uuid,
+        restored: Option<&RestoredCheckpoint>,
         is_current: impl Fn() -> bool,
         use_key: impl FnOnce(&VerifiedImportedKey) -> Result<T, String>,
     ) -> Result<T, String> {
         if !is_current() {
             return Err("Imported signing was cancelled.".into());
         }
+        match fs::symlink_metadata(restore::restore_intent_path(
+            self.directory,
+            self.operation_id,
+        )) {
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            _ => return Err("Finish the imported key restore before signing.".into()),
+        }
         let credential = self.check_active()?;
         let lock = self.lock()?;
         let manifest = self.read_manifest_recoverable(&lock)?;
+        if manifest.restored.as_ref() != restored
+            || manifest
+                .restored
+                .as_ref()
+                .is_some_and(|binding| !binding.ready)
+        {
+            return Err("Restored imported keys require current Connect authorization.".into());
+        }
         let device = self.device(false)?;
         let mut result = None;
         let mut use_key = Some(use_key);
@@ -1684,7 +1734,7 @@ impl<'a> LocalKeyRepository<'a> {
         current: &Psbt,
         is_current: impl Fn() -> bool,
     ) -> Result<Psbt, String> {
-        self.with_key(record_id, expected_revision, is_current, |key| {
+        self.with_key(record_id, expected_revision, None, is_current, |key| {
             key.sign(&self.attachment.descriptor, original, current)
                 .map_err(|_| "Imported signing failed verification.".into())
         })
@@ -3994,6 +4044,72 @@ mod tests {
         .unwrap()
     }
 
+    fn checkpoint_test_ready_restored(
+        fixture: &Fixture,
+        device: &coincube_core::seed_crypt::DeviceSecret,
+    ) -> (LocalKeyRecord, RestoredCheckpoint) {
+        use crate::services::{
+            coincube::imported_checkpoint::Checkpoint,
+            recovery::imported_key_v3::{ImportedKeyKitV3, KitKey},
+        };
+        let repository = fixture.repository();
+        let record =
+            LocalKeyRecord::from_account(&fixture.accounts[0], Uuid::new_v4(), Uuid::new_v4());
+        let kit = ImportedKeyKitV3 {
+            public: checkpoint_test_public(fixture),
+            operation_id: repository.operation_id,
+            wallet_id: fixture.attachment.wallet_id.to_string(),
+            policy_hash: hex::encode(repository.policy_hash),
+            inventory_generation: 7,
+            checkpoint_generation: 3,
+            local_keys: vec![KitKey {
+                record: record.clone(),
+                secret: ImportedKeySecret::new(
+                    Zeroizing::new(fixture.phrases[0].clone()),
+                    Zeroizing::new(String::new()),
+                )
+                .unwrap(),
+            }],
+        };
+        kit.validate().unwrap();
+        let binding = RestoredCheckpoint {
+            cube_id: 42,
+            generation: 3,
+            commitment: "a".repeat(64),
+            source_inventory_generation: 7,
+            ready: false,
+        };
+        repository
+            .admit_restored_batch_locked(
+                repository.read_manifest().unwrap(),
+                kit,
+                binding.clone(),
+                "synthetic unlock",
+                device,
+                || true,
+            )
+            .unwrap();
+        let remote = Checkpoint {
+            generation: 3,
+            commitment: binding.commitment.clone(),
+            active: true,
+        };
+        repository
+            .finish_restored_batch_locked(
+                repository.read_manifest().unwrap(),
+                42,
+                &remote,
+                7,
+                "synthetic unlock",
+                device,
+                || true,
+            )
+            .unwrap();
+        let mut ready = binding;
+        ready.ready = true;
+        (record, ready)
+    }
+
     fn checkpoint_test_admit(fixture: &Fixture, device: &coincube_core::seed_crypt::DeviceSecret) {
         let repository = fixture.repository();
         repository
@@ -4662,5 +4778,339 @@ mod tests {
         assert_eq!(kit.inventory_generation, 3);
         write_replace(&repository.root().join(MANIFEST), &old_bytes).unwrap();
         assert!(repository.read_manifest().is_err());
+    }
+
+    #[test]
+    fn restored_batch_preserves_exact_records_and_requires_ready_remote_path() {
+        use crate::services::{
+            coincube::imported_checkpoint::Checkpoint,
+            recovery::imported_key_v3::{ImportedKeyKitV3, KitKey},
+        };
+        let _session_guard = app::session::test_guard();
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([91u8; 32]);
+        let record =
+            LocalKeyRecord::from_account(&fixture.accounts[0], Uuid::new_v4(), Uuid::new_v4());
+        let kit = ImportedKeyKitV3 {
+            public: checkpoint_test_public(&fixture),
+            operation_id: repository.operation_id,
+            wallet_id: fixture.attachment.wallet_id.to_string(),
+            policy_hash: hex::encode(repository.policy_hash),
+            inventory_generation: 7,
+            checkpoint_generation: 3,
+            local_keys: vec![KitKey {
+                record: record.clone(),
+                secret: ImportedKeySecret::new(
+                    Zeroizing::new(fixture.phrases[0].clone()),
+                    Zeroizing::new(String::new()),
+                )
+                .unwrap(),
+            }],
+        };
+        kit.validate().unwrap();
+        let binding = RestoredCheckpoint {
+            cube_id: 42,
+            generation: 3,
+            commitment: "a".repeat(64),
+            source_inventory_generation: 7,
+            ready: false,
+        };
+        let original = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        assert_eq!(
+            repository
+                .admit_restored_batch_locked(
+                    repository.read_manifest().unwrap(),
+                    kit,
+                    binding.clone(),
+                    "synthetic unlock",
+                    &device,
+                    || true,
+                )
+                .unwrap(),
+            vec![record.clone()]
+        );
+        let staged = repository.read_manifest().unwrap();
+        assert_eq!(staged.records, vec![record.clone()]);
+        assert_eq!(staged.restored.as_ref(), Some(&binding));
+        assert!(staged.checkpoint.is_none());
+        let mut conflicting = record.clone();
+        conflicting.revision = Uuid::new_v4();
+        let conflicting_kit = ImportedKeyKitV3 {
+            public: checkpoint_test_public(&fixture),
+            operation_id: repository.operation_id,
+            wallet_id: fixture.attachment.wallet_id.to_string(),
+            policy_hash: hex::encode(repository.policy_hash),
+            inventory_generation: 7,
+            checkpoint_generation: 3,
+            local_keys: vec![KitKey {
+                record: conflicting,
+                secret: ImportedKeySecret::new(
+                    Zeroizing::new(fixture.phrases[0].clone()),
+                    Zeroizing::new(String::new()),
+                )
+                .unwrap(),
+            }],
+        };
+        assert!(repository
+            .admit_restored_batch_locked(
+                staged.clone(),
+                conflicting_kit,
+                binding.clone(),
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .is_err());
+        assert_eq!(
+            repository.read_manifest().unwrap().records,
+            vec![record.clone()]
+        );
+        assert_eq!(
+            repository
+                .read_key(&record, "synthetic unlock", &device)
+                .unwrap()
+                .account(),
+            &fixture.accounts[0]
+        );
+        assert!(checkpoint::ensure_unbound(&staged).is_err());
+        fixture.save_cube(fixture.cube.clone());
+        app::session::open(
+            fixture.cube.id.clone(),
+            Zeroizing::new("synthetic PIN".into()),
+        );
+        assert!(repository
+            .with_key(record.record_id, record.revision, None, || true, |_| Ok(()))
+            .is_err());
+        let remote = Checkpoint {
+            generation: 3,
+            commitment: binding.commitment.clone(),
+            active: true,
+        };
+        repository
+            .finish_restored_batch_locked(
+                staged,
+                42,
+                &remote,
+                7,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        let ready = repository.read_manifest().unwrap();
+        assert!(ready.restored.as_ref().unwrap().ready);
+        assert_eq!(ready.records, vec![record]);
+        assert!(
+            repository
+                .verified_restored_binding(&ready, "synthetic unlock", &device, || {
+                    app::session::close();
+                })
+                .is_err(),
+            "session closure after record verification must deny release"
+        );
+        app::session::open(
+            fixture.cube.id.clone(),
+            Zeroizing::new("synthetic PIN".into()),
+        );
+        assert!(
+            repository
+                .verified_restored_binding(&ready, "synthetic unlock", &device, || {
+                    DuressLocalState {
+                        active: true,
+                        ..DuressLocalState::default()
+                    }
+                    .save(&fixture.root)
+                    .unwrap();
+                })
+                .is_err(),
+            "Duress activation after record verification must deny release"
+        );
+        DuressLocalState::default().save(&fixture.root).unwrap();
+        assert!(repository
+            .with_key(
+                ready.records[0].record_id,
+                ready.records[0].revision,
+                None,
+                || true,
+                |_| Ok(())
+            )
+            .is_err());
+        write_replace(&repository.root().join(MANIFEST), &original).unwrap();
+        assert!(
+            repository.read_manifest().is_err(),
+            "rolled-back manifest must not authorize old keys"
+        );
+        app::session::close();
+    }
+
+    #[test]
+    fn durable_restore_intent_denies_legacy_signer_before_key_read() {
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let intent = restore::restore_intent_path(repository.directory, repository.operation_id);
+        fs::create_dir_all(intent.parent().unwrap()).unwrap();
+        fs::write(&intent, b"pending restore").unwrap();
+        write_replace(&repository.root().join(MANIFEST), b"invalid manifest").unwrap();
+        let error = repository
+            .with_key(Uuid::new_v4(), Uuid::new_v4(), None, || true, |_| Ok(()))
+            .unwrap_err();
+        assert_eq!(error, "Finish the imported key restore before signing.");
+    }
+
+    #[test]
+    fn restored_tombstone_release_retires_keys_and_survives_pending_crash() {
+        use crate::services::coincube::imported_checkpoint::Checkpoint;
+        let _session_guard = app::session::test_guard();
+        for crash_after_pending in [false, true] {
+            let fixture = Fixture::new();
+            fixture.save_cube(fixture.cube.clone());
+            app::session::open(
+                fixture.cube.id.clone(),
+                Zeroizing::new("synthetic PIN".into()),
+            );
+            let repository = fixture.repository();
+            let device = Zeroizing::new([94u8; 32]);
+            let (record, binding) = checkpoint_test_ready_restored(&fixture, &device);
+            let ready = repository.read_manifest().unwrap();
+            let ready_bytes = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+            let cube = checkpoint_test_scope(&fixture);
+            assert!(repository.remove_operation_storage().is_err());
+
+            let active_newer = Checkpoint {
+                generation: binding.generation + 1,
+                commitment: "b".repeat(64),
+                active: true,
+            };
+            assert!(repository
+                .release_restored_locked(
+                    ready.clone(),
+                    &binding,
+                    &cube,
+                    &active_newer,
+                    "synthetic unlock",
+                    &device,
+                    || true,
+                )
+                .is_err());
+            let inactive_equal = Checkpoint {
+                generation: binding.generation,
+                commitment: binding.commitment.clone(),
+                active: false,
+            };
+            assert!(repository
+                .release_restored_locked(
+                    ready.clone(),
+                    &binding,
+                    &cube,
+                    &inactive_equal,
+                    "synthetic unlock",
+                    &device,
+                    || true,
+                )
+                .is_err());
+            let inactive_older = Checkpoint {
+                generation: binding.generation - 1,
+                commitment: binding.commitment.clone(),
+                active: false,
+            };
+            assert!(repository
+                .release_restored_locked(
+                    ready.clone(),
+                    &binding,
+                    &cube,
+                    &inactive_older,
+                    "synthetic unlock",
+                    &device,
+                    || true,
+                )
+                .is_err());
+            let tombstone = Checkpoint {
+                generation: binding.generation + 1,
+                commitment: binding.commitment.clone(),
+                active: false,
+            };
+            let mut wrong_owner = cube.clone();
+            wrong_owner.uuid = "other-cube".into();
+            assert!(repository
+                .release_restored_locked(
+                    ready.clone(),
+                    &binding,
+                    &wrong_owner,
+                    &tombstone,
+                    "synthetic unlock",
+                    &device,
+                    || true,
+                )
+                .is_err());
+            let mut wrong_network = cube.clone();
+            wrong_network.network = "mainnet".into();
+            assert!(repository
+                .release_restored_locked(
+                    ready.clone(),
+                    &binding,
+                    &wrong_network,
+                    &tombstone,
+                    "synthetic unlock",
+                    &device,
+                    || true,
+                )
+                .is_err());
+            assert_eq!(
+                read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap(),
+                ready_bytes
+            );
+
+            if crash_after_pending {
+                anchor::tests::inject_update_fault(
+                    &repository.anchor_scope(),
+                    anchor::tests::UpdateFault::AfterWriteReadbackError,
+                );
+                assert!(repository
+                    .release_restored_locked(
+                        ready,
+                        &binding,
+                        &cube,
+                        &tombstone,
+                        "synthetic unlock",
+                        &device,
+                        || true,
+                    )
+                    .is_err());
+                assert!(repository.remove_operation_storage().is_err());
+                let pending = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+                assert!(matches!(pending.state, AnchorState::Pending { .. }));
+                repository
+                    .recover_pending_with(pending, "synthetic unlock", &device)
+                    .unwrap();
+            } else {
+                repository
+                    .release_restored_locked(
+                        ready,
+                        &binding,
+                        &cube,
+                        &tombstone,
+                        "synthetic unlock",
+                        &device,
+                        || true,
+                    )
+                    .unwrap();
+            }
+            let released = repository.read_manifest().unwrap();
+            assert!(released.records.is_empty());
+            assert!(released.restored.is_none());
+            assert!(!repository.root().join(record.file_name()).exists());
+            assert!(checkpoint::ensure_unbound(&released).is_ok());
+            let released_bytes = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+            write_replace(&repository.root().join(MANIFEST), &ready_bytes).unwrap();
+            assert!(
+                repository.read_manifest().is_err(),
+                "old binding cannot be replayed"
+            );
+            write_replace(&repository.root().join(MANIFEST), &released_bytes).unwrap();
+            repository.remove_operation_storage().unwrap();
+            assert!(repository.is_removed().unwrap());
+            app::session::close();
+        }
     }
 }

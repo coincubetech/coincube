@@ -19,10 +19,10 @@ use super::launcher_coin;
 pub(crate) fn import_steps(passkey: bool) -> &'static [&'static str] {
     if passkey {
         &[
-            "Cube", "Passkey", "Backup", "Source", "Review", "Scan", "Done",
+            "Cube", "Passkey", "Backup", "Source", "Keys", "Review", "Scan", "Done",
         ]
     } else {
-        &["Cube", "Backup", "Source", "Review", "Scan", "Done"]
+        &["Cube", "Backup", "Source", "Keys", "Review", "Scan", "Done"]
     }
 }
 

@@ -160,6 +160,7 @@ impl Context {
                 Phase::Paused
             };
             job.last_error = None;
+            job.transient_failures = 0;
             history::write_json(&path, &job)?;
             status.job = Some(job);
             if !matches!(action, Action::Cancel) {
@@ -329,11 +330,8 @@ impl Context {
             rpc.prepare_wallet(&wallet_path, vault, range).await?;
             job.wallet_ready = true;
             if job.import_requested {
-                let source = match config.bitcoin_backend.as_ref() {
-                    Some(BitcoinBackend::Esplora(source)) => Some(source),
-                    _ => config.fallback_esplora.as_ref(),
-                }
-                .ok_or("No Connect/Esplora source is configured for transaction proofs")?;
+                let source = history::outspend_source(config)
+                    .ok_or("No Connect/Esplora source is configured for transaction proofs")?;
                 let txids: BTreeSet<_> = coins
                     .iter()
                     .flat_map(|coin| {
@@ -351,19 +349,22 @@ impl Context {
                             .transactions,
                     );
                 }
-                let fallback = history::import_transactions(&rpc, source, &transactions)
-                    .await?
-                    .into_iter()
-                    .min();
-                let missing = history::reconcile_coins(&rpc, &coins).await?;
-                // Even complete proof imports get a final tail/mempool scan.
-                job.start = fallback
-                    .into_iter()
-                    .chain(missing)
-                    .min()
-                    .unwrap_or(tip.saturating_sub(history::BATCH_BLOCKS - 1));
-                job.next = job.start;
-                job.download_next = job.start;
+                // Blocks whose transaction had no proof or was refused (a spend
+                // with no change back to this Vault) are scanned one by one.
+                let unproved = history::import_transactions(&rpc, source, &transactions).await?;
+                let mut plan = history::plan_coin_scans(&rpc, &coins, Some(source)).await?;
+                plan.blocks.extend(unproved);
+                // Even complete proof imports get a final tail/mempool scan,
+                // started lower only when some coin needs every block.
+                let mut tail = tip.saturating_sub(history::BATCH_BLOCKS - 1);
+                let mut fallback = None;
+                if let Some((floor, reason)) = plan.floor {
+                    if floor < tail {
+                        tail = floor;
+                        fallback = Some(reason);
+                    }
+                }
+                job.plan(plan.blocks, tail, fallback);
                 job.import_requested = false;
             }
             job.phase = if job.next > job.target {
@@ -374,6 +375,7 @@ impl Context {
             };
             job.fetch_attempts = 0;
             job.last_error = None;
+            job.transient_failures = 0;
             history::write_json(&path, &job)?;
             status.job = Some(job);
         } else if let Some(job) = &status.job {
@@ -384,9 +386,10 @@ impl Context {
                         history::read_json(&path)?.ok_or("Missing recovery progress")?;
                     saved.phase = Phase::FetchingForLoad;
                     saved.wallet_ready = false;
-                    saved.db_replayed = false;
-                    saved.next = saved.start;
-                    saved.download_next = saved.start;
+                    saved.rewind(Some(
+                        "The local wallet had to be reloaded, so Tenshu scans every block again."
+                            .into(),
+                    ));
                     history::write_json(&path, &saved)?;
                     status.job = Some(saved);
                     return Ok(Outcome { status, node });
@@ -453,14 +456,20 @@ impl Context {
                 .await
                 .map_err(|e| e.to_string())?
                 .coins;
-            status.reconciled = history::reconcile_coins(&rpc, &coins).await?.is_none();
+            status.reconciled =
+                history::reconcile_coins(&rpc, &coins, history::outspend_source(config))
+                    .await?
+                    .is_none();
             if !status.reconciled {
                 status.error=Some("The scan finished, but Connect and the local wallet still disagree about transaction/spend history. Sync Connect, then import or recover again before switching.".into());
                 let mut saved: Recovery =
                     history::read_json(&path)?.ok_or("Missing recovery progress")?;
                 saved.phase = Phase::Paused;
-                saved.db_replayed = false;
-                saved.next = saved.start;
+                // Resuming scans every block, the check single blocks missed.
+                saved.rewind(Some(
+                    "Checking single blocks left Connect and your node disagreeing, so Tenshu scans every block."
+                        .into(),
+                ));
                 saved.last_error = status.error.clone();
                 history::write_json(&path, &saved)?;
                 status.job = Some(saved);
