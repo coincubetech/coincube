@@ -40,7 +40,8 @@ use coincube_spark_protocol::{
     PrepareLnurlPayFromParams, PrepareSendFromOk, PrepareSendFromParams, PrepareSendOk,
     PrepareSwapOk, PrepareSwapParams, ReceivePaymentOk, RegisterLightningAddressOk, Request,
     Response, SendPaymentOk, SetAutoConvertParams, SetStableBalanceParams, StableBalanceSnapshot,
-    SwapOk, SwapParams, UsdbBalanceSnapshot, WalletAsset, CONVERSION_MAX_SLIPPAGE_BPS,
+    SwapOk, SwapParams, TokenPayment, UsdbBalanceSnapshot, WalletAsset,
+    CONVERSION_MAX_SLIPPAGE_BPS,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, OnceCell, RwLock};
@@ -1080,6 +1081,13 @@ const NOT_ENOUGH_USDB: &str = "Not enough USDB in this Spark wallet to cover the
 const TOKEN_INVOICE_REFUSAL: &str = "This invoice asks to be paid in a token, which can't be paid \
      from Bitcoin or US Dollar.";
 
+const USDB_INVOICE_FROM_BITCOIN: &str = "This invoice asks to be paid in US Dollar (USDB). Pay it \
+     from US Dollar.";
+
+const AMOUNTLESS_USDB_INVOICE: &str =
+    "This invoice asks to be paid in US Dollar (USDB) but doesn't \
+     say how much. Ask the recipient for an invoice with an amount.";
+
 /// Whether an SDK prepare error is the wallet saying the *bitcoin* balance
 /// can't cover the send. Two shapes: `SdkError::InsufficientFunds` from the
 /// Lightning and Spark paths — since 0.25.0 it names a token when the
@@ -1277,12 +1285,18 @@ async fn handle_prepare_send_from(
             "init must succeed before prepare_send_from",
         );
     };
-    // Refuse a token invoice before preparing anything. A failed parse is
-    // left to the prepare, and a token leg it returns is refused there too
-    // (`pay_from_refusal`), which also covers a BIP-21 URI carrying one.
+    // A token invoice is decided before preparing anything: a USDB one paid
+    // from USDB takes its own path, every other one is refused. A failed
+    // parse is left to the prepare, and a token leg it returns is refused
+    // there (`pay_from_refusal`), which also covers a BIP-21 URI carrying one.
     if let Ok(InputType::SparkInvoice(details)) = sdk.sdk.parse(params.input.trim()).await {
-        if details.token_identifier.is_some() {
-            return Response::err(id, ErrorKind::BadRequest, TOKEN_INVOICE_REFUSAL);
+        if let Some(token_identifier) = details.token_identifier.as_deref() {
+            if let Some((kind, reason)) =
+                token_invoice_refusal(pay_from, token_identifier, details.amount)
+            {
+                return Response::err(id, kind, reason);
+            }
+            return prepare_usdb_invoice(id, params.input, &sdk, &state).await;
         }
     }
     match prepare_send(id, params.input, params.amount_sat, Some(pay_from), &state).await {
@@ -1292,10 +1306,181 @@ async fn handle_prepare_send_from(
                 prepare,
                 pay_from,
                 conversion,
+                token_payment: None,
             }),
         ),
         Err(response) => response,
     }
+}
+
+/// Why a Spark invoice that requests `token_identifier` can't be paid from
+/// `pay_from`, or `None` for the one shape this bridge pays: a USDB invoice
+/// that names its amount, paid from USDB ([`prepare_usdb_invoice`]).
+///
+/// Paid from bitcoin it stays refused. The SDK can fund a token invoice
+/// with a `FromBitcoin` conversion (`prepare/spark_invoice.rs` at the pin),
+/// but no Review shows a bitcoin-to-USDB conversion on a send yet. An
+/// amountless one is refused because the only amount the gui sends is in
+/// sats, and the SDK would read it as token base units.
+fn token_invoice_refusal(
+    pay_from: WalletAsset,
+    token_identifier: &str,
+    amount: Option<u128>,
+) -> Option<(ErrorKind, &'static str)> {
+    if token_identifier != sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER {
+        return Some((ErrorKind::BadRequest, TOKEN_INVOICE_REFUSAL));
+    }
+    if pay_from == WalletAsset::Bitcoin {
+        return Some((ErrorKind::BadRequest, USDB_INVOICE_FROM_BITCOIN));
+    }
+    if amount.unwrap_or(0) == 0 {
+        return Some((ErrorKind::BadRequest, AMOUNTLESS_USDB_INVOICE));
+    }
+    None
+}
+
+/// Pay a USDB invoice straight from the USDB balance, once
+/// [`token_invoice_refusal`] has let it through: the SDK prepares a direct
+/// token transfer of the invoice's own amount, with no conversion.
+///
+/// The preview's sats figures are `0` and the real ones travel as
+/// [`PrepareSendFromOk::token_payment`], so nothing reads token base units
+/// as sats. `has_token_leg` is `Some(true)`: the send drops the
+/// idempotency key (`execute_regular_send`), so the gui treats a retry as
+/// unguarded.
+async fn prepare_usdb_invoice(
+    id: u64,
+    input: String,
+    sdk: &SdkHandle,
+    state: &ServerState,
+) -> Response {
+    let prepare = match sdk
+        .sdk
+        .prepare_send_payment(PrepareSendPaymentRequest {
+            payment_request: PaymentRequest::Input { input },
+            // The invoice's own amount, in token base units.
+            amount: None,
+            token_identifier: Some(sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string()),
+            conversion_options: None,
+            fee_policy: None,
+        })
+        .await
+    {
+        Ok(prepare) => prepare,
+        Err(breez_sdk_spark::SdkError::InsufficientFunds {
+            token_identifier: Some(_),
+        }) => return Response::err(id, ErrorKind::BadRequest, NOT_ENOUGH_USDB),
+        Err(e) => return Response::err(id, ErrorKind::Sdk, format!("prepare_send failed: {e}")),
+    };
+    let invoice_fee = match &prepare.payment_method {
+        SendPaymentMethod::SparkInvoice {
+            fee,
+            token_identifier,
+            ..
+        } => Some((*fee, token_identifier.as_deref())),
+        _ => None,
+    };
+    let token_payment = match usdb_invoice_payment(
+        prepare.token_identifier.as_deref(),
+        prepare.conversion_estimate.is_some(),
+        invoice_fee,
+        prepare.amount,
+    ) {
+        Ok(token_payment) => token_payment,
+        Err(reason) => return Response::err(id, ErrorKind::Sdk, reason),
+    };
+
+    // The SDK checks the holding when it sends, not here. Check it now so a
+    // short balance is refused on the amount screen, not after Confirm. A
+    // forced sync, as in `unfundable_conversion_error`: a stale cache that
+    // under-reports would refuse a send that would have worked.
+    let held = match sdk
+        .sdk
+        .get_info(GetInfoRequest {
+            ensure_synced: Some(true),
+        })
+        .await
+    {
+        Ok(info) => usdb_balance(&info.token_balances).map_or(0, |usdb| usdb.balance),
+        Err(e) => {
+            return Response::err(
+                id,
+                ErrorKind::Sdk,
+                format!("could not read the USDB holding to price this send: {e}"),
+            );
+        }
+    };
+    if held
+        < token_payment
+            .amount
+            .amount
+            .saturating_add(token_payment.fee.amount)
+    {
+        return Response::err(id, ErrorKind::BadRequest, NOT_ENOUGH_USDB);
+    }
+
+    let handle = Uuid::new_v4().to_string();
+    state
+        .pending_prepares
+        .lock()
+        .await
+        .insert(handle.clone(), (Instant::now(), prepare));
+    Response::ok(
+        id,
+        OkPayload::PrepareSendFrom(PrepareSendFromOk {
+            prepare: PrepareSendOk {
+                handle,
+                // Token base units travel in `token_payment`, never here.
+                amount_sat: 0,
+                fee_sat: 0,
+                method: "SparkInvoice".to_string(),
+                cross_chain: None,
+                has_token_leg: Some(true),
+            },
+            pay_from: WalletAsset::Usdb,
+            conversion: None,
+            token_payment: Some(token_payment),
+        }),
+    )
+}
+
+/// The USDB figures of a prepared USDB invoice payment, or why the prepare
+/// isn't one: the SDK must have prepared a direct transfer of the USDB
+/// token to a Spark invoice (`invoice_fee` is the `SparkInvoice` method's
+/// fee and token), with no conversion. The SDK denominates both the amount
+/// and the fee in the token's base units when a token is set.
+fn usdb_invoice_payment(
+    token_identifier: Option<&str>,
+    has_conversion: bool,
+    invoice_fee: Option<(u128, Option<&str>)>,
+    amount: u128,
+) -> Result<TokenPayment, String> {
+    let usdb = Some(sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER);
+    if has_conversion {
+        return Err("prepare attached a conversion to a USDB invoice payment".to_string());
+    }
+    if token_identifier != usdb {
+        return Err(format!(
+            "prepare of a USDB invoice moves {token_identifier:?}, not USDB"
+        ));
+    }
+    let fee = match invoice_fee {
+        Some((fee, method_token)) if method_token == usdb => fee,
+        Some((_, method_token)) => {
+            return Err(format!(
+                "prepare of a USDB invoice pays {method_token:?}, not USDB"
+            ))
+        }
+        None => return Err("prepare of a USDB invoice is not a Spark invoice payment".to_string()),
+    };
+    let usdb = |amount| AssetAmount {
+        asset: WalletAsset::Usdb,
+        amount,
+    };
+    Ok(TokenPayment {
+        amount: usdb(amount),
+        fee: usdb(fee),
+    })
 }
 
 /// [`Method::PrepareSend`] (`pay_from: None`) and [`Method::PrepareSendFrom`]:
@@ -2036,8 +2221,16 @@ async fn execute_regular_send(
     // options the SDK executes under, and (via `handle_prepare_send`) the fee
     // the confirmation screen showed. They cannot disagree.
     let speed = selected_onchain_speed();
-    let amount_sat = clamp_u128_to_u64(prepare.amount);
     let (fee_sat, method_tag) = fee_and_method(&prepare.payment_method, &speed);
+    // A direct token transfer (a USDB invoice, `prepare_usdb_invoice`) has
+    // its amount and fee in token base units. Report no sats rather than
+    // those, as its preview did. A conversion's prepare carries no token
+    // identifier: the SDK clears it for `ToBitcoin`.
+    let (amount_sat, fee_sat) = if prepare.token_identifier.is_some() {
+        (0, 0)
+    } else {
+        (clamp_u128_to_u64(prepare.amount), fee_sat)
+    };
     let options = send_options_for(&prepare.payment_method, &speed);
     if options.is_some() {
         // Which tier the money actually goes out at, next to the fee reported
@@ -2265,6 +2458,7 @@ fn input_type_to_ok(input: InputType) -> ParseInputOk {
             lnurl_max_sendable_sat: None,
             lnurl_comment_allowed: 0,
             lnurl_address: None,
+            usdb_invoice: false,
         },
         InputType::BitcoinAddress(_details) => ParseInputOk {
             // Plain on-chain addresses don't carry an amount — only
@@ -2276,6 +2470,7 @@ fn input_type_to_ok(input: InputType) -> ParseInputOk {
             lnurl_max_sendable_sat: None,
             lnurl_comment_allowed: 0,
             lnurl_address: None,
+            usdb_invoice: false,
         },
         InputType::Bip21(details) => ParseInputOk {
             kind: ParseInputKind::BitcoinAddress,
@@ -2284,6 +2479,7 @@ fn input_type_to_ok(input: InputType) -> ParseInputOk {
             lnurl_max_sendable_sat: None,
             lnurl_comment_allowed: 0,
             lnurl_address: None,
+            usdb_invoice: false,
         },
         InputType::LnurlPay(pay) => ParseInputOk {
             kind: ParseInputKind::LnurlPay,
@@ -2292,6 +2488,7 @@ fn input_type_to_ok(input: InputType) -> ParseInputOk {
             lnurl_max_sendable_sat: Some(msat_to_sat(pay.max_sendable)),
             lnurl_comment_allowed: pay.comment_allowed,
             lnurl_address: pay.address,
+            usdb_invoice: false,
         },
         InputType::LightningAddress(addr) => ParseInputOk {
             kind: ParseInputKind::LightningAddress,
@@ -2300,6 +2497,7 @@ fn input_type_to_ok(input: InputType) -> ParseInputOk {
             lnurl_max_sendable_sat: Some(msat_to_sat(addr.pay_request.max_sendable)),
             lnurl_comment_allowed: addr.pay_request.comment_allowed,
             lnurl_address: Some(addr.address),
+            usdb_invoice: false,
         },
         InputType::SparkAddress(_details) => ParseInputOk {
             // Static, identity-bound Spark address — no amount.
@@ -2309,6 +2507,7 @@ fn input_type_to_ok(input: InputType) -> ParseInputOk {
             lnurl_max_sendable_sat: None,
             lnurl_comment_allowed: 0,
             lnurl_address: None,
+            usdb_invoice: false,
         },
         InputType::SparkInvoice(details) => ParseInputOk {
             kind: ParseInputKind::SparkInvoice,
@@ -2324,6 +2523,8 @@ fn input_type_to_ok(input: InputType) -> ParseInputOk {
             lnurl_max_sendable_sat: None,
             lnurl_comment_allowed: 0,
             lnurl_address: None,
+            usdb_invoice: details.token_identifier.as_deref()
+                == Some(sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER),
         },
         // Everything else — BOLT12 invoices/offers, LNURL-auth,
         // LNURL-withdraw, silent payment, bare URLs — falls through
@@ -2336,6 +2537,7 @@ fn input_type_to_ok(input: InputType) -> ParseInputOk {
             lnurl_max_sendable_sat: None,
             lnurl_comment_allowed: 0,
             lnurl_address: None,
+            usdb_invoice: false,
         },
     }
 }
@@ -2366,6 +2568,7 @@ async fn handle_prepare_lnurl_pay_from(
                 prepare,
                 pay_from,
                 conversion,
+                token_payment: None,
             }),
         ),
         Err(response) => response,
@@ -3537,6 +3740,60 @@ mod usdb_fallback_tests {
         assert_eq!(pay_from_refusal(WalletAsset::Usdb, None, true), None);
         assert_eq!(pay_from_refusal(WalletAsset::Bitcoin, None, false), None);
         assert_eq!(pay_from_refusal(WalletAsset::Bitcoin, None, true), None);
+    }
+
+    /// A USDB invoice is paid only from USDB and only with its own amount.
+    /// Every other token, and USDB from bitcoin, stays refused before
+    /// anything is prepared.
+    #[test]
+    fn a_usdb_invoice_is_paid_from_usdb_and_every_other_token_is_refused() {
+        let usdb = sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER;
+        assert_eq!(
+            token_invoice_refusal(WalletAsset::Usdb, usdb, Some(2_500_000)),
+            None
+        );
+        assert_eq!(
+            token_invoice_refusal(WalletAsset::Bitcoin, usdb, Some(2_500_000)),
+            Some((ErrorKind::BadRequest, USDB_INVOICE_FROM_BITCOIN))
+        );
+        for amount in [None, Some(0)] {
+            assert_eq!(
+                token_invoice_refusal(WalletAsset::Usdb, usdb, amount),
+                Some((ErrorKind::BadRequest, AMOUNTLESS_USDB_INVOICE))
+            );
+        }
+        for pay_from in [WalletAsset::Bitcoin, WalletAsset::Usdb] {
+            assert_eq!(
+                token_invoice_refusal(pay_from, "btkn1other", Some(2_500_000)),
+                Some((ErrorKind::BadRequest, TOKEN_INVOICE_REFUSAL))
+            );
+        }
+    }
+
+    /// The preview carries the invoice's USDB amount and fee, denominated,
+    /// and refuses a prepare that isn't a direct USDB transfer to an invoice.
+    #[test]
+    fn a_usdb_invoice_preview_carries_usdb_figures() {
+        let usdb = Some(sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER);
+        let usdb_amount = |amount| AssetAmount {
+            asset: WalletAsset::Usdb,
+            amount,
+        };
+        assert_eq!(
+            usdb_invoice_payment(usdb, false, Some((1_200, usdb)), 2_500_000),
+            Ok(TokenPayment {
+                amount: usdb_amount(2_500_000),
+                fee: usdb_amount(1_200),
+            })
+        );
+        // A conversion, another token, a bitcoin leg or another method.
+        assert!(usdb_invoice_payment(usdb, true, Some((0, usdb)), 2_500_000).is_err());
+        assert!(
+            usdb_invoice_payment(Some("btkn1other"), false, Some((0, usdb)), 2_500_000).is_err()
+        );
+        assert!(usdb_invoice_payment(None, false, Some((0, None)), 2_500_000).is_err());
+        assert!(usdb_invoice_payment(usdb, false, Some((0, None)), 2_500_000).is_err());
+        assert!(usdb_invoice_payment(usdb, false, None, 2_500_000).is_err());
     }
 
     #[test]

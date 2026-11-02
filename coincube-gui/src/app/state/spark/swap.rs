@@ -35,7 +35,7 @@ use crate::app::wallets::SparkBackend;
 
 /// USDB's precision when the wallet holds none yet, so nothing reports its
 /// decimals. USDB ships at 6.
-const USDB_DEFAULT_DECIMALS: u32 = 6;
+pub(crate) const USDB_DEFAULT_DECIMALS: u32 = 6;
 
 /// Whether Spark offers Swap on `network`. Conversions run on mainnet only:
 /// the bridge refuses them elsewhere and only the mainnet USDB token is
