@@ -2367,7 +2367,15 @@ impl ImportedBitcoinPanel {
         )
     }
 
-    pub fn stop(&mut self) {
+    /// Like [`Self::stop`], but the owned daemon stops on its own thread so
+    /// locking the Cube does not wait for its in-flight network request.
+    pub fn stop_in_background(&mut self) {
+        if let Some(daemon) = self.release_daemon() {
+            crate::daemon::stopping::stop_in_background(daemon, || {});
+        }
+    }
+
+    fn release_daemon(&mut self) -> Option<Arc<dyn Daemon + Send + Sync>> {
         self.birthday_calendar_open = false;
         self.generation = fresh_generation();
         self.generation_gate
@@ -2380,7 +2388,11 @@ impl ImportedBitcoinPanel {
         self.source.clear_transient();
         let owns_daemon = self.owns_daemon;
         self.owns_daemon = false;
-        if let Some(daemon) = self.daemon.take().filter(|_| owns_daemon) {
+        self.daemon.take().filter(|_| owns_daemon)
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(daemon) = self.release_daemon() {
             let runtime = tokio::runtime::Handle::try_current().ok();
             let result = std::thread::spawn(move || {
                 if let Some(handle) = runtime {

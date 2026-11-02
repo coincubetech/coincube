@@ -51,6 +51,7 @@ pub async fn delete_failed_install(
     wallet_id: &settings::WalletId,
 ) -> Result<(), DeleteError> {
     let coincubed_directory = network_dir.coincubed_data_directory(wallet_id);
+    crate::daemon::stopping::wait_for_async(coincubed_directory.path().to_path_buf()).await;
 
     if !wallet_id.is_legacy() {
         ignore_not_found(tokio::fs::remove_dir_all(coincubed_directory.path()).await)?;
@@ -115,6 +116,9 @@ pub async fn delete_wallet<C: Into<crate::chain::ChainId>>(
     let network = chain.into().bitcoin_network();
     let wallet_id = wallet.wallet_id();
     let coincubed_directory = network_dir.coincubed_data_directory(&wallet_id);
+    // Deleting a Cube right after locking it: its daemon may still be stopping
+    // and writing to this directory.
+    crate::daemon::stopping::wait_for_async(coincubed_directory.path().to_path_buf()).await;
 
     if !wallet_id.is_legacy() {
         ignore_not_found(tokio::fs::remove_dir_all(coincubed_directory.path()).await)?;

@@ -48,6 +48,14 @@ fn map_spend_command_error(error: CommandError) -> DaemonError {
     }
 }
 
+// A Cube locked moments ago may still be stopping its daemon in the
+// background, holding this directory's `daemon.lock`.
+fn wait_for_previous_daemon(config: &Config) {
+    if let Some(dir) = config.data_directory() {
+        super::stopping::wait_for(dir.path());
+    }
+}
+
 // If an async caller abandons startup, the blocking result still owns cleanup.
 // DaemonHandle itself does not stop its poller on drop.
 struct PendingConnectDaemon(Option<DaemonHandle>);
@@ -95,6 +103,7 @@ impl EmbeddedDaemon {
     }
 
     pub fn start(config: Config) -> Result<EmbeddedDaemon, DaemonError> {
+        wait_for_previous_daemon(&config);
         let handle =
             DaemonHandle::start_default(config.clone(), false).map_err(DaemonError::Start)?;
         Ok(Self {
@@ -107,6 +116,7 @@ impl EmbeddedDaemon {
     /// Local fork startup trusts the selected consensus-validating node and
     /// requires its exact-chain RPC admission before wallet/database writes.
     pub fn start_local_fork(config: Config) -> Result<Self, DaemonError> {
+        wait_for_previous_daemon(&config);
         let handle =
             DaemonHandle::start_with_local_node(config.clone()).map_err(DaemonError::Start)?;
         Ok(Self {
@@ -175,6 +185,7 @@ impl EmbeddedDaemon {
         // its narrow Connect-only capability and never starts a pending node.
         config.pending_bitcoind = None;
         let result = tokio::task::spawn_blocking(move || {
+            wait_for_previous_daemon(&config);
             DaemonHandle::start_with_connect(config, backend, false)
                 .map(|handle| PendingConnectDaemon(Some(handle)))
         })

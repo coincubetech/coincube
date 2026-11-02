@@ -3352,9 +3352,13 @@ impl GUI {
                 let Some((owner, root, chain, cube_id)) = identity else {
                     return Task::none();
                 };
+                // Locking must not wait on daemon shutdowns: each poller first
+                // finishes its in-flight network request. Those daemons stop on
+                // their own threads; only the watch-only daemon outlives this
+                // update, while the signer and wallet clients go with the tabs.
                 let mut empty_panes = Vec::new();
                 for (&other_id, pane) in self.panes.iter_mut() {
-                    pane.close_tabs_matching(|sibling| {
+                    pane.close_tabs_matching_in_background(|sibling| {
                         !(other_id == pane_id && sibling.id == tab_id)
                             && (sibling.copy_owner() == Some(owner)
                                 || sibling.matches_cube_identity(&root, chain, &cube_id)
@@ -3388,7 +3392,7 @@ impl GUI {
                                     .update(pane::Message::tab(tab_id, *inner), &self.config)
                                     .map(move |message| Message::Pane(pane_id, message));
                             }
-                            pane.close_tab(index); // waits for daemon stop
+                            pane.close_tab_in_background(index);
                             crate::app::session::close(); // zeroizes signer/PIN
                             self.focus = Some(pane_id);
                             let task = pane.focus_launcher(&self.config);
