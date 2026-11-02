@@ -44,6 +44,31 @@ pub fn swap_available(network: Network) -> bool {
     crate::feature_flags::SPARK_SWAP && network == Network::Bitcoin
 }
 
+/// What happens to bitcoin received next, from the bridge's auto-convert
+/// state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoConvertLine {
+    /// Off, including a paused breaker (which turns it off): it stays bitcoin.
+    Off,
+    /// On: it converts to USDB.
+    On,
+    /// On, but held while a swap out of USDB settles: bitcoin received
+    /// meanwhile stays bitcoin (`AutoConvertState::held_after_swap`).
+    Held,
+}
+
+impl AutoConvertLine {
+    pub fn from_state(state: &coincube_spark_protocol::AutoConvertState) -> Self {
+        if !state.enabled {
+            Self::Off
+        } else if state.held_after_swap {
+            Self::Held
+        } else {
+            Self::On
+        }
+    }
+}
+
 /// Where the swap stands.
 #[derive(Debug, Clone)]
 pub enum SwapPhase {
@@ -103,9 +128,9 @@ pub struct SparkSwap {
     /// Identity of the latest estimate or swap request. Any edit bumps it,
     /// so an answer to an older request is dropped.
     request: u64,
-    /// Whether auto-convert is on, once read: the side panel says what
-    /// happens to bitcoin received after the swap (H-Convert).
-    auto_convert: Option<bool>,
+    /// What auto-convert does with bitcoin received next, once read: the
+    /// side panel says it (H-Convert).
+    auto_convert: Option<AutoConvertLine>,
     /// The swap's result arrived while another page was showing, so the
     /// user hasn't seen it: the next visit shows it instead of a new form.
     result_unseen: bool,
@@ -280,7 +305,7 @@ impl SparkSwap {
                     .get_auto_convert()
                     .await
                     .ok()
-                    .map(|state| state.enabled)
+                    .map(|state| AutoConvertLine::from_state(&state))
             },
             |enabled| {
                 Message::View(view::Message::SparkSwap(
@@ -290,8 +315,11 @@ impl SparkSwap {
         )
     }
 
-    pub(crate) fn auto_convert_for_view(&self) -> Option<bool> {
+    /// The line to show, once read. Hidden while a swap is out: the bridge
+    /// may hold auto-convert for it, and the answer re-reads the state.
+    pub(crate) fn auto_convert_for_view(&self) -> Option<AutoConvertLine> {
         self.auto_convert
+            .filter(|_| !matches!(self.phase, SwapPhase::Swapping(_)))
     }
 
     fn fetch_limits(&self) -> Task<Message> {
@@ -443,8 +471,9 @@ impl SparkSwap {
                     SwapAttempt::Refused(message) => SwapPhase::Refused(message),
                     SwapAttempt::Unknown(message) => SwapPhase::Unknown(message),
                 };
-                // The balances moved (or may have): show them as they are now.
-                self.fetch_balance()
+                // The balances moved (or may have), and a swap out of USDB may
+                // have put auto-convert on hold: show both as they are now.
+                Task::batch([self.fetch_balance(), self.fetch_auto_convert()])
             }
             SparkSwapMessage::SwapAgain => {
                 if matches!(
@@ -952,16 +981,61 @@ mod tests {
     fn the_auto_convert_state_is_kept_once_read() {
         let mut swap = SparkSwap::new(None);
         assert_eq!(swap.auto_convert_for_view(), None);
-        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(false))));
-        assert_eq!(swap.auto_convert_for_view(), Some(false));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(
+            AutoConvertLine::Off,
+        ))));
+        assert_eq!(swap.auto_convert_for_view(), Some(AutoConvertLine::Off));
         drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(None)));
         assert_eq!(
             swap.auto_convert_for_view(),
-            Some(false),
+            Some(AutoConvertLine::Off),
             "an unread state keeps the last"
         );
-        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(true))));
-        assert_eq!(swap.auto_convert_for_view(), Some(true));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(
+            AutoConvertLine::On,
+        ))));
+        assert_eq!(swap.auto_convert_for_view(), Some(AutoConvertLine::On));
+        // While a swap is out the line is hidden: the bridge may hold
+        // auto-convert for it.
+        swap.request += 1;
+        swap.phase = SwapPhase::Swapping(Box::new(quote(WalletAsset::Usdb, 1_000_000)));
+        assert_eq!(swap.auto_convert_for_view(), None);
+    }
+
+    /// Grok on #1019: a hold after a swap out of USDB means bitcoin received
+    /// meanwhile stays bitcoin, so the line must not say it converts.
+    #[test]
+    fn a_held_auto_convert_reads_as_held() {
+        use coincube_spark_protocol::{AutoConvertBreaker, AutoConvertState};
+        let state = |enabled, held_after_swap, breaker| AutoConvertState {
+            enabled,
+            breaker,
+            held_after_swap,
+        };
+        assert_eq!(
+            AutoConvertLine::from_state(&state(true, false, AutoConvertBreaker::Ready)),
+            AutoConvertLine::On
+        );
+        assert_eq!(
+            AutoConvertLine::from_state(&state(true, true, AutoConvertBreaker::Ready)),
+            AutoConvertLine::Held
+        );
+        assert_eq!(
+            AutoConvertLine::from_state(&state(false, false, AutoConvertBreaker::Ready)),
+            AutoConvertLine::Off
+        );
+        assert_eq!(
+            AutoConvertLine::from_state(&state(
+                false,
+                false,
+                AutoConvertBreaker::Paused {
+                    failures: 3,
+                    reason: "price moved".into(),
+                }
+            )),
+            AutoConvertLine::Off,
+            "a paused breaker turns it off"
+        );
     }
 
     #[test]

@@ -285,14 +285,20 @@ pub const WALLET_SETTINGS_ID: &str = "tenshu.spark.swap.wallet-settings";
 
 /// What happens to bitcoin received after the swap (H-Convert's side panel),
 /// with the way to change it.
-pub fn auto_convert_line<'a>(enabled: bool) -> Element<'a, Message> {
-    let (title, body) = if enabled {
-        (
+pub fn auto_convert_line<'a>(
+    line: crate::app::state::spark::swap::AutoConvertLine,
+) -> Element<'a, Message> {
+    use crate::app::state::spark::swap::AutoConvertLine;
+    let (title, body) = match line {
+        AutoConvertLine::On => (
             "Auto-convert is on",
             "Bitcoin you receive converts to USDB.",
-        )
-    } else {
-        ("Auto-convert is off", "Bitcoin you receive stays bitcoin.")
+        ),
+        AutoConvertLine::Held => (
+            "Auto-convert is waiting",
+            "A swap out of USDB is settling. Bitcoin received meanwhile stays bitcoin.",
+        ),
+        AutoConvertLine::Off => ("Auto-convert is off", "Bitcoin you receive stays bitcoin."),
     };
     Column::new()
         .spacing(4)
@@ -855,11 +861,22 @@ mod tests {
         let mut swap = funded();
         let probe = inspect("spark-swap-auto-convert-unread", swap_body(&cache, &swap));
         assert!(!probe.contains("Auto-convert is"));
-        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(false))));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(
+            crate::app::state::spark::swap::AutoConvertLine::Off,
+        ))));
         let probe = inspect("spark-swap-auto-convert-off", swap_body(&cache, &swap));
         assert!(probe.contains("Auto-convert is off"));
         assert!(probe.contains("Bitcoin you receive stays bitcoin."));
-        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(true))));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(
+            crate::app::state::spark::swap::AutoConvertLine::Held,
+        ))));
+        let probe = inspect("spark-swap-auto-convert-held", swap_body(&cache, &swap));
+        assert!(probe.contains("Auto-convert is waiting"));
+        assert!(probe.contains("Bitcoin received meanwhile stays bitcoin."));
+        assert!(!probe.contains("converts to USDB"));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(
+            crate::app::state::spark::swap::AutoConvertLine::On,
+        ))));
         let probe = inspect("spark-swap-auto-convert-on", swap_body(&cache, &swap));
         assert!(probe.contains("Auto-convert is on"));
         assert!(probe.contains("Bitcoin you receive converts to USDB."));
