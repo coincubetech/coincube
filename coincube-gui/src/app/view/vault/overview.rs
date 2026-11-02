@@ -8,11 +8,13 @@ use iced::{
 };
 
 use coincube_core::miniscript::bitcoin;
+use coincube_ui::component::tenshu::{asset_row, AmountVisibility, BalanceValue, Figure};
+use coincube_ui::theme::tenshu::size;
 use coincube_ui::{
     component::{amount::*, button, card, form, spinner, text::*},
     icon::{self, cross_icon},
     theme,
-    widget::{action::Action, Button, Column, ColumnExt, Element},
+    widget::{Button, Column, ColumnExt, Element},
 };
 
 use crate::{
@@ -23,10 +25,7 @@ use crate::{
         view::{
             dashboard_headed,
             message::Message,
-            shared::landing::{
-                amount_cell, landing_balance_section, landing_button, landing_control_id,
-                AmountCell, AmountTier,
-            },
+            shared::landing::{landing_balance_section, landing_button, landing_control_id},
             vault::coins,
             vault::label,
             vault_page_head,
@@ -185,54 +184,111 @@ fn failure_detail(message: &str) -> String {
     format!("{}…", truncated.trim_end())
 }
 
-/// The one Tools row on the Vault page (P-Overview): it names the tools the
-/// Vault offers and opens the Tools page on the first of them, where a tab
-/// bar switches between them.
-pub(crate) fn vault_tools<'a>(
-    cube_id: &str,
-    tools: &[(&'static str, Menu)],
-) -> Element<'a, Message> {
-    let Some((_, first)) = tools.first() else {
-        return Space::new().into();
-    };
-    let summary = tools
-        .iter()
-        .enumerate()
-        .map(|(index, (label, _))| {
-            // "Coin control, PSBT proposals, recovery path, split coins".
-            if index == 0 || label.starts_with("PSBT") {
-                label.to_string()
-            } else {
-                label.to_lowercase()
-            }
+/// One item of the Vault page's protection strip (W3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProtectionItem {
+    /// Coins whose recovery path opens soon, with the copy that says so.
+    Recovery(String),
+    /// PSBTs still waiting for signatures, with the copy that says so.
+    Psbts(String),
+}
+
+/// The strip's items: each only when its count is above zero.
+///
+/// - Recovery: the coins `coins_summary` flags as expiring, and the
+///   soonest of their recovery paths, `remaining_sequence` blocks away. The
+///   day count rounds up, so a path a few blocks away never reads "0 days".
+/// - PSBTs: the proposals PSBT proposals shows as "Not signed" or "Partially
+///   signed" ([`waiting_for_signatures`]).
+pub(crate) fn protection_items(
+    expiring_coins: usize,
+    remaining_sequence: Option<u32>,
+    psbts_waiting: usize,
+) -> Vec<ProtectionItem> {
+    let plural =
+        |n: usize, one: &str, many: &str| format!("{} {}", n, if n == 1 { one } else { many });
+    let recovery = (expiring_coins > 0).then(|| {
+        let coins = plural(expiring_coins, "coin", "coins");
+        ProtectionItem::Recovery(match remaining_sequence.map(coins::blocks_to_days_ceil) {
+            Some(0) | None => format!("Recovery path is open for {}", coins),
+            Some(days) => format!(
+                "Recovery path opens in {} for {}",
+                plural(days as usize, "day", "days"),
+                coins
+            ),
         })
-        .collect::<Vec<_>>()
-        .join(", ");
-    Container::new(
-        Action::new(
-            landing_control_id(cube_id, "Vault", "tools"),
-            Row::new()
-                .spacing(15)
-                .align_y(Alignment::Center)
-                .push(icon::wrench_icon().style(theme::text::secondary))
-                .push(
-                    Column::new()
-                        .spacing(2)
-                        .width(Length::Fill)
-                        .push(text("Tools").size(P1_SIZE).bold())
-                        .push(text(summary).size(P2_SIZE).style(theme::text::secondary)),
-                )
-                .push(icon::chevron_right().style(theme::text::secondary)),
-            Message::FocusAction,
-        )
-        .style(theme::button::transparent_border)
-        .width(Length::Fill)
-        .padding(15)
-        .on_press(Message::Menu(first.clone())),
+    });
+    let psbts = (psbts_waiting > 0).then(|| {
+        ProtectionItem::Psbts(format!(
+            "{} waiting for signatures",
+            plural(psbts_waiting, "PSBT", "PSBTs")
+        ))
+    });
+    recovery.into_iter().chain(psbts).collect()
+}
+
+/// PSBTs waiting for signatures: pending, with the primary path short of
+/// its threshold. The same split PSBT proposals uses for "Not signed" and
+/// "Partially signed" (`view::vault::psbts`), so the two pages agree.
+pub(crate) fn waiting_for_signatures(txs: &[crate::daemon::model::SpendTx]) -> usize {
+    txs.iter()
+        .filter(|tx| {
+            tx.status == crate::daemon::model::SpendStatus::Pending && tx.path_ready().is_none()
+        })
+        .count()
+}
+
+fn protection_strip<'a>(
+    cube_id: &str,
+    expiring_coins: &[bitcoin::OutPoint],
+    remaining_sequence: Option<u32>,
+    psbts_waiting: usize,
+) -> Option<Element<'a, Message>> {
+    let items = protection_items(expiring_coins.len(), remaining_sequence, psbts_waiting);
+    if items.is_empty() {
+        return None;
+    }
+    let column = items
+        .into_iter()
+        .fold(Column::new().spacing(12), |column, item| {
+            let (copy, control, label, route, icon) = match item {
+                ProtectionItem::Recovery(copy) => (
+                    copy,
+                    "refresh-coins",
+                    "Refresh coins",
+                    Menu::Vault(VaultSubMenu::Coins(Some(expiring_coins.to_owned()))),
+                    Some(icon::arrow_repeat()),
+                ),
+                ProtectionItem::Psbts(copy) => (
+                    copy,
+                    "review-psbts",
+                    "Review",
+                    Menu::Vault(VaultSubMenu::PSBTs(None)),
+                    None,
+                ),
+            };
+            column.push(
+                Row::new()
+                    .spacing(15)
+                    .align_y(Alignment::Center)
+                    .push(text(copy).size(P1_SIZE).width(Length::Fill))
+                    .push(landing_button(
+                        landing_control_id(cube_id, "Vault", control),
+                        label,
+                        icon,
+                        Message::FocusAction,
+                        Some(Message::Menu(route)),
+                        theme::button::secondary,
+                    )),
+            )
+        });
+    Some(
+        Container::new(column)
+            .padding(20)
+            .width(Length::Fill)
+            .style(theme::card::border)
+            .into(),
     )
-    .width(Length::Fill)
-    .style(theme::card::simple)
-    .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -253,7 +309,7 @@ pub fn vault_overview_view<'a>(
     _show_direction_badges: bool,
     display_mode: DisplayMode,
     mask_amounts: bool,
-    tools: &[(&'static str, Menu)],
+    psbts_waiting: usize,
 ) -> Element<'a, Message> {
     // Show external-unconfirmed coins as part of the headline balance
     // (matching the Cube → Overview Vault card). The per-transaction
@@ -266,36 +322,29 @@ pub fn vault_overview_view<'a>(
     let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(total_balance));
     let sync = balance_sync_state(sync_status, total_balance, awaiting_rescan_date);
     let history_unknown = matches!(sync, SyncState::Unknown { .. });
-    let btc_fiat_str = fiat_balance
+    let primary = Figure::new(total_balance.to_formatted_string_with_unit(bitcoin_unit))
+        .unit(bitcoin_unit.label());
+    let secondary = fiat_balance
         .as_ref()
-        .map(|f| format!("{} {}", f.to_formatted_string(), f.currency()))
-        .unwrap_or_default();
-    let vault_btc_row = Row::new()
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .push(coincube_ui::image::asset_network_logo::<Message>(
-            "btc", "bitcoin", 40.0,
-        ))
-        .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-        .push(amount_cell::<Message>(
-            if mask_amounts {
-                AmountCell::masked()
-            } else if history_unknown {
-                AmountCell::unknown("Vault history has not loaded")
-            } else {
-                AmountCell::shown(
-                    format!(
-                        "{} {}",
-                        total_balance.to_formatted_string_with_unit(bitcoin_unit),
-                        bitcoin_unit.label()
-                    ),
-                    (!btc_fiat_str.is_empty()).then_some(btc_fiat_str),
-                )
-            },
-            AmountTier::Row,
-        ))
-        .push(Space::new().width(Length::Fill))
-        .push(
+        .map(|f| Figure::new(f.to_formatted_string()).unit(f.currency().to_string()));
+    let vault_btc_row = asset_row(
+        coincube_ui::image::asset_network_logo::<Message>("btc", "bitcoin", size::COIN),
+        "Bitcoin",
+        if history_unknown {
+            BalanceValue::Pending {
+                label: "Vault history has not loaded".into(),
+            }
+        } else if total_balance == bitcoin::Amount::ZERO {
+            BalanceValue::Zero { primary, secondary }
+        } else {
+            BalanceValue::Known { primary, secondary }
+        },
+        if mask_amounts {
+            AmountVisibility::Hidden
+        } else {
+            AmountVisibility::Shown
+        },
+        [
             landing_button(
                 landing_control_id(cube_id, "Vault", "send-btc"),
                 "Send",
@@ -304,9 +353,8 @@ pub fn vault_overview_view<'a>(
                 Some(Message::Menu(Menu::Vault(VaultSubMenu::Send))),
                 theme::button::primary,
             )
-            .width(Length::Fixed(90.0)),
-        )
-        .push(
+            .width(Length::Fixed(90.0))
+            .into(),
             landing_button(
                 landing_control_id(cube_id, "Vault", "receive-btc"),
                 "Receive",
@@ -315,8 +363,10 @@ pub fn vault_overview_view<'a>(
                 Some(Message::Menu(Menu::Vault(VaultSubMenu::Receive))),
                 theme::button::orange_outline,
             )
-            .width(Length::Fixed(90.0)),
-        );
+            .width(Length::Fixed(90.0))
+            .into(),
+        ],
+    );
     Container::new(
         Column::new()
             .push(landing_balance_section(
@@ -325,7 +375,7 @@ pub fn vault_overview_view<'a>(
                     .push(
                         Column::new()
                             .spacing(8)
-                            .push(h4_bold("Balance"))
+                            .push(h4_bold("Total balance"))
                             .push(wallet_header::<Message>(WalletHeaderProps {
                                 sats: total_balance,
                                 fiat: fiat_balance,
@@ -375,64 +425,15 @@ pub fn vault_overview_view<'a>(
                 ),
                 _ => None,
             })
-            .push(if expiring_coins.is_empty() {
-                remaining_sequence.map(|sequence| {
-                    Container::new(
-                        Row::new()
-                            .spacing(15)
-                            .align_y(Alignment::Center)
-                            .push(
-                                h4_regular(format!(
-                                    "≈ {} left before first recovery path becomes available.",
-                                    coins::expire_message_units(sequence).join(", ")
-                                ))
-                                .width(Length::Fill),
-                            )
-                            .push(
-                                icon::tooltip_icon()
-                                    .size(20)
-                                    .style(theme::text::secondary)
-                                    .width(Length::Fixed(20.0)),
-                            )
-                            .width(Length::Fill),
-                    )
-                    .padding(25)
-                    .style(theme::card::border)
-                })
-            } else {
-                Some(
-                    Container::new(
-                        Row::new()
-                            .spacing(15)
-                            .align_y(Alignment::Center)
-                            .push(
-                                h4_regular(format!(
-                                    "Recovery path is or will soon be available for {} coin(s).",
-                                    expiring_coins.len(),
-                                ))
-                                .width(Length::Fill),
-                            )
-                            .push(landing_button(
-                                landing_control_id(cube_id, "Vault", "refresh-coins"),
-                                "Refresh coins",
-                                Some(icon::arrow_repeat()),
-                                Message::FocusAction,
-                                Some(Message::Menu(Menu::Vault(
-                                    crate::app::menu::VaultSubMenu::Coins(Some(
-                                        expiring_coins.to_owned(),
-                                    )),
-                                ))),
-                                theme::button::primary,
-                            )),
-                    )
-                    .padding(25)
-                    .style(theme::card::invalid),
-                )
-            })
+            .push_maybe(protection_strip(
+                cube_id,
+                expiring_coins,
+                *remaining_sequence,
+                psbts_waiting,
+            ))
             // "Recent activity": App mounts Activity's rows for the Vault
             // (`view::activity::recent_activity`).
             .push_maybe(recent_activity)
-            .push_maybe((!tools.is_empty()).then(|| vault_tools(cube_id, tools)))
             .push(Space::new().height(Length::Fixed(40.0)))
             .spacing(20),
     )
@@ -589,7 +590,7 @@ pub fn received_celebration_page<'a>(
 
 #[cfg(test)]
 mod balance_state_tests {
-    use super::{balance_sync_state, failure_detail};
+    use super::{balance_sync_state, coins, failure_detail, protection_items, ProtectionItem};
     use crate::app::{view::wallet_header::SyncState, wallet::SyncStatus};
     use coincube_core::miniscript::bitcoin::Amount;
 
@@ -705,6 +706,65 @@ mod balance_state_tests {
         }
     }
 
+    /// Each item shows only when its count is above zero.
+    #[test]
+    fn the_protection_strip_shows_each_item_only_when_its_count_is_above_zero() {
+        let kinds = |expiring, psbts| {
+            protection_items(expiring, Some(1_440), psbts)
+                .into_iter()
+                .map(|item| match item {
+                    ProtectionItem::Recovery(_) => "recovery",
+                    ProtectionItem::Psbts(_) => "psbts",
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(kinds(0, 0).is_empty());
+        assert_eq!(kinds(2, 0), ["recovery"]);
+        assert_eq!(kinds(0, 1), ["psbts"]);
+        assert_eq!(kinds(2, 1), ["recovery", "psbts"]);
+    }
+
+    #[test]
+    fn protection_copy_pluralises_coins_days_and_psbts() {
+        // 144 blocks is one day; 1,440 is ten.
+        assert_eq!(
+            protection_items(1, Some(144), 1),
+            [
+                ProtectionItem::Recovery("Recovery path opens in 1 day for 1 coin".into()),
+                ProtectionItem::Psbts("1 PSBT waiting for signatures".into()),
+            ]
+        );
+        assert_eq!(
+            protection_items(3, Some(1_440), 2),
+            [
+                ProtectionItem::Recovery("Recovery path opens in 10 days for 3 coins".into()),
+                ProtectionItem::Psbts("2 PSBTs waiting for signatures".into()),
+            ]
+        );
+        // A path that has opened says so.
+        assert_eq!(
+            protection_items(2, Some(0), 0),
+            [ProtectionItem::Recovery(
+                "Recovery path is open for 2 coins".into()
+            )]
+        );
+    }
+
+    /// Rounds up, sharing the block length `expire_message_units` uses.
+    #[test]
+    fn recovery_days_round_up() {
+        assert_eq!(coins::blocks_to_days_ceil(0), 0);
+        assert_eq!(
+            coins::blocks_to_days_ceil(1),
+            1,
+            "a block away is a day away"
+        );
+        assert_eq!(coins::blocks_to_days_ceil(144), 1);
+        assert_eq!(coins::blocks_to_days_ceil(145), 2);
+        assert_eq!(coins::blocks_to_days_ceil(4_320), 30);
+        assert_eq!(coins::expire_message_units(4_320), ["30 days"]);
+    }
+
     #[test]
     fn long_failure_messages_are_trimmed() {
         let long = "x".repeat(500);
@@ -719,6 +779,70 @@ mod balance_state_tests {
 mod capture_tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
+
+    /// The Vault page under its head, with both protection items (W3).
+    /// Opt-in: `TOP_BAR_CAPTURE_DIR=<dir> cargo test -p coincube-gui --lib
+    /// page_head_capture_vault -- --ignored`.
+    #[test]
+    #[ignore = "writes PNG frames; needs a GPU adapter"]
+    fn page_head_capture_vault() {
+        use crate::app::state::preferences::BalancePrivacy;
+        use crate::app::view::nav::shell::capture_tests;
+        let Some(directory) = capture_tests::directory() else {
+            return;
+        };
+        let mut renderer = capture_tests::renderer();
+        let menu = Menu::Vault(VaultSubMenu::Overview);
+        let balance = bitcoin::Amount::from_sat(1_250_000);
+        let zero = bitcoin::Amount::ZERO;
+        let expiring = [bitcoin::OutPoint::null()];
+        for (appearance, palette) in capture_tests::themes() {
+            let mut cache = capture_tests::cache(appearance == "light", BalancePrivacy::Shown);
+            cache.has_vault = true;
+            let cache = &cache;
+            let (balance, zero, expiring) = (&balance, &zero, &expiring);
+            capture_tests::save_page_head_frames(
+                &mut renderer,
+                &directory,
+                "vault",
+                appearance,
+                &palette,
+                || {
+                    crate::app::view::dashboard_with_detail(
+                        &menu,
+                        cache,
+                        move || {
+                            crate::app::state::vault::overview::VaultOverview::page_head_for_tests(
+                                cache,
+                            )
+                        },
+                        move || {
+                            vault_overview_view(
+                                balance,
+                                zero,
+                                &Some(1_440),
+                                None,
+                                expiring,
+                                None,
+                                "synthetic-cube",
+                                &SyncStatus::Synced,
+                                false,
+                                false,
+                                BitcoinDisplayUnit::Sats,
+                                None,
+                                None,
+                                true,
+                                DisplayMode::BitcoinNative,
+                                false,
+                                1,
+                            )
+                        },
+                        || None,
+                    )
+                },
+            );
+        }
+    }
 
     #[test]
     fn hidden_overview_redacts_balance() {
@@ -743,7 +867,7 @@ mod capture_tests {
                 true,
                 DisplayMode::BitcoinNative,
                 true,
-                &[],
+                0,
             ),
             (1024, 768),
             "dark",
@@ -751,60 +875,6 @@ mod capture_tests {
         );
         assert!(mounted.contains("••••••"));
         assert!(!mounted.contains("12,345,678"));
-    }
-
-    #[test]
-    fn vault_page_has_one_tools_row_naming_each_tool() {
-        let balance = bitcoin::Amount::from_sat(250_000);
-        let zero = bitcoin::Amount::ZERO;
-        let tools = [
-            ("Coin control", Menu::Vault(VaultSubMenu::Coins(None))),
-            ("PSBT proposals", Menu::Vault(VaultSubMenu::PSBTs(None))),
-            ("Recovery path", Menu::Vault(VaultSubMenu::Recovery)),
-            ("Split coins", Menu::Vault(VaultSubMenu::SplitCoins)),
-        ];
-        let view = |tools: &[(&'static str, Menu)]| {
-            capture::inspect(
-                "vault-tools",
-                vault_overview_view(
-                    &balance,
-                    &zero,
-                    &None,
-                    None,
-                    &[],
-                    None,
-                    "synthetic-cube",
-                    &SyncStatus::Synced,
-                    false,
-                    false,
-                    BitcoinDisplayUnit::Sats,
-                    None,
-                    None,
-                    true,
-                    DisplayMode::BitcoinNative,
-                    false,
-                    tools,
-                ),
-                (1024, 2000),
-                "dark",
-                theme::Theme::dark(),
-            )
-        };
-        let with = view(&tools);
-        // One Tools row naming every tool, not one button per tool.
-        assert!(with.contains("Tools"));
-        assert!(with.contains("Coin control, PSBT proposals, recovery path, split coins"));
-        assert!(with.has_focus(landing_control_id("synthetic-cube", "Vault", "tools")));
-        for (label, _) in &tools {
-            assert!(
-                !with.has_focus(landing_control_id("synthetic-cube", "Vault", label)),
-                "{:?} has its own button",
-                label
-            );
-        }
-        let without = view(&[]);
-        assert!(!without.contains("Coin control"));
-        assert!(!without.has_focus(landing_control_id("synthetic-cube", "Vault", "tools")));
     }
 
     #[test]
@@ -841,7 +911,7 @@ mod capture_tests {
                             true,
                             DisplayMode::BitcoinNative,
                             false,
-                            &[],
+                            0,
                         )
                     };
                 }
@@ -859,6 +929,11 @@ mod capture_tests {
                         control
                     )));
                 }
+                assert!(normal.contains("Total balance"));
+                assert!(normal.contains("Bitcoin"));
+                // No counts, no strip.
+                assert!(!normal.contains("Recovery path"));
+                assert!(!normal.contains("waiting for signatures"));
 
                 let unfinished = capture::inspect(
                     "vault-rescan-date-unknown",
@@ -885,6 +960,66 @@ mod capture_tests {
                 );
                 assert!(stale.contains("Last known balance"));
             }
+        }
+    }
+
+    /// The strip renders both items with their actions, which open Coin
+    /// control on the expiring coins and PSBT proposals.
+    #[test]
+    fn the_protection_strip_opens_coins_and_psbts() {
+        let balance = bitcoin::Amount::from_sat(250_000);
+        let zero = bitcoin::Amount::ZERO;
+        let expiring = [bitcoin::OutPoint::null()];
+        let view = || {
+            vault_overview_view(
+                &balance,
+                &zero,
+                &Some(1_440),
+                None,
+                &expiring,
+                None,
+                "synthetic-cube",
+                &SyncStatus::Synced,
+                false,
+                false,
+                BitcoinDisplayUnit::Sats,
+                None,
+                None,
+                true,
+                DisplayMode::BitcoinNative,
+                false,
+                2,
+            )
+        };
+        let mounted = capture::inspect(
+            "vault-strip",
+            view(),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Recovery path opens in 10 days for 1 coin"));
+        assert!(mounted.contains("2 PSBTs waiting for signatures"));
+        for (control, route) in [
+            (
+                "refresh-coins",
+                Menu::Vault(VaultSubMenu::Coins(Some(expiring.to_vec()))),
+            ),
+            ("review-psbts", Menu::Vault(VaultSubMenu::PSBTs(None))),
+        ] {
+            let emitted = capture::activate(
+                view(),
+                landing_control_id("synthetic-cube", "Vault", control),
+                (1440, 900),
+                true,
+            );
+            assert!(
+                emitted
+                    .iter()
+                    .any(|message| matches!(message, Message::Menu(m) if *m == route)),
+                "{}",
+                control
+            );
         }
     }
 }

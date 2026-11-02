@@ -611,13 +611,24 @@ fn recovery_status_copy(remaining_blocks: u32) -> String {
 }
 
 /// Human duration used by the Vault overview's recovery summary.
+/// Ten minutes a block, as [`expire_message_units`] counts.
+const MINUTES_PER_BLOCK: u32 = 10;
+const MINUTES_PER_DAY: u32 = 1440;
+
+/// Days until `sequence` blocks have passed, rounded up: a path one block
+/// away is "1 day" away, not "0 days". [`expire_message_units`] floors, for
+/// its "≈ N left" breakdown.
+pub fn blocks_to_days_ceil(sequence: u32) -> u32 {
+    (sequence.saturating_mul(MINUTES_PER_BLOCK)).div_ceil(MINUTES_PER_DAY)
+}
+
 pub fn expire_message_units(sequence: u32) -> Vec<String> {
-    let mut n_minutes = sequence * 10;
+    let mut n_minutes = sequence * MINUTES_PER_BLOCK;
     let n_years = n_minutes / 525960;
     n_minutes -= n_years * 525960;
     let n_months = n_minutes / 43830;
     n_minutes -= n_months * 43830;
-    let n_days = n_minutes / 1440;
+    let n_days = n_minutes / MINUTES_PER_DAY;
 
     #[allow(clippy::nonminimal_bool)]
     if n_years != 0 || n_months != 0 || n_days != 0 {
@@ -632,7 +643,7 @@ pub fn expire_message_units(sequence: u32) -> Vec<String> {
             })
             .collect()
     } else {
-        n_minutes -= n_days * 1440;
+        n_minutes -= n_days * MINUTES_PER_DAY;
         let n_hours = n_minutes / 60;
         n_minutes -= n_hours * 60;
         [(n_hours, "hour"), (n_minutes, "minute")]

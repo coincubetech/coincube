@@ -86,7 +86,7 @@ fn source_digest(
 }
 
 pub(super) fn ensure_unbound(manifest: &Manifest) -> Result<(), String> {
-    if manifest.checkpoint.is_some() {
+    if manifest.checkpoint.is_some() || manifest.restored.is_some() {
         return Err("Imported inventory has a remote Recovery Kit; reconcile or revoke its checkpoint before changing keys.".into());
     }
     Ok(())
@@ -230,7 +230,7 @@ async fn fence_checkpoint_attempt(
 }
 
 impl LocalKeyRepository<'_> {
-    pub(super) fn live_checkpoint_public(
+    pub(crate) fn live_checkpoint_public(
         &self,
     ) -> Result<ImportedDescriptorBlob, PublicationError> {
         let settings =

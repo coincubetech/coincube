@@ -50,6 +50,8 @@ pub struct VaultOverview {
     unconfirmed_balance: Amount,
     remaining_sequence: Option<u32>,
     expiring_coins: Vec<OutPoint>,
+    /// PSBT proposals waiting for signatures, for the protection strip.
+    psbts_waiting: usize,
     payments: Payments,
     processing: bool,
     selected_event: Option<(HistoryTransaction, usize)>,
@@ -90,6 +92,7 @@ impl VaultOverview {
             unconfirmed_balance,
             remaining_sequence: remaining_seq,
             expiring_coins,
+            psbts_waiting: 0,
             selected_event: None,
             payments: Payments::default(),
             labels_edited: LabelsEdited::default(),
@@ -180,7 +183,21 @@ impl VaultOverview {
     }
 
     fn page_head<'a>(cache: &Cache) -> PageHead<'a, view::Message> {
-        view::wallet_page_head(cache, "Vault", cache.wallet_names.vault.as_deref())
+        let tools = view::nav::vault::tools(&view::nav::NavContext::from_cache(cache));
+        head_actions(
+            &cache.cube_id,
+            tools.first().map(|(_, route)| route.clone()),
+        )
+        .into_iter()
+        .fold(
+            view::wallet_page_head(cache, "Vault", cache.wallet_names.vault.as_deref()),
+            |head, (_, action)| head.action(action),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn page_head_for_tests<'a>(cache: &Cache) -> PageHead<'a, view::Message> {
+        Self::page_head(cache)
     }
 
     fn page_body<'a>(
@@ -207,7 +224,7 @@ impl VaultOverview {
             cache.show_direction_badges,
             cache.display_mode,
             cache.balance_amounts_masked(),
-            &view::nav::vault::tools(&view::nav::NavContext::from_cache(cache)),
+            self.psbts_waiting,
         )
     }
 }
@@ -270,6 +287,14 @@ impl State for VaultOverview {
                     );
                 }
             },
+            // The protection strip's PSBT count. A failed read keeps the
+            // last count rather than raising an error on the Vault page;
+            // PSBT proposals reports it.
+            Message::SpendTxs(Ok(mut txs)) => {
+                self.wallet.apply_spend_tx_overrides(&mut txs);
+                self.psbts_waiting = view::vault::overview::waiting_for_signatures(&txs);
+            }
+            Message::SpendTxs(Err(_)) => {}
             Message::Payments(res) => match res {
                 Err(e) => {
                     self.payments.refresh_in_flight = false;
@@ -519,7 +544,17 @@ impl State for VaultOverview {
         // poller to flag the spend. Mirrors the override applied to
         // the central `Cache.coins()`.
         let wallet_for_coins = self.wallet.clone();
+        let daemon3 = daemon.clone();
         Task::batch(vec![
+            Task::perform(
+                async move {
+                    daemon3
+                        .list_spend_transactions(None)
+                        .await
+                        .map_err(|e| e.into())
+                },
+                Message::SpendTxs,
+            ),
             Task::perform(
                 async move {
                     let mut payments = daemon
@@ -565,8 +600,78 @@ impl From<VaultOverview> for Box<dyn State> {
     }
 }
 
+/// The Vault page's head actions, labelled: **Tools**, opening the first
+/// tool the Vault offers (`tools`; none, none shown), and **Wallet
+/// settings**, opening Settings › Vault › Wallet & signers.
+fn head_actions<'a>(
+    cube_id: &str,
+    tools: Option<Menu>,
+) -> Vec<(&'static str, Element<'a, view::Message>)> {
+    use coincube_ui::component::tenshu::{ActionButton, ActionKind};
+    let action = |label: &'static str, control: &str, route: Menu| {
+        let button: Element<'a, view::Message> = ActionButton::new(
+            view::shared::landing::landing_control_id(cube_id, "Vault", control),
+            label,
+            ActionKind::Secondary,
+            view::Message::FocusAction,
+        )
+        .on_press(view::Message::Menu(route))
+        .compact()
+        .into();
+        (label, button)
+    };
+    let tools = tools.map(|route| action("Tools", "tools", route));
+    let settings = action(
+        "Wallet settings",
+        "wallet-settings",
+        Menu::Vault(crate::app::menu::VaultSubMenu::Settings(Some(
+            crate::app::menu::SettingsOption::Wallet,
+        ))),
+    );
+    tools.into_iter().chain(std::iter::once(settings)).collect()
+}
 #[cfg(test)]
 mod tests {
+    /// Tools opens the first tool and is left out without one; Wallet
+    /// settings opens Settings › Vault › Wallet & signers.
+    #[test]
+    fn vault_head_actions_open_tools_and_wallet_settings() {
+        use crate::app::menu::{SettingsOption, VaultSubMenu};
+        use crate::app::view::shared::landing::{capture, landing_control_id};
+        let labels = |tools| {
+            head_actions("cube", tools)
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect::<Vec<_>>()
+        };
+        let coins = Menu::Vault(VaultSubMenu::Coins(None));
+        assert_eq!(labels(Some(coins.clone())), ["Tools", "Wallet settings"]);
+        assert_eq!(labels(None), ["Wallet settings"]);
+        for (index, control, route) in [
+            (0, "tools", coins.clone()),
+            (
+                1,
+                "wallet-settings",
+                Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Wallet))),
+            ),
+        ] {
+            let (_, action) = head_actions("cube", Some(coins.clone())).remove(index);
+            let emitted = capture::activate(
+                action,
+                landing_control_id("cube", "Vault", control),
+                (1024, 768),
+                false,
+            );
+            assert!(
+                emitted
+                    .iter()
+                    .any(|message| matches!(message, view::Message::Menu(m) if *m == route)),
+                "{}",
+                control
+            );
+        }
+    }
+
     use super::*;
     use crate::daemon::model::Coin;
     use coincube_core::miniscript::bitcoin;

@@ -599,6 +599,9 @@ async fn install_inner(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestoredKitSource {
     Password,
+    /// Password-v3 public restore leaves key-backup completion unset; local
+    /// signer admission is handled by the restore coordinator.
+    PasswordV3,
     OwnerKeychain,
 }
 
@@ -813,6 +816,10 @@ pub async fn restore_from_kit(
             RestoredKitSource::Password => {
                 cube.recovery_kit_password_backed_up = true;
                 cube.recovery_kit_last_backed_up_descriptor_fingerprint = Some(fingerprint.clone());
+            }
+            RestoredKitSource::PasswordV3 => {
+                cube.recovery_kit_password_backed_up = false;
+                cube.recovery_kit_last_backed_up_descriptor_fingerprint = None;
             }
             RestoredKitSource::OwnerKeychain => {
                 cube.recovery_kit_last_backed_up_keychain_descriptor_fingerprint =
@@ -1236,6 +1243,33 @@ mod recovery_pair_tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn password_v3_public_restore_does_not_claim_key_backup_complete() {
+        let (blob, _) = kits();
+        let root = RestoreRoot::new();
+        seed_only_cube(&root.0, &blob).await;
+        let directory = root.0.network_directory(ChainId::Bitcoin);
+        let cube = restore_from_kit(
+            &directory,
+            &blob.cube.uuid,
+            &blob,
+            backend(),
+            RestoredKitSource::PasswordV3,
+        )
+        .await
+        .unwrap();
+        assert!(cube
+            .bitcoin_import
+            .as_ref()
+            .unwrap()
+            .active_attachment()
+            .is_some());
+        assert!(!cube.recovery_kit_password_backed_up);
+        assert!(cube
+            .recovery_kit_last_backed_up_descriptor_fingerprint
+            .is_none());
     }
 
     #[tokio::test]
