@@ -10661,7 +10661,16 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let view = if self.show_received_celebration {
+        let journey = self
+            .panels
+            .imported_bitcoin
+            .as_ref()
+            .filter(|panel| panel.journey_open());
+        let view = if let Some(panel) = journey {
+            // Import or restore holds the window from the imported wallet's
+            // Source step until the user leaves Done.
+            panel.journey_view(&self.cache, self.cube_settings.passkey_metadata.is_some())
+        } else if self.show_received_celebration {
             // Global celebration overlay takes precedence over the normal panel view.
             view::dashboard(
                 &self.panels.current,
@@ -11438,6 +11447,50 @@ pub(crate) mod tests {
         assert!(app.authenticated_coincube_client().is_some());
         assert!(app.panels.connect.account.bitcoin_blake2b_enabled());
         assert!(app.claim_connect_session().is_none());
+    }
+
+    /// An open Import or restore takes the whole window: none of the Cube's
+    /// menu shows until the user leaves it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_open_import_journey_replaces_the_cube_shell() {
+        use crate::home::restore_frame::rendered_labels;
+        let root =
+            std::env::temp_dir().join(format!("imported-vault-journey-{}", uuid::Uuid::new_v4()));
+        let (mut app, _daemon, _) = imported_vault_app(&root);
+        let shell = rendered_labels(app.view()).await;
+        assert!(
+            !shell.iter().any(|text| text == "Import or restore"),
+            "{:?}",
+            shell
+        );
+        assert!(shell.iter().any(|text| text == "Activity"), "{:?}", shell);
+
+        app.panels
+            .imported_bitcoin
+            .as_mut()
+            .unwrap()
+            .open_journey_for_tests();
+        let journey = rendered_labels(app.view()).await;
+        assert!(
+            journey.iter().any(|text| text == "Import or restore"),
+            "{:?}",
+            journey
+        );
+        assert!(
+            !journey.iter().any(|text| text == "Activity"),
+            "{:?}",
+            journey
+        );
+
+        drop(app.update(Message::View(view::Message::ImportedBitcoin(
+            state::imported_bitcoin::ImportMessage::LeaveJourney,
+        ))));
+        let closed = rendered_labels(app.view()).await;
+        assert!(
+            !closed.iter().any(|text| text == "Import or restore"),
+            "{:?}",
+            closed
+        );
     }
 
     /// The imported runtime never sends `UpdateDaemonCache`, so the Overview's

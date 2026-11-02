@@ -58,7 +58,7 @@ use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
 
 mod launcher_activity;
 #[cfg(test)]
-mod launcher_capture;
+pub(crate) mod launcher_capture;
 mod launcher_catalog;
 mod launcher_chrome;
 pub(crate) mod launcher_coin;
@@ -66,6 +66,7 @@ mod launcher_gpu;
 pub(crate) mod launcher_opening;
 pub(crate) mod launcher_presenter;
 pub(crate) mod launcher_scene;
+pub(crate) mod restore_frame;
 pub(crate) use launcher_catalog::LauncherSceneContext;
 
 /// The firmware advisory whose one-time incident notice this install still
@@ -5207,12 +5208,8 @@ impl Home {
         // that Home owns its later steps. The fork has its own ordered path.
         // The import path after the Cube: the imported-wallet screens inside
         // it (Source, Review, Scan) finish the import.
-        let steps: &[&str] = if restoring && self.passkey_mode {
-            &[
-                "Cube", "Passkey", "Backup", "Source", "Review", "Scan", "Done",
-            ]
-        } else if restoring {
-            &["Cube", "Backup", "Source", "Review", "Scan", "Done"]
+        let steps: &[&str] = if restoring {
+            restore_frame::import_steps(self.passkey_mode)
         } else if blake2b {
             &[
                 "Network", "PIN", "Vault", "Policy", "Keys", "Seed", "Connect", "Node", "Name",
@@ -5250,60 +5247,7 @@ impl Home {
         } else {
             1
         };
-        let progress = steps.iter().enumerate().fold(
-            Row::new().spacing(3).align_y(Alignment::Center),
-            |row, (index, label)| {
-                let current = index == active_step;
-                let done = index < active_step;
-                let number = Container::new(p2_regular((index + 1).to_string()).size(12))
-                    .width(Length::Fixed(22.0))
-                    .height(Length::Fixed(22.0))
-                    .center_x(Length::Fixed(22.0))
-                    .center_y(Length::Fixed(22.0))
-                    .style(move |theme: &theme::Theme| iced::widget::container::Style {
-                        background: current
-                            .then_some(iced::Background::Color(theme.colors.shell.selected)),
-                        border: iced::Border {
-                            color: if current {
-                                theme.colors.shell.accent
-                            } else if done {
-                                theme.colors.shell.good
-                            } else {
-                                theme.colors.shell.line
-                            },
-                            width: 1.0,
-                            radius: 11.0.into(),
-                        },
-                        ..Default::default()
-                    });
-                let row = row.push(
-                    Row::new()
-                        .spacing(4)
-                        .align_y(Alignment::Center)
-                        .push(number)
-                        .push(p2_regular(*label).size(11).style(move |theme| {
-                            if current || done {
-                                theme::text::primary(theme)
-                            } else {
-                                theme::text::secondary(theme)
-                            }
-                        })),
-                );
-                if index + 1 < steps.len() {
-                    row.push(
-                        Container::new(Space::new())
-                            .width(Length::Fixed(18.0))
-                            .height(Length::Fixed(1.0))
-                            .style(|theme: &theme::Theme| iced::widget::container::Style {
-                                background: Some(iced::Background::Color(theme.colors.shell.line)),
-                                ..Default::default()
-                            }),
-                    )
-                } else {
-                    row
-                }
-            },
-        );
+        let progress = restore_frame::stepper(steps, active_step);
 
         let leave = self.can_leave_create_journey();
         let brand = FocusableAction::new(
@@ -5395,33 +5339,12 @@ impl Home {
         if launcher_coin::is_test_network(self.network) {
             identity = identity.push(create_journey_tag(self.network.label(), false));
         }
-        let header_divider = || {
-            Container::new(Space::new())
-                .width(Length::Fixed(1.0))
-                .height(Length::Fixed(20.0))
-                .style(|theme: &theme::Theme| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(theme.colors.shell.line)),
-                    ..Default::default()
-                })
-        };
         let header = if restoring {
-            Row::new()
-                .align_y(Alignment::Center)
-                .spacing(12)
-                .push(p1_bold("Import or restore"))
-                .push(header_divider())
-                .push(
-                    Row::new()
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .push(create_journey_coin(self.network, light, 16.0))
-                        .push(
-                            p2_regular(launcher_chrome::network_name(self.network))
-                                .style(theme::text::secondary),
-                        ),
-                )
-                .push(Space::new().width(Length::Fill))
-                .push(
+            restore_frame::header(
+                self.network,
+                launcher_chrome::network_name(self.network),
+                light,
+                Some(
                     // Close leaves Import or restore whenever no Cube is being
                     // made: to the Cube list, or with none to list, to the
                     // plain Create form `ShowCreateCube(false)` falls back to.
@@ -5435,8 +5358,10 @@ impl Home {
                     .on_press_maybe(
                         (!backing_up && !self.creating_cube)
                             .then_some(ViewMessage::ShowCreateCube(false)),
-                    ),
-                )
+                    )
+                    .into(),
+                ),
+            )
         } else {
             Row::new()
                 .align_y(Alignment::Center)
@@ -5453,6 +5378,7 @@ impl Home {
                 )
                 .push(identity)
                 .push(Space::new().width(Length::Fill))
+                .into()
         };
 
         let body: Element<ViewMessage> = if hub {
@@ -5818,29 +5744,7 @@ impl Home {
         };
         // Import or restore: its title over a path list beside the path.
         let region: Element<ViewMessage> = if let Some(header) = header {
-            Column::new()
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .push(Container::new(header).padding([16, 28]).width(Length::Fill))
-                .push(divider())
-                .push(
-                    Row::new()
-                        .height(Length::Fill)
-                        .push(self.restore_nav(backing_up))
-                        .push(
-                            Container::new(Space::new())
-                                .width(Length::Fixed(1.0))
-                                .height(Length::Fill)
-                                .style(|theme: &theme::Theme| iced::widget::container::Style {
-                                    background: Some(iced::Background::Color(
-                                        theme.colors.shell.line,
-                                    )),
-                                    ..Default::default()
-                                }),
-                        )
-                        .push(region),
-                )
-                .into()
+            restore_frame::split(header, self.restore_nav(backing_up), region.into())
         } else {
             region.into()
         };
@@ -5881,29 +5785,11 @@ impl Home {
             FocusableAction::new(Id::new(id), p2_regular(label), create_journey_focus)
                 .width(Length::Fill)
                 .padding([10, 12])
-                .style(move |theme, status| {
-                    let mut style = theme::button::transparent(
-                        theme,
-                        if current {
-                            iced::widget::button::Status::Active
-                        } else {
-                            status
-                        },
-                    );
-                    if current {
-                        style.background =
-                            Some(iced::Background::Color(theme.colors.shell.selected));
-                        style.text_color = theme.colors.shell.ink;
-                    }
-                    style
-                })
+                .style(restore_frame::nav_style(current))
                 .on_press_maybe((!locked && !current).then_some(message))
         };
         let importing = self.pending_bitcoin_import.is_some();
-        let mut nav = Column::new()
-            .spacing(4)
-            .padding([16, 12])
-            .width(Length::Fixed(220.0))
+        let mut nav = restore_frame::nav()
             .push(item(
                 RESTORE_OVERVIEW_ID,
                 "Overview",

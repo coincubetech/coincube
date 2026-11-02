@@ -200,7 +200,7 @@ fn dock_button(
 }
 
 /// A network's full name (`CH.full`), for a Cube's face and its unlock.
-pub(super) fn network_name(chain: ChainId) -> &'static str {
+pub(crate) fn network_name(chain: ChainId) -> &'static str {
     match chain {
         ChainId::Bitcoin => "Bitcoin mainnet",
         ChainId::BitcoinBlake2b => "Bitcoin Blake2b mainnet",

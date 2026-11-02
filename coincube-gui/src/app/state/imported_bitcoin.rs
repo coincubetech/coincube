@@ -292,6 +292,12 @@ pub enum ImportMessage {
     CopyAddress,
     ToggleDetails,
     Abandon,
+    /// Scan → Done while the scan carries on.
+    ContinueFromScan,
+    /// Close, or Done's Open Cube: back to the Cube.
+    LeaveJourney,
+    /// The Vault page's Continue import: back to Import or restore.
+    ResumeJourney,
     ShowSend,
     CloseSend,
     RecipientEdited(String),
@@ -397,6 +403,26 @@ impl ScanDisplay {
     }
 }
 
+/// The import's steps after the Cube, on Import or restore's stepper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JourneyStep {
+    Source,
+    Review,
+    Scan,
+    Done,
+}
+
+impl JourneyStep {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Source => "Source",
+            Self::Review => "Review",
+            Self::Scan => "Scan",
+            Self::Done => "Done",
+        }
+    }
+}
+
 pub struct ImportedBitcoinPanel {
     directory: NetworkDirectory,
     cube_id: String,
@@ -442,6 +468,12 @@ pub struct ImportedBitcoinPanel {
     connect_token: Option<String>,
     hardware_root: Option<CoincubeDirectory>,
     hardware_wallets: Option<HardwareWallets>,
+    /// Import or restore (P-Restore) holds the window from Source until the
+    /// user leaves Done. It opens for a Cube with no wallet attached yet,
+    /// new or resumed, and stays through this session's scan.
+    journey: bool,
+    /// The user moved on from Scan to Done before the scan finished.
+    scan_continued: bool,
 }
 
 impl ImportedBitcoinPanel {
@@ -457,7 +489,6 @@ impl ImportedBitcoinPanel {
         Self {
             directory,
             cube_id,
-            import,
             source: WalletSourceForm::default(),
             birthday: String::new(),
             birthday_calendar_open: false,
@@ -497,6 +528,9 @@ impl ImportedBitcoinPanel {
             connect_token: None,
             hardware_root: None,
             hardware_wallets: None,
+            journey: import.active_attachment().is_none(),
+            scan_continued: false,
+            import,
         }
     }
 
@@ -1012,7 +1046,17 @@ impl ImportedBitcoinPanel {
             );
             return Task::none();
         }
-        if self.busy && (!matches!(&message, ImportMessage::PollProgress) || self.address_reserving)
+        // Moving between Import or restore and the Cube changes only what is
+        // shown, so it stays open while a refresh keeps the panel busy.
+        let presentation = matches!(
+            &message,
+            ImportMessage::LeaveJourney
+                | ImportMessage::ResumeJourney
+                | ImportMessage::ContinueFromScan
+        );
+        if self.busy
+            && !presentation
+            && (!matches!(&message, ImportMessage::PollProgress) || self.address_reserving)
         {
             return Task::none();
         }
@@ -1744,6 +1788,24 @@ impl ImportedBitcoinPanel {
                     },
                 )
             }
+            ImportMessage::ContinueFromScan => {
+                if self.import.active_attachment().is_some() {
+                    self.scan_continued = true;
+                }
+                Task::none()
+            }
+            ImportMessage::LeaveJourney => {
+                if !self.writing_setup() {
+                    self.journey = false;
+                }
+                Task::none()
+            }
+            ImportMessage::ResumeJourney => {
+                if self.import.active_attachment().is_none() {
+                    self.journey = true;
+                }
+                Task::none()
+            }
             ImportMessage::Abandon => {
                 if self.import.active_attachment().is_some() {
                     self.error =
@@ -2343,13 +2405,273 @@ impl ImportedBitcoinPanel {
         }
     }
 
+    /// The setup step as one column: its form over its action row.
+    #[cfg(test)]
     fn setup_view(&self) -> Element<'_, view::Message> {
-        let mut content = Column::new()
+        let (form, actions) = self.setup_step();
+        Column::new()
             .spacing(16)
             .max_width(800)
-            .push(h2(if self.review.is_none() { "Import a Bitcoin wallet" } else { "Review Bitcoin wallet" }))
-            .push(p1_regular("Use your existing Bitcoin wallet in this Cube. Signing stays with your original wallet or hardware device.").style(theme::text::secondary));
+            .push(form)
+            .push(actions)
+            .into()
+    }
+
+    /// The Vault page while the import is unfinished and Import or restore
+    /// is closed.
+    fn resume_view(&self) -> Element<'_, view::Message> {
+        Column::new()
+            .spacing(16)
+            .max_width(800)
+            .push(h3("Finish importing your Bitcoin wallet"))
+            .push(
+                p1_regular("This Cube is waiting for your existing Bitcoin wallet. Continue in Import or restore, or use a new Vault instead.")
+                    .style(theme::text::secondary),
+            )
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .push(button::primary(None, "Continue import").on_press(
+                        view::Message::ImportedBitcoin(ImportMessage::ResumeJourney),
+                    ))
+                    .push(
+                        button::secondary(None, "Use a new Vault instead").on_press_maybe(
+                            (!self.busy).then_some(view::Message::ImportedBitcoin(
+                                ImportMessage::Abandon,
+                            )),
+                        ),
+                    ),
+            )
+            .push_maybe(
+                self.error
+                    .as_ref()
+                    .map(|error| p1_regular(error).style(theme::text::error)),
+            )
+            .into()
+    }
+
+    /// True while Import or restore holds the window instead of the Cube.
+    /// An install or abandon is being written. Refreshes during the scan
+    /// also set `busy`, but leaving then interrupts nothing.
+    fn writing_setup(&self) -> bool {
+        self.busy && self.import.active_attachment().is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_journey_for_tests(&mut self) {
+        self.journey = true;
+    }
+
+    pub fn journey_open(&self) -> bool {
+        self.journey && !self.abandoned
+    }
+
+    /// Where the import stands on Import or restore's stepper.
+    fn journey_step(&self) -> JourneyStep {
+        if self.import.active_attachment().is_none() {
+            if self.review.is_none() {
+                JourneyStep::Source
+            } else {
+                JourneyStep::Review
+            }
+        } else if self.is_ready() || self.scan_continued {
+            JourneyStep::Done
+        } else {
+            JourneyStep::Scan
+        }
+    }
+
+    /// Import or restore around the import's steps after the Cube exists:
+    /// the Launcher's header, path list and stepper, with no Cube menu.
+    pub fn journey_view<'a>(
+        &'a self,
+        cache: &'a Cache,
+        passkey: bool,
+    ) -> Element<'a, view::Message> {
+        use crate::home::restore_frame;
+        use coincube_ui::widget::{Button, Container};
+        use iced::{widget::Space, Alignment, Length};
+
+        let light = matches!(
+            cache.theme_mode,
+            coincube_ui::theme::palette::ThemeMode::Light
+        );
+        let step = self.journey_step();
+        let steps = restore_frame::import_steps(passkey);
+        let active = steps
+            .iter()
+            .position(|label| *label == step.label())
+            .unwrap_or(steps.len() - 1);
+        let (form, actions): (Element<'a, view::Message>, Element<'a, view::Message>) = match step {
+            JourneyStep::Source | JourneyStep::Review => self.setup_step(),
+            JourneyStep::Scan => (
+                self.scan_content(Column::new().spacing(16))
+                    .push(
+                        Row::new()
+                            .spacing(10)
+                            .align_y(Alignment::Center)
+                            .push(button::secondary(None, "Receive").width(Length::Shrink))
+                            .push(
+                                caption(
+                                    "Wait for the complete Bitcoin history scan before receiving.",
+                                )
+                                .style(theme::text::secondary),
+                            ),
+                    )
+                    .push_maybe(
+                        self.error
+                            .as_ref()
+                            .map(|error| p1_regular(error).style(theme::text::error)),
+                    )
+                    .into(),
+                Row::new()
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        button::primary(None, "Continue")
+                            .width(Length::Shrink)
+                            .on_press(view::Message::ImportedBitcoin(
+                                ImportMessage::ContinueFromScan,
+                            )),
+                    )
+                    .into(),
+            ),
+            JourneyStep::Done => (
+                self.done_content(cache),
+                Row::new()
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        button::primary(None, "Open Cube")
+                            .width(Length::Shrink)
+                            .on_press(view::Message::ImportedBitcoin(ImportMessage::LeaveJourney)),
+                    )
+                    .into(),
+            ),
+        };
+        let nav_item = |label: &'static str, current: bool| {
+            Button::new(p2_regular(label))
+                .width(Length::Fill)
+                .padding([10, 12])
+                .style(restore_frame::nav_style(current))
+        };
+        // The Cube now exists, so the import is the only path left open.
+        let nav = restore_frame::nav()
+            .push(nav_item("Overview", false))
+            .push(nav_item("Import Bitcoin wallet", true));
+        let region = Column::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(
+                iced::widget::scrollable(
+                    Column::new()
+                        .spacing(20)
+                        .padding([24, 28])
+                        .push(h2("Import Bitcoin wallet"))
+                        .push(restore_frame::stepper(steps, active))
+                        .push(form),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill),
+            )
+            .push(restore_frame::full_rule())
+            .push(
+                Container::new(actions)
+                    .padding([14, 28])
+                    .width(Length::Fill),
+            );
+        // Close returns to the Cube; the Vault page reopens an unfinished
+        // import. Done has its own Open Cube.
+        let close = (step != JourneyStep::Done).then(|| {
+            button::secondary(Some(coincube_ui::icon::cross_icon()), "Close")
+                .width(Length::Shrink)
+                .on_press_maybe(
+                    (!self.writing_setup())
+                        .then_some(view::Message::ImportedBitcoin(ImportMessage::LeaveJourney)),
+                )
+                .into()
+        });
+        let header = restore_frame::header(
+            self.chain(),
+            restore_frame::network_name(self.chain()),
+            light,
+            close,
+        );
+        let top_bar = Container::new(
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(coincube_ui::icon::cube_outline_icon())
+                .push(p2_regular("Tenshu"))
+                .push(Space::new().width(Length::Fill))
+                .push(p2_regular(cache.cube_name.as_str()).style(theme::text::secondary)),
+        )
+        .center_y(Length::Fixed(64.0))
+        .padding([0, 24])
+        .width(Length::Fill)
+        .style(theme::container::shell_rail);
+        let stage = Container::new(
+            Container::new(restore_frame::split(header, nav.into(), region.into()))
+                .style(theme::card::simple)
+                .width(Length::Fill)
+                .max_width(1120),
+        )
+        .padding([28, 24])
+        .center_x(Length::Fill)
+        .height(Length::Fill);
+        Container::new(Column::new().height(Length::Fill).push(top_bar).push(stage))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::container::background)
+            .into()
+    }
+
+    /// Done: what was imported and what is left to the user.
+    fn done_content<'a>(&'a self, cache: &'a Cache) -> Element<'a, view::Message> {
+        let summary = self
+            .import
+            .active_attachment()
+            .map(|wallet| wallet_summary(&wallet.descriptor));
+        let mut content = Column::new()
+            .spacing(16)
+            .push(h3(format!("{} is ready", cache.cube_name)));
+        if let Some((script, threshold, _)) = summary {
+            content = content.push(
+                p1_regular(format!(
+                    "Imported wallet · {} · {script} · {threshold}. Receive, Activity and Tools work on it in this Cube. To spend, sign with your original wallet or hardware device.",
+                    crate::home::restore_frame::network_name(self.chain())
+                ))
+                .style(theme::text::secondary),
+            );
+        }
+        content
+            .push(p1_regular(if self.is_ready() {
+                "Balance and history: from the completed scan"
+            } else {
+                "Balance and history: the scan is still running. They appear in the Vault when it finishes."
+            }))
+            .push(p1_regular(
+                "Recovery Kit: update it from Cube settings to include this wallet",
+            ))
+            .into()
+    }
+
+    /// Source, or Review once the form parses: the step's form and its
+    /// action row.
+    fn setup_step(&self) -> (Element<'_, view::Message>, Element<'_, view::Message>) {
+        let mut content = Column::new().spacing(16);
+        let mut footer = Row::new()
+            .spacing(10)
+            .align_y(iced::Alignment::Center)
+            .push(
+                button::secondary(None, "Use a new Vault instead")
+                    .width(iced::Length::Shrink)
+                    .on_press_maybe(
+                        (!self.busy)
+                            .then_some(view::Message::ImportedBitcoin(ImportMessage::Abandon)),
+                    ),
+            )
+            .push(iced::widget::Space::new().width(iced::Length::Fill));
         if self.review.is_none() {
+            content = content.push(p1_regular("Use your existing Bitcoin wallet in this Cube. Signing stays with your original wallet or hardware device.").style(theme::text::secondary));
             let beginning = if self.scan_from_beginning {
                 button::primary(None, "From the beginning")
             } else {
@@ -2433,8 +2755,9 @@ impl ImportedBitcoinPanel {
                         .padding(10),
                 );
             }
-            content = content.push(
+            footer = footer.push(
                 button::primary(None, "Review wallet")
+                    .width(iced::Length::Shrink)
                     .on_press(view::Message::ImportedBitcoin(ImportMessage::Review)),
             );
         } else if let Some(wallet) = &self.review {
@@ -2443,6 +2766,7 @@ impl ImportedBitcoinPanel {
             let sample_address = sample_receive_address(&wallet.descriptor)
                 .unwrap_or_else(|_| "Unable to derive a sample address".into());
             content = content
+                .push(h3("Review Bitcoin wallet"))
                 .push(p1_bold("Wallet details"))
                 .push(p1_regular(format!("Bitcoin mainnet · {script} · {threshold}")))
                 .push(p1_regular(format!("Signer fingerprints: {}", if fingerprints.is_empty() { "Not provided" } else { &fingerprints })))
@@ -2530,12 +2854,17 @@ impl ImportedBitcoinPanel {
             if self.provider == Provider::Connect {
                 content = content.push(caption("Connect server: COINCUBE's authenticated Bitcoin proxy, with public fallback servers."));
             }
-            content = content.push(
+            footer = footer.push(
                 Row::new()
                     .spacing(10)
-                    .push(button::secondary(None, "Edit wallet").on_press_maybe(
-                        (!retry).then_some(view::Message::ImportedBitcoin(ImportMessage::Edit)),
-                    ))
+                    .push(
+                        button::secondary(None, "Edit wallet")
+                            .width(iced::Length::Shrink)
+                            .on_press_maybe(
+                                (!retry)
+                                    .then_some(view::Message::ImportedBitcoin(ImportMessage::Edit)),
+                            ),
+                    )
                     .push(
                         button::primary(
                             None,
@@ -2549,6 +2878,7 @@ impl ImportedBitcoinPanel {
                                 }
                             },
                         )
+                        .width(iced::Length::Shrink)
                         .on_press_maybe(
                             (!self.busy)
                                 .then_some(view::Message::ImportedBitcoin(ImportMessage::Confirm)),
@@ -2559,12 +2889,7 @@ impl ImportedBitcoinPanel {
         if let Some(error) = &self.error {
             content = content.push(p1_regular(error).style(theme::text::error));
         }
-        content = content.push(
-            button::secondary_compact(None, "Use a new Vault instead").on_press_maybe(
-                (!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::Abandon)),
-            ),
-        );
-        content.into()
+        (content.into(), footer.into())
     }
 
     fn wallet_view(&self, mask_amounts: bool) -> Element<'_, view::Message> {
@@ -2649,91 +2974,100 @@ impl ImportedBitcoinPanel {
                 }
             }
         } else {
-            let scan = ScanDisplay::from_info(self.info.as_ref(), self.sync_failed);
-            let label = match scan {
-                ScanDisplay::Starting => "Finding your wallet's Bitcoin history",
-                ScanDisplay::Scanning { .. } => "Scanning your Bitcoin wallet history",
-                ScanDisplay::Saving => "Finishing your Bitcoin history scan",
-                ScanDisplay::Retrying => "Bitcoin history scan was interrupted",
-                ScanDisplay::NeedsAttention => "Bitcoin history needs attention",
-            };
-            content = content.push(h3(label));
-            if matches!(
-                scan,
-                ScanDisplay::Starting | ScanDisplay::Scanning { .. } | ScanDisplay::Saving
-            ) {
-                content = content.push(
-                    p1_regular("Your balance and transactions will appear when the scan finishes.")
-                        .style(theme::text::secondary),
-                );
-            }
-            match scan {
-                ScanDisplay::Scanning {
-                    checked,
-                    expected,
-                    progress,
-                } => {
-                    content = content
-                        .push(
-                            progress_bar(0.0..=1.0, progress as f32)
-                                .style(theme::progress_bar::primary),
-                        )
-                        .push(
-                            caption(format!(
-                                "{:.0}% · {checked} addresses checked (about {expected} expected)",
-                                progress * 100.0
-                            ))
-                            .style(theme::text::secondary),
-                        );
-                }
-                ScanDisplay::Starting | ScanDisplay::Saving => {
-                    content = content.push(spinner::typing_text_carousel(
-                        "...",
-                        true,
-                        Duration::from_millis(2000),
-                        |value| caption(value).style(theme::text::secondary),
-                    ));
-                }
-                ScanDisplay::Retrying | ScanDisplay::NeedsAttention => {
-                    if self.error.is_none() {
-                        content = content.push(
-                            p1_regular(
-                                "Check your connection and Bitcoin server, then retry the scan.",
-                            )
-                            .style(theme::text::secondary),
-                        );
-                    }
-                    content = content.push(
-                        button::secondary_compact(
-                            None,
-                            if self.sync_requesting {
-                                "Retrying…"
-                            } else {
-                                self.synchronization_action_label()
-                            },
-                        )
-                        .on_press_maybe(
-                            (!self.busy && !self.sync_requesting).then_some(
-                                view::Message::ImportedBitcoin(ImportMessage::RetrySynchronization),
-                            ),
-                        ),
-                    );
-                }
-            }
-            if matches!(
-                scan,
-                ScanDisplay::Starting | ScanDisplay::Scanning { .. } | ScanDisplay::Saving
-            ) {
-                content = content.push(
-                    caption("Progress updates automatically. Keep Tenshu open while it scans.")
-                        .style(theme::text::secondary),
-                );
-            }
+            content = self.scan_content(content);
         }
         if let Some(error) = &self.error {
             content = content.push(p1_regular(error).style(theme::text::error));
         }
         content.into()
+    }
+
+    /// The history scan's heading, progress and retry, under `content`.
+    fn scan_content<'a>(
+        &'a self,
+        mut content: Column<'a, view::Message>,
+    ) -> Column<'a, view::Message> {
+        let scan = ScanDisplay::from_info(self.info.as_ref(), self.sync_failed);
+        let label = match scan {
+            ScanDisplay::Starting => "Finding your wallet's Bitcoin history",
+            ScanDisplay::Scanning { .. } => "Scanning your Bitcoin wallet history",
+            ScanDisplay::Saving => "Finishing your Bitcoin history scan",
+            ScanDisplay::Retrying => "Bitcoin history scan was interrupted",
+            ScanDisplay::NeedsAttention => "Bitcoin history needs attention",
+        };
+        content = content.push(h3(label));
+        if matches!(
+            scan,
+            ScanDisplay::Starting | ScanDisplay::Scanning { .. } | ScanDisplay::Saving
+        ) {
+            content = content.push(
+                p1_regular("Your balance and transactions will appear when the scan finishes.")
+                    .style(theme::text::secondary),
+            );
+        }
+        match scan {
+            ScanDisplay::Scanning {
+                checked,
+                expected,
+                progress,
+            } => {
+                content = content
+                    .push(
+                        progress_bar(0.0..=1.0, progress as f32)
+                            .style(theme::progress_bar::primary),
+                    )
+                    .push(
+                        caption(format!(
+                            "{:.0}% · {checked} addresses checked (about {expected} expected)",
+                            progress * 100.0
+                        ))
+                        .style(theme::text::secondary),
+                    );
+            }
+            ScanDisplay::Starting | ScanDisplay::Saving => {
+                content = content.push(spinner::typing_text_carousel(
+                    "...",
+                    true,
+                    Duration::from_millis(2000),
+                    |value| caption(value).style(theme::text::secondary),
+                ));
+            }
+            ScanDisplay::Retrying | ScanDisplay::NeedsAttention => {
+                if self.error.is_none() {
+                    content = content.push(
+                        p1_regular(
+                            "Check your connection and Bitcoin server, then retry the scan.",
+                        )
+                        .style(theme::text::secondary),
+                    );
+                }
+                content = content.push(
+                    button::secondary_compact(
+                        None,
+                        if self.sync_requesting {
+                            "Retrying…"
+                        } else {
+                            self.synchronization_action_label()
+                        },
+                    )
+                    .on_press_maybe(
+                        (!self.busy && !self.sync_requesting).then_some(
+                            view::Message::ImportedBitcoin(ImportMessage::RetrySynchronization),
+                        ),
+                    ),
+                );
+            }
+        }
+        if matches!(
+            scan,
+            ScanDisplay::Starting | ScanDisplay::Scanning { .. } | ScanDisplay::Saving
+        ) {
+            content = content.push(
+                caption("Progress updates automatically. Keep Tenshu open while it scans.")
+                    .style(theme::text::secondary),
+            );
+        }
+        content
     }
 
     fn send_view(&self, psbts_only: bool) -> Element<'_, view::Message> {
@@ -3023,7 +3357,7 @@ fn passive_wallet_amount(sats: u64, mask_amounts: bool) -> String {
 impl State for ImportedBitcoinPanel {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
         let body = if self.import.active_attachment().is_none() {
-            self.setup_view()
+            self.resume_view()
         } else if !self.is_ready() {
             self.wallet_view(cache.balance_amounts_masked())
         } else {
@@ -4087,6 +4421,211 @@ mod tests {
             "Retry synchronization"
         );
         assert!(!panel.error.as_deref().unwrap().contains("<!DOCTYPE"));
+    }
+
+    use crate::home::restore_frame::rendered_labels;
+
+    fn assert_labels(shown: &[String], present: &[&str], absent: &[&str]) {
+        for label in present {
+            assert!(
+                shown.iter().any(|text| text == label),
+                "missing {:?} in {:?}",
+                label,
+                shown
+            );
+        }
+        for label in absent {
+            assert!(
+                !shown.iter().any(|text| text == label),
+                "unexpected {:?} in {:?}",
+                label,
+                shown
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pending_import_opens_import_or_restore_at_source() {
+        let directory = NetworkDirectory::new(std::env::temp_dir().join("import-journey-source"));
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "cube-1".into(), BitcoinImport::pending());
+        let cache = Cache {
+            cube_name: "Family savings".into(),
+            ..Cache::default()
+        };
+        assert!(panel.journey_open());
+        assert_eq!(panel.journey_step(), JourneyStep::Source);
+        let shown = rendered_labels(panel.journey_view(&cache, false)).await;
+        assert_labels(
+            &shown,
+            &[
+                "Import or restore",
+                "Bitcoin mainnet",
+                "Overview",
+                "Import Bitcoin wallet",
+                "Cube",
+                "Backup",
+                "Source",
+                "Scan",
+                "Done",
+                "Review wallet",
+                "Use a new Vault instead",
+                "Close",
+                "Family savings",
+            ],
+            // The Cube's own menu and the pre-redesign title stay out.
+            &["Passkey", "Import a Bitcoin wallet", "Vault", "Open Cube"],
+        );
+        let passkey = rendered_labels(panel.journey_view(&cache, true)).await;
+        assert_labels(&passkey, &["Passkey"], &[]);
+
+        // Close returns to the Cube, whose Vault page reopens the import.
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(!panel.journey_open());
+        let resume = rendered_labels(panel.resume_view()).await;
+        assert_labels(
+            &resume,
+            &["Finish importing your Bitcoin wallet", "Continue import"],
+            &["Review wallet"],
+        );
+        let _ = panel.update_view(ImportMessage::ResumeJourney, None, 0);
+        assert!(panel.journey_open());
+
+        // Close cannot leave while an import is being written.
+        panel.busy = true;
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(panel.journey_open());
+    }
+
+    #[tokio::test]
+    async fn the_scan_continues_to_done_and_open_cube_returns_to_the_cube() {
+        let mut panel = ready_import_panel();
+        let cache = Cache {
+            cube_name: "Family savings".into(),
+            ..Cache::default()
+        };
+        // A Cube reopened with its wallet attached starts in the Cube.
+        assert!(!panel.journey_open());
+        // This session's import: the scan is still running.
+        panel.journey = true;
+        let info = panel.info.take();
+        assert_eq!(panel.journey_step(), JourneyStep::Scan);
+        let scan = rendered_labels(panel.journey_view(&cache, false)).await;
+        assert_labels(
+            &scan,
+            &[
+                "Finding your wallet's Bitcoin history",
+                "Receive",
+                "Wait for the complete Bitcoin history scan before receiving.",
+                "Continue",
+                "Close",
+            ],
+            &["Open Cube"],
+        );
+        // ResumeJourney only reopens an unfinished import.
+        panel.journey = false;
+        let _ = panel.update_view(ImportMessage::ResumeJourney, None, 0);
+        assert!(!panel.journey_open());
+        panel.journey = true;
+
+        // A refresh during the scan keeps the panel busy; moving on still works.
+        panel.busy = true;
+        let _ = panel.update_view(ImportMessage::ContinueFromScan, None, 0);
+        assert_eq!(panel.journey_step(), JourneyStep::Done);
+        panel.busy = false;
+        let early = rendered_labels(panel.journey_view(&cache, false)).await;
+        assert_labels(
+            &early,
+            &[
+                "Family savings is ready",
+                "Balance and history: the scan is still running. They appear in the Vault when it finishes.",
+                "Open Cube",
+            ],
+            &["Continue", "Close"],
+        );
+
+        // The finished scan reaches Done on its own.
+        panel.scan_continued = false;
+        panel.info = info;
+        assert!(panel.is_ready());
+        assert_eq!(panel.journey_step(), JourneyStep::Done);
+        let done = rendered_labels(panel.journey_view(&cache, false)).await;
+        assert_labels(
+            &done,
+            &["Balance and history: from the completed scan"],
+            &[],
+        );
+        panel.busy = true;
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(!panel.journey_open());
+    }
+
+    /// Import or restore's Source, Review, Scan and Done through the wgpu
+    /// renderer. Opt-in: `LAUNCHER_CAPTURE_DIR=<dir> cargo test -p
+    /// coincube-gui --lib import_journey_capture -- --ignored`.
+    #[test]
+    #[ignore]
+    fn import_journey_capture() {
+        use crate::home::launcher_capture::{renderer, save};
+        let Ok(directory) = std::env::var("LAUNCHER_CAPTURE_DIR") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut renderer = renderer().expect("wgpu headless renderer");
+        let size = iced::Size::new(1440.0, 900.0);
+        let ready = ready_import_panel();
+        let wallet = ready.import.active_attachment().cloned().unwrap();
+        for light in [false, true] {
+            let appearance = if light { "light" } else { "dark" };
+            let palette = if light {
+                coincube_ui::theme::Theme::light()
+            } else {
+                coincube_ui::theme::Theme::dark()
+            };
+            let cache = Cache {
+                cube_name: "Family savings".into(),
+                theme_mode: if light {
+                    coincube_ui::theme::palette::ThemeMode::Light
+                } else {
+                    coincube_ui::theme::palette::ThemeMode::Dark
+                },
+                ..Cache::default()
+            };
+            let directory_for = |name: &str| {
+                NetworkDirectory::new(std::env::temp_dir().join(format!("import-capture-{name}")))
+            };
+            let source = ImportedBitcoinPanel::new(
+                directory_for("source"),
+                "cube-1".into(),
+                BitcoinImport::pending(),
+            );
+            let mut review = ImportedBitcoinPanel::new(
+                directory_for("review"),
+                "cube-1".into(),
+                BitcoinImport::pending(),
+            );
+            review.review = Some(wallet.clone());
+            let mut scan = ready_import_panel();
+            scan.journey = true;
+            scan.info = None;
+            let mut done = ready_import_panel();
+            done.journey = true;
+            for (name, panel) in [
+                ("source", &source),
+                ("review", &review),
+                ("scan", &scan),
+                ("done", &done),
+            ] {
+                save(
+                    &mut renderer,
+                    panel.journey_view(&cache, false),
+                    size,
+                    &palette,
+                    directory.join(format!("import-{name}-{appearance}.png")),
+                );
+            }
+        }
     }
 
     #[test]
