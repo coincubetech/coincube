@@ -11,10 +11,18 @@ The Node settings panel exposes three related operations:
   from the current wallet engine, requests Merkle-block proofs from the configured
   Esplora providers, validates their transaction membership and active-chain block
   hash, and imports supported transactions with `importprunedfunds`. Existing
-  Coincube database history remains intact. Missing proofs and transactions Core
-  cannot import, including transactions with no wallet-owned output, fall back to
-  block scanning. Tokens are sent only to their configured provider; redirects
-  are disabled.
+  Coincube database history remains intact. A transaction with no usable proof,
+  or one Core cannot import (including a spend with no wallet-owned output), has
+  only its own block fetched and scanned. A coin whose spend Connect knows queues
+  just the spend's block; when Connect's wallet view lacks the spender of an
+  output the node reports spent, Tenshu asks the Esplora
+  `/tx/:txid/outspend/:vout` endpoint and accepts its block only if the hash
+  matches the local active chain. The final check asks again and accepts the
+  coin once the local wallet holds that spender. Queued blocks are fetched and scanned one at a
+  time in height order, followed by a scan of the last 32 blocks. Only a pending
+  spend, or a spender that stays unknown, scans every block from the coin's
+  height, and the panel says why. Tokens are sent only to their configured
+  provider; redirects are disabled.
 - **Recover wallet history** accepts an exact block height or a UTC date in
   `YYYY-MM-DD` form. It fetches missing blocks from connected outbound archival
   peers, verifies the block bodies, scans retained batches, and saves progress.
@@ -61,11 +69,15 @@ Progress and retention intent are atomic private files under
 network genesis, managed-node instance, endpoint, wallet path and descriptor.
 Changed identities or malformed journals are refused. A per-network filesystem
 lease serializes block fetching/scanning, reconciliation and pruning across Cubes.
-Pruning is limited by the earliest unfinished scan. Downloaded blocks do not
-count as scanned progress. Reorganizations rewind the affected recovery before
-completion.
+Pruning is limited by the earliest unfinished scan, which for a queue of single
+blocks is the lowest unscanned one. Downloaded blocks do not count as scanned
+progress. Reorganizations, a wallet reload and a failed final reconciliation
+rewind the affected recovery to a full range scan before completion. A node RPC
+that misses its deadline does not pause recovery: Tenshu keeps polling and
+pauses only after 12 consecutive unreachable steps (about a minute) or on any
+other error.
 
-**Pause after batch** waits for the current worker; **Resume** rechecks the saved
+**Pause** waits for the current worker; **Resume** rechecks the saved
 identity and continues; **Cancel** releases the recovery's retention obligation.
 Wallet records already imported/scanned survive cancellation and later pruning.
 Temporary recovery restores the previous storage-size pruning target when no
@@ -119,10 +131,13 @@ and [pruneblockchain](https://bitcoincore.org/en/doc/29.0.0/rpc/blockchain/prune
 ### Guided switch and default retention
 
 For a Connect Vault, select **Switch to local node**. When the managed local
-wallet is missing history, Tenshu offers **Import Connect history** as the
-recommended first step. Recovery from a height/date and a custom rolling
-retention window are under **Advanced wallet history recovery options**.
-An existing interrupted recovery remains visible so it can be resumed.
+wallet is missing history, Tenshu shows **Move this Vault to your local node**:
+sync the blockchain, bring this Vault's history over, then switch. Step 2 offers
+**Start from Connect's history** (recommended; **Import history from Connect**)
+or **Start from a date or block**, which also shows the custom rolling retention
+window. Step 3's **Switch to local node** stays visible but disabled until the
+history checks out. An existing interrupted recovery remains visible so it can
+be resumed. **Rescan from a date** is disabled while a recovery runs.
 Once reconciliation and a fresh history check succeed, an explicit switch
 request is retried through the normal sync and running-scan guards.
 

@@ -2376,7 +2376,13 @@ impl VaultHistoryProbe {
                     .await
                     .ok()?;
                 rpc.check_chain(self.chain.bitcoin_network()).await.ok()?;
-                match crate::node::history::reconcile_coins(&rpc, &coins).await {
+                match crate::node::history::reconcile_coins(
+                    &rpc,
+                    &coins,
+                    crate::node::history::outspend_source(config),
+                )
+                .await
+                {
                     Ok(None) => Some(local_switch::VaultHistory::TrackedLocally),
                     Ok(Some(_)) => Some(history),
                     Err(_) => None,
@@ -3440,6 +3446,8 @@ impl App {
                 );
                 panel.set_hardware_root(data_dir.clone());
                 tasks.push(panel.bind_runtime(daemon.clone()));
+                // Vault settings say whether recovery words are stored here.
+                tasks.push(panel.load_key_inventory());
                 panels.imported_bitcoin = Some(Box::new(panel));
                 panels.global_home.imported_installed = true;
             }
@@ -17111,18 +17119,23 @@ mod local_node_sync_tests {
             &app.cache.datadir_path,
             app.cache.network,
         ));
+        let error = Some("Cannot reach local node for getblockhash".to_string());
+        app.cache.node_history.error = error.clone();
 
         drop(app.update(Message::NodeHistory(node_history::Action::Poll)));
-        assert!(app.node_history_in_progress, "the Poll must still run");
-        assert!(
-            !app.cache.node_history.busy,
-            "a background Poll must not read as recovery in progress"
-        );
+        assert!(app.node_history_in_progress, "the poll must still run");
+        assert!(!app.cache.node_history.busy);
+        assert_eq!(app.cache.node_history.error, error);
 
-        // A user's action still shows as busy.
+        // A user action still disables the controls and clears the error.
         app.node_history_in_progress = false;
-        drop(app.update(Message::NodeHistory(node_history::Action::Resume)));
+        drop(app.update(Message::NodeHistory(node_history::Action::Pause)));
         assert!(app.cache.node_history.busy);
+        assert!(app.cache.node_history.error.is_none());
+        drop(app);
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -347,6 +347,15 @@ pub enum CreateSpendMessage {
     Generate,
     SendMaxToRecipient(usize),
     FetchFeeEstimate(usize),
+    /// A preset's estimate (`None` if the fetch failed), carrying the identity
+    /// of the `FetchFeeEstimate` request it answers.
+    FeeEstimated {
+        request: u64,
+        feerate: Option<usize>,
+    },
+    /// The Custom fee segment: reveal the feerate field, restoring the last
+    /// rate typed into it.
+    CustomFeerate,
     SessionError(SpendCreationError),
     Clear,
 }
@@ -696,6 +705,11 @@ pub enum InstallStatsViewMessage {
 #[derive(Debug, Clone)]
 pub enum NodeSettingsMessage {
     RecoveryAdvancedToggled,
+    /// Pick where history recovery starts: `true` for a date or block
+    /// height, `false` for Connect's history.
+    RecoverySourceSelected(bool),
+    /// Show or hide the local node's latest log line.
+    NodeLogToggled,
     NodeAdvancedToggled,
     RecoveryDismiss,
     RecoveryStartEdited(String),
