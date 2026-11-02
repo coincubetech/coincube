@@ -59,6 +59,13 @@ pub struct SparkSendView<'a> {
     pub balance_sats: u64,
     /// The side panel's balances, each in its own unit.
     pub balances: crate::app::view::spark::SparkBalances<'a>,
+    /// The balance this send pays from (S4).
+    pub pay_from: coincube_spark_protocol::WalletAsset,
+    /// Why US Dollar can't pay this send, or `None` when it can.
+    pub usdb_unavailable: Option<&'static str>,
+    /// What the prepared preview pays from, and the conversion funding it.
+    pub paid_from: coincube_spark_protocol::WalletAsset,
+    pub conversion: Option<&'a coincube_spark_protocol::ConversionQuote>,
     /// Line under the Amount field when the entered amount exceeds the
     /// bitcoin balance and USDB will cover the rest — see
     /// `state::spark::send::usdb_conversion_hint`.
@@ -90,7 +97,20 @@ pub struct SparkSendView<'a> {
     pub quote_countdown: Option<cross_chain::QuoteCountdown>,
 }
 
+/// Under the amount when US Dollar pays (H-Send, pay from USDB).
+pub const PAID_FROM_USDB_NOTE: &str = "Paid from USDB: the amount converts to bitcoin at send. \
+     Review shows the rate and conversion fee before anything moves.";
+
+/// The pay-from picker's explanation of paying from bitcoin (S2's
+/// "Always on" shortfall conversion).
+pub const PAY_FROM_BITCOIN_NOTE: &str = "Bitcoin is used first. If it can't cover a payment, \
+     just enough USDB converts to cover the rest, and Review shows it.";
+
 impl<'a> SparkSendView<'a> {
+    fn pays_from_usdb(&self) -> bool {
+        self.pay_from == coincube_spark_protocol::WalletAsset::Usdb
+    }
+
     pub fn render(self) -> Element<'a, Message> {
         if !self.backend_available {
             return Column::new()
@@ -167,8 +187,12 @@ impl<'a> SparkSendView<'a> {
             .push_maybe(
                 self.usdb_conversion_hint
                     .clone()
-                    .filter(|_| !self.mask_amounts)
+                    .filter(|_| !self.mask_amounts && !self.pays_from_usdb())
                     .map(|hint| p2_regular(hint).style(theme::text::secondary)),
+            )
+            .push_maybe(
+                self.pays_from_usdb()
+                    .then(|| p2_regular(PAID_FROM_USDB_NOTE).style(theme::text::secondary)),
             );
 
         // Unified balance (BTC + Stable Balance), as the YOU SEND card showed it.
@@ -224,6 +248,7 @@ impl<'a> SparkSendView<'a> {
                 .push(card_section(spark_send_cards(
                     self.receive_target,
                     self.destination_input.is_empty(),
+                    self.pay_from,
                 )))
                 .push(iced::widget::rule::horizontal(1))
                 .push(card_section(
@@ -384,6 +409,9 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
     let recipient_checks_enabled = view.recipient_checks_enabled;
     let recipient_lookup_eligible = view.recipient_lookup_eligible;
     let theme_mode = view.theme_mode;
+    let paid_from = view.paid_from;
+    let conversion = view.conversion;
+    let usdb_decimals = view.balances.stable.map_or(6, |usdb| usdb.decimals);
     use crate::app::view::SparkSendMessage;
     use coincube_ui::component::amount::format_u64_as_string;
 
@@ -648,6 +676,24 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                     .spacing(14)
                     .push(h4_bold("Preview"))
                     .push(kv_row("Method", ok.method.clone()))
+                    .push(kv_row("Paid from", pay_from_label(paid_from).to_owned()))
+                    // The conversion funding the send, with its own fee and
+                    // the price cap that stops it, as Swap's Review shows them.
+                    .push_maybe(conversion.map(|quote| {
+                        kv_row("Conversion", conversion_line(quote, usdb_decimals))
+                    }))
+                    .push_maybe(conversion.map(|quote| {
+                        kv_row(
+                            "Conversion fee",
+                            crate::app::view::spark::swap::quote_fee_line(quote, usdb_decimals),
+                        )
+                    }))
+                    .push_maybe(conversion.map(|quote| {
+                        kv_row(
+                            "Max price change",
+                            crate::app::view::spark::swap::price_change(quote.max_slippage_bps),
+                        )
+                    }))
                     .push(kv_row("Amount", format!("{} sats", ok.amount_sat)))
                     .push(kv_row("Fee", format!("{} sats", ok.fee_sat)))
                     .push(kv_row(
@@ -945,6 +991,133 @@ fn orange_badge<'a>(label: &str) -> Element<'a, Message> {
 const DESTINATION_INPUT_ID: &str = "spark-send-destination";
 const AMOUNT_INPUT_ID: &str = "spark-send-amount";
 const RECEIVE_TARGET_ACTION_ID: &str = "spark-send-receive-target";
+pub const PAY_FROM_ACTION_ID: &str = "spark-send-pay-from";
+pub const PAY_FROM_BITCOIN_ID: &str = "spark-send-pay-from-bitcoin";
+pub const PAY_FROM_USDB_ID: &str = "spark-send-pay-from-usdb";
+const PAY_FROM_CLOSE_ID: &str = "spark-send-pay-from-close";
+
+fn pay_from_label(asset: coincube_spark_protocol::WalletAsset) -> &'static str {
+    match asset {
+        coincube_spark_protocol::WalletAsset::Bitcoin => "Bitcoin",
+        coincube_spark_protocol::WalletAsset::Usdb => "US Dollar",
+    }
+}
+
+/// Review's Conversion row: "12.40 USDB → 15,003 sats".
+pub fn conversion_line(
+    quote: &coincube_spark_protocol::ConversionQuote,
+    usdb_decimals: u32,
+) -> String {
+    let side = |amount: coincube_spark_protocol::AssetAmount| match amount.asset {
+        coincube_spark_protocol::WalletAsset::Usdb => format!(
+            "{} USDB",
+            crate::app::breez_spark::assets::format_token_display_u128(
+                amount.amount,
+                usdb_decimals
+            )
+        ),
+        coincube_spark_protocol::WalletAsset::Bitcoin => format!(
+            "{} sats",
+            crate::app::breez_spark::assets::format_token_display_u128(amount.amount, 0)
+        ),
+    };
+    format!("{} → {}", side(quote.amount_in), side(quote.amount_out))
+}
+
+/// "You send from": Bitcoin or US Dollar, each with its balance (P-Send's
+/// pay-from picker). US Dollar is offered only when it covers the send;
+/// otherwise it says why and can't be picked.
+pub fn pay_from_picker_modal<'a>(
+    current: coincube_spark_protocol::WalletAsset,
+    usdb_unavailable: Option<&'static str>,
+    balances: crate::app::view::spark::SparkBalances<'a>,
+) -> Element<'a, Message> {
+    use coincube_spark_protocol::WalletAsset;
+    let (rows, _) = balances.rows();
+    let balance_of = |name: &str| {
+        rows.iter()
+            .find(|(row, _, _)| *row == name)
+            .map(|(_, figure, unit)| format!("{} {}", figure, unit))
+            .unwrap_or_else(|| "0".to_owned())
+    };
+    let option =
+        |asset: WalletAsset, id: &'static str, logo: Element<'a, Message>, badge: &'static str| {
+            let enabled = asset == WalletAsset::Bitcoin || usdb_unavailable.is_none();
+            let selected = asset == current;
+            let line = match (asset, usdb_unavailable) {
+                (WalletAsset::Usdb, Some(reason)) => reason.to_owned(),
+                _ => balance_of(pay_from_label(asset)),
+            };
+            let row = Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .push(logo)
+                .push(
+                    Column::new()
+                        .spacing(2)
+                        .push(
+                            Row::new()
+                                .spacing(8)
+                                .align_y(Alignment::Center)
+                                .push(text(pay_from_label(asset)).size(P1_SIZE).bold())
+                                .push(orange_badge(badge)),
+                        )
+                        .push(text(line).size(P2_SIZE).style(theme::text::secondary)),
+                )
+                .push(Space::new().width(Length::Fill))
+                .push_maybe(selected.then(|| icon::check2_icon().size(18).color(color::ORANGE)));
+            Action::new(
+                id,
+                Container::new(row)
+                    .padding([12, 16])
+                    .width(Length::Fill)
+                    .style(if selected {
+                        picker_row_selected
+                    } else {
+                        crate::app::view::shared::picker::picker_row_idle
+                    }),
+                Message::FocusAction,
+            )
+            .style(picker_action_style)
+            .padding(0)
+            .width(Length::Fill)
+            .focus_radius(8.0)
+            .on_press_maybe(
+                enabled.then_some(Message::SparkSend(SparkSendMessage::SelectPayFrom(asset))),
+            )
+        };
+    let list = Column::new()
+        .spacing(8)
+        .push(option(
+            WalletAsset::Bitcoin,
+            PAY_FROM_BITCOIN_ID,
+            asset_network_logo("btc", "spark", 36.0),
+            "SPARK",
+        ))
+        .push(option(
+            WalletAsset::Usdb,
+            PAY_FROM_USDB_ID,
+            asset_logo("usdb")
+                .width(Length::Fixed(36.0))
+                .height(Length::Fixed(36.0))
+                .into(),
+            "USDB",
+        ))
+        .push(p2_regular(PAY_FROM_BITCOIN_NOTE).style(theme::text::secondary))
+        .push(
+            Row::new().push(Space::new().width(Length::Fill)).push(
+                Action::new(
+                    PAY_FROM_CLOSE_ID,
+                    text("Close").size(P2_SIZE).bold(),
+                    Message::FocusAction,
+                )
+                .style(theme::button::transparent_border)
+                .padding([8, 18])
+                .on_press(Message::SparkSend(SparkSendMessage::ClosePayFromPicker)),
+            ),
+        );
+    picker_modal_card("YOU SEND FROM", list)
+}
 const PREPARE_ACTION_ID: &str = "spark-send-prepare";
 const TARGET_PICKER_CLOSE_ID: &str = "spark-send-target-picker-close";
 
@@ -1072,7 +1245,11 @@ fn compose_footer<'a>(status: &'static str, prepare: Option<Message>) -> Element
 /// The "YOU SEND (Bitcoin) → THEY RECEIVE (target)" pair. YOU SEND is fixed —
 /// the Spark wallet always spends bitcoin — so only THEY RECEIVE is an Action,
 /// and it opens the real rail picker.
-fn spark_send_cards<'a>(target: SparkSendTarget, destination_empty: bool) -> Element<'a, Message> {
+fn spark_send_cards<'a>(
+    target: SparkSendTarget,
+    destination_empty: bool,
+    pay_from: coincube_spark_protocol::WalletAsset,
+) -> Element<'a, Message> {
     let tile_caption =
         |label: &'static str| text(label).size(P2_SIZE).style(theme::text::secondary);
     let asset = |logo: Element<'a, Message>, label: &'static str| {
@@ -1083,17 +1260,52 @@ fn spark_send_cards<'a>(target: SparkSendTarget, destination_empty: bool) -> Ele
             .push(text(label).size(H5_SIZE).bold().style(theme::text::primary))
     };
 
-    let you_send = Container::new(
+    // A stablecoin send is BTC-funded cross-chain, so only bitcoin rails
+    // offer a choice of balance (S4).
+    let choose = !target.is_stablecoin();
+    let (logo, label, badge): (Element<'a, Message>, &'static str, &'static str) = match pay_from {
+        coincube_spark_protocol::WalletAsset::Usdb if choose => (
+            asset_logo("usdb")
+                .width(Length::Fixed(40.0))
+                .height(Length::Fixed(40.0))
+                .into(),
+            "US Dollar",
+            "USDB",
+        ),
+        _ => (asset_network_logo("btc", "spark", 40.0), "Bitcoin", "SPARK"),
+    };
+    let you_send_body = Container::new(
         Column::new()
             .spacing(8)
-            .push(tile_caption("You send"))
-            .push(asset(asset_network_logo("btc", "spark", 40.0), "Bitcoin"))
-            .push(orange_badge("SPARK")),
+            .push(
+                Row::new()
+                    .push(tile_caption("You send"))
+                    .push(Space::new().width(Length::Fill))
+                    .push_maybe(choose.then(|| {
+                        text("Change").size(P2_SIZE).style(|theme: &theme::Theme| {
+                            iced::widget::text::Style {
+                                color: Some(theme.colors.shell.accent_ink),
+                            }
+                        })
+                    })),
+            )
+            .push(asset(logo, label))
+            .push(orange_badge(badge)),
     )
     .padding([14, 16])
     .width(Length::Fill)
-    .height(Length::Fixed(ROUTE_TILE_HEIGHT))
-    .style(fixed_tile_style);
+    .height(Length::Fixed(ROUTE_TILE_HEIGHT));
+    let you_send: Element<'a, Message> = if choose {
+        Action::new(PAY_FROM_ACTION_ID, you_send_body, Message::FocusAction)
+            .style(receive_tile_button_style)
+            .padding(0)
+            .width(Length::Fill)
+            .focus_radius(8.0)
+            .on_press(Message::SparkSend(SparkSendMessage::OpenPayFromPicker))
+            .into()
+    } else {
+        you_send_body.style(fixed_tile_style).into()
+    };
 
     let they_receive = Action::new(
         RECEIVE_TARGET_ACTION_ID,
@@ -1418,6 +1630,9 @@ mod tests {
         quote: Quote,
         image: iced::widget::image::Handle,
         stable: Option<coincube_spark_protocol::UsdbBalanceSnapshot>,
+        pay_from: coincube_spark_protocol::WalletAsset,
+        usdb_unavailable: Option<&'static str>,
+        conversion: Option<coincube_spark_protocol::ConversionQuote>,
     }
 
     impl Fixture {
@@ -1449,6 +1664,9 @@ mod tests {
                 },
                 image: iced::widget::image::Handle::from_rgba(1, 1, vec![0u8; 4]),
                 stable: None,
+                pay_from: coincube_spark_protocol::WalletAsset::Bitcoin,
+                usdb_unavailable: Some("You have no USDB."),
+                conversion: None,
             }
         }
 
@@ -1515,6 +1733,10 @@ mod tests {
                     masked: self.mask_amounts,
                 },
                 usdb_conversion_hint: self.hint.clone(),
+                pay_from: self.pay_from,
+                usdb_unavailable: self.usdb_unavailable,
+                paid_from: self.pay_from,
+                conversion: self.conversion.as_ref(),
                 bitcoin_unit: self.unit,
                 reference_btc_usd_price: None,
                 show_direction_badges: false,
@@ -2123,6 +2345,125 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// S4: You send opens the pay-from picker on a bitcoin rail; a
+    /// stablecoin send has no choice.
+    #[test]
+    fn you_send_opens_the_pay_from_picker_on_bitcoin_rails() {
+        let menu = spark_send_menu();
+        let fixture = Fixture::filled(SparkSendPhase::Idle);
+        let cache = fixture.cache();
+        let mut harness = Harness::new(screen(&fixture, &menu, &cache, false), COMPACT);
+        assert!(harness.probe().bounds(PAY_FROM_ACTION_ID).is_some());
+        let mut stablecoin = Fixture::filled(SparkSendPhase::Idle);
+        stablecoin.target = SparkSendTarget::Usdt;
+        let cache = stablecoin.cache();
+        let mut harness = Harness::new(screen(&stablecoin, &menu, &cache, false), COMPACT);
+        assert!(harness.probe().bounds(PAY_FROM_ACTION_ID).is_none());
+    }
+
+    #[test]
+    fn the_pay_from_picker_offers_us_dollar_only_when_it_covers() {
+        use crate::app::view::shared::landing::capture;
+        use coincube_spark_protocol::WalletAsset;
+        let balances = |stable| crate::app::view::spark::SparkBalances {
+            btc_sats: 35_000,
+            stable,
+            fiat_converter: None,
+            btc_usd_price: None,
+            bitcoin_unit: BitcoinDisplayUnit::Sats,
+            masked: false,
+        };
+        let usdb = coincube_spark_protocol::UsdbBalanceSnapshot {
+            token_identifier: "btkn1synthetic".into(),
+            balance: 12_400_000,
+            decimals: 6,
+            ticker: "USDB".into(),
+        };
+        let short = capture::inspect(
+            "spark-send-pay-from-short",
+            pay_from_picker_modal(
+                WalletAsset::Bitcoin,
+                Some("Your USDB doesn't cover this amount."),
+                balances(Some(&usdb)),
+            ),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(short.contains("YOU SEND FROM") && short.contains("Bitcoin is used first."));
+        assert!(short.contains("Your USDB doesn't cover this amount."));
+        assert!(!short.has_focus(iced::advanced::widget::Id::new(PAY_FROM_USDB_ID)));
+        let picked = capture::activate(
+            pay_from_picker_modal(WalletAsset::Bitcoin, None, balances(Some(&usdb))),
+            iced::advanced::widget::Id::new(PAY_FROM_USDB_ID),
+            (1440, 900),
+            true,
+        );
+        assert!(picked.iter().any(|m| matches!(
+            m,
+            Message::SparkSend(SparkSendMessage::SelectPayFrom(WalletAsset::Usdb))
+        )));
+        let covered = capture::inspect(
+            "spark-send-pay-from-covered",
+            pay_from_picker_modal(WalletAsset::Bitcoin, None, balances(Some(&usdb))),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(covered.contains("12.40 USDB") && covered.contains("35,000 SATS"));
+    }
+
+    #[test]
+    fn paying_from_usdb_says_so_and_review_shows_the_conversion() {
+        use coincube_spark_protocol::{AssetAmount, ConversionQuote, WalletAsset};
+        let menu = spark_send_menu();
+        let mut fixture = Fixture::filled(SparkSendPhase::Idle);
+        fixture.pay_from = WalletAsset::Usdb;
+        fixture.usdb_unavailable = None;
+        let cache = fixture.cache();
+        let mut harness = Harness::new(screen(&fixture, &menu, &cache, false), COMPACT);
+        let probe = harness.probe();
+        assert!(probe.contains("US Dollar") && probe.contains("Paid from USDB:"));
+
+        let mut review = Fixture::ordinary_prepared();
+        review.pay_from = WalletAsset::Usdb;
+        review.conversion = Some(ConversionQuote {
+            amount_in: AssetAmount {
+                asset: WalletAsset::Usdb,
+                amount: 12_400_000,
+            },
+            amount_out: AssetAmount {
+                asset: WalletAsset::Bitcoin,
+                amount: 15_003,
+            },
+            fee: AssetAmount {
+                asset: WalletAsset::Usdb,
+                amount: 12_400,
+            },
+            amount_adjustment: None,
+            max_slippage_bps: 50,
+        });
+        let cache = review.cache();
+        let mut harness = Harness::new(screen(&review, &menu, &cache, false), FULL_HEIGHT);
+        let probe = harness.probe();
+        assert!(probe.contains("Paid from"));
+        assert!(probe.contains("12.40 USDB → 15,003 sats"));
+        // The conversion's own fee and cap, not just the bitcoin send fee.
+        assert!(probe.contains("Conversion fee"));
+        assert!(probe.contains("0.01 USDB (0.10%)"));
+        assert!(probe.contains("Max price change") && probe.contains("0.5%"));
+
+        // Paying from bitcoin with a USDB shortfall shows the same rows.
+        drop(probe);
+        drop(harness);
+        review.pay_from = WalletAsset::Bitcoin;
+        let cache = review.cache();
+        let mut harness = Harness::new(screen(&review, &menu, &cache, false), FULL_HEIGHT);
+        let probe = harness.probe();
+        assert!(probe.contains("12.40 USDB → 15,003 sats"));
+        assert!(probe.contains("Conversion fee") && probe.contains("Max price change"));
     }
 
     #[test]

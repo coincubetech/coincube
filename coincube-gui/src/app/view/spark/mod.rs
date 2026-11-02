@@ -305,13 +305,18 @@ pub enum SparkSendMessage {
     PrepareRequested,
     PreparationFinished {
         generation: u64,
-        result: Result<coincube_spark_protocol::PrepareSendOk, String>,
+        result: Result<crate::app::state::spark::send::PreparedSend, String>,
         recipient: Option<(
             crate::services::branta::LookupTicket,
             crate::services::branta::LookupResult,
         )>,
     },
     OpenRecipientIdentity(usize),
+    /// Open the "You send from" picker (S4).
+    OpenPayFromPicker,
+    ClosePayFromPicker,
+    /// Pay this send from Bitcoin or US Dollar.
+    SelectPayFrom(coincube_spark_protocol::WalletAsset),
     ConfirmRequested,
     SendSucceeded(coincube_spark_protocol::SendPaymentOk),
     SendFailed(String),

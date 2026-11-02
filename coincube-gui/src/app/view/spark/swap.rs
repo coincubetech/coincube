@@ -4,7 +4,9 @@
 //! The figures on Review are the bridge's estimate. The price is not
 //! locked, so the copy says "estimated", never "quoted" (plan S3, master I6).
 
-use coincube_spark_protocol::{AssetAmount, PrepareSwapOk, SwapStatus, WalletAsset};
+use coincube_spark_protocol::{
+    AssetAmount, ConversionQuote, PrepareSwapOk, SwapStatus, WalletAsset,
+};
 use coincube_ui::{
     component::tenshu::{steps, ActionButton, ActionKind},
     component::text::*,
@@ -111,11 +113,17 @@ pub fn estimated_rate(ok: &PrepareSwapOk, usdb_decimals: u32) -> Option<f64> {
 
 /// The fee as a share of what is converted: "1,000 SATS (0.10%)".
 pub fn fee_line(ok: &PrepareSwapOk, usdb_decimals: u32) -> String {
-    let fee = format_asset(ok.quote.fee.asset, ok.quote.fee.amount, usdb_decimals);
-    if ok.quote.amount_in.amount == 0 || ok.quote.fee.asset != ok.quote.amount_in.asset {
+    quote_fee_line(&ok.quote, usdb_decimals)
+}
+
+/// A conversion quote's fee, with its share of the amount converted when
+/// both are in the same asset. Send's Review shows it too.
+pub fn quote_fee_line(quote: &ConversionQuote, usdb_decimals: u32) -> String {
+    let fee = format_asset(quote.fee.asset, quote.fee.amount, usdb_decimals);
+    if quote.amount_in.amount == 0 || quote.fee.asset != quote.amount_in.asset {
         return fee;
     }
-    let percent = ok.quote.fee.amount as f64 / ok.quote.amount_in.amount as f64 * 100.0;
+    let percent = quote.fee.amount as f64 / quote.amount_in.amount as f64 * 100.0;
     format!("{} ({:.2}%)", fee, percent)
 }
 
