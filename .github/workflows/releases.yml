@@ -37,7 +37,9 @@ env:
 jobs:
   release:
     name: Build & Release
-    if: github.repository == 'coincubetech/coincube'
+    # Manual dispatch is allowed for a tag, but a branch build must never
+    # publish assets without the tag-bound verification job below.
+    if: github.repository == 'coincubetech/coincube' && startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.os }}
     # LTO release build + codesign/notarize; a healthy leg is well under this.
     timeout-minutes: 150
