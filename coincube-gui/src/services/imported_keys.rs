@@ -1430,6 +1430,20 @@ impl<'a> LocalKeyRepository<'a> {
         Ok(key)
     }
 
+    /// Ordinary key admission must serialize with password-v3 Restore and
+    /// revocation. The Restore intent is durable before its signer inventory
+    /// is bound, so an empty manifest alone cannot authorize new records.
+    /// Keep this lock until admission returns; Restore takes it before the
+    /// repository lock in the same order.
+    fn lock_unrestored_admission(&self) -> Result<File, String> {
+        let path = restore::restore_intent_path(self.directory, self.operation_id);
+        let lock = crate::services::recovery::imported_restore_v3::lock_restore_intent(&path)?;
+        if crate::services::recovery::imported_restore_v3::read_intent(&path)?.is_some() {
+            return Err("Finish the imported key restore before changing keys.".into());
+        }
+        Ok(lock)
+    }
+
     /// Admit or replace one exact account. The caller supplies its current
     /// revision for replacement; a stale or missing expectation cannot win.
     /// The returned public record is safe for a future Keys UI or Kit manifest.
@@ -1443,6 +1457,7 @@ impl<'a> LocalKeyRepository<'a> {
         if !is_current() {
             return Err("Imported key admission was cancelled.".into());
         }
+        let _restore_operation_lock = self.lock_unrestored_admission()?;
         let credential = self.check_active()?;
         let lock = self.lock()?;
         self.provision_empty()?;
@@ -1471,6 +1486,7 @@ impl<'a> LocalKeyRepository<'a> {
         if !is_current() {
             return Err("Imported key admission was cancelled.".into());
         }
+        let _restore_operation_lock = self.lock_unrestored_admission()?;
         let credential = self.check_active()?;
         let lock = self.lock()?;
         self.provision_empty()?;
@@ -5072,6 +5088,90 @@ mod tests {
             .with_key(Uuid::new_v4(), Uuid::new_v4(), None, || true, |_| Ok(()))
             .unwrap_err();
         assert_eq!(error, "Finish the imported key restore before signing.");
+    }
+
+    #[test]
+    fn restarted_keys_admission_cannot_fill_an_unbound_restore_inventory() {
+        use crate::services::{
+            coincube::imported_checkpoint::Checkpoint,
+            recovery::imported_restore_v3::{clear_intent, lock_restore_intent, RestoreIntent},
+        };
+
+        let _session_guard = app::session::test_guard();
+        let fixture = Fixture::new();
+        fixture.save_cube(fixture.cube.clone());
+        app::session::open(
+            fixture.cube.id.clone(),
+            Zeroizing::new("synthetic PIN".into()),
+        );
+        let repository = fixture.repository();
+        // A crash after the first anchor but before the restored binding is
+        // written leaves exactly this empty, unbound inventory. Merged Keys
+        // UI #1000 reads zero records and offers Add recovery words.
+        assert!(repository.read_manifest().unwrap().records.is_empty());
+        assert!(anchor::load(&repository.anchor_scope()).unwrap().is_some());
+        let binding = RestoredCheckpoint {
+            cube_id: 42,
+            generation: 3,
+            commitment: "a".repeat(64),
+            source_inventory_generation: 7,
+            ready: false,
+        };
+        let intent = RestoreIntent {
+            version: 1,
+            cube_id: binding.cube_id,
+            cube_uuid: fixture.cube.id.clone(),
+            operation_id: repository.operation_id,
+            wallet_id: fixture.attachment.wallet_id.to_string(),
+            public_digest: "c".repeat(64),
+            source_inventory_generation: binding.source_inventory_generation,
+            checkpoint_generation: binding.generation,
+            checkpoint_commitment: binding.commitment.clone(),
+        };
+        let path = restore::restore_intent_path(repository.directory, repository.operation_id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        let secret = || {
+            ImportedKeySecret::new(
+                Zeroizing::new(fixture.phrases[0].clone()),
+                Zeroizing::new(String::new()),
+            )
+            .unwrap()
+        };
+        let single = repository.admit(&fixture.accounts[0], secret(), None, || true);
+        assert_eq!(
+            single.unwrap_err(),
+            "Finish the imported key restore before changing keys."
+        );
+        let batch =
+            repository.admit_new_batch(vec![(fixture.accounts[0].clone(), secret())], || true);
+        assert_eq!(
+            batch.unwrap_err(),
+            "Finish the imported key restore before changing keys."
+        );
+        let empty = repository.read_manifest().unwrap();
+        assert!(empty.records.is_empty());
+        assert!(empty.restored.is_none());
+        let _operation_lock = lock_restore_intent(&path).unwrap();
+        repository
+            .release_restored_locked(
+                empty,
+                &binding,
+                Some(&intent),
+                &checkpoint_test_scope(&fixture),
+                &Checkpoint {
+                    generation: binding.generation + 1,
+                    commitment: "b".repeat(64),
+                    active: false,
+                },
+                "synthetic unlock",
+                &Zeroizing::new([11u8; 32]),
+                || true,
+            )
+            .unwrap();
+        clear_intent(&path, &intent).unwrap();
+        assert!(!path.exists());
+        app::session::close();
     }
 
     #[test]
