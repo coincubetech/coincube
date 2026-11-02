@@ -631,7 +631,7 @@ impl ImportedBitcoinPanel {
             keys_stored: KeysStored::None,
             adding_keys: false,
             stored_keys: None,
-            keys_gate: Arc::new(AtomicU64::new(1)),
+            keys_gate: Arc::new(AtomicU64::new(fresh_generation())),
             import,
         }
     }
@@ -1347,7 +1347,9 @@ impl ImportedBitcoinPanel {
             ImportMessage::VerifyWords(index) => self.verify_words(index),
             ImportMessage::CheckDevice(index) => self.check_device(index),
             ImportMessage::KeysDone if self.adding_keys => {
-                if !self.keys.as_ref().is_some_and(KeysState::ready_to_add) {
+                if self.keys_stored == KeysStored::Storing
+                    || !self.keys.as_ref().is_some_and(KeysState::ready_to_add)
+                {
                     return Task::none();
                 }
                 if let Err(error) = self.storage_preflight() {
@@ -2086,7 +2088,13 @@ impl ImportedBitcoinPanel {
                             self.import.stage = BitcoinImportStage::Syncing { wallet };
                         }
                         let store = self.store_keys();
-                        Task::batch([self.open_daemon(), store])
+                        let inventory = if self.keys_stored == KeysStored::Storing {
+                            Task::none()
+                        } else {
+                            // A device-only import: say what this device holds.
+                            self.load_key_inventory()
+                        };
+                        Task::batch([self.open_daemon(), store, inventory])
                     }
                     Err(error) => {
                         self.error = Some(error);
@@ -2438,7 +2446,12 @@ impl ImportedBitcoinPanel {
                             }
                         }
                     }
-                    Err(error) => self.keys_stored = KeysStored::Failed(error),
+                    Err(error) => {
+                        self.keys_stored = KeysStored::Failed(error);
+                        // Once the words are gone, Add recovery words is the
+                        // way back; it needs the current count.
+                        return self.load_key_inventory();
+                    }
                 }
                 Task::none()
             }
@@ -3199,7 +3212,9 @@ impl ImportedBitcoinPanel {
                     .push(
                         button::primary(None, "Open Cube")
                             .width(Length::Shrink)
-                            .on_press(view::Message::ImportedBitcoin(ImportMessage::LeaveJourney)),
+                            .on_press_maybe((self.keys_stored != KeysStored::Storing).then_some(
+                                view::Message::ImportedBitcoin(ImportMessage::LeaveJourney),
+                            )),
                     )
                     .into(),
             ),
@@ -3241,7 +3256,7 @@ impl ImportedBitcoinPanel {
             button::secondary(Some(coincube_ui::icon::cross_icon()), "Close")
                 .width(Length::Shrink)
                 .on_press_maybe(
-                    (!self.writing_setup())
+                    (!self.writing_setup() && self.keys_stored != KeysStored::Storing)
                         .then_some(view::Message::ImportedBitcoin(ImportMessage::LeaveJourney)),
                 )
                 .into()
@@ -5792,6 +5807,48 @@ mod tests {
         let generation = panel.generation;
         let _ = panel.update_event(ImportEvent::Abandoned(generation, Ok(())));
         assert!(panel.keys.is_none());
+    }
+
+    /// Leaving while a device check runs must not leave the slot Checking:
+    /// its result can no longer land, and Checking disables every control.
+    #[test]
+    fn leaving_during_a_device_check_frees_the_keys_step() {
+        let root =
+            std::env::temp_dir().join(format!("import-leave-check-{}", uuid::Uuid::new_v4()));
+        let mut panel = verified_words_panel(&root);
+        panel.keys_confirmed = false;
+        {
+            let slot = &mut panel.keys.as_mut().unwrap().slots[0];
+            slot.source = KeySource::Hardware;
+            slot.status = keys::KeyStatus::Checking;
+            slot.check = keys::next_check();
+        }
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        let _ = panel.update_view(ImportMessage::ResumeJourney, None, 0);
+        let keys = panel.keys.as_ref().unwrap();
+        assert!(!keys.checking(), "the Keys step must be usable again");
+        assert_eq!(keys.slots[0].status, keys::KeyStatus::Missing);
+    }
+
+    /// A failed store asks for the inventory, so Add recovery words is
+    /// offered in the same session once the typed words are gone.
+    #[test]
+    fn a_failed_store_reads_the_inventory_for_add_recovery_words() {
+        let mut panel = ready_import_panel();
+        let wallet = panel.import.active_attachment().cloned().unwrap();
+        let mut keys = KeysState::new(&wallet.descriptor);
+        keys.slots[0].words = phrase(1);
+        keys.slots[0].status = keys::KeyStatus::Verified;
+        panel.keys = Some(keys);
+        panel.journey = true;
+        panel.keys_stored = KeysStored::Storing;
+        let epoch = panel.keys_gate.load(Ordering::SeqCst);
+        let task = panel.update_event(ImportEvent::KeysStored(epoch, Err("synthetic".into())));
+        assert!(task.units() > 0, "the inventory read is scheduled");
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        let _ = panel.update_event(ImportEvent::KeysInventory(epoch, Ok(0)));
+        let _ = panel.update_view(ImportMessage::AddKeys, None, 0);
+        assert!(panel.adding_keys && panel.journey_open());
     }
 
     #[test]

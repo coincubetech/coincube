@@ -132,7 +132,9 @@ impl KeysState {
             slot.words = Zeroizing::new(String::new());
             slot.passphrase = Zeroizing::new(String::new());
             slot.check = 0;
-            if slot.source == KeySource::Words {
+            // A check in flight can no longer land, so nothing may stay
+            // Checking: that would hold every control disabled.
+            if slot.source == KeySource::Words || slot.status == KeyStatus::Checking {
                 slot.status = KeyStatus::Missing;
             }
         }
