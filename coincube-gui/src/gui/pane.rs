@@ -342,14 +342,28 @@ impl Pane {
     }
 
     pub fn close_tab(&mut self, i: usize) {
+        self.close_tab_with(i, false);
+    }
+
+    /// [`Self::close_tab`] for locking: daemons stop on their own threads
+    /// (see [`tab::Tab::stop_in_background`]).
+    pub(crate) fn close_tab_in_background(&mut self, i: usize) {
+        self.close_tab_with(i, true);
+    }
+
+    fn close_tab_with(&mut self, i: usize, in_background: bool) {
         if let Some(mut tab) = self.remove_tab(i) {
             let owner = match &tab.state {
                 tab::State::App(app) => Some(app.cache().app_generation),
                 _ => None,
             };
-            tab.stop();
+            if in_background {
+                tab.stop_in_background();
+            } else {
+                tab.stop();
+            }
             if let Some(owner) = owner {
-                self.close_tabs_matching(|tab| tab.copy_owner() == Some(owner));
+                self.close_tabs_matching_with(|tab| tab.copy_owner() == Some(owner), in_background);
             }
         }
     }
@@ -358,6 +372,22 @@ impl Pane {
     /// each selected tab by stable ID after every close instead of retaining
     /// indices into a vector whose lower entries may have disappeared.
     pub(crate) fn close_tabs_matching(&mut self, predicate: impl Fn(&tab::Tab) -> bool) -> bool {
+        self.close_tabs_matching_with(predicate, false)
+    }
+
+    /// [`Self::close_tabs_matching`] for locking.
+    pub(crate) fn close_tabs_matching_in_background(
+        &mut self,
+        predicate: impl Fn(&tab::Tab) -> bool,
+    ) -> bool {
+        self.close_tabs_matching_with(predicate, true)
+    }
+
+    fn close_tabs_matching_with(
+        &mut self,
+        predicate: impl Fn(&tab::Tab) -> bool,
+        in_background: bool,
+    ) -> bool {
         let selected: Vec<usize> = self
             .tabs
             .iter()
@@ -367,7 +397,7 @@ impl Pane {
         let mut closed = false;
         for id in selected {
             if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
-                self.close_tab(index);
+                self.close_tab_with(index, in_background);
                 closed = true;
             }
         }

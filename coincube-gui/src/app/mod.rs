@@ -5365,27 +5365,57 @@ impl App {
     }
 
     pub fn stop(&mut self) {
+        self.stop_with(false);
+    }
+
+    /// [`Self::stop`] for locking a Cube. Everything tied to the session ends
+    /// here, but the embedded daemon, then any managed node, stops on its own
+    /// thread: the daemon's poller first finishes its in-flight network
+    /// request, which on a slow network kept the UI blocked for over a minute.
+    /// Reopening the Cube waits for it (see [`crate::daemon::stopping`]).
+    pub fn stop_in_background(&mut self) {
+        self.stop_with(true);
+    }
+
+    fn stop_with(&mut self, in_background: bool) {
         info!("Close requested");
         if let Some(mut destination) = self.transfer_destination.take() {
             destination.revoke();
         }
         if let Some(imported) = &mut self.panels.imported_bitcoin {
-            imported.stop();
+            if in_background {
+                imported.stop_in_background();
+            } else {
+                imported.stop();
+            }
         }
         // Before the daemon that would carry a claim submission goes away.
         self.local_mcp.revoke();
         self.revoke_claim();
-        if self.daemon_backend().is_embedded() {
-            if let Some(daemon) = &self.daemon {
+        if !self.daemon_backend().is_embedded() {
+            return;
+        }
+        let bitcoind = self.internal_bitcoind.take();
+        match self.daemon.clone() {
+            Some(daemon) if in_background => {
+                crate::daemon::stopping::stop_in_background(daemon, move || {
+                    if let Some(bitcoind) = bitcoind {
+                        bitcoind.stop();
+                    }
+                });
+                return;
+            }
+            Some(daemon) => {
                 if let Err(e) = Handle::current().block_on(async { daemon.stop().await }) {
                     error!("{}", e);
                 } else {
                     info!("Internal daemon stopped");
                 }
             }
-            if let Some(bitcoind) = self.internal_bitcoind.take() {
-                bitcoind.stop();
-            }
+            None => {}
+        }
+        if let Some(bitcoind) = bitcoind {
+            bitcoind.stop();
         }
     }
 

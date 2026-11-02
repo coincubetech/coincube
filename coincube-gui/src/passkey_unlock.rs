@@ -121,7 +121,9 @@ fn derived_fingerprint_opens_this_cube(
 /// be able to tell "we're waiting on the system Touch ID sheet" from "we have
 /// your key and are opening your wallets".
 enum Phase {
-    /// Nothing running; the user taps Unlock to raise the system prompt.
+    /// Nothing running. Opening from the Launcher leaves this at once for
+    /// `Authenticating`; the screen comes back here after a failed or
+    /// cancelled prompt or a re-lock, and Unlock raises the prompt again.
     Idle { error: Option<String> },
     /// The ceremony is up; the system sheet is in front of the user.
     ///
@@ -219,10 +221,7 @@ impl PasskeyUnlock {
 
         let (rp_id, credential_id) = match self.credential() {
             Ok(pair) => pair,
-            Err(e) => {
-                self.fail(e);
-                return Task::none();
-            }
+            Err(e) => return self.fail(e),
         };
 
         match NativePasskeyCeremony::authenticate(&rp_id, &credential_id) {
@@ -231,10 +230,7 @@ impl PasskeyUnlock {
                 self.phase = Phase::Authenticating;
                 Task::none()
             }
-            Err(e) => {
-                self.fail(e);
-                Task::none()
-            }
+            Err(e) => self.fail(e),
         }
     }
 
@@ -318,8 +314,7 @@ impl PasskeyUnlock {
                             error = %e,
                             "passkey assertion succeeded but the seed would not derive"
                         );
-                        self.fail(PasskeyError::InvalidPrfOutput);
-                        return Task::none();
+                        return self.fail(PasskeyError::InvalidPrfOutput);
                     }
                 };
 
@@ -338,10 +333,9 @@ impl PasskeyUnlock {
                         derived = %fingerprint,
                         "passkey assertion derived a seed that is not this Cube's"
                     );
-                    self.fail(PasskeyError::CredentialNotFound(
+                    return self.fail(PasskeyError::CredentialNotFound(
                         "the passkey that answered belongs to a different Cube".to_string(),
                     ));
-                    return Task::none();
                 }
 
                 crate::app::session::store_unlocked_signer(&self.cube.id, fingerprint, signer);
@@ -355,13 +349,9 @@ impl PasskeyUnlock {
                 // somehow does, the response is not one we can derive from.
                 self.fail(PasskeyError::InvalidResponse(
                     "the authenticator answered an unlock with a registration".to_string(),
-                ));
-                Task::none()
+                ))
             }
-            NativeOutcome::Failed(e) => {
-                self.fail(e);
-                Task::none()
-            }
+            NativeOutcome::Failed(e) => self.fail(e),
         }
     }
 
@@ -430,16 +420,21 @@ impl PasskeyUnlock {
     /// Land a classified failure on the screen. **I12**: the copy comes from
     /// [`PasskeyError::user_message`], and none of it says the Cube is lost.
     ///
+    /// Returns focus to the Unlock button, which the prompt's `Authenticating`
+    /// view replaced, so a cancelled prompt the Launcher raised unasked is one
+    /// key press from trying again.
+    ///
     /// macOS-only, like the `MasterSigner` import and `POLL_INTERVAL` above:
     /// every caller is inside `begin` or `poll`'s `#[cfg(target_os = "macos")]`
     /// arm. The non-macOS arms set `Phase::Idle` directly, because the one
     /// thing they have to say is fixed and needs no `PasskeyError` to classify.
     #[cfg(target_os = "macos")]
-    fn fail(&mut self, error: PasskeyError) {
+    fn fail(&mut self, error: PasskeyError) -> Task<Message> {
         tracing::warn!(cube_id = %self.cube.id, error = %error, "passkey unlock did not complete");
         self.phase = Phase::Idle {
             error: Some(error.user_message()),
         };
+        iced::widget::operation::focus(begin_button_id())
     }
 
     pub fn view(&self) -> Element<Message> {

@@ -727,12 +727,33 @@ impl Loader {
     }
 
     pub fn stop(&mut self) {
+        self.stop_with(false);
+    }
+
+    /// [`Self::stop`] for locking a Cube: the daemon, then any managed node,
+    /// stops on its own thread (see [`crate::app::App::stop_in_background`]).
+    pub fn stop_in_background(&mut self) {
+        self.stop_with(true);
+    }
+
+    fn stop_with(&mut self, in_background: bool) {
         if let Some(handle) = self.fork_task.take() {
             handle.abort();
         }
         info!("Close requested");
+        // NOTE: we take() the internal_bitcoind here to make sure the debug.log reader
+        // subscription is dropped.
+        let bitcoind = self.internal_bitcoind.take();
         if let Step::Syncing { daemon, .. } = &mut self.step {
             if daemon.backend().is_embedded() {
+                if in_background {
+                    crate::daemon::stopping::stop_in_background(daemon.clone(), move || {
+                        if let Some(bitcoind) = bitcoind {
+                            bitcoind.stop();
+                        }
+                    });
+                    return;
+                }
                 info!("Stopping internal daemon...");
                 if let Err(e) = Handle::current().block_on(async { daemon.stop().await }) {
                     warn!("Internal daemon failed to stop: {}", e);
@@ -741,10 +762,7 @@ impl Loader {
                 }
             }
         }
-
-        // NOTE: we take() the internal_bitcoind here to make sure the debug.log reader
-        // subscription is dropped.
-        if let Some(bitcoind) = self.internal_bitcoind.take() {
+        if let Some(bitcoind) = bitcoind {
             bitcoind.stop();
         }
     }
@@ -1590,6 +1608,15 @@ async fn start_bitcoind_and_daemon_with_import_auth(
             cube: chain,
             config: found.bitcoin_config.chain,
         });
+    }
+    // Reopening a Cube right after locking it: let the previous daemon finish
+    // stopping before anything here touches its directory or node.
+    if let Some(dir) = found.data_directory() {
+        if !crate::daemon::stopping::wait_for_async(dir.path().to_path_buf()).await {
+            return Err(Error::Daemon(DaemonError::Unexpected(
+                crate::daemon::stopping::STILL_STOPPING.to_string(),
+            )));
+        }
     }
     // Promote pre-fallback vaults: rewrite `daemon.toml` so the
     // Connect URL moves to `fallback_addr` and `mempool.space`

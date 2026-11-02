@@ -107,6 +107,14 @@ pub async fn remove_cube_import(
     directory: &NetworkDirectory,
     expected: &CubeSettings,
 ) -> Result<(), String> {
+    remove_cube_import_within(directory, expected, crate::daemon::stopping::WAIT_LIMIT).await
+}
+
+async fn remove_cube_import_within(
+    directory: &NetworkDirectory,
+    expected: &CubeSettings,
+    stop_limit: std::time::Duration,
+) -> Result<(), String> {
     let intent = expected
         .bitcoin_import
         .as_ref()
@@ -232,6 +240,14 @@ pub async fn remove_cube_import(
                         .is_some_and(|wallet| &wallet.wallet_id == wallet_id))
         }) {
             return Err("Another Cube still references this wallet; no files were removed.".into());
+        }
+    }
+    // Deleting a Cube right after locking it: the imported wallet's daemon may
+    // still be stopping in its directory (see `crate::daemon::stopping`).
+    // If it outlasts the wait, remove nothing.
+    for dir in [Some(stage.clone()), destination.clone()].iter().flatten() {
+        if !crate::daemon::stopping::wait_for_async_within(dir.clone(), stop_limit).await {
+            return Err(crate::daemon::stopping::STILL_STOPPING.to_string());
         }
     }
     if let Some(attachment) = expected_attachment {
@@ -444,6 +460,59 @@ mod tests {
         assert!(!journal.exists());
         assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
         remove_cube_import(&f.directory, &f.cube).await.unwrap();
+    }
+
+    /// Deleting a Cube right after locking it: its imported daemon may still
+    /// be stopping in the wallet directory, so removal waits for that stop.
+    #[tokio::test]
+    async fn removal_waits_for_a_daemon_still_stopping_in_the_wallet_directory() {
+        let mut f = Fixture::new().await;
+        f.install().await;
+        let destination = f.destination();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        // Registered as production does: the daemon config's canonical path.
+        let registered = std::fs::canonicalize(&destination).unwrap();
+        crate::daemon::stopping::run_in_background(Some(registered), move || {
+            released.recv().unwrap();
+        });
+        let removal = remove_cube_import(&f.directory, &f.cube);
+        tokio::pin!(removal);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), &mut removal)
+                .await
+                .is_err(),
+            "removal must wait for the stopping daemon"
+        );
+        assert!(destination.join("coincubed.sqlite3").is_file());
+        release.send(()).unwrap();
+        removal.await.unwrap();
+        assert!(!destination.exists());
+    }
+
+    /// A stop that outlasts the wait leaves every file and the Cube in place.
+    #[tokio::test]
+    async fn removal_refuses_while_the_daemon_is_still_stopping() {
+        let mut f = Fixture::new().await;
+        f.install().await;
+        let destination = f.destination();
+        let journal = journal_path(&f.directory, f.operation_id());
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        // Registered as production does: the daemon config's canonical path.
+        let registered = std::fs::canonicalize(&destination).unwrap();
+        crate::daemon::stopping::run_in_background(Some(registered), move || {
+            released.recv().unwrap();
+        });
+        let error =
+            remove_cube_import_within(&f.directory, &f.cube, std::time::Duration::from_millis(50))
+                .await
+                .unwrap_err();
+        assert_eq!(error, crate::daemon::stopping::STILL_STOPPING);
+        assert!(destination.join("coincubed.sqlite3").is_file());
+        assert!(journal.is_file());
+        let saved = Settings::from_file(&f.directory).unwrap();
+        assert!(saved.cubes.iter().any(|cube| cube.id == f.cube.id));
+        release.send(()).unwrap();
+        assert!(crate::daemon::stopping::wait_for(&destination));
     }
 
     #[tokio::test]

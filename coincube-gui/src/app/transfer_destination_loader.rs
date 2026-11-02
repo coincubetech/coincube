@@ -34,6 +34,8 @@ pub(crate) enum Refusal {
     SameWallet,
     IdentityChanged,
     BackendUnavailable,
+    /// The other Cube's daemon is still stopping after a lock.
+    StillStopping,
     WrongCredential,
     Duress,
     Locked(Duration),
@@ -48,6 +50,9 @@ impl Refusal {
             Self::SameWallet => "That Cube holds the same Vault as this one.".into(),
             Self::IdentityChanged => "The other Cube changed. Choose it again.".into(),
             Self::BackendUnavailable => "The other Cube's Vault isn't available.".into(),
+            Self::StillStopping => {
+                "The other Cube is still finishing locking. Try again in a moment.".into()
+            }
             Self::WrongCredential => "That PIN or passkey didn't unlock it.".into(),
             Self::Duress => "The other Cube can't be used.".into(),
             Self::Locked(remaining) => format!(
@@ -808,7 +813,14 @@ async fn destination_daemon(
             .map(|daemon| OwnedEmbeddedDestination {
                 daemon: Arc::new(daemon),
             })
-            .map_err(|_| Refusal::BackendUnavailable)
+            .map_err(|error| match error {
+                crate::daemon::DaemonError::Unexpected(message)
+                    if message == crate::daemon::stopping::STILL_STOPPING =>
+                {
+                    Refusal::StillStopping
+                }
+                _ => Refusal::BackendUnavailable,
+            })
     })
     .await
     .map_err(|_| Refusal::BackendUnavailable)??;

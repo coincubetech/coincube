@@ -11,6 +11,7 @@ use coincube_ui::{font, image};
 
 use coincube_gui::{
     app::settings::global::{GlobalSettings, WindowConfig},
+    daemon::stopping,
     dir::CoincubeDirectory,
     gui::{Config, GUI},
     node::bitcoind::{delete_all_bitcoind_locks_for_process, wait_for_managed_node_cleanup},
@@ -167,6 +168,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     .settings(settings)
     .window(window_settings)
     .run();
+    // A Cube locked just before quitting may still be stopping its daemon.
+    if !stopping::wait_for_all(std::time::Duration::from_secs(120)) {
+        tracing::warn!("Timed out waiting for a daemon to stop");
+    }
     // Final-owner release runs off the UI thread. Keep a normal process exit
     // from abandoning that work after the last window closes.
     if !wait_for_managed_node_cleanup(std::time::Duration::from_secs(120)) {

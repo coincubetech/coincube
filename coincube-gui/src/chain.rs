@@ -160,27 +160,31 @@ pub(crate) fn is_managed_local_fork(
 }
 
 pub(crate) fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
-    fn normalized(path: &std::path::Path) -> std::path::PathBuf {
-        let mut ancestor = path;
-        let mut suffix = Vec::new();
-        loop {
-            if let Ok(mut normalized) = std::fs::canonicalize(ancestor) {
-                for name in suffix.iter().rev() {
-                    normalized.push(name);
-                }
-                return normalized;
+    normalized_path(a) == normalized_path(b)
+}
+
+/// `path` canonicalized through its nearest existing ancestor, so one that
+/// does not exist (yet, or any more) still compares equal to its canonical
+/// spelling (`\\?\C:\…` on Windows, through symlinks elsewhere).
+pub(crate) fn normalized_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    loop {
+        if let Ok(mut normalized) = std::fs::canonicalize(ancestor) {
+            for name in suffix.iter().rev() {
+                normalized.push(name);
             }
-            let Some(name) = ancestor.file_name() else {
-                return path.to_path_buf();
-            };
-            suffix.push(name.to_os_string());
-            let Some(parent) = ancestor.parent() else {
-                return path.to_path_buf();
-            };
-            ancestor = parent;
+            return normalized;
         }
+        let Some(name) = ancestor.file_name() else {
+            return path.to_path_buf();
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = ancestor.parent() else {
+            return path.to_path_buf();
+        };
+        ancestor = parent;
     }
-    normalized(a) == normalized(b)
 }
 
 /// Read the Cube's own config before deciding whether its unlock needs Connect.

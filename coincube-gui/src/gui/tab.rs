@@ -1955,7 +1955,7 @@ impl Tab {
                 // App is dropped. GUI dispatch already closed same-Cube
                 // siblings across panes.
                 crate::app::session::close();
-                app.stop();
+                app.stop_in_background();
                 let (home, command) = Home::new_for_chain(datadir, Some(chain));
                 self.state = State::Home(home);
                 command.map(Message::Launch)
@@ -1974,7 +1974,8 @@ impl Tab {
                 // A claim in flight is revoked before the Cube's context goes:
                 // the `App` is dropped a few lines down, and a queued
                 // submission must not outlive the session it was confirmed in.
-                app.stop();
+                // Unlocking again waits for the daemon this leaves stopping.
+                app.stop_in_background();
                 crate::app::session::close();
 
                 let config = app::Config::from_file(
@@ -2258,9 +2259,17 @@ impl Tab {
                         State::PinEntry(_) => {
                             iced::widget::operation::focus(crate::pin_input::first_digit_id())
                         }
-                        State::PasskeyUnlock(_) => {
-                            iced::widget::operation::focus(crate::passkey_unlock::begin_button_id())
-                        }
+                        // Opening a passkey Cube is the request to unlock it,
+                        // so raise the system prompt now rather than wait for a
+                        // second press. Only this route does: a re-lock must
+                        // not answer itself with a prompt, so it shows the
+                        // button and waits.
+                        State::PasskeyUnlock(_) => Task::batch([
+                            iced::widget::operation::focus(crate::passkey_unlock::begin_button_id()),
+                            Task::done(Message::PasskeyUnlock(
+                                crate::passkey_unlock::Message::Begin,
+                            )),
+                        ]),
                         _ => Task::none(),
                     }
                 }
@@ -4926,14 +4935,26 @@ impl Tab {
     }
 
     pub fn stop(&mut self) {
+        self.stop_with(false);
+    }
+
+    /// [`Self::stop`] for locking: an App's or Loader's daemon stops on its
+    /// own thread instead of blocking the UI.
+    pub fn stop_in_background(&mut self) {
+        self.stop_with(true);
+    }
+
+    fn stop_with(&mut self, in_background: bool) {
         self.copy_owner = None;
         self.unlock_motion = None;
         self.unlock_floor = None;
         self.opening = None;
         match &mut self.state {
+            State::Loader(s) if in_background => s.stop_in_background(),
             State::Loader(s) => s.stop(),
             State::Home(s) => s.stop(),
             State::Installer(s) => s.stop(),
+            State::App(s) if in_background => s.stop_in_background(),
             State::App(s) => s.stop(),
             State::Login(_) => {}
             State::PinEntry(_) => {}
@@ -6152,6 +6173,56 @@ mod migration_warning_tests {
         );
         assert_eq!(state, "PinEntry");
         assert_eq!(error, None);
+    }
+
+    /// Opening a passkey Cube from the Launcher raises the system prompt by
+    /// itself: the open task carries `Begin`, so the user is not left on a
+    /// face whose only job is to be pressed again. The task is inspected, not
+    /// run, so no real prompt is raised here.
+    #[test]
+    fn a_launcher_opened_passkey_cube_raises_its_prompt_at_once() {
+        use iced_runtime::futures::futures::StreamExt;
+
+        let cube =
+            cube_on(crate::chain::ChainId::Signet).with_passkey(app::settings::PasskeyMetadata {
+                credential_id: "Y3JlZC1pZA==".to_string(),
+                rp_id: "coincube.io".to_string(),
+                created_at: 1_786_122_245,
+                label: None,
+            });
+        let mut tab = non_app_tab();
+        let datadir = match &tab.state {
+            State::Home(home) => home.datadir_path.clone(),
+            _ => unreachable!(),
+        };
+        let task = tab.update(Message::Launch(home::Message::Run(
+            datadir,
+            app::config::Config::new(false),
+            crate::chain::ChainId::Signet,
+            cube,
+        )));
+
+        if !crate::feature_flags::PASSKEY_ENABLED {
+            // The open path refuses passkey Cubes in this build; that refusal
+            // has its own copy and is not what this test is about.
+            assert!(matches!(tab.state, State::Home(_)));
+            return;
+        }
+        assert!(matches!(tab.state, State::PasskeyUnlock(_)));
+        let actions = iced_runtime::futures::futures::executor::block_on(
+            iced_runtime::task::into_stream(task)
+                .expect("the open returns a task")
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                iced_runtime::Action::Output(Message::PasskeyUnlock(
+                    crate::passkey_unlock::Message::Begin
+                ))
+            )),
+            "the passkey prompt must start without a second press"
+        );
     }
 
     /// Directory identity must agree with the persisted settings before any
