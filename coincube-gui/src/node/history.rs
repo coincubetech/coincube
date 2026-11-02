@@ -1142,12 +1142,15 @@ pub async fn plan_coin_scans(
             let found = match outspends {
                 Some(source) => match fetch_outspend(source, coin.outpoint).await {
                     // The provider's height can be past the local tip or wrong;
-                    // either way the coin falls back to a full scan.
-                    Ok(Some((spent_at, block))) if spent_at >= height => rpc
-                        .block_hash(spent_at)
-                        .await
-                        .is_ok_and(|local| local == block)
-                        .then_some(spent_at),
+                    // either way the coin falls back to a full scan. A node that
+                    // missed its deadline is retried instead.
+                    Ok(Some((spent_at, block))) if spent_at >= height => {
+                        match rpc.block_hash(spent_at).await {
+                            Ok(local) => (local == block).then_some(spent_at),
+                            Err(e) if e.starts_with(UNREACHABLE) => return Err(e),
+                            Err(_) => None,
+                        }
+                    }
                     _ => None,
                 },
                 None => None,
@@ -1816,6 +1819,36 @@ mod tests {
             .unwrap();
         assert!(plan.blocks.is_empty());
         assert_eq!(plan.floor.map(|(height, _)| height), Some(0));
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_node_while_checking_an_outspend_is_retried_not_scanned() {
+        let funding = genesis().txdata[0].compute_txid();
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .json_body_partial(r#"{"method":"getblockhash"}"#)
+                    .body_contains("\"params\":[7]");
+                then.status(200)
+                    .delay(Duration::from_secs(11))
+                    .json_body(json!({"id":"history","result":genesis().block_hash().to_string()}));
+            })
+            .await;
+        spent_coin_node(&server).await;
+        let esplora = MockServer::start_async().await;
+        esplora
+            .mock_async(|when, then| {
+                when.method(GET).path(format!("/tx/{funding}/outspend/0"));
+                then.status(200).json_body(json!({"spent":true,"status":{"confirmed":true,"block_height":7,"block_hash":genesis().block_hash().to_string()}}));
+            })
+            .await;
+        let config: EsploraConfig =
+            serde_json::from_value(json!({"addr":esplora.base_url()})).unwrap();
+        let error = plan_coin_scans(&rpc(&server).await, &[coin(None)], Some(&config))
+            .await
+            .unwrap_err();
+        assert!(error.starts_with(UNREACHABLE), "{}", error);
     }
 
     #[tokio::test]

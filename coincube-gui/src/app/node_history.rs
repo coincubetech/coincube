@@ -160,6 +160,7 @@ impl Context {
                 Phase::Paused
             };
             job.last_error = None;
+            job.transient_failures = 0;
             history::write_json(&path, &job)?;
             status.job = Some(job);
             if !matches!(action, Action::Cancel) {
@@ -377,6 +378,7 @@ impl Context {
             };
             job.fetch_attempts = 0;
             job.last_error = None;
+            job.transient_failures = 0;
             history::write_json(&path, &job)?;
             status.job = Some(job);
         } else if let Some(job) = &status.job {
