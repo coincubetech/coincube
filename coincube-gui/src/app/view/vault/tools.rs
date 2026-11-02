@@ -63,6 +63,7 @@ pub fn page_head(menu: &Menu, cache: &Cache) -> Option<PageHead<'static, Message
     is_tool(menu).then(|| {
         with_back(
             menu,
+            cache,
             coincube_ui::component::tenshu::page_head("Tools", Message::FocusAction).context(
                 crate::app::view::cube_coin(cache),
                 crate::app::view::network_line(cache, &crate::app::view::cube_display_name(cache)),
@@ -71,21 +72,48 @@ pub fn page_head(menu: &Menu, cache: &Cache) -> Option<PageHead<'static, Message
     })
 }
 
-/// `head` with the Tools head's Back to Vault on a Vault tool route, so a
-/// tool's own steps (Recovery's compose and review) keep the way back.
-pub fn with_back<'a>(menu: &Menu, head: PageHead<'a, Message>) -> PageHead<'a, Message> {
-    if is_tool(menu) {
-        head.back("Vault", Message::Menu(Menu::Vault(VaultSubMenu::Overview)))
-    } else {
+/// `head` on a Vault tool route: the Tools head's Back to Vault, so a tool's
+/// own head (Recovery's compose and review) keeps the way back, and the Tools
+/// tabs on the head's rule (P-Advanced, plan W6) unless the tool's own steps
+/// already sit there, in which case [`in_content_navigation`] keeps the tabs
+/// in the body.
+pub fn with_back<'a>(
+    menu: &Menu,
+    cache: &Cache,
+    head: PageHead<'a, Message>,
+) -> PageHead<'a, Message> {
+    if !is_tool(menu) {
+        return head;
+    }
+    let head = head.back("Vault", Message::Menu(Menu::Vault(VaultSubMenu::Overview)));
+    if head.has_rule() {
         head
+    } else {
+        head.rule(tab_row(menu, cache))
     }
 }
 
-/// The tab bar for a Vault tool route, `None` elsewhere.
-pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'static, Message>> {
-    if !is_tool(menu) {
+/// The Tools tabs in the body, for a tool route whose own head's rule holds
+/// its steps (`own_steps`), so the tabs couldn't go there. `None` elsewhere.
+pub fn in_content_navigation(
+    menu: &Menu,
+    cache: &Cache,
+    own_steps: bool,
+) -> Option<Element<'static, Message>> {
+    if !is_tool(menu) || !own_steps {
         return None;
     }
+    Some(
+        Column::new()
+            .width(Length::Fill)
+            .push(tab_row(menu, cache))
+            .push(Space::new().height(Length::Fixed(20.0)))
+            .into(),
+    )
+}
+
+/// The Tools tabs, the current tool selected.
+fn tab_row(menu: &Menu, cache: &Cache) -> Element<'static, Message> {
     let tools = nav::vault::tools(&nav::NavContext::from_cache(cache));
 
     let intents: Vec<Message> = tools
@@ -100,14 +128,7 @@ pub fn in_content_navigation(menu: &Menu, cache: &Cache) -> Option<Element<'stat
         Message::FocusAction,
     )
     .on_select(move |index| intents[index].clone());
-
-    Some(
-        Column::new()
-            .width(Length::Fill)
-            .push(tab_row)
-            .push(Space::new().height(Length::Fixed(20.0)))
-            .into(),
-    )
+    tab_row.into()
 }
 
 #[cfg(test)]
@@ -126,21 +147,40 @@ mod tests {
             Menu::Vault(VaultSubMenu::Recovery),
             Menu::Vault(VaultSubMenu::SplitCoins),
         ] {
-            assert!(in_content_navigation(&menu, &cache).is_some(), "{:?}", menu);
-            assert!(page_head(&menu, &cache).is_some(), "{:?}", menu);
+            let head = page_head(&menu, &cache).expect("a tool route has the Tools head");
+            assert!(
+                head.has_rule(),
+                "the tabs sit on the head's rule: {:?}",
+                menu
+            );
+            assert!(
+                in_content_navigation(&menu, &cache, false).is_none(),
+                "no second tab row: {:?}",
+                menu
+            );
+            // A tool whose own head holds its steps keeps the tabs in the body.
+            assert!(
+                in_content_navigation(&menu, &cache, true).is_some(),
+                "{:?}",
+                menu
+            );
         }
         for menu in [
             Menu::Vault(VaultSubMenu::Overview),
             Menu::Vault(VaultSubMenu::Send),
             Menu::Vault(VaultSubMenu::Settings(None)),
         ] {
-            assert!(in_content_navigation(&menu, &cache).is_none(), "{:?}", menu);
+            assert!(
+                in_content_navigation(&menu, &cache, true).is_none(),
+                "{:?}",
+                menu
+            );
             assert!(page_head(&menu, &cache).is_none(), "{:?}", menu);
         }
     }
 
     #[test]
-    fn tools_frame_mounts_title_back_link_and_one_tab_per_tool() {
+    fn the_tools_head_mounts_title_back_and_one_tab_per_tool_on_its_rule() {
         use crate::app::view::shared::landing::capture;
         let cache = Cache {
             has_vault: true,
@@ -149,13 +189,9 @@ mod tests {
         };
         let menu = Menu::Vault(VaultSubMenu::PSBTs(None));
         let head = page_head(&menu, &cache).expect("PSBT proposals is a tool route");
-        let frame = in_content_navigation(&menu, &cache).expect("PSBT proposals is a tool route");
         let mounted = capture::inspect(
             "vault-tools-frame",
-            Column::new()
-                .push(head.view(crate::app::view::page_gutter))
-                .push(frame)
-                .into(),
+            head.view(crate::app::view::page_gutter),
             (1024, 768),
             "dark",
             coincube_ui::theme::Theme::dark(),
@@ -168,6 +204,49 @@ mod tests {
             assert!(mounted.contains(label), "missing tab {:?}", label);
             assert!(mounted.has_focus(tab_id(&route).into()));
         }
+    }
+
+    /// P-Advanced: the Tools tabs sit on the head's rule, once; a tool whose
+    /// own head holds its steps (Recovery) keeps them in the body instead.
+    #[test]
+    fn tools_tabs_show_once_on_the_page() {
+        use crate::app::view::shared::landing::capture;
+        let cache = Cache {
+            has_vault: true,
+            cube_name: "Everyday".to_owned(),
+            ..Cache::default()
+        };
+        let tools = nav::vault::tools(&nav::NavContext::from_cache(&cache));
+        let (label, _) = tools[0];
+        let count = |probe: &capture::Inspection| {
+            probe.text.iter().filter(|(text, _)| text == label).count()
+        };
+        let menu = Menu::Vault(VaultSubMenu::PSBTs(None));
+        let routed = capture::inspect_full_window(
+            "vault-tools-routed",
+            crate::app::view::dashboard(&menu, &cache, Column::new()),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        );
+        assert_eq!(count(&routed), 1, "one tab row, in the head");
+        let recovery = Menu::Vault(VaultSubMenu::Recovery);
+        let stepped = capture::inspect_full_window(
+            "vault-tools-own-steps",
+            crate::app::view::dashboard_headed(
+                &recovery,
+                &cache,
+                crate::app::view::vault_page_head(&cache, "Recovery").rule(
+                    coincube_ui::component::tenshu::steps(&["Details", "Review"], 0),
+                ),
+                Column::new(),
+            ),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        );
+        assert_eq!(count(&stepped), 1, "the tabs move to the body");
+        assert!(stepped.contains("Details") && stepped.contains("Back to Vault"));
     }
 
     #[test]

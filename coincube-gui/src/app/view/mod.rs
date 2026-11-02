@@ -394,7 +394,7 @@ pub fn replacement_page<'a, T: Into<Element<'a, Message>>>(
 
 /// `head` is the page's own; without one, Settings and the Vault's Tools
 /// take theirs from the route. Settings carries its scope switch and tabs in
-/// the head; the Tools tabs stay in the body for now (plan W6).
+/// the head, and the Tools head its tabs (plan W6).
 #[allow(clippy::too_many_arguments)]
 fn dashboard_with_info_layout<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
@@ -433,8 +433,11 @@ fn dashboard_layout<'a, T: Into<Element<'a, Message>>>(
     lightning_address: Option<&'a str>,
     width: PageWidth,
 ) -> Element<'a, Message> {
+    // A Vault tool's own head whose rule holds its steps (Recovery) leaves no
+    // room there for the Tools tabs, which then stay in the body.
+    let own_steps = head.as_ref().is_some_and(PageHead::has_rule);
     let head = if route_chrome {
-        head.map(|head| vault::tools::with_back(menu, head))
+        head.map(|head| vault::tools::with_back(menu, cache, head))
             .or_else(|| settings::frame::page_head(menu, cache))
             .or_else(|| vault::tools::page_head(menu, cache))
     } else {
@@ -444,7 +447,7 @@ fn dashboard_layout<'a, T: Into<Element<'a, Message>>>(
         Column::new()
             .push_maybe(
                 route_chrome
-                    .then(|| vault::tools::in_content_navigation(menu, cache))
+                    .then(|| vault::tools::in_content_navigation(menu, cache, own_steps))
                     .flatten(),
             )
             .push(content.into())

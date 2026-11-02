@@ -1,7 +1,8 @@
-//! A flow's steps on a page head's rule (`.steps`, `.step`): a numbered disc
+//! A flow's steps on a page head's rule (`.hsteps`, `.step`): a numbered disc
 //! and a label per step. The current step is ink, semibold and underlined in
-//! the accent, its disc filled with the accent; the others are muted. Steps
-//! are progress, not navigation, so none of them is a control.
+//! the accent, its disc filled with the accent; a finished step's disc takes
+//! the "good" colour (`li.done .n`); the rest are muted. Steps are progress,
+//! not navigation, so none of them is a control.
 //!
 //! Place the row with [`PageHead::rule`](super::PageHead::rule): its
 //! underline then sits on the head's 1px rule, as the section tabs do.
@@ -32,13 +33,35 @@ pub fn steps<'a, M: 'a>(labels: &[&'a str], current: usize) -> Element<'a, M> {
         .iter()
         .enumerate()
         .fold(Row::new().spacing(STEP_GAP), |row, (index, label)| {
-            row.push(step(index + 1, label, index == current))
+            let state = step_state(index, current);
+            row.push(step(
+                index + 1,
+                label,
+                state == StepState::Current,
+                state == StepState::Done,
+            ))
         })
         .wrap()
         .into()
 }
 
-fn step<'a, M: 'a>(number: usize, label: &'a str, current: bool) -> Element<'a, M> {
+/// How a step at `index` reads when `current` is the step in progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepState {
+    Done,
+    Current,
+    Ahead,
+}
+
+pub fn step_state(index: usize, current: usize) -> StepState {
+    match index.cmp(&current) {
+        std::cmp::Ordering::Less => StepState::Done,
+        std::cmp::Ordering::Equal => StepState::Current,
+        std::cmp::Ordering::Greater => StepState::Ahead,
+    }
+}
+
+fn step<'a, M: 'a>(number: usize, label: &'a str, current: bool, done: bool) -> Element<'a, M> {
     let mark = Container::new(
         iced::widget::text(number.to_string())
             .size(type_size::CAPTION)
@@ -46,6 +69,8 @@ fn step<'a, M: 'a>(number: usize, label: &'a str, current: bool) -> Element<'a, 
             .style(move |theme: &Theme| iced::widget::text::Style {
                 color: Some(if current {
                     ON_ACCENT
+                } else if done {
+                    theme.colors.shell.good
                 } else {
                     theme.colors.shell.muted
                 }),
@@ -58,6 +83,8 @@ fn step<'a, M: 'a>(number: usize, label: &'a str, current: bool) -> Element<'a, 
         border: Border {
             color: if current {
                 theme.colors.shell.accent
+            } else if done {
+                theme.colors.shell.good
             } else {
                 theme.colors.shell.line
             },
@@ -98,4 +125,25 @@ fn step<'a, M: 'a>(number: usize, label: &'a str, current: bool) -> Element<'a, 
         .width(Length::Shrink)
         .padding(iced::Padding::default().top(STEP_PAD_Y))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn steps_before_the_current_one_are_done() {
+        let states: Vec<_> = (0..4).map(|index| step_state(index, 2)).collect();
+        assert_eq!(
+            states,
+            [
+                StepState::Done,
+                StepState::Done,
+                StepState::Current,
+                StepState::Ahead
+            ]
+        );
+        // Past the last step: every step is finished (Transfer's sent state).
+        assert!((0..3).all(|index| step_state(index, 3) == StepState::Done));
+    }
 }
