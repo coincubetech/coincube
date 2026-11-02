@@ -1,10 +1,10 @@
 //! View renderer for [`crate::app::state::spark::settings::SparkSettings`].
 //!
-//! Renders the Balances & conversion tab:
-//! - A "Stable Balance" toggle card (USD-pegging feature) with a
-//!   clear on/off status line and a toggle button. Disabled while
-//!   the bridge is unavailable or an `update_user_settings` RPC
-//!   is in flight.
+//! Renders the Balances & conversion tab (board H-Settings-Spark, plan S2):
+//! - US dollar balance: the Auto-convert switch (bridge-driven since S2b),
+//!   with its breaker state and a confirmation before it turns off, and
+//!   "Pay from USDB when bitcoin runs short · Always on".
+//! - Conversion: the max price change, read-only, and Swap by hand.
 //! - The Spark nickname field.
 //!
 //! and the Connections tab, whose "Spark bridge" row shows whether the
@@ -58,9 +58,21 @@ pub struct SparkSettingsView {
     /// flight. Disables the toggle buttons so the user can't queue
     /// a second flip mid-rpc.
     pub stable_balance_saving: bool,
+    /// The auto-convert breaker and hold, from `get_auto_convert`, once read.
+    pub auto_convert: Option<coincube_spark_protocol::AutoConvertState>,
+    /// Whether Swap exists here, for the Swap by hand row (mainnet only).
+    pub swap_available: bool,
 }
 
-pub const STABLE_BALANCE_ID: &str = "tenshu.settings.spark.stable-balance";
+pub const STABLE_BALANCE_ID: &str = "tenshu.settings.spark.auto-convert";
+pub const SWAP_BY_HAND_ID: &str = "tenshu.settings.spark.swap-by-hand";
+pub const KEEP_AUTO_CONVERT_ID: &str = "tenshu.settings.spark.keep-auto-convert";
+pub const TURN_OFF_AUTO_CONVERT_ID: &str = "tenshu.settings.spark.turn-off-auto-convert";
+
+/// What turning auto-convert off does (plan S2, master §3 decision 5).
+/// Since S2b the bridge drives auto-convert and SDK Stable Balance stays
+/// off, so turning it off converts nothing back.
+pub const TURN_OFF_COPY: &str = "Your USDB stays USDB, and new bitcoin you receive stays bitcoin.";
 pub const NICKNAME_ID: &str = "tenshu.settings.spark.nickname";
 
 /// The Spark nickname (master plan §3 decision 6): the side panel's
@@ -109,11 +121,16 @@ impl SparkSettingsView {
             );
         }
         let bridge_reachable = matches!(self.status, SparkSettingsStatus::Connected);
-        stable_balance_group(
-            self.stable_balance_active,
-            self.stable_balance_saving,
-            bridge_reachable,
-        )
+        Column::new()
+            .width(Length::Fill)
+            .push(stable_balance_group(
+                self.stable_balance_active,
+                self.stable_balance_saving,
+                bridge_reachable,
+                self.auto_convert.as_ref(),
+            ))
+            .push(conversion_group(self.swap_available))
+            .into()
     }
 
     /// The Connections tab: the Connect account, the Cube service session and
@@ -201,21 +218,29 @@ fn stable_balance_group<'a>(
     active: Option<bool>,
     saving: bool,
     spark_available: bool,
+    auto_convert: Option<&coincube_spark_protocol::AutoConvertState>,
 ) -> Element<'a, Message> {
+    use coincube_spark_protocol::AutoConvertBreaker;
     let toggle_state = stable_balance_toggle_state(active, saving, spark_available);
+    let paused = auto_convert.and_then(|state| match &state.breaker {
+        AutoConvertBreaker::Paused { failures, reason } => Some((*failures, reason.clone())),
+        AutoConvertBreaker::Ready => None,
+    });
+    let held = auto_convert.is_some_and(|state| state.held_after_swap);
     let (kind, word) = match (active, spark_available) {
         (_, false) => (page::Status::Bad, "Bridge unavailable"),
         (None, true) => (page::Status::Busy, "Loading…"),
+        (Some(false), true) if paused.is_some() => (page::Status::Warn, "Paused"),
+        (Some(true), true) if held => (page::Status::Busy, "Waiting"),
         (Some(true), true) => (page::Status::Ok, "On"),
         (Some(false), true) => (page::Status::Off, "Off"),
     };
-    let row = page::row("Stable Balance")
+    let auto = page::row("Auto-convert received bitcoin")
         .accessory(page::status(kind, word))
         .description(
-            "Keeps your spendable balance pegged to USD as USDB. Turning it on converts sats \
-             above a small threshold to USDB; turning it off converts USDB back to bitcoin. \
-             Conversions can retry after a failure and the amount can differ slightly from the \
-             estimate. No peg is guaranteed.",
+            "Bitcoin that arrives in Spark from now on is converted to USDB, so the wallet holds \
+             its dollar value. Bitcoin you already have stays bitcoin. Each conversion can fill \
+             slightly differently from the rate at the time.",
         )
         .control(
             toggle(
@@ -224,11 +249,125 @@ fn stable_balance_group<'a>(
                 Message::FocusAction,
             )
             .on_toggle_maybe(toggle_state.can_toggle.then_some(|on| {
-                Message::SparkSettings(SparkSettingsMessage::StableBalanceToggled(on))
+                Message::SparkSettings(if on {
+                    SparkSettingsMessage::StableBalanceToggled(true)
+                } else {
+                    // Off asks first: say what happens to the USDB.
+                    SparkSettingsMessage::AutoConvertOffRequested
+                })
             })),
         )
         .top();
-    page::group("Stable Balance", None, page::rows([row.into()]))
+    let pay_from = page::row("Pay from USDB when bitcoin runs short")
+        .accessory(page::status(page::Status::Ok, "Always on"))
+        .description(
+            "A send uses bitcoin first, then converts just enough USDB to cover the rest. The \
+             review step shows the conversion before you confirm.",
+        );
+    let mut column = Column::new().width(Length::Fill);
+    if let Some((failures, reason)) = paused {
+        column = column.push(page::note(
+            coincube_ui::component::tenshu::Tone::Warn,
+            page::muted(format!(
+                "Auto-convert paused after {} failed conversions: {}. Turn it on again to retry.",
+                failures, reason
+            )),
+            None,
+        ));
+    }
+    if held && active == Some(true) {
+        column = column.push(page::note(
+            coincube_ui::component::tenshu::Tone::Muted,
+            page::muted(
+                "Auto-convert is waiting while a swap out of USDB settles. Bitcoin received \
+                 meanwhile stays bitcoin.",
+            ),
+            None,
+        ));
+    }
+    column
+        .push(page::group(
+            "US dollar balance (USDB)",
+            None,
+            page::rows([auto.into(), pay_from.into()]),
+        ))
+        .into()
+}
+
+/// The conversion settings: the slippage cap every conversion uses, shown
+/// read-only (master §3 decision 6), and the way to the Swap screen.
+fn conversion_group<'a>(swap_available: bool) -> Element<'a, Message> {
+    use coincube_ui::component::tenshu::{ActionButton, ActionKind};
+    let cap = crate::app::view::spark::swap::price_change(
+        coincube_spark_protocol::CONVERSION_MAX_SLIPPAGE_BPS,
+    );
+    let max = page::row("Max price change")
+        .accessory(page::muted(cap))
+        .description("A conversion that would fill worse than this doesn't go through.");
+    let mut rows: Vec<Element<'a, Message>> = vec![max.into()];
+    if swap_available {
+        rows.push(
+            page::row("Swap by hand")
+                .description("Move any amount between bitcoin and USDB. Also on the Spark page.")
+                .control(
+                    ActionButton::new(
+                        iced::advanced::widget::Id::new(SWAP_BY_HAND_ID),
+                        "Swap BTC ⇄ USDB",
+                        ActionKind::Secondary,
+                        Message::FocusAction,
+                    )
+                    .compact()
+                    .on_press(Message::Menu(crate::app::menu::Menu::Spark(
+                        crate::app::menu::SparkSubMenu::Swap,
+                    ))),
+                )
+                .into(),
+        );
+    }
+    page::group("Conversion", None, page::rows(rows))
+}
+
+/// "Turn off auto-convert?", over the page.
+pub fn turn_off_dialog<'a>() -> Element<'a, Message> {
+    use coincube_ui::component::tenshu::{ActionButton, ActionKind};
+    use coincube_ui::component::text::{h4_bold, p1_regular};
+    Container::new(
+        Column::new()
+            .spacing(16)
+            .push(h4_bold("Turn off auto-convert?"))
+            .push(p1_regular(TURN_OFF_COPY))
+            .push(
+                Row::new()
+                    .spacing(12)
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        ActionButton::new(
+                            iced::advanced::widget::Id::new(KEEP_AUTO_CONVERT_ID),
+                            "Keep auto-convert",
+                            ActionKind::Secondary,
+                            Message::FocusAction,
+                        )
+                        .on_press(Message::SparkSettings(
+                            SparkSettingsMessage::AutoConvertOffCancelled,
+                        )),
+                    )
+                    .push(
+                        ActionButton::new(
+                            iced::advanced::widget::Id::new(TURN_OFF_AUTO_CONVERT_ID),
+                            "Turn off",
+                            ActionKind::Primary,
+                            Message::FocusAction,
+                        )
+                        .on_press(Message::SparkSettings(
+                            SparkSettingsMessage::StableBalanceToggled(false),
+                        )),
+                    ),
+            ),
+    )
+    .padding(24)
+    .max_width(480)
+    .style(coincube_ui::theme::card::modal)
+    .into()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -335,6 +474,8 @@ mod tests {
                                     status: SparkSettingsStatus::Connected,
                                     stable_balance_active: Some(false),
                                     stable_balance_saving: false,
+                                    auto_convert: None,
+                                    swap_available: true,
                                 }
                                 .render(),
                             )
@@ -343,6 +484,153 @@ mod tests {
                 },
             );
         }
+    }
+
+    fn balances(
+        active: bool,
+        auto_convert: Option<coincube_spark_protocol::AutoConvertState>,
+        swap_available: bool,
+    ) -> crate::app::view::shared::landing::capture::Inspection {
+        crate::app::view::shared::landing::capture::inspect(
+            "spark-settings-balances",
+            SparkSettingsView {
+                status: SparkSettingsStatus::Connected,
+                stable_balance_active: Some(active),
+                stable_balance_saving: false,
+                auto_convert,
+                swap_available,
+            }
+            .render(),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        )
+    }
+
+    /// H-Settings-Spark's rows, with S2's copy: turning auto-convert off
+    /// keeps USDB, so nothing says it converts back.
+    #[test]
+    fn balances_and_conversion_rows_say_what_auto_convert_does() {
+        let probe = balances(true, None, true);
+        for label in [
+            "US dollar balance (USDB)",
+            "Auto-convert received bitcoin",
+            "Bitcoin you already have stays bitcoin.",
+            "Pay from USDB when bitcoin runs short",
+            "Always on",
+            "Conversion",
+            "Max price change",
+            "0.5%",
+            "Swap by hand",
+            "Swap BTC ⇄ USDB",
+        ] {
+            assert!(probe.contains(label), "{}", label);
+        }
+        assert!(!probe.contains("back to bitcoin") && !probe.contains("Stable Balance"));
+        assert!(!balances(true, None, false).contains("Swap by hand"));
+    }
+
+    #[test]
+    fn the_switch_asks_before_turning_off_and_turns_on_at_once() {
+        let content = || {
+            SparkSettingsView {
+                status: SparkSettingsStatus::Connected,
+                stable_balance_active: Some(true),
+                stable_balance_saving: false,
+                auto_convert: None,
+                swap_available: true,
+            }
+            .render()
+        };
+        let off = crate::app::view::shared::landing::capture::activate(
+            content(),
+            iced::advanced::widget::Id::new(STABLE_BALANCE_ID),
+            (1440, 900),
+            true,
+        );
+        assert!(off.iter().any(|m| matches!(
+            m,
+            Message::SparkSettings(SparkSettingsMessage::AutoConvertOffRequested)
+        )));
+        assert!(!off.iter().any(|m| matches!(
+            m,
+            Message::SparkSettings(SparkSettingsMessage::StableBalanceToggled(false))
+        )));
+        let on = crate::app::view::shared::landing::capture::activate(
+            SparkSettingsView {
+                status: SparkSettingsStatus::Connected,
+                stable_balance_active: Some(false),
+                stable_balance_saving: false,
+                auto_convert: None,
+                swap_available: true,
+            }
+            .render(),
+            iced::advanced::widget::Id::new(STABLE_BALANCE_ID),
+            (1440, 900),
+            true,
+        );
+        assert!(on.iter().any(|m| matches!(
+            m,
+            Message::SparkSettings(SparkSettingsMessage::StableBalanceToggled(true))
+        )));
+
+        let dialog = crate::app::view::shared::landing::capture::inspect(
+            "spark-settings-turn-off",
+            turn_off_dialog(),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        );
+        assert!(dialog.contains("Turn off auto-convert?") && dialog.contains(TURN_OFF_COPY));
+        for (id, expected) in [
+            (TURN_OFF_AUTO_CONVERT_ID, true),
+            (KEEP_AUTO_CONVERT_ID, false),
+        ] {
+            let messages = crate::app::view::shared::landing::capture::activate(
+                turn_off_dialog(),
+                iced::advanced::widget::Id::new(id),
+                (1440, 900),
+                true,
+            );
+            assert_eq!(
+                messages.iter().any(|m| matches!(
+                    m,
+                    Message::SparkSettings(SparkSettingsMessage::StableBalanceToggled(false))
+                )),
+                expected,
+                "{}",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn a_paused_breaker_shows_its_reason() {
+        use coincube_spark_protocol::{AutoConvertBreaker, AutoConvertState};
+        let probe = balances(
+            false,
+            Some(AutoConvertState {
+                enabled: false,
+                breaker: AutoConvertBreaker::Paused {
+                    failures: 3,
+                    reason: "price moved".into(),
+                },
+                held_after_swap: false,
+            }),
+            true,
+        );
+        assert!(probe.contains("Paused"));
+        assert!(probe.contains("paused after 3 failed conversions: price moved"));
+        let held = balances(
+            true,
+            Some(AutoConvertState {
+                enabled: true,
+                breaker: AutoConvertBreaker::Ready,
+                held_after_swap: true,
+            }),
+            true,
+        );
+        assert!(held.contains("waiting while a swap out of USDB settles"));
     }
 
     #[test]

@@ -272,6 +272,13 @@ pub enum SparkSettingsMessage {
     /// new state so the view can update immediately without
     /// re-fetching; `Err` surfaces the SDK error.
     StableBalanceSaved(Result<bool, String>),
+    /// The auto-convert state from `get_auto_convert` (`None` if it
+    /// couldn't be read): the switch, the breaker and the post-swap hold.
+    AutoConvertLoaded(Option<coincube_spark_protocol::AutoConvertState>),
+    /// The switch was flipped off: ask before turning it off.
+    AutoConvertOffRequested,
+    /// Keep auto-convert: close the question.
+    AutoConvertOffCancelled,
     /// The user typed in the Spark nickname field on Balances & conversion.
     NicknameEdited(String),
     /// Return in the nickname field, or leaving the tab with a typed name.
