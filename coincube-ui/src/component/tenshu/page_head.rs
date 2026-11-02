@@ -696,6 +696,31 @@ mod tests {
     }
 
     #[test]
+    fn steps_sit_on_the_rule_in_order_and_take_no_focus() {
+        let (probe, size) = probe(
+            page_head::<Msg>("Send", Msg::Focus).rule(crate::component::tenshu::steps(
+                &["Details", "Review", "Sign", "Sent"],
+                1,
+            )),
+            1024.0,
+        );
+        let labels: Vec<_> = ["1", "Details", "2", "Review", "3", "Sign", "4", "Sent"]
+            .iter()
+            .map(|label| probe.text(label))
+            .collect();
+        for pair in labels.windows(2) {
+            assert!(pair[0].x < pair[1].x, "steps read left to right: {pair:?}");
+        }
+        let review = probe.text("Review");
+        // 10px under the label, then the 2px underline, then the 1px rule.
+        assert!(
+            (size.height - 1.0 - (review.y + review.height + 10.0 + 2.0)).abs() < 1.0,
+            "the underline sits on the rule: {review:?} {size:?}"
+        );
+        assert!(probe.focus.is_empty(), "steps are progress, not controls");
+    }
+
+    #[test]
     fn a_head_without_actions_is_the_title_block() {
         let (probe, size) = probe(page_head::<Msg>("Settings", Msg::Focus), 1024.0);
         assert!(probe.focus.is_empty());

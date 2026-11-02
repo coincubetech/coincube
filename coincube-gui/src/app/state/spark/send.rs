@@ -428,6 +428,8 @@ pub struct SparkSend {
     /// when the wallet holds no USDB — then there is nothing to convert and
     /// the send simply fails on funds.
     usdb_holding: Option<String>,
+    /// The USDB holding as last loaded, for the side panel's US Dollar row.
+    stable_balance: Option<coincube_spark_protocol::StableBalanceSnapshot>,
     /// Free-text destination input (BOLT11 / BIP21 / on-chain address).
     pub destination_input: String,
     /// Amount override for amountless invoices / on-chain sends, in sats.
@@ -512,6 +514,7 @@ impl SparkSend {
             balance_sats: 0,
             btc_balance_sats: 0,
             usdb_holding: None,
+            stable_balance: None,
             destination_input: String::new(),
             amount_input: String::new(),
             invoice_amount_sat: None,
@@ -843,8 +846,14 @@ impl State for SparkSend {
     ) -> Element<'a, crate::app::view::Message> {
         let backend_available = self.backend.is_some();
         // The sent celebration takes the whole page, head included.
-        let head = (!matches!(self.phase, SparkSendPhase::Sent(_)))
-            .then(|| crate::app::view::spark::sub_page_head(cache, "Send"));
+        let head = (!matches!(self.phase, SparkSendPhase::Sent(_))).then(|| {
+            crate::app::view::spark::sub_page_head(cache, "Send").rule(
+                coincube_ui::component::tenshu::steps(
+                    &crate::app::view::spark::SEND_STEPS,
+                    crate::app::view::spark::send::send_step(&self.phase),
+                ),
+            )
+        });
         let content = crate::app::view::dashboard_payment(
             menu,
             cache,
@@ -870,6 +879,11 @@ impl State for SparkSend {
                 sent_image_handle: &self.sent_image_handle,
                 recent_transactions: &self.recent_transactions,
                 balance_sats: self.balance_sats,
+                balances: crate::app::view::spark::SparkBalances::new(
+                    cache,
+                    self.btc_balance_sats,
+                    self.stable_balance.as_ref(),
+                ),
                 usdb_conversion_hint: usdb_conversion_hint(
                     self.invoice_amount_sat.or_else(|| {
                         parse_amount_to_sats(&self.amount_input, cache.bitcoin_unit).ok()
@@ -1480,6 +1494,7 @@ impl State for SparkSend {
                     self.balance_sats =
                         super::unified_spark_balance_sats(btc_sats, stable.as_ref(), cache);
                     self.btc_balance_sats = btc_sats;
+                    self.stable_balance = stable.clone();
                     self.usdb_holding = stable.as_ref().filter(|sb| sb.balance > 0).map(|sb| {
                         format!(
                             "{} {}",

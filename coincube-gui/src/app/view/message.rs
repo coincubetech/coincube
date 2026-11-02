@@ -353,6 +353,8 @@ pub enum CreateSpendMessage {
         request: u64,
         feerate: Option<usize>,
     },
+    /// Choose coins: open the coin list instead of the automatic selection.
+    ChooseCoins,
     /// The Custom fee segment: reveal the feerate field, restoring the last
     /// rate typed into it.
     CustomFeerate,

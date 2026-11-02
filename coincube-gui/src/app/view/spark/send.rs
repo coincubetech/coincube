@@ -57,6 +57,8 @@ pub struct SparkSendView<'a> {
     pub recent_transactions: &'a [SparkRecentTransaction],
     /// Unified balance (sats: BTC + Stable Balance), shown on the YOU SEND card.
     pub balance_sats: u64,
+    /// The side panel's balances, each in its own unit.
+    pub balances: crate::app::view::spark::SparkBalances<'a>,
     /// Line under the Amount field when the entered amount exceeds the
     /// bitcoin balance and USDB will cover the rest — see
     /// `state::spark::send::usdb_conversion_hint`.
@@ -268,34 +270,11 @@ impl<'a> SparkSendView<'a> {
             Message::SparkSend(SparkSendMessage::History),
         ));
 
-        let balance = if self.mask_amounts {
-            "••••••".to_owned()
-        } else {
-            format!(
-                "{} {}",
-                Amount::from_sat(self.balance_sats)
-                    .to_formatted_string_with_unit(self.bitcoin_unit),
-                if matches!(self.bitcoin_unit, BitcoinDisplayUnit::BTC) {
-                    "BTC"
-                } else {
-                    "SATS"
-                }
-            )
-        };
-        let reviewing = matches!(
-            self.phase,
-            SparkSendPhase::Prepared(_) | SparkSendPhase::Sending
-        );
-        let aside = Column::new()
-            .spacing(12)
-            .push(send_step("1", "Details", !reviewing))
-            .push(send_step("2", "Review", reviewing))
-            .push(send_step("3", "Sent", false))
-            .push(iced::widget::rule::horizontal(1))
-            .push(p2_regular("Available in Spark").style(theme::text::secondary))
-            .push(p1_bold(balance));
-        // The title, the Cube line and Back to Spark are in the page head
-        // (`head`).
+        // The steps are on the head's rule; the side panel lists what the
+        // payment can come from.
+        let aside = self.balances.view();
+        // The title, the Cube line, Back to Spark and the steps are in the
+        // page head (`head`).
         let page = Row::new()
             .spacing(40)
             .align_y(Alignment::Start)
@@ -306,6 +285,23 @@ impl<'a> SparkSendView<'a> {
         Container::new(Container::new(page).width(Length::Fill).max_width(960.0))
             .width(Length::Fill)
             .into()
+    }
+}
+
+/// Where `phase` stands on [`SEND_STEPS`](crate::app::view::spark::SEND_STEPS):
+/// Review from a quote until the payment is known to have landed, Sent once
+/// it has, and Details otherwise.
+pub fn send_step(phase: &SparkSendPhase) -> usize {
+    match phase {
+        SparkSendPhase::Prepared(_)
+        | SparkSendPhase::Sending
+        | SparkSendPhase::CrossChainFailed { .. }
+        | SparkSendPhase::OutcomeUnknown { .. } => 1,
+        SparkSendPhase::Sent(_) => 2,
+        SparkSendPhase::Idle
+        | SparkSendPhase::Preparing
+        | SparkSendPhase::CrossChainRoutes
+        | SparkSendPhase::Error(_) => 0,
     }
 }
 
@@ -372,42 +368,6 @@ fn recipient_status_row(
                     ),
                 )))
         }))
-        .into()
-}
-
-fn send_step<'a>(number: &'static str, label: &'static str, active: bool) -> Element<'a, Message> {
-    Row::new()
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .push(
-            Container::new(
-                text(number)
-                    .size(P2_SIZE)
-                    .style(move |theme: &theme::Theme| iced::widget::text::Style {
-                        color: Some(if active {
-                            iced::color!(0x1a1208)
-                        } else {
-                            theme.colors.shell.muted
-                        }),
-                    }),
-            )
-            .center_x(Length::Fixed(24.0))
-            .center_y(Length::Fixed(24.0))
-            .style(move |theme: &theme::Theme| container::Style {
-                background: active.then_some(Background::Color(theme.colors.shell.accent)),
-                border: iced::Border {
-                    color: theme.colors.shell.line,
-                    width: 1.0,
-                    radius: 12.0.into(),
-                },
-                ..Default::default()
-            }),
-        )
-        .push(if active {
-            p1_bold(label)
-        } else {
-            p1_regular(label).style(theme::text::secondary)
-        })
         .into()
 }
 
@@ -1457,6 +1417,7 @@ mod tests {
         countdown: Option<cross_chain::QuoteCountdown>,
         quote: Quote,
         image: iced::widget::image::Handle,
+        stable: Option<coincube_spark_protocol::StableBalanceSnapshot>,
     }
 
     impl Fixture {
@@ -1487,6 +1448,7 @@ mod tests {
                     contexts: Vec::new(),
                 },
                 image: iced::widget::image::Handle::from_rgba(1, 1, vec![0u8; 4]),
+                stable: None,
             }
         }
 
@@ -1544,6 +1506,14 @@ mod tests {
                 sent_image_handle: &self.image,
                 recent_transactions: &[],
                 balance_sats: SYNTHETIC_BALANCE_SATS,
+                balances: crate::app::view::spark::SparkBalances {
+                    btc_sats: SYNTHETIC_BALANCE_SATS,
+                    stable: self.stable.as_ref(),
+                    fiat_converter: None,
+                    btc_usd_price: None,
+                    bitcoin_unit: self.unit,
+                    masked: self.mask_amounts,
+                },
                 usdb_conversion_hint: self.hint.clone(),
                 bitcoin_unit: self.unit,
                 reference_btc_usd_price: None,
@@ -1586,7 +1556,12 @@ mod tests {
         let content = crate::app::view::dashboard_payment(
             menu,
             cache,
-            Some(crate::app::view::spark::sub_page_head(cache, "Send")),
+            Some(crate::app::view::spark::sub_page_head(cache, "Send").rule(
+                coincube_ui::component::tenshu::steps(
+                    &crate::app::view::spark::SEND_STEPS,
+                    send_step(&fixture.phase),
+                ),
+            )),
             fixture.view().render(),
         );
         if picker_open {
@@ -1652,6 +1627,13 @@ mod tests {
     impl Probe {
         fn contains(&self, needle: &str) -> bool {
             self.text.iter().any(|(value, _)| value.contains(needle))
+        }
+
+        /// The first text that is exactly `needle`, in draw order.
+        fn text_bounds(&self, needle: &str) -> Option<Rectangle> {
+            self.text
+                .iter()
+                .find_map(|(value, bounds)| (value == needle).then_some(*bounds))
         }
 
         fn action_ids(&self) -> Vec<Id> {
@@ -2105,6 +2087,64 @@ mod tests {
                 &palette,
                 || screen(&fixture, &menu, &cache, false),
             );
+        }
+    }
+
+    #[test]
+    fn the_steps_sit_on_the_head_and_follow_the_phase() {
+        assert_eq!(super::send_step(&SparkSendPhase::Idle), 0);
+        assert_eq!(super::send_step(&SparkSendPhase::Preparing), 0);
+        assert_eq!(super::send_step(&SparkSendPhase::CrossChainRoutes), 0);
+        assert_eq!(super::send_step(&SparkSendPhase::Error("no".into())), 0);
+        assert_eq!(super::send_step(&ordinary_prepared()), 1);
+        assert_eq!(super::send_step(&SparkSendPhase::Sending), 1);
+
+        let menu = spark_send_menu();
+        for fixture in [
+            Fixture::filled(SparkSendPhase::Idle),
+            Fixture::ordinary_prepared(),
+        ] {
+            let cache = fixture.cache();
+            let mut harness = Harness::new(screen(&fixture, &menu, &cache, false), COMPACT);
+            let probe = harness.probe();
+            let head = probe.text_bounds("Back to Spark").expect("the head");
+            let title = probe.text_bounds("Send").expect("the title");
+            for label in crate::app::view::spark::SEND_STEPS {
+                // The side panel has its own "Review" link; the step is the
+                // one under the head's title row, on the page column.
+                assert!(
+                    probe.text.iter().any(|(value, bounds)| value == label
+                        && bounds.y > head.y
+                        && bounds.y < head.y + 120.0
+                        && bounds.x >= title.x - 1.0),
+                    "{} is on the head's rule: head {:?}",
+                    label,
+                    head
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_side_panel_lists_bitcoin_and_us_dollar() {
+        let mut fixture = Fixture::filled(SparkSendPhase::Idle);
+        fixture.stable = Some(coincube_spark_protocol::StableBalanceSnapshot {
+            balance: 12_400_000,
+            decimals: 6,
+            ticker: "USDB".into(),
+        });
+        let menu = spark_send_menu();
+        let cache = fixture.cache();
+        let mut harness = Harness::new(screen(&fixture, &menu, &cache, false), COMPACT);
+        let probe = harness.probe();
+        for expected in [
+            "Available in Spark",
+            "Bitcoin",
+            "US Dollar",
+            "12.40",
+            "USDB",
+        ] {
+            assert!(probe.contains(expected), "missing {:?}", expected);
         }
     }
 

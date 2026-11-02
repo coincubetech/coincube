@@ -21,6 +21,7 @@ mod scope;
 pub mod segmented;
 pub mod select;
 pub mod setting_row;
+pub mod steps;
 pub mod surface;
 pub mod text;
 pub mod toggle;
@@ -46,6 +47,7 @@ pub use segmented::{
 };
 pub use select::{select, Select};
 pub use setting_row::{setting_row, SettingRow};
+pub use steps::steps;
 pub use surface::{card, panel};
 pub use text::{body, caption, heading, label, mono, section, title};
 pub use toggle::{toggle, Toggle, ToggleForm};
