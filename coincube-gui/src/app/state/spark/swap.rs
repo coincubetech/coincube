@@ -103,6 +103,9 @@ pub struct SparkSwap {
     /// Identity of the latest estimate or swap request. Any edit bumps it,
     /// so an answer to an older request is dropped.
     request: u64,
+    /// Whether auto-convert is on, once read: the side panel says what
+    /// happens to bitcoin received after the swap (H-Convert).
+    auto_convert: Option<bool>,
     /// The swap's result arrived while another page was showing, so the
     /// user hasn't seen it: the next visit shows it instead of a new form.
     result_unseen: bool,
@@ -121,6 +124,7 @@ impl SparkSwap {
             limits: None,
             phase: SwapPhase::Details { error: None },
             request: 0,
+            auto_convert: None,
             result_unseen: false,
         }
     }
@@ -263,6 +267,31 @@ impl SparkSwap {
                 balance,
             )))
         })
+    }
+
+    fn fetch_auto_convert(&self) -> Task<Message> {
+        let Some(backend) = self.backend.clone() else {
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                backend
+                    .client()
+                    .get_auto_convert()
+                    .await
+                    .ok()
+                    .map(|state| state.enabled)
+            },
+            |enabled| {
+                Message::View(view::Message::SparkSwap(
+                    SparkSwapMessage::AutoConvertLoaded(enabled),
+                ))
+            },
+        )
+    }
+
+    pub(crate) fn auto_convert_for_view(&self) -> Option<bool> {
+        self.auto_convert
     }
 
     fn fetch_limits(&self) -> Task<Message> {
@@ -447,6 +476,13 @@ impl SparkSwap {
                 }
                 Task::none()
             }
+            SparkSwapMessage::AutoConvertLoaded(enabled) => {
+                // An unread state keeps the last one rather than guessing.
+                if enabled.is_some() {
+                    self.auto_convert = enabled;
+                }
+                Task::none()
+            }
         }
     }
 }
@@ -492,7 +528,11 @@ impl State for SparkSwap {
         if !matches!(self.phase, SwapPhase::Swapping(_)) {
             self.request += 1;
         }
-        Task::batch([self.fetch_balance(), self.fetch_limits()])
+        Task::batch([
+            self.fetch_balance(),
+            self.fetch_limits(),
+            self.fetch_auto_convert(),
+        ])
     }
 }
 
@@ -906,6 +946,22 @@ mod tests {
         ));
         drop(swap.reload(None, None));
         assert!(matches!(swap.phase, SwapPhase::Details { error: None }));
+    }
+
+    #[test]
+    fn the_auto_convert_state_is_kept_once_read() {
+        let mut swap = SparkSwap::new(None);
+        assert_eq!(swap.auto_convert_for_view(), None);
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(false))));
+        assert_eq!(swap.auto_convert_for_view(), Some(false));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(None)));
+        assert_eq!(
+            swap.auto_convert_for_view(),
+            Some(false),
+            "an unread state keeps the last"
+        );
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(true))));
+        assert_eq!(swap.auto_convert_for_view(), Some(true));
     }
 
     #[test]

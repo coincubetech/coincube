@@ -263,6 +263,10 @@ pub fn swap_body<'a>(cache: &'a Cache, swap: &'a SparkSwap) -> Element<'a, Messa
         )
         .view(),
     };
+    let aside = Column::new()
+        .spacing(16)
+        .push(aside)
+        .push_maybe(swap.auto_convert_for_view().map(auto_convert_line));
     Row::new()
         .spacing(40)
         .align_y(Alignment::Start)
@@ -274,6 +278,44 @@ pub fn swap_body<'a>(cache: &'a Cache, swap: &'a SparkSwap) -> Element<'a, Messa
         .push(Container::new(aside).width(Length::Fixed(240.0)))
         .wrap()
         .vertical_spacing(20)
+        .into()
+}
+
+pub const WALLET_SETTINGS_ID: &str = "tenshu.spark.swap.wallet-settings";
+
+/// What happens to bitcoin received after the swap (H-Convert's side panel),
+/// with the way to change it.
+pub fn auto_convert_line<'a>(enabled: bool) -> Element<'a, Message> {
+    let (title, body) = if enabled {
+        (
+            "Auto-convert is on",
+            "Bitcoin you receive converts to USDB.",
+        )
+    } else {
+        ("Auto-convert is off", "Bitcoin you receive stays bitcoin.")
+    };
+    Column::new()
+        .spacing(4)
+        .push(iced::widget::rule::horizontal(1))
+        .push(Space::new().height(Length::Fixed(8.0)))
+        .push(p2_bold(title))
+        .push(p2_regular(body).style(theme::text::secondary))
+        .push(
+            coincube_ui::widget::action::Action::new(
+                Id::new(WALLET_SETTINGS_ID),
+                p2_regular("Change in Wallet settings"),
+                Message::FocusAction,
+            )
+            .padding([4, 0])
+            .style(|theme: &theme::Theme, status| {
+                let mut style = theme::button::link(theme, status);
+                style.text_color = theme.colors.shell.accent_ink;
+                style
+            })
+            .on_press(Message::Menu(Menu::Spark(SparkSubMenu::Settings(Some(
+                crate::app::menu::SparkSettingsOption::General,
+            ))))),
+        )
         .into()
 }
 
@@ -803,6 +845,36 @@ mod tests {
         assert!(probe.contains("Check Activity before"));
         assert!(probe.contains("See in Activity"));
         assert!(!probe.contains("didn't go through") && !probe.contains("failed"));
+    }
+
+    /// H-Convert: the side panel says what happens to bitcoin received
+    /// after the swap, and links to Wallet settings, once auto-convert is read.
+    #[test]
+    fn the_side_panel_says_what_auto_convert_does() {
+        let cache = mainnet();
+        let mut swap = funded();
+        let probe = inspect("spark-swap-auto-convert-unread", swap_body(&cache, &swap));
+        assert!(!probe.contains("Auto-convert is"));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(false))));
+        let probe = inspect("spark-swap-auto-convert-off", swap_body(&cache, &swap));
+        assert!(probe.contains("Auto-convert is off"));
+        assert!(probe.contains("Bitcoin you receive stays bitcoin."));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(true))));
+        let probe = inspect("spark-swap-auto-convert-on", swap_body(&cache, &swap));
+        assert!(probe.contains("Auto-convert is on"));
+        assert!(probe.contains("Bitcoin you receive converts to USDB."));
+        let messages = crate::app::view::shared::landing::capture::activate(
+            swap_body(&cache, &swap),
+            Id::new(WALLET_SETTINGS_ID),
+            (1440, 900),
+            true,
+        );
+        assert!(messages.iter().any(|m| matches!(
+            m,
+            Message::Menu(Menu::Spark(SparkSubMenu::Settings(Some(
+                crate::app::menu::SparkSettingsOption::General
+            ))))
+        )));
     }
 
     #[test]
