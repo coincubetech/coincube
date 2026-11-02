@@ -3446,6 +3446,8 @@ impl App {
                 );
                 panel.set_hardware_root(data_dir.clone());
                 tasks.push(panel.bind_runtime(daemon.clone()));
+                // Vault settings say whether recovery words are stored here.
+                tasks.push(panel.load_key_inventory());
                 panels.imported_bitcoin = Some(Box::new(panel));
                 panels.global_home.imported_installed = true;
             }
