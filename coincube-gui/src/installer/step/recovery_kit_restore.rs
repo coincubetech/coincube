@@ -633,6 +633,18 @@ impl From<RecoveryKitRestoreStep> for Box<dyn Step> {
 }
 
 impl Step for RecoveryKitRestoreStep {
+    fn restore_stage(&self) -> Option<crate::installer::RestoreStage> {
+        use crate::installer::RestoreStage;
+        Some(match &self.phase {
+            Phase::Email | Phase::OtpEntry => RestoreStage::SignIn,
+            Phase::LoadingCubes | Phase::CubePicker { .. } => RestoreStage::Cube,
+            Phase::PasswordEntry { .. }
+            | Phase::Decrypting { .. }
+            | Phase::Ready { .. }
+            | Phase::Error { .. } => RestoreStage::Password,
+        })
+    }
+
     /// Pick up an already-authenticated Connect session from
     /// `Context` the first time this step becomes active.
     ///

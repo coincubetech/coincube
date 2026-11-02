@@ -6399,6 +6399,69 @@ mod tests {
         );
     }
 
+    /// The design's Recovery Kit and Recover with phone paths: the Kit
+    /// path opens the installer's sign-in and Cube picker; the phone path
+    /// lists only Cubes a phone can recover.
+    #[test]
+    fn import_or_restore_offers_the_kit_and_phone_paths() {
+        let mut home = home_with(&[("a", "Alpha")]);
+        crate::home::tests::enable_btcb2(&mut home);
+        home.remote_cubes = vec![
+            remote("kit", "Kit only", true, true, false, false),
+            remote("phone", "Phone only", false, false, true, true),
+        ];
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        for target in [
+            super::super::RESTORE_START_KIT_ID,
+            super::super::RESTORE_KIT_ID,
+        ] {
+            let pressed = press_in_journey(&home, target);
+            assert!(
+                matches!(pressed.as_slice(), [ViewMessage::RestoreFromAnyRecoveryKit]),
+                "{} {:?}",
+                target,
+                pressed
+            );
+        }
+        if !feature_flags::OWNER_KEYCHAIN_RECOVERY_ENABLED {
+            return;
+        }
+        for target in [
+            super::super::RESTORE_START_PHONE_ID,
+            super::super::RESTORE_PHONE_ID,
+        ] {
+            let pressed = press_in_journey(&home, target);
+            assert!(
+                matches!(pressed.as_slice(), [ViewMessage::ShowRestorePhone]),
+                "{} {:?}",
+                target,
+                pressed
+            );
+        }
+        let _ = home.update(Message::View(ViewMessage::ShowRestorePhone));
+        assert!(home.restore_hub && home.restore_phone);
+        let pressed = press_in_journey(&home, "tenshu.restore:phone:phone");
+        assert!(
+            matches!(
+                pressed.as_slice(),
+                [ViewMessage::RestoreWithPhone {
+                    cube_id: 7,
+                    full_cube: true
+                }]
+            ),
+            "{:?}",
+            pressed
+        );
+        // A Kit-only Cube is not on the phone path.
+        assert!(press_in_journey(&home, "tenshu.restore:phone:kit").is_empty());
+        // The Overview and Close leave it.
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        assert!(home.restore_hub && !home.restore_phone);
+        let _ = home.update(Message::View(ViewMessage::ShowRestorePhone));
+        let _ = home.update(Message::View(ViewMessage::ShowCreateCube(false)));
+        assert!(!home.restore_hub && !home.restore_phone);
+    }
+
     #[test]
     fn leaving_bitcoin_leaves_import_or_restore() {
         let mut home = all_networks();

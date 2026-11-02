@@ -81,6 +81,11 @@ pub trait Step {
     }
     fn revert(&self, _ctx: &mut Context) {}
     fn stop(&mut self) {}
+    /// Where this step sits on Import or restore's stepper, if it is one of
+    /// a restore path's named steps.
+    fn restore_stage(&self) -> Option<super::RestoreStage> {
+        None
+    }
 }
 
 pub struct Final {

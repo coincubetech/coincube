@@ -157,6 +157,10 @@ impl From<OwnerKeychainRestoreStep> for Box<dyn Step> {
 }
 
 impl Step for OwnerKeychainRestoreStep {
+    fn restore_stage(&self) -> Option<crate::installer::RestoreStage> {
+        Some(crate::installer::RestoreStage::Approve)
+    }
+
     /// Pick up the owner's already-authenticated Connect client from `Context`.
     fn load_context(&mut self, ctx: &Context) {
         if self.client.is_none() {
@@ -301,7 +305,8 @@ impl Step for OwnerKeychainRestoreStep {
         email: Option<&'a str>,
     ) -> Element<'a, Message> {
         match &self.phase {
-            Phase::Decrypting | Phase::Ready { .. } => view::install(
+            Phase::Decrypting | Phase::Ready { .. } => view::install_titled(
+                "Approve on your phone",
                 progress,
                 email,
                 true,
@@ -312,9 +317,15 @@ impl Step for OwnerKeychainRestoreStep {
                         .to_string(),
                 ),
             ),
-            Phase::Error { message } => {
-                view::install(progress, email, false, false, Some(message), None)
-            }
+            Phase::Error { message } => view::install_titled(
+                "Approve on your phone",
+                progress,
+                email,
+                false,
+                false,
+                Some(message),
+                None,
+            ),
         }
     }
 }
