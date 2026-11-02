@@ -2379,7 +2379,7 @@ impl VaultHistoryProbe {
                 match crate::node::history::reconcile_coins(
                     &rpc,
                     &coins,
-                    crate::node::history::outspend_source(&config),
+                    crate::node::history::outspend_source(config),
                 )
                 .await
                 {
