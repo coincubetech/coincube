@@ -14,7 +14,7 @@ use crate::{
         },
         settings::preferences::PreferenceChange,
         state::preferences::{BalancePrivacy, BalancePrivacyChrome},
-        view::{shared::glyph, Message},
+        view::{settings::page, shared::glyph, Message},
         ConnectionStatus,
     },
     chain::{ChainId, ChainIdExt},
@@ -126,7 +126,10 @@ fn muted<'a>(label: impl Into<String>, size: u32) -> Text<'a> {
 }
 
 /// `theme::container::shell_chip`'s pill radius.
-const CHIP_RADIUS: f32 = 16.0;
+/// `.chip { border-radius: 8px }`.
+const CHIP_RADIUS: f32 = 8.0;
+/// `.chip { height: 32px }`.
+const CHIP_HEIGHT: f32 = 32.0;
 
 /// A chip's press target: the shell's hover fill, kept inside the pill.
 fn chip_button(
@@ -138,16 +141,47 @@ fn chip_button(
     style
 }
 
-fn status<'a>(label: impl Into<String>, good: bool) -> Text<'a> {
-    text(label.into())
-        .size(13)
-        .style(move |t: &theme::Theme| iced::widget::text::Style {
-            color: Some(if good {
-                t.colors.shell.good
-            } else {
-                t.colors.shell.muted
-            }),
-        })
+/// A chip's content: the Settings status glyph, then 13px text, both in the
+/// status tone (`.chip .s-ok`, `.s-busy`, ...).
+fn status<'a>(label: impl Into<String>, kind: page::Status) -> Element<'a, Message> {
+    let (glyph, tone) = page::status_glyph(kind);
+    let style = move |t: &theme::Theme| theme::tenshu::text::tone(t, tone);
+    row![
+        glyph.size(16).style(style),
+        text(label.into()).size(13).style(style)
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// A top-bar chip: a 32px, 8px-radius pressable status (`.chip`).
+fn chip<'a>(
+    id: &'static str,
+    content: Element<'a, Message>,
+    on_press: Message,
+) -> Element<'a, Message> {
+    container(
+        Action::new(
+            id,
+            // Inside the 1px border; a button keeps content at its top.
+            container(content).center_y(Length::Fixed(CHIP_HEIGHT - 2.0)),
+            Message::FocusAction,
+        )
+        .padding([0, 11])
+        .style(chip_button)
+        .focus_radius(CHIP_RADIUS)
+        .on_press(on_press),
+    )
+    .style(chip_style)
+    .into()
+}
+
+/// `.chip`: the shell's chip surface with the design's 8px corners.
+fn chip_style(t: &theme::Theme) -> iced::widget::container::Style {
+    let mut style = theme::container::shell_chip(t);
+    style.border.radius = CHIP_RADIUS.into();
+    style
 }
 
 /// Legacy entry point for callers without the GUI privacy owner. Cube routes
@@ -210,34 +244,18 @@ pub fn top_bar_with_privacy<'a>(
     ctx: &NavContext<'a>,
     privacy: Option<BalancePrivacyChrome>,
 ) -> Element<'a, Message> {
-    let account: Element<'a, Message> = if ctx.connect_authenticated {
-        container(
-            Action::new(
-                "tenshu.connect.account",
-                status("Signed in", true),
-                Message::FocusAction,
-            )
-            .padding([6, 11])
-            .style(chip_button)
-            .focus_radius(CHIP_RADIUS)
-            .on_press(Message::OpenConnectSignIn),
+    let account = if ctx.connect_authenticated {
+        chip(
+            "tenshu.connect.account",
+            status("Signed in", page::Status::Ok),
+            Message::OpenConnectSignIn,
         )
-        .style(theme::container::shell_chip)
-        .into()
     } else {
-        container(
-            Action::new(
-                "tenshu.connect.sign-in",
-                status("Signed out", false),
-                Message::FocusAction,
-            )
-            .padding([6, 11])
-            .style(chip_button)
-            .focus_radius(CHIP_RADIUS)
-            .on_press(Message::OpenConnectSignIn),
+        chip(
+            "tenshu.connect.sign-in",
+            status("Signed out", page::Status::Unknown),
+            Message::OpenConnectSignIn,
         )
-        .style(theme::container::shell_chip)
-        .into()
     };
     let account_name = if ctx.connect_authenticated {
         ctx.connect_email
@@ -254,29 +272,22 @@ pub fn top_bar_with_privacy<'a>(
         iced::widget::tooltip::Position::Bottom,
     );
 
-    let (connection, healthy) = match ctx.connect_stream_status {
-        ConnectionStatus::Connected => ("Connected", true),
-        ConnectionStatus::Connecting => ("Checking…", false),
-        ConnectionStatus::Error(_) => ("Reconnect required", false),
-        ConnectionStatus::DeviceRejected => ("Device not recognized", false),
-        ConnectionStatus::Inactive => ("Not checked", false),
+    let (connection, kind) = match ctx.connect_stream_status {
+        ConnectionStatus::Connected => ("Connected", page::Status::Ok),
+        ConnectionStatus::Connecting => ("Checking…", page::Status::Busy),
+        ConnectionStatus::Error(_) => ("Reconnect required", page::Status::Warn),
+        ConnectionStatus::DeviceRejected => ("Device not recognized", page::Status::Bad),
+        ConnectionStatus::Inactive => ("Not checked", page::Status::Unknown),
     };
     let route = connection_route(
         ctx.connect_stream_status,
         ctx.has_vault || ctx.has_imported_bitcoin,
     );
-    let connection_chip = container(
-        Action::new(
-            CONNECTION_ID,
-            status(connection, healthy),
-            Message::FocusAction,
-        )
-        .padding([6, 11])
-        .style(chip_button)
-        .focus_radius(CHIP_RADIUS)
-        .on_press(Message::Menu(route)),
-    )
-    .style(theme::container::shell_chip);
+    let connection_chip = chip(
+        CONNECTION_ID,
+        status(connection, kind),
+        Message::Menu(route),
+    );
     let connection = iced::widget::tooltip(
         connection_chip,
         container(muted(

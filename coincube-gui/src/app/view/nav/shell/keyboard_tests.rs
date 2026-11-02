@@ -255,6 +255,10 @@ fn top_bar_right_group_is_eye_then_chips_then_app_preferences() {
     for icon in [&order[0], &order[3]] {
         assert_eq!((at(icon).width, at(icon).height), (32.0, 32.0));
     }
+    // The chips are the design's 32px `.chip`: 30px inside its 1px border.
+    for chip in [&order[1], &order[2]] {
+        assert_eq!(at(chip).height, 30.0, "{chip:?}");
+    }
     assert!(
         order.windows(2).all(|pair| x(&pair[0]) < x(&pair[1])),
         "right group order: {:?}",

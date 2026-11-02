@@ -34,6 +34,25 @@ pub fn section<'a>(
     cache: &'a cache::Cache,
     state: &'a LocalSigningState,
 ) -> Element<'a, Message> {
+    // Keychain keys only enter a Vault when it is created, so a Vault
+    // without one can never pair a phone: say so once instead of laying out
+    // empty key, pairing and phone groups.
+    if no_keychain_key(state) && phones_for_vault(state).is_empty() {
+        return dashboard(
+            menu,
+            cache,
+            page::group(
+                "Keychain",
+                None,
+                page::rows([page::row("This Vault has no Keychain key")
+                    .description(
+                        "Phones sign with a key from the COINCUBE Keychain app, and that key \
+                         can only be added when a Vault is created.",
+                    )
+                    .into()]),
+            ),
+        );
+    }
     let mut col = Column::new()
         .width(Length::Fill)
         .push(key_group(state))
@@ -53,9 +72,14 @@ pub fn section<'a>(
     dashboard(menu, cache, col)
 }
 
+/// The Vault records its Keychain keys and has none.
+fn no_keychain_key(state: &LocalSigningState) -> bool {
+    state.keychain_keys_recorded && state.vault_keys.is_empty()
+}
+
 /// "Key for the phone": the Vault's Keychain keys as radio rows.
 fn key_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
-    if state.keychain_keys_recorded && state.vault_keys.is_empty() {
+    if no_keychain_key(state) {
         return page::group(
             "Key for the phone",
             None,
@@ -161,7 +185,7 @@ fn pair_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
 }
 
 fn idle_body<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
-    if state.keychain_keys_recorded && state.vault_keys.is_empty() {
+    if no_keychain_key(state) {
         return page::rows([page::row("")
             .line(page::status(
                 page::Status::Off,
@@ -365,20 +389,25 @@ fn error_body<'a>(err: &'a PairingError) -> Element<'a, Message> {
 
 /// "Paired phones": each phone paired with this Vault, its binding status,
 /// name, fallback address and removal.
+/// Pairing is vault-scoped: only phones paired with the currently-loaded
+/// vault, so the list agrees with the pairing group's "sign for this Vault"
+/// copy and the hw refresh loop's scoping.
+fn phones_for_vault(
+    state: &LocalSigningState,
+) -> Vec<&crate::phone_signer::pairing_store::PairedPhone> {
+    match state.wallet_fingerprint {
+        Some(vid) => state
+            .phones
+            .phones
+            .iter()
+            .filter(|p| p.vault_fingerprint == vid)
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
-    // Pairing is vault-scoped: only list phones paired with the
-    // currently-loaded vault, so this list agrees with the pairing
-    // group's "sign for this Vault" copy and the hw refresh loop's scoping.
-    let phones_for_vault: Vec<&crate::phone_signer::pairing_store::PairedPhone> =
-        match state.wallet_fingerprint {
-            Some(vid) => state
-                .phones
-                .phones
-                .iter()
-                .filter(|p| p.vault_fingerprint == vid)
-                .collect(),
-            None => Vec::new(),
-        };
+    let phones_for_vault = phones_for_vault(state);
 
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
     if phones_for_vault.is_empty() {
@@ -574,6 +603,38 @@ mod tests {
 
         state.selected_key = Some(state.vault_keys[0].xpub.clone());
         let _ = idle_body(&state);
+    }
+
+    #[test]
+    fn a_vault_without_a_keychain_key_shows_one_note_instead_of_pairing() {
+        use crate::app::view::shared::landing::capture;
+
+        let menu = Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning)));
+        let cache = cache::Cache::default();
+        let render = |state: &LocalSigningState| {
+            capture::inspect(
+                "settings-pair-keychain",
+                section(&menu, &cache, state),
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            )
+        };
+
+        let mut state = LocalSigningState::default();
+        state.keychain_keys_recorded = true;
+        let empty = render(&state);
+        assert!(empty.contains("This Vault has no Keychain key"));
+        for gone in ["Key for the phone", "Pair a phone", "Paired phones"] {
+            assert!(!empty.contains(gone), "{gone}");
+        }
+
+        state.vault_keys = vec![key(Some("My iPhone"), true)];
+        let pairable = render(&state);
+        assert!(!pairable.contains("This Vault has no Keychain key"));
+        for shown in ["Key for the phone", "Pair a phone", "Paired phones"] {
+            assert!(pairable.contains(shown), "{shown}");
+        }
     }
 
     #[test]

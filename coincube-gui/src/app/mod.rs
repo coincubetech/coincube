@@ -7246,9 +7246,14 @@ impl App {
                 self.node_history_request_epoch = self.node_history_request_epoch.wrapping_add(1);
                 let request_epoch = self.node_history_request_epoch;
                 self.node_history_in_progress = true;
-                self.cache.node_history.busy = true;
-                self.cache.node_history.error = None;
+                // The 5-second background Poll is not a user's batch. Marking
+                // it busy made Node settings show recovery in progress and
+                // hide the switch for the length of each Poll, so the page
+                // flashed every 5 seconds. `node_history_in_progress` still
+                // keeps a second worker from starting.
                 if !matches!(action, node_history::Action::Poll) {
+                    self.cache.node_history.busy = true;
+                    self.cache.node_history.error = None;
                     self.node_history_epoch = self.node_history_epoch.wrapping_add(1);
                     self.cache.local_switch_history = None;
                 }
@@ -16897,6 +16902,38 @@ mod local_node_sync_tests {
             Some(node_history::Action::Cancel)
         ));
         assert!(app.cache.node_history.cancel_queued);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn background_history_poll_does_not_mark_recovery_busy() {
+        let root = std::env::temp_dir().join(format!("history-poll-{}", uuid::Uuid::new_v4()));
+        let _guard = crate::app::session::test_guard();
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let config = node(8333);
+        let mut daemon_config = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        daemon_config.pending_bitcoind = Some(config.clone());
+        app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(
+            daemon_config,
+            None,
+        )));
+        app.internal_bitcoind = Some(Bitcoind::for_test(
+            config,
+            &app.cache.datadir_path,
+            app.cache.network,
+        ));
+
+        drop(app.update(Message::NodeHistory(node_history::Action::Poll)));
+        assert!(app.node_history_in_progress, "the Poll must still run");
+        assert!(
+            !app.cache.node_history.busy,
+            "a background Poll must not read as recovery in progress"
+        );
+
+        // A user's action still shows as busy.
+        app.node_history_in_progress = false;
+        drop(app.update(Message::NodeHistory(node_history::Action::Resume)));
+        assert!(app.cache.node_history.busy);
         let _ = std::fs::remove_dir_all(root);
     }
 
