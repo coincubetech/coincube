@@ -711,13 +711,16 @@ impl Recovery {
         self.tail = Some(tail);
         self.planned = self.blocks.len() as u32;
         self.fallback = fallback;
-        self.full_start.get_or_insert(self.start);
+        let full = self.range_start();
         self.start = self.blocks.first().copied().unwrap_or(tail);
+        // A tail below the oldest coin widens the range; keep the lower start.
+        self.full_start = Some(full.min(self.start));
         self.next = self.start;
         self.download_next = self.start;
     }
 
-    /// The start of the range the user asked for, before any `plan`.
+    /// The start of the range the user asked for, before any `plan`, or the
+    /// plan's start when its tail reaches lower.
     pub fn range_start(&self) -> u32 {
         self.full_start.unwrap_or(self.start)
     }
@@ -1759,6 +1762,15 @@ mod tests {
         job.plan(BTreeSet::new(), 69, None);
         assert_eq!((job.start, job.next), (69, 69));
         assert!(job.validate(&binding()).is_ok());
+        // Coins newer than the tail: the plan starts lower than the request,
+        // and the journal must stay valid and rewind from the lower start.
+        let mut job = Recovery::new(binding(), 90, 100, genesis().block_hash()).unwrap();
+        job.plan(BTreeSet::new(), 69, None);
+        assert_eq!((job.start, job.full_start), (69, Some(69)));
+        assert!(job.validate(&binding()).is_ok());
+        job.rewind(None);
+        assert_eq!((job.start, job.next), (69, 69));
+        assert!(job.validate(&binding()).is_ok());
     }
 
     #[test]
@@ -1955,6 +1967,32 @@ mod tests {
                 Some(0)
             );
         }
+        // A held transaction under the named txid that spends some other
+        // output proves nothing; its block stays queued.
+        let mut other = spender.clone();
+        other.input[0].previous_output.vout = 1;
+        let otherid = other.compute_txid();
+        let esplora = MockServer::start_async().await;
+        esplora
+            .mock_async(|when, then| {
+                when.method(GET).path(format!("/tx/{funding}/outspend/0"));
+                then.status(200).json_body(json!({"spent":true,"txid":otherid.to_string(),"vin":0,"status":{"confirmed":true,"block_height":7,"block_hash":genesis().block_hash().to_string()}}));
+            })
+            .await;
+        let config: EsploraConfig =
+            serde_json::from_value(json!({"addr":esplora.base_url()})).unwrap();
+        let server = MockServer::start_async().await;
+        server.mock_async(|when,then| {
+            when.method(POST).json_body_partial(json!({"method":"gettransaction","params":[otherid.to_string(),true]}).to_string());
+            then.status(200).json_body(json!({"id":"history","result":{"txid":otherid.to_string(),"hex":serialize_hex(&other),"confirmations":1,"blockhash":genesis().block_hash().to_string()}}));
+        }).await;
+        spent_coin_node(&server).await;
+        assert_eq!(
+            reconcile_coins(&rpc(&server).await, &[coin(None)], Some(&config))
+                .await
+                .unwrap(),
+            Some(7)
+        );
     }
 
     #[tokio::test]
