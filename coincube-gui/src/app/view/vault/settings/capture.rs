@@ -204,6 +204,7 @@ fn node_panel<'a>(fixture: &'a Fixture, offline: bool) -> Element<'a, Message> {
         None,
         None,
         None,
+        false,
         !offline,
         false,
         false,
@@ -230,6 +231,7 @@ fn node_panel<'a>(fixture: &'a Fixture, offline: bool) -> Element<'a, Message> {
                 false,
                 false,
                 true,
+                false,
                 false,
                 false,
                 false,
@@ -398,7 +400,7 @@ fn assert_labels(scenario: &str, labels: &Labels, width: u32) {
         expected
     );
     if scenario == "node_local" {
-        for lower_control in ["Node resources", "Blockchain rescan"] {
+        for lower_control in ["Node resources", "Rescan from a date"] {
             assert!(
                 labels.0.iter().any(|(label, _)| label == lower_control),
                 "node capture did not mount {}",

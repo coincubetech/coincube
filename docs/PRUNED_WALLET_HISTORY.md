@@ -76,7 +76,7 @@ that misses its deadline does not pause recovery: Tenshu keeps polling and
 pauses only after 12 consecutive unreachable steps (about a minute) or on any
 other error.
 
-**Pause after batch** waits for the current worker; **Resume** rechecks the saved
+**Pause** waits for the current worker; **Resume** rechecks the saved
 identity and continues; **Cancel** releases the recovery's retention obligation.
 Wallet records already imported/scanned survive cancellation and later pruning.
 Temporary recovery restores the previous storage-size pruning target when no
@@ -130,10 +130,13 @@ and [pruneblockchain](https://bitcoincore.org/en/doc/29.0.0/rpc/blockchain/prune
 ### Guided switch and default retention
 
 For a Connect Vault, select **Switch to local node**. When the managed local
-wallet is missing history, Tenshu offers **Import Connect history** as the
-recommended first step. Recovery from a height/date and a custom rolling
-retention window are under **Advanced wallet history recovery options**.
-An existing interrupted recovery remains visible so it can be resumed.
+wallet is missing history, Tenshu shows **Move this Vault to your local node**:
+sync the blockchain, bring this Vault's history over, then switch. Step 2 offers
+**Start from Connect's history** (recommended; **Import history from Connect**)
+or **Start from a date or block**, which also shows the custom rolling retention
+window. Step 3's **Switch to local node** stays visible but disabled until the
+history checks out. An existing interrupted recovery remains visible so it can
+be resumed. **Rescan from a date** is disabled while a recovery runs.
 Once reconciliation and a fresh history check succeed, an explicit switch
 request is retried through the normal sync and running-scan guards.
 

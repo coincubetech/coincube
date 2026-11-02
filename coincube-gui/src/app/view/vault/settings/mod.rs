@@ -1140,6 +1140,7 @@ pub fn rescan<'a>(
     invalid_date: bool,
     past_possible_height: bool,
     future_date: bool,
+    recovery_running: bool,
 ) -> Element<'a, SettingsEditMessage> {
     use crate::app::view::settings::page;
     use coincube_ui::component::tenshu::ActionKind;
@@ -1211,10 +1212,15 @@ pub fn rescan<'a>(
             "Successfully rescanned the blockchain",
         ));
     }
+    if recovery_running {
+        body = body.push(page::muted(
+            "Available when wallet history recovery finishes or is cancelled.",
+        ));
+    }
     body = body.push(page::muted(
-        "A rescan rebuilds wallet history. It does not repair Connect sign-in or node connectivity.",
+        "Re-reads blocks your node still keeps to rebuild this Vault's history. It does not repair Connect sign-in or node connectivity.",
     ));
-    page::group("Blockchain rescan", None, body)
+    page::group("Rescan from a date", None, body)
 }
 
 fn is_ok_and<T, E>(res: &Result<T, E>, f: impl FnOnce(&T) -> bool) -> bool {
@@ -1645,6 +1651,7 @@ pub fn node_backend_status<'a>(
     // `None` leaves the build unnamed rather than asserting one.
     pending_subversion: Option<&'a str>,
     pending_bitcoind_log: Option<&'a str>,
+    show_log: bool,
     can_switch_to_connect: bool,
     can_switch_to_bitcoind: bool,
     recovery_in_progress: bool,
@@ -1670,13 +1677,7 @@ pub fn node_backend_status<'a>(
     use crate::app::view::settings::page;
     use coincube_ui::component::tenshu::{ActionKind, Tone};
     let _ = active_icon;
-    let mut col = Column::new()
-        .width(Length::Fill)
-        .push(Space::new().height(Length::Fixed(page::GROUP_GAP)))
-        .push(page::heading(format!(
-            "Active backend · {}",
-            active_backend
-        )));
+    let mut col = Column::new().width(Length::Fill);
 
     // Surface an in-flight backend switch so the disabled buttons read as
     // "busy" rather than broken. This covers the promotion/rescan window
@@ -1700,8 +1701,10 @@ pub fn node_backend_status<'a>(
         ));
     }
 
-    // Switch actions, shown beside the blockchain status.
+    // Actions on the backend in use sit on its row; switching to the local
+    // node sits on the node's row.
     let mut actions: Vec<Element<'a, NodeSettingsMessage>> = Vec::new();
+    let mut node_actions: Vec<Element<'a, NodeSettingsMessage>> = Vec::new();
     if can_switch_to_connect {
         actions.push(page::plain_button(
             "Switch to COINCUBE | Connect",
@@ -1716,7 +1719,7 @@ pub fn node_backend_status<'a>(
     let show_switch_to_bitcoind_btn =
         can_switch_to_bitcoind && pending_ibd != Some(true) && !recovery_in_progress;
     if show_switch_to_bitcoind_btn {
-        actions.push(page::plain_button(
+        node_actions.push(page::plain_button(
             "Switch to local node",
             ActionKind::Secondary,
             (!processing).then_some(NodeSettingsMessage::SwitchToBitcoind),
@@ -1730,6 +1733,20 @@ pub fn node_backend_status<'a>(
         ));
     }
 
+    // A pending node is not necessarily one of ours: switching to Connect
+    // parks whichever Bitcoind backend was active, and that can be an
+    // external node running any client. So the name is only used for a
+    // subversion we actually recognise.
+    let flavor = pending_subversion.and_then(|sv| {
+        let flavor = crate::node::bitcoind::recognized_flavor(sv)?.display_name();
+        Some(match crate::node::bitcoind::node_version_label(sv) {
+            Some(version) => format!("{flavor} {version}"),
+            None => flavor.to_string(),
+        })
+    });
+    let name = flavor
+        .clone()
+        .unwrap_or_else(|| "Your local node".to_string());
     let mut status_block: Option<coincube_ui::widget::Column<'a, NodeSettingsMessage>> = None;
     if let Some(progress) = pending_progress {
         let pace = if progress > 0.98 {
@@ -1739,19 +1756,6 @@ pub fn node_backend_status<'a>(
         } else {
             "A full synchronisation typically takes a few days and is resource-intensive. Once the initial synchronisation is done, the next ones will be much faster."
         };
-        // A pending node is not necessarily one of ours: switching to Connect
-        // parks whichever Bitcoind backend was active, and that can be an
-        // external node running any client. So the name is only used for a
-        // subversion we actually recognise.
-        let name = pending_subversion
-            .and_then(|sv| {
-                let flavor = crate::node::bitcoind::recognized_flavor(sv)?.display_name();
-                Some(match crate::node::bitcoind::node_version_label(sv) {
-                    Some(version) => format!("{flavor} {version}"),
-                    None => flavor.to_string(),
-                })
-            })
-            .unwrap_or_else(|| "Your local node".to_string());
         let pending = can_switch_to_bitcoind;
         let desc = if catching_up {
             format!("{name} has finished initial blockchain sync and is catching up with known headers.")
@@ -1765,7 +1769,7 @@ pub fn node_backend_status<'a>(
         } else if switch_in_progress {
             format!("{name} has finished initial blockchain sync. The wallet backend switch is still in progress.")
         } else if pending && recovery_in_progress {
-            format!("{name} is synced. Finish or cancel wallet history recovery before switching.")
+            format!("{name} is synced. Bring this Vault's history over below, then switch.")
         } else if pending {
             format!("{name} has finished initial blockchain sync and is ready to use.")
         } else {
@@ -1804,7 +1808,7 @@ pub fn node_backend_status<'a>(
             );
         }
         block = block.push(page::muted(desc));
-        if let Some(log) = pending_bitcoind_log {
+        if let Some(log) = pending_bitcoind_log.filter(|_| show_log) {
             block = block.push(coincube_ui::component::tenshu::mono(log).size(12));
         }
         status_block = Some(block);
@@ -1815,28 +1819,44 @@ pub fn node_backend_status<'a>(
         )));
     }
 
-    match status_block {
-        Some(block) => {
-            let row = actions
-                .into_iter()
-                .fold(page::row("").line(block).top(), |row, action| {
-                    row.control(action)
-                });
-            col = col.push(page::group(
-                "Local blockchain status",
-                None,
-                page::rows([row.into()]),
+    let in_use = match active_backend {
+        "COINCUBE | Connect" => "This Vault reads its balance and history through Connect.",
+        "Local Node" => "This Vault reads its balance and history from your own node.",
+        _ => "Where this Vault reads its balance and history.",
+    };
+    let mut rows: Vec<Element<'a, NodeSettingsMessage>> = vec![actions
+        .into_iter()
+        .fold(
+            page::row(format!("In use · {active_backend}")).description(in_use),
+            |row, action| row.control(action),
+        )
+        .into()];
+    if let Some(block) = status_block {
+        if pending_bitcoind_log.is_some() {
+            node_actions.push(page::plain_button(
+                if show_log {
+                    "Hide node log"
+                } else {
+                    "Node log"
+                },
+                ActionKind::Secondary,
+                Some(NodeSettingsMessage::NodeLogToggled),
             ));
         }
-        None if !actions.is_empty() => {
-            col = col.push(Space::new().height(Length::Fixed(12.0))).push(
-                actions
-                    .into_iter()
-                    .fold(Row::new().spacing(8), |row, action| row.push(action)),
-            );
-        }
-        None => {}
+        let label = match &flavor {
+            Some(flavor) => format!("Local node · {flavor}"),
+            None => "Local node".to_string(),
+        };
+        rows.push(
+            node_actions
+                .into_iter()
+                .fold(page::row(label).line(block).top(), |row, action| {
+                    row.control(action)
+                })
+                .into(),
+        );
     }
+    col = col.push(page::group("Wallet backend", None, page::rows(rows)));
 
     if let Some(w) = warning {
         col = col.push(page::note(Tone::Warn, text(w).size(13), None));
@@ -2470,190 +2490,566 @@ pub fn custom_esplora_section<'a>(
     card::simple(col).width(Length::Fill).into()
 }
 
-/// The "Node resources" panel: tune the managed node's prune target and mempool
-/// cap, then apply via a force-restart. Reuses the installer's shared controls so
-/// the presets/fields never drift, and adds the honesty copy about what changing
-/// each value actually does. `processing` is true while a restart is in flight.
+/// How a step of the move-to-local-node card is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepState {
+    Done,
+    Current,
+    Stopped,
+    Todo,
+}
+
+/// One numbered step: a 28px marker, the title with a right-hand note, and
+/// the step's body below the title.
+fn history_step<'a>(
+    number: u8,
+    state: StepState,
+    title: &'a str,
+    note: Option<String>,
+    body: Option<Element<'a, NodeSettingsMessage>>,
+) -> Element<'a, NodeSettingsMessage> {
+    use coincube_ui::component::tenshu::Tone;
+    let tone = match state {
+        StepState::Done => Tone::Good,
+        StepState::Current => Tone::Neutral,
+        StepState::Stopped => Tone::Warn,
+        StepState::Todo => Tone::Muted,
+    };
+    let glyph: Element<'a, NodeSettingsMessage> = match state {
+        StepState::Done => icon::check_icon()
+            .size(14)
+            .style(move |t: &theme::Theme| theme::tenshu::text::tone(t, tone))
+            .into(),
+        StepState::Stopped => text("!")
+            .size(13)
+            .font(coincube_ui::font::SEMIBOLD)
+            .style(move |t: &theme::Theme| theme::tenshu::text::tone(t, tone))
+            .into(),
+        _ => text(number.to_string())
+            .size(13)
+            .font(coincube_ui::font::SEMIBOLD)
+            .style(move |t: &theme::Theme| {
+                if state == StepState::Current {
+                    iced::widget::text::Style {
+                        color: Some(t.colors.shell.accent_ink),
+                    }
+                } else {
+                    theme::tenshu::text::tone(t, tone)
+                }
+            })
+            .into(),
+    };
+    let marker = Container::new(glyph)
+        .width(Length::Fixed(28.0))
+        .height(Length::Fixed(28.0))
+        .center_x(Length::Fixed(28.0))
+        .center_y(Length::Fixed(28.0))
+        .style(move |t: &theme::Theme| {
+            let shell = &t.colors.shell;
+            let (color, width) = match state {
+                StepState::Done => (shell.good, 1.0),
+                StepState::Current => (shell.accent, 2.0),
+                StepState::Stopped => (shell.warn, 2.0),
+                StepState::Todo => (shell.line, 1.0),
+            };
+            iced::widget::container::Style {
+                border: iced::Border {
+                    color,
+                    width,
+                    radius: 14.0.into(),
+                },
+                ..Default::default()
+            }
+        });
+    let title_text = text(title)
+        .size(15)
+        .font(
+            if matches!(state, StepState::Current | StepState::Stopped) {
+                coincube_ui::font::SEMIBOLD
+            } else {
+                coincube_ui::font::MEDIUM
+            },
+        )
+        .style(move |t: &theme::Theme| {
+            theme::tenshu::text::tone(
+                t,
+                if state == StepState::Todo {
+                    Tone::Muted
+                } else {
+                    Tone::Neutral
+                },
+            )
+        });
+    let mut header = Row::new()
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .height(Length::Fixed(28.0))
+        .push(Container::new(title_text).width(Length::Fill));
+    if let Some(note) = note {
+        header = header.push(text(note).size(13).style(move |t: &theme::Theme| {
+            theme::tenshu::text::tone(
+                t,
+                if state == StepState::Done {
+                    Tone::Good
+                } else {
+                    Tone::Muted
+                },
+            )
+        }));
+    }
+    let mut column = Column::new().spacing(10).width(Length::Fill).push(header);
+    if let Some(body) = body {
+        column = column.push(body);
+    }
+    Row::new()
+        .spacing(16)
+        .align_y(Alignment::Start)
+        .padding([12, 0])
+        .push(marker)
+        .push(column)
+        .into()
+}
+
+/// A choice card for where history recovery starts.
+fn history_source<'a>(
+    title: &'a str,
+    tag: Option<&'a str>,
+    detail: &'a str,
+    selected: bool,
+    from_date: bool,
+) -> Element<'a, NodeSettingsMessage> {
+    use crate::app::view::settings::page;
+    let mut heading = Row::new()
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .push(text(title).size(14).font(coincube_ui::font::SEMIBOLD));
+    if let Some(tag) = tag {
+        heading = heading.push(text(tag).size(12).font(coincube_ui::font::SEMIBOLD).style(
+            |t: &theme::Theme| iced::widget::text::Style {
+                color: Some(t.colors.shell.accent_ink),
+            },
+        ));
+    }
+    iced::widget::button(
+        Column::new()
+            .spacing(3)
+            .push(heading)
+            .push(page::muted(detail)),
+    )
+    .width(Length::Fill)
+    .padding([12, 16])
+    .style(move |t, status| {
+        let mut style = theme::tenshu::control::segment(t, status, selected, 10.0);
+        if !selected {
+            style.border.color = t.colors.shell.line;
+            style.border.width = 1.0;
+        }
+        style
+    })
+    .on_press(NodeSettingsMessage::RecoverySourceSelected(from_date))
+    .into()
+}
+
+/// The card that moves a Vault from Connect to the local node: sync the
+/// blockchain, bring the Vault's history over, then switch. All three steps
+/// stay on screen in every state, so a switch that is not yet possible says
+/// why instead of disappearing.
 pub fn wallet_history_section<'a>(
     start: &'a form::Value<String>,
     status: &'a crate::app::node_history::Status,
-    advanced: bool,
+    from_date: bool,
     date_picker_open: bool,
+    node_height: Option<u64>,
+    can_switch: bool,
 ) -> Element<'a, NodeSettingsMessage> {
+    use crate::app::view::settings::page;
     use crate::node::history::Phase;
-    let mut content = Column::new().spacing(15)
-        .push(text("Recover history to switch to your local node").bold().size(18))
-        .push(text("Your local wallet is missing some history. Import what Connect has already found, then check it against your node before switching.").size(14))
-        .push(text("Recommended: Import Connect history").bold())
-        .push(text("Usually the quickest option. If history is still missing, Tenshu must download and scan old blocks, which can take hours or longer.").size(14));
-    let mut import = button::primary(None, "Import Connect history");
-    if !status.busy
-        && status.job.as_ref().is_none_or(|job| {
+    use coincube_ui::component::tenshu::{ActionKind, Tone};
+
+    let job = status.job.as_ref();
+    let running = job.is_some_and(|job| {
+        matches!(
+            job.phase,
+            Phase::FetchingForLoad | Phase::Downloading | Phase::Scanning | Phase::Reconciling
+        )
+    });
+    let paused = job.is_some_and(|job| job.phase == Phase::Paused);
+    let done = status.reconciled && job.is_some_and(|job| job.phase == Phase::Complete);
+    // A user action is in flight but no job has been written yet.
+    let preparing = status.busy && !running && !paused && !done;
+    let can_start = !status.busy
+        && job.is_none_or(|job| {
             matches!(
                 job.phase,
                 Phase::Complete | Phase::Cancelled | Phase::Paused
             )
-        })
-    {
-        import = import.on_press(NodeSettingsMessage::ImportConnectHistory);
-    }
-    content = content.push(import).push(
-        button::transparent(
+        });
+
+    let step1 = match node_height {
+        Some(height) => history_step(
+            1,
+            StepState::Done,
+            "Sync the blockchain",
+            Some(format!("Done · block {height}")),
             None,
-            if advanced {
-                "Hide advanced wallet history recovery options"
-            } else {
-                "Advanced wallet history recovery options"
-            },
-        )
-        .on_press(NodeSettingsMessage::RecoveryAdvancedToggled),
-    );
-    if advanced {
-        let initial_date = chrono::NaiveDate::parse_from_str(start.value.trim(), "%Y-%m-%d")
-            .unwrap_or_else(|_| chrono::Local::now().date_naive());
-        let start_entry = Row::new()
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .width(Length::Fill)
-            .push(form::Form::new_trimmed(
-                "Block height or YYYY-MM-DD",
-                start,
-                NodeSettingsMessage::RecoveryStartEdited,
-            ))
-            .push(date_picker::calendar_button(
-                date_picker_open,
-                initial_date,
-                NodeSettingsMessage::RecoveryDateOpen,
-                NodeSettingsMessage::RecoveryDateCancel,
-                NodeSettingsMessage::RecoveryDateSelected,
-            ));
-        let mut recover = button::secondary(None, "Recover from this height or date");
-        if !status.busy
-            && status.job.as_ref().is_none_or(|job| {
-                matches!(
-                    job.phase,
-                    Phase::Complete | Phase::Cancelled | Phase::Paused
-                )
-            })
-        {
-            recover = recover.on_press(NodeSettingsMessage::RecoveryStart);
-        }
-        content = content
-            .push(start_entry)
-            .push(recover)
-            .push(text("Downloads and scans blocks from your chosen point. Keep Tenshu open while it runs; progress is saved if interrupted.").size(12).style(theme::text::secondary));
-    }
-    if let Some(job) = &status.job {
-        let label = match job.phase {
-            Phase::FetchingForLoad => "Downloading blocks needed to load the wallet",
-            Phase::Downloading => "Downloading blocks",
-            Phase::Scanning => "Scanning wallet transactions",
-            Phase::Reconciling => "Checking transaction and spend history",
-            Phase::Paused => "Recovery paused",
-            Phase::Complete => "Recovery scan complete",
-            Phase::Cancelled => "Recovery cancelled",
-        };
-        // A planned import counts the single blocks it fetches plus its
-        // short tail; a range scan counts every block between its ends.
-        let blocks = if job.tail.is_some() {
+        ),
+        None => history_step(
+            1,
+            StepState::Current,
+            "Sync the blockchain",
+            Some("Waiting for your node".into()),
+            None,
+        ),
+    };
+
+    let percent = job.map(|job| job.progress() * 100.0).unwrap_or(0.0);
+    let bar = |progress: f32| -> Element<'a, NodeSettingsMessage> {
+        ProgressBar::new(0.0..=1.0, progress)
+            .length(Length::Fill)
+            .girth(Length::Fixed(6.0))
+            .into()
+    };
+    let blocks_line = |job: &crate::node::history::Recovery| {
+        if job.tail.is_some() {
             let (done, total) = job.block_counts();
             format!("{done} of {total} blocks")
         } else {
-            format!("blocks {}–{}", job.start, job.target)
+            format!("Blocks {}–{}", job.start, job.target)
+        }
+    };
+
+    let mut body = Column::new().spacing(10).width(Length::Fill);
+    let (state2, note2) = if done {
+        body = body.push(page::note(
+            Tone::Good,
+            Column::new()
+                .spacing(2)
+                .push(page::status(page::Status::Ok, "History matches your node"))
+                .push(page::muted(
+                    "Every payment and spend Connect found checks out against your node.",
+                )),
+            None,
+        ));
+        (StepState::Done, Some("Done".to_string()))
+    } else if preparing {
+        body = body
+            .push(page::status(page::Status::Busy, "Preparing…"))
+            .push(page::muted(
+                "Importing what Connect found and working out which blocks your node still needs.",
+            ));
+        (StepState::Current, None)
+    } else if let Some(job) = job.filter(|_| running) {
+        let current = match job.phase {
+            Phase::FetchingForLoad => 0,
+            Phase::Downloading => 1,
+            Phase::Scanning => 2,
+            _ => 3,
         };
-        content = content
-            .push(text(format!(
-                "{label}: {blocks} · {:.1}% scanned",
-                job.progress() * 100.0
+        let phases = [
+            "Fetch blocks needed to load the wallet",
+            "Fetch blocks",
+            "Scan for this Vault's payments",
+            "Check payments and spends",
+        ];
+        let list = phases.iter().enumerate().skip(
+            // Loading only appears when it ran.
+            usize::from(current > 0),
+        );
+        let list = list.fold(Column::new().spacing(6), |column, (index, label)| {
+            column.push(page::status(
+                if index < current {
+                    page::Status::Ok
+                } else if index == current {
+                    page::Status::Busy
+                } else {
+                    page::Status::Off
+                },
+                *label,
+            ))
+        });
+        body = body
+            .push(bar(job.progress()))
+            .push(page::muted(format!(
+                "{} · {percent:.1}% done",
+                blocks_line(job)
             )))
-            .push(ProgressBar::new(0.0..=1.0, job.progress()));
+            .push(list);
         if let Some(reason) = &job.fallback {
-            content = content.push(text(reason).size(12).style(theme::text::secondary));
+            body = body.push(page::muted(reason.as_str()));
         }
-        if !status.cancel_queued
-            && matches!(
-                job.phase,
-                Phase::FetchingForLoad | Phase::Downloading | Phase::Scanning | Phase::Reconciling
-            )
-        {
-            content = content.push(
-                button::secondary(None, "Pause after this batch")
-                    .on_press(NodeSettingsMessage::RecoveryPause),
-            );
-        } else if !status.cancel_queued && job.phase == Phase::Paused {
-            content = content.push(
-                button::secondary(None, "Resume recovery")
-                    .on_press(NodeSettingsMessage::RecoveryResume),
+        if let Some(note) = &job.last_error {
+            body = body.push(page::muted(note.as_str()));
+        }
+        let mut actions = Row::new().spacing(8).align_y(Alignment::Center);
+        if !status.cancel_queued {
+            actions = actions
+                .push(page::plain_button(
+                    "Pause",
+                    ActionKind::Secondary,
+                    Some(NodeSettingsMessage::RecoveryPause),
+                ))
+                .push(page::plain_button(
+                    "Cancel",
+                    ActionKind::Secondary,
+                    Some(NodeSettingsMessage::RecoveryCancel),
+                ));
+        }
+        body = body.push(actions.push(page::muted(if status.cancel_queued {
+            "Cancelling after the current batch…"
+        } else {
+            "Both wait for the current batch. Progress is saved if Tenshu closes."
+        })));
+        (StepState::Current, Some(format!("{percent:.0}%")))
+    } else if let Some(job) = job.filter(|_| paused) {
+        body = body.push(bar(job.progress())).push(page::muted(format!(
+            "{} · {percent:.1}% done",
+            blocks_line(job)
+        )));
+        if let Some(reason) = &job.fallback {
+            body = body.push(page::muted(reason.as_str()));
+        }
+        body = body.push(page::note(
+            Tone::Warn,
+            page::muted(
+                job.last_error
+                    .as_deref()
+                    .unwrap_or("Recovery is paused. Nothing already fetched is lost."),
+            ),
+            None,
+        ));
+        if !status.cancel_queued {
+            body = body.push(
+                Row::new()
+                    .spacing(8)
+                    .push(page::plain_button(
+                        "Resume",
+                        ActionKind::Primary,
+                        can_start.then_some(NodeSettingsMessage::RecoveryResume),
+                    ))
+                    .push(page::plain_button(
+                        "Cancel recovery",
+                        ActionKind::Secondary,
+                        Some(NodeSettingsMessage::RecoveryCancel),
+                    )),
             );
         }
-        if !status.cancel_queued && !matches!(job.phase, Phase::Complete | Phase::Cancelled) {
-            content = content.push(
-                button::secondary(
-                    None,
-                    if status.busy {
-                        "Cancel after this batch"
-                    } else {
-                        "Cancel recovery"
-                    },
+        (StepState::Stopped, Some(format!("Paused at {percent:.0}%")))
+    } else {
+        body = body
+            .push(page::muted(
+                "Your node only keeps recent blocks, so it hasn't seen this Vault's older payments yet. Tenshu brings them over and checks every payment and spend against your node.",
+            ))
+            .push(
+                Row::new()
+                    .spacing(12)
+                    .push(history_source(
+                        "Start from Connect's history",
+                        Some("Recommended"),
+                        "Imports what Connect found and fetches only the blocks it can't prove. Usually the quickest.",
+                        !from_date,
+                        false,
+                    ))
+                    .push(history_source(
+                        "Start from a date or block",
+                        None,
+                        "Scans every block from that point, for payments Connect may have missed. Can take hours.",
+                        from_date,
+                        true,
+                    )),
+            );
+        if from_date {
+            let initial_date = chrono::NaiveDate::parse_from_str(start.value.trim(), "%Y-%m-%d")
+                .unwrap_or_else(|_| chrono::Local::now().date_naive());
+            body = body
+                .push(
+                    Row::new()
+                        .spacing(10)
+                        .align_y(Alignment::Center)
+                        .push(
+                            Container::new(form::Form::new_trimmed(
+                                "Block height or YYYY-MM-DD",
+                                start,
+                                NodeSettingsMessage::RecoveryStartEdited,
+                            ))
+                            .max_width(320),
+                        )
+                        .push(date_picker::calendar_button(
+                            date_picker_open,
+                            initial_date,
+                            NodeSettingsMessage::RecoveryDateOpen,
+                            NodeSettingsMessage::RecoveryDateCancel,
+                            NodeSettingsMessage::RecoveryDateSelected,
+                        )),
                 )
-                .on_press(NodeSettingsMessage::RecoveryCancel),
-            );
-        }
-        if let Some(error) = &job.last_error {
-            content = content.push(text(error).style(theme::text::warning));
-        }
-        if status.reconciled {
-            content = content.push(text(
-                "Transaction and spend history reconciled with the local wallet.",
+                .push(page::muted(
+                    "Downloads and scans every block from there. Keep Tenshu open; progress is saved if interrupted.",
+                ))
+                .push(page::plain_button(
+                    "Recover from this date or block",
+                    ActionKind::Primary,
+                    can_start.then_some(NodeSettingsMessage::RecoveryStart),
+                ));
+        } else {
+            body = body.push(page::plain_button(
+                "Import history from Connect",
+                ActionKind::Primary,
+                can_start.then_some(NodeSettingsMessage::ImportConnectHistory),
             ));
         }
-    }
-    if status.cancel_queued {
-        content = content.push(text("Cancellation requested. Tenshu will finish the current batch, then stop recovery. This can take a while.").size(12));
-    } else if status.busy {
-        content = content.push(text("Processing the current batch…").size(12));
-    }
+        (StepState::Current, None)
+    };
     if let Some(error) = &status.error {
-        content = content.push(text(error).style(theme::text::warning));
+        body = body.push(page::note(Tone::Warn, page::muted(error.as_str()), None));
     }
-    if !status.busy
-        && status
-            .job
-            .as_ref()
-            .is_none_or(|job| matches!(job.phase, Phase::Complete | Phase::Cancelled))
-    {
-        content = content.push(
-            button::transparent(None, "Keep using Connect")
-                .on_press(NodeSettingsMessage::RecoveryDismiss),
+    let step2 = history_step(
+        2,
+        state2,
+        "Bring this Vault's history to your node",
+        note2,
+        Some(body.into()),
+    );
+
+    let step3_body: Element<'a, NodeSettingsMessage> = if done {
+        Column::new()
+            .spacing(10)
+            .push(page::muted(
+                "From now on Tenshu reads this Vault from your node. You can switch back to Connect from this page.",
+            ))
+            .push(page::plain_button(
+                "Switch to local node",
+                ActionKind::Primary,
+                can_switch.then_some(NodeSettingsMessage::SwitchToBitcoind),
+            ))
+            .into()
+    } else {
+        Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .push(page::plain_button(
+                "Switch to local node",
+                ActionKind::Secondary,
+                None,
+            ))
+            .push(page::muted("Available after step 2"))
+            .into()
+    };
+    let step3 = history_step(
+        3,
+        if done {
+            StepState::Current
+        } else {
+            StepState::Todo
+        },
+        "Switch to your local node",
+        None,
+        Some(step3_body),
+    );
+
+    let mut card = Column::new()
+        .width(Length::Fill)
+        .push(
+            Container::new(
+                Column::new()
+                    .spacing(4)
+                    .push(page::heading("Move this Vault to your local node"))
+                    .push(page::muted(
+                        "Bring this Vault's history over, then switch. Connect keeps working until you do.",
+                    )),
+            )
+            .padding([20, 24]),
+        )
+        .push(
+            Container::new(Column::new().push(step1).push(step2).push(step3))
+                .padding([4, 24]),
+        );
+    let idle = !status.busy
+        && job.is_none_or(|job| matches!(job.phase, Phase::Complete | Phase::Cancelled));
+    if idle {
+        card = card.push(page::rule()).push(
+            Container::new(
+                Row::new()
+                    .spacing(16)
+                    .align_y(Alignment::Center)
+                    .push(
+                        Container::new(page::muted(
+                            "Not ready? Connect keeps working, and you can come back here any time.",
+                        ))
+                        .width(Length::Fill),
+                    )
+                    .push(page::plain_button(
+                        "Not now",
+                        ActionKind::Secondary,
+                        Some(NodeSettingsMessage::RecoveryDismiss),
+                    )),
+            )
+            .padding([14, 24]),
         );
     }
-    card::simple(content).into()
+    Column::new()
+        .push(Space::new().height(Length::Fixed(page::GROUP_GAP)))
+        .push(
+            Container::new(card)
+                .width(Length::Fill)
+                .style(|t: &theme::Theme| {
+                    let shell = &t.colors.shell;
+                    iced::widget::container::Style {
+                        background: Some(iced::Background::Color(shell.panel)),
+                        border: iced::Border {
+                            color: shell.line,
+                            width: 1.0,
+                            radius: 12.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                }),
+        )
+        .into()
 }
 
+/// Block retention as a settings group: the current policy, an optional
+/// rolling window and the apply action.
 pub fn rolling_retention_section<'a>(
     days: &'a form::Value<String>,
     status: &'a crate::app::node_history::Status,
 ) -> Element<'a, NodeSettingsMessage> {
+    use crate::app::view::settings::page;
+    use coincube_ui::component::tenshu::ActionKind;
     let policy = status.policy.as_ref().filter(|policy| !policy.temporary);
-    let mut content = Column::new().spacing(15)
-        .push(text("Block retention").bold().size(18))
-        .push(text(policy.map(|policy|format!("Keeping the most recent {} days of blocks.",policy.days)).unwrap_or_else(||"Default: automatic pruning using your node’s storage-size target.".into())))
-        .push(text("Choose a rolling window only if you want to keep more history. This can use hundreds of GB.").size(14))
-        .push(form::Form::new_trimmed("Optional retention days (for example 180 or 365)",days,NodeSettingsMessage::RetentionDaysEdited));
-    let mut apply = button::secondary(None, "Apply retention and recover missing blocks");
-    if !status.busy
-        && days
-            .value
-            .parse::<u32>()
-            .is_ok_and(|days| (1..=3650).contains(&days))
-    {
-        apply = apply.on_press(NodeSettingsMessage::RetentionApply);
-    }
-    content = content.push(apply)
-        .push(text("Extending the window downloads missing blocks. Tenshu maintains the window while open. To return to automatic pruning, apply a storage-size target in node resources.").size(12).style(theme::text::secondary));
-    card::simple(content).into()
+    let current = policy
+        .map(|policy| format!("Keeping the most recent {} days of blocks.", policy.days))
+        .unwrap_or_else(|| {
+            "Automatic: keeps recent blocks within your node's storage target.".into()
+        });
+    let valid = days
+        .value
+        .parse::<u32>()
+        .is_ok_and(|days| (1..=3650).contains(&days));
+    let row = page::row("Keep more history")
+        .description(current)
+        .description(
+            "Choose a rolling window only if you need older blocks. It downloads them and can use hundreds of GB. To return to automatic pruning, apply a storage-size target in node resources.",
+        )
+        .line(
+            Container::new(form::Form::new_trimmed(
+                "Days to keep, for example 180 or 365",
+                days,
+                NodeSettingsMessage::RetentionDaysEdited,
+            ))
+            .max_width(320),
+        )
+        .control(page::plain_button(
+            "Apply",
+            ActionKind::Secondary,
+            (!status.busy && valid).then_some(NodeSettingsMessage::RetentionApply),
+        ))
+        .top();
+    page::group("Block retention", None, page::rows([row.into()]))
 }
 
+/// The "Node resources" panel: tune the managed node's prune target and mempool
+/// cap, then apply via a force-restart. Reuses the installer's shared controls so
+/// the presets/fields never drift, and adds the honesty copy about what changing
+/// each value actually does. `processing` is true while a restart is in flight.
 pub fn node_resources_section<'a>(
     prune: &'a form::Value<String>,
     max_mempool: &'a form::Value<String>,
@@ -3060,6 +3456,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         let _ = rescan(
             &good_year,
@@ -3072,6 +3469,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
         let _ = rescan(
             &bad_year,
@@ -3081,6 +3479,7 @@ mod tests {
             false,
             true,
             false,
+            true,
             true,
             true,
             true,
@@ -3108,6 +3507,7 @@ mod tests {
             Some("UpdateTip: headers progress"),
             true,
             true,
+            true,
             false,
             true,
             true,
@@ -3124,6 +3524,7 @@ mod tests {
             // Flavour unknown: the copy must fall back rather than name a build.
             None,
             None,
+            false,
             false,
             true,
             false,
@@ -3232,6 +3633,7 @@ mod tests {
                 None,
                 None,
                 false,
+                false,
                 pending,
                 recovery,
                 false,
@@ -3286,8 +3688,147 @@ mod tests {
             );
             if recovery {
                 assert!(labels.0.iter().any(|text| {
-                    text.contains("Finish or cancel wallet history recovery before switching")
+                    text.contains("Bring this Vault's history over below, then switch")
                 }));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn history_card_keeps_every_step_and_says_why_switch_waits() {
+        use crate::app::node_history::Status;
+        use crate::node::history::{Binding, Phase, Recovery};
+        use coincube_core::miniscript::bitcoin::{hashes::Hash, BlockHash};
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+        let renderer = <iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let job = |phase: Phase| {
+            let binding = Binding {
+                genesis: BlockHash::all_zeros(),
+                node_instance: "fixture".into(),
+                endpoint: "fixture".into(),
+                wallet: "fixture".into(),
+                descriptor: "fixture".into(),
+            };
+            let mut job = Recovery::new(binding, 100, 200, BlockHash::all_zeros()).unwrap();
+            job.phase = phase;
+            job
+        };
+        let start = value("", false);
+        let mut paused = job(Phase::Paused);
+        paused.last_error = Some("Cannot reach local node for getblockhash".into());
+        let mut complete = job(Phase::Complete);
+        complete.next = 201;
+        let cases: Vec<(Status, bool, &[&str], &[&str])> = vec![
+            (
+                Status::default(),
+                false,
+                &[
+                    "Sync the blockchain",
+                    "Import history from Connect",
+                    "Available after step 2",
+                    "Not now",
+                ],
+                &["Pause", "Resume"],
+            ),
+            (
+                Status::default(),
+                true,
+                &["Recover from this date or block"],
+                &["Import history from Connect"],
+            ),
+            (
+                Status {
+                    busy: true,
+                    ..Status::default()
+                },
+                false,
+                &["Preparing…", "Available after step 2"],
+                &["Import history from Connect", "Not now"],
+            ),
+            (
+                Status {
+                    job: Some(job(Phase::Downloading)),
+                    ..Status::default()
+                },
+                false,
+                &["Fetch blocks", "Pause", "Cancel", "Available after step 2"],
+                &["Resume", "Not now"],
+            ),
+            (
+                Status {
+                    job: Some(paused),
+                    ..Status::default()
+                },
+                false,
+                &[
+                    "Resume",
+                    "Cancel recovery",
+                    "Cannot reach local node for getblockhash",
+                ],
+                &["Pause"],
+            ),
+            (
+                Status {
+                    job: Some(complete),
+                    reconciled: true,
+                    ..Status::default()
+                },
+                false,
+                &[
+                    "History matches your node",
+                    "Switch to local node",
+                    "Not now",
+                ],
+                &["Available after step 2"],
+            ),
+        ];
+        for (status, from_date, present, absent) in cases {
+            let mut element =
+                wallet_history_section(&start, &status, from_date, false, Some(974215), true);
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1200.0, 2400.0)),
+            );
+            let mut labels = Labels::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+            for label in present {
+                assert!(
+                    labels.0.iter().any(|text| text == label),
+                    "missing {label}: {:?}",
+                    labels.0
+                );
+            }
+            for label in absent {
+                assert!(
+                    !labels.0.iter().any(|text| text == label),
+                    "unexpected {label}: {:?}",
+                    labels.0
+                );
             }
         }
     }

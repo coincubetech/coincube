@@ -696,6 +696,11 @@ pub enum InstallStatsViewMessage {
 #[derive(Debug, Clone)]
 pub enum NodeSettingsMessage {
     RecoveryAdvancedToggled,
+    /// Pick where history recovery starts: `true` for a date or block
+    /// height, `false` for Connect's history.
+    RecoverySourceSelected(bool),
+    /// Show or hide the local node's latest log line.
+    NodeLogToggled,
     NodeAdvancedToggled,
     RecoveryDismiss,
     RecoveryStartEdited(String),
