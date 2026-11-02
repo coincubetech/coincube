@@ -15,12 +15,21 @@ use coincube_ui::{
     theme,
     widget::{Column, Element, Row},
 };
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use iced::{widget::text_input, Alignment, Length};
 use zeroize::Zeroizing;
 
 use crate::app::view;
 
 use super::ImportMessage;
+
+/// A fresh id for one words or device check. A result lands only on the
+/// slot whose current check carries the same id.
+pub(super) fn next_check() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Where the user keeps one signer's key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +66,8 @@ pub(super) struct KeySlot {
     pub(super) words: Zeroizing<String>,
     pub(super) passphrase: Zeroizing<String>,
     pub(super) status: KeyStatus,
+    /// The check in flight, if any; 0 when none.
+    pub(super) check: u64,
 }
 
 impl KeySlot {
@@ -81,6 +92,7 @@ impl KeysState {
                 words: Zeroizing::new(String::new()),
                 passphrase: Zeroizing::new(String::new()),
                 status: KeyStatus::Missing,
+                check: 0,
             })
             .collect::<Vec<_>>();
         let threshold = signing_threshold(descriptor).clamp(1, slots.len().max(1));
@@ -101,6 +113,29 @@ impl KeysState {
             && self.slots.iter().all(|slot| {
                 slot.provided() || (slot.source == KeySource::Elsewhere && self.multisig())
             })
+    }
+
+    /// Adding words to an attached wallet: at least one verified set of
+    /// words, nothing still checking. Other signers need no answer.
+    pub(super) fn ready_to_add(&self) -> bool {
+        !self.checking()
+            && self
+                .slots
+                .iter()
+                .any(|slot| slot.source == KeySource::Words && slot.provided())
+    }
+
+    /// Wipe every typed phrase and passphrase; verified words fall back to
+    /// unverified, since they would have to be typed again.
+    pub(super) fn forget_words(&mut self) {
+        for slot in &mut self.slots {
+            slot.words = Zeroizing::new(String::new());
+            slot.passphrase = Zeroizing::new(String::new());
+            slot.check = 0;
+            if slot.source == KeySource::Words {
+                slot.status = KeyStatus::Missing;
+            }
+        }
     }
 
     pub(super) fn checking(&self) -> bool {
@@ -187,20 +222,25 @@ fn message(message: ImportMessage) -> view::Message {
 /// The Keys step's form and action row.
 pub(super) fn step<'a>(
     keys: &'a KeysState,
+    adding: bool,
     hardware_connected: impl Fn(&ImportedAccount) -> bool,
     error: Option<&'a String>,
 ) -> (Element<'a, view::Message>, Element<'a, view::Message>) {
     let count = keys.slots.len();
-    let lead = if keys.multisig() {
+    let lead = if adding {
+        "Enter the recovery words for any of this wallet's signers. Each set is checked \
+         against its signer's fingerprint, then stored on this device for this Cube."
+            .to_string()
+    } else if keys.multisig() {
         format!(
             "The descriptor names {count} signers and needs {} to spend. Provide at least {} \
-             of them so this Cube can sign; mark the others as signing elsewhere. Each key \
-             is checked against its fingerprint before it is accepted.",
+             of them; mark the others as signing elsewhere. Each key is checked against its \
+             fingerprint before it is accepted.",
             keys.threshold, keys.threshold
         )
     } else {
-        "The descriptor names 1 signer. Provide its key so this Cube can sign with the \
-         wallet. The key is checked against its fingerprint before it is accepted."
+        "The descriptor names 1 signer. Provide its key; it is checked against its \
+         fingerprint before it is accepted."
             .to_string()
     };
     let mut content = Column::new()
@@ -230,9 +270,14 @@ pub(super) fn step<'a>(
             KeyStatus::Missing => p2_regular("Not provided yet").style(theme::text::secondary),
         });
         let mut sources = Row::new().spacing(8);
-        let mut choices = vec![KeySource::Words, KeySource::Hardware];
-        if keys.multisig() {
-            choices.push(KeySource::Elsewhere);
+        // Adding to an attached wallet only stores words; a device needs
+        // nothing stored.
+        let mut choices = vec![KeySource::Words];
+        if !adding {
+            choices.push(KeySource::Hardware);
+            if keys.multisig() {
+                choices.push(KeySource::Elsewhere);
+            }
         }
         for source in choices {
             let pick = if slot.source == source {
@@ -271,8 +316,9 @@ pub(super) fn step<'a>(
                 )
                 .push(
                     caption(
-                        "Words are checked here and stored inside this Cube, protected by its \
-                         PIN, like any Vault key.",
+                        "Words are checked here, then stored encrypted on this device for this \
+                         Cube. They are not in the Recovery Kit yet, so keep your original \
+                         backup.",
                     )
                     .style(theme::text::secondary),
                 )
@@ -333,7 +379,7 @@ pub(super) fn step<'a>(
                 .style(theme::card::simple),
         );
     }
-    if keys.multisig() && keys.provided() < keys.threshold {
+    if !adding && keys.multisig() && keys.provided() < keys.threshold {
         content = content.push(
             p2_regular(format!(
                 "{} of {} keys needed to sign are provided.",
@@ -349,18 +395,31 @@ pub(super) fn step<'a>(
     let actions = Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
-        .push(
+        .push((!adding).then(|| {
             button::secondary(None, "Back")
                 .width(Length::Shrink)
-                .on_press_maybe((!busy).then_some(message(ImportMessage::Edit))),
-        )
+                .on_press_maybe((!busy).then_some(message(ImportMessage::Edit)))
+        }))
         .push(iced::widget::Space::new().width(Length::Fill))
         .push(
-            button::primary(None, "Review wallet")
-                .width(Length::Shrink)
-                .on_press_maybe(
-                    (!busy && keys.ready()).then_some(message(ImportMessage::KeysDone)),
-                ),
+            button::primary(
+                None,
+                if adding {
+                    "Store words"
+                } else {
+                    "Review wallet"
+                },
+            )
+            .width(Length::Shrink)
+            .on_press_maybe(
+                (!busy
+                    && if adding {
+                        keys.ready_to_add()
+                    } else {
+                        keys.ready()
+                    })
+                .then_some(message(ImportMessage::KeysDone)),
+            ),
         );
     (content.into(), actions.into())
 }

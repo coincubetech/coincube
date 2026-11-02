@@ -352,6 +352,8 @@ pub enum ImportMessage {
     BackToKeys,
     /// Store the verified words again after a failed attempt.
     RetryStoreKeys,
+    /// Vault settings: add recovery words to the attached wallet.
+    AddKeys,
     /// The Vault page's Continue import: back to Import or restore.
     ResumeJourney,
     ShowSend,
@@ -384,9 +386,13 @@ type SignedSpend = (Psbt, Vec<usize>, Option<Txid>);
 #[derive(Debug)]
 pub enum ImportEvent {
     Start,
-    WordsVerified(u64, usize, Result<(), String>),
-    DeviceVerified(u64, usize, Result<(), String>),
+    /// (generation, signer, check id, result)
+    WordsVerified(u64, usize, u64, Result<(), String>),
+    DeviceVerified(u64, usize, u64, Result<(), String>),
+    /// (storage epoch, result)
     KeysStored(u64, Result<usize, String>),
+    /// (storage epoch, local key records for this wallet)
+    KeysInventory(u64, Result<usize, String>),
     Installed(u64, Result<(), String>),
     Resumed(u64, Result<Option<settings::WalletId>, String>),
     Opened(u64, Result<Arc<dyn Daemon + Send + Sync>, String>),
@@ -541,6 +547,14 @@ pub struct ImportedBitcoinPanel {
     keys_confirmed: bool,
     /// Storing the verified recovery words in this Cube.
     keys_stored: KeysStored,
+    /// Import or restore reopened at Keys to add words to the attached
+    /// wallet.
+    adding_keys: bool,
+    /// Local key records for the attached wallet, once read.
+    stored_keys: Option<usize>,
+    /// Key storage and inventory reads end only with the panel. A refresh
+    /// or a wider history search must not drop their results.
+    keys_gate: Arc<AtomicU64>,
 }
 
 /// Where storing the Keys step's recovery words stands.
@@ -615,6 +629,9 @@ impl ImportedBitcoinPanel {
                 .map(|wallet| KeysState::new(&wallet.descriptor)),
             keys_confirmed: false,
             keys_stored: KeysStored::None,
+            adding_keys: false,
+            stored_keys: None,
+            keys_gate: Arc::new(AtomicU64::new(1)),
             import,
         }
     }
@@ -993,6 +1010,10 @@ impl ImportedBitcoinPanel {
         self.review_connect_epoch = None;
         self.keys = None;
         self.keys_confirmed = false;
+        if self.import.active_attachment().is_none() {
+            // Bound to the reviewed descriptor's policy.
+            self.hardware_wallets = None;
+        }
         self.error = None;
     }
 
@@ -1281,12 +1302,17 @@ impl ImportedBitcoinPanel {
                 self.review = None;
                 self.keys = None;
                 self.keys_confirmed = false;
+                if self.import.active_attachment().is_none() {
+                    // Bound to the reviewed descriptor's policy.
+                    self.hardware_wallets = None;
+                }
                 self.error = None;
                 Task::none()
             }
             ImportMessage::KeySourcePicked(index, source) => {
                 if let Some(slot) = self.key_slot(index) {
                     slot.source = source;
+                    slot.check = 0;
                     slot.words = zeroize::Zeroizing::new(String::new());
                     slot.passphrase = zeroize::Zeroizing::new(String::new());
                     slot.status = if source == KeySource::Elsewhere {
@@ -1305,6 +1331,7 @@ impl ImportedBitcoinPanel {
             ImportMessage::KeyWordsEdited(index, SecretInput(value)) => {
                 if let Some(slot) = self.key_slot(index) {
                     slot.words = value;
+                    slot.check = 0;
                     slot.status = KeyStatus::Missing;
                 }
                 Task::none()
@@ -1312,17 +1339,45 @@ impl ImportedBitcoinPanel {
             ImportMessage::KeyPassphraseEdited(index, SecretInput(value)) => {
                 if let Some(slot) = self.key_slot(index) {
                     slot.passphrase = value;
+                    slot.check = 0;
                     slot.status = KeyStatus::Missing;
                 }
                 Task::none()
             }
             ImportMessage::VerifyWords(index) => self.verify_words(index),
             ImportMessage::CheckDevice(index) => self.check_device(index),
+            ImportMessage::KeysDone if self.adding_keys => {
+                if !self.keys.as_ref().is_some_and(KeysState::ready_to_add) {
+                    return Task::none();
+                }
+                if let Err(error) = self.storage_preflight() {
+                    self.error = Some(error);
+                    return Task::none();
+                }
+                self.keys_confirmed = true;
+                self.error = None;
+                self.store_keys()
+            }
             ImportMessage::KeysDone => {
                 if self.keys.as_ref().is_some_and(KeysState::ready) {
                     self.keys_confirmed = true;
                     self.error = None;
                 }
+                Task::none()
+            }
+            ImportMessage::AddKeys => {
+                let Some(wallet) = self.import.active_attachment() else {
+                    return Task::none();
+                };
+                if self.stored_keys != Some(0) || self.adding_keys {
+                    return Task::none();
+                }
+                self.keys = Some(KeysState::new(&wallet.descriptor));
+                self.keys_confirmed = false;
+                self.keys_stored = KeysStored::None;
+                self.adding_keys = true;
+                self.journey = true;
+                self.error = None;
                 Task::none()
             }
             ImportMessage::BackToKeys => {
@@ -1331,7 +1386,13 @@ impl ImportedBitcoinPanel {
                 }
                 Task::none()
             }
-            ImportMessage::RetryStoreKeys => self.store_keys(),
+            ImportMessage::RetryStoreKeys => {
+                if matches!(self.keys_stored, KeysStored::Failed(_)) {
+                    self.store_keys()
+                } else {
+                    Task::none()
+                }
+            }
             ImportMessage::Confirm | ImportMessage::Retry => {
                 if self.provider == Provider::Connect
                     && self
@@ -1351,6 +1412,12 @@ impl ImportedBitcoinPanel {
                 };
                 if self.keys.is_some() && !self.keys_confirmed {
                     self.error = Some("Add the wallet's keys before importing it.".into());
+                    return Task::none();
+                }
+                // Installing cannot be undone, so the words must be storable
+                // before the wallet is attached.
+                if let Err(error) = self.storage_preflight() {
+                    self.error = Some(error);
                     return Task::none();
                 }
                 let config = match self.config(&wallet, client.as_ref()) {
@@ -1941,8 +2008,19 @@ impl ImportedBitcoinPanel {
                 Task::none()
             }
             ImportMessage::LeaveJourney => {
-                if !self.writing_setup() {
+                if !self.writing_setup() && self.keys_stored != KeysStored::Storing {
                     self.journey = false;
+                    // Typed words do not outlive the screen they were typed on.
+                    if let Some(keys) = &mut self.keys {
+                        keys.forget_words();
+                    }
+                    if self.import.active_attachment().is_none() {
+                        self.keys_confirmed = false;
+                    }
+                    if self.adding_keys {
+                        self.adding_keys = false;
+                        self.keys = None;
+                    }
                 }
                 Task::none()
             }
@@ -1997,7 +2075,7 @@ impl ImportedBitcoinPanel {
                     )
                 }
                 BitcoinImportStage::Syncing { .. } | BitcoinImportStage::Ready { .. } => {
-                    self.open_daemon()
+                    Task::batch([self.open_daemon(), self.load_key_inventory()])
                 }
             },
             ImportEvent::Installed(generation, result) if generation == self.generation => {
@@ -2023,7 +2101,9 @@ impl ImportedBitcoinPanel {
                         if let Some(wallet) = self.review.clone() {
                             self.import.stage = BitcoinImportStage::Syncing { wallet };
                         }
-                        self.open_daemon()
+                        // The words given before the interruption were not
+                        // kept; the inventory says whether any were stored.
+                        Task::batch([self.open_daemon(), self.load_key_inventory()])
                     }
                     Ok(None) => {
                         self.error = Some(
@@ -2187,7 +2267,10 @@ impl ImportedBitcoinPanel {
             ImportEvent::Abandoned(generation, result) if generation == self.generation => {
                 self.busy = false;
                 match result {
-                    Ok(()) => self.abandoned = true,
+                    Ok(()) => {
+                        self.abandoned = true;
+                        self.keys = None;
+                    }
                     Err(error) => self.error = Some(error),
                 }
                 Task::none()
@@ -2316,14 +2399,15 @@ impl ImportedBitcoinPanel {
                 }
                 Task::none()
             }
-            ImportEvent::WordsVerified(generation, index, result)
-            | ImportEvent::DeviceVerified(generation, index, result)
+            ImportEvent::WordsVerified(generation, index, check, result)
+            | ImportEvent::DeviceVerified(generation, index, check, result)
                 if generation == self.generation =>
             {
                 if let Some(slot) = self.key_slot(index) {
-                    // An edit or a new source while checking makes this
-                    // result stale.
-                    if slot.status == KeyStatus::Checking {
+                    // Only the check this slot is waiting for may land: an
+                    // edit, a new source or a newer check makes it stale.
+                    if slot.status == KeyStatus::Checking && slot.check == check && check != 0 {
+                        slot.check = 0;
                         slot.status = match result {
                             Ok(()) => KeyStatus::Verified,
                             Err(error) => KeyStatus::Failed(error),
@@ -2332,10 +2416,19 @@ impl ImportedBitcoinPanel {
                 }
                 Task::none()
             }
-            ImportEvent::KeysStored(generation, result) if generation == self.generation => {
+            ImportEvent::KeysInventory(epoch, result)
+                if epoch == self.keys_gate.load(Ordering::SeqCst) =>
+            {
+                self.stored_keys = result.ok();
+                Task::none()
+            }
+            ImportEvent::KeysStored(epoch, result)
+                if epoch == self.keys_gate.load(Ordering::SeqCst) =>
+            {
                 match result {
                     Ok(count) => {
                         self.keys_stored = KeysStored::Stored(count);
+                        self.stored_keys = Some(count);
                         // The words now live only in the Cube's encrypted
                         // key records.
                         if let Some(keys) = &mut self.keys {
@@ -2548,6 +2641,10 @@ impl ImportedBitcoinPanel {
     }
 
     pub fn stop(&mut self) {
+        self.keys_gate.fetch_add(1, Ordering::SeqCst);
+        if let Some(keys) = &mut self.keys {
+            keys.forget_words();
+        }
         self.birthday_calendar_open = false;
         self.generation = fresh_generation();
         self.generation_gate
@@ -2599,6 +2696,13 @@ impl ImportedBitcoinPanel {
 
     /// Done's account of where the wallet's keys are.
     fn keys_line(&self) -> Option<Element<'_, view::Message>> {
+        if self.keys_stored == KeysStored::None && !self.adding_keys {
+            // A resumed install or a device-only import: say what this
+            // device holds and offer to add words.
+            if let Some(view) = self.stored_keys_view() {
+                return Some(view);
+            }
+        }
         let keys = self.keys.as_ref().filter(|keys| !keys.slots.is_empty())?;
         let devices = keys
             .slots
@@ -2613,7 +2717,8 @@ impl ImportedBitcoinPanel {
         let mut parts = Vec::new();
         match &self.keys_stored {
             KeysStored::Stored(count) => parts.push(format!(
-                "{count} from recovery words, stored in this Cube and protected by its PIN"
+                "{count} from recovery words, stored encrypted on this device for this Cube. \
+                 They are not in the Recovery Kit yet, so keep your original backup"
             )),
             KeysStored::Storing => parts.push("storing the recovery words…".to_string()),
             KeysStored::Failed(error) => {
@@ -2700,17 +2805,24 @@ impl ImportedBitcoinPanel {
         if slot.source != KeySource::Words || slot.status == KeyStatus::Checking {
             return Task::none();
         }
-        // BIP39 words are lowercase and single-spaced.
-        let words = zeroize::Zeroizing::new(
-            slot.words
-                .split_whitespace()
-                .map(str::to_lowercase)
-                .collect::<Vec<_>>()
-                .join(" "),
-        );
+        // BIP39 words are lowercase and single-spaced. Built in place so no
+        // unwiped copy of the phrase is left behind.
+        let mut words = zeroize::Zeroizing::new(String::with_capacity(slot.words.len()));
+        for word in slot.words.split_whitespace() {
+            if !words.is_empty() {
+                words.push(' ');
+            }
+            for c in word.chars() {
+                for lower in c.to_lowercase() {
+                    words.push(lower);
+                }
+            }
+        }
         slot.words = words.clone();
         let passphrase = slot.passphrase.clone();
         let expected = slot.account.clone();
+        let check = keys::next_check();
+        slot.check = check;
         slot.status = KeyStatus::Checking;
         Task::perform(
             async move {
@@ -2725,7 +2837,7 @@ impl ImportedBitcoinPanel {
             },
             move |result| {
                 Message::ImportedBitcoin(Box::new(ImportEvent::WordsVerified(
-                    generation, index, result,
+                    generation, index, check, result,
                 )))
             },
         )
@@ -2751,7 +2863,9 @@ impl ImportedBitcoinPanel {
         };
         let generation = self.generation;
         let gate = self.generation_gate.clone();
+        let check = keys::next_check();
         if let Some(slot) = self.key_slot(index) {
+            slot.check = check;
             slot.status = KeyStatus::Checking;
         }
         Task::perform(
@@ -2768,7 +2882,7 @@ impl ImportedBitcoinPanel {
             },
             move |result| {
                 Message::ImportedBitcoin(Box::new(ImportEvent::DeviceVerified(
-                    generation, index, result,
+                    generation, index, check, result,
                 )))
             },
         )
@@ -2809,8 +2923,8 @@ impl ImportedBitcoinPanel {
         };
         let directory = self.directory.clone();
         let cube_id = self.cube_id.clone();
-        let generation = self.generation;
-        let gate = self.generation_gate.clone();
+        let gate = self.keys_gate.clone();
+        let epoch = gate.load(Ordering::SeqCst);
         self.keys_stored = KeysStored::Storing;
         Task::perform(
             async move {
@@ -2828,16 +2942,118 @@ impl ImportedBitcoinPanel {
                         &attachment,
                     )?;
                     repository
-                        .admit_new_batch(entries, || gate.load(Ordering::SeqCst) == generation)
+                        .admit_new_batch(entries, || gate.load(Ordering::SeqCst) == epoch)
                         .map(|records| records.len())
                 })
                 .await
                 .map_err(|_| "Storing the keys stopped unexpectedly.".to_string())?
             },
             move |result| {
-                Message::ImportedBitcoin(Box::new(ImportEvent::KeysStored(generation, result)))
+                Message::ImportedBitcoin(Box::new(ImportEvent::KeysStored(epoch, result)))
             },
         )
+    }
+
+    /// Words can be stored only for the unlocked Cube and never while Duress
+    /// Mode is set up. Checked before installing, which cannot be undone.
+    fn storage_preflight(&self) -> Result<(), String> {
+        let words = self.keys.as_ref().is_some_and(|keys| {
+            keys.slots
+                .iter()
+                .any(|slot| slot.source == KeySource::Words && slot.provided())
+        });
+        if !words {
+            return Ok(());
+        }
+        if crate::app::session::current_cube_id().as_deref() != Some(self.cube_id.as_str()) {
+            return Err("Unlock this Cube again before storing recovery words.".into());
+        }
+        let root = self
+            .directory
+            .path()
+            .parent()
+            .ok_or("Missing Cube data root.")?;
+        let duress = crate::services::duress::DuressLocalState::load(root)
+            .map_err(|_| "Cannot check Duress Mode.".to_string())?;
+        if duress.enrolled || duress.arming || duress.active {
+            return Err(
+                "Recovery words cannot be stored while Duress Mode is set up. Use a \
+                        hardware wallet for this key, or turn off Duress Mode first."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Read how many local key records the attached wallet has.
+    pub fn load_key_inventory(&self) -> Task<Message> {
+        let Some(attachment) = self.import.active_attachment().cloned() else {
+            return Task::none();
+        };
+        let directory = self.directory.clone();
+        let cube_id = self.cube_id.clone();
+        let epoch = self.keys_gate.load(Ordering::SeqCst);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let settings = settings::Settings::from_file(&directory)
+                        .map_err(|_| "Cannot read this Cube's settings.".to_string())?;
+                    let cube = settings
+                        .cubes
+                        .iter()
+                        .find(|cube| cube.id == cube_id)
+                        .ok_or("This Cube no longer exists.")?;
+                    crate::services::imported_keys::LocalKeyRepository::new(
+                        &directory,
+                        cube,
+                        &attachment,
+                    )?
+                    .records()
+                    .map(|records| records.len())
+                })
+                .await
+                .map_err(|_| "Reading the stored keys stopped unexpectedly.".to_string())?
+            },
+            move |result| {
+                Message::ImportedBitcoin(Box::new(ImportEvent::KeysInventory(epoch, result)))
+            },
+        )
+    }
+
+    /// Where this wallet's recovery words stand on this device, with Add
+    /// recovery words when none are stored.
+    fn stored_keys_view(&self) -> Option<Element<'_, view::Message>> {
+        let count = self.stored_keys?;
+        let mut content = Column::new()
+            .spacing(8)
+            .push(p1_bold("Keys on this device"));
+        if count == 0 {
+            content = content
+                .push(
+                    p1_regular(
+                        "No recovery words for this wallet are stored on this device. If you \
+                         hold any of its keys as recovery words, add them.",
+                    )
+                    .style(theme::text::secondary),
+                )
+                .push(
+                    button::secondary(None, "Add recovery words")
+                        .width(iced::Length::Shrink)
+                        .on_press_maybe(
+                            (!self.adding_keys)
+                                .then_some(view::Message::ImportedBitcoin(ImportMessage::AddKeys)),
+                        ),
+                );
+        } else {
+            content = content.push(
+                p1_regular(format!(
+                    "{count} from recovery words, stored encrypted on this device for this \
+                     Cube. They are not in the Recovery Kit yet, so keep your original backup."
+                ))
+                .style(theme::text::secondary),
+            );
+        }
+        Some(content.into())
     }
 
     /// The Vault page while the import is unfinished and Import or restore
@@ -2891,6 +3107,13 @@ impl ImportedBitcoinPanel {
 
     /// Where the import stands on Import or restore's stepper.
     fn journey_step(&self) -> JourneyStep {
+        if self.adding_keys {
+            return if self.keys_confirmed {
+                JourneyStep::Done
+            } else {
+                JourneyStep::Keys
+            };
+        }
         if self.import.active_attachment().is_none() {
             if self.review.is_none() {
                 JourneyStep::Source
@@ -2932,6 +3155,7 @@ impl ImportedBitcoinPanel {
             JourneyStep::Keys => match &self.keys {
                 Some(keys) => keys::step(
                     keys,
+                    self.adding_keys,
                     |account| self.device_connected(account),
                     self.error.as_ref(),
                 ),
@@ -3783,7 +4007,8 @@ impl ImportedBitcoinPanel {
             SettingsOption::Wallet | SettingsOption::ImportExport => {
                 content = content
                     .push(p1_regular("This Vault uses the imported wallet's original signer keys. The Cube seed unlocks the Cube but cannot sign its Bitcoin transactions."))
-                    .push(p1_regular("Keep the Cube Recovery Kit current after importing this wallet or reserving a new receive address."));
+                    .push(p1_regular("Keep the Cube Recovery Kit current after importing this wallet or reserving a new receive address."))
+                    .push_maybe(self.stored_keys_view());
                 if let Some(wallet) = self.import.active_attachment() {
                     content = content.push(caption(format!(
                         "Wallet ID: {}",
@@ -5288,36 +5513,76 @@ mod tests {
             Some("Add the wallet's keys before importing it.")
         );
 
-        // A verified result for a slot the user since edited is stale.
+        // Each check carries an id; only the check a slot waits for lands.
+        let check_of = |panel: &ImportedBitcoinPanel, index: usize| {
+            panel.keys.as_ref().unwrap().slots[index].check
+        };
+        let status_of = |panel: &ImportedBitcoinPanel, index: usize| {
+            panel.keys.as_ref().unwrap().slots[index].status.clone()
+        };
         let _ = panel.update_view(
             ImportMessage::KeyWordsEdited(0, SecretInput::new(phrase(1).to_string())),
             None,
             0,
         );
-        panel.keys.as_mut().unwrap().slots[0].status = keys::KeyStatus::Checking;
+        let _ = panel.update_view(ImportMessage::VerifyWords(0), None, 0);
+        let first = check_of(&panel, 0);
+        assert_eq!(status_of(&panel, 0), keys::KeyStatus::Checking);
+        // Edit while checking, then check the new words: the first result is
+        // stale and cannot mark the second words verified.
         let _ = panel.update_view(
-            ImportMessage::KeyWordsEdited(0, SecretInput::new("edited".into())),
+            ImportMessage::KeyWordsEdited(0, SecretInput::new(phrase(4).to_string())),
             None,
             0,
         );
+        assert_eq!(status_of(&panel, 0), keys::KeyStatus::Missing);
+        let _ = panel.update_view(ImportMessage::VerifyWords(0), None, 0);
+        let second = check_of(&panel, 0);
+        assert_ne!(first, second);
         let generation = panel.generation;
-        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 0, Ok(())));
-        assert_eq!(
-            panel.keys.as_ref().unwrap().slots[0].status,
-            keys::KeyStatus::Missing
+        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 0, first, Ok(())));
+        assert_eq!(status_of(&panel, 0), keys::KeyStatus::Checking);
+        // A result from another generation never lands either.
+        let _ = panel.update_event(ImportEvent::WordsVerified(
+            generation + 1,
+            0,
+            second,
+            Ok(()),
+        ));
+        assert_eq!(status_of(&panel, 0), keys::KeyStatus::Checking);
+        let _ = panel.update_event(ImportEvent::WordsVerified(
+            generation,
+            0,
+            second,
+            Err("This key does not match the selected wallet account.".into()),
+        ));
+        assert!(matches!(status_of(&panel, 0), keys::KeyStatus::Failed(_)));
+        let _ = panel.update_view(
+            ImportMessage::KeyWordsEdited(0, SecretInput::new(phrase(1).to_string())),
+            None,
+            0,
         );
-        // A result from an earlier generation never lands.
-        panel.keys.as_mut().unwrap().slots[0].status = keys::KeyStatus::Checking;
-        let _ = panel.update_event(ImportEvent::WordsVerified(generation + 1, 0, Ok(())));
-        assert_eq!(
-            panel.keys.as_ref().unwrap().slots[0].status,
-            keys::KeyStatus::Checking
+        let _ = panel.update_view(ImportMessage::VerifyWords(0), None, 0);
+        let third = check_of(&panel, 0);
+        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 0, third, Ok(())));
+        assert_eq!(status_of(&panel, 0), keys::KeyStatus::Verified);
+        // A words result cannot land on a slot moved to another source.
+        let _ = panel.update_view(
+            ImportMessage::KeyWordsEdited(2, SecretInput::new(phrase(3).to_string())),
+            None,
+            0,
         );
-        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 0, Ok(())));
-        assert_eq!(
-            panel.keys.as_ref().unwrap().slots[0].status,
-            keys::KeyStatus::Verified
+        let _ = panel.update_view(ImportMessage::VerifyWords(2), None, 0);
+        let moved = check_of(&panel, 2);
+        let _ = panel.update_view(
+            ImportMessage::KeySourcePicked(2, KeySource::Hardware),
+            None,
+            0,
         );
+        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 2, moved, Ok(())));
+        assert_eq!(status_of(&panel, 2), keys::KeyStatus::Missing);
+        // A review-bound device list goes with an edited source.
+        let _ = panel.update_view(ImportMessage::KeySourcePicked(2, KeySource::Words), None, 0);
 
         let _ = panel.update_view(
             ImportMessage::KeySourcePicked(1, KeySource::Elsewhere),
@@ -5341,8 +5606,9 @@ mod tests {
             None,
             0,
         );
-        panel.keys.as_mut().unwrap().slots[1].status = keys::KeyStatus::Checking;
-        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 1, Ok(())));
+        let _ = panel.update_view(ImportMessage::VerifyWords(1), None, 0);
+        let check = check_of(&panel, 1);
+        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 1, check, Ok(())));
         let _ = panel.update_view(ImportMessage::KeysDone, None, 0);
         assert_eq!(panel.journey_step(), JourneyStep::Review);
         let review = rendered_labels(panel.journey_view(&cache, false)).await;
@@ -5369,12 +5635,14 @@ mod tests {
         keys.slots[0].words = phrase(1);
         keys.slots[0].status = keys::KeyStatus::Verified;
         panel.keys = Some(keys);
-        let generation = panel.generation;
-        let _ = panel.update_event(ImportEvent::KeysStored(generation, Err("synthetic".into())));
+        let epoch = panel.keys_gate.load(Ordering::SeqCst);
+        // The store is under way when its result arrives.
+        panel.keys_stored = KeysStored::Storing;
+        let _ = panel.update_event(ImportEvent::KeysStored(epoch, Err("synthetic".into())));
         assert_eq!(panel.keys_stored, KeysStored::Failed("synthetic".into()));
         // The words stay for a retry.
         assert!(!panel.keys.as_ref().unwrap().slots[0].words.is_empty());
-        let _ = panel.update_event(ImportEvent::KeysStored(generation, Ok(1)));
+        let _ = panel.update_event(ImportEvent::KeysStored(epoch, Ok(1)));
         assert_eq!(panel.keys_stored, KeysStored::Stored(1));
         assert!(panel.keys.as_ref().unwrap().slots[0].words.is_empty());
         // A hardware or elsewhere signer has no words to store.
@@ -5384,6 +5652,181 @@ mod tests {
         panel.keys = Some(device);
         let _ = panel.store_keys();
         assert_eq!(panel.keys_stored, KeysStored::None);
+    }
+
+    /// A panel whose 1-of-1 key is verified recovery words, rooted in a
+    /// fresh data directory so Duress Mode state can be written beside it.
+    fn verified_words_panel(root: &std::path::Path) -> ImportedBitcoinPanel {
+        let ready = ready_import_panel();
+        let wallet = ready.import.active_attachment().cloned().unwrap();
+        let directory = NetworkDirectory::new(root.join("bitcoin"));
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "cube-1".into(), BitcoinImport::pending());
+        let mut keys = KeysState::new(&wallet.descriptor);
+        keys.slots[0].words = phrase(1);
+        keys.slots[0].status = keys::KeyStatus::Verified;
+        panel.keys = Some(keys);
+        panel.keys_confirmed = true;
+        panel.review = Some(wallet);
+        panel
+    }
+
+    /// Installing cannot be undone, so words that could not be stored stop
+    /// the import before it attaches the wallet.
+    #[test]
+    fn words_that_cannot_be_stored_stop_the_import_first() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("import-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("bitcoin")).unwrap();
+        let mut panel = verified_words_panel(&root);
+        crate::app::session::close();
+        let _ = panel.update_view(ImportMessage::Confirm, None, 0);
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Unlock this Cube again before storing recovery words.")
+        );
+        assert!(!panel.busy, "nothing was installed");
+
+        crate::app::session::open("cube-1", zeroize::Zeroizing::new("synthetic PIN".into()));
+        crate::services::duress::DuressLocalState {
+            enrolled: true,
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        panel.error = None;
+        let _ = panel.update_view(ImportMessage::Confirm, None, 0);
+        assert!(
+            panel
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Duress Mode")),
+            "{:?}",
+            panel.error
+        );
+        assert!(!panel.busy);
+
+        // A device-only import stores nothing, so the preflight passes.
+        panel.keys.as_mut().unwrap().slots[0].source = KeySource::Hardware;
+        assert_eq!(panel.storage_preflight(), Ok(()));
+        crate::app::session::close();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Recovery words can be added to an attached wallet that has none, from
+    /// Vault settings or Done; Storing survives a refresh or a wider search.
+    #[test]
+    fn recovery_words_can_be_added_after_the_wallet_attaches() {
+        let _guard = crate::app::session::test_guard();
+        let mut panel = ready_import_panel();
+        let epoch = panel.keys_gate.load(Ordering::SeqCst);
+        // Unknown inventory: nothing offered.
+        let _ = panel.update_view(ImportMessage::AddKeys, None, 0);
+        assert!(!panel.adding_keys);
+        // An older read never lands.
+        let _ = panel.update_event(ImportEvent::KeysInventory(epoch + 7, Ok(0)));
+        assert_eq!(panel.stored_keys, None);
+        let _ = panel.update_event(ImportEvent::KeysInventory(epoch, Ok(0)));
+        assert_eq!(panel.stored_keys, Some(0));
+
+        let _ = panel.update_view(ImportMessage::AddKeys, None, 0);
+        assert!(panel.adding_keys && panel.journey_open());
+        assert_eq!(panel.journey_step(), JourneyStep::Keys);
+        // Nothing verified yet: Store words stays shut.
+        let _ = panel.update_view(ImportMessage::KeysDone, None, 0);
+        assert_eq!(panel.journey_step(), JourneyStep::Keys);
+        let _ = panel.update_view(
+            ImportMessage::KeyWordsEdited(0, SecretInput::new(phrase(1).to_string())),
+            None,
+            0,
+        );
+        let _ = panel.update_view(ImportMessage::VerifyWords(0), None, 0);
+        let check = panel.keys.as_ref().unwrap().slots[0].check;
+        let generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 0, check, Ok(())));
+        // Locked: refused before storing.
+        crate::app::session::close();
+        let _ = panel.update_view(ImportMessage::KeysDone, None, 0);
+        assert_eq!(panel.keys_stored, KeysStored::None);
+        assert_eq!(panel.journey_step(), JourneyStep::Keys);
+        crate::app::session::open("cube-1", zeroize::Zeroizing::new("synthetic PIN".into()));
+        let _ = panel.update_view(ImportMessage::KeysDone, None, 0);
+        assert_eq!(panel.keys_stored, KeysStored::Storing);
+        assert_eq!(panel.journey_step(), JourneyStep::Done);
+        // Close waits for the store.
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(panel.journey_open());
+
+        // A wider history search bumps the panel generation, not the key
+        // storage epoch, so the result still lands.
+        panel.generation = fresh_generation();
+        let _ = panel.update_event(ImportEvent::KeysStored(epoch, Ok(1)));
+        assert_eq!(panel.keys_stored, KeysStored::Stored(1));
+        assert_eq!(panel.stored_keys, Some(1));
+        assert!(panel.keys.as_ref().unwrap().slots[0].words.is_empty());
+        // A second store is not offered once one exists.
+        let _ = panel.update_view(ImportMessage::RetryStoreKeys, None, 0);
+        assert_eq!(panel.keys_stored, KeysStored::Stored(1));
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(!panel.journey_open() && !panel.adding_keys && panel.keys.is_none());
+        let _ = panel.update_view(ImportMessage::AddKeys, None, 0);
+        assert!(!panel.adding_keys, "words are already stored");
+
+        // Closing the Cube ends the epoch: a late result is dropped.
+        panel.stop();
+        let _ = panel.update_event(ImportEvent::KeysStored(epoch, Ok(2)));
+        assert_eq!(panel.stored_keys, Some(1));
+        crate::app::session::close();
+    }
+
+    #[test]
+    fn leaving_or_abandoning_forgets_typed_words() {
+        let root = std::env::temp_dir().join(format!("import-forget-{}", uuid::Uuid::new_v4()));
+        let mut panel = verified_words_panel(&root);
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        let slot = &panel.keys.as_ref().unwrap().slots[0];
+        assert!(slot.words.is_empty() && slot.status == keys::KeyStatus::Missing);
+        assert!(!panel.keys_confirmed, "the words must be typed again");
+
+        let mut panel = verified_words_panel(&root);
+        let generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::Abandoned(generation, Ok(())));
+        assert!(panel.keys.is_none());
+    }
+
+    #[test]
+    fn editing_the_source_drops_its_device_list() {
+        let root = std::env::temp_dir().join(format!("import-hw-{}", uuid::Uuid::new_v4()));
+        let mut panel = verified_words_panel(&root);
+        panel.set_hardware_root(CoincubeDirectory::new(root.clone()));
+        panel.keys_confirmed = false;
+        let _ = panel.update_view(
+            ImportMessage::KeySourcePicked(0, KeySource::Hardware),
+            None,
+            0,
+        );
+        assert!(
+            panel.hardware_wallets.is_some(),
+            "listing bound to the reviewed policy"
+        );
+        let _ = panel.update_view(ImportMessage::Edit, None, 0);
+        assert!(panel.hardware_wallets.is_none());
+    }
+
+    #[test]
+    fn a_plain_multi_threshold_is_read_too() {
+        let keys: Vec<String> = (1..=3).map(|entropy| phrase_account(entropy).0).collect();
+        let branch = |n: u8| {
+            format!(
+                "wsh(multi(2,{}/{n}/*,{}/{n}/*,{}/{n}/*))",
+                keys[0], keys[1], keys[2]
+            )
+        };
+        let wallet =
+            ImportedWalletDescriptor::parse(&branch(0), Some(&branch(1)), ChainId::Bitcoin)
+                .unwrap();
+        let state = KeysState::new(&wallet);
+        assert_eq!((state.slots.len(), state.threshold), (3, 2));
     }
 
     #[test]
