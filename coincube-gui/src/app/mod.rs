@@ -125,6 +125,8 @@ struct Panels {
     /// Phase 4d follow-ups.
     spark_send: state::SparkSend,
     spark_receive: state::SparkReceive,
+    /// Swap BTC ⇄ USDB (S3).
+    spark_swap: state::spark::swap::SparkSwap,
     /// Phase 4b ships real Transactions + Settings panels — they use
     /// `list_payments` / `get_info` which the bridge already exposes, so
     /// they ship ahead of the write-path flows.
@@ -284,6 +286,7 @@ impl Panels {
             spark_overview: state::SparkOverview::new(spark_backend.clone()),
             spark_send: state::SparkSend::new(spark_backend.clone()),
             spark_receive: state::SparkReceive::new(spark_backend.clone()),
+            spark_swap: state::spark::swap::SparkSwap::new(spark_backend.clone()),
             spark_transactions: state::SparkTransactions::new(spark_backend.clone()),
             spark_settings: state::SparkSettings::new(spark_backend.clone()),
             global_settings: GeneralSettingsState::from_directory(
@@ -405,6 +408,7 @@ impl Panels {
             spark_overview: state::SparkOverview::new(spark_backend.clone()),
             spark_send: state::SparkSend::new(spark_backend.clone()),
             spark_receive: state::SparkReceive::new(spark_backend.clone()),
+            spark_swap: state::spark::swap::SparkSwap::new(spark_backend.clone()),
             spark_transactions: state::SparkTransactions::new(spark_backend.clone()),
             spark_settings: state::SparkSettings::new(spark_backend.clone()),
             global_settings: GeneralSettingsState::from_directory(
@@ -651,6 +655,7 @@ impl Panels {
                 }
                 crate::app::menu::SparkSubMenu::Send => Some(&self.spark_send as &dyn State),
                 crate::app::menu::SparkSubMenu::Receive => Some(&self.spark_receive as &dyn State),
+                crate::app::menu::SparkSubMenu::Swap => Some(&self.spark_swap as &dyn State),
                 crate::app::menu::SparkSubMenu::Transactions(_) => {
                     Some(&self.spark_transactions as &dyn State)
                 }
@@ -748,6 +753,9 @@ impl Panels {
                 }
                 crate::app::menu::SparkSubMenu::Receive => {
                     Some(&mut self.spark_receive as &mut dyn State)
+                }
+                crate::app::menu::SparkSubMenu::Swap => {
+                    Some(&mut self.spark_swap as &mut dyn State)
                 }
                 crate::app::menu::SparkSubMenu::Transactions(_) => {
                     Some(&mut self.spark_transactions as &mut dyn State)
@@ -9399,6 +9407,13 @@ impl App {
             }
             Message::SparkStableBalanceApplied(Err(e)) => {
                 log::warn!("could not re-apply Spark Stable Balance preference: {e}");
+            }
+
+            // Swap's answers reach its panel whichever page is showing, so a
+            // swap that settles while the user is elsewhere keeps its result.
+            Message::View(view::Message::SparkSwap(msg)) => {
+                let on_screen = self.panels.current == Menu::Spark(menu::SparkSubMenu::Swap);
+                return self.panels.spark_swap.deliver(msg, on_screen);
             }
 
             // The user changed the Stable Balance toggle and the bridge
@@ -18276,6 +18291,50 @@ mod wallet_recent_activity_tests {
         ))));
         assert!(app.panels.spark_overview.has_snapshot_for_tests());
         assert_eq!(app.panels.activity.spark_refresh_requests, before + 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A swap's answer reaches the Swap panel while another page shows, and
+    /// coming back to Swap shows it rather than a fresh form.
+    #[test]
+    fn a_swap_answer_reaches_its_panel_from_another_page() {
+        use coincube_spark_protocol::{
+            AssetAmount, ConversionLimits, ConversionQuote, PrepareSwapOk, SwapOk, SwapStatus,
+            WalletAsset,
+        };
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("swap-routing-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let amount = |asset, amount| AssetAmount { asset, amount };
+        let request = app
+            .panels
+            .spark_swap
+            .start_swapping_for_tests(PrepareSwapOk {
+                handle: "h".into(),
+                quote: ConversionQuote {
+                    amount_in: amount(WalletAsset::Bitcoin, 100_000),
+                    amount_out: amount(WalletAsset::Usdb, 80_000_000),
+                    fee: amount(WalletAsset::Bitcoin, 100),
+                    amount_adjustment: None,
+                    max_slippage_bps: 50,
+                },
+                limits: ConversionLimits::default(),
+            });
+        drop(app.set_current_panel(Menu::Spark(menu::SparkSubMenu::Overview)));
+        drop(app.update(Message::View(view::Message::SparkSwap(
+            view::spark::SparkSwapMessage::Swapped {
+                request,
+                result: crate::app::state::spark::swap::SwapAttempt::Done(SwapOk {
+                    swap_id: "swap".into(),
+                    status: SwapStatus::Completed,
+                }),
+            },
+        ))));
+        drop(app.set_current_panel(Menu::Spark(menu::SparkSubMenu::Swap)));
+        assert!(matches!(
+            app.panels.spark_swap.phase(),
+            crate::app::state::spark::swap::SwapPhase::Swapped(_)
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 

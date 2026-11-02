@@ -244,6 +244,7 @@ pub enum Message {
     SparkSettings(crate::app::view::spark::SparkSettingsMessage),
     SparkSend(crate::app::view::spark::SparkSendMessage),
     SparkReceive(crate::app::view::spark::SparkReceiveMessage),
+    SparkSwap(crate::app::view::spark::SparkSwapMessage),
     LiquidReceive(LiquidReceiveMessage),
     VaultReceive(VaultReceiveMessage),
     LiquidSend(LiquidSendMessage),

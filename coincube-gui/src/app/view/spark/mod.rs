@@ -13,6 +13,7 @@ pub mod receive;
 pub mod send;
 pub mod settings;
 pub mod sideshift_receive;
+pub mod swap;
 pub mod transactions;
 
 pub use overview::{SparkOverviewView, SparkPaymentMethod, SparkRecentTransaction, SparkStatus};
@@ -158,6 +159,36 @@ impl<'a> SparkBalances<'a> {
         }
         column.into()
     }
+}
+
+/// Messages for the Swap panel ([`crate::app::state::spark::swap`]).
+#[derive(Debug, Clone)]
+pub enum SparkSwapMessage {
+    AmountEdited(String),
+    /// Convert all of the source asset.
+    Max,
+    /// Flip the direction.
+    Reverse,
+    GetQuote,
+    /// Leave Review for the form.
+    EditAmount,
+    /// Swap with the estimate on Review.
+    Confirm,
+    /// Start over after a result.
+    SwapAgain,
+    BalanceLoaded(Option<(u64, Option<coincube_spark_protocol::UsdbBalanceSnapshot>)>),
+    LimitsLoaded {
+        from: coincube_spark_protocol::WalletAsset,
+        limits: Option<coincube_spark_protocol::ConversionLimits>,
+    },
+    QuoteLoaded {
+        request: u64,
+        result: Result<coincube_spark_protocol::PrepareSwapOk, String>,
+    },
+    Swapped {
+        request: u64,
+        result: crate::app::state::spark::swap::SwapAttempt,
+    },
 }
 
 /// View-level messages for the Spark Overview panel.

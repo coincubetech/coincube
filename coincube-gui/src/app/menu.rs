@@ -106,6 +106,8 @@ pub enum SparkSubMenu {
     Overview,
     Send,
     Receive,
+    /// Swap BTC ⇄ USDB (S3), mainnet only.
+    Swap,
     Transactions(Option<Txid>),
     Settings(Option<SparkSettingsOption>),
 }
