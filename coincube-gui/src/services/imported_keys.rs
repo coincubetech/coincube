@@ -4,8 +4,10 @@
 //! atomically replaced. The device-only inventory anchor is the admission
 //! authority. An undeclared ciphertext causes inventory and signing to fail
 //! closed; it is never deleted based on this unauthenticated public manifest.
-//! No mnemonic enters Cube Settings. Keys, ordinary Send, and Recovery Kit are
-//! separate integrations and do not consume this repository yet.
+//! No mnemonic enters Cube Settings. Import or restore's Keys step admits a
+//! new wallet's verified recovery words with `admit_new_batch` once the wallet
+//! is attached. Ordinary Send and the Recovery Kit do not consume this
+//! repository yet.
 
 // Admission and signing are staged until the external inventory release gate.
 #![allow(dead_code)]
