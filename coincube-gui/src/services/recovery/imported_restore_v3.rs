@@ -75,12 +75,6 @@ impl RestoreAdmissionReceipt {
 }
 
 fn preflight(directory: &NetworkDirectory, download: &VerifiedDownload) -> Result<(), String> {
-    // An unsupported keystore is not an absent anchor: without an adapter the
-    // durable intent could be neither admitted nor released, so refuse before
-    // the caller writes it.
-    if !anchor::supported() {
-        return Err("Imported key restore is unavailable on this platform.".into());
-    }
     let kit = download.kit();
     kit.validate()?;
     let chain = kit.public.wallet.descriptor.chain();
@@ -385,8 +379,34 @@ pub(crate) async fn restore_verified_password_kit(
     backend: BitcoinBackend,
     is_current: impl Fn() -> bool,
 ) -> Result<RestoreAdmissionReceipt, String> {
+    restore_verified_password_kit_with_anchor_support(
+        directory,
+        client,
+        download,
+        backend,
+        is_current,
+        anchor::supported(),
+    )
+    .await
+}
+
+async fn restore_verified_password_kit_with_anchor_support(
+    directory: &NetworkDirectory,
+    client: &CoincubeClient,
+    download: VerifiedDownload,
+    backend: BitcoinBackend,
+    is_current: impl Fn() -> bool,
+    anchor_supported: bool,
+) -> Result<RestoreAdmissionReceipt, String> {
     if !is_current() {
         return Err("Imported restore was cancelled.".into());
+    }
+    // Reject unsupported platforms before creating the operation lock,
+    // durable intent, or public wallet.
+    if !anchor_supported {
+        return Err(
+            "Imported restore requires a verified device keystore adapter on this platform.".into(),
+        );
     }
     let path = restore_intent_path(directory, download.kit().operation_id);
     let _operation_lock = lock_restore_intent(&path)?;
@@ -514,6 +534,58 @@ pub async fn fetch_and_restore_password_v3(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unsupported_anchor_rejects_restore_before_intent_or_public_wallet() {
+        let root =
+            std::env::temp_dir().join(format!("imported-restore-unsupported-{}", Uuid::new_v4()));
+        let directory = NetworkDirectory::new(root.join("bitcoin"));
+        directory.init().unwrap();
+        let kit = super::super::imported_key_v3::tests::sample();
+        let path = restore_intent_path(&directory, kit.operation_id);
+        let download = VerifiedDownload::for_test(
+            42,
+            Checkpoint {
+                generation: 1,
+                commitment: "a".repeat(64),
+                active: true,
+            },
+            kit,
+        );
+        let client = CoincubeClient::for_test("http://127.0.0.1:1");
+        let backend = BitcoinBackend::Electrum(coincubed::config::ElectrumConfig {
+            addr: "tcp://127.0.0.1:50001".into(),
+            validate_domain: true,
+        });
+        let result = restore_verified_password_kit_with_anchor_support(
+            &directory,
+            &client,
+            download,
+            backend,
+            || true,
+            false,
+        )
+        .await;
+        assert!(matches!(result, Err(ref error) if error.contains("device keystore adapter")));
+        assert!(
+            !path.exists(),
+            "unsupported Restore must not write an intent"
+        );
+        assert!(
+            !path.parent().unwrap().exists(),
+            "unsupported Restore must not create an operation lock"
+        );
+        assert!(
+            !directory.path().join("settings.json").exists(),
+            "unsupported Restore must not attach a public wallet"
+        );
+        assert_eq!(
+            fs::read_dir(directory.path().join("data")).unwrap().count(),
+            0,
+            "unsupported Restore must not install wallet data"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn restore_intent_recovers_partial_write_and_rejects_conflicting_retry() {

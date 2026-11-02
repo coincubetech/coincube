@@ -4,6 +4,8 @@
 
 The caller must not treat a public-only v2 Kit as a local-key restore. A v3 download is admitted only after ciphertext SHA-256, password envelope, Cube UUID, operation ID, wallet/chain/policy/account identity, record IDs/revisions, and current Connect generation/commitment validate. The restore coordinator also checks the live Cube identity, network, unlock session, Duress state, and conflicting local wallet/key state. Unsupported or unavailable Connect responses fail closed.
 
+Restore rejects a platform without a verified device keystore anchor adapter before creating an operation lock, durable intent, or public wallet. The production anchor adapter currently supports macOS; Linux and Windows must fail before local mutation until their own verified adapters exist.
+
 ## Durable sequence and restart behavior
 
 1. Download and decrypt v3, then recheck current Connect status after the KDF. Preflight the target Cube and local state.
