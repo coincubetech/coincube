@@ -3269,10 +3269,9 @@ impl P2PPanel {
             async move { spark.get_info().await },
             move |result| match result {
                 Ok(info) => {
-                    let usdb_sats = info
-                        .stable_balance
+                    let usdb_sats = crate::app::breez_spark::assets::usdb_holding(&info)
                         .map(|sb| {
-                            crate::app::breez_spark::assets::stable_token_as_sats(
+                            crate::app::breez_spark::assets::stable_token_as_sats_u128(
                                 sb.balance,
                                 sb.decimals,
                                 reference_price,

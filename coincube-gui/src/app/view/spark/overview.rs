@@ -204,7 +204,7 @@ pub enum SparkAsset {
     UsDollar,
 }
 
-pub fn spark_assets(balance_sats: u64, usdb_units: u64) -> Vec<SparkAsset> {
+pub fn spark_assets(balance_sats: u64, usdb_units: u128) -> Vec<SparkAsset> {
     let bitcoin = (balance_sats > 0 || usdb_units == 0).then_some(SparkAsset::Bitcoin);
     let us_dollar = (usdb_units > 0).then_some(SparkAsset::UsDollar);
     bitcoin.into_iter().chain(us_dollar).collect()
@@ -231,7 +231,7 @@ impl<'a> SparkOverviewView<'a> {
                 .into(),
             SparkStatus::Connected(snapshot) => connected_view(
                 snapshot.balance_sats,
-                snapshot.stable_balance.as_ref(),
+                snapshot.usdb_balance.as_ref(),
                 self.btc_usd_price,
                 self.recent_transactions,
                 self.fiat_converter,
@@ -249,7 +249,7 @@ impl<'a> SparkOverviewView<'a> {
 #[allow(clippy::too_many_arguments)]
 fn connected_view<'a>(
     balance_sats: u64,
-    stable_balance: Option<&coincube_spark_protocol::StableBalanceSnapshot>,
+    usdb_balance: Option<&coincube_spark_protocol::UsdbBalanceSnapshot>,
     btc_usd_price: Option<f64>,
     recent: &'a [SparkRecentTransaction],
     fiat_converter: Option<FiatAmountConverter>,
@@ -260,7 +260,7 @@ fn connected_view<'a>(
     cube_id: &str,
     last_error: Option<&str>,
 ) -> Element<'a, SparkOverviewMessage> {
-    use crate::app::breez_spark::assets::stable_token_as_sats;
+    use crate::app::breez_spark::assets::stable_token_as_sats_u128;
 
     let mut content = Column::new().spacing(20);
 
@@ -273,11 +273,11 @@ fn connected_view<'a>(
     // USDB is USD-denominated. A quote in EUR/GBP is not a USD quote;
     // only the dedicated BTC/USD quote can value this holding in sats.
     let reference_price = btc_usd_price.filter(|price| *price > 0.0 && price.is_finite());
-    let usdb_as_sats = stable_balance
-        .map(|sb| stable_token_as_sats(sb.balance, sb.decimals, reference_price))
+    let usdb_as_sats = usdb_balance
+        .map(|sb| stable_token_as_sats_u128(sb.balance, sb.decimals, reference_price))
         .unwrap_or(0);
     let has_unvalued_usdb =
-        stable_balance.as_ref().is_some_and(|sb| sb.balance > 0) && reference_price.is_none();
+        usdb_balance.as_ref().is_some_and(|sb| sb.balance > 0) && reference_price.is_none();
     let total_balance = Amount::from_sat(balance_sats.saturating_add(usdb_as_sats));
     let total_fiat = (!has_unvalued_usdb)
         .then(|| fiat_converter.as_ref().map(|c| c.convert(total_balance)))
@@ -333,7 +333,7 @@ fn connected_view<'a>(
     } else {
         AmountVisibility::Shown
     };
-    let usdb_units = stable_balance.map_or(0, |sb| sb.balance);
+    let usdb_units = usdb_balance.map_or(0, |sb| sb.balance);
     let send_receive = |asset: &str, send: SparkOverviewMessage, receive: SparkOverviewMessage| {
         vec![
             landing_button(
@@ -390,9 +390,10 @@ fn connected_view<'a>(
                 )
             }
             SparkAsset::UsDollar => {
-                use crate::app::breez_spark::assets::format_token_display;
-                let decimals = stable_balance.map_or(0, |sb| sb.decimals);
-                let primary = Figure::new(format_token_display(usdb_units, decimals)).unit("USDB");
+                use crate::app::breez_spark::assets::format_token_display_u128;
+                let decimals = usdb_balance.map_or(0, |sb| sb.decimals);
+                let primary =
+                    Figure::new(format_token_display_u128(usdb_units, decimals)).unit("USDB");
                 // ≈ sats only at a dedicated BTC/USD quote.
                 let secondary = reference_price.map(|_| {
                     Figure::new(format!(
@@ -513,7 +514,8 @@ mod tests {
         // Both balances, so the US Dollar row shows (W2).
         let snapshot = SparkBalanceSnapshot {
             balance_sats: 25_053,
-            stable_balance: Some(coincube_spark_protocol::StableBalanceSnapshot {
+            usdb_balance: Some(coincube_spark_protocol::UsdbBalanceSnapshot {
+                token_identifier: "btkn1synthetic".into(),
                 balance: 12_400_000,
                 decimals: 6,
                 ticker: "USDB".into(),
@@ -614,7 +616,7 @@ mod tests {
         });
         let snapshot = SparkBalanceSnapshot {
             balance_sats: 25_053,
-            stable_balance: None,
+            usdb_balance: None,
         };
         for bytes in coincube_ui::font::load() {
             iced::advanced::graphics::text::font_system()
@@ -729,7 +731,7 @@ mod tests {
         connect.ln_change_confirm_pending = Some("newname".into());
         let snapshot = SparkBalanceSnapshot {
             balance_sats: 25_053,
-            stable_balance: None,
+            usdb_balance: None,
         };
         for (appearance, theme) in [
             ("dark", theme::Theme::dark()),
@@ -988,14 +990,15 @@ mod tests {
 
     #[test]
     fn hidden_overview_redacts_btc_usdb_and_activity_amounts() {
-        let stable = coincube_spark_protocol::StableBalanceSnapshot {
+        let stable = coincube_spark_protocol::UsdbBalanceSnapshot {
+            token_identifier: "btkn1synthetic".into(),
             balance: 2_500_000,
             decimals: 6,
             ticker: "USDB".into(),
         };
         let snapshot = SparkBalanceSnapshot {
             balance_sats: 12_345_678,
-            stable_balance: Some(stable),
+            usdb_balance: Some(stable),
         };
         let rows = [tx(
             "payment",
@@ -1032,14 +1035,15 @@ mod tests {
 
     #[test]
     fn r06a_spark_headless_content_matrix() {
-        let stable = coincube_spark_protocol::StableBalanceSnapshot {
+        let stable = coincube_spark_protocol::UsdbBalanceSnapshot {
+            token_identifier: "btkn1synthetic".into(),
             balance: 2_500_000,
             decimals: 6,
             ticker: "USDB".into(),
         };
         let snapshot = SparkBalanceSnapshot {
             balance_sats: 125_000,
-            stable_balance: Some(stable),
+            usdb_balance: Some(stable),
         };
         let rows = vec![
             tx(

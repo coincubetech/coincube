@@ -340,7 +340,7 @@ pub struct GlobalHome {
     spark_balance: Amount,
     /// Raw Spark holdings retained solely for truthful landing presentation.
     spark_btc_balance: Amount,
-    spark_stable_balance: Option<coincube_spark_protocol::StableBalanceSnapshot>,
+    spark_usdb_balance: Option<coincube_spark_protocol::UsdbBalanceSnapshot>,
     spark_balance_error: bool,
     spark_balance_loaded: bool,
     /// Set once the bridge has forwarded `Event::Synced` from the
@@ -561,7 +561,7 @@ impl GlobalHome {
             liquid_balance_error: false,
             spark_balance: Amount::ZERO,
             spark_btc_balance: Amount::ZERO,
-            spark_stable_balance: None,
+            spark_usdb_balance: None,
             spark_balance_error: false,
             spark_balance_loaded: false,
             spark_synced_seen: false,
@@ -652,7 +652,7 @@ impl GlobalHome {
             liquid_balance_error: false,
             spark_balance: Amount::ZERO,
             spark_btc_balance: Amount::ZERO,
-            spark_stable_balance: None,
+            spark_usdb_balance: None,
             spark_balance_error: false,
             spark_balance_loaded: false,
             spark_synced_seen: false,
@@ -807,7 +807,7 @@ impl GlobalHome {
             liquid_balance,
             spark_balance: self.spark_balance,
             spark_btc_balance: self.spark_btc_balance,
-            spark_stable_balance: self.spark_stable_balance.as_ref(),
+            spark_usdb_balance: self.spark_usdb_balance.as_ref(),
             spark_balance_error: self.spark_balance_error,
             usdt_balance,
             usdt_balance_error,
@@ -1011,10 +1011,7 @@ impl State for GlobalHome {
                         use crate::app::menu::SparkSubMenu;
                         crate::app::state::redirect(Menu::Spark(SparkSubMenu::Receive))
                     }
-                    HomeMessage::SparkBalanceUpdated {
-                        btc,
-                        stable_balance,
-                    } => {
+                    HomeMessage::SparkBalanceUpdated { btc, usdb_balance } => {
                         self.spark_balance_loading = false;
                         // The in-flight fetch was issued before
                         // `Synced` arrived — its value reflects the
@@ -1026,7 +1023,7 @@ impl State for GlobalHome {
                             return self.load_spark_balance().unwrap_or_else(Task::none);
                         }
                         self.spark_btc_balance = btc;
-                        self.spark_stable_balance = stable_balance.clone();
+                        self.spark_usdb_balance = usdb_balance.clone();
                         self.spark_balance_error = false;
                         // Fold any Stable Balance (USDB) holding into the shown
                         // Spark balance — auto-sweep means a BTC-only reading
@@ -1035,7 +1032,7 @@ impl State for GlobalHome {
                         self.spark_balance =
                             Amount::from_sat(crate::app::state::spark::unified_spark_balance_sats(
                                 btc.to_sat(),
-                                stable_balance.as_ref(),
+                                usdb_balance.as_ref(),
                                 cache,
                             ));
                         self.spark_balance_received = true;
@@ -4000,7 +3997,7 @@ impl GlobalHome {
             |result| match result {
                 Ok(info) => Message::View(view::Message::Home(HomeMessage::SparkBalanceUpdated {
                     btc: Amount::from_sat(info.balance_sats),
-                    stable_balance: info.stable_balance,
+                    usdb_balance: crate::app::breez_spark::assets::usdb_holding(&info),
                 })),
                 Err(e) => {
                     tracing::warn!("Home: spark get_info failed: {}", e);
@@ -4401,7 +4398,7 @@ impl GlobalHome {
             &mut home,
             HomeMessage::SparkBalanceUpdated {
                 btc: Amount::from_sat(10_000),
-                stable_balance: None,
+                usdb_balance: None,
             },
         );
         let presync = snapshot("presync-nonzero", &home, true);
@@ -4417,7 +4414,7 @@ impl GlobalHome {
             &mut home,
             HomeMessage::SparkBalanceUpdated {
                 btc: Amount::from_sat(12_000),
-                stable_balance: None,
+                usdb_balance: None,
             },
         );
         let trusted = snapshot("trusted-postsync", &home, true);
@@ -4500,7 +4497,8 @@ mod tests {
             "synthetic-cube".into(),
             false,
         );
-        let stale = coincube_spark_protocol::StableBalanceSnapshot {
+        let stale = coincube_spark_protocol::UsdbBalanceSnapshot {
+            token_identifier: "btkn1synthetic".into(),
             balance: 2_500_000,
             decimals: 6,
             ticker: "USDB".into(),
@@ -4509,11 +4507,11 @@ mod tests {
             &mut home,
             HomeMessage::SparkBalanceUpdated {
                 btc: Amount::from_sat(10_000),
-                stable_balance: Some(stale.clone()),
+                usdb_balance: Some(stale.clone()),
             },
         );
         assert_eq!(
-            home.spark_stable_balance.as_ref().map(|s| s.balance),
+            home.spark_usdb_balance.as_ref().map(|s| s.balance),
             Some(2_500_000)
         );
         assert!(!home.spark_balance_loaded);
@@ -4523,14 +4521,15 @@ mod tests {
         assert!(home.spark_balance_error);
         assert!(!home.spark_balance_loaded);
         assert_eq!(
-            home.spark_stable_balance.as_ref().map(|s| s.balance),
+            home.spark_usdb_balance.as_ref().map(|s| s.balance),
             Some(stale.balance)
         );
 
         send(&mut home, HomeMessage::SparkSyncedObserved);
         assert!(home.spark_synced_seen);
         assert!(!home.spark_balance_loaded);
-        let fresh = coincube_spark_protocol::StableBalanceSnapshot {
+        let fresh = coincube_spark_protocol::UsdbBalanceSnapshot {
+            token_identifier: "btkn1synthetic".into(),
             balance: 3_750_000,
             decimals: 6,
             ticker: "USDB".into(),
@@ -4539,13 +4538,13 @@ mod tests {
             &mut home,
             HomeMessage::SparkBalanceUpdated {
                 btc: Amount::from_sat(12_000),
-                stable_balance: Some(fresh.clone()),
+                usdb_balance: Some(fresh.clone()),
             },
         );
         assert!(home.spark_balance_loaded);
         assert!(!home.spark_balance_error);
         assert_eq!(
-            home.spark_stable_balance.as_ref().map(|s| s.balance),
+            home.spark_usdb_balance.as_ref().map(|s| s.balance),
             Some(3_750_000)
         );
 
@@ -4553,7 +4552,7 @@ mod tests {
         assert!(home.spark_balance_loaded);
         assert!(home.spark_balance_error);
         assert_eq!(
-            home.spark_stable_balance.as_ref().map(|s| s.balance),
+            home.spark_usdb_balance.as_ref().map(|s| s.balance),
             Some(fresh.balance)
         );
     }
@@ -4582,7 +4581,7 @@ mod tests {
             &mut home,
             HomeMessage::SparkBalanceUpdated {
                 btc: Amount::from_sat(1_000),
-                stable_balance: None,
+                usdb_balance: None,
             },
         );
         assert!(home.spark_settled());

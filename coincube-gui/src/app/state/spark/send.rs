@@ -429,7 +429,7 @@ pub struct SparkSend {
     /// the send simply fails on funds.
     usdb_holding: Option<String>,
     /// The USDB holding as last loaded, for the side panel's US Dollar row.
-    stable_balance: Option<coincube_spark_protocol::StableBalanceSnapshot>,
+    usdb_balance: Option<coincube_spark_protocol::UsdbBalanceSnapshot>,
     /// Free-text destination input (BOLT11 / BIP21 / on-chain address).
     pub destination_input: String,
     /// Amount override for amountless invoices / on-chain sends, in sats.
@@ -514,7 +514,7 @@ impl SparkSend {
             balance_sats: 0,
             btc_balance_sats: 0,
             usdb_holding: None,
-            stable_balance: None,
+            usdb_balance: None,
             destination_input: String::new(),
             amount_input: String::new(),
             invoice_amount_sat: None,
@@ -882,7 +882,7 @@ impl State for SparkSend {
                 balances: crate::app::view::spark::SparkBalances::new(
                     cache,
                     self.btc_balance_sats,
-                    self.stable_balance.as_ref(),
+                    self.usdb_balance.as_ref(),
                 ),
                 usdb_conversion_hint: usdb_conversion_hint(
                     self.invoice_amount_sat.or_else(|| {
@@ -1494,11 +1494,11 @@ impl State for SparkSend {
                     self.balance_sats =
                         super::unified_spark_balance_sats(btc_sats, stable.as_ref(), cache);
                     self.btc_balance_sats = btc_sats;
-                    self.stable_balance = stable.clone();
+                    self.usdb_balance = stable.clone();
                     self.usdb_holding = stable.as_ref().filter(|sb| sb.balance > 0).map(|sb| {
                         format!(
                             "{} {}",
-                            crate::app::breez_spark::assets::format_token_display(
+                            crate::app::breez_spark::assets::format_token_display_u128(
                                 sb.balance,
                                 sb.decimals
                             ),

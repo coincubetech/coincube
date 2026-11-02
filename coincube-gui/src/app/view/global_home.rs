@@ -2377,7 +2377,7 @@ pub struct GlobalViewConfig<'a> {
     /// bridge subprocess is currently down.
     pub spark_balance: Amount,
     pub spark_btc_balance: Amount,
-    pub spark_stable_balance: Option<&'a coincube_spark_protocol::StableBalanceSnapshot>,
+    pub spark_usdb_balance: Option<&'a coincube_spark_protocol::UsdbBalanceSnapshot>,
     pub spark_balance_error: bool,
     pub usdt_balance: u64,
     pub usdt_balance_error: bool,
@@ -2517,7 +2517,7 @@ pub fn global_home_view<'a>(
         liquid_balance,
         spark_balance,
         spark_btc_balance,
-        spark_stable_balance,
+        spark_usdb_balance,
         spark_balance_error,
         usdt_balance,
         usdt_balance_error,
@@ -2685,11 +2685,11 @@ pub fn global_home_view<'a>(
     // A bridge response received before Synced can contain persisted values
     // from the prior session. Neither BTC nor USDB may enter the aggregate or
     // read as a holding until the existing corroboration gate opens.
-    let trusted_spark_stable_balance = spark_stable_balance.filter(|_| spark_balance_loaded);
-    let spark_usdb_held = trusted_spark_stable_balance.is_some_and(|holding| holding.balance > 0);
-    let spark_usdb_as_sats = trusted_spark_stable_balance
+    let trusted_spark_usdb_balance = spark_usdb_balance.filter(|_| spark_balance_loaded);
+    let spark_usdb_held = trusted_spark_usdb_balance.is_some_and(|holding| holding.balance > 0);
+    let spark_usdb_as_sats = trusted_spark_usdb_balance
         .map(|holding| {
-            crate::app::breez_spark::assets::stable_token_as_sats(
+            crate::app::breez_spark::assets::stable_token_as_sats_u128(
                 holding.balance,
                 holding.decimals,
                 usable_usd_quote,
@@ -3137,10 +3137,10 @@ pub fn global_home_view<'a>(
             ))
             .push(spark_header)
             .push(spark_btc_row)
-            .push_maybe(spark_stable_balance.map(|holding| {
+            .push_maybe(spark_usdb_balance.map(|holding| {
                 let text_value = format!(
                     "{} USDB",
-                    crate::app::breez_spark::assets::format_token_display(
+                    crate::app::breez_spark::assets::format_token_display_u128(
                         holding.balance,
                         holding.decimals,
                     )
@@ -3520,7 +3520,7 @@ mod tests {
                 liquid_balance: Amount::from_sat(125_000),
                 spark_balance: Amount::from_sat(250_000),
                 spark_btc_balance: Amount::from_sat(250_000),
-                spark_stable_balance: None,
+                spark_usdb_balance: None,
                 spark_balance_error: false,
                 usdt_balance: 100_000_000,
                 usdt_balance_error: false,
@@ -3621,14 +3621,15 @@ mod tests {
     fn r06a_hub_headless_content_matrix_and_presync_usdb_gate() {
         use crate::app::view::shared::landing::capture;
         let fixture = ViewFixture::new();
-        let usdb = coincube_spark_protocol::StableBalanceSnapshot {
+        let usdb = coincube_spark_protocol::UsdbBalanceSnapshot {
+            token_identifier: "btkn1synthetic".into(),
             balance: 93_420_000_000,
             decimals: 6,
             ticker: "USDB".into(),
         };
         let raw_usdb = format!(
             "{} USDB",
-            crate::app::breez_spark::assets::format_token_display(usdb.balance, usdb.decimals)
+            crate::app::breez_spark::assets::format_token_display_u128(usdb.balance, usdb.decimals)
         );
         for (appearance, theme) in [
             ("dark", theme::Theme::dark()),
@@ -3661,7 +3662,7 @@ mod tests {
                 }
 
                 let mut presync = fixture.config(0, None, None);
-                presync.spark_stable_balance = Some(&usdb);
+                presync.spark_usdb_balance = Some(&usdb);
                 presync.spark_balance_loaded = false;
                 presync.total_balance_loading = true;
                 let before = capture::inspect(
@@ -3675,7 +3676,7 @@ mod tests {
                 assert!(before.contains("Waiting for Spark sync"));
 
                 let mut first_error = fixture.config(0, None, None);
-                first_error.spark_stable_balance = Some(&usdb);
+                first_error.spark_usdb_balance = Some(&usdb);
                 first_error.spark_balance_loaded = false;
                 first_error.spark_balance_error = true;
                 let failed = capture::inspect(
@@ -3689,7 +3690,7 @@ mod tests {
                 assert!(failed.contains("Balance unavailable"));
 
                 let mut trusted = fixture.config(0, None, None);
-                trusted.spark_stable_balance = Some(&usdb);
+                trusted.spark_usdb_balance = Some(&usdb);
                 trusted.spark_balance_loaded = true;
                 trusted.btc_usd_price = None;
                 let shown = capture::inspect(
@@ -3703,7 +3704,7 @@ mod tests {
                 assert!(shown.contains("Partial total"));
 
                 let mut masked = fixture.config(0, None, None);
-                masked.spark_stable_balance = Some(&usdb);
+                masked.spark_usdb_balance = Some(&usdb);
                 masked.balance_masked = true;
                 let hidden =
                     capture::inspect("hub-masked", overview(masked), outer, appearance, theme);

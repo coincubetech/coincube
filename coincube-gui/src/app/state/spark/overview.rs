@@ -35,11 +35,10 @@ use crate::utils::format_time_ago;
 #[derive(Debug, Clone)]
 pub struct SparkBalanceSnapshot {
     pub balance_sats: u64,
-    /// USDB amount in token base units, when Stable Balance is on
-    /// and the SDK reports a non-zero USDB holding. The view folds
-    /// this into the unified portfolio total at the current BTC
-    /// price, the same way Liquid folds USDt into L-BTC.
-    pub stable_balance: Option<coincube_spark_protocol::StableBalanceSnapshot>,
+    /// The bridge's validated USDB holding (`usdb_holding`), `None` when
+    /// there is none. The view shows it as the US Dollar row and adds it to
+    /// the total at the BTC/USD quote.
+    pub usdb_balance: Option<coincube_spark_protocol::UsdbBalanceSnapshot>,
 }
 
 pub struct SparkOverview {
@@ -262,7 +261,7 @@ impl State for SparkOverview {
                 (Ok(info), Ok(list)) => Message::View(view::Message::SparkOverview(
                     view::SparkOverviewMessage::DataLoaded {
                         balance: Amount::from_sat(info.balance_sats),
-                        stable_balance: info.stable_balance,
+                        usdb_balance: crate::app::breez_spark::assets::usdb_holding(&info),
                         recent_payments: list.payments,
                     },
                 )),
@@ -298,14 +297,14 @@ impl State for SparkOverview {
             match msg {
                 view::SparkOverviewMessage::DataLoaded {
                     balance,
-                    stable_balance,
+                    usdb_balance,
                     recent_payments,
                 } => {
                     self.loading = false;
                     self.error = None;
                     self.snapshot = Some(SparkBalanceSnapshot {
                         balance_sats: balance.to_sat(),
-                        stable_balance,
+                        usdb_balance,
                     });
 
                     let fiat_converter: Option<FiatAmountConverter> =
@@ -743,7 +742,8 @@ mod tests {
             Message::View(view::Message::SparkOverview(
                 view::SparkOverviewMessage::DataLoaded {
                     balance: Amount::from_sat(123_456),
-                    stable_balance: Some(coincube_spark_protocol::StableBalanceSnapshot {
+                    usdb_balance: Some(coincube_spark_protocol::UsdbBalanceSnapshot {
+                        token_identifier: "btkn1synthetic".into(),
                         balance: 2_500_000,
                         decimals: 6,
                         ticker: "USDB".to_string(),
@@ -758,7 +758,7 @@ mod tests {
         let snapshot = panel.snapshot.as_ref().expect("snapshot loaded");
         assert_eq!(snapshot.balance_sats, 123_456);
         assert_eq!(
-            snapshot.stable_balance.as_ref().map(|s| s.balance),
+            snapshot.usdb_balance.as_ref().map(|s| s.balance),
             Some(2_500_000)
         );
         assert_eq!(panel.recent_transactions.len(), 5);
@@ -802,7 +802,7 @@ mod tests {
             Message::View(view::Message::SparkOverview(
                 view::SparkOverviewMessage::DataLoaded {
                     balance: Amount::from_sat(42_000),
-                    stable_balance: None,
+                    usdb_balance: None,
                     recent_payments: vec![payment("Receive", "Complete", "spark", 1_000)],
                 },
             )),
@@ -841,7 +841,7 @@ mod tests {
             Message::View(view::Message::SparkOverview(
                 view::SparkOverviewMessage::DataLoaded {
                     balance: Amount::from_sat(42_000),
-                    stable_balance: None,
+                    usdb_balance: None,
                     recent_payments: vec![],
                 },
             )),
