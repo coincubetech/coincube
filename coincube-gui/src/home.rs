@@ -11354,7 +11354,7 @@ mod tests {
         release.send(()).unwrap();
         crate::daemon::stopping::wait_for(&wallet_dir);
         assert!(!crate::daemon::stopping::any_stopping(
-            &[wallet_dir.clone()]
+            std::slice::from_ref(&wallet_dir)
         ));
         let _ = modal.update(Message::View(ViewMessage::DeleteCube(
             DeleteCubeMessage::DaemonStopped(cube.id.clone()),
