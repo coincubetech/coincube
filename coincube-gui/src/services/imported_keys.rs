@@ -49,6 +49,7 @@ use crate::{
 };
 
 pub(crate) mod checkpoint;
+pub(crate) mod restore;
 
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const LEGACY_MANIFEST_BYTES: usize = 16_384;
@@ -107,6 +108,21 @@ struct Manifest {
     records: Vec<LocalKeyRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     checkpoint: Option<checkpoint::Journal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restored: Option<RestoredCheckpoint>,
+}
+
+/// Authenticated by the device-only inventory anchor together with exact
+/// record IDs and revisions. `ready` is committed only after the public
+/// wallet installation and a second server freshness check succeed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoredCheckpoint {
+    cube_id: u64,
+    generation: u64,
+    commitment: String,
+    source_inventory_generation: u64,
+    ready: bool,
 }
 
 struct RepositoryGuard {
@@ -212,6 +228,7 @@ impl<'a> LocalKeyRepository<'a> {
             policy_hash: hex::encode(self.policy_hash),
             records,
             checkpoint: None,
+            restored: None,
         }
     }
 
@@ -1300,10 +1317,27 @@ impl<'a> LocalKeyRepository<'a> {
         if serde_json::to_vec(&manifest).ok().as_deref() != Some(bytes.as_slice()) {
             return Err("Imported key manifest has a noncanonical or duplicate field.".into());
         }
-        if manifest.checkpoint.is_none() && bytes.len() > LEGACY_MANIFEST_BYTES {
+        if manifest.checkpoint.is_none()
+            && manifest.restored.is_none()
+            && bytes.len() > LEGACY_MANIFEST_BYTES
+        {
             return Err("Legacy imported key manifest is oversized.".into());
         }
         checkpoint::validate_journal(self, &manifest)?;
+        if manifest.restored.as_ref().is_some_and(|binding| {
+            manifest.checkpoint.is_some()
+                || manifest.records.is_empty()
+                || binding.cube_id == 0
+                || binding.generation == 0
+                || binding.source_inventory_generation == 0
+                || binding.commitment.len() != 64
+                || !binding
+                    .commitment
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }) {
+            return Err("Invalid restored imported checkpoint binding.".into());
+        }
         let expected = self.manifest(manifest.records.clone());
         if manifest.version != expected.version
             || manifest.cube_id != expected.cube_id
@@ -1649,6 +1683,7 @@ impl<'a> LocalKeyRepository<'a> {
         &self,
         record_id: Uuid,
         expected_revision: Uuid,
+        restored: Option<&RestoredCheckpoint>,
         is_current: impl Fn() -> bool,
         use_key: impl FnOnce(&VerifiedImportedKey) -> Result<T, String>,
     ) -> Result<T, String> {
@@ -1658,6 +1693,14 @@ impl<'a> LocalKeyRepository<'a> {
         let credential = self.check_active()?;
         let lock = self.lock()?;
         let manifest = self.read_manifest_recoverable(&lock)?;
+        if manifest.restored.as_ref() != restored
+            || manifest
+                .restored
+                .as_ref()
+                .is_some_and(|binding| !binding.ready)
+        {
+            return Err("Restored imported keys require current Connect authorization.".into());
+        }
         let device = self.device(false)?;
         let mut result = None;
         let mut use_key = Some(use_key);
@@ -1684,7 +1727,7 @@ impl<'a> LocalKeyRepository<'a> {
         current: &Psbt,
         is_current: impl Fn() -> bool,
     ) -> Result<Psbt, String> {
-        self.with_key(record_id, expected_revision, is_current, |key| {
+        self.with_key(record_id, expected_revision, None, is_current, |key| {
             key.sign(&self.attachment.descriptor, original, current)
                 .map_err(|_| "Imported signing failed verification.".into())
         })
@@ -4662,5 +4705,142 @@ mod tests {
         assert_eq!(kit.inventory_generation, 3);
         write_replace(&repository.root().join(MANIFEST), &old_bytes).unwrap();
         assert!(repository.read_manifest().is_err());
+    }
+
+    #[test]
+    fn restored_batch_preserves_exact_records_and_requires_ready_remote_path() {
+        use crate::services::{
+            coincube::imported_checkpoint::Checkpoint,
+            recovery::imported_key_v3::{ImportedKeyKitV3, KitKey},
+        };
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([91u8; 32]);
+        let record =
+            LocalKeyRecord::from_account(&fixture.accounts[0], Uuid::new_v4(), Uuid::new_v4());
+        let kit = ImportedKeyKitV3 {
+            public: checkpoint_test_public(&fixture),
+            operation_id: repository.operation_id,
+            wallet_id: fixture.attachment.wallet_id.to_string(),
+            policy_hash: hex::encode(repository.policy_hash),
+            inventory_generation: 7,
+            checkpoint_generation: 3,
+            local_keys: vec![KitKey {
+                record: record.clone(),
+                secret: ImportedKeySecret::new(
+                    Zeroizing::new(fixture.phrases[0].clone()),
+                    Zeroizing::new(String::new()),
+                )
+                .unwrap(),
+            }],
+        };
+        kit.validate().unwrap();
+        let binding = RestoredCheckpoint {
+            cube_id: 42,
+            generation: 3,
+            commitment: "a".repeat(64),
+            source_inventory_generation: 7,
+            ready: false,
+        };
+        let original = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        assert_eq!(
+            repository
+                .admit_restored_batch_locked(
+                    repository.read_manifest().unwrap(),
+                    kit,
+                    binding.clone(),
+                    "synthetic unlock",
+                    &device,
+                    || true,
+                )
+                .unwrap(),
+            vec![record.clone()]
+        );
+        let staged = repository.read_manifest().unwrap();
+        assert_eq!(staged.records, vec![record.clone()]);
+        assert_eq!(staged.restored.as_ref(), Some(&binding));
+        assert!(staged.checkpoint.is_none());
+        let mut conflicting = record.clone();
+        conflicting.revision = Uuid::new_v4();
+        let conflicting_kit = ImportedKeyKitV3 {
+            public: checkpoint_test_public(&fixture),
+            operation_id: repository.operation_id,
+            wallet_id: fixture.attachment.wallet_id.to_string(),
+            policy_hash: hex::encode(repository.policy_hash),
+            inventory_generation: 7,
+            checkpoint_generation: 3,
+            local_keys: vec![KitKey {
+                record: conflicting,
+                secret: ImportedKeySecret::new(
+                    Zeroizing::new(fixture.phrases[0].clone()),
+                    Zeroizing::new(String::new()),
+                )
+                .unwrap(),
+            }],
+        };
+        assert!(repository
+            .admit_restored_batch_locked(
+                staged.clone(),
+                conflicting_kit,
+                binding.clone(),
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .is_err());
+        assert_eq!(
+            repository.read_manifest().unwrap().records,
+            vec![record.clone()]
+        );
+        assert_eq!(
+            repository
+                .read_key(&record, "synthetic unlock", &device)
+                .unwrap()
+                .account(),
+            &fixture.accounts[0]
+        );
+        assert!(checkpoint::ensure_unbound(&staged).is_err());
+        fixture.save_cube(fixture.cube.clone());
+        app::session::open(
+            fixture.cube.id.clone(),
+            Zeroizing::new("synthetic PIN".into()),
+        );
+        assert!(repository
+            .with_key(record.record_id, record.revision, None, || true, |_| Ok(()))
+            .is_err());
+        let remote = Checkpoint {
+            generation: 3,
+            commitment: binding.commitment.clone(),
+            active: true,
+        };
+        repository
+            .finish_restored_batch_locked(
+                staged,
+                42,
+                &remote,
+                7,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        let ready = repository.read_manifest().unwrap();
+        assert!(ready.restored.as_ref().unwrap().ready);
+        assert_eq!(ready.records, vec![record]);
+        assert!(repository
+            .with_key(
+                ready.records[0].record_id,
+                ready.records[0].revision,
+                None,
+                || true,
+                |_| Ok(())
+            )
+            .is_err());
+        write_replace(&repository.root().join(MANIFEST), &original).unwrap();
+        assert!(
+            repository.read_manifest().is_err(),
+            "rolled-back manifest must not authorize old keys"
+        );
+        app::session::close();
     }
 }
