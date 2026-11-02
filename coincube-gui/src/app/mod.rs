@@ -979,9 +979,6 @@ pub struct App {
     /// The latest nickname requested while a write was running, written once
     /// that write lands.
     spark_nickname_queued: Option<Option<String>>,
-    /// Closes when the running nickname write ends (or its task is dropped),
-    /// so a write the tab starts as it replaces this App can follow it.
-    spark_nickname_running: Option<tokio::sync::watch::Receiver<()>>,
     received_celebration_amount: String,
     received_celebration_context: String,
     received_celebration_quote: coincube_ui::component::quote_display::Quote,
@@ -3592,7 +3589,6 @@ impl App {
             spark_stable_balance_reconciled: false,
             spark_nickname_in_flight: None,
             spark_nickname_queued: None,
-            spark_nickname_running: None,
             received_celebration_amount: String::new(),
             received_celebration_context: "transaction-received".to_string(),
             received_celebration_quote: coincube_ui::component::quote_display::random_quote(
@@ -3801,7 +3797,6 @@ impl App {
                 spark_stable_balance_reconciled: false,
                 spark_nickname_in_flight: None,
                 spark_nickname_queued: None,
-                spark_nickname_running: None,
                 received_celebration_amount: String::new(),
                 received_celebration_context: "transaction-received".to_string(),
                 received_celebration_quote: coincube_ui::component::quote_display::random_quote(
@@ -9442,7 +9437,15 @@ impl App {
                     self.spark_nickname_queued = Some(nickname);
                     return Task::none();
                 }
-                if nickname == self.cube_settings.spark_alias {
+                // So is one going back to the saved name while an earlier
+                // App's write for this Cube is still running (Lock Cube, then
+                // reopen): that write would land after the shortcut.
+                if nickname == self.cube_settings.spark_alias
+                    && !SparkNicknameWrite::pending(
+                        &self.spark_nickname_network_dir(),
+                        &self.cube_settings.id,
+                    )
+                {
                     return self.panels.spark_settings.update(
                         self.daemon.clone(),
                         &self.cache,
@@ -9458,7 +9461,6 @@ impl App {
             Message::SparkNicknameSaved { cube_id, .. } if cube_id != self.cube_settings.id => {}
             Message::SparkNicknameSaved { result, .. } => {
                 self.spark_nickname_in_flight = None;
-                self.spark_nickname_running = None;
                 let mut tasks = Vec::new();
                 match result {
                     Ok(nickname) => {
@@ -10621,20 +10623,19 @@ impl App {
             .unwrap_or_else(|| self.cube_settings.spark_alias.clone())
     }
 
+    fn spark_nickname_network_dir(&self) -> crate::dir::NetworkDirectory {
+        self.datadir.network_directory(self.cube_settings.network)
+    }
+
     /// Write `nickname` to this Cube's settings; [`Message::SparkNicknameSaved`]
-    /// answers. Callers start one only while none is running.
+    /// answers. Callers start one only while none is running, so this App's
+    /// requests are coalesced; the write itself follows every earlier one
+    /// for this Cube, from any App.
     fn start_spark_nickname_write(&mut self, nickname: Option<String>) -> Task<Message> {
         self.spark_nickname_in_flight = Some(nickname.clone());
-        let (running, ended) = tokio::sync::watch::channel(());
-        self.spark_nickname_running = Some(ended);
         let cube_id = self.cube_settings.id.clone();
-        let write = SparkNicknameWrite {
-            network_dir: self.datadir.network_directory(self.cube_settings.network),
-            cube_id: cube_id.clone(),
-            nickname,
-            after: None,
-            running: Some(running),
-        };
+        let write =
+            SparkNicknameWrite::new(self.spark_nickname_network_dir(), cube_id.clone(), nickname);
         Task::perform(write.run(), move |result| Message::SparkNicknameSaved {
             cube_id: cube_id.clone(),
             result,
@@ -10645,9 +10646,10 @@ impl App {
     /// (Lock Cube, Set up Vault): a name typed on Balances & conversion and
     /// not yet requested, else one queued behind a running write. A running
     /// write finishes on its own, and this one waits for it to end before
-    /// writing, however the two tasks are scheduled. The tab starts this
-    /// without waiting for it, so the field's "saved when you leave" holds
-    /// without delaying the lock.
+    /// writing, however the two tasks are scheduled (see
+    /// [`SparkNicknameWrite::new`]). The tab starts this without waiting for
+    /// it, so the field's "saved when you leave" holds without delaying the
+    /// lock.
     pub fn spark_nickname_flush(&self) -> Option<SparkNicknameWrite> {
         let on_balances = matches!(
             self.panels.current,
@@ -10664,13 +10666,11 @@ impl App {
             .flatten()
             .map(|input| state::spark::settings::saved_nickname(&input));
         let nickname = typed.or_else(|| self.spark_nickname_queued.clone())?;
-        Some(SparkNicknameWrite {
-            network_dir: self.datadir.network_directory(self.cube_settings.network),
-            cube_id: self.cube_settings.id.clone(),
+        Some(SparkNicknameWrite::new(
+            self.spark_nickname_network_dir(),
+            self.cube_settings.id.clone(),
             nickname,
-            after: self.spark_nickname_running.clone(),
-            running: None,
-        })
+        ))
     }
 
     /// Render content for a settings sub-page that needs both its
@@ -11389,11 +11389,55 @@ pub struct SparkNicknameWrite {
     /// The write this one must follow: it ends when that write's `running`
     /// closes.
     after: Option<tokio::sync::watch::Receiver<()>>,
-    /// Closed when this write ends, or when its task is dropped unrun.
-    running: Option<tokio::sync::watch::Sender<()>>,
+    /// Closed when this write ends, or when it is dropped unrun.
+    running: tokio::sync::watch::Sender<()>,
+}
+
+/// Each Cube's latest nickname write created in this process, keyed by its
+/// settings file and Cube id. Process-wide because an App can be replaced
+/// (Lock Cube, then reopen) while its write still runs.
+type SparkNicknameChain =
+    std::collections::HashMap<(std::path::PathBuf, String), tokio::sync::watch::Receiver<()>>;
+
+fn spark_nickname_chain() -> std::sync::MutexGuard<'static, SparkNicknameChain> {
+    static CHAIN: std::sync::OnceLock<std::sync::Mutex<SparkNicknameChain>> =
+        std::sync::OnceLock::new();
+    CHAIN
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 impl SparkNicknameWrite {
+    /// A write that lands after every nickname write created before it for
+    /// this Cube, from this App or any other: writes are created in the
+    /// order they are requested, on the update thread.
+    pub fn new(
+        network_dir: crate::dir::NetworkDirectory,
+        cube_id: String,
+        nickname: Option<String>,
+    ) -> Self {
+        let (running, ended) = tokio::sync::watch::channel(());
+        let mut chain = spark_nickname_chain();
+        // Writes that have ended need no entry.
+        chain.retain(|_, ended| ended.has_changed().is_ok());
+        let after = chain.insert((network_dir.path().to_path_buf(), cube_id.clone()), ended);
+        Self {
+            network_dir,
+            cube_id,
+            nickname,
+            after,
+            running,
+        }
+    }
+
+    /// Whether a nickname write for this Cube has been created and not ended.
+    pub fn pending(network_dir: &crate::dir::NetworkDirectory, cube_id: &str) -> bool {
+        spark_nickname_chain()
+            .get(&(network_dir.path().to_path_buf(), cube_id.to_string()))
+            .is_some_and(|ended| ended.has_changed().is_ok())
+    }
+
     /// Writes after the write it follows has ended: the settings file's own
     /// lock doesn't order writers, and neither does the order their tasks
     /// are polled in.
@@ -16473,6 +16517,14 @@ mod settings_navigation_integration_tests {
 
     /// An App on Spark's Balances & conversion with its Cube in the settings
     /// file, as a saved Cube is.
+    /// A second App over `old`'s Cube, as reopening it builds.
+    fn reopened_nickname_app(root: &std::path::Path, old: &App) -> App {
+        let mut app = nickname_app(root);
+        app.cube_settings = old.cube_settings.clone();
+        app.cache.cube_id = old.cube_settings.id.clone();
+        app
+    }
+
     fn nickname_app(root: &std::path::Path) -> App {
         let (mut app, _) = super::shell_tests::bitcoin_app(root);
         let network_dir = app.datadir.network_directory(app.cube_settings.network);
@@ -16609,6 +16661,83 @@ mod settings_navigation_integration_tests {
         });
         assert_eq!(written, Ok(Ok(Some("B".into()))));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A Cube locked while its nickname write runs and reopened at once: the
+    /// new App's writes land after the old App's, however the tasks are
+    /// polled, and going back to the name the new App read isn't skipped as
+    /// already saved while the old write could still land over it.
+    #[test]
+    fn a_reopened_cubes_nickname_writes_follow_the_previous_apps() {
+        use iced_runtime::futures::futures::StreamExt;
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("spark-nickname-reopen-{}", uuid::Uuid::new_v4()));
+        let mut old = nickname_app(&root);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let submit = |app: &mut App, name: &str| {
+            app.update(nickname(view::SparkSettingsMessage::NicknameSubmitted(
+                name.into(),
+            )))
+        };
+
+        // The old App's B is created but its task hasn't run; the reopened
+        // App (a second App over the same settings file) submits C.
+        let b = submit(&mut old, "B");
+        let mut reopened = reopened_nickname_app(&root, &old);
+        let c = submit(&mut reopened, "C");
+        runtime.block_on(async {
+            let c = tokio::spawn(async move {
+                iced_runtime::task::into_stream(c)
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await
+            });
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert!(!c.is_finished(), "C waits for B");
+            iced_runtime::task::into_stream(b)
+                .unwrap()
+                .for_each(|_| async {})
+                .await;
+            c.await.unwrap();
+        });
+        assert_eq!(
+            saved_spark_alias(&reopened).as_deref(),
+            Some("C"),
+            "C after B"
+        );
+
+        // B is running again in the old App; the reopened App read A before
+        // B landed, and asks for A: it is written, after B.
+        let root = root.join("back");
+        let mut old = nickname_app(&root);
+        let mut reopened = reopened_nickname_app(&root, &old);
+        let b = submit(&mut old, "B");
+        assert_eq!(reopened.cube_settings.spark_alias, None);
+        let back = submit(&mut reopened, "");
+        runtime.block_on(
+            iced_runtime::task::into_stream(b)
+                .unwrap()
+                .for_each(|_| async {}),
+        );
+        let back = outputs(back);
+        assert!(
+            matches!(
+                back.as_slice(),
+                [Message::SparkNicknameSaved {
+                    result: Ok(None),
+                    ..
+                }]
+            ),
+            "plain Spark is written, not skipped"
+        );
+        assert_eq!(saved_spark_alias(&reopened), None, "plain Spark after B");
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
     }
 
     /// What the App still owes when the tab replaces it: a typed name on
