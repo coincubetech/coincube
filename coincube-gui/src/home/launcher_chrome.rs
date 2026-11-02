@@ -1069,23 +1069,29 @@ pub(super) fn plan_layer<'a>(
             background: Some(iced::Background::Color(theme.colors.shell.line)),
             ..Default::default()
         });
+    // The note and the link label start where the rows' text does, 10px in:
+    // the foot sits 4px in so the link's own 6px padding lands its label
+    // there, and the rule and note take the remaining inset themselves.
     let mut foot = Column::new()
         .padding(Padding {
             top: 6.0,
-            right: 6.0,
+            right: 4.0,
             bottom: 4.0,
-            left: 6.0,
+            left: 4.0,
         })
         .spacing(8)
-        .push(rule);
+        .push(Container::new(rule).padding([0.0, 2.0]));
     if let Some(note) = plan_limit_note(projection) {
         foot = foot.push(
-            text(note)
-                .size(12)
-                .style(|theme: &theme::Theme| text::Style {
-                    color: Some(theme.colors.shell.warn),
-                })
-                .wrapping(text::Wrapping::WordOrGlyph),
+            Container::new(
+                text(note)
+                    .size(12)
+                    .style(|theme: &theme::Theme| text::Style {
+                        color: Some(theme.colors.shell.warn),
+                    })
+                    .wrapping(text::Wrapping::WordOrGlyph),
+            )
+            .padding([0.0, 6.0]),
         );
     }
     let foot = foot.push(if home.connect_account.is_authenticated() {
