@@ -583,6 +583,73 @@ pub(crate) mod capture {
         }
         messages
     }
+
+    /// A complete primary-pointer click at the centre of the `nth` text
+    /// that reads exactly `needle`: a press on plain content, where no
+    /// Action sits, as on a card's surface.
+    pub fn click_text<M: Clone + 'static>(
+        content: Element<'_, M>,
+        needle: &str,
+        nth: usize,
+        outer: (u32, u32),
+    ) -> Vec<M> {
+        for bytes in font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let sidebar = if outer.0 <= 1100 { 208.0 } else { 248.0 };
+        let size = Size::new(
+            ((outer.0 as f32 - sidebar) * 0.8).floor(),
+            outer.1.saturating_sub(100) as f32,
+        );
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut element: Element<'_, M> = iced::widget::scrollable(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let mut probe = TextProbe::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut probe);
+        let bounds = probe
+            .entries
+            .iter()
+            .filter(|(value, _)| value == needle)
+            .nth(nth)
+            .map(|(_, bounds)| *bounds)
+            .unwrap_or_else(|| panic!("text {:?} #{} in the presenter", needle, nth));
+        let cursor = mouse::Cursor::Available(bounds.center());
+        let mut messages = Vec::new();
+        for event in [
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                cursor,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &Rectangle::with_size(size),
+            );
+        }
+        messages
+    }
 }
 
 #[cfg(test)]

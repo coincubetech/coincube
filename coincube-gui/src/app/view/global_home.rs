@@ -275,10 +275,12 @@ fn wallet_card<'a>(
                             .on_press(Message::Menu(Menu::Liquid(LiquidSubMenu::Receive))),
                     ),
             );
-        return Container::new(content)
-            .padding(20)
-            .style(landing_card_style)
-            .into();
+        return openable_card(
+            Container::new(content)
+                .padding(20)
+                .style(landing_card_style),
+            overview_action,
+        );
     }
 
     let content = match wallet_type {
@@ -470,7 +472,7 @@ fn wallet_card<'a>(
                 Message::FocusAction,
             )
             .style(theme::button::transparent)
-            .on_press(overview_action);
+            .on_press(overview_action.clone());
             let content = Column::new()
                 .spacing(12)
                 .push(title_action)
@@ -531,9 +533,22 @@ fn wallet_card<'a>(
         content
     };
 
-    Container::new(content)
-        .padding(20)
-        .style(landing_card_style)
+    openable_card(
+        Container::new(content)
+            .padding(20)
+            .style(landing_card_style),
+        overview_action,
+    )
+}
+
+/// A wallet card opens its wallet from anywhere on its surface, not only
+/// from its title. The buttons, links and balance swap inside it capture
+/// their own presses, so this fires only where nothing else would. The
+/// title stays the card's focusable control for keyboard users.
+fn openable_card<'a>(card: impl Into<Element<'a, Message>>, open: Message) -> Element<'a, Message> {
+    iced::widget::mouse_area(card)
+        .on_press(open)
+        .interaction(iced::mouse::Interaction::Pointer)
         .into()
 }
 
@@ -2936,10 +2951,12 @@ pub fn global_home_view<'a>(
         .push(lbtc_row)
         .push(usdt_row);
 
-    let liquid_card: Element<'a, Message> = Container::new(liquid_card_content)
-        .padding(20)
-        .style(landing_card_style)
-        .into();
+    let liquid_card = openable_card(
+        Container::new(liquid_card_content)
+            .padding(20)
+            .style(landing_card_style),
+        Message::Menu(Menu::Liquid(LiquidSubMenu::Overview)),
+    );
 
     // --- Spark card (BTC row only, mirrors the Liquid layout) ---
     // Rendered above the Liquid card because Spark is the default
@@ -3127,12 +3144,12 @@ pub fn global_home_view<'a>(
                     .then(|| pending_deposit_card(pt, bitcoin_unit, wallet_balance_masked))
             }));
 
-        let spark_card: Element<'a, Message> = Container::new(spark_card_content)
-            .padding(20)
-            .style(landing_card_style)
-            .into();
-
-        spark_card
+        openable_card(
+            Container::new(spark_card_content)
+                .padding(20)
+                .style(landing_card_style),
+            Message::Menu(Menu::Spark(crate::app::menu::SparkSubMenu::Overview)),
+        )
     });
 
     let vault_card_element: Element<'a, Message> = {
@@ -3797,6 +3814,74 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn overview_wallet_card_surface_routes_once_to_its_wallet() {
+        use crate::app::view::shared::landing::capture;
+        let fixture = ViewFixture::new();
+        // Plain labels on each card's surface, not on any Action: Spark's
+        // and the Vault's "BTC" rows (in card order) and Liquid's "L-BTC".
+        for (needle, nth, menu) in [
+            (
+                "BTC",
+                0,
+                Menu::Spark(crate::app::menu::SparkSubMenu::Overview),
+            ),
+            ("L-BTC", 0, Menu::Liquid(LiquidSubMenu::Overview)),
+            ("BTC", 1, Menu::Vault(VaultSubMenu::Overview)),
+        ] {
+            let messages = capture::click_text(
+                overview(fixture.config(0, None, None)),
+                needle,
+                nth,
+                // Tall enough that the Vault card, alone on the second
+                // row, sits inside the scroll viewport.
+                (1024, 2000),
+            );
+            let routes = messages
+                .iter()
+                .filter(|message| matches!(message, Message::Menu(_)))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                routes.len(),
+                1,
+                "{needle} #{nth}: {messages:?}",
+                needle = needle,
+                nth = nth,
+                messages = messages
+            );
+            assert!(
+                matches!(routes[0], Message::Menu(actual) if actual == &menu),
+                "{needle} #{nth}: {messages:?}",
+                needle = needle,
+                nth = nth,
+                messages = messages
+            );
+        }
+
+        // A button on a card keeps its own action; the card does not open
+        // its wallet underneath it.
+        let messages = capture::activate(
+            overview(fixture.config(0, None, None)),
+            landing_control_id("test-cube", "Spark", "send-btc"),
+            (1024, 768),
+            true,
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, Message::Home(HomeMessage::SendSparkBtc))),
+            "{messages:?}",
+            messages = messages
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, Message::Menu(_))),
+            "{messages:?}",
+            messages = messages
+        );
     }
 
     #[test]
