@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+pub(crate) mod imported_checkpoint;
 pub mod network_anchor;
 pub mod network_status;
 pub mod vault_reconcile;
