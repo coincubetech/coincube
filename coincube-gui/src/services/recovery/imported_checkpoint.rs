@@ -237,6 +237,7 @@ mod tests {
             (2, prepared.checkpoint.commitment.clone(), true),
             (1, prepared.checkpoint.commitment.clone(), false),
             (0, String::new(), false),
+            (1, String::new(), false),
         ] {
             let server = MockServer::start();
             server.mock(|when, then| {
