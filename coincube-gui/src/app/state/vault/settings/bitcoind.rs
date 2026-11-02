@@ -154,6 +154,7 @@ pub struct BitcoindSettingsState {
     recovery_requested: bool,
     recovery_advanced: bool,
     node_advanced: bool,
+    node_log_open: bool,
     /// "Your own Esplora" editor (`PLAN-connect-blinding` PR D5). Pre-filled
     /// with the active Esplora primary so the field always shows where chain
     /// queries actually go. Nothing is applied until the URL answers a probe.
@@ -269,6 +270,7 @@ impl BitcoindSettingsState {
             recovery_requested: cache.node_history_switch_requested,
             recovery_advanced: false,
             node_advanced: false,
+            node_log_open: false,
             recovery_start: form::Value::default(),
             recovery_date_picker_open: false,
             retention_days: form::Value {
@@ -654,6 +656,15 @@ impl State for BitcoindSettingsState {
                         if !self.recovery_advanced {
                             self.recovery_date_picker_open = false;
                         }
+                    }
+                    NodeSettingsMessage::RecoverySourceSelected(from_date) => {
+                        self.recovery_advanced = from_date;
+                        if !from_date {
+                            self.recovery_date_picker_open = false;
+                        }
+                    }
+                    NodeSettingsMessage::NodeLogToggled => {
+                        self.node_log_open = !self.node_log_open;
                     }
                     NodeSettingsMessage::NodeAdvancedToggled => {
                         self.node_advanced = !self.node_advanced;
@@ -1329,6 +1340,7 @@ impl State for BitcoindSettingsState {
                     cache.node_bitcoind_sync_progress, cache.node_bitcoind_sync_heights,
                     cache.node_bitcoind_ibd, cache.node_bitcoind_subversion.as_deref(),
                     cache.node_bitcoind_last_log.as_deref(),
+                    self.node_log_open,
                     local && cfg.is_some_and(|cfg| cfg.fallback_esplora.is_some()),
                     !local && pending, recovery_in_progress, false,
                     cfg.is_some_and(|cfg| cfg.auto_switch_to_pending != Some(false)),
@@ -1371,6 +1383,29 @@ impl State for BitcoindSettingsState {
                 .map(|settings| settings.edit)
                 == Some(true);
         let can_do_rescan = !self.rescan_settings.processing && !settings_edit;
+        // Recovery must be available while Connect is still active: its
+        // pending managed node may need history before it can be selected.
+        let history_managed = self.pending_node_setup.is_none()
+            && self
+                .full_config
+                .as_ref()
+                .and_then(crate::app::local_node_sync_config)
+                .is_some_and(|cfg| {
+                    crate::node::retention::is_managed_endpoint(
+                        &cache.datadir_path,
+                        cache.network,
+                        cache.chain(),
+                        cfg,
+                    )
+                });
+        let recovery_active = cache.node_history.job.as_ref().is_some_and(|job| {
+            !matches!(
+                job.phase,
+                crate::node::history::Phase::Complete | crate::node::history::Phase::Cancelled
+            )
+        });
+        let history_card = history_managed
+            && (self.recovery_requested || recovery_active || cache.node_history.busy);
         let content = view::vault::settings::bitcoind_settings(menu, cache, {
             let mut setting_panels = Vec::new();
             let mut advanced_disclosure = false;
@@ -1488,9 +1523,11 @@ impl State for BitcoindSettingsState {
                         cache.node_bitcoind_ibd,
                         cache.node_bitcoind_subversion.as_deref(),
                         cache.node_bitcoind_last_log.as_deref(),
+                        self.node_log_open,
                         can_switch_to_connect,
                         can_switch_to_bitcoind,
-                        recovery_in_progress,
+                        // The history card carries the switch while it shows.
+                        recovery_in_progress || history_card,
                         can_setup_local_node,
                         self.full_config
                             .as_ref()
@@ -1509,36 +1546,29 @@ impl State for BitcoindSettingsState {
                 // once synced" copy above would otherwise go unexplained.
             }
 
-            // Recovery must be available while Connect is still active: its
-            // pending managed node may need history before it can be selected.
-            if self.pending_node_setup.is_none()
-                && self
-                    .full_config
-                    .as_ref()
-                    .and_then(crate::app::local_node_sync_config)
-                    .is_some_and(|cfg| {
-                        crate::node::retention::is_managed_endpoint(
-                            &cache.datadir_path,
-                            cache.network,
-                            cache.chain(),
-                            cfg,
-                        )
-                    })
-            {
-                let recovery_active = cache.node_history.job.as_ref().is_some_and(|job| {
-                    !matches!(
-                        job.phase,
-                        crate::node::history::Phase::Complete
-                            | crate::node::history::Phase::Cancelled
-                    )
-                });
-                if self.recovery_requested || recovery_active || cache.node_history.busy {
+            if history_managed {
+                if history_card {
+                    let synced = cache.node_bitcoind_ibd == Some(false);
                     setting_panels.push(
                         view::vault::settings::wallet_history_section(
                             &self.recovery_start,
                             &cache.node_history,
                             self.recovery_advanced,
                             self.recovery_date_picker_open,
+                            cache
+                                .node_bitcoind_sync_heights
+                                .map(|(blocks, _)| blocks)
+                                .filter(|_| synced),
+                            synced
+                                && self.full_config.as_ref().is_some_and(|cfg| {
+                                    cfg.pending_bitcoind.is_some()
+                                        && matches!(
+                                            cfg.bitcoin_backend,
+                                            Some(BitcoinBackend::Esplora(_))
+                                        )
+                                })
+                                && !self.node_switch_processing
+                                && !cache.daemon_switch_in_progress,
                         )
                         .map(map_node_msg),
                     );
@@ -2653,6 +2683,8 @@ impl RescanSetting {
     }
 
     fn view<'a>(&self, cache: &'a Cache, can_edit: bool) -> Element<'a, view::SettingsEditMessage> {
+        // A rescan and a history recovery would both drive the node wallet.
+        let recovery_running = wallet_history_recovery_in_progress(cache);
         view::vault::settings::rescan(
             &self.year,
             &self.month,
@@ -2660,10 +2692,11 @@ impl RescanSetting {
             cache.rescan_progress(),
             self.success,
             self.processing,
-            can_edit,
+            can_edit && !recovery_running,
             self.invalid_date,
             self.past_possible_height,
             self.future_date,
+            recovery_running,
         )
     }
 }
@@ -4683,9 +4716,9 @@ mod tests {
                 .as_widget_mut()
                 .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
             for label in [
-                "Recover history to switch to your local node",
-                "Recommended: Import Connect history",
-                "Import Connect history",
+                "Move this Vault to your local node",
+                "Bring this Vault's history to your node",
+                "Start from Connect's history",
             ] {
                 assert_eq!(labels.0.iter().any(|text| text == label), expected,
                     "missing/unsupported history controls: local={local} external={external} blake2b={blake2b}: {label}");
@@ -4694,7 +4727,7 @@ mod tests {
                 labels
                     .0
                     .iter()
-                    .any(|text| text == "Recover from this height or date"),
+                    .any(|text| text == "Recover from this date or block"),
                 expected && advanced
             );
             assert_eq!(
