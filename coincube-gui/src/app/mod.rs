@@ -3355,6 +3355,7 @@ impl App {
         cache.fiat_chain = cube_settings.network;
         cache.has_vault = wallet.supports_inheritance();
         cache.has_imported_bitcoin = wallet.is_imported();
+        cache.vault_lacks_keychain_key = wallet.lacks_keychain_key();
         cache.wallet_names = cache::WalletNames::new(&cube_settings, Some(&wallet));
         if cache.fiat_chain.is_blake2b() {
             cache.clear_btcb2_fiat();
@@ -6139,6 +6140,7 @@ impl App {
         self.daemon = Some(daemon.clone());
         self.cache.has_vault = false;
         self.cache.has_imported_bitcoin = true;
+        self.cache.vault_lacks_keychain_key = false;
         self.panels.global_home.imported_installed = true;
         self.panels.global_home.imported_balance = panel.authoritative_balance();
         let mut tasks = Vec::new();
@@ -7241,9 +7243,14 @@ impl App {
                 self.node_history_request_epoch = self.node_history_request_epoch.wrapping_add(1);
                 let request_epoch = self.node_history_request_epoch;
                 self.node_history_in_progress = true;
-                self.cache.node_history.busy = true;
-                self.cache.node_history.error = None;
+                // The 5-second background Poll is not a user's batch. Marking
+                // it busy made Node settings show recovery in progress and
+                // hide the switch for the length of each Poll, so the page
+                // flashed every 5 seconds. `node_history_in_progress` still
+                // keeps a second worker from starting.
                 if !matches!(action, node_history::Action::Poll) {
+                    self.cache.node_history.busy = true;
+                    self.cache.node_history.error = None;
                     self.node_history_epoch = self.node_history_epoch.wrapping_add(1);
                     self.cache.local_switch_history = None;
                 }
@@ -8510,6 +8517,7 @@ impl App {
                     .reload(&self.datadir, &self.cube_settings);
                 self.cache.has_vault = wallet.supports_inheritance();
                 self.cache.has_imported_bitcoin = wallet.is_imported();
+                self.cache.vault_lacks_keychain_key = wallet.lacks_keychain_key();
 
                 // A Vault attached mid-session never passes through `App::new`,
                 // so run the same identity backfill here — otherwise a Vault
@@ -17026,6 +17034,38 @@ mod local_node_sync_tests {
             Some(node_history::Action::Cancel)
         ));
         assert!(app.cache.node_history.cancel_queued);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn background_history_poll_does_not_mark_recovery_busy() {
+        let root = std::env::temp_dir().join(format!("history-poll-{}", uuid::Uuid::new_v4()));
+        let _guard = crate::app::session::test_guard();
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let config = node(8333);
+        let mut daemon_config = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        daemon_config.pending_bitcoind = Some(config.clone());
+        app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(
+            daemon_config,
+            None,
+        )));
+        app.internal_bitcoind = Some(Bitcoind::for_test(
+            config,
+            &app.cache.datadir_path,
+            app.cache.network,
+        ));
+
+        drop(app.update(Message::NodeHistory(node_history::Action::Poll)));
+        assert!(app.node_history_in_progress, "the Poll must still run");
+        assert!(
+            !app.cache.node_history.busy,
+            "a background Poll must not read as recovery in progress"
+        );
+
+        // A user's action still shows as busy.
+        app.node_history_in_progress = false;
+        drop(app.update(Message::NodeHistory(node_history::Action::Resume)));
+        assert!(app.cache.node_history.busy);
         let _ = std::fs::remove_dir_all(root);
     }
 
