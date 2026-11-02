@@ -801,6 +801,9 @@ impl<I: Iterator> Iterator for UntilAborted<I> {
     }
 }
 
+// Strictly this breaks `ExactSizeIterator`'s contract once `abort` is set: the
+// iterator ends early and `size_hint` shrinks mid-iteration. Harmless here,
+// because a sync that saw the flag is discarded as `Error::Aborted`.
 impl<I: ExactSizeIterator> ExactSizeIterator for UntilAborted<I> {}
 
 #[cfg(test)]

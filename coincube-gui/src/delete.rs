@@ -252,7 +252,9 @@ mod tests {
         std::fs::create_dir_all(&wallet_dir).unwrap();
         std::fs::write(wallet_dir.join("coincubed.sqlite3"), b"synthetic").unwrap();
         let (release, released) = std::sync::mpsc::channel::<()>();
-        crate::daemon::stopping::run_in_background(Some(wallet_dir.clone()), move || {
+        // Registered as production does: the daemon config's canonical path.
+        let registered = std::fs::canonicalize(&wallet_dir).unwrap();
+        crate::daemon::stopping::run_in_background(Some(registered), move || {
             released.recv().unwrap();
         });
 

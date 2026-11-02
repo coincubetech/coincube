@@ -11366,7 +11366,10 @@ mod tests {
         );
 
         let (release, released) = std::sync::mpsc::channel::<()>();
-        crate::daemon::stopping::run_in_background(Some(wallet_dir.clone()), move || {
+        // Registered as production does: the daemon config's canonical path,
+        // while the modal looks the directory up from the Cube's settings.
+        let registered = std::fs::canonicalize(&wallet_dir).unwrap();
+        crate::daemon::stopping::run_in_background(Some(registered), move || {
             released.recv().unwrap();
         });
         let started = std::time::Instant::now();
@@ -11439,7 +11442,10 @@ mod tests {
             false,
         );
         let (release, released) = std::sync::mpsc::channel::<()>();
-        crate::daemon::stopping::run_in_background(Some(wallet_dir.clone()), move || {
+        // Registered as production does: the daemon config's canonical path,
+        // while the modal looks the directory up from the Cube's settings.
+        let registered = std::fs::canonicalize(&wallet_dir).unwrap();
+        crate::daemon::stopping::run_in_background(Some(registered), move || {
             released.recv().unwrap();
         });
         let _ = modal.update(Message::View(ViewMessage::DeleteCube(

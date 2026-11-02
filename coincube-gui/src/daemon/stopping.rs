@@ -68,7 +68,17 @@ pub fn stop_in_background(
     });
 }
 
+/// The registry's spelling of `dir`. A stop registers the path its daemon's
+/// config names, which for a Vault is canonicalized (`\\?\C:\…` on Windows),
+/// while a delete or start looks the directory up from the Cube's settings.
+/// Both go through this so they meet.
+fn key(dir: &Path) -> PathBuf {
+    let absolute = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    crate::chain::normalized_path(&absolute)
+}
+
 pub(crate) fn run_in_background(dir: Option<PathBuf>, stop: impl FnOnce() + Send + 'static) {
+    let dir = dir.as_deref().map(key);
     // Deregisters even if `stop` panics, so no waiter is stranded.
     struct Stopped(Option<PathBuf>);
     impl Drop for Stopped {
@@ -109,6 +119,8 @@ fn is_stopping(pending: &[Option<PathBuf>], dir: Option<&Path>) -> bool {
 /// Wait until no daemon for `dir` (every daemon, for `None`) is stopping, up
 /// to `timeout`. Returns whether they all stopped.
 fn wait(dir: Option<&Path>, timeout: Duration) -> bool {
+    let dir = dir.map(key);
+    let dir = dir.as_deref();
     let (pending, changed) = stopping();
     let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());
     let deadline = Instant::now() + timeout;
@@ -128,8 +140,9 @@ fn wait(dir: Option<&Path>, timeout: Duration) -> bool {
 /// Whether a daemon for any of `dirs` is still stopping. Lets a UI caller
 /// wait in a task instead of blocking its update on [`wait_for`].
 pub fn any_stopping(dirs: &[PathBuf]) -> bool {
+    let keys: Vec<PathBuf> = dirs.iter().map(|dir| key(dir)).collect();
     let pending = stopping().0.lock().unwrap_or_else(|e| e.into_inner());
-    dirs.iter().any(|dir| is_stopping(&pending, Some(dir)))
+    keys.iter().any(|dir| is_stopping(&pending, Some(dir)))
 }
 
 /// Block until a daemon still stopping for `dir` has released it, up to
@@ -160,8 +173,9 @@ pub async fn wait_for_async(dir: PathBuf) -> bool {
 
 pub(crate) async fn wait_for_async_within(dir: PathBuf, limit: Duration) -> bool {
     let pending = {
+        let key = key(&dir);
         let pending = stopping().0.lock().unwrap_or_else(|e| e.into_inner());
-        is_stopping(&pending, Some(&dir))
+        is_stopping(&pending, Some(&key))
     };
     if !pending {
         return true;
@@ -288,6 +302,47 @@ mod tests {
         release.send(()).unwrap();
         assert!(wait_for_within(&dir, Duration::from_secs(5)));
         assert!(runtime.block_on(wait_for_async_within(dir, Duration::ZERO)));
+    }
+
+    /// A stop registers the directory as its daemon's config spells it, which
+    /// for a Vault is canonicalized (`\\?\C:\…` on Windows; `/private/var`
+    /// for macOS's temp dir). A lookup by the Cube's plain path must find it.
+    #[test]
+    fn a_stop_registered_by_its_canonical_path_is_found_by_the_plain_one() {
+        let plain = unique_dir("stopping-canonical");
+        std::fs::create_dir_all(&plain).unwrap();
+        let canonical = std::fs::canonicalize(&plain).unwrap();
+        let (release, released) = mpsc::channel::<()>();
+        run_in_background(Some(canonical.clone()), move || released.recv().unwrap());
+        assert!(any_stopping(std::slice::from_ref(&plain)));
+        assert!(!wait_for_within(&plain, Duration::from_millis(50)));
+        // And the reverse, for a stop registered by the plain spelling.
+        release.send(()).unwrap();
+        assert!(wait_for_within(&canonical, Duration::from_secs(5)));
+        std::fs::remove_dir_all(&plain).ok();
+    }
+
+    /// The same through a symlinked parent, which a temp dir need not have.
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_is_found_through_a_symlinked_parent() {
+        let real = unique_dir("stopping-real");
+        let wallet = real.join("wallet");
+        std::fs::create_dir_all(&wallet).unwrap();
+        let link = unique_dir("stopping-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let (release, released) = mpsc::channel::<()>();
+        run_in_background(Some(std::fs::canonicalize(&wallet).unwrap()), move || {
+            released.recv().unwrap()
+        });
+        assert!(any_stopping(&[link.join("wallet")]));
+        release.send(()).unwrap();
+        assert!(wait_for_within(
+            &link.join("wallet"),
+            Duration::from_secs(5)
+        ));
+        std::fs::remove_file(&link).ok();
+        std::fs::remove_dir_all(&real).ok();
     }
 
     #[test]

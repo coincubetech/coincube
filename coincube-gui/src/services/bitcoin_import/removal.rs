@@ -470,7 +470,9 @@ mod tests {
         f.install().await;
         let destination = f.destination();
         let (release, released) = std::sync::mpsc::channel::<()>();
-        crate::daemon::stopping::run_in_background(Some(destination.clone()), move || {
+        // Registered as production does: the daemon config's canonical path.
+        let registered = std::fs::canonicalize(&destination).unwrap();
+        crate::daemon::stopping::run_in_background(Some(registered), move || {
             released.recv().unwrap();
         });
         let removal = remove_cube_import(&f.directory, &f.cube);
@@ -495,7 +497,9 @@ mod tests {
         let destination = f.destination();
         let journal = journal_path(&f.directory, f.operation_id());
         let (release, released) = std::sync::mpsc::channel::<()>();
-        crate::daemon::stopping::run_in_background(Some(destination.clone()), move || {
+        // Registered as production does: the daemon config's canonical path.
+        let registered = std::fs::canonicalize(&destination).unwrap();
+        crate::daemon::stopping::run_in_background(Some(registered), move || {
             released.recv().unwrap();
         });
         let error =
