@@ -28,7 +28,7 @@ impl Checkpoint {
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
         if (self.generation == 0 && (self.active || !self.commitment.is_empty()))
-            || (self.generation > 0 && !digest)
+            || (self.generation > 0 && !digest && (self.active || !self.commitment.is_empty()))
         {
             return Err(CheckpointError::InvalidResponse);
         }
@@ -119,7 +119,7 @@ impl CoincubeClient {
         &self,
         cube_id: u64,
         method: Method,
-        suffix: &str,
+        resource: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T, CheckpointError> {
         if self.token().is_none() {
@@ -128,10 +128,7 @@ impl CoincubeClient {
         if cube_id == 0 {
             return Err(CheckpointError::InvalidRequest);
         }
-        let url = format!(
-            "{}/api/v1/connect/cubes/{cube_id}/recovery-kit/imported-checkpoint{suffix}",
-            self.base_url
-        );
+        let url = format!("{}/api/v1/connect/cubes/{cube_id}{resource}", self.base_url);
         // An anchor response must originate at the configured API. Following
         // redirects can disclose the opaque PUT body/device identity and make
         // another origin's status appear authenticated.
@@ -202,12 +199,31 @@ impl CoincubeClient {
         envelope.data.ok_or(CheckpointError::InvalidResponse)
     }
 
+    /// Authenticated same-origin scope read for checkpoint transactions.
+    pub(crate) async fn get_imported_checkpoint_cube(
+        &self,
+        cube_id: u64,
+    ) -> Result<super::CubeResponse, CheckpointError> {
+        let cube: super::CubeResponse = self
+            .imported_checkpoint_request(cube_id, Method::GET, "", None)
+            .await?;
+        if cube.id != cube_id || cube.uuid.is_empty() {
+            return Err(CheckpointError::InvalidResponse);
+        }
+        Ok(cube)
+    }
+
     pub(crate) async fn get_imported_checkpoint(
         &self,
         cube_id: u64,
     ) -> Result<Checkpoint, CheckpointError> {
         let result: Checkpoint = self
-            .imported_checkpoint_request(cube_id, Method::GET, "", None)
+            .imported_checkpoint_request(
+                cube_id,
+                Method::GET,
+                "/recovery-kit/imported-checkpoint",
+                None,
+            )
             .await?;
         result.validate()?;
         Ok(result)
@@ -217,8 +233,13 @@ impl CoincubeClient {
         &self,
         cube_id: u64,
     ) -> Result<CheckpointCiphertext, CheckpointError> {
-        self.imported_checkpoint_request(cube_id, Method::GET, "/ciphertext", None)
-            .await
+        self.imported_checkpoint_request(
+            cube_id,
+            Method::GET,
+            "/recovery-kit/imported-checkpoint/ciphertext",
+            None,
+        )
+        .await
     }
 
     pub(crate) async fn put_imported_checkpoint(
@@ -233,7 +254,7 @@ impl CoincubeClient {
         {
             return Err(CheckpointError::InvalidRequest);
         }
-        let result: Checkpoint = self.imported_checkpoint_request(cube_id, Method::PUT, "", Some(serde_json::json!({"expectedGeneration": expected_generation, "ciphertext": ciphertext}))).await?;
+        let result: Checkpoint = self.imported_checkpoint_request(cube_id, Method::PUT, "/recovery-kit/imported-checkpoint", Some(serde_json::json!({"expectedGeneration": expected_generation, "ciphertext": ciphertext}))).await?;
         result.validate()?;
         Ok(result)
     }
@@ -243,14 +264,14 @@ impl CoincubeClient {
         cube_id: u64,
         expected_generation: u64,
     ) -> Result<Checkpoint, CheckpointError> {
-        if expected_generation == 0 || expected_generation == u64::MAX {
+        if expected_generation == u64::MAX {
             return Err(CheckpointError::InvalidRequest);
         }
         let result: Checkpoint = self
             .imported_checkpoint_request(
                 cube_id,
                 Method::DELETE,
-                "",
+                "/recovery-kit/imported-checkpoint",
                 Some(serde_json::json!({"expectedGeneration": expected_generation})),
             )
             .await?;
@@ -309,6 +330,64 @@ mod tests {
                 .active
         );
         revoke.assert_hits(1);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_initial_tombstone_fences_a_first_publication() {
+        let server = MockServer::start();
+        let revoke = server.mock(|when, then| {
+            when.method(MockMethod::DELETE)
+                .path("/api/v1/connect/cubes/42/recovery-kit/imported-checkpoint")
+                .json_body(json!({"expectedGeneration":0}));
+            then.status(200).json_body(
+                json!({"success":true,"data":{"generation":1,"commitment":"","active":false}}),
+            );
+        });
+        let status = server.mock(|when, then| {
+            when.method(MockMethod::GET)
+                .path("/api/v1/connect/cubes/42/recovery-kit/imported-checkpoint");
+            then.status(200).json_body(
+                json!({"success":true,"data":{"generation":1,"commitment":"","active":false}}),
+            );
+        });
+        server.mock(|when, then| {
+            when.method(MockMethod::PUT)
+                .json_body(json!({"expectedGeneration":0,"ciphertext":"late"}));
+            then.status(409);
+        });
+        server.mock(|when, then| {
+            when.method(MockMethod::GET)
+                .path("/api/v1/connect/cubes/42/recovery-kit/imported-checkpoint/ciphertext");
+            then.status(404);
+        });
+        let client = client(&server);
+        assert_eq!(
+            client
+                .get_imported_checkpoint_ciphertext(42)
+                .await
+                .unwrap_err(),
+            CheckpointError::NotFound
+        );
+        assert_eq!(
+            client.delete_imported_checkpoint(42, 0).await.unwrap(),
+            client.get_imported_checkpoint(42).await.unwrap()
+        );
+        assert_eq!(
+            client
+                .put_imported_checkpoint(42, 0, "late")
+                .await
+                .unwrap_err(),
+            CheckpointError::Conflict
+        );
+        revoke.assert_hits(1);
+        status.assert_hits(1);
+        assert!(Checkpoint {
+            generation: 1,
+            commitment: String::new(),
+            active: true
+        }
+        .validate()
+        .is_err());
     }
 
     #[tokio::test]
@@ -433,9 +512,37 @@ mod tests {
                 client.delete_imported_checkpoint(42, 1).await.unwrap_err(),
                 CheckpointError::InvalidResponse
             );
-            redirected.assert_hits(4);
+            assert_eq!(
+                client.get_imported_checkpoint_cube(42).await.unwrap_err(),
+                CheckpointError::InvalidResponse
+            );
+            redirected.assert_hits(5);
         }
         forwarded.assert_hits(0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_cube_scope_requires_same_authenticated_id_and_uuid() {
+        for (id, uuid, expected_ok) in [
+            (42, "cube-uuid", true),
+            (43, "cube-uuid", false),
+            (42, "", false),
+        ] {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(MockMethod::GET).path("/api/v1/connect/cubes/42")
+                    .header("authorization", "Bearer synthetic-test-token");
+                then.status(200).json_body(json!({"success":true,"data":{"id":id,"uuid":uuid,"network":"regtest","name":"Synthetic","status":"active"}}));
+            });
+            assert_eq!(
+                client(&server)
+                    .get_imported_checkpoint_cube(42)
+                    .await
+                    .is_ok(),
+                expected_ok
+            );
+            mock.assert_hits(1);
+        }
     }
 
     #[tokio::test]

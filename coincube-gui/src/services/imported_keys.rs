@@ -48,6 +48,10 @@ use crate::{
     },
 };
 
+pub(crate) mod checkpoint;
+
+const MAX_MANIFEST_BYTES: usize = 256 * 1024;
+const LEGACY_MANIFEST_BYTES: usize = 16_384;
 const MANIFEST: &str = "manifest.json";
 const LOCK_PREFIX: &str = ".imported-key-anchor-";
 const MAX_RECORDS: usize = 32;
@@ -101,6 +105,8 @@ struct Manifest {
     wallet_id: String,
     policy_hash: String,
     records: Vec<LocalKeyRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<checkpoint::Journal>,
 }
 
 struct RepositoryGuard {
@@ -205,6 +211,7 @@ impl<'a> LocalKeyRepository<'a> {
             wallet_id: self.attachment.wallet_id.to_string(),
             policy_hash: hex::encode(self.policy_hash),
             records,
+            checkpoint: None,
         }
     }
 
@@ -380,6 +387,7 @@ impl<'a> LocalKeyRepository<'a> {
         if anchor::digest(&bytes) != digest {
             return Err("Imported key manifest differs from its device anchor.".into());
         }
+        checkpoint::validate_generation(&manifest, &authority)?;
         if cleanup.is_some() {
             if let Err(error) = self.finish_cleanup(&authority) {
                 log::warn!("Imported inventory cleanup remains pending: {error}");
@@ -1280,11 +1288,11 @@ impl<'a> LocalKeyRepository<'a> {
         {
             return Err("Imported key manifest endpoint is unsafe.".into());
         }
-        let mut bytes = Vec::with_capacity(16_385);
-        file.take(16_385)
+        let mut bytes = Vec::new();
+        file.take((MAX_MANIFEST_BYTES + 1) as u64)
             .read_to_end(&mut bytes)
             .map_err(|_| "Cannot read imported key manifest.")?;
-        if bytes.len() > 16_384 {
+        if bytes.len() > MAX_MANIFEST_BYTES {
             return Err("Imported key manifest is oversized.".into());
         }
         let manifest: Manifest =
@@ -1292,6 +1300,10 @@ impl<'a> LocalKeyRepository<'a> {
         if serde_json::to_vec(&manifest).ok().as_deref() != Some(bytes.as_slice()) {
             return Err("Imported key manifest has a noncanonical or duplicate field.".into());
         }
+        if manifest.checkpoint.is_none() && bytes.len() > LEGACY_MANIFEST_BYTES {
+            return Err("Legacy imported key manifest is oversized.".into());
+        }
+        checkpoint::validate_journal(self, &manifest)?;
         let expected = self.manifest(manifest.records.clone());
         if manifest.version != expected.version
             || manifest.cube_id != expected.cube_id
@@ -1443,6 +1455,7 @@ impl<'a> LocalKeyRepository<'a> {
         device: &coincube_core::seed_crypt::DeviceSecret,
         is_current: impl Fn() -> bool,
     ) -> Result<Vec<LocalKeyRecord>, String> {
+        checkpoint::ensure_unbound(&manifest)?;
         if entries.is_empty() || entries.len() > MAX_RECORDS {
             return Err("Imported key batch has an invalid size.".into());
         }
@@ -1555,6 +1568,7 @@ impl<'a> LocalKeyRepository<'a> {
         device: &coincube_core::seed_crypt::DeviceSecret,
         is_current: impl Fn() -> bool,
     ) -> Result<LocalKeyRecord, String> {
+        checkpoint::ensure_unbound(&manifest)?;
         // Corruption of any admitted sibling blocks mutation; never replace a
         // broken repository with a misleading partial inventory.
         for old in &manifest.records {
@@ -1703,6 +1717,7 @@ impl<'a> LocalKeyRepository<'a> {
         let credential = self.check_active()?;
         let lock = self.lock()?;
         let mut manifest = self.read_manifest_recoverable(&lock)?;
+        checkpoint::ensure_unbound(&manifest)?;
         let device = self.device(false)?;
         for record in &manifest.records {
             self.read_key(record, &credential, &device)?;
@@ -1741,6 +1756,7 @@ impl<'a> LocalKeyRepository<'a> {
         match anchor::load(&scope)? {
             Some(current) if matches!(current.state, AnchorState::Revoked { .. }) => {}
             Some(current) => {
+                self.checkpoint_removal_gate(&current)?;
                 let (generation, digest) = match &current.state {
                     AnchorState::Committed {
                         generation, digest, ..
@@ -1850,10 +1866,10 @@ fn read_manifest_bytes(path: &Path) -> Result<Vec<u8>, String> {
         return Err("Imported key manifest endpoint is unsafe.".into());
     }
     let mut bytes = Vec::new();
-    file.take(16_385)
+    file.take((MAX_MANIFEST_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| "Cannot read imported key manifest.")?;
-    if bytes.len() > 16_384 {
+    if bytes.len() > MAX_MANIFEST_BYTES {
         return Err("Imported key manifest is oversized.".into());
     }
     Ok(bytes)
@@ -3952,5 +3968,699 @@ mod tests {
         repository.remove_operation_storage().unwrap();
         assert!(repository.records().is_err(), "tombstone must refuse");
         app::session::close();
+    }
+    fn checkpoint_test_scope(fixture: &Fixture) -> crate::services::coincube::CubeResponse {
+        serde_json::from_value(serde_json::json!({"id":42,"uuid":fixture.cube.id,"network":fixture.cube.network.api_str(),"name":"Synthetic","status":"active"})).unwrap()
+    }
+
+    fn checkpoint_test_public(
+        fixture: &Fixture,
+    ) -> crate::services::recovery::ImportedDescriptorBlob {
+        crate::services::recovery::ImportedDescriptorBlob::new_with_pair(
+            fixture.cube.id.clone(),
+            fixture.cube.network,
+            crate::services::recovery::ImportedDescriptorBlobWallet {
+                name: "Synthetic".into(),
+                descriptor: fixture.attachment.descriptor.clone(),
+                birthday: 0,
+                initial_lookahead: 100,
+                receive_index: 0,
+                change_index: 0,
+            },
+            None,
+            None,
+            Some(fixture.cube.bitcoin_import.as_ref().unwrap().operation_id),
+        )
+        .unwrap()
+    }
+
+    fn checkpoint_test_admit(fixture: &Fixture, device: &coincube_core::seed_crypt::DeviceSecret) {
+        let repository = fixture.repository();
+        repository
+            .admit_new_batch_locked(
+                repository.read_manifest().unwrap(),
+                vec![(
+                    fixture.accounts[0].clone(),
+                    ImportedKeySecret::new(
+                        Zeroizing::new(fixture.phrases[0].clone()),
+                        Zeroizing::new(String::new()),
+                    )
+                    .unwrap(),
+                )],
+                "synthetic unlock",
+                device,
+                || true,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn checkpoint_inventory_export_binding_rollback_and_tombstone_release() {
+        use crate::services::{
+            coincube::imported_checkpoint::Checkpoint, recovery::imported_key_v3::ImportedKeyKitV3,
+        };
+        use checkpoint::PublicationError;
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([91u8; 32]);
+        checkpoint_test_admit(&fixture, &device);
+        let password = Zeroizing::new("synthetic recovery password".to_owned());
+        let cube = checkpoint_test_scope(&fixture);
+        let absent = Checkpoint {
+            generation: 0,
+            commitment: String::new(),
+            active: false,
+        };
+        let original = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        repository
+            .prepare_checkpoint_locked(
+                repository.read_manifest().unwrap(),
+                &cube,
+                &absent,
+                checkpoint_test_public(&fixture),
+                &password,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        let prepared_bytes = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        let prepared = fixture.repository().read_manifest().unwrap();
+        let journal = prepared.checkpoint.clone().unwrap();
+        let decoded = ImportedKeyKitV3::decrypt_password(
+            journal.ciphertext.as_ref().unwrap(),
+            &password,
+            &fixture.cube.id,
+        )
+        .unwrap();
+        assert_eq!(decoded.local_keys[0].record, prepared.records[0]);
+        assert_eq!(decoded.local_keys[0].secret.words(), fixture.phrases[0]);
+        assert_eq!(decoded.inventory_generation, 1);
+        assert_eq!(decoded.checkpoint_generation, 1);
+        assert!(!format!("{prepared:?}").contains(journal.ciphertext.as_ref().unwrap()));
+        assert!(checkpoint::ensure_unbound(&prepared).is_err());
+        assert!(repository
+            .admit_new_batch_locked(
+                prepared.clone(),
+                vec![],
+                "synthetic unlock",
+                &device,
+                || true
+            )
+            .is_err());
+        assert!(repository.remove_operation_storage().is_err());
+        assert!(!repository.is_removed().unwrap());
+        write_replace(&repository.root().join(MANIFEST), &original).unwrap();
+        assert!(repository.read_manifest().is_err());
+        assert!(repository.remove_operation_storage().is_err());
+        write_replace(&repository.root().join(MANIFEST), &prepared_bytes).unwrap();
+        assert_eq!(
+            repository.read_manifest().unwrap().checkpoint.as_ref(),
+            Some(&journal)
+        );
+        let current = Checkpoint {
+            generation: journal.generation,
+            commitment: journal.commitment.clone(),
+            active: true,
+        };
+        let wrong = Checkpoint {
+            generation: journal.generation + 1,
+            commitment: journal.commitment.clone(),
+            active: true,
+        };
+        assert_eq!(
+            repository.confirm_checkpoint_locked(
+                prepared.clone(),
+                &journal,
+                &cube,
+                &wrong,
+                "synthetic unlock",
+                &device,
+                || true
+            ),
+            Err(PublicationError::Stale)
+        );
+        assert_eq!(
+            repository.confirm_checkpoint_locked(
+                prepared.clone(),
+                &journal,
+                &cube,
+                &current,
+                "synthetic unlock",
+                &device,
+                || false
+            ),
+            Err(PublicationError::Cancelled)
+        );
+        assert_eq!(
+            repository.read_manifest().unwrap().checkpoint.as_ref(),
+            Some(&journal)
+        );
+        let receipt = repository
+            .confirm_checkpoint_locked(
+                prepared,
+                &journal,
+                &cube,
+                &current,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        assert_eq!(receipt.source_generation, 1);
+        let confirmed = repository.read_manifest().unwrap();
+        let confirmed_journal = confirmed.checkpoint.clone().unwrap();
+        assert!(confirmed_journal.ciphertext.is_none());
+        assert!(repository.remove_operation_storage().is_err());
+        assert_eq!(
+            repository.release_checkpoint_locked(
+                confirmed.clone(),
+                &confirmed_journal,
+                &cube,
+                &wrong,
+                "synthetic unlock",
+                &device,
+                || true
+            ),
+            Err(PublicationError::Stale)
+        );
+        let tombstone = Checkpoint {
+            generation: current.generation + 1,
+            commitment: current.commitment.clone(),
+            active: false,
+        };
+        repository
+            .release_checkpoint_locked(
+                confirmed,
+                &confirmed_journal,
+                &cube,
+                &tombstone,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        let released = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        assert!(repository.read_manifest().unwrap().checkpoint.is_none());
+        write_replace(&repository.root().join(MANIFEST), &prepared_bytes).unwrap();
+        assert!(repository.read_manifest().is_err());
+        write_replace(&repository.root().join(MANIFEST), &released).unwrap();
+        repository.remove_operation_storage().unwrap();
+    }
+
+    #[test]
+    fn checkpoint_inventory_refuses_cancel_scope_active_backup_and_corrupt_record() {
+        use crate::services::coincube::imported_checkpoint::Checkpoint;
+        use checkpoint::PublicationError;
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([92u8; 32]);
+        checkpoint_test_admit(&fixture, &device);
+        let password = Zeroizing::new("synthetic recovery password".to_owned());
+        let mut cube = checkpoint_test_scope(&fixture);
+        let absent = Checkpoint {
+            generation: 0,
+            commitment: String::new(),
+            active: false,
+        };
+        let original = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        assert_eq!(
+            repository.prepare_checkpoint_locked(
+                repository.read_manifest().unwrap(),
+                &cube,
+                &absent,
+                checkpoint_test_public(&fixture),
+                &password,
+                "synthetic unlock",
+                &device,
+                || false
+            ),
+            Err(PublicationError::Cancelled)
+        );
+        cube.uuid = "another-cube".into();
+        assert_eq!(
+            repository.prepare_checkpoint_locked(
+                repository.read_manifest().unwrap(),
+                &cube,
+                &absent,
+                checkpoint_test_public(&fixture),
+                &password,
+                "synthetic unlock",
+                &device,
+                || true
+            ),
+            Err(PublicationError::Scope)
+        );
+        cube = checkpoint_test_scope(&fixture);
+        let active = Checkpoint {
+            generation: 1,
+            commitment: "a".repeat(64),
+            active: true,
+        };
+        assert_eq!(
+            repository.prepare_checkpoint_locked(
+                repository.read_manifest().unwrap(),
+                &cube,
+                &active,
+                checkpoint_test_public(&fixture),
+                &password,
+                "synthetic unlock",
+                &device,
+                || true
+            ),
+            Err(PublicationError::Bound)
+        );
+        let manifest = repository.read_manifest().unwrap();
+        let record_path = repository.root().join(manifest.records[0].file_name());
+        let mut corrupt = read_key_frame(&record_path).unwrap();
+        *corrupt.last_mut().unwrap() ^= 1;
+        fs::write(record_path, corrupt).unwrap();
+        assert_eq!(
+            repository.prepare_checkpoint_locked(
+                manifest,
+                &cube,
+                &absent,
+                checkpoint_test_public(&fixture),
+                &password,
+                "synthetic unlock",
+                &device,
+                || true
+            ),
+            Err(PublicationError::Inventory)
+        );
+        assert_eq!(
+            read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn checkpoint_inventory_crash_recovery_keeps_exact_ciphertext_and_binding() {
+        use crate::services::coincube::imported_checkpoint::Checkpoint;
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([93u8; 32]);
+        checkpoint_test_admit(&fixture, &device);
+        let password = Zeroizing::new("synthetic recovery password".to_owned());
+        let cube = checkpoint_test_scope(&fixture);
+        let absent = Checkpoint {
+            generation: 0,
+            commitment: String::new(),
+            active: false,
+        };
+        anchor::tests::inject_update_fault(
+            &repository.anchor_scope(),
+            anchor::tests::UpdateFault::AfterWriteReadbackError,
+        );
+        assert!(repository
+            .prepare_checkpoint_locked(
+                repository.read_manifest().unwrap(),
+                &cube,
+                &absent,
+                checkpoint_test_public(&fixture),
+                &password,
+                "synthetic unlock",
+                &device,
+                || true
+            )
+            .is_err());
+        let pending = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        let AnchorState::Pending { txn_id, .. } = &pending.state else {
+            panic!("expected durable pending intent");
+        };
+        let candidate = repository
+            .read_manifest_structure(&repository.prepared(*txn_id), false)
+            .unwrap();
+        let exact = candidate.checkpoint.unwrap();
+        assert!(repository.remove_operation_storage().is_err());
+        repository
+            .recover_pending_with(pending, "synthetic unlock", &device)
+            .unwrap();
+        let prepared = repository.read_manifest().unwrap();
+        assert_eq!(prepared.checkpoint.as_ref(), Some(&exact));
+        let remote = Checkpoint {
+            generation: exact.generation,
+            commitment: exact.commitment.clone(),
+            active: true,
+        };
+        anchor::tests::inject_update_fault(
+            &repository.anchor_scope(),
+            anchor::tests::UpdateFault::AfterWriteReadbackError,
+        );
+        assert!(repository
+            .confirm_checkpoint_locked(
+                prepared,
+                &exact,
+                &cube,
+                &remote,
+                "synthetic unlock",
+                &device,
+                || true
+            )
+            .is_err());
+        let pending = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        repository
+            .recover_pending_with(pending, "synthetic unlock", &device)
+            .unwrap();
+        let confirmed = repository.read_manifest().unwrap();
+        let journal = confirmed.checkpoint.clone().unwrap();
+        assert!(journal.ciphertext.is_none());
+        let receipt = repository
+            .confirm_checkpoint_locked(
+                confirmed,
+                &journal,
+                &cube,
+                &remote,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        assert_eq!(receipt.commitment, exact.commitment);
+    }
+    #[test]
+    fn checkpoint_inventory_public_state_comes_from_live_read_only_authority() {
+        use crate::services::{
+            coincube::imported_checkpoint::Checkpoint,
+            recovery::imported_descriptor_blob_fingerprint,
+        };
+        use checkpoint::PublicationError;
+        use coincubed::{
+            config::{BitcoinBackend, BitcoinConfig, Config, ElectrumConfig},
+            datadir::DataDirectory,
+        };
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        assert!(matches!(
+            repository.live_checkpoint_public(),
+            Err(PublicationError::PublicState)
+        ));
+        let metadata: app::settings::WalletSettings = serde_json::from_value(serde_json::json!({
+            "name":"Live signer metadata", "descriptor_checksum":fixture.attachment.wallet_id.descriptor_checksum,
+            "pinned_at":fixture.attachment.wallet_id.timestamp, "start_internal_bitcoind":true
+        })).unwrap();
+        let mut saved = Settings {
+            cubes: vec![fixture.cube.clone()],
+            wallets: vec![metadata],
+            ..Settings::default()
+        };
+        let save = |saved: &Settings| {
+            fs::write(
+                fixture.directory.path().join("settings.json"),
+                serde_json::to_vec(saved).unwrap(),
+            )
+            .unwrap()
+        };
+        save(&saved);
+        // Missing storage is a refusal, never permission to use caller indices.
+        assert!(matches!(
+            repository.live_checkpoint_public(),
+            Err(PublicationError::PublicState)
+        ));
+        let data = fixture
+            .directory
+            .coincubed_data_directory(&fixture.attachment.wallet_id);
+        let stage = DataDirectory::new(fixture.root.join("checkpoint-public-stage"));
+        let mut config = Config::new(
+            BitcoinConfig::new(fixture.cube.network, std::time::Duration::from_secs(10)),
+            Some(BitcoinBackend::Electrum(ElectrumConfig {
+                addr: "tcp://127.0.0.1:50001".into(),
+                validate_domain: true,
+            })),
+            log::LevelFilter::Info,
+            coincube_core::wallet_descriptor::WalletDescriptor::Imported(
+                fixture.attachment.descriptor.clone(),
+            ),
+            DataDirectory::new(data.path().to_path_buf()),
+        );
+        config.import_birthday = Some(fixture.attachment.birthday);
+        config.import_initial_lookahead = Some(fixture.attachment.initial_lookahead);
+        coincubed::create_imported_storage(
+            &config,
+            &stage,
+            fixture.attachment.birthday,
+            fixture.attachment.initial_lookahead,
+        )
+        .unwrap();
+        coincubed::restore_imported_address_state(&config, &stage, 7, 4).unwrap();
+        fs::rename(stage.path(), data.path()).unwrap();
+        let public = repository.live_checkpoint_public().unwrap();
+        assert_eq!(
+            (public.wallet.receive_index, public.wallet.change_index),
+            (7, 4)
+        );
+        assert_eq!(public.wallet.birthday, fixture.attachment.birthday);
+        assert_eq!(
+            public.wallet.initial_lookahead,
+            fixture.attachment.initial_lookahead
+        );
+        assert_eq!(
+            public.signer_metadata.as_ref().unwrap().name,
+            "Live signer metadata"
+        );
+        assert_eq!(
+            public
+                .signer_metadata
+                .as_ref()
+                .unwrap()
+                .start_internal_bitcoind,
+            Some(false)
+        );
+        assert_ne!(
+            imported_descriptor_blob_fingerprint(&public),
+            imported_descriptor_blob_fingerprint(&checkpoint_test_public(&fixture))
+        );
+        let expected = imported_descriptor_blob_fingerprint(&public).unwrap();
+        let device = Zeroizing::new([94u8; 32]);
+        checkpoint_test_admit(&fixture, &device);
+        let absent = Checkpoint {
+            generation: 0,
+            commitment: String::new(),
+            active: false,
+        };
+        let cube = checkpoint_test_scope(&fixture);
+        let password = Zeroizing::new("synthetic recovery password".to_owned());
+        repository
+            .prepare_checkpoint_locked(
+                repository.read_manifest().unwrap(),
+                &cube,
+                &absent,
+                public,
+                &password,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        let prepared = repository.read_manifest().unwrap();
+        let journal = prepared.checkpoint.clone().unwrap();
+        saved.wallets[0].name = "New signer metadata".into();
+        save(&saved);
+        assert_ne!(
+            imported_descriptor_blob_fingerprint(&repository.live_checkpoint_public().unwrap())
+                .as_ref(),
+            Some(&expected)
+        );
+        let remote = Checkpoint {
+            generation: journal.generation,
+            commitment: journal.commitment.clone(),
+            active: true,
+        };
+        assert_eq!(
+            repository.confirm_checkpoint_locked(
+                prepared,
+                &journal,
+                &cube,
+                &remote,
+                "synthetic unlock",
+                &device,
+                || repository
+                    .live_checkpoint_public()
+                    .ok()
+                    .and_then(|blob| imported_descriptor_blob_fingerprint(&blob))
+                    .as_ref()
+                    == Some(&expected)
+            ),
+            Err(PublicationError::Cancelled)
+        );
+        assert!(repository
+            .read_manifest()
+            .unwrap()
+            .checkpoint
+            .unwrap()
+            .ciphertext
+            .is_some());
+    }
+    #[test]
+    fn checkpoint_inventory_cancellation_after_local_intent_keeps_durable_state() {
+        use crate::services::coincube::imported_checkpoint::Checkpoint;
+        use checkpoint::PublicationError;
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([95u8; 32]);
+        checkpoint_test_admit(&fixture, &device);
+        let source = anchor::load(&repository.anchor_scope()).unwrap().unwrap();
+        let AnchorState::Committed {
+            generation: source_generation,
+            ..
+        } = source.state
+        else {
+            unreachable!()
+        };
+        let before_epoch = |epoch| {
+            matches!(anchor::load(&repository.anchor_scope()),
+            Ok(Some(Anchor { state:AnchorState::Committed { generation, .. }, .. })) if generation <= epoch)
+        };
+        let cube = checkpoint_test_scope(&fixture);
+        let absent = Checkpoint {
+            generation: 0,
+            commitment: String::new(),
+            active: false,
+        };
+        let password = Zeroizing::new("synthetic recovery password".to_owned());
+        // Cancel when durable publication intent appears, without depending on
+        // how many times the transaction invokes the currentness callback.
+        assert_eq!(
+            repository.prepare_checkpoint_locked(
+                repository.read_manifest().unwrap(),
+                &cube,
+                &absent,
+                checkpoint_test_public(&fixture),
+                &password,
+                "synthetic unlock",
+                &device,
+                || before_epoch(source_generation)
+            ),
+            Err(PublicationError::Cancelled)
+        );
+        let prepared = repository.read_manifest().unwrap();
+        let journal = prepared.checkpoint.clone().unwrap();
+        assert!(journal.ciphertext.is_some());
+        assert!(repository.remove_operation_storage().is_err());
+        let remote = Checkpoint {
+            generation: journal.generation,
+            commitment: journal.commitment.clone(),
+            active: true,
+        };
+        assert_eq!(
+            repository.confirm_checkpoint_locked(
+                prepared,
+                &journal,
+                &cube,
+                &remote,
+                "synthetic unlock",
+                &device,
+                || before_epoch(source_generation + 1)
+            ),
+            Err(PublicationError::Cancelled)
+        );
+        let confirmed = repository.read_manifest().unwrap();
+        let durable = confirmed.checkpoint.clone().unwrap();
+        assert!(durable.ciphertext.is_none());
+        // A cancelled callback never claims completion, but an exact later
+        // reconciliation can recover a local confirmation that did commit.
+        let receipt = repository
+            .confirm_checkpoint_locked(
+                confirmed,
+                &durable,
+                &cube,
+                &remote,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        assert_eq!(receipt.commitment, journal.commitment);
+    }
+    #[test]
+    fn checkpoint_inventory_initial_tombstone_releases_intent_and_next_epoch_is_two() {
+        use crate::services::{
+            coincube::imported_checkpoint::Checkpoint, recovery::imported_key_v3::ImportedKeyKitV3,
+        };
+        let fixture = Fixture::new();
+        let repository = fixture.repository();
+        let device = Zeroizing::new([96u8; 32]);
+        checkpoint_test_admit(&fixture, &device);
+        let cube = checkpoint_test_scope(&fixture);
+        let absent = Checkpoint {
+            generation: 0,
+            commitment: String::new(),
+            active: false,
+        };
+        let password = Zeroizing::new("synthetic recovery password".to_owned());
+        repository
+            .prepare_checkpoint_locked(
+                repository.read_manifest().unwrap(),
+                &cube,
+                &absent,
+                checkpoint_test_public(&fixture),
+                &password,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        let prepared = repository.read_manifest().unwrap();
+        let journal = prepared.checkpoint.clone().unwrap();
+        let old_bytes = read_manifest_bytes(&repository.root().join(MANIFEST)).unwrap();
+        let initial_tombstone = Checkpoint {
+            generation: 1,
+            commitment: String::new(),
+            active: false,
+        };
+        repository
+            .release_checkpoint_locked(
+                prepared,
+                &journal,
+                &cube,
+                &initial_tombstone,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        let released = repository.read_manifest().unwrap();
+        assert!(released.checkpoint.is_none());
+        let old_remote = Checkpoint {
+            generation: 1,
+            commitment: journal.commitment.clone(),
+            active: true,
+        };
+        assert!(repository
+            .confirm_checkpoint_locked(
+                released.clone(),
+                &journal,
+                &cube,
+                &old_remote,
+                "synthetic unlock",
+                &device,
+                || true
+            )
+            .is_err());
+        repository
+            .prepare_checkpoint_locked(
+                released,
+                &cube,
+                &initial_tombstone,
+                checkpoint_test_public(&fixture),
+                &password,
+                "synthetic unlock",
+                &device,
+                || true,
+            )
+            .unwrap();
+        let fresh = repository.read_manifest().unwrap();
+        let fresh = fresh.checkpoint.as_ref().unwrap();
+        assert_eq!(fresh.generation, 2);
+        let kit = ImportedKeyKitV3::decrypt_password(
+            fresh.ciphertext.as_ref().unwrap(),
+            &password,
+            &fixture.cube.id,
+        )
+        .unwrap();
+        assert_eq!(kit.checkpoint_generation, 2);
+        assert_eq!(kit.inventory_generation, 3);
+        write_replace(&repository.root().join(MANIFEST), &old_bytes).unwrap();
+        assert!(repository.read_manifest().is_err());
     }
 }
