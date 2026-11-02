@@ -195,6 +195,12 @@ pub struct DefineSpend {
     /// feerate field, so the matching Fast/Normal/Slow button can render as
     /// selected. Cleared when the user types a feerate manually.
     selected_feerate_target: Option<usize>,
+    /// The Custom fee segment is chosen (W4): the field is shown, and the
+    /// presets are not selected.
+    custom_feerate: bool,
+    /// The last rate typed into the field, restored when Custom is chosen
+    /// again after a preset replaced it.
+    custom_feerate_value: Option<String>,
     fee_amount: Option<Amount>,
     generated: Option<(Psbt, Vec<String>)>,
     generating: bool,
@@ -257,6 +263,8 @@ impl DefineSpend {
             feerate: form::Value::default(),
             fee_amount: None,
             selected_feerate_target: None,
+            custom_feerate: false,
+            custom_feerate_value: None,
             amount_left_to_select: None,
             warning: None,
             is_first_step,
@@ -902,6 +910,9 @@ impl Step for DefineSpend {
                         // flight is that fetch's result — keep the preset
                         // highlighted. A manual edit (no fetch pending) has
                         // `loading_fee_estimate == None`, clearing the selection.
+                        if self.loading_fee_estimate.is_none() {
+                            self.custom_feerate_value = Some(self.feerate.value.clone());
+                        }
                         self.selected_feerate_target = self.loading_fee_estimate;
                         self.loading_fee_estimate = None;
                         // A feerate change must re-run coin selection: it
@@ -918,7 +929,25 @@ impl Step for DefineSpend {
                         self.warning = Some(err);
                         return Task::done(Message::View(view::Message::ShowError(err_msg)));
                     }
+                    view::CreateSpendMessage::CustomFeerate => {
+                        self.custom_feerate = true;
+                        self.selected_feerate_target = None;
+                        // A preset fetch still in flight would replace the
+                        // custom rate when it lands: drop it.
+                        self.loading_fee_estimate = None;
+                        if let Some(value) = self
+                            .custom_feerate_value
+                            .clone()
+                            .filter(|value| *value != self.feerate.value)
+                        {
+                            return Task::done(Message::View(view::Message::CreateSpend(
+                                CreateSpendMessage::FeerateEdited(value),
+                            )));
+                        }
+                        return Task::none();
+                    }
                     view::CreateSpendMessage::FetchFeeEstimate(block_target) => {
+                        self.custom_feerate = false;
                         self.loading_fee_estimate = Some(block_target);
                         return Task::perform(
                             async move {
@@ -1271,6 +1300,8 @@ impl Step for DefineSpend {
             self.is_first_step,
             self.loading_fee_estimate,
             self.selected_feerate_target,
+            self.custom_feerate_shown(),
+            self.threshold(),
             self.generating,
             self.bitcoin_unit,
             max_under_dust,
@@ -1279,6 +1310,26 @@ impl Step for DefineSpend {
 
     fn reload_wallet(&mut self, wallet: Arc<Wallet>) {
         self.wallet = wallet;
+    }
+}
+
+impl DefineSpend {
+    /// Whether the fee field shows: Custom chosen, or no preset filling it
+    /// (a rate typed before any preset).
+    pub(crate) fn custom_feerate_shown(&self) -> bool {
+        self.custom_feerate
+            || (self.selected_feerate_target.is_none() && self.loading_fee_estimate.is_none())
+    }
+
+    /// The primary path's threshold and key count, for the Send footer.
+    fn threshold(&self) -> Option<(usize, usize)> {
+        let descriptor = self.wallet.inheritance_descriptor()?;
+        Some(match descriptor.policy().primary_path() {
+            coincube_core::descriptors::PathInfo::Single(_) => (1, 1),
+            coincube_core::descriptors::PathInfo::Multi(threshold, keys) => {
+                (*threshold, keys.len())
+            }
+        })
     }
 }
 
@@ -2478,6 +2529,88 @@ mod tests {
         assert!(associate_recipients(&recipients, &prepared_outputs(&[1_000, 2_000])).is_none());
         assert!(associate_recipients(&[bip21_recipient(1_001)], &psbt).is_none());
         assert!(associate_recipients(&[], &psbt).unwrap().is_empty());
+    }
+
+    /// Fee segments map to rates: a preset fetches its block target's
+    /// estimate and hides the field; Custom shows the field and keeps the rate
+    /// typed into it, even after a preset replaced it.
+    #[tokio::test]
+    async fn fee_segments_map_to_rates_and_custom_keeps_the_typed_value() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        let send = |state: &mut DefineSpend, message: view::CreateSpendMessage| {
+            state.update(
+                daemon.clone(),
+                &Cache::default(),
+                Message::View(view::Message::CreateSpend(message)),
+            )
+        };
+        // Typed before any preset: the field shows.
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FeerateEdited("12".into()),
+        ));
+        assert!(state.custom_feerate_shown());
+
+        // Normal: its block target is fetched and its estimate fills the
+        // field, which hides.
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FetchFeeEstimate(6),
+        ));
+        assert_eq!(state.loading_fee_estimate, Some(6));
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FeerateEdited("4".into()),
+        ));
+        assert_eq!(state.selected_feerate_target, Some(6));
+        assert_eq!(state.feerate.value, "4");
+        assert!(!state.custom_feerate_shown());
+
+        // Custom: the field shows again with the typed 12, not Normal's 4.
+        let restore = send(&mut state, view::CreateSpendMessage::CustomFeerate);
+        assert!(state.custom_feerate_shown());
+        assert_eq!(state.selected_feerate_target, None);
+        let restored: Vec<Message> = {
+            use iced_runtime::futures::futures::StreamExt;
+            iced_runtime::task::into_stream(restore)
+                .expect("a restore task")
+                .filter_map(|action| async move {
+                    match action {
+                        iced_runtime::Action::Output(message) => Some(message),
+                        _ => None,
+                    }
+                })
+                .collect()
+                .await
+        };
+        assert!(matches!(
+            restored.as_slice(),
+            [Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::FeerateEdited(value)
+            ))] if value == "12"
+        ));
+        for message in restored {
+            drop(state.update(daemon.clone(), &Cache::default(), message));
+        }
+        assert_eq!(state.feerate.value, "12");
+        assert!(state.custom_feerate_shown(), "still Custom after restoring");
+
+        // A preset fetch in flight when Custom is chosen doesn't land on it.
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FetchFeeEstimate(1),
+        ));
+        drop(send(&mut state, view::CreateSpendMessage::CustomFeerate));
+        assert_eq!(state.loading_fee_estimate, None);
+        drop(send(
+            &mut state,
+            view::CreateSpendMessage::FeerateEdited("30".into()),
+        ));
+        assert_eq!(state.selected_feerate_target, None);
+        assert!(state.custom_feerate_shown());
     }
 
     #[tokio::test]

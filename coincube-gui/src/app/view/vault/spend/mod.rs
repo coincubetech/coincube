@@ -30,7 +30,7 @@ use crate::{
         menu::Menu,
         view::{
             balance_header_card, dashboard_headed, message::*, vault::coins, vault::psbt,
-            vault_page_head, FiatAmountConverter,
+            FiatAmountConverter,
         },
         wallet::SyncStatus,
     },
@@ -65,7 +65,7 @@ pub fn spend_view<'a>(
     dashboard_headed(
         menu,
         cache,
-        vault_page_head(cache, if is_recovery { "Recovery" } else { "Send" }),
+        super::sub_page_head(cache, if is_recovery { "Recovery" } else { "Send" }),
         Column::new()
             .spacing(20)
             .push_maybe(mcp_review.then(|| mcp_prepared_review(tx, network)))
@@ -185,6 +185,34 @@ const PRESET_SPACING: u32 = 4;
 
 fn feerate_preset_id(block_target: usize) -> Id {
     Id::from(format!("tenshu.vault.send.feerate-preset.{block_target}"))
+}
+
+const FEERATE_CUSTOM_ID: &str = "tenshu.vault.send.feerate-custom";
+
+/// The fourth segment after the presets (W4, master §3 decision 6): it
+/// reveals the feerate field, which the presets fill and hide.
+fn feerate_custom_button<'a>(selected: bool) -> Element<'a, Message> {
+    let label = text("Custom").size(P2_SIZE).font(if selected {
+        font::SEMIBOLD
+    } else {
+        font::MEDIUM
+    });
+    Action::new(Id::new(FEERATE_CUSTOM_ID), label, Message::FocusAction)
+        .padding([4, 12])
+        .style(move |theme, status| preset_style(theme, status, selected))
+        .on_press(Message::CreateSpend(CreateSpendMessage::CustomFeerate))
+        .into()
+}
+
+/// The footer line for a policy that needs more than one key: "This Vault
+/// needs 2 of 3 keys. You'll sign, then share the PSBT." `None` for one key.
+pub(crate) fn threshold_footer(threshold: usize, keys: usize) -> Option<String> {
+    (threshold > 1).then(|| {
+        format!(
+            "This Vault needs {} of {} keys. You'll sign, then share the PSBT.",
+            threshold, keys
+        )
+    })
 }
 
 /// Always-visible review for an MCP-origin construction. Read the actual loaded
@@ -465,6 +493,8 @@ pub fn create_spend_tx<'a>(
     is_first_step: bool,
     loading_fee_estimate: Option<usize>,
     selected_feerate_target: Option<usize>,
+    custom_feerate: bool,
+    threshold: Option<(usize, usize)>,
     generating: bool,
     bitcoin_unit: BitcoinDisplayUnit,
     max_under_dust: bool,
@@ -692,14 +722,19 @@ pub fn create_spend_tx<'a>(
                 .push(section_label("Fee rate (sat/vB)").width(Length::Fill))
                 .push(
                     Container::new(
-                        Row::with_children(FEERATE_PRESETS.iter().map(|&(label, block_target)| {
-                            feerate_preset_button(
-                                label,
-                                block_target,
-                                loading_fee_estimate,
-                                selected_feerate_target,
-                            )
-                        }))
+                        Row::with_children(
+                            FEERATE_PRESETS
+                                .iter()
+                                .map(|&(label, block_target)| {
+                                    feerate_preset_button(
+                                        label,
+                                        block_target,
+                                        loading_fee_estimate,
+                                        selected_feerate_target.filter(|_| !custom_feerate),
+                                    )
+                                })
+                                .chain(std::iter::once(feerate_custom_button(custom_feerate))),
+                        )
                         .spacing(PRESET_SPACING),
                     )
                     .padding(2)
@@ -716,17 +751,31 @@ pub fn create_spend_tx<'a>(
                     }),
                 ),
         )
-        .push(
-            Container::new(
-                form::Form::new_trimmed("42 (in sats/vbyte)", feerate, move |msg| {
-                    Message::CreateSpend(CreateSpendMessage::FeerateEdited(msg))
-                })
-                .warning("Feerate must be an integer less than or equal to 1000 sats/vbyte")
-                .size(P1_SIZE)
-                .padding(10),
+        // Custom reveals the field; a preset fills it and shows its rate.
+        .push(if custom_feerate {
+            Element::from(
+                Container::new(
+                    form::Form::new_trimmed("42 (in sats/vbyte)", feerate, move |msg| {
+                        Message::CreateSpend(CreateSpendMessage::FeerateEdited(msg))
+                    })
+                    .warning("Feerate must be an integer less than or equal to 1000 sats/vbyte")
+                    .size(P1_SIZE)
+                    .padding(10),
+                )
+                .width(Length::Fixed(240.0)),
             )
-            .width(Length::Fixed(240.0)),
-        )
+        } else {
+            text(
+                if loading_fee_estimate.is_some() || feerate.value.is_empty() {
+                    "Fetching the fee estimate…".to_string()
+                } else {
+                    format!("{} sat/vB", feerate.value)
+                },
+            )
+            .size(P2_SIZE)
+            .style(theme::text::secondary)
+            .into()
+        })
         .push_maybe(fee_amount.map(|fee| {
             Row::new()
                 .spacing(10)
@@ -856,26 +905,34 @@ pub fn create_spend_tx<'a>(
             .into()
     };
 
+    let threshold_line = threshold.and_then(|(threshold, keys)| threshold_footer(threshold, keys));
     let footer = Container::new(
-        Row::new()
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push_maybe((!is_first_step).then(|| {
-                quiet_action(
-                    BACK_ID,
-                    Some(icon::previous_icon()),
-                    "Back",
-                    Message::Previous,
-                )
-            }))
-            .push(Container::new(hint).width(Length::Fill))
-            .push(quiet_action(
-                CLEAR_ID,
-                None,
-                "Clear",
-                Message::CreateSpend(CreateSpendMessage::Clear),
-            ))
-            .push(prepare_action(can_proceed, generating)),
+        Column::new()
+            .spacing(10)
+            .push(
+                Row::new()
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .push_maybe((!is_first_step).then(|| {
+                        quiet_action(
+                            BACK_ID,
+                            Some(icon::previous_icon()),
+                            "Back",
+                            Message::Previous,
+                        )
+                    }))
+                    .push(Container::new(hint).width(Length::Fill))
+                    .push(quiet_action(
+                        CLEAR_ID,
+                        None,
+                        "Clear",
+                        Message::CreateSpend(CreateSpendMessage::Clear),
+                    ))
+                    .push(prepare_action(can_proceed, generating)),
+            )
+            .push_maybe(
+                threshold_line.map(|line| text(line).size(P2_SIZE).style(theme::text::secondary)),
+            ),
     )
     .padding([16, 24])
     .width(Length::Fill);
@@ -911,7 +968,7 @@ pub fn create_spend_tx<'a>(
     dashboard_headed(
         menu,
         cache,
-        vault_page_head(cache, title),
+        super::sub_page_head(cache, title),
         Container::new(
             Column::new()
                 .spacing(20)
@@ -1332,6 +1389,8 @@ mod tests {
         first_step: bool,
         loading: Option<usize>,
         selected: Option<usize>,
+        custom: bool,
+        threshold: Option<(usize, usize)>,
         generating: bool,
         max_under_dust: bool,
         coins_selected: bool,
@@ -1357,6 +1416,8 @@ mod tests {
                 first_step: true,
                 loading: None,
                 selected: None,
+                custom: false,
+                threshold: None,
                 generating: false,
                 max_under_dust: false,
                 coins_selected: true,
@@ -1423,10 +1484,18 @@ mod tests {
             s.first_step,
             s.loading,
             s.selected,
+            fee_is_custom(s),
+            s.threshold,
             s.generating,
             s.unit,
             s.max_under_dust,
         )
+    }
+
+    /// As `DefineSpend::custom_feerate_shown`: Custom chosen, or no preset
+    /// filling the field.
+    fn fee_is_custom(s: &Scenario) -> bool {
+        s.custom || (s.selected.is_none() && s.loading.is_none())
     }
 
     #[derive(Debug, Clone)]
@@ -2098,14 +2167,17 @@ mod tests {
                     // Native editing stays native: the fee form, every passed
                     // recipient form, and the batch label for 2+ recipients.
                     let inputs = probe.inputs();
+                    let custom = fee_is_custom(scenario);
                     assert!(
-                        inputs.contains(&scenario.feerate.0)
+                        !custom
+                            || inputs.contains(&scenario.feerate.0)
                             || (scenario.feerate.0.is_empty()
                                 && inputs.contains(&"42 (in sats/vbyte)")),
                         "{}: fee input {:?}",
                         context,
                         inputs
                     );
+                    assert!(probe.has_focus(&Id::new(FEERATE_CUSTOM_ID)), "{}", context);
                     assert_eq!(
                         inputs.contains(&"Batch label"),
                         scenario.recipients > 1,
@@ -2113,7 +2185,9 @@ mod tests {
                     );
                     assert_eq!(
                         inputs.len(),
-                        1 + 3 * scenario.recipients + usize::from(scenario.recipients > 1),
+                        usize::from(custom)
+                            + 3 * scenario.recipients
+                            + usize::from(scenario.recipients > 1),
                         "{context}: {inputs:?}"
                     );
                     harness.capture(name, appearance, &theme);
@@ -2143,7 +2217,7 @@ mod tests {
             first_step: false,
             ..Scenario::valid_send()
         };
-        let cases: [(Id, IntentCheck); 7] = [
+        let cases: [(Id, IntentCheck); 8] = [
             (Id::new(ADD_RECIPIENT_ID), |m| {
                 matches!(m, Message::CreateSpend(CreateSpendMessage::AddRecipient))
             }),
@@ -2165,6 +2239,9 @@ mod tests {
                     Message::CreateSpend(CreateSpendMessage::FetchFeeEstimate(1))
                 )
             }),
+            (Id::new(FEERATE_CUSTOM_ID), |m| {
+                matches!(m, Message::CreateSpend(CreateSpendMessage::CustomFeerate))
+            }),
             (Id::new(BACK_ID), |m| matches!(m, Message::Previous)),
             (Id::new(CLEAR_ID), |m| {
                 matches!(m, Message::CreateSpend(CreateSpendMessage::Clear))
@@ -2175,7 +2252,13 @@ mod tests {
         ];
         for outer in [COMPACT, WIDE] {
             let mut harness = Harness::new(compose(&fixture, &scenario), outer);
-            let order = [Id::new(ADD_RECIPIENT_ID), preset(24), preset(6), preset(1)];
+            let order = [
+                Id::new(ADD_RECIPIENT_ID),
+                preset(24),
+                preset(6),
+                preset(1),
+                Id::new(FEERATE_CUSTOM_ID),
+            ];
             harness.focus(order[0].clone());
             assert_eq!(harness.focused_id(), Some(order[0].clone()));
             for expected in &order[1..] {
@@ -2288,6 +2371,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// One key: no footer; 2 of 3 and 3 of 5 say how many keys sign.
+    #[test]
+    fn the_threshold_footer_names_the_keys_a_send_needs() {
+        assert_eq!(threshold_footer(1, 1), None);
+        assert_eq!(
+            threshold_footer(2, 3).as_deref(),
+            Some("This Vault needs 2 of 3 keys. You'll sign, then share the PSBT.")
+        );
+        assert_eq!(
+            threshold_footer(3, 5).as_deref(),
+            Some("This Vault needs 3 of 5 keys. You'll sign, then share the PSBT.")
+        );
+        let fixture = Fixture::new(ThemeMode::Dark, 3);
+        for (threshold, shown) in [(None, false), (Some((1, 1)), false), (Some((2, 3)), true)] {
+            let scenario = Scenario {
+                threshold,
+                ..Scenario::valid_send()
+            };
+            let probe = Harness::new(compose(&fixture, &scenario), TALL).probe();
+            assert_eq!(
+                probe.contains("This Vault needs 2 of 3 keys."),
+                shown,
+                "{threshold:?}"
+            );
+        }
+    }
+
+    /// A preset hides the field and shows its rate; Custom shows the field.
+    #[test]
+    fn a_preset_shows_its_rate_and_custom_shows_the_field() {
+        let fixture = Fixture::new(ThemeMode::Dark, 3);
+        let preset_scenario = Scenario {
+            selected: Some(6),
+            ..Scenario::valid_send()
+        };
+        let probe = Harness::new(compose(&fixture, &preset_scenario), TALL).probe();
+        assert!(probe.contains("5 sat/vB"));
+        assert!(!probe.inputs().contains(&"5"));
+        let custom = Scenario {
+            custom: true,
+            ..preset_scenario
+        };
+        let probe = Harness::new(compose(&fixture, &custom), TALL).probe();
+        assert!(probe.inputs().contains(&"5"));
+        assert!(!probe.contains("5 sat/vB"));
     }
 
     #[test]
@@ -3319,7 +3449,7 @@ mod tests {
             "40 coins overflow the coin list's own scroll: {:?}",
             probe.scrollables
         );
-        harness.focus(preset(1));
+        harness.focus(Id::new(FEERATE_CUSTOM_ID));
         assert_eq!(harness.tab().input.as_deref(), Some("5"));
         for expected in [BACK_ID, CLEAR_ID, PREPARE_ID] {
             assert_eq!(harness.tab().id, Some(Id::new(expected)));
@@ -3328,6 +3458,7 @@ mod tests {
             harness.shift_tab();
         }
         assert_eq!(harness.shift_tab().input.as_deref(), Some("5"));
+        assert_eq!(harness.shift_tab().id, Some(Id::new(FEERATE_CUSTOM_ID)));
         assert_eq!(harness.shift_tab().id, Some(preset(1)));
     }
 

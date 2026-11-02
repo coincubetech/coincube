@@ -262,7 +262,7 @@ impl State for VaultReceivePanel {
         let content = view::dashboard_headed(
             menu,
             cache,
-            view::vault_page_head(cache, "Receive"),
+            view::vault::sub_page_head(cache, "Receive"),
             view::vault::receive::receive(
                 &self.addresses.list,
                 self.current_qr.as_ref(),

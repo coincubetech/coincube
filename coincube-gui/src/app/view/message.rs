@@ -347,6 +347,9 @@ pub enum CreateSpendMessage {
     Generate,
     SendMaxToRecipient(usize),
     FetchFeeEstimate(usize),
+    /// The Custom fee segment: reveal the feerate field, restoring the last
+    /// rate typed into it.
+    CustomFeerate,
     SessionError(SpendCreationError),
     Clear,
 }
