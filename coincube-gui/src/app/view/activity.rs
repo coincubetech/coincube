@@ -2648,7 +2648,7 @@ mod tests {
                 .text
                 .iter()
                 .find_map(|(text, bounds)| (text == value).then_some(*bounds))
-                .unwrap_or_else(|| panic!("rendered {value:?}"))
+                .unwrap_or_else(|| panic!("rendered {:?}", value))
         };
         let activity_page = mount(
             "activity-head-matches-page-head",
