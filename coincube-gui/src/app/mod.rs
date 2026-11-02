@@ -9409,6 +9409,13 @@ impl App {
                 log::warn!("could not re-apply Spark Stable Balance preference: {e}");
             }
 
+            // Swap's answers reach its panel whichever page is showing, so a
+            // swap that settles while the user is elsewhere keeps its result.
+            Message::View(view::Message::SparkSwap(msg)) => {
+                let on_screen = self.panels.current == Menu::Spark(menu::SparkSubMenu::Swap);
+                return self.panels.spark_swap.deliver(msg, on_screen);
+            }
+
             // The user changed the Stable Balance toggle and the bridge
             // accepted it: record the decision before the panel updates its
             // own state, then let it through. Routed to the settings panel
@@ -18284,6 +18291,50 @@ mod wallet_recent_activity_tests {
         ))));
         assert!(app.panels.spark_overview.has_snapshot_for_tests());
         assert_eq!(app.panels.activity.spark_refresh_requests, before + 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A swap's answer reaches the Swap panel while another page shows, and
+    /// coming back to Swap shows it rather than a fresh form.
+    #[test]
+    fn a_swap_answer_reaches_its_panel_from_another_page() {
+        use coincube_spark_protocol::{
+            AssetAmount, ConversionLimits, ConversionQuote, PrepareSwapOk, SwapOk, SwapStatus,
+            WalletAsset,
+        };
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("swap-routing-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let amount = |asset, amount| AssetAmount { asset, amount };
+        let request = app
+            .panels
+            .spark_swap
+            .start_swapping_for_tests(PrepareSwapOk {
+                handle: "h".into(),
+                quote: ConversionQuote {
+                    amount_in: amount(WalletAsset::Bitcoin, 100_000),
+                    amount_out: amount(WalletAsset::Usdb, 80_000_000),
+                    fee: amount(WalletAsset::Bitcoin, 100),
+                    amount_adjustment: None,
+                    max_slippage_bps: 50,
+                },
+                limits: ConversionLimits::default(),
+            });
+        drop(app.set_current_panel(Menu::Spark(menu::SparkSubMenu::Overview)));
+        drop(app.update(Message::View(view::Message::SparkSwap(
+            view::spark::SparkSwapMessage::Swapped {
+                request,
+                result: crate::app::state::spark::swap::SwapAttempt::Done(SwapOk {
+                    swap_id: "swap".into(),
+                    status: SwapStatus::Completed,
+                }),
+            },
+        ))));
+        drop(app.set_current_panel(Menu::Spark(menu::SparkSubMenu::Swap)));
+        assert!(matches!(
+            app.panels.spark_swap.phase(),
+            crate::app::state::spark::swap::SwapPhase::Swapped(_)
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 
