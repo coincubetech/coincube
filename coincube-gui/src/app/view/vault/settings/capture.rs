@@ -563,8 +563,9 @@ fn assert_mounted_wallet_policy(labels: &Labels, width: u32) {
 
 #[tokio::test]
 async fn mounted_settings_pair_route_accepts_vault_and_denies_imported_wallet() {
-    // Settings routes live in page content; the Cube sidebar contains only
-    // the Settings entry. Exercise the mounted choice in its actual location.
+    // Settings routes are tabs on the pinned page head's rule (W5); the Cube
+    // sidebar contains only the Settings entry. Exercise the mounted choice
+    // in its actual location.
     load_fonts();
     let size = iced::Size::new(1440.0, 2400.0);
     let viewport = iced::Rectangle::with_size(size);
@@ -595,25 +596,37 @@ async fn mounted_settings_pair_route_accepts_vault_and_denies_imported_wallet() 
             .expect("mounted Pair settings choice")
             .1;
         let pair_center = pair_bounds.center();
+        // The content viewport is the wide scrollable in Pair's column that
+        // starts nearest below it: the pinned head sits directly above it,
+        // so the choice can't scroll away. Any other scrollable (a narrower
+        // one, one in another column, or one above Pair) can't stand in.
+        let pair_bottom = pair_bounds.y + pair_bounds.height;
         let content_scroll = labels
             .1
             .iter()
-            .find(|bounds| {
+            .filter(|bounds| {
                 bounds.width > 500.0
                     && pair_center.x >= bounds.x
                     && pair_center.x <= bounds.x + bounds.width
-                    && pair_center.y >= bounds.y
-                    && pair_center.y <= bounds.y + bounds.height
+                    && bounds.y >= pair_bottom
             })
-            .expect("Pair must be inside the visible settings content viewport");
+            .min_by(|a, b| a.y.total_cmp(&b.y))
+            .expect("a settings content viewport below the pinned Pair choice");
+        // Pair is in the head, not inside any scrollable: tabs moved back
+        // into the body would sit in one.
+        assert!(
+            !labels.1.iter().any(|bounds| bounds.contains(pair_center)),
+            "Pair settings choice is inside a scrollable: {:?} in {:?}",
+            pair_bounds,
+            labels.1
+        );
         assert!(
             pair_bounds.x >= crate::app::view::nav::shell::FULL_WIDTH
                 && pair_bounds.x >= content_scroll.x
                 && pair_bounds.x + pair_bounds.width <= content_scroll.x + content_scroll.width
-                && pair_bounds.y >= content_scroll.y
-                && pair_bounds.y + pair_bounds.height <= content_scroll.y + content_scroll.height
-                && pair_bounds.y + pair_bounds.height <= size.height,
-            "Pair settings choice is clipped or offscreen: {:?} in {:?}",
+                && pair_bounds.y >= 0.0
+                && pair_bounds.y + pair_bounds.height <= content_scroll.y,
+            "Pair settings choice is not in the pinned head above the content viewport: {:?} over {:?}",
             pair_bounds,
             content_scroll
         );

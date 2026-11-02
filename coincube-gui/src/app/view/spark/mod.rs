@@ -117,6 +117,15 @@ pub enum SparkSettingsMessage {
     /// new state so the view can update immediately without
     /// re-fetching; `Err` surfaces the SDK error.
     StableBalanceSaved(Result<bool, String>),
+    /// The user typed in the Spark nickname field on Balances & conversion.
+    NicknameEdited(String),
+    /// Return in the nickname field, or leaving the tab with a typed name.
+    /// The App saves it to this Cube's settings.
+    NicknameSubmitted(String),
+    /// The App saved this nickname (`None`: plain "Spark"), or found it
+    /// already saved. The field shows the saved name again unless the user
+    /// has typed another since.
+    NicknameSaved(Option<String>),
 }
 
 /// View-level messages for the Phase 4c Spark Send panel. Drives the

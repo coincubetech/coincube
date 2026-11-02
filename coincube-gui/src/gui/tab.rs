@@ -1914,6 +1914,20 @@ impl Tab {
             }
         }
 
+        // A Spark nickname this App still owes is written when the tab
+        // replaces the App (Lock Cube, Set up Vault), as leaving its tab
+        // would. Taken before the App goes; started after, without waiting.
+        let nickname_flush = match (&self.state, &message) {
+            (State::App(app), Message::LockCube | Message::LockCubeToLauncher)
+            | (
+                State::App(app),
+                Message::Run(app::Message::View(
+                    app::view::Message::SetupVault | app::view::Message::SetupVaultRestoreFromKit,
+                )),
+            ) => app.spark_nickname_flush(),
+            _ => None,
+        };
+
         let result = match (&mut self.state, message) {
             #[cfg(feature = "mcp-proposals")]
             (State::Installer(installer), Message::LockCube)
@@ -4557,11 +4571,24 @@ impl Tab {
             _ => Task::none(),
         };
         self.sync_theme_mode();
+        // Only if the App is gone: a refused Set up Vault keeps it, and its
+        // field still saves as usual.
+        let nickname_flush = nickname_flush
+            .filter(|_| !matches!(self.state, State::App(_)))
+            .map(|write| {
+                Task::perform(write.run(), |result| {
+                    if let Err(error) = result {
+                        log::error!("Couldn't save the Spark nickname: {}", error);
+                    }
+                })
+                .discard()
+            })
+            .unwrap_or_else(Task::none);
         // After the transition, not before: this is the point where the arm
         // above has already decided which state the tab is in, so a warning
         // parked on the way to `Loader` is released by whichever later update
         // finally reaches `App`.
-        Task::batch([result, self.flush_migration_warning()])
+        Task::batch([result, self.flush_migration_warning(), nickname_flush])
     }
 
     pub fn subscription(&self, foreground: bool) -> Subscription<Message> {
@@ -8486,5 +8513,77 @@ mod opening_tests {
         assert!(matches!(tab.state, State::Home(_)));
         crate::app::session::close();
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod spark_nickname_flush_tests {
+    use super::*;
+
+    /// Lock Cube replaces the App, so a Spark nickname typed on Balances &
+    /// conversion and not yet saved is written as the tab locks, as leaving
+    /// the tab would write it.
+    #[test]
+    fn locking_writes_a_typed_spark_nickname() {
+        std::thread::Builder::new()
+            .name("spark-nickname-lock".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::app::session::test_guard();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let path = std::env::temp_dir()
+                    .join(format!("spark-nickname-lock-{}", uuid::Uuid::new_v4()));
+                let (mut app, _) = crate::app::shell_tests::bitcoin_app(&path);
+                let network_dir = app.datadir().network_directory(app.cube_settings().network);
+                let cube = app.cube_settings().clone();
+                let cube_id = cube.id.clone();
+                runtime
+                    .block_on(app::settings::update_settings_file(
+                        &network_dir,
+                        move |mut s| {
+                            s.cubes.push(cube);
+                            Some(s)
+                        },
+                    ))
+                    .unwrap();
+                drop(app.update(app::Message::View(app::view::Message::Menu(
+                    app::menu::Menu::Spark(app::menu::SparkSubMenu::Settings(Some(
+                        app::menu::SparkSettingsOption::General,
+                    ))),
+                ))));
+                drop(
+                    app.update(app::Message::View(app::view::Message::SparkSettings(
+                        app::view::SparkSettingsMessage::NicknameEdited("Daily spending".into()),
+                    ))),
+                );
+
+                let mut tab = Tab::new(1, State::App(app));
+                let task = tab.update(Message::LockCubeToLauncher);
+                assert!(matches!(tab.state, State::Home(_)));
+                // Run the lock's tasks, the write among them; the launcher's
+                // own loading may take longer, so this waits only so long.
+                if let Some(stream) = iced_runtime::task::into_stream(task) {
+                    use iced_runtime::futures::futures::StreamExt;
+                    let _ = runtime.block_on(tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        stream.for_each(|_| async {}),
+                    ));
+                }
+                let saved = app::settings::Settings::from_file(&network_dir)
+                    .unwrap()
+                    .cubes
+                    .into_iter()
+                    .find(|cube| cube.id == cube_id)
+                    .and_then(|cube| cube.spark_alias);
+                assert_eq!(saved.as_deref(), Some("Daily spending"));
+                let _ = std::fs::remove_dir_all(&path);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
