@@ -7800,6 +7800,9 @@ pub enum DeleteCubeMessage {
     DeleteLianaConnect(bool),
     DeleteConnectBackup(bool),
     Deleted,
+    /// A daemon this Cube left stopping when it was locked has finished, so
+    /// a confirmed delete can go ahead. Carries the Cube ID.
+    DaemonStopped(String),
     PinInput(pin_input::Message),
     // Remote-only cube deletion
     ConfirmRemoteDelete(String), // uuid
@@ -7826,6 +7829,9 @@ struct DeleteCubeModal {
     datadir_root: std::path::PathBuf,
     pin_input: pin_input::PinInput,
     pin_error: Option<String>,
+    /// The PIN was accepted, and the delete waits for a daemon this Cube left
+    /// stopping when it was locked.
+    waiting_for_stop: bool,
 }
 
 /// Modal for deleting a remote-only cube (exists on server, not locally).
@@ -8059,6 +8065,7 @@ impl DeleteCubeModal {
             user_role: None,
             pin_input: pin_input::PinInput::new(),
             pin_error: None,
+            waiting_for_stop: false,
         };
         if let Some(wallet) = &wallet_settings {
             if let Some(auth) = &wallet.remote_backend_auth {
@@ -8079,6 +8086,113 @@ impl DeleteCubeModal {
         modal
     }
 
+    /// Directories whose daemon a delete must wait for: the Vault's, or an
+    /// imported wallet's staged and final ones.
+    fn daemon_directories(&self) -> Vec<std::path::PathBuf> {
+        let mut directories = Vec::new();
+        if let Some(wallet) = &self.wallet_settings {
+            directories.push(
+                self.network_directory
+                    .coincubed_data_directory(&wallet.wallet_id())
+                    .path()
+                    .to_path_buf(),
+            );
+        }
+        if let Some(import) = &self.cube.bitcoin_import {
+            directories.push(
+                self.network_directory
+                    .path()
+                    .join("data")
+                    .join(format!(".import-{}", import.operation_id)),
+            );
+            if let Some(wallet) = import.attachment() {
+                directories.push(
+                    self.network_directory
+                        .coincubed_data_directory(&wallet.wallet_id)
+                        .path()
+                        .to_path_buf(),
+                );
+            }
+        }
+        directories
+    }
+
+    /// The confirmed delete, once the PIN is accepted and no daemon of this
+    /// Cube is still stopping.
+    fn delete(&mut self) -> Task<Message> {
+        self.warning = None;
+
+        // Pairing is identifying authorization material. Remove it
+        // before deleting the Cube, while its exact identity is known.
+        if let Err(error) =
+            crate::app::local_mcp::remove_cube_pairings(&self.datadir_root, &self.cube)
+        {
+            self.warning = Some(DeleteError::Settings(settings::SettingsError::WritingFile(
+                error.to_string(),
+            )));
+            return Task::none();
+        }
+
+        // Imported wallets have no Vault id. Their database and
+        // journal belong to an exact Cube/import operation, so use
+        // the ownership-checked removal path rather than the generic
+        // wallet deletion below.
+        if self.cube.bitcoin_import.is_some() {
+            if let Err(error) =
+                Handle::current().block_on(crate::services::bitcoin_import::remove_cube_import(
+                    &self.network_directory,
+                    &self.cube,
+                ))
+            {
+                self.warning = Some(DeleteError::Settings(settings::SettingsError::WritingFile(
+                    error,
+                )));
+                return Task::none();
+            }
+            self.deleted = true;
+            return Task::perform(async {}, |_| {
+                Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::Deleted))
+            });
+        }
+
+        // Delete vault if it exists
+        if let Some(wallet_settings) = &self.wallet_settings {
+            if let Err(e) = Handle::current().block_on(delete_wallet(
+                self.cube.network,
+                &self.network_directory,
+                wallet_settings,
+                self.delete_liana_connect,
+            )) {
+                self.warning = Some(e);
+                return Task::none();
+            }
+        }
+
+        // Delete the cube from settings
+        let network_dir = self.network_directory.clone();
+        let cube_id = self.cube.id.clone();
+        if let Err(e) = Handle::current().block_on(async {
+            settings::update_settings_file(&network_dir, |mut settings| {
+                settings.cubes.retain(|cube| cube.id != cube_id);
+                // Delete file if both cubes and wallets are empty
+                if settings.cubes.is_empty() && settings.wallets.is_empty() {
+                    None
+                } else {
+                    Some(settings)
+                }
+            })
+            .await
+        }) {
+            self.warning = Some(DeleteError::Settings(e));
+        } else {
+            self.deleted = true;
+            return Task::perform(async {}, |_| {
+                Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::Deleted))
+            });
+        }
+        Task::none()
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::Confirm(cube_id))) => {
@@ -8090,7 +8204,7 @@ impl DeleteCubeModal {
                 // stored PIN hash any more: the check is a trial decryption of
                 // this Cube's seed file, which costs ~831 ms. That is a
                 // blocking call on the UI thread, consistent with the
-                // `block_on(delete_wallet(...))` immediately below — this modal
+                // `block_on(delete_wallet(...))` in `delete` below — this modal
                 // has always been synchronous. A confirm dialog that takes a
                 // beat to answer is acceptable; a cheap verifier next to an
                 // expensive one is not (I1).
@@ -8131,75 +8245,31 @@ impl DeleteCubeModal {
                     }
                 }
 
-                self.warning = None;
-
-                // Pairing is identifying authorization material. Remove it
-                // before deleting the Cube, while its exact identity is known.
-                if let Err(error) =
-                    crate::app::local_mcp::remove_cube_pairings(&self.datadir_root, &self.cube)
-                {
-                    self.warning = Some(DeleteError::Settings(
-                        settings::SettingsError::WritingFile(error.to_string()),
-                    ));
-                    return Task::none();
+                // Deleting a Cube right after locking it: its daemon may still
+                // be stopping in the directories removed below. Wait for that in
+                // a task, not in `delete_wallet` on the UI thread.
+                let directories = self.daemon_directories();
+                if crate::daemon::stopping::any_stopping(&directories) {
+                    self.waiting_for_stop = true;
+                    return Task::perform(
+                        async move {
+                            for dir in directories {
+                                crate::daemon::stopping::wait_for_async(dir).await;
+                            }
+                        },
+                        move |_| {
+                            Message::View(ViewMessage::DeleteCube(
+                                DeleteCubeMessage::DaemonStopped(cube_id),
+                            ))
+                        },
+                    );
                 }
-
-                // Imported wallets have no Vault id. Their database and
-                // journal belong to an exact Cube/import operation, so use
-                // the ownership-checked removal path rather than the generic
-                // wallet deletion below.
-                if self.cube.bitcoin_import.is_some() {
-                    if let Err(error) = Handle::current().block_on(
-                        crate::services::bitcoin_import::remove_cube_import(
-                            &self.network_directory,
-                            &self.cube,
-                        ),
-                    ) {
-                        self.warning = Some(DeleteError::Settings(
-                            settings::SettingsError::WritingFile(error),
-                        ));
-                        return Task::none();
-                    }
-                    self.deleted = true;
-                    return Task::perform(async {}, |_| {
-                        Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::Deleted))
-                    });
-                }
-
-                // Delete vault if it exists
-                if let Some(wallet_settings) = &self.wallet_settings {
-                    if let Err(e) = Handle::current().block_on(delete_wallet(
-                        self.cube.network,
-                        &self.network_directory,
-                        wallet_settings,
-                        self.delete_liana_connect,
-                    )) {
-                        self.warning = Some(e);
-                        return Task::none();
-                    }
-                }
-
-                // Delete the cube from settings
-                let network_dir = self.network_directory.clone();
-                let cube_id = self.cube.id.clone();
-                if let Err(e) = Handle::current().block_on(async {
-                    settings::update_settings_file(&network_dir, |mut settings| {
-                        settings.cubes.retain(|cube| cube.id != cube_id);
-                        // Delete file if both cubes and wallets are empty
-                        if settings.cubes.is_empty() && settings.wallets.is_empty() {
-                            None
-                        } else {
-                            Some(settings)
-                        }
-                    })
-                    .await
-                }) {
-                    self.warning = Some(DeleteError::Settings(e));
-                } else {
-                    self.deleted = true;
-                    return Task::perform(async {}, |_| {
-                        Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::Deleted))
-                    });
+                return self.delete();
+            }
+            Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::DaemonStopped(cube_id))) => {
+                if cube_id == self.cube.id && self.waiting_for_stop {
+                    self.waiting_for_stop = false;
+                    return self.delete();
                 }
             }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::DeleteLianaConnect(
@@ -8225,7 +8295,7 @@ impl DeleteCubeModal {
 
     fn view(&self) -> Element<Message> {
         let pin_ready = !self.cube.has_pin(&self.datadir_root) || self.pin_input.is_complete();
-        let can_delete = pin_ready && self.warning.is_none();
+        let can_delete = pin_ready && self.warning.is_none() && !self.waiting_for_stop;
         let display_name = catalog_display_name(&self.cube.name);
         let mut confirm_button = button::secondary_action(
             DELETE_LOCAL_CONFIRM_ID,
@@ -8325,6 +8395,16 @@ impl DeleteCubeModal {
                         .center_x(Length::Fill),
                 );
             }
+        }
+
+        if self.waiting_for_stop {
+            col = col.push(
+                Container::new(
+                    p1_regular("Finishing locking this Cube before deleting it…")
+                        .style(theme::text::secondary),
+                )
+                .center_x(Length::Fill),
+            );
         }
 
         col = col
@@ -11209,6 +11289,82 @@ mod tests {
         let recovery = inspect(recovery_input_view(&words, None, false).map(Message::View));
         assert!(recovery.contains("Enter your 12-word recovery phrase to restore your Cube."));
         assert!(!recovery.contains("Liquid"));
+    }
+
+    /// Deleting a Cube right after locking it: its daemon may still be
+    /// stopping. The confirm must return at once and leave the files alone,
+    /// and the delete runs when the daemon has stopped. Before, the update
+    /// blocked the UI thread in `delete_wallet` for up to two minutes.
+    #[test]
+    fn a_delete_waits_for_a_stopping_daemon_off_the_ui_thread() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let root = std::env::temp_dir().join(format!("delete-stopping-{}", uuid::Uuid::new_v4()));
+        let datadir = CoincubeDirectory::new(root.clone());
+        let network_dir = datadir.network_directory(Network::Bitcoin);
+        let wallet = WalletSettings {
+            name: "Coincube-kt6ht0kt".to_string(),
+            alias: None,
+            descriptor_checksum: "kt6ht0kt".to_string(),
+            pinned_at: Some(1_720_000_000),
+            keys: Vec::new(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: None,
+            start_internal_bitcoind: Some(false),
+            pending_rescan: None,
+            keychain_keys_recorded: false,
+        };
+        let wallet_dir = network_dir
+            .coincubed_data_directory(&wallet.wallet_id())
+            .path()
+            .to_path_buf();
+        std::fs::create_dir_all(&wallet_dir).unwrap();
+        std::fs::write(wallet_dir.join("coincubed.sqlite3"), b"synthetic").unwrap();
+        let cube = cube("local-a", "Local A", Network::Bitcoin);
+        let mut modal = DeleteCubeModal::new(
+            cube.clone(),
+            network_dir,
+            root.clone(),
+            Some(wallet),
+            Some(false),
+            false,
+        );
+
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        crate::daemon::stopping::run_in_background(Some(wallet_dir.clone()), move || {
+            released.recv().unwrap();
+        });
+        let started = std::time::Instant::now();
+        let _ = modal.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::Confirm(cube.id.clone()),
+        )));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the confirm must not wait for the daemon on the UI thread"
+        );
+        assert!(modal.waiting_for_stop);
+        assert!(!modal.deleted);
+        assert!(wallet_dir.join("coincubed.sqlite3").is_file());
+        let _ = modal.view();
+
+        release.send(()).unwrap();
+        crate::daemon::stopping::wait_for(&wallet_dir);
+        assert!(!crate::daemon::stopping::any_stopping(
+            &[wallet_dir.clone()]
+        ));
+        let _ = modal.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::DaemonStopped(cube.id.clone()),
+        )));
+        assert!(!modal.waiting_for_stop);
+        assert!(
+            !wallet_dir.exists(),
+            "the delete ran once the daemon stopped"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -120,6 +120,13 @@ fn wait(dir: Option<&Path>, timeout: Duration) -> bool {
     true
 }
 
+/// Whether a daemon for any of `dirs` is still stopping. Lets a UI caller
+/// wait in a task instead of blocking its update on [`wait_for`].
+pub fn any_stopping(dirs: &[PathBuf]) -> bool {
+    let pending = stopping().0.lock().unwrap_or_else(|e| e.into_inner());
+    dirs.iter().any(|dir| is_stopping(&pending, Some(dir)))
+}
+
 /// Block until a daemon still stopping for `dir` has released it.
 pub fn wait_for(dir: &Path) {
     if !wait(Some(dir), WAIT_LIMIT) {
