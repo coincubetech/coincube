@@ -144,7 +144,7 @@ const BTC_LOGO: &[u8] = include_bytes!("../static/logos/btc.svg");
 const LBTC_LOGO: &[u8] = include_bytes!("../static/logos/lbtc.svg");
 const USDT_LOGO: &[u8] = include_bytes!("../static/logos/usdt.svg");
 const USDC_LOGO: &[u8] = include_bytes!("../static/logos/usdc.svg");
-/// A COINCUBE-drawn mark for USDB (Tenshu v175 W2), not a third-party logo.
+/// USDB's token icon, from https://usdb.flashnet.xyz/icons/icon-usdb-token.svg.
 const USDB_LOGO: &[u8] = include_bytes!("../static/logos/usdb.svg");
 const ETH_LOGO: &[u8] = include_bytes!("../static/logos/eth.svg");
 const TRX_LOGO: &[u8] = include_bytes!("../static/logos/trx.svg");
