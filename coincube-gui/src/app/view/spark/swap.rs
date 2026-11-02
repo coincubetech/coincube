@@ -192,6 +192,30 @@ pub fn swap_page<'a>(
 }
 
 /// The page below the head: the form or the result, and the side panel.
+/// The result card's body and heading for the bridge's answer. Only a
+/// completed swap is headed "Swapped".
+fn swapped_copy(status: &SwapStatus) -> (&'static str, &'static str) {
+    match status {
+        SwapStatus::Completed => ("The swap is complete.", "Swapped"),
+        SwapStatus::Pending => (
+            "The swap is settling. It shows as complete in Activity once it lands.",
+            "Swap settling",
+        ),
+        SwapStatus::Failed => (
+            "The swap didn't go through. Nothing was swapped.",
+            "Swap didn't go through",
+        ),
+        SwapStatus::RefundNeeded => (
+            "The swap didn't go through. Your funds are being refunded.",
+            "Swap being refunded",
+        ),
+        SwapStatus::Refunded => (
+            "The swap didn't go through. Your funds were refunded.",
+            "Swap refunded",
+        ),
+    }
+}
+
 pub fn swap_body<'a>(cache: &'a Cache, swap: &'a SparkSwap) -> Element<'a, Message> {
     if !swap_available(cache.network) {
         return p1_regular("Swap needs Bitcoin mainnet: USDB exists only there.").into();
@@ -204,21 +228,10 @@ pub fn swap_body<'a>(cache: &'a Cache, swap: &'a SparkSwap) -> Element<'a, Messa
         }
         SwapPhase::Review(ok) => review_card(ok, price, decimals, false),
         SwapPhase::Swapping(ok) => review_card(ok, price, decimals, true),
-        SwapPhase::Swapped(ok) => result_card(
-            match ok.status {
-                SwapStatus::Completed => "The swap is complete.",
-                SwapStatus::Pending => {
-                    "The swap is settling. It shows as complete in Activity once it lands."
-                }
-                SwapStatus::Failed => "The swap didn't go through. Nothing was swapped.",
-                SwapStatus::RefundNeeded => {
-                    "The swap didn't go through. Your funds are being refunded."
-                }
-                SwapStatus::Refunded => "The swap didn't go through. Your funds were refunded.",
-            },
-            "Swapped",
-            true,
-        ),
+        SwapPhase::Swapped(ok) => {
+            let (body, heading) = swapped_copy(&ok.status);
+            result_card(body, heading, true)
+        }
         SwapPhase::Refused(_) => result_card(
             "The swap didn't start, so nothing was swapped. Get a new estimate to try again.",
             "Swap didn't start",
@@ -595,6 +608,28 @@ mod tests {
                 max_slippage_bps: 50,
             },
             limits: ConversionLimits::default(),
+        }
+    }
+
+    #[test]
+    fn only_a_completed_swap_is_headed_swapped() {
+        assert_eq!(swapped_copy(&SwapStatus::Completed).1, "Swapped");
+        for status in [
+            SwapStatus::Pending,
+            SwapStatus::Failed,
+            SwapStatus::RefundNeeded,
+            SwapStatus::Refunded,
+        ] {
+            let (body, heading) = swapped_copy(&status);
+            assert_ne!(heading, "Swapped", "{:?}", status);
+            if body.contains("didn't go through") {
+                assert!(
+                    heading.contains("didn't go through") || heading.contains("refund"),
+                    "{:?}: {}",
+                    status,
+                    heading
+                );
+            }
         }
     }
 
