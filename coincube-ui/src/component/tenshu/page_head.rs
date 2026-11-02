@@ -48,7 +48,7 @@ pub const BACK_HEIGHT: f32 = 36.0;
 /// The back action's id. A page has at most one.
 pub const BACK_ID: &str = "tenshu.page_head.back";
 /// `.phead h1 { line-height: 1.25 }`.
-const TITLE_LINE_HEIGHT: f32 = 1.25;
+pub const TITLE_LINE_HEIGHT: f32 = 1.25;
 /// `.idl { margin-top: 4px }`.
 const CONTEXT_GAP: f32 = 4.0;
 /// `.idl { gap: 6px }`.
