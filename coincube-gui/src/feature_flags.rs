@@ -228,6 +228,11 @@ const fn bytes_eq_ci(a: &[u8], b: &[u8]) -> bool {
     true
 }
 
+/// Whether the Spark page offers **Swap BTC ⇄ USDB** (Tenshu v175 S3). The
+/// W2 page lays the action out hidden; S3u adds the Swap screen and turns
+/// this on.
+pub const SPARK_SWAP: bool = false;
+
 #[cfg(test)]
 mod tests {
     use super::*;

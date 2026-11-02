@@ -144,6 +144,8 @@ const BTC_LOGO: &[u8] = include_bytes!("../static/logos/btc.svg");
 const LBTC_LOGO: &[u8] = include_bytes!("../static/logos/lbtc.svg");
 const USDT_LOGO: &[u8] = include_bytes!("../static/logos/usdt.svg");
 const USDC_LOGO: &[u8] = include_bytes!("../static/logos/usdc.svg");
+/// A COINCUBE-drawn mark for USDB (Tenshu v175 W2), not a third-party logo.
+const USDB_LOGO: &[u8] = include_bytes!("../static/logos/usdb.svg");
 const ETH_LOGO: &[u8] = include_bytes!("../static/logos/eth.svg");
 const TRX_LOGO: &[u8] = include_bytes!("../static/logos/trx.svg");
 const BNB_LOGO: &[u8] = include_bytes!("../static/logos/bnb.svg");
@@ -223,11 +225,17 @@ pub fn network_logo<'a>(network: &str) -> Svg<'a, Theme> {
 
 /// Returns the asset logo SVG for a given asset slug.
 pub fn asset_logo<'a>(asset: &str) -> Svg<'a, Theme> {
+    Svg::new(svg::Handle::from_memory(asset_logo_bytes(asset)))
+}
+
+/// The logo file for an asset slug ("btc", "lbtc", "usdt", "usdc", "usdb");
+/// anything else is bitcoin's.
+fn asset_logo_bytes(asset: &str) -> &'static [u8] {
     match asset {
-        "btc" | "lbtc" => btc_logo(),
-        "usdt" => usdt_logo(),
-        "usdc" => usdc_logo(),
-        _ => btc_logo(),
+        "usdt" => USDT_LOGO,
+        "usdc" => USDC_LOGO,
+        "usdb" => USDB_LOGO,
+        _ => BTC_LOGO,
     }
 }
 
@@ -323,4 +331,18 @@ pub fn asset_network_logo<'a, M: 'a>(
     .width(Length::Fixed(total))
     .height(Length::Fixed(total))
     .into()
+}
+
+#[cfg(test)]
+mod asset_logo_tests {
+    use super::*;
+
+    #[test]
+    fn usdb_has_its_own_logo() {
+        assert_eq!(asset_logo_bytes("usdb"), USDB_LOGO);
+        assert_ne!(USDB_LOGO, BTC_LOGO);
+        assert_eq!(asset_logo_bytes("btc"), BTC_LOGO);
+        assert_eq!(asset_logo_bytes("usdt"), USDT_LOGO);
+        assert_eq!(asset_logo_bytes("unknown"), BTC_LOGO);
+    }
 }
