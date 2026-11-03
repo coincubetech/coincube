@@ -861,22 +861,25 @@ mod tests {
         let mut swap = funded();
         let probe = inspect("spark-swap-auto-convert-unread", swap_body(&cache, &swap));
         assert!(!probe.contains("Auto-convert is"));
-        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(
-            crate::app::state::spark::swap::AutoConvertLine::Off,
-        ))));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded {
+            read: 0,
+            line: Some(crate::app::state::spark::swap::AutoConvertLine::Off),
+        }));
         let probe = inspect("spark-swap-auto-convert-off", swap_body(&cache, &swap));
         assert!(probe.contains("Auto-convert is off"));
         assert!(probe.contains("Bitcoin you receive stays bitcoin."));
-        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(
-            crate::app::state::spark::swap::AutoConvertLine::Held,
-        ))));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded {
+            read: 0,
+            line: Some(crate::app::state::spark::swap::AutoConvertLine::Held),
+        }));
         let probe = inspect("spark-swap-auto-convert-held", swap_body(&cache, &swap));
         assert!(probe.contains("Auto-convert is waiting"));
         assert!(probe.contains("Bitcoin received meanwhile stays bitcoin."));
         assert!(!probe.contains("converts to USDB"));
-        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(
-            crate::app::state::spark::swap::AutoConvertLine::On,
-        ))));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded {
+            read: 0,
+            line: Some(crate::app::state::spark::swap::AutoConvertLine::On),
+        }));
         let probe = inspect("spark-swap-auto-convert-on", swap_body(&cache, &swap));
         assert!(probe.contains("Auto-convert is on"));
         assert!(probe.contains("Bitcoin you receive converts to USDB."));

@@ -181,8 +181,12 @@ pub enum SparkSwapMessage {
         from: coincube_spark_protocol::WalletAsset,
         limits: Option<coincube_spark_protocol::ConversionLimits>,
     },
-    /// What auto-convert does next (`None`: it couldn't be read).
-    AutoConvertLoaded(Option<crate::app::state::spark::swap::AutoConvertLine>),
+    /// What auto-convert does next (`None`: it couldn't be read), for the
+    /// read numbered `read`.
+    AutoConvertLoaded {
+        read: u64,
+        line: Option<crate::app::state::spark::swap::AutoConvertLine>,
+    },
     QuoteLoaded {
         request: u64,
         result: Result<coincube_spark_protocol::PrepareSwapOk, String>,

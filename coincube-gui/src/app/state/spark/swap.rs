@@ -131,6 +131,9 @@ pub struct SparkSwap {
     /// What auto-convert does with bitcoin received next, once read: the
     /// side panel says it (H-Convert).
     auto_convert: Option<AutoConvertLine>,
+    /// Identity of the latest auto-convert read. A swap's answer bumps it,
+    /// so a read sent before the swap can't land on its result.
+    auto_convert_read: u64,
     /// The swap's result arrived while another page was showing, so the
     /// user hasn't seen it: the next visit shows it instead of a new form.
     result_unseen: bool,
@@ -150,6 +153,7 @@ impl SparkSwap {
             phase: SwapPhase::Details { error: None },
             request: 0,
             auto_convert: None,
+            auto_convert_read: 0,
             result_unseen: false,
         }
     }
@@ -298,6 +302,7 @@ impl SparkSwap {
         let Some(backend) = self.backend.clone() else {
             return Task::none();
         };
+        let read = self.auto_convert_read;
         Task::perform(
             async move {
                 backend
@@ -307,9 +312,9 @@ impl SparkSwap {
                     .ok()
                     .map(|state| AutoConvertLine::from_state(&state))
             },
-            |enabled| {
+            move |line| {
                 Message::View(view::Message::SparkSwap(
-                    SparkSwapMessage::AutoConvertLoaded(enabled),
+                    SparkSwapMessage::AutoConvertLoaded { read, line },
                 ))
             },
         )
@@ -473,6 +478,10 @@ impl SparkSwap {
                 };
                 // The balances moved (or may have), and a swap out of USDB may
                 // have put auto-convert on hold: show both as they are now.
+                // The line read before the swap may no longer hold, so the
+                // result shows none until a read sent from here succeeds.
+                self.auto_convert = None;
+                self.auto_convert_read += 1;
                 Task::batch([self.fetch_balance(), self.fetch_auto_convert()])
             }
             SparkSwapMessage::SwapAgain => {
@@ -505,10 +514,10 @@ impl SparkSwap {
                 }
                 Task::none()
             }
-            SparkSwapMessage::AutoConvertLoaded(enabled) => {
+            SparkSwapMessage::AutoConvertLoaded { read, line } => {
                 // An unread state keeps the last one rather than guessing.
-                if enabled.is_some() {
-                    self.auto_convert = enabled;
+                if read == self.auto_convert_read && line.is_some() {
+                    self.auto_convert = line;
                 }
                 Task::none()
             }
@@ -981,25 +990,80 @@ mod tests {
     fn the_auto_convert_state_is_kept_once_read() {
         let mut swap = SparkSwap::new(None);
         assert_eq!(swap.auto_convert_for_view(), None);
-        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(
-            AutoConvertLine::Off,
-        ))));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded {
+            read: 0,
+            line: Some(AutoConvertLine::Off),
+        }));
         assert_eq!(swap.auto_convert_for_view(), Some(AutoConvertLine::Off));
-        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(None)));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded {
+            read: 0,
+            line: None,
+        }));
         assert_eq!(
             swap.auto_convert_for_view(),
             Some(AutoConvertLine::Off),
             "an unread state keeps the last"
         );
-        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded(Some(
-            AutoConvertLine::On,
-        ))));
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded {
+            read: 0,
+            line: Some(AutoConvertLine::On),
+        }));
         assert_eq!(swap.auto_convert_for_view(), Some(AutoConvertLine::On));
         // While a swap is out the line is hidden: the bridge may hold
         // auto-convert for it.
         swap.request += 1;
         swap.phase = SwapPhase::Swapping(Box::new(quote(WalletAsset::Usdb, 1_000_000)));
         assert_eq!(swap.auto_convert_for_view(), None);
+    }
+
+    /// Grok and Codex on #1019: the result must not repeat the line read
+    /// before the swap. It shows only what a read sent after the answer says,
+    /// and stays hidden if that read fails.
+    #[test]
+    fn a_swap_result_shows_only_a_fresh_auto_convert_read() {
+        let mut swap = SparkSwap::new(None);
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded {
+            read: 0,
+            line: Some(AutoConvertLine::On),
+        }));
+        assert_eq!(swap.auto_convert_for_view(), Some(AutoConvertLine::On));
+        let request = swap.start_swapping_for_tests(quote(WalletAsset::Usdb, 1_000_000));
+        drop(swap.on_message(SparkSwapMessage::Swapped {
+            request,
+            result: SwapAttempt::Done(SwapOk {
+                swap_id: "swap".into(),
+                status: SwapStatus::Completed,
+            }),
+        }));
+        assert!(matches!(swap.phase, SwapPhase::Swapped(_)));
+        assert_eq!(
+            swap.auto_convert_for_view(),
+            None,
+            "the pre-send line is dropped"
+        );
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded {
+            read: 0,
+            line: Some(AutoConvertLine::On),
+        }));
+        assert_eq!(
+            swap.auto_convert_for_view(),
+            None,
+            "a read sent before the swap is ignored"
+        );
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded {
+            read: 1,
+            line: None,
+        }));
+        assert_eq!(
+            swap.auto_convert_for_view(),
+            None,
+            "a failed re-read stays hidden"
+        );
+        drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded {
+            read: 1,
+            line: Some(AutoConvertLine::Held),
+        }));
+        assert_eq!(swap.auto_convert_for_view(), Some(AutoConvertLine::Held));
     }
 
     /// Grok on #1019: a hold after a swap out of USDB means bitcoin received
