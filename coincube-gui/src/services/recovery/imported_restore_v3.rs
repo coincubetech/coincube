@@ -170,9 +170,7 @@ fn write_intent(path: &Path, intent: &RestoreIntent) -> Result<(), String> {
                 .map_err(|_| "Cannot write imported restore intent.")?;
             file.sync_all()
                 .map_err(|_| "Cannot sync imported restore intent.")?;
-            fs::File::open(parent)
-                .and_then(|dir| dir.sync_all())
-                .map_err(|_| "Cannot sync imported restore directory.")?;
+            sync_directory(parent, "Cannot sync imported restore directory.")?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let metadata =
@@ -186,9 +184,7 @@ fn write_intent(path: &Path, intent: &RestoreIntent) -> Result<(), String> {
             // be discarded and retried; a different complete intent cannot.
             if existing.len() < bytes.len() && bytes.starts_with(&existing) {
                 fs::remove_file(path).map_err(|_| "Cannot discard incomplete restore intent.")?;
-                fs::File::open(parent)
-                    .and_then(|dir| dir.sync_all())
-                    .map_err(|_| "Cannot sync restore intent cleanup.")?;
+                sync_directory(parent, "Cannot sync restore intent cleanup.")?;
                 return write_intent(path, intent);
             }
             let decoded: RestoreIntent = serde_json::from_slice(&existing)
@@ -262,9 +258,18 @@ pub(crate) fn clear_intent(path: &Path, intent: &RestoreIntent) -> Result<(), St
     }
     fs::remove_file(path).map_err(|_| "Cannot finish imported restore intent.")?;
     let parent = path.parent().ok_or("Missing imported restore directory.")?;
-    fs::File::open(parent)
+    sync_directory(parent, "Cannot sync completed restore intent.")
+}
+
+// Windows cannot open a directory as a file, so only Unix syncs the entry.
+fn sync_directory(dir: &Path, error: &'static str) -> Result<(), String> {
+    #[cfg(unix)]
+    fs::File::open(dir)
         .and_then(|dir| dir.sync_all())
-        .map_err(|_| "Cannot sync completed restore intent.".into())
+        .map_err(|_| error)?;
+    #[cfg(not(unix))]
+    let _ = (dir, error);
+    Ok(())
 }
 
 fn release_owner_network(
