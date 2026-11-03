@@ -956,8 +956,8 @@ fn account_error_card<'a>(err: &PanelError) -> Element<'a, ConnectAccountMessage
 /// Product benefits from the approved Connect artboards, each with its own
 /// glyph. These describe the service; the plan picker below remains the
 /// source for current eligibility. The last field marks a benefit that is not
-/// enabled yet (Duress, as in the Pro plan tagline). Buy/Sell and P2P are not
-/// enabled either, so they are not listed (Robert, 2026-10-27).
+/// enabled yet. Buy/Sell, P2P and Duress are not enabled either, so they are
+/// not listed (Robert, 2026-10-27; Duress 2026-11-03).
 fn connect_benefit_rows<'a>() -> [(iced::widget::Text<'a, theme::Theme>, &'static str, bool); 7] {
     [
         (shield_check_icon(), "Encrypted Recovery Kit backup for each Cube — COINCUBE never sees your keys", false),
@@ -966,7 +966,7 @@ fn connect_benefit_rows<'a>() -> [(iced::widget::Text<'a, theme::Theme>, &'stati
         (lightning_outline_icon(), "Hosted Esplora server — use your Vault instantly while your node syncs", false),
         (laptop_icon(), "Sign Vault transactions from your phone with the companion Keychain app", false),
         (lightning_outline_icon(), "Lightning Address and avatar for Spark wallets", false),
-        (exclamation_circle_icon(), "Duress mode and Connect-enforced spending policies (Pro and Estate)", true),
+        (exclamation_circle_icon(), "Connect-enforced spending policies (Pro and Estate)", true),
     ]
 }
 
@@ -1375,8 +1375,9 @@ fn plan_tier_color(tier: &PlanTier) -> iced::Color {
 /// `name` + `price` + `features[]` + `entitlements`), so this copy lives here.
 /// Keep it aligned with the entitlement matrix in
 /// `documentation/PRICING_AND_TIERS.md` (coincube-api repo): Pro adds cube/key
-/// capacity, Duress and Connect-enforced policies; Estate adds inheritance
-/// escrow, duress alerts and collaborative keyholder invitations.
+/// capacity and Connect-enforced policies; Estate adds inheritance escrow and
+/// collaborative keyholder invitations. Duress is unannounced, so it is not
+/// mentioned here even though the pricing matrix lists it.
 fn plan_tagline(tier: &PlanTier) -> &'static str {
     match tier {
         PlanTier::Free => {
@@ -1384,8 +1385,7 @@ fn plan_tagline(tier: &PlanTier) -> &'static str {
              and a Lightning address."
         }
         PlanTier::Pro => {
-            "More Cubes per network and Connect-enforced policies for greater control. \
-             Duress mode — Coming soon."
+            "More Cubes per network and Connect-enforced policies for greater control."
         }
         PlanTier::Estate => {
             "Maximum Cube capacity, inheritance escrow, and collaborative \
@@ -1657,11 +1657,17 @@ fn billing_management_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conn
         .push(iced::widget::Space::new().height(Length::Fixed(32.0)))
         .push(group_title("Features on this account"))
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)));
+    let current_features = current_features.map(|info| {
+        info.features
+            .iter()
+            .filter_map(|feature| launch_feature_copy(feature))
+            .collect::<Vec<_>>()
+    });
     match current_features {
-        Some(info) if !info.features.is_empty() => {
-            col = col.push(ruled_list(info.features.iter().map(|feature| {
+        Some(features) if !features.is_empty() => {
+            col = col.push(ruled_list(features.into_iter().map(|feature| {
                 Row::new()
-                    .push(tenshu_text::label(launch_feature_copy(feature)).width(Length::Fill))
+                    .push(tenshu_text::label(feature).width(Length::Fill))
                     .push(status_line(check_circle_icon(), "Included", Tone::Good))
                     .spacing(16)
                     .align_y(Alignment::Center)
@@ -1777,13 +1783,17 @@ fn plan_provenance_display(plan: &ConnectPlan) -> Option<(&str, Option<&str>)> {
     Some((label, badge))
 }
 
-fn launch_feature_copy(feature: &str) -> String {
-    match feature.trim().to_ascii_lowercase().as_str() {
-        "duress" | "duress mode" | "duress protection" => "Duress mode — Coming soon".to_string(),
+/// Launch-safe copy for one server-authored plan feature, or `None` to hide
+/// it. Duress is unannounced, so any feature naming it is dropped; duress
+/// alerts read as the (also unreleased) recovery alerts.
+fn launch_feature_copy(feature: &str) -> Option<String> {
+    let key = feature.trim().to_ascii_lowercase();
+    match key.as_str() {
         "recovery alert" | "recovery alerts" | "duress alert" | "duress alerts" => {
-            "Recovery alerts — Coming soon".to_string()
+            Some("Recovery alerts — Coming soon".to_string())
         }
-        _ => feature.to_string(),
+        _ if key.contains("duress") => None,
+        _ => Some(feature.to_string()),
     }
 }
 
@@ -1974,14 +1984,14 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
                         BillingCycle::Annual => p.annual,
                     });
                     // Preserve server-authored availability while keeping
-                    // unreleased duress and alert marketing launch-safe.
+                    // unreleased alert marketing launch-safe and duress hidden.
                     Some(PlanCardData {
                         name: tier.to_string(),
                         tier,
                         features: info
                             .features
                             .iter()
-                            .map(|feature| launch_feature_copy(feature))
+                            .filter_map(|feature| launch_feature_copy(feature))
                             .collect(),
                         price_amount,
                     })
@@ -3972,25 +3982,40 @@ mod renewal_banner_tests {
     }
 
     #[test]
-    fn unreleased_plan_features_are_marked_coming_soon() {
+    fn sign_in_benefits_do_not_mention_duress() {
+        for (_, benefit, _) in connect_benefit_rows() {
+            assert!(
+                !benefit.to_ascii_lowercase().contains("duress"),
+                "{}",
+                benefit
+            );
+        }
+    }
+
+    #[test]
+    fn unreleased_plan_features_are_hidden_or_marked_coming_soon() {
         assert_eq!(
             plan_tagline(&PlanTier::Pro),
-            "More Cubes per network and Connect-enforced policies for greater control. \
-             Duress mode — Coming soon."
+            "More Cubes per network and Connect-enforced policies for greater control."
+        );
+        assert_eq!(launch_feature_copy("Duress mode"), None);
+        assert_eq!(launch_feature_copy("Duress protection"), None);
+        assert_eq!(launch_feature_copy("Duress activation alerts"), None);
+        assert_eq!(
+            launch_feature_copy("Duress alerts").as_deref(),
+            Some("Recovery alerts — Coming soon")
         );
         assert_eq!(
-            launch_feature_copy("Duress mode"),
-            "Duress mode — Coming soon"
+            launch_feature_copy("Recovery alerts").as_deref(),
+            Some("Recovery alerts — Coming soon")
         );
         assert_eq!(
-            launch_feature_copy("Recovery alerts"),
-            "Recovery alerts — Coming soon"
+            launch_feature_copy("More Cubes").as_deref(),
+            Some("More Cubes")
         );
-        assert_eq!(launch_feature_copy("More Cubes"), "More Cubes");
-        assert_eq!(launch_feature_copy("Price alerts"), "Price alerts");
         assert_eq!(
-            launch_feature_copy("Duress activation alerts"),
-            "Duress activation alerts"
+            launch_feature_copy("Price alerts").as_deref(),
+            Some("Price alerts")
         );
     }
 
