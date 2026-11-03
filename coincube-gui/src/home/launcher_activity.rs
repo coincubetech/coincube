@@ -104,6 +104,9 @@ pub enum Unavailable {
     LocalNodeNotRunning,
     /// The public explorer for the network did not answer.
     Unreachable(Via),
+    /// Automatic found no local node and its public explorer did not answer.
+    NeitherAnswered(Via),
+    /// The network has no public explorer (regtest).
     NoSource,
 }
 
@@ -112,9 +115,23 @@ impl Unavailable {
         match self {
             Unavailable::LocalNodeNotRunning => "Local node isn't running",
             Unavailable::Unreachable(Via::MempoolSpace) => "mempool.space is unreachable",
-            Unavailable::Unreachable(_) => "Connect is unreachable",
-            Unavailable::NoSource => "No activity source",
+            Unavailable::Unreachable(_) => "COINCUBE | Connect is unreachable",
+            Unavailable::NeitherAnswered(Via::MempoolSpace) => {
+                "No local node, and mempool.space is unreachable"
+            }
+            Unavailable::NeitherAnswered(_) => "No local node, and Connect is unreachable",
+            Unavailable::NoSource => "No public explorer for this network",
         }
+    }
+}
+
+/// Why Automatic shows nothing once the local node has not answered: the
+/// public explorer failed too, or the network has none and only a running
+/// node could have served it.
+fn automatic_unavailable(chain: ChainId) -> Unavailable {
+    match public_source(chain) {
+        Some((via, _)) => Unavailable::NeitherAnswered(via),
+        None => Unavailable::LocalNodeNotRunning,
     }
 }
 
@@ -373,7 +390,7 @@ pub(super) async fn read(
                 tracing::debug!("Launcher activity: no local node for {chain}: {error}");
                 public(chain).await.map_err(|error| {
                     tracing::debug!("Launcher activity: public explorer for {chain}: {error}");
-                    Unavailable::NoSource
+                    automatic_unavailable(chain)
                 })
             }
         },
@@ -1176,6 +1193,20 @@ mod tests {
         assert_eq!(
             Unavailable::Unreachable(Via::MempoolSpace).label(),
             "mempool.space is unreachable"
+        );
+        // Automatic names the explorer that failed after the local node,
+        // and on regtest, which has no explorer, the node it needs.
+        assert_eq!(
+            automatic_unavailable(ChainId::Bitcoin).label(),
+            "No local node, and Connect is unreachable"
+        );
+        assert_eq!(
+            automatic_unavailable(ChainId::Signet).label(),
+            "No local node, and mempool.space is unreachable"
+        );
+        assert_eq!(
+            automatic_unavailable(ChainId::Regtest),
+            Unavailable::LocalNodeNotRunning
         );
         let mut testnet = snapshot(120_000);
         testnet.via = Via::MempoolSpace;
