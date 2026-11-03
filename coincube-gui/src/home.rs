@@ -5524,6 +5524,7 @@ impl Home {
             }
             content.into()
         } else if let State::CreationBackup(step) = &self.state {
+            // Wide enough for the 4×150 word grid and its gutters.
             Container::new(creation_backup_view(
                 step,
                 self.creation_backup_words.as_ref().map(|w| w.as_slice()),
@@ -5535,7 +5536,7 @@ impl Home {
                 self.creation_kit_error.as_deref(),
                 self.can_create_recovery_kit(),
             ))
-            .max_width(640)
+            .max_width(760)
             .into()
         } else {
             self.creation_form(false)
@@ -5621,7 +5622,9 @@ impl Home {
         };
         region = region.push(test_strip);
         let region = region.push(
-            scrollable(Container::new(body).padding(28).width(Length::Fill))
+            // Every step's column is centred in the card, so a narrow form
+            // does not leave a dead gutter on its right.
+            scrollable(Container::new(body).padding(28).center_x(Length::Fill))
                 .id(Id::new(CREATE_BODY_SCROLL_ID))
                 .height(Length::Fill),
         );
@@ -6913,14 +6916,10 @@ fn create_cube_form<'a>(
         );
     }
 
-    let form = Container::new(column)
+    Container::new(column)
         .padding(if importing_bitcoin { 20 } else { 0 })
-        .width(Length::Fill);
-    if importing_bitcoin {
-        form.center_x(Length::Fill).into()
-    } else {
-        form.into()
-    }
+        .center_x(Length::Fill)
+        .into()
 }
 
 /// The Vault line under a Cube's name on the Cubes list.
@@ -7014,7 +7013,8 @@ fn creation_backup_view<'a>(
 
     let with_bypass = |inner: Element<'a, ViewMessage>| -> Element<'a, ViewMessage> {
         Column::new()
-            .align_x(Alignment::Start)
+            .width(Length::Fill)
+            .align_x(Alignment::Center)
             .spacing(20)
             .push(inner)
             .push(bypass_link())
@@ -7023,15 +7023,22 @@ fn creation_backup_view<'a>(
 
     match step {
         CreationBackupStep::Intro(checked) => Column::new()
-            .align_x(Alignment::Start)
+            .width(Length::Fill)
+            .align_x(Alignment::Center)
             .spacing(20)
-            .push(backup::intro_view(*checked, ViewMessage::CreationBackup))
-            .push(
-                Container::new(
-                    p1_regular(creation_gate::NOT_A_BACKUP_COPY).style(theme::text::secondary),
-                )
-                .max_width(500),
-            )
+            .push(backup::intro_view(
+                *checked,
+                Some(
+                    Container::new(
+                        p1_regular(creation_gate::NOT_A_BACKUP_COPY)
+                            .style(theme::text::secondary)
+                            .align_x(iced::alignment::Horizontal::Center),
+                    )
+                    .max_width(560)
+                    .into(),
+                ),
+                ViewMessage::CreationBackup,
+            ))
             .push(bypass_link())
             .into(),
         CreationBackupStep::Phrase => match words {
@@ -7072,7 +7079,8 @@ fn creation_backup_view<'a>(
         }
         CreationBackupStep::KitUploading => Container::new(
             Column::new()
-                .align_x(Alignment::Start)
+                .width(Length::Fill)
+                .align_x(Alignment::Center)
                 .spacing(20)
                 .push(text("Saving your Recovery Kit…").size(24).bold())
                 .push(
@@ -7082,7 +7090,8 @@ fn creation_backup_view<'a>(
                              and saving it to COINCUBE Connect. Your Cube is created once \
                              this finishes.",
                         )
-                        .style(theme::text::secondary),
+                        .style(theme::text::secondary)
+                        .align_x(iced::alignment::Horizontal::Center),
                     )
                     .max_width(500),
                 ),
@@ -7111,7 +7120,7 @@ fn creation_choice_view(
     is_passkey: bool,
     kit_available: bool,
 ) -> Element<'static, ViewMessage> {
-    let mut options = Column::new().align_x(Alignment::Start).spacing(12).push(
+    let mut options = Column::new().align_x(Alignment::Center).spacing(12).push(
         button::primary(None, "Write down my recovery phrase")
             .on_press_maybe(
                 (!saving).then_some(ViewMessage::CreationBackup(BackupWalletMessage::NextStep)),
@@ -7128,7 +7137,8 @@ fn creation_choice_view(
     }
 
     let mut content = Column::new()
-        .align_x(Alignment::Start)
+        .width(Length::Fill)
+        .align_x(Alignment::Center)
         .spacing(20)
         .push(text("Back up this Cube").size(24).bold())
         .push(
@@ -7139,14 +7149,16 @@ fn creation_choice_view(
                      Recovery Kit, which stores the same seed with COINCUBE Connect, \
                      encrypted with a recovery password only you know.",
                 )
-                .style(theme::text::secondary),
+                .style(theme::text::secondary)
+                .align_x(iced::alignment::Horizontal::Center),
             )
             .max_width(560),
         )
         .push(
             Container::new(
                 p1_regular(creation_gate::not_a_backup_copy(is_passkey))
-                    .style(theme::text::secondary),
+                    .style(theme::text::secondary)
+                    .align_x(iced::alignment::Horizontal::Center),
             )
             .max_width(560),
         );
@@ -7158,7 +7170,8 @@ fn creation_choice_view(
                     "Sign in to COINCUBE Connect to save a Recovery Kit instead. \
                      Your written phrase works either way.",
                 )
-                .style(theme::text::secondary),
+                .style(theme::text::secondary)
+                .align_x(iced::alignment::Horizontal::Center),
             )
             .max_width(560),
         );
@@ -7192,13 +7205,15 @@ fn creation_backup_bypass_view(
 ) -> Element<'static, ViewMessage> {
     Container::new(
         Column::new()
-            .align_x(Alignment::Start)
+            .width(Length::Fill)
+            .align_x(Alignment::Center)
             .spacing(20)
             .push(text("Create this Cube without a backup?").size(24).bold())
             .push(
                 Container::new(
                     p1_regular(creation_gate::not_a_backup_copy(is_passkey))
-                        .style(theme::text::secondary),
+                        .style(theme::text::secondary)
+                        .align_x(iced::alignment::Horizontal::Center),
                 )
                 .max_width(500),
             )
@@ -9167,14 +9182,80 @@ mod tests {
             } else {
                 coincube_ui::theme::palette::ThemeMode::Dark
             };
-            for (name, chain, confirmed, bottom) in [
-                ("network", ChainId::Bitcoin, false, false),
-                ("cube", ChainId::Bitcoin, true, false),
-                ("cube-bottom", ChainId::Bitcoin, true, true),
-                ("test-network", ChainId::Testnet4, false, false),
+            let words: Vec<String> = MasterSigner::generate(Network::Bitcoin)
+                .unwrap()
+                .words()
+                .iter()
+                .map(|w| w.to_string())
+                .collect();
+            home.creation_backup_words = Some(zeroize::Zeroizing::new(words));
+            for (name, chain, confirmed, bottom, backup) in [
+                ("network", ChainId::Bitcoin, false, false, None),
+                ("cube", ChainId::Bitcoin, true, false, None),
+                ("cube-bottom", ChainId::Bitcoin, true, true, None),
+                ("test-network", ChainId::Testnet4, false, false, None),
+                (
+                    "backup-choice",
+                    ChainId::Testnet4,
+                    true,
+                    false,
+                    Some(CreationBackupStep::Choice),
+                ),
+                (
+                    "backup-intro",
+                    ChainId::Testnet4,
+                    true,
+                    false,
+                    Some(CreationBackupStep::Intro(false)),
+                ),
+                (
+                    "backup-phrase",
+                    ChainId::Testnet4,
+                    true,
+                    false,
+                    Some(CreationBackupStep::Phrase),
+                ),
+                (
+                    "backup-verify",
+                    ChainId::Testnet4,
+                    true,
+                    false,
+                    Some(CreationBackupStep::Verification {
+                        word_indices: [2, 6, 11],
+                        word_inputs: Default::default(),
+                        error: Some("Word 6 doesn't match. Check your list.".into()),
+                    }),
+                ),
+                (
+                    "backup-bypass",
+                    ChainId::Testnet4,
+                    true,
+                    false,
+                    Some(CreationBackupStep::Bypass {
+                        acknowledged: false,
+                    }),
+                ),
+                (
+                    "backup-kit-password",
+                    ChainId::Testnet4,
+                    true,
+                    false,
+                    Some(CreationBackupStep::KitPassword),
+                ),
+                (
+                    "backup-kit-uploading",
+                    ChainId::Testnet4,
+                    true,
+                    false,
+                    Some(CreationBackupStep::KitUploading),
+                ),
             ] {
                 home.network = chain;
                 home.create_network_confirmed = confirmed;
+                home.state = match backup {
+                    Some(step) => State::CreationBackup(step),
+                    None => State::NoCube { create_cube: true },
+                };
                 let mut element = home.create_journey_view();
                 let mut tree = Tree::new(element.as_widget());
                 let node = element.as_widget_mut().layout(

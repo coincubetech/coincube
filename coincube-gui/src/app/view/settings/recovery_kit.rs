@@ -172,17 +172,14 @@ pub fn password_entry_view<'a, M: Clone + 'a>(
     let mut col = Column::new()
         .spacing(20)
         .width(Length::Fill)
-        .push(header_with(on))
-        .push(Space::new().height(Length::Fixed(16.0)))
         .push(
             Row::new()
                 .width(Length::Fill)
                 .align_y(Alignment::Center)
                 .push(Space::new().width(Length::Fill))
-                .push(icon::key_icon().size(100).color(color::ORANGE))
+                .push(icon::key_icon().size(72).color(color::ORANGE))
                 .push(Space::new().width(Length::Fill)),
         )
-        .push(Space::new().height(Length::Fixed(16.0)))
         .push(
             Row::new()
                 .width(Length::Fill)
