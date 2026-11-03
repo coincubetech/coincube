@@ -744,19 +744,6 @@ fn balance_privacy_eye_change(
     }
 }
 
-/// The Launcher eye may only hide or show balances, and only while the tab
-/// that sent it still shows the Launcher. A queued press from a tab that
-/// has since opened a Cube is dropped, like a stale App eye.
-fn launcher_eye_is_current(
-    tab: Option<&tab::Tab>,
-    change: &crate::app::settings::preferences::PreferenceChange,
-) -> bool {
-    matches!(
-        change,
-        crate::app::settings::preferences::PreferenceChange::HideBalances(_)
-    ) && tab.is_some_and(|tab| matches!(tab.state, tab::State::Home(_)))
-}
-
 /// Home reload also reconciles fork and Split flow availability. Only feature
 /// edits may ask it to run that reconciliation.
 fn needs_global_settings_reload(
@@ -870,10 +857,6 @@ mod balance_privacy_eye_origin_tests {
         let mut tab = tab::Tab::new(1, tab::State::App(app));
         let generation = tab.app_generation_token().unwrap();
         let change = PreferenceChange::HideBalances(false);
-        assert!(
-            !launcher_eye_is_current(Some(&tab), &change),
-            "a Launcher eye event cannot write once an App owns the tab"
-        );
         let eye = || {
             tab::Message::AppAsync(
                 generation,
@@ -899,15 +882,6 @@ mod balance_privacy_eye_origin_tests {
         );
         drop(tab.update(tab::Message::LockCubeToLauncher));
         assert!(matches!(tab.state, tab::State::Home(_)));
-        assert!(
-            !launcher_eye_is_current(None, &change),
-            "a Launcher eye event for a closed tab is dropped"
-        );
-        assert!(launcher_eye_is_current(Some(&tab), &change));
-        assert!(
-            !launcher_eye_is_current(Some(&tab), &PreferenceChange::DeveloperMode(true)),
-            "the Launcher path writes only the hide-balances preference"
-        );
         assert_eq!(
             balance_privacy_eye_change(Some(&tab), &eye()),
             Some((change, false))
@@ -2243,12 +2217,10 @@ impl GUI {
                     Task::none()
                 };
             }
-            if let tab::Message::HomeDevicePreference(change) = inner.as_ref() {
-                return if launcher_eye_is_current(tab, change) {
-                    self.change_balance_privacy(*change)
-                } else {
-                    Task::none()
-                };
+            // The Launcher shows no balances and has no eye, so nothing it
+            // sends may change device-wide balance privacy.
+            if matches!(inner.as_ref(), tab::Message::HomeDevicePreference(_)) {
+                return Task::none();
             }
         }
         // Validate session-tagged App callbacks before inspecting global auth
@@ -4957,12 +4929,16 @@ mod app_preferences_sheet_tests {
         std::fs::create_dir_all(&path).unwrap();
         let root = CoincubeDirectory::new(path.clone());
         let mut gui = launcher_gui(&root);
+        // The Launcher draws no eye, but its tab keeps the chrome for the
+        // Cube it opens next.
         let launcher_chrome = |gui: &GUI| {
             let pane = gui.panes.get(gui.focus.unwrap()).unwrap();
-            let tab::State::Home(home) = &pane.tabs[0].state else {
-                panic!("the launcher starts as Home");
-            };
-            home.balance_privacy
+            assert!(
+                matches!(pane.tabs[0].state, tab::State::Home(_)),
+                "the launcher starts as Home"
+            );
+            pane.tabs[0]
+                .balance_privacy
                 .expect("the shell publishes privacy chrome")
         };
         gui.publish_balance_privacy();

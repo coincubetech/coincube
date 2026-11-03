@@ -507,8 +507,6 @@ pub struct Home {
     pub active_section: HomeSection,
     /// Current theme mode (dark/light) — used for theme-aware rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
-    /// The GUI's accepted balance-privacy receipt for the Launcher's eye.
-    pub(crate) balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
     /// App preferences is open over this Launcher; its top-bar entry shows
     /// the current state (`.tbtn.on`). Set by the GUI that owns the sheet.
     pub(crate) app_preferences_open: bool,
@@ -680,7 +678,6 @@ impl Home {
                 connect_expanded: false,
                 active_section: HomeSection::Cubes,
                 theme_mode: GlobalSettings::load_theme_mode(&GlobalSettings::path(&datadir_path)),
-                balance_privacy: None,
                 app_preferences_open: false,
                 system_reduces_motion,
                 liquid_on_disk: false,
@@ -7714,8 +7711,8 @@ pub enum ViewMessage {
     ToggleTheme,
     /// Open the device-wide preferences sheet over the current screen.
     OpenAppPreferences,
-    /// The Launcher eye's device-wide hide-balances intent. The GUI applies
-    /// it only while this tab is still the Launcher.
+    /// A device-wide preference change, bubbled to the GUI. The Launcher
+    /// has no hide-balances eye; only open Cubes show one.
     ChangeDevicePreference(crate::app::settings::preferences::PreferenceChange),
     /// Toggle passkey mode for Cube creation (no PIN when enabled).
     TogglePasskeyMode(bool),
