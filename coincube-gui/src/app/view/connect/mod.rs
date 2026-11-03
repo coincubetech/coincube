@@ -955,18 +955,17 @@ fn account_error_card<'a>(err: &PanelError) -> Element<'a, ConnectAccountMessage
 
 /// Product benefits from the approved Connect artboards, each with its own
 /// glyph. These describe the service; the plan picker below remains the
-/// source for current eligibility. The last field marks a benefit that is not
-/// enabled yet. Buy/Sell, P2P and Duress are not enabled either, so they are
-/// not listed (Robert, 2026-10-27; Duress 2026-11-03).
-fn connect_benefit_rows<'a>() -> [(iced::widget::Text<'a, theme::Theme>, &'static str, bool); 7] {
+/// source for current eligibility. Buy/Sell, P2P and Duress are not enabled,
+/// so they are not listed (Robert, 2026-10-27; Duress 2026-11-03).
+fn connect_benefit_rows<'a>() -> [(iced::widget::Text<'a, theme::Theme>, &'static str); 7] {
     [
-        (shield_check_icon(), "Encrypted Recovery Kit backup for each Cube — COINCUBE never sees your keys", false),
-        (people_icon(), "Inheritance: invite family or friends to hold keys in the Keychain app, with time-locked recovery keys to recover funds", false),
-        (bell_icon(), "Recovery alerts and emergency contacts for people you trust", false),
-        (lightning_outline_icon(), "Hosted Esplora server — use your Vault instantly while your node syncs", false),
-        (laptop_icon(), "Sign Vault transactions from your phone with the companion Keychain app", false),
-        (lightning_outline_icon(), "Lightning Address and avatar for Spark wallets", false),
-        (exclamation_circle_icon(), "Connect-enforced spending policies (Pro and Estate)", true),
+        (shield_check_icon(), "Encrypted Recovery Kit backup for each Cube — COINCUBE never sees your keys"),
+        (people_icon(), "Inheritance: invite family or friends to hold keys in the Keychain app, with time-locked recovery keys to recover funds"),
+        (bell_icon(), "Recovery alerts and emergency contacts for people you trust"),
+        (lightning_outline_icon(), "Hosted Esplora server — use your Vault instantly while your node syncs"),
+        (laptop_icon(), "Sign Vault transactions from your phone with the companion Keychain app"),
+        (lightning_outline_icon(), "Lightning Address and avatar for Spark wallets"),
+        (exclamation_circle_icon(), "Connect-enforced spending policies (Pro and Estate)"),
     ]
 }
 
@@ -975,17 +974,11 @@ fn connect_benefit_rows<'a>() -> [(iced::widget::Text<'a, theme::Theme>, &'stati
 fn connect_benefits<'a>(compact: bool) -> Element<'a, ConnectAccountMessage> {
     let (size, gap) = if compact { (13.0, 6) } else { (14.0, 8) };
     let mut list = Column::new().spacing(gap);
-    for (icon, benefit, coming_soon) in connect_benefit_rows() {
-        let mut copy = Row::new()
+    for (icon, benefit) in connect_benefit_rows() {
+        let copy = Row::new()
             .push(tenshu_text::body(benefit).size(size))
             .spacing(8)
             .align_y(Alignment::Center);
-        if coming_soon {
-            copy = copy.push(coincube_ui::component::tenshu::status_badge(
-                "Coming soon",
-                Tone::Muted,
-            ));
-        }
         list = list.push(
             Row::new()
                 .push(icon.size(18).style(theme::tenshu::text::muted))
@@ -3983,7 +3976,7 @@ mod renewal_banner_tests {
 
     #[test]
     fn sign_in_benefits_do_not_mention_duress() {
-        for (_, benefit, _) in connect_benefit_rows() {
+        for (_, benefit) in connect_benefit_rows() {
             assert!(
                 !benefit.to_ascii_lowercase().contains("duress"),
                 "{}",
@@ -5158,7 +5151,6 @@ mod renewal_banner_tests {
             "Sign-in method",
             "What Connect provides",
             "Sign out…",
-            "Coming soon",
         ] {
             assert!(
                 labels.iter().any(|label| label == expected),
@@ -5413,11 +5405,11 @@ mod renewal_banner_tests {
                 overview
             );
         }
-        // Duress is listed but not enabled yet; Buy/Sell and P2P are not
-        // enabled and not listed (Robert, 2026-10-27).
+        // Every listed benefit is available; Buy/Sell, P2P and Duress are
+        // not enabled and not listed (Robert, 2026-10-27; Duress 2026-11-03).
         assert_eq!(
             overview.iter().filter(|l| *l == "Coming soon").count(),
-            1,
+            0,
             "{:?}",
             overview
         );
