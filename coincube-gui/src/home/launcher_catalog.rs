@@ -6333,7 +6333,7 @@ mod tests {
                 assert_eq!((projection.local_total, projection.remote_total), (0, 0));
                 assert_eq!(projection.floor_eligible(mode), mode == LauncherMode::Cubes);
                 for window in [COMPACT, WIDE] {
-                    let tree = home_tree("empty-startup", &home, window, appearance, theme.clone());
+                    let tree = home_tree("empty-startup", &home, window, appearance, theme);
                     assert!(tree.has(&create_id()));
                     assert!(tree.has(&import_id()));
                     assert_eq!(tree.has(&empty_create_id()), mode == LauncherMode::Cubes);
