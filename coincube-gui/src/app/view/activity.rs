@@ -317,6 +317,7 @@ impl Entry {
             .cloned();
         let title = label.unwrap_or_else(|| {
             match direction {
+                DirectionFilter::Received if tx.time.is_none() => "Incoming Bitcoin",
                 DirectionFilter::Received => "Received Bitcoin",
                 DirectionFilter::Sent => "Sent Bitcoin",
                 _ => "Self-transfer",
@@ -366,12 +367,13 @@ impl Entry {
             direction,
             status,
             status_label: if status == StatusFilter::Pending {
-                "Unconfirmed"
+                "Pending"
             } else {
                 "Confirmed"
             }
             .into(),
-            status_note: None,
+            status_note: (status == StatusFilter::Pending)
+                .then_some("Waiting for blockchain confirmation"),
             title,
             amount: grouped(amount.to_sat()),
             unit: "SATS".into(),
@@ -1677,6 +1679,14 @@ pub fn recent_activity<'a>(
         );
     }
     let mut content = Column::new().spacing(10).push(heading);
+    if !entries.is_empty() {
+        content = content.push(words(
+            "Select a transaction to view details",
+            13.0,
+            font::REGULAR,
+            glyph::muted,
+        ));
+    }
     for (wallet, (_, error)) in &states {
         let Some((source, error)) = error else {
             continue;
@@ -1889,6 +1899,24 @@ fn next_step(entry: &Entry, replaceable: bool) -> Option<&'static str> {
 
 pub const DETAIL_NEXT_STEP_ID: &str = "tenshu.activity.detail.next";
 
+/// Use chain identity rather than address encoding: fork transactions must
+/// never be sent to a Bitcoin explorer. Regtest has no public explorer.
+fn vault_explorer_url(chain: crate::chain::ChainId, tx: &HistoryTransaction) -> Option<String> {
+    use crate::chain::ChainId;
+    let base = match chain {
+        ChainId::Bitcoin => "https://mempool.space",
+        ChainId::Testnet => "https://mempool.space/testnet",
+        ChainId::Testnet4 => "https://mempool.space/testnet4",
+        ChainId::Signet => "https://mempool.space/signet",
+        ChainId::Regtest | ChainId::BitcoinBlake2b | ChainId::BitcoinBlake2bTestnet4 => {
+            return None
+        }
+    };
+    Some(format!("{base}/tx/{}", tx.txid))
+}
+
+const DETAIL_EXPLORER_ID: &str = "tenshu.activity.detail.explorer";
+
 fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> Column<'a, Message> {
     let masked = cache.balance_amounts_masked();
     let needs_signatures = matches!(
@@ -2053,6 +2081,8 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
                 vault_confirmation_detail(height, cache.blockheight()),
                 false,
             ));
+        } else {
+            detail = detail.push(fact("Confirmations", "0 · Pending".to_owned(), false));
         }
     }
     if let Some((key, value)) = &entry.peer {
@@ -2098,6 +2128,22 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
 
     for (index, (name, value)) in entry.identifiers.iter().enumerate() {
         detail = detail.push(identifier_row(index, name, value));
+    }
+    if let ActivityTarget::Vault(tx) = &entry.target {
+        if let Some(url) = vault_explorer_url(cache.chain(), tx) {
+            detail = detail.push(
+                Action::new(
+                    DETAIL_EXPLORER_ID,
+                    text("View on blockchain explorer")
+                        .size(13)
+                        .font(font::MEDIUM),
+                    Message::FocusAction,
+                )
+                .style(theme::button::secondary)
+                .padding([8, 12])
+                .on_press(Message::OpenUrl(url)),
+            );
+        }
     }
 
     if let Some((title, facts)) = entry
@@ -3466,6 +3512,93 @@ mod tests {
             vec![0],
             Network::Regtest,
         )
+    }
+
+    #[test]
+    fn pending_vault_receipt_opens_details_and_explorer_before_confirmation() {
+        let cache = Cache::default();
+        let confirmed = outgoing_vault_payment();
+        let pending = HistoryTransaction::new(
+            confirmed.tx.clone(),
+            None,
+            None,
+            vec![],
+            vec![0],
+            confirmed.network,
+        );
+        let entry = Entry::vault(pending.clone());
+        assert_eq!(entry.direction, DirectionFilter::Received);
+        assert_eq!(entry.title, "Incoming Bitcoin");
+        assert_eq!(entry.status_label, "Pending");
+        let mut activity = Activity::new(None, None);
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::ActivityVaultLoaded(0, Ok((vec![pending], false))),
+        ));
+        for (appearance, theme) in [
+            ("dark", coincube_ui::theme::Theme::dark()),
+            ("light", coincube_ui::theme::Theme::light()),
+        ] {
+            let page = mount(
+                "vault-pending-receipt",
+                recent_activity(
+                    &activity,
+                    &cache,
+                    RecentScope::Wallet(WalletFilter::Vault),
+                    None,
+                ),
+                (1440, 900),
+                appearance,
+                theme,
+                680,
+            );
+            assert!(page.contains("Incoming Bitcoin"));
+            assert!(page.contains("Pending"));
+            assert!(page.has_focus(row_focus_id(&entry.id)));
+        }
+        drop(activity.update(
+            None,
+            &cache,
+            AppMessage::View(Message::Activity(ActivityMessage::Select(entry.id))),
+        ));
+        let detail = wallet_activity_detail(&activity, &cache, WalletFilter::Vault).unwrap();
+        let detail = mount(
+            "vault-pending-receipt-detail",
+            detail_column(detail),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+            420,
+        );
+        assert!(detail.contains("Waiting for blockchain confirmation"));
+        assert!(detail.contains("0 · Pending"));
+        assert!(detail.contains("Txid"));
+        assert!(detail.has_focus(Id::from(DETAIL_EXPLORER_ID)));
+    }
+
+    #[test]
+    fn vault_explorer_respects_exact_chain_identity() {
+        use crate::chain::ChainId;
+        let tx = outgoing_vault_payment();
+        for (chain, base) in [
+            (ChainId::Bitcoin, "https://mempool.space"),
+            (ChainId::Testnet, "https://mempool.space/testnet"),
+            (ChainId::Testnet4, "https://mempool.space/testnet4"),
+            (ChainId::Signet, "https://mempool.space/signet"),
+        ] {
+            assert_eq!(
+                vault_explorer_url(chain, &tx),
+                Some(format!("{base}/tx/{}", tx.txid))
+            );
+        }
+        for chain in [
+            ChainId::Regtest,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            assert!(vault_explorer_url(chain, &tx).is_none());
+        }
     }
 
     #[test]
