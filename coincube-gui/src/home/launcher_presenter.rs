@@ -1594,13 +1594,17 @@ fn empty_floor<'a>(home: &'a Home, width: f32, available: f32) -> Element<'a, Vi
         coincube_ui::theme::palette::ThemeMode::Light
     );
     let at_limit = launcher_catalog::project(home).at_limit();
+    let key = launcher_catalog::create_placeholder_key();
+    // It floats under the pointer as a resting Cube does, and its plus
+    // rises with it; the words below stay, as a Cube's name does.
+    let lift = home.catalog.lift(&key, std::time::Instant::now());
     let (_, center_y) = layout.rest_center(0, 1);
     let content = Column::new()
         .width(Length::Fill)
         .height(Length::Fill)
         .align_x(Alignment::Center)
         .push(Space::new().height(Length::Fixed(
-            (center_y - layout.rows_top() - 22.0).max(0.0),
+            (center_y - layout.rows_top() - 22.0 - lift * layout.scale).max(0.0),
         )))
         .push(
             Container::new(icon::plus_icon().size(28))
@@ -1647,11 +1651,23 @@ fn empty_floor<'a>(home: &'a Home, width: f32, available: f32) -> Element<'a, Vi
         .padding([0.0, 4.0])
         .style(floor_style())
         .on_press_maybe((!at_limit).then_some(ViewMessage::ShowCreateCube(true)));
+    // At the limit nothing opens, so nothing floats to invite a click.
+    let create = iced::widget::mouse_area(create);
+    let create = if at_limit {
+        create
+    } else {
+        create
+            .on_enter(ViewMessage::Catalog(CatalogMessage::CubeHover(
+                key.clone(),
+                true,
+            )))
+            .on_exit(ViewMessage::Catalog(CatalogMessage::CubeHover(key, false)))
+    };
     Stack::new()
         .width(Length::Fill)
         .height(Length::Fixed(height))
         .push(launcher_gpu::stage(
-            launcher_gpu::StageData::create_placeholder(&layout, light),
+            launcher_gpu::StageData::create_placeholder(&layout, light, lift),
         ))
         .push(
             Column::new()
@@ -1925,9 +1941,7 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
     if !projection.floor_eligible(home.catalog.mode) {
         return list_body(home);
     }
-    // Nothing to stand and nothing filtered out, local or in Connect: the
-    // create placeholder.
-    if projection.floor_len() == 0 && projection.floor_hidden() == 0 {
+    if projection.shows_create_placeholder(home.catalog.mode) {
         return responsive(move |size: Size| empty_floor(home, size.width, available))
             .height(Length::Shrink)
             .into();

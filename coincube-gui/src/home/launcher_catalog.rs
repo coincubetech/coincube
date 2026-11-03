@@ -846,12 +846,17 @@ impl Home {
                 // Settled floats, and Cubes paged or selected away, stop.
                 let browsing = self.catalog.selected.is_none();
                 let on_page: Vec<_> = if browsing && !self.catalog.hover.is_empty() {
-                    project(self)
-                        .floor_keys()
-                        .into_iter()
-                        .skip(self.catalog.page * self.catalog.page_size())
-                        .take(self.catalog.page_size())
-                        .collect()
+                    let projection = project(self);
+                    if projection.shows_create_placeholder(self.catalog.mode) {
+                        vec![create_placeholder_key()]
+                    } else {
+                        projection
+                            .floor_keys()
+                            .into_iter()
+                            .skip(self.catalog.page * self.catalog.page_size())
+                            .take(self.catalog.page_size())
+                            .collect()
+                    }
                 } else {
                     Vec::new()
                 };
@@ -1394,6 +1399,15 @@ pub(super) fn ghost_key(cube: &RemoteCube) -> CubeCatalogKey {
 
 /// The chain a registration names. The floor stands only ghosts whose
 /// network parses; acting on one first makes its network current.
+/// The Create Cube placeholder's hover key. No Cube has this id: Cube ids
+/// and Connect UUIDs never contain a colon.
+pub(super) fn create_placeholder_key() -> CubeCatalogKey {
+    CubeCatalogKey {
+        chain: ChainId::Bitcoin,
+        cube_id: "tenshu.launcher.empty:create".into(),
+    }
+}
+
 pub(super) fn ghost_chain(cube: &RemoteCube) -> Option<ChainId> {
     ChainId::from_api_str(&cube.network)
 }
@@ -1460,6 +1474,12 @@ impl Projection<'_> {
     /// Every Cube the filter keeps off the floor, local or only in Connect.
     pub(super) fn floor_hidden(&self) -> usize {
         self.hidden + self.hidden_ghosts
+    }
+
+    /// The floor stands only the Create Cube placeholder: nothing to stand
+    /// and nothing filtered out, local or in Connect.
+    pub(super) fn shows_create_placeholder(&self, mode: LauncherMode) -> bool {
+        self.floor_eligible(mode) && self.floor_len() == 0 && self.floor_hidden() == 0
     }
 
     pub(super) fn floor_keys(&self) -> Vec<CubeCatalogKey> {
@@ -6422,6 +6442,52 @@ mod tests {
         home.catalog.filter = NetworkFilter::All;
         let projection = project(&home);
         assert_eq!((projection.floor_len(), projection.hidden_ghosts), (2, 0));
+    }
+
+    /// The Create Cube placeholder floats under the pointer as a resting Cube
+    /// does, its plus rising with the dashed Cube, and settles once it leaves.
+    #[test]
+    fn create_placeholder_floats_under_the_pointer_and_settles() {
+        use super::super::launcher_presenter::empty_create_id;
+        use super::super::launcher_scene::{BOB_HEIGHT, BOB_PERIOD, BOB_SETTLE};
+        let mut home = home_with(&[]);
+        home.state = State::NoCube { create_cube: false };
+        home.catalog.mode = LauncherMode::Cubes;
+        let placeholder = create_placeholder_key();
+        let slot = bounds_of(
+            &focus_bounds_window(launcher_view(&home), 1440.0, 900.0),
+            &empty_create_id(),
+        );
+        let away = iced::Point::new(slot.center_x(), slot.y - 40.0);
+        pointer_path(&mut home, &[away, slot.center()]);
+        assert!(
+            home.catalog.animating(),
+            "the placeholder floats under the pointer"
+        );
+        let entered = home.catalog.hover[0].clone();
+        assert_eq!(entered.key, placeholder);
+
+        // Frames keep it floating; at the top of the bob it is fully lifted.
+        let top = Instant::now() + BOB_PERIOD / 2;
+        catalog(&mut home, CatalogMessage::MotionTick(top));
+        assert!(home.catalog.animating());
+        let lift = home.catalog.lift(&placeholder, top);
+        assert!(lift > 0.5 * BOB_HEIGHT, "lift {}", lift);
+        // Leaving settles it, and a settled float stops the frames.
+        pointer_path(&mut home, &[away]);
+        catalog(
+            &mut home,
+            CatalogMessage::MotionTick(Instant::now() + BOB_SETTLE),
+        );
+        assert!(
+            !home.catalog.animating(),
+            "a settled placeholder stops the frames"
+        );
+
+        // At the Cube limit nothing opens, so nothing floats.
+        home.server_cube_limit = Some(0);
+        pointer_path(&mut home, &[away, slot.center()]);
+        assert!(home.catalog.hover.is_empty());
     }
 
     /// Close returns to the Launcher even when the device has no Cubes.

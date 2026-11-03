@@ -252,10 +252,15 @@ impl StageData {
 
     /// A presentation-only create affordance: no Cube identity, wallet facts,
     /// network art, recovery status or catalog entry is fabricated.
-    pub fn create_placeholder(layout: &Layout, light: bool) -> Self {
+    /// `lift` is its hover float, as [`Pose::lifted`] takes.
+    pub fn create_placeholder(layout: &Layout, light: bool, lift: f32) -> Self {
         let palette = Palette::new(light);
-        let (frame, faces) =
-            launcher_scene::project_faces(layout, layout.rest_center(0, 1), Pose::REST, true);
+        let (frame, faces) = launcher_scene::project_faces(
+            layout,
+            layout.rest_center(0, 1),
+            Pose::REST.lifted(lift),
+            true,
+        );
         Self {
             width: layout.width,
             height: layout.height,
@@ -1511,13 +1516,28 @@ mod tests {
     fn create_placeholder_has_no_wallet_or_connect_art() {
         for light in [false, true] {
             let layout = Layout::new(1440.0, 742.0);
-            let stage = StageData::create_placeholder(&layout, light);
+            let stage = StageData::create_placeholder(&layout, light, 0.0);
             assert!(stage.floor);
             assert_eq!(stage.layers.len(), 1);
             assert!(stage.layers[0].dashed);
             assert!(stage.layers[0].footprint.is_none());
             assert!(stage.layers[0].faces.iter().all(|face| face.art.is_none()));
         }
+    }
+
+    #[test]
+    fn create_placeholder_rises_by_its_hover_lift() {
+        let layout = Layout::new(1440.0, 742.0);
+        let top = |lift| {
+            StageData::create_placeholder(&layout, false, lift).layers[0]
+                .faces
+                .iter()
+                .flat_map(|face| face.projected.corners)
+                .map(|(_, y)| y)
+                .fold(f32::INFINITY, f32::min)
+        };
+        let lift = launcher_scene::BOB_HEIGHT;
+        assert!((top(0.0) - top(lift) - lift * layout.scale).abs() < 0.5);
     }
 
     #[test]

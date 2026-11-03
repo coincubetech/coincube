@@ -783,5 +783,18 @@ fn launcher_capture_empty_modes() {
                 );
             }
         }
+        // The placeholder under the pointer, at the top of its float.
+        home.catalog.mode = LauncherMode::Cubes;
+        let top = std::time::Instant::now() - super::launcher_scene::BOB_PERIOD / 2;
+        home.catalog
+            .hover(super::launcher_catalog::create_placeholder_key(), true, top);
+        save(
+            &mut renderer,
+            home.view(),
+            Size::new(1440.0, 900.0),
+            &palette,
+            directory.join(format!("empty-cubes-hover-{appearance}-1440x900.png")),
+        );
+        home.catalog.hover.clear();
     }
 }
