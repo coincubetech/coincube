@@ -4981,8 +4981,8 @@ impl Home {
 
     /// Return the ID of the Connect control actually mounted by Home.
     pub(crate) fn connect_sheet_origin_id(&self) -> Id {
-        // Create takes precedence over the catalog when an empty Cube list
-        // falls directly into the journey. Its top bar retains these IDs.
+        // Explicit creation takes precedence over the catalog. Its top bar
+        // retains these IDs; the empty Launcher uses the catalog IDs below.
         if self.showing_create_journey() {
             return Id::new(if self.connect_account.is_authenticated() {
                 LEGACY_CONNECT_ENTRY_ID

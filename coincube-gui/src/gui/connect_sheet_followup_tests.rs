@@ -609,7 +609,7 @@ fn probe_p2_launcher_entry_records_focus_origin() {
         assert_eq!(
             focus,
             Some(iced::advanced::widget::Id::new(
-                "tenshu.launcher.legacy:connect:entry"
+                "tenshu.launcher.catalog:control:connect"
             )),
             "wrong no-Cube Launcher return target"
         );
@@ -637,7 +637,7 @@ fn no_cube_signed_out_launcher_close_focuses_mounted_sign_in() {
         assert_eq!(
             focus,
             Some(iced::advanced::widget::Id::new(
-                "tenshu.launcher.legacy:connect:sign-in"
+                "tenshu.launcher.catalog:control:sign-in"
             ))
         );
         assert!(
