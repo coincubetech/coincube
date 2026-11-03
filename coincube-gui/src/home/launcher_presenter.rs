@@ -1925,20 +1925,22 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
     if !projection.floor_eligible(home.catalog.mode) {
         return list_body(home);
     }
-    // P-Launcher's `.empty` state: every Cube is filtered out. Placed at
-    // `top: 32%` of the stage, where the floor would be.
-    if projection.floor_len() == 0 && projection.hidden == 0 {
+    // Nothing to stand and nothing filtered out, local or in Connect: the
+    // create placeholder.
+    if projection.floor_len() == 0 && projection.floor_hidden() == 0 {
         return responsive(move |size: Size| empty_floor(home, size.width, available))
             .height(Length::Shrink)
             .into();
     }
+    // P-Launcher's `.empty` state: every Cube is filtered out. Placed at
+    // `top: 32%` of the stage, where the floor would be.
     if projection.floor_len() == 0 {
         let height = if available.is_finite() {
             available
         } else {
             launcher_scene::DESIGN_STAGE_HEIGHT
         };
-        return Container::new(filtered_out(projection.hidden))
+        return Container::new(filtered_out(projection.floor_hidden()))
             .width(Length::Fill)
             .height(Length::Fixed(height))
             .padding(iced::Padding {
@@ -4434,6 +4436,7 @@ mod tests {
             tier: "Free",
             usage: Vec::new(),
             hidden: 0,
+            hidden_ghosts: 0,
             filtered_total: 3,
             unread: Vec::new(),
             network_counts: vec![(ChainId::Bitcoin, 3)],

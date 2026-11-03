@@ -1327,6 +1327,10 @@ pub(super) struct Projection<'a> {
     pub(super) tier: &'static str,
     /// Local Cubes the network filter hides (after any search).
     pub(super) hidden: usize,
+    /// Connect-only Cubes on listed networks the filter hides from the
+    /// floor (after any search). The List never shows other networks'
+    /// ghosts, so only the floor counts these.
+    pub(super) hidden_ghosts: usize,
     /// Local Cubes the network filter shows, before any search: what the
     /// floor would hold, so the 20-Cube cap counts only these.
     pub(super) filtered_total: usize,
@@ -1451,6 +1455,11 @@ impl Projection<'_> {
 
     pub(super) fn floor_len(&self) -> usize {
         self.locals.len() + self.ghosts.len()
+    }
+
+    /// Every Cube the filter keeps off the floor, local or only in Connect.
+    pub(super) fn floor_hidden(&self) -> usize {
+        self.hidden + self.hidden_ghosts
     }
 
     pub(super) fn floor_keys(&self) -> Vec<CubeCatalogKey> {
@@ -1608,6 +1617,17 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
         .into_iter()
         .filter(|rc| matches_query(&catalog_display_name(&rc.name), &query))
         .collect();
+    let hidden_ghosts = home
+        .ordered_networks()
+        .into_iter()
+        .filter(|chain| !chain.is_blake2b() && !filter.matches(*chain))
+        .flat_map(|chain| {
+            home.remote_cubes
+                .iter()
+                .filter(move |rc| ghost_chain(rc) == Some(chain))
+        })
+        .filter(|rc| matches_query(&catalog_display_name(&rc.name), &query))
+        .count();
     // A ghost is selected on the floor only, where it has a details face.
     let selected_ghost = home.catalog.selected.as_ref().and_then(|key| {
         if !catalog_visible(home) || home.catalog.mode != LauncherMode::Cubes {
@@ -1630,6 +1650,7 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
         local_total,
         filtered_total,
         hidden,
+        hidden_ghosts,
         network_counts,
         usage,
         unread: home.network_catalog_unread.clone(),
@@ -6371,6 +6392,36 @@ mod tests {
         assert!(!tree.has(&empty_create_id()));
         assert!(!tree.has(&create_id()));
         assert!(tree.contains("Cube limit reached"));
+    }
+
+    /// No local Cubes, and the filter hides every Connect-only Cube: the
+    /// floor shows the filter empty state, not the create placeholder.
+    #[test]
+    fn filtered_out_ghosts_keep_the_filter_empty_state_on_the_floor() {
+        use super::super::launcher_presenter::empty_create_id;
+        let mut home = all_networks();
+        home.network_catalog.clear();
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            cubes.clear();
+        }
+        home.remote_cubes = vec![
+            remote("r-1", "Cloud copy", true, true, false, false),
+            remote("r-2", "Phone copy", false, false, true, true),
+        ];
+        home.remote_cubes[1].network = settings::network_to_api_string(ChainId::Testnet4);
+        home.catalog.filter = NetworkFilter::Network(ChainId::Regtest);
+        let projection = project(&home);
+        assert_eq!(projection.floor_len(), 0);
+        assert_eq!((projection.hidden, projection.hidden_ghosts), (0, 2));
+        let tree = home_tree("filtered-ghosts", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(tree.contains("No Cubes match these filters"));
+        assert!(tree.contains("2 Cubes hidden."));
+        assert!(tree.has(&clear_filters_empty_id()));
+        assert!(!tree.has(&empty_create_id()));
+        // Clearing the filter brings the ghosts back to the floor.
+        home.catalog.filter = NetworkFilter::All;
+        let projection = project(&home);
+        assert_eq!((projection.floor_len(), projection.hidden_ghosts), (2, 0));
     }
 
     /// Close returns to the Launcher even when the device has no Cubes.
