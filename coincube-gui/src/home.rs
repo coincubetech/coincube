@@ -192,8 +192,8 @@ pub enum State {
     /// [`State::Cubes`] because this screen is not always empty: remote Cubes
     /// registered in Connect are listed here for restore, and that list needs
     /// the same "Create Cube" button → dedicated form navigation rather than a
-    /// form stacked underneath it. When there is genuinely nothing to list the
-    /// view shows the form directly, so a first run still lands on it.
+    /// form stacked underneath it. An empty first run stays on the Launcher
+    /// until creation is explicitly opened.
     NoCube {
         create_cube: bool,
     },
@@ -2920,7 +2920,7 @@ impl Home {
                     Task::none()
                 }
                 Ok(mut state) => {
-                    if self.create_network_selection_pending {
+                    if self.create_network_selection_pending || self.showing_create_form() {
                         if let State::Cubes { create_cube, .. } | State::NoCube { create_cube } =
                             &mut state
                         {
@@ -5329,9 +5329,8 @@ impl Home {
                 launcher_chrome::network_name(self.network),
                 light,
                 Some(
-                    // Close leaves Import or restore whenever no Cube is being
-                    // made: to the Cube list, or with none to list, to the
-                    // plain Create form `ShowCreateCube(false)` falls back to.
+                    // Close returns to the Launcher whenever no Cube is being
+                    // made, including when its catalog is empty.
                     button::secondary_action(
                         RESTORE_CLOSE_ID,
                         Some(icon::cross_icon()),
@@ -8720,6 +8719,46 @@ mod tests {
                 message,
                 Message::Install(_, ChainId::BitcoinBlake2b, UserFlow::CreateWallet, _)
             )));
+    }
+
+    #[test]
+    fn a_late_network_probe_preserves_creation_opened_after_network_selection() {
+        for with_cubes in [false, true] {
+            let mut home = home();
+            home.developer_mode = true;
+            home.state = State::NoCube { create_cube: false };
+            drop(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Signet))));
+            assert!(!home.create_network_selection_pending);
+            drop(home.update(Message::View(ViewMessage::ShowCreateCube(true))));
+            drop(home.update(Message::View(ViewMessage::CubeNameEdited("Travel".into()))));
+            let checked = || Message::Checked {
+                for_chain: ChainId::Signet,
+                res: Ok(if with_cubes {
+                    State::Cubes {
+                        cubes: vec![CubeSettings::new("Existing".into(), ChainId::Signet)],
+                        create_cube: false,
+                        source: ChainId::Signet,
+                    }
+                } else {
+                    State::NoCube { create_cube: false }
+                }),
+            };
+            drop(home.update(checked()));
+            assert!(
+                home.showing_create_form(),
+                "late probe hid explicit creation"
+            );
+            assert_eq!(home.create_cube_name.value, "Travel");
+            assert!(!home.create_network_selection_pending);
+
+            drop(home.update(Message::View(ViewMessage::ShowCreateCube(false))));
+            drop(home.update(checked()));
+            assert!(
+                !home.showing_create_form(),
+                "late probe reopened cancelled creation"
+            );
+            assert!(launcher_catalog::catalog_visible(&home));
+        }
     }
 
     #[test]
