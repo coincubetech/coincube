@@ -250,6 +250,41 @@ impl StageData {
         }
     }
 
+    /// A presentation-only create affordance: no Cube identity, wallet facts,
+    /// network art, recovery status or catalog entry is fabricated.
+    pub fn create_placeholder(layout: &Layout, light: bool) -> Self {
+        let palette = Palette::new(light);
+        let (frame, faces) =
+            launcher_scene::project_faces(layout, layout.rest_center(0, 1), Pose::REST, true);
+        Self {
+            width: layout.width,
+            height: layout.height,
+            horizon: layout.horizon(),
+            palette,
+            floor: true,
+            layers: vec![SceneLayer {
+                frame: SceneFrame {
+                    shadow_opacity: 0.0,
+                    ..frame
+                },
+                faces: faces
+                    .into_iter()
+                    .map(|projected| FaceDraw {
+                        color: palette.face(projected.face),
+                        alpha: 0.06,
+                        projected,
+                        art: None,
+                    })
+                    .collect(),
+                edge: [palette.ink[0], palette.ink[1], palette.ink[2], 150],
+                dashed: true,
+                border: border_fraction(layout.size()),
+                footprint: None,
+                glow: None,
+            }],
+        }
+    }
+
     /// Pose every Cube and choose its face art. Callers pass Cubes in paint
     /// order: peers in page order, then the outgoing Cube, then the lead.
     pub fn new<'a>(
@@ -1471,6 +1506,19 @@ mod tests {
     use super::*;
     use crate::chain::ChainId;
     use crate::home::launcher_scene::{BackupMark, DESIGN_STAGE_HEIGHT};
+
+    #[test]
+    fn create_placeholder_has_no_wallet_or_connect_art() {
+        for light in [false, true] {
+            let layout = Layout::new(1440.0, 742.0);
+            let stage = StageData::create_placeholder(&layout, light);
+            assert!(stage.floor);
+            assert_eq!(stage.layers.len(), 1);
+            assert!(stage.layers[0].dashed);
+            assert!(stage.layers[0].footprint.is_none());
+            assert!(stage.layers[0].faces.iter().all(|face| face.art.is_none()));
+        }
+    }
 
     #[test]
     fn spark_is_marked_on_every_cube_whose_network_supports_it() {

@@ -1580,6 +1580,92 @@ fn stage_height(available: f32) -> f32 {
     }
 }
 
+pub(super) fn empty_create_id() -> Id {
+    Id::new("tenshu.launcher.empty:create")
+}
+
+/// A real stage with a clickable wireframe placeholder, separate from the
+/// Connect restore ghosts and from the user's Cube inventory.
+fn empty_floor<'a>(home: &'a Home, width: f32, available: f32) -> Element<'a, ViewMessage> {
+    let height = stage_height(available);
+    let layout = launcher_scene::Layout::new(width, height);
+    let light = matches!(
+        home.theme_mode,
+        coincube_ui::theme::palette::ThemeMode::Light
+    );
+    let at_limit = launcher_catalog::project(home).at_limit();
+    let (_, center_y) = layout.rest_center(0, 1);
+    let content = Column::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
+        .push(Space::new().height(Length::Fixed(
+            (center_y - layout.rows_top() - 22.0).max(0.0),
+        )))
+        .push(
+            Container::new(icon::plus_icon().size(28))
+                .center_x(Length::Fixed(44.0))
+                .center_y(Length::Fixed(44.0))
+                .style(move |theme: &theme::Theme| container::Style {
+                    background: Some(iced::Background::Color(if at_limit {
+                        theme.colors.shell.line
+                    } else {
+                        theme.colors.shell.accent
+                    })),
+                    text_color: Some(if at_limit {
+                        theme.colors.shell.muted
+                    } else {
+                        theme::tenshu::ON_ACCENT
+                    }),
+                    border: iced::Border {
+                        radius: 22.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+        )
+        .push(Space::new().height(Length::Fill))
+        .push(face_words(
+            "Create Cube",
+            20.0,
+            coincube_ui::font::SEMIBOLD,
+            false,
+        ))
+        .push(face_words(
+            if at_limit {
+                "Cube limit reached"
+            } else {
+                "Click to get started"
+            },
+            14.0,
+            coincube_ui::font::REGULAR,
+            true,
+        ));
+    let create = Action::new(empty_create_id(), content, focus)
+        .width(Length::Fixed(layout.slot()))
+        .height(Length::Fixed(layout.slot_height()))
+        .padding([0.0, 4.0])
+        .style(floor_style())
+        .on_press_maybe((!at_limit).then_some(ViewMessage::ShowCreateCube(true)));
+    Stack::new()
+        .width(Length::Fill)
+        .height(Length::Fixed(height))
+        .push(launcher_gpu::stage(
+            launcher_gpu::StageData::create_placeholder(&layout, light),
+        ))
+        .push(
+            Column::new()
+                .width(Length::Fill)
+                .push(Space::new().height(Length::Fixed(layout.rows_top())))
+                .push(
+                    Container::new(create)
+                        .width(Length::Fill)
+                        .center_x(Length::Fill),
+                ),
+        )
+        .into()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn floor_layout<'a>(
     projection: &Projection<'_>,
@@ -1841,6 +1927,11 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
     }
     // P-Launcher's `.empty` state: every Cube is filtered out. Placed at
     // `top: 32%` of the stage, where the floor would be.
+    if projection.floor_len() == 0 && projection.hidden == 0 {
+        return responsive(move |size: Size| empty_floor(home, size.width, available))
+            .height(Length::Shrink)
+            .into();
+    }
     if projection.floor_len() == 0 {
         let height = if available.is_finite() {
             available
@@ -4334,7 +4425,6 @@ mod tests {
             local_total: 3,
             remote_total: 2,
             ghosts: Vec::new(),
-            ghost_total: 0,
             selected: None,
             selected_ghost: None,
             query: "hidden".into(),

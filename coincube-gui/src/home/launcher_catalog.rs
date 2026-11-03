@@ -1316,7 +1316,6 @@ pub(super) struct Projection<'a> {
     /// ghosts, after the local Cubes, in network order. `remotes` stays the
     /// current network's, as the List acts on those in place.
     pub(super) ghosts: Vec<&'a RemoteCube>,
-    pub(super) ghost_total: usize,
     /// The selected local Cube when it is listed exactly once and visible.
     pub(super) selected: Option<usize>,
     /// The selected ghost on the floor: its index in `remotes`.
@@ -1428,9 +1427,7 @@ impl Projection<'_> {
     /// stand on the floor as ghosts after the local Cubes, and are the whole
     /// row on a new device.
     pub(super) fn floor_eligible(&self, mode: LauncherMode) -> bool {
-        mode == LauncherMode::Cubes
-            && self.local_total + self.ghost_total > 0
-            && self.query.is_empty()
+        mode == LauncherMode::Cubes && self.query.is_empty()
     }
 
     /// Every Cube the floor stands, local Cubes first.
@@ -1607,7 +1604,6 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
                 .filter(move |rc| ghost_chain(rc) == Some(chain))
         })
         .collect();
-    let ghost_total = all_ghosts.len();
     let ghosts: Vec<&RemoteCube> = all_ghosts
         .into_iter()
         .filter(|rc| matches_query(&catalog_display_name(&rc.name), &query))
@@ -1640,7 +1636,6 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
         filter,
         remote_total,
         ghosts,
-        ghost_total,
         locals,
         remotes,
         selected,
@@ -6319,25 +6314,63 @@ mod tests {
     }
 
     #[test]
-    fn empty_startup_renders_launcher_actions_in_both_themes() {
+    fn empty_startup_respects_launcher_mode_in_both_themes() {
+        use super::super::launcher_presenter::empty_create_id;
         for (appearance, theme) in [
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
         ] {
+            for mode in [LauncherMode::Cubes, LauncherMode::List] {
+                let mut home = home_with(&[]);
+                home.state = State::NoCube { create_cube: false };
+                home.catalog.mode = mode;
+                home.theme_mode = if appearance == "light" {
+                    coincube_ui::theme::palette::ThemeMode::Light
+                } else {
+                    coincube_ui::theme::palette::ThemeMode::Dark
+                };
+                let projection = project(&home);
+                assert_eq!((projection.local_total, projection.remote_total), (0, 0));
+                assert_eq!(projection.floor_eligible(mode), mode == LauncherMode::Cubes);
+                for window in [COMPACT, WIDE] {
+                    let tree = home_tree("empty-startup", &home, window, appearance, theme.clone());
+                    assert!(tree.has(&create_id()));
+                    assert!(tree.has(&import_id()));
+                    assert_eq!(tree.has(&empty_create_id()), mode == LauncherMode::Cubes);
+                    assert_eq!(tree.has(&search_id()), mode == LauncherMode::List);
+                    assert_eq!(
+                        tree.contains("No Cubes on this network."),
+                        mode == LauncherMode::List
+                    );
+                    assert!(!tree.contains(super::super::launcher_presenter::GHOST_INTRO));
+                    assert!(!tree.contains("Back to Cube list"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_placeholder_opens_creation_by_pointer_enter_and_space() {
+        use super::super::launcher_presenter::empty_create_id;
+        for press in [Press::Pointer, Press::Enter, Press::SpaceHeld] {
             let mut home = home_with(&[]);
             home.state = State::NoCube { create_cube: false };
-            home.advisory_notice = None;
-            home.theme_mode = if appearance == "light" {
-                coincube_ui::theme::palette::ThemeMode::Light
-            } else {
-                coincube_ui::theme::palette::ThemeMode::Dark
-            };
-            let tree = home_tree("empty-startup", &home, WIDE, appearance, theme);
-            assert!(tree.contains("Create Cube"));
-            assert!(tree.contains("Import Bitcoin wallet"));
-            assert!(tree.contains("No Cubes on this network."));
-            assert!(!tree.contains("Back to Cube list"));
+            home.catalog.mode = LauncherMode::Cubes;
+            let message = activate_chrome(&home, empty_create_id(), press);
+            assert!(matches!(message, ViewMessage::ShowCreateCube(true)));
+            drop(home.update(Message::View(message)));
+            assert!(home.showing_create_journey());
+            drop(home.update(Message::View(ViewMessage::ShowCreateCube(false))));
+            assert!(project(&home).floor_eligible(home.catalog.mode));
+            assert!(project(&home).locals.is_empty());
         }
+        let mut home = home_with(&[]);
+        home.catalog.mode = LauncherMode::Cubes;
+        home.server_cube_limit = Some(0);
+        let tree = home_tree("empty-limit", &home, WIDE, "dark", theme::Theme::dark());
+        assert!(!tree.has(&empty_create_id()));
+        assert!(!tree.has(&create_id()));
+        assert!(tree.contains("Cube limit reached"));
     }
 
     /// Close returns to the Launcher even when the device has no Cubes.
