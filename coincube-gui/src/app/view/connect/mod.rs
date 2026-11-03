@@ -3986,7 +3986,8 @@ mod renewal_banner_tests {
         for (_, benefit, _) in connect_benefit_rows() {
             assert!(
                 !benefit.to_ascii_lowercase().contains("duress"),
-                "{benefit}"
+                "{}",
+                benefit
             );
         }
     }
