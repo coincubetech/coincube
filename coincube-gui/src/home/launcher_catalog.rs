@@ -71,8 +71,7 @@ const CELL_GAP: f32 = 14.0;
 /// integration; reveal itself is not implemented here.
 pub(super) const CATALOG_SCROLL_ID: &str = "tenshu.launcher.catalog.scroll";
 
-/// Whether `Home::view` renders this List as its body: the ordinary local
-/// catalog, or the remote-only list when there is something to list.
+/// Whether `Home::view` renders the Launcher catalog, including its empty state.
 pub(super) fn shows_catalog(home: &Home) -> bool {
     match &home.state {
         State::Cubes { create_cube, .. } => !*create_cube,
@@ -3798,7 +3797,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_replaces_only_list_screens_and_keeps_first_run_forms() {
+    fn the_launcher_includes_empty_catalogs_but_preserves_explicit_forms() {
         let mut home = home_with(&[("a", "Alpha")]);
         assert!(shows_catalog(&home));
         if let State::Cubes { create_cube, .. } = &mut home.state {
@@ -3808,8 +3807,11 @@ mod tests {
 
         let mut fresh = home_with(&[]);
         fresh.state = State::NoCube { create_cube: false };
-        // A genuinely empty device lands on the creation form.
+        // An empty device lands on the Launcher too.
+        assert!(shows_catalog(&fresh));
+        fresh.state = State::NoCube { create_cube: true };
         assert!(!shows_catalog(&fresh));
+        fresh.state = State::NoCube { create_cube: false };
         fresh.remote_cubes = vec![remote("r1", "Remote", true, true, false, false)];
         assert!(shows_catalog(&fresh));
         let remote_only = project(&fresh);
@@ -5209,7 +5211,7 @@ mod tests {
     }
 
     #[test]
-    fn live_onto_a_network_without_cubes_opens_create_and_back_lists_every_cube() {
+    fn live_onto_a_network_without_cubes_keeps_launcher_and_can_create() {
         let mut home = cubes_on_test_networks_only();
         let switch = run_task(home.update_catalog(CatalogMessage::Filter(NetworkFilter::Live)));
         assert!(switch.iter().any(|m| matches!(
@@ -5221,8 +5223,11 @@ mod tests {
             for_chain: ChainId::Bitcoin,
             res: Ok(State::NoCube { create_cube: false }),
         }));
-        // No live Cube to show: Create opens on Bitcoin, at its network step.
+        // No live Cube to show: keep the empty Launcher until Create is chosen.
         assert_eq!(home.network, ChainId::Bitcoin);
+        assert!(catalog_visible(&home));
+        assert!(!home.showing_create_journey());
+        drop(home.update(Message::View(ViewMessage::ShowCreateCube(true))));
         assert!(home.showing_create_journey());
         assert!(!home.create_network_confirmed);
         // The test networks' Cubes are still a list to go back to.
@@ -5250,16 +5255,15 @@ mod tests {
     }
 
     #[test]
-    fn another_networks_read_yields_an_untouched_form_but_keeps_one_being_typed_in() {
-        // Bitcoin checked before any other network was read: nothing to list
-        // yet, so the form is the landing screen, implicitly.
+    fn another_networks_read_preserves_launcher_or_explicit_creation() {
+        // Bitcoin checked before any other network was read: start on the Launcher.
         let empty_bitcoin = || {
             let mut home = all_networks();
             home.state = State::NoCube { create_cube: false };
             home.network_catalog.clear();
             home.network_catalog_generation = 1;
-            assert!(home.showing_create_journey());
-            assert!(!home.can_leave_create_journey());
+            assert!(catalog_visible(&home));
+            assert!(!home.showing_create_journey());
             home
         };
         let testnet4_read = || Message::NetworkCatalogLoaded {
@@ -5278,6 +5282,7 @@ mod tests {
         assert!(catalog_visible(&untouched));
 
         let mut typing = empty_bitcoin();
+        drop(typing.update(Message::View(ViewMessage::ShowCreateCube(true))));
         typing.create_network_confirmed = true;
         drop(typing.update(Message::View(ViewMessage::CubeNameEdited(
             "Half typed".into(),
@@ -5652,7 +5657,7 @@ mod tests {
     }
 
     #[test]
-    fn first_run_form_and_unavailable_branches_render_no_catalog_controls() {
+    fn explicit_forms_and_unavailable_branches_render_no_catalog_controls() {
         let listed = rows(2);
         assert!(home_tree(
             "r05b-branch-list",
@@ -5664,7 +5669,7 @@ mod tests {
         .has_any_catalog_control());
 
         let mut first_run = home_with(&[]);
-        first_run.state = State::NoCube { create_cube: false };
+        first_run.state = State::NoCube { create_cube: true };
         let mut create = rows(2);
         if let State::Cubes { create_cube, .. } = &mut create.state {
             *create_cube = true;
@@ -6313,8 +6318,29 @@ mod tests {
             .collect()
     }
 
-    /// A first-run device has no Cube list to go back to; Close still
-    /// leaves Import or restore, for the plain Create form.
+    #[test]
+    fn empty_startup_renders_launcher_actions_in_both_themes() {
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            let mut home = home_with(&[]);
+            home.state = State::NoCube { create_cube: false };
+            home.advisory_notice = None;
+            home.theme_mode = if appearance == "light" {
+                coincube_ui::theme::palette::ThemeMode::Light
+            } else {
+                coincube_ui::theme::palette::ThemeMode::Dark
+            };
+            let tree = home_tree("empty-startup", &home, WIDE, appearance, theme);
+            assert!(tree.contains("Create Cube"));
+            assert!(tree.contains("Import Bitcoin wallet"));
+            assert!(tree.contains("No Cubes on this network."));
+            assert!(!tree.contains("Back to Cube list"));
+        }
+    }
+
+    /// Close returns to the Launcher even when the device has no Cubes.
     #[test]
     fn close_leaves_import_or_restore_on_a_device_with_no_cubes() {
         let mut home = home_with(&[]);
@@ -6332,7 +6358,7 @@ mod tests {
         }
         assert!(!home.showing_import_or_restore());
         assert!(home.pending_bitcoin_import.is_none());
-        assert!(home.showing_create_journey(), "the plain Create form");
+        assert!(catalog_visible(&home), "the empty Launcher");
 
         // From the Overview too.
         let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));

@@ -192,8 +192,8 @@ pub enum State {
     /// [`State::Cubes`] because this screen is not always empty: remote Cubes
     /// registered in Connect are listed here for restore, and that list needs
     /// the same "Create Cube" button → dedicated form navigation rather than a
-    /// form stacked underneath it. When there is genuinely nothing to list the
-    /// view shows the form directly, so a first run still lands on it.
+    /// form stacked underneath it. An empty first run stays on the Launcher
+    /// until creation is explicitly opened.
     NoCube {
         create_cube: bool,
     },
@@ -1069,8 +1069,7 @@ impl Home {
     /// Whether this screen has any Cubes to list under the Launcher's network
     /// filter — local ones, or remote ones registered in Connect for the
     /// selected network. False on a genuinely fresh device, and when the
-    /// filter shows nothing: picking Live, Test or a network without Cubes
-    /// opens Create for it.
+    /// filter shows nothing. Empty catalogs remain on the Launcher.
     fn has_cube_list(&self) -> bool {
         self.has_cube_list_under(self.effective_filter())
     }
@@ -1095,34 +1094,11 @@ impl Home {
         self.remote_cubes.iter().any(|rc| rc.network == network_str)
     }
 
-    /// Whether the create-Cube form is the screen currently being shown, as
-    /// opposed to a Cube list. Single source of truth for the three things that
-    /// have to agree about it: which body the view renders, whether the "Back
-    /// to Cube list" button appears, and whether the top-level error is drawn
-    /// here or left to the form (which renders `self.error` itself — deciding
-    /// this twice would print it twice).
-    ///
-    /// Whether the user has put anything into the create-Cube form. Used to
-    /// tell an untouched implicit form (safe to replace with a list that just
-    /// loaded) from one being filled in (replacing it would steal input the
-    /// user can no longer see).
-    fn create_form_has_input(&self) -> bool {
-        self.pending_bitcoin_import.is_some()
-            || !self.create_cube_name.value.is_empty()
-            || !self.create_cube_pin.value().is_empty()
-            || !self.create_cube_pin_confirm.value().is_empty()
-    }
-
-    /// The form is shown when the user navigated to it, and also when there is
-    /// nothing to list: a first run should land on the form directly rather
-    /// than on an empty list behind a button.
+    /// Creation is an explicit Launcher action, including on a fresh device.
+    /// Neither an empty catalog nor Connect authentication opens the form.
     fn showing_create_form(&self) -> bool {
         match &self.state {
-            State::Cubes { create_cube, .. } | State::NoCube { create_cube } => {
-                *create_cube || !self.has_cube_list()
-            }
-            // Transient, pre-check: nothing is known to list yet.
-            State::Unchecked => true,
+            State::Cubes { create_cube, .. } | State::NoCube { create_cube } => *create_cube,
             _ => false,
         }
     }
@@ -1139,13 +1115,10 @@ impl Home {
         self.restore_hub || self.pending_bitcoin_import.is_some()
     }
 
-    /// "Back to Cube list" needs Cubes somewhere, not under the current
-    /// filter: leaving clears a filter that would list none (see
-    /// `ShowCreateCube(false)`).
+    /// The Launcher remains a destination even when its catalog is empty.
+    /// Backup and in-flight creation still retain their existing exit gates.
     fn can_leave_create_journey(&self) -> bool {
-        self.has_cube_list_under(launcher_catalog::NetworkFilter::All)
-            && !matches!(self.state, State::CreationBackup(_))
-            && !self.creating_cube
+        !matches!(self.state, State::CreationBackup(_)) && !self.creating_cube
     }
 
     pub fn stop(&mut self) {}
@@ -1718,8 +1691,7 @@ impl Home {
                     self.passkey_mode = self.default_passkey_mode();
                 }
                 // Both list screens navigate to the same form, so both carry
-                // the flag — `NoCube` is a list screen too whenever Connect
-                // holds remote Cubes to restore.
+                // the flag, including an empty Launcher on a fresh device.
                 let toggled = match &mut self.state {
                     State::Cubes { create_cube, .. } | State::NoCube { create_cube } => {
                         *create_cube = show;
@@ -1745,9 +1717,7 @@ impl Home {
                         word.shrink_to_fit();
                     }
                     self.recovery_active_index = None;
-                    // A filter that lists nothing (Live with Cubes on test
-                    // networks only) is what opened this form; keeping it
-                    // would open it again. Back shows every Cube instead.
+                    // Show every Cube when returning from an empty filter.
                     if !self.has_cube_list() {
                         self.catalog.filter = launcher_catalog::NetworkFilter::All;
                         self.catalog.page = 0;
@@ -2514,22 +2484,10 @@ impl Home {
                 }
                 self.network_catalog_unread.retain(|c| *c != chain);
                 match cubes {
-                    Ok(cubes) => {
-                        // Can hand an empty network a list, as a remote-cube
-                        // fetch can: keep a create form being filled in (see
-                        // `RemoteCubesLoaded`).
-                        if self.showing_create_form() && self.create_form_has_input() {
-                            match &mut self.state {
-                                State::Cubes { create_cube, .. }
-                                | State::NoCube { create_cube } => *create_cube = true,
-                                _ => {}
-                            }
-                        }
-                        match self.network_catalog.iter_mut().find(|(c, _)| *c == chain) {
-                            Some((_, list)) => *list = cubes,
-                            None => self.network_catalog.push((chain, cubes)),
-                        }
-                    }
+                    Ok(cubes) => match self.network_catalog.iter_mut().find(|(c, _)| *c == chain) {
+                        Some((_, list)) => *list = cubes,
+                        None => self.network_catalog.push((chain, cubes)),
+                    },
                     // Keep whatever was last read; the menu says the
                     // network is unavailable rather than showing 0 Cubes.
                     Err(_) => self.network_catalog_unread.push(chain),
@@ -2550,25 +2508,6 @@ impl Home {
                 }
                 match result {
                     Ok(remote_only) => {
-                        // On a device with nothing to list, the create form is
-                        // the landing screen *implicitly* — `create_cube` is
-                        // still false. This fetch can hand us a list (it has
-                        // three unsynchronised triggers, sign-in among them),
-                        // which would flip that screen to the list underneath
-                        // a user who is mid-way through typing, stranding the
-                        // input where they can no longer see it. Promote the
-                        // implicit form to an explicit one first, so the fetch
-                        // adds a "Back to Cube list" route instead of taking
-                        // the form away. Only when there IS input: an
-                        // untouched form should still yield to the list, which
-                        // is the screen that user wants.
-                        if self.showing_create_form() && self.create_form_has_input() {
-                            match &mut self.state {
-                                State::Cubes { create_cube, .. }
-                                | State::NoCube { create_cube } => *create_cube = true,
-                                _ => {}
-                            }
-                        }
                         self.remote_cubes = remote_only;
                     }
                     Err(e) => {
@@ -2981,7 +2920,7 @@ impl Home {
                     Task::none()
                 }
                 Ok(mut state) => {
-                    if self.create_network_selection_pending {
+                    if self.create_network_selection_pending || self.showing_create_form() {
                         if let State::Cubes { create_cube, .. } | State::NoCube { create_cube } =
                             &mut state
                         {
@@ -5042,8 +4981,8 @@ impl Home {
 
     /// Return the ID of the Connect control actually mounted by Home.
     pub(crate) fn connect_sheet_origin_id(&self) -> Id {
-        // Create takes precedence over the catalog when an empty Cube list
-        // falls directly into the journey. Its top bar retains these IDs.
+        // Explicit creation takes precedence over the catalog. Its top bar
+        // retains these IDs; the empty Launcher uses the catalog IDs below.
         if self.showing_create_journey() {
             return Id::new(if self.connect_account.is_authenticated() {
                 LEGACY_CONNECT_ENTRY_ID
@@ -5390,9 +5329,8 @@ impl Home {
                 launcher_chrome::network_name(self.network),
                 light,
                 Some(
-                    // Close leaves Import or restore whenever no Cube is being
-                    // made: to the Cube list, or with none to list, to the
-                    // plain Create form `ShowCreateCube(false)` falls back to.
+                    // Close returns to the Launcher whenever no Cube is being
+                    // made, including when its catalog is empty.
                     button::secondary_action(
                         RESTORE_CLOSE_ID,
                         Some(icon::cross_icon()),
@@ -6189,10 +6127,7 @@ impl Home {
                 // Network selection — right-aligned at top
                 .push(
                     Row::new()
-                        // Only offered when there is a list to go back to —
-                        // on a fresh device the form IS the screen, and a back
-                        // button that returns to the same form is a dead end.
-                        .push(if self.showing_create_form() && self.has_cube_list() {
+                        .push(if self.showing_create_form() && self.can_leave_create_journey() {
                             Some(
                                 button::secondary(Some(icon::previous_icon()), "Back to Cube list")
                                     .on_press_maybe(if self.creating_cube {
@@ -8787,6 +8722,46 @@ mod tests {
     }
 
     #[test]
+    fn a_late_network_probe_preserves_creation_opened_after_network_selection() {
+        for with_cubes in [false, true] {
+            let mut home = home();
+            home.developer_mode = true;
+            home.state = State::NoCube { create_cube: false };
+            drop(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Signet))));
+            assert!(!home.create_network_selection_pending);
+            drop(home.update(Message::View(ViewMessage::ShowCreateCube(true))));
+            drop(home.update(Message::View(ViewMessage::CubeNameEdited("Travel".into()))));
+            let checked = || Message::Checked {
+                for_chain: ChainId::Signet,
+                res: Ok(if with_cubes {
+                    State::Cubes {
+                        cubes: vec![CubeSettings::new("Existing".into(), ChainId::Signet)],
+                        create_cube: false,
+                        source: ChainId::Signet,
+                    }
+                } else {
+                    State::NoCube { create_cube: false }
+                }),
+            };
+            drop(home.update(checked()));
+            assert!(
+                home.showing_create_form(),
+                "late probe hid explicit creation"
+            );
+            assert_eq!(home.create_cube_name.value, "Travel");
+            assert!(!home.create_network_selection_pending);
+
+            drop(home.update(Message::View(ViewMessage::ShowCreateCube(false))));
+            drop(home.update(checked()));
+            assert!(
+                !home.showing_create_form(),
+                "late probe reopened cancelled creation"
+            );
+            assert!(launcher_catalog::catalog_visible(&home));
+        }
+    }
+
+    #[test]
     fn create_network_probe_keeps_the_form_after_stale_result() {
         let mut home = home();
         home.developer_mode = true;
@@ -9009,12 +8984,15 @@ mod tests {
     }
 
     #[test]
-    fn unchecked_home_waits_for_probe_before_showing_create_journey() {
+    fn empty_home_waits_for_explicit_creation_after_probe() {
         let mut home = home();
         assert!(matches!(home.state, State::Unchecked));
         assert!(!home.showing_create_journey());
 
         home.state = State::NoCube { create_cube: false };
+        assert!(!home.showing_create_journey());
+        assert!(launcher_catalog::catalog_visible(&home));
+        drop(home.update(Message::View(ViewMessage::ShowCreateCube(true))));
         assert!(home.showing_create_journey());
     }
 
@@ -9276,7 +9254,6 @@ mod tests {
             .as_ref()
             .expect("import intent")
             .operation_id;
-        assert!(home.create_form_has_input());
 
         let _ = home.update(Message::View(ViewMessage::ShowImportBitcoin));
         assert_eq!(
@@ -9934,29 +9911,42 @@ mod tests {
         home.view();
     }
 
-    /// A fresh device has no list to put behind a button, so the form stays the
-    /// landing screen — and offers no "Back to Cube list" button, which would
-    /// only lead back to itself.
     #[test]
-    fn no_cube_with_nothing_to_list_still_lands_on_the_form() {
-        let mut home = home();
-        home.state = State::NoCube { create_cube: false };
+    fn no_local_cubes_land_on_launcher_regardless_of_connect_session() {
+        for signed_in in [false, true] {
+            let mut home = home();
+            if signed_in {
+                let mut client = CoincubeClient::new();
+                client.set_token("synthetic-launcher-session");
+                home.connect_account.install_admitted_client(client);
+                home.connect_account.step = ConnectFlowStep::Dashboard;
+            }
+            assert_eq!(home.connect_account.is_authenticated(), signed_in);
+            drop(home.update(Message::Checked {
+                for_chain: ChainId::Bitcoin,
+                res: Ok(State::NoCube { create_cube: false }),
+            }));
+            assert!(!home.has_cube_list());
+            assert!(!home.showing_create_form());
+            assert!(launcher_catalog::catalog_visible(&home));
+            home.view();
 
-        assert!(!home.has_cube_list());
-        assert!(home.showing_create_form());
-        home.view();
+            drop(home.update(Message::View(ViewMessage::ShowCreateCube(true))));
+            assert!(home.showing_create_journey());
+            assert!(home.can_leave_create_journey());
+            drop(home.update(Message::View(ViewMessage::ShowCreateCube(false))));
+            assert!(launcher_catalog::catalog_visible(&home));
+        }
     }
 
-    /// A remote-cube fetch landing while the user types into the implicit form
-    /// must not swap that form out for the list it just loaded. The input is
-    /// still in state but invisible, so it reads as the app having eaten it.
+    /// A late Connect response must preserve explicitly opened creation.
     #[test]
     fn a_remote_cube_fetch_does_not_steal_a_create_form_being_filled_in() {
         let mut home = home();
         home.state = State::NoCube { create_cube: false };
-        // Nothing to list yet: the form is the landing screen, implicitly.
+        drop(home.update(Message::View(ViewMessage::ShowCreateCube(true))));
         assert!(home.showing_create_form());
-        assert!(matches!(home.state, State::NoCube { create_cube: false }));
+        assert!(matches!(home.state, State::NoCube { create_cube: true }));
 
         let _ = home.update(Message::View(ViewMessage::CubeNameEdited(
             "Half typed".to_string(),
@@ -9971,7 +9961,7 @@ mod tests {
         assert!(home.has_cube_list(), "the fetch did land a list");
         assert!(
             matches!(home.state, State::NoCube { create_cube: true }),
-            "the implicit form is promoted to an explicit one"
+            "the explicit creation choice survives the fetch"
         );
         assert!(
             home.showing_create_form(),
@@ -9980,14 +9970,12 @@ mod tests {
         assert_eq!(home.create_cube_name.value, "Half typed");
     }
 
-    /// The converse: an untouched implicit form has nothing to protect, so a
-    /// fetch that lands restorable Cubes should surface them. That list is the
-    /// screen a user with remote Cubes actually wants.
+    /// A late Connect response populates the Launcher without opening creation.
     #[test]
-    fn a_remote_cube_fetch_replaces_an_untouched_create_form() {
+    fn a_remote_cube_fetch_keeps_the_launcher_visible() {
         let mut home = home();
         home.state = State::NoCube { create_cube: false };
-        assert!(home.showing_create_form());
+        assert!(!home.showing_create_form());
 
         let current = home.remote_cubes_request;
         let _ = home.update(Message::RemoteCubesLoaded {
@@ -9998,13 +9986,12 @@ mod tests {
         assert!(matches!(home.state, State::NoCube { create_cube: false }));
         assert!(
             !home.showing_create_form(),
-            "nothing was typed, so the freshly-loaded list takes the screen"
+            "the freshly-loaded list stays on the Launcher"
         );
         home.view();
     }
 
-    /// A remote Cube on another network doesn't count as a list on this one —
-    /// the network picker must not strand the user on an empty list screen.
+    /// An empty network stays on the Launcher even with remote Cubes elsewhere.
     #[test]
     fn remote_cubes_on_another_network_do_not_count_as_a_list() {
         let mut home = home();
@@ -10016,7 +10003,7 @@ mod tests {
         )];
 
         assert!(!home.has_cube_list());
-        assert!(home.showing_create_form());
+        assert!(!home.showing_create_form());
     }
 
     #[test]
@@ -14091,7 +14078,7 @@ mod chain_identity_open_tests {
             for_chain: ChainId::Bitcoin,
             res: Ok(State::NoCube { create_cube: false }),
         }));
-        assert!(home.showing_create_journey());
+        assert!(!home.showing_create_journey());
         assert!(!home.create_network_confirmed);
         assert!(home.creation_backup_words.is_none());
         assert!(home.recovery_words.iter().all(String::is_empty));
