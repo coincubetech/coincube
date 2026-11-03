@@ -10,7 +10,7 @@ use iced::{
 };
 
 use coincube_ui::{
-    component::tenshu::top_bar::{self, APP_PREFERENCES, EYE_OPEN, EYE_SHUT, SLIDERS},
+    component::tenshu::top_bar::{self, APP_PREFERENCES, SLIDERS},
     font, theme,
     widget::{action::Action, Column, Container, Element, Row},
 };
@@ -22,7 +22,6 @@ use super::{
 };
 use crate::{
     app::settings::preferences::{NetworkActivitySource, PreferenceChange},
-    app::state::preferences::BalancePrivacyChrome,
     chain::{ChainId, ChainIdExt},
     feature_flags,
 };
@@ -317,21 +316,6 @@ fn connect_entry<'a>(home: &Home, quiet: bool) -> Element<'a, ViewMessage> {
         .into()
 }
 
-/// `.tbtn.eye`: the device-wide hide-balances switch. Its state and intent
-/// come from the GUI's accepted privacy receipt, as in an open Cube.
-fn privacy_eye<'a>(
-    chrome: Option<BalancePrivacyChrome>,
-    quiet: bool,
-) -> Option<Element<'a, ViewMessage>> {
-    let eye = crate::app::view::nav::shell::balance_privacy_eye(
-        launcher_catalog::privacy_id(),
-        chrome?,
-        focus,
-        ViewMessage::ChangeDevicePreference,
-    );
-    Some(eye.muted(quiet).into())
-}
-
 /// One `.chip`: a 32px filter toggle, `.chip.on` while it applies.
 fn filter_chip<'a>(
     id: Id,
@@ -492,7 +476,6 @@ pub(super) fn top_bar<'a>(
             (projection.filter != NetworkFilter::All)
                 .then(|| clear_filters(launcher_catalog::clear_filters_id())),
         )
-        .eye(privacy_eye(home.balance_privacy, quiet))
         .chip(connect_entry(home, quiet))
         .into()
 }
@@ -1496,8 +1479,6 @@ pub(crate) struct ChromeSnapshot {
     /// Whether "Clear filters" shows.
     filtered: bool,
     count: String,
-    /// `Some(hidden)` while the balances eye is shown.
-    eye: Option<bool>,
     connect: Vec<(String, Ink, f32, bool)>,
     links: Vec<&'static str>,
     /// The dock's plan button: its label, and whether the current network is
@@ -1556,9 +1537,6 @@ pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapsh
             projection.local_total,
             projection.connect_only(home.catalog.mode),
         ),
-        eye: home
-            .balance_privacy
-            .map(|chrome| chrome.privacy.masks_amounts()),
         connect,
         links,
         plan: (format!("{} plan", projection.tier), projection.at_limit()),
@@ -1632,13 +1610,6 @@ pub(crate) fn quiet_top_bar<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M
             chip_style(false)(theme, iced_button::Status::Active)
         }));
     }
-    let eye = chrome.eye.map(|hidden| {
-        if hidden {
-            top_bar::resting_icon(EYE_SHUT, "Balances hidden")
-        } else {
-            top_bar::resting_icon(EYE_OPEN, "Balances shown")
-        }
-    });
     let mut connect =
         Row::new()
             .spacing(8)
@@ -1667,7 +1638,6 @@ pub(crate) fn quiet_top_bar<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M
     .lead(chrome.filtered.then(|| {
         Container::new(words("Clear filters", 13.0, font::REGULAR, Ink::Muted)).padding([2.0, 4.0])
     }))
-    .eye(eye)
     .chip(resting(connect, 32.0, 10.0, resting_bar))
     .into()
 }
@@ -1813,11 +1783,6 @@ mod top_bar_tests {
         };
         home.advisory_notice = None;
         home.catalog.mode = launcher_catalog::LauncherMode::Cubes;
-        home.balance_privacy = Some(crate::app::state::preferences::BalancePrivacyChrome {
-            privacy: crate::app::state::preferences::BalancePrivacy::Shown,
-            busy: false,
-            interactive: true,
-        });
         home.theme_mode = if light {
             coincube_ui::theme::palette::ThemeMode::Light
         } else {
@@ -1873,8 +1838,9 @@ mod top_bar_tests {
     }
 
     /// App preferences is icon-only on both Launcher bars, and its accessible
-    /// label stays "App preferences". The right group reads eye, Connect,
-    /// App preferences, packed to the 24px gutter.
+    /// label stays "App preferences". The right group reads Connect, then
+    /// App preferences, packed to the 24px gutter. The Launcher shows no
+    /// balances, so it has no hide-balances eye; that stays in open Cubes.
     #[test]
     fn launcher_bars_take_the_shared_layout_and_label_the_preferences_icon() {
         let home = home(false);
@@ -1898,7 +1864,6 @@ mod top_bar_tests {
             .collect();
         assert_eq!(labels.len(), 1, "{:?}", live.text);
         assert_eq!(labels[0].1, settings);
-        let eye = at(&launcher_catalog::privacy_id());
         // A session still being checked leaves the Connect entry inert.
         let connect = live
             .text
@@ -1906,8 +1871,11 @@ mod top_bar_tests {
             .find(|(value, _)| value == "Connect")
             .unwrap()
             .1;
-        assert!(eye.x < connect.x && connect.x < settings.x);
-        assert!(live.text.iter().any(|(value, _)| value == "Hide balances"));
+        assert!(connect.x < settings.x);
+        assert!(!live
+            .text
+            .iter()
+            .any(|(value, _)| value.to_lowercase().contains("balances")));
         let brand = live
             .text
             .iter()
@@ -1929,10 +1897,10 @@ mod top_bar_tests {
             .1;
         assert_eq!((label.width, label.height), (32.0, 32.0));
         assert_eq!(label.x + label.width, 1024.0 - super::GUTTER);
-        assert!(quiet
+        assert!(!quiet
             .text
             .iter()
-            .any(|(value, _)| value == "Balances shown"));
+            .any(|(value, _)| value.to_lowercase().contains("balances")));
     }
 
     #[test]
@@ -1961,7 +1929,6 @@ mod top_bar_tests {
                 );
             }
             for (id, name) in [
-                (launcher_catalog::privacy_id(), "eye"),
                 (launcher_catalog::sign_in_id(), "connect"),
                 (launcher_catalog::settings_id(), "preferences"),
             ] {

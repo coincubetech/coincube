@@ -545,8 +545,8 @@ pub enum Message {
     /// the tab switch, so this is bubbled up rather than handled here.
     OpenLauncher,
     OpenAppPreferences(PreferencesSource),
-    /// The Launcher eye's hide-balances intent. The GUI applies it only while
-    /// the sending tab is still showing the Launcher.
+    /// A device preference change from the Launcher. The GUI does not
+    /// apply it: the Launcher has no hide-balances eye.
     HomeDevicePreference(crate::app::settings::preferences::PreferenceChange),
     /// Explicitly lock the Cube and return to the Launcher in this tab.
     LockCubeToLauncher,
@@ -1093,10 +1093,8 @@ impl Tab {
         chrome: Option<crate::app::state::preferences::BalancePrivacyChrome>,
     ) {
         self.balance_privacy = chrome;
-        match &mut self.state {
-            State::App(app) => app.cache_mut().balance_privacy = chrome,
-            State::Home(home) => home.balance_privacy = chrome,
-            _ => {}
+        if let State::App(app) = &mut self.state {
+            app.cache_mut().balance_privacy = chrome;
         }
     }
 
@@ -1111,7 +1109,6 @@ impl Tab {
             }
             State::Home(home) => {
                 home.theme_mode = mode;
-                home.balance_privacy = self.balance_privacy;
             }
             _ => {}
         }

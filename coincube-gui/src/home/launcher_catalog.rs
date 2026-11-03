@@ -1232,9 +1232,6 @@ pub(super) fn connect_id() -> Id {
 pub(super) fn sign_in_id() -> Id {
     control_id("sign-in")
 }
-pub(super) fn privacy_id() -> Id {
-    control_id("privacy")
-}
 
 pub(super) fn key_id() -> Id {
     control_id("key")

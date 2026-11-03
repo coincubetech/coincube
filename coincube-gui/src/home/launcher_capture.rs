@@ -150,11 +150,6 @@ fn home(light: bool) -> Home {
     };
     home.advisory_notice = None;
     home.catalog.mode = LauncherMode::Cubes;
-    home.balance_privacy = Some(crate::app::state::preferences::BalancePrivacyChrome {
-        privacy: crate::app::state::preferences::BalancePrivacy::Shown,
-        busy: false,
-        interactive: true,
-    });
     home.theme_mode = if light {
         coincube_ui::theme::palette::ThemeMode::Light
     } else {
