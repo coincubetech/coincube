@@ -545,8 +545,8 @@ pub enum Message {
     /// the tab switch, so this is bubbled up rather than handled here.
     OpenLauncher,
     OpenAppPreferences(PreferencesSource),
-    /// A device preference change from the Launcher. The GUI does not
-    /// apply it: the Launcher has no hide-balances eye.
+    /// The Launcher dock's network activity source. The GUI saves it only
+    /// while the sending tab is still showing the Launcher.
     HomeDevicePreference(crate::app::settings::preferences::PreferenceChange),
     /// Explicitly lock the Cube and return to the Launcher in this tab.
     LockCubeToLauncher,

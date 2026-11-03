@@ -7711,8 +7711,8 @@ pub enum ViewMessage {
     ToggleTheme,
     /// Open the device-wide preferences sheet over the current screen.
     OpenAppPreferences,
-    /// A device-wide preference change, bubbled to the GUI. The Launcher
-    /// has no hide-balances eye; only open Cubes show one.
+    /// The dock's network activity source, bubbled to the GUI to save. The
+    /// Launcher has no hide-balances eye; only open Cubes show one.
     ChangeDevicePreference(crate::app::settings::preferences::PreferenceChange),
     /// Toggle passkey mode for Cube creation (no PIN when enabled).
     TogglePasskeyMode(bool),

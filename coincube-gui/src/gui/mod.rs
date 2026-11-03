@@ -744,6 +744,20 @@ fn balance_privacy_eye_change(
     }
 }
 
+/// The Launcher's dock may only choose where network activity is read from,
+/// and only while the tab that sent it still shows the Launcher. It shows no
+/// balances, so it never changes balance privacy; a queued pick from a tab
+/// that has since opened a Cube is dropped.
+fn launcher_change_is_current(
+    tab: Option<&tab::Tab>,
+    change: &crate::app::settings::preferences::PreferenceChange,
+) -> bool {
+    matches!(
+        change,
+        crate::app::settings::preferences::PreferenceChange::NetworkActivitySource(_)
+    ) && tab.is_some_and(|tab| matches!(tab.state, tab::State::Home(_)))
+}
+
 /// Home reload also reconciles fork and Split flow availability. Only feature
 /// edits may ask it to run that reconciliation.
 fn needs_global_settings_reload(
@@ -857,6 +871,13 @@ mod balance_privacy_eye_origin_tests {
         let mut tab = tab::Tab::new(1, tab::State::App(app));
         let generation = tab.app_generation_token().unwrap();
         let change = PreferenceChange::HideBalances(false);
+        let source = PreferenceChange::NetworkActivitySource(
+            crate::app::settings::preferences::NetworkActivitySource::Connect,
+        );
+        assert!(
+            !launcher_change_is_current(Some(&tab), &source),
+            "a Launcher dock pick cannot write once an App owns the tab"
+        );
         let eye = || {
             tab::Message::AppAsync(
                 generation,
@@ -882,6 +903,15 @@ mod balance_privacy_eye_origin_tests {
         );
         drop(tab.update(tab::Message::LockCubeToLauncher));
         assert!(matches!(tab.state, tab::State::Home(_)));
+        assert!(
+            !launcher_change_is_current(None, &source),
+            "a Launcher dock pick for a closed tab is dropped"
+        );
+        assert!(launcher_change_is_current(Some(&tab), &source));
+        assert!(
+            !launcher_change_is_current(Some(&tab), &change),
+            "the Launcher has no eye and never writes balance privacy"
+        );
         assert_eq!(
             balance_privacy_eye_change(Some(&tab), &eye()),
             Some((change, false))
@@ -2217,10 +2247,12 @@ impl GUI {
                     Task::none()
                 };
             }
-            // The Launcher shows no balances and has no eye, so nothing it
-            // sends may change device-wide balance privacy.
-            if matches!(inner.as_ref(), tab::Message::HomeDevicePreference(_)) {
-                return Task::none();
+            if let tab::Message::HomeDevicePreference(change) = inner.as_ref() {
+                return if launcher_change_is_current(tab, change) {
+                    self.change_preference(*change)
+                } else {
+                    Task::none()
+                };
             }
         }
         // Validate session-tagged App callbacks before inspecting global auth
@@ -4913,6 +4945,46 @@ mod app_preferences_sheet_tests {
             Some(Operation::Save(PreferenceChange::Zoom(Zoom::from(125))))
         );
         assert_eq!(gui.scale_factor(), 1.25);
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    /// The dock's source menu saves on the same lane as App preferences.
+    /// Nothing else the Launcher sends is a device preference: it has no
+    /// balances eye, so a hide-balances change from it is dropped.
+    #[test]
+    fn the_launcher_dock_saves_only_the_activity_source() {
+        use crate::app::settings::preferences::NetworkActivitySource;
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("tenshu-dock-source-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let root = CoincubeDirectory::new(path.clone());
+        GlobalSettings::load_or_initialize_preferences(&root).unwrap();
+        let mut gui = launcher_gui(&root);
+        let pane_id = gui.focus.unwrap();
+        let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
+        let from_dock = |change| {
+            Message::Pane(
+                pane_id,
+                pane::Message::Tab(tab_id, Box::new(tab::Message::HomeDevicePreference(change))),
+            )
+        };
+
+        drop(gui.update(from_dock(PreferenceChange::HideBalances(true))));
+        assert_eq!(gui.preferences.pending_operation(), None);
+
+        let local = PreferenceChange::NetworkActivitySource(NetworkActivitySource::LocalNode);
+        drop(gui.update(from_dock(local)));
+        assert_eq!(
+            gui.preferences.pending_operation(),
+            Some(Operation::Save(local))
+        );
         drop(gui);
         std::fs::remove_dir_all(path).ok();
     }
