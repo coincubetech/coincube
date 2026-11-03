@@ -1595,8 +1595,8 @@ fn empty_floor<'a>(home: &'a Home, width: f32, available: f32) -> Element<'a, Vi
     );
     let at_limit = launcher_catalog::project(home).at_limit();
     let key = launcher_catalog::create_placeholder_key();
-    // It floats under the pointer as a resting Cube does, and its plus
-    // rises with it; the words below stay, as a Cube's name does.
+    // The dashed Cube floats under the pointer as a resting Cube does; the
+    // plus and the words stay put (Robert, 2026-11-03).
     let lift = home.catalog.lift(&key, std::time::Instant::now());
     let (_, center_y) = layout.rest_center(0, 1);
     let content = Column::new()
@@ -1604,7 +1604,7 @@ fn empty_floor<'a>(home: &'a Home, width: f32, available: f32) -> Element<'a, Vi
         .height(Length::Fill)
         .align_x(Alignment::Center)
         .push(Space::new().height(Length::Fixed(
-            (center_y - layout.rows_top() - 22.0 - lift * layout.scale).max(0.0),
+            (center_y - layout.rows_top() - 22.0).max(0.0),
         )))
         .push(
             Container::new(icon::plus_icon().size(28))

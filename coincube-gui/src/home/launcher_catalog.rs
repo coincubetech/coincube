@@ -6445,7 +6445,7 @@ mod tests {
     }
 
     /// The Create Cube placeholder floats under the pointer as a resting Cube
-    /// does, its plus rising with the dashed Cube, and settles once it leaves.
+    /// does, behind its static plus, and settles once the pointer leaves.
     #[test]
     fn create_placeholder_floats_under_the_pointer_and_settles() {
         use super::super::launcher_presenter::empty_create_id;
