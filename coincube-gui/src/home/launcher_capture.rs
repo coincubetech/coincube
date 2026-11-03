@@ -746,3 +746,42 @@ fn launcher_capture_dock_and_restore() {
         );
     }
 }
+
+/// Empty Cubes and List preferences through the production GPU renderer.
+#[test]
+#[ignore = "writes PNG frames; needs a GPU adapter"]
+fn launcher_capture_empty_modes() {
+    let Ok(directory) = std::env::var("LAUNCHER_CAPTURE_DIR") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut renderer = renderer().expect("wgpu headless renderer");
+    for light in [false, true] {
+        let appearance = if light { "light" } else { "dark" };
+        let palette = if light {
+            theme::Theme::light()
+        } else {
+            theme::Theme::dark()
+        };
+        let mut home = home(light);
+        home.state = State::NoCube { create_cube: false };
+        for mode in [LauncherMode::Cubes, LauncherMode::List] {
+            home.catalog.mode = mode;
+            let name = if mode == LauncherMode::Cubes {
+                "cubes"
+            } else {
+                "list"
+            };
+            for (width, height) in [(1024, 768), (1440, 900)] {
+                save(
+                    &mut renderer,
+                    home.view(),
+                    Size::new(width as f32, height as f32),
+                    &palette,
+                    directory.join(format!("empty-{name}-{appearance}-{width}x{height}.png")),
+                );
+            }
+        }
+    }
+}
