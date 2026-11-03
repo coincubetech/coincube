@@ -3797,7 +3797,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_replaces_only_list_screens_and_keeps_first_run_forms() {
+    fn the_launcher_includes_empty_catalogs_but_preserves_explicit_forms() {
         let mut home = home_with(&[("a", "Alpha")]);
         assert!(shows_catalog(&home));
         if let State::Cubes { create_cube, .. } = &mut home.state {
@@ -3807,8 +3807,11 @@ mod tests {
 
         let mut fresh = home_with(&[]);
         fresh.state = State::NoCube { create_cube: false };
-        // A genuinely empty device lands on the creation form.
+        // An empty device lands on the Launcher too.
+        assert!(shows_catalog(&fresh));
+        fresh.state = State::NoCube { create_cube: true };
         assert!(!shows_catalog(&fresh));
+        fresh.state = State::NoCube { create_cube: false };
         fresh.remote_cubes = vec![remote("r1", "Remote", true, true, false, false)];
         assert!(shows_catalog(&fresh));
         let remote_only = project(&fresh);
@@ -5654,7 +5657,7 @@ mod tests {
     }
 
     #[test]
-    fn first_run_form_and_unavailable_branches_render_no_catalog_controls() {
+    fn explicit_forms_and_unavailable_branches_render_no_catalog_controls() {
         let listed = rows(2);
         assert!(home_tree(
             "r05b-branch-list",
@@ -5666,7 +5669,7 @@ mod tests {
         .has_any_catalog_control());
 
         let mut first_run = home_with(&[]);
-        first_run.state = State::NoCube { create_cube: false };
+        first_run.state = State::NoCube { create_cube: true };
         let mut create = rows(2);
         if let State::Cubes { create_cube, .. } = &mut create.state {
             *create_cube = true;
