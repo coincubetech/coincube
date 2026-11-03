@@ -6331,7 +6331,7 @@ mod tests {
             };
             let tree = home_tree("empty-startup", &home, WIDE, appearance, theme);
             assert!(tree.contains("Create Cube"));
-            assert!(tree.contains("Import or restore"));
+            assert!(tree.contains("Import Bitcoin wallet"));
             assert!(tree.contains("No Cubes on this network."));
             assert!(!tree.contains("Back to Cube list"));
         }
