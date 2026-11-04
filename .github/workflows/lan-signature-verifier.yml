@@ -1,9 +1,6 @@
 name: LAN signature verifier
 
 on:
-  push:
-    branches:
-      - master
   pull_request:
     paths:
       - ".github/workflows/lan-signature-verifier.yml"
@@ -26,9 +23,20 @@ on:
       - "grpc/**"
       - "rust-toolchain.toml"
 
+    branches:
+      - master
+      - redesign
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+      - converted_to_draft
+  workflow_dispatch:
 concurrency:
-  group: lan-signature-verifier-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: batch-${{ github.workflow }}-${{ github.ref }}-${{ github.event.action == 'edited' && github.event.changes.base == null && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   COINCUBE_ENABLE_PASSKEY: ${{ vars.COINCUBE_ENABLE_PASSKEY }}
@@ -41,6 +49,7 @@ jobs:
     # macOS-only by design: it is the security boundary the shipped Apple
     # binary crosses. Relevant PR heads run so downstream consumers can pin an
     # exact reviewed revision; unrelated PRs do not spend the 10x macOS rate.
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
