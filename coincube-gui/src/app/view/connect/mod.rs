@@ -1054,7 +1054,12 @@ fn login_ux<'a>(email: &'a str, loading: bool) -> Element<'a, ConnectAccountMess
                 .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-        .push(text::p2_medium("Email").style(theme::text::primary))
+        .push(
+            text::p2_medium("Email")
+                .style(theme::text::primary)
+                .width(Length::Fill)
+                .align_x(Alignment::Start),
+        )
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
             TextInput::new("you@example.test", email)
