@@ -25,7 +25,7 @@ use coincube_ui::{
     component::{badge, button, card, date_picker, form, separation, text::*},
     icon,
     theme::{self},
-    widget::{Button, Container, Element, ProgressBar, Row, TextInput},
+    widget::{Button, ColumnExt, Container, Element, ProgressBar, Row, TextInput},
 };
 
 use crate::{
@@ -2661,6 +2661,14 @@ fn history_source<'a>(
     .into()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalNodeSwitchStep {
+    Waiting,
+    Ready,
+    Switching,
+    Complete,
+}
+
 /// The card that moves a Vault from Connect to the local node: sync the
 /// blockchain, bring the Vault's history over, then switch. All three steps
 /// stay on screen in every state, so a switch that is not yet possible says
@@ -2671,7 +2679,7 @@ pub fn wallet_history_section<'a>(
     from_date: bool,
     date_picker_open: bool,
     node_height: Option<u64>,
-    can_switch: bool,
+    switch_step: LocalNodeSwitchStep,
 ) -> Element<'a, NodeSettingsMessage> {
     use crate::app::view::settings::page;
     use crate::node::history::Phase;
@@ -2685,7 +2693,11 @@ pub fn wallet_history_section<'a>(
         )
     });
     let paused = job.is_some_and(|job| job.phase == Phase::Paused);
-    let done = status.reconciled && job.is_some_and(|job| job.phase == Phase::Complete);
+    let switched = switch_step == LocalNodeSwitchStep::Complete;
+    let switching = switch_step == LocalNodeSwitchStep::Switching;
+    let history_available = switch_step != LocalNodeSwitchStep::Waiting;
+    let done = history_available
+        || (status.reconciled && job.is_some_and(|job| job.phase == Phase::Complete));
     // A user action is in flight but no job has been written yet.
     let preparing = status.busy && !running && !paused && !done;
     let can_start = !status.busy
@@ -2702,6 +2714,13 @@ pub fn wallet_history_section<'a>(
             StepState::Done,
             "Sync the blockchain",
             Some(format!("Done · block {height}")),
+            None,
+        ),
+        None if switching || switched => history_step(
+            1,
+            StepState::Done,
+            "Sync the blockchain",
+            Some("Done".into()),
             None,
         ),
         None => history_step(
@@ -2735,10 +2754,19 @@ pub fn wallet_history_section<'a>(
             Tone::Good,
             Column::new()
                 .spacing(2)
-                .push(page::status(page::Status::Ok, "History matches your node"))
-                .push(page::muted(
-                    "Every payment and spend Connect found checks out against your node.",
-                )),
+                .push(page::status(
+                    page::Status::Ok,
+                    if status.reconciled {
+                        "History matches your node"
+                    } else {
+                        "Vault history is available"
+                    },
+                ))
+                .push(page::muted(if status.reconciled {
+                    "Every payment and spend Connect found checks out against your node."
+                } else {
+                    "Your node can provide this Vault's history."
+                })),
             None,
         ));
         (StepState::Done, Some("Done".to_string()))
@@ -2920,17 +2948,34 @@ pub fn wallet_history_section<'a>(
         Some(body.into()),
     );
 
-    let step3_body: Element<'a, NodeSettingsMessage> = if done {
+    let step3_body: Element<'a, NodeSettingsMessage> = if switched {
+        page::status(page::Status::Ok, "This Vault now uses your local node")
+    } else if switching {
+        Column::new()
+            .spacing(10)
+            .push(page::status(
+                page::Status::Busy,
+                "Switching to your local node…",
+            ))
+            .push(page::muted(
+                "Tenshu is stopping Connect and loading this Vault on your local node.",
+            ))
+            .into()
+    } else if done {
         Column::new()
             .spacing(10)
             .push(page::muted(
-                "From now on Tenshu reads this Vault from your node. You can switch back to Connect from this page.",
+                "Switch this Vault to read its balance and history from your node.",
             ))
             .push(page::plain_button(
                 "Switch to local node",
                 ActionKind::Primary,
-                can_switch.then_some(NodeSettingsMessage::SwitchToBitcoind),
+                (switch_step == LocalNodeSwitchStep::Ready)
+                    .then_some(NodeSettingsMessage::SwitchToBitcoind),
             ))
+            .push_maybe((switch_step == LocalNodeSwitchStep::Waiting).then(|| {
+                page::muted("Waiting for the node and wallet history checks before switching.")
+            }))
             .into()
     } else {
         Row::new()
@@ -2946,13 +2991,15 @@ pub fn wallet_history_section<'a>(
     };
     let step3 = history_step(
         3,
-        if done {
+        if switched {
+            StepState::Done
+        } else if done {
             StepState::Current
         } else {
             StepState::Todo
         },
         "Switch to your local node",
-        None,
+        if switched { Some("Done".into()) } else { None },
         Some(step3_body),
     );
 
@@ -2962,10 +3009,14 @@ pub fn wallet_history_section<'a>(
             Container::new(
                 Column::new()
                     .spacing(4)
-                    .push(page::heading("Move this Vault to your local node"))
-                    .push(page::muted(
-                        "Bring this Vault's history over, then switch. Connect keeps working until you do.",
-                    )),
+                    .push(page::heading(if switched { "Vault moved to your local node" } else { "Move this Vault to your local node" }))
+                    .push(page::muted(if switched {
+                        "All steps complete. Tenshu reads this Vault from your node."
+                    } else if switching {
+                        "Your blockchain and Vault history are ready. Finishing the switch…"
+                    } else {
+                        "Bring this Vault's history over, then switch. Connect keeps working until you do."
+                    })),
             )
             .padding([20, 24]),
         )
@@ -2974,6 +3025,7 @@ pub fn wallet_history_section<'a>(
                 .padding([4, 24]),
         );
     let idle = !status.busy
+        && !switching
         && job.is_none_or(|job| matches!(job.phase, Phase::Complete | Phase::Cancelled));
     if idle {
         card = card.push(page::rule()).push(
@@ -2982,13 +3034,15 @@ pub fn wallet_history_section<'a>(
                     .spacing(16)
                     .align_y(Alignment::Center)
                     .push(
-                        Container::new(page::muted(
-                            "Not ready? Connect keeps working, and you can come back here any time.",
-                        ))
+                        Container::new(page::muted(if switched {
+                            "You can switch back to Connect from this page."
+                        } else {
+                            "Not ready? Connect keeps working, and you can come back here any time."
+                        }))
                         .width(Length::Fill),
                     )
                     .push(page::plain_button(
-                        "Not now",
+                        if switched { "Done" } else { "Not now" },
                         ActionKind::Secondary,
                         Some(NodeSettingsMessage::RecoveryDismiss),
                     )),
@@ -3880,8 +3934,18 @@ mod tests {
             ),
         ];
         for (status, from_date, present, absent) in cases {
-            let mut element =
-                wallet_history_section(&start, &status, from_date, false, Some(974215), true);
+            let mut element = wallet_history_section(
+                &start,
+                &status,
+                from_date,
+                false,
+                Some(974215),
+                if status.reconciled {
+                    LocalNodeSwitchStep::Ready
+                } else {
+                    LocalNodeSwitchStep::Waiting
+                },
+            );
             let mut tree = Tree::new(element.as_widget());
             let node = element.as_widget_mut().layout(
                 &mut tree,
@@ -3905,6 +3969,176 @@ mod tests {
                     "unexpected {label}: {:?}",
                     labels.0
                 );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn local_node_wizard_shows_switching_then_all_steps_complete() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+        #[derive(Default)]
+        struct Labels(Vec<String>, Option<iced::Rectangle>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+                if text == "Done" {
+                    self.1 = Some(bounds);
+                }
+            }
+        }
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let start = value("", false);
+        let status = crate::app::node_history::Status::default();
+        for (theme_name, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for (name, step) in [
+                ("ready", LocalNodeSwitchStep::Ready),
+                ("switching", LocalNodeSwitchStep::Switching),
+                ("complete", LocalNodeSwitchStep::Complete),
+            ] {
+                let mut renderer = <iced::Renderer as Headless>::new(
+                    coincube_ui::font::REGULAR,
+                    iced::Pixels(16.0),
+                    Some("tiny-skia"),
+                )
+                .await
+                .expect("software renderer");
+                // Successful restart clears the RPC/history caches. Completion
+                // must remain visible even before the replacement probe answers.
+                let height = (step != LocalNodeSwitchStep::Complete).then_some(974594);
+                let mut element =
+                    wallet_history_section(&start, &status, false, false, height, step);
+                let mut tree = Tree::new(element.as_widget());
+                let size = iced::Size::new(1000.0, 720.0);
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(iced::Size::ZERO, size),
+                );
+                let mut labels = Labels::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &renderer,
+                    &mut labels,
+                );
+                for title in [
+                    "Sync the blockchain",
+                    "Bring this Vault's history to your node",
+                    "Switch to your local node",
+                ] {
+                    assert!(labels.0.iter().any(|text| text == title));
+                }
+                assert_eq!(
+                    labels.0.iter().any(|text| text == "Switch to local node"),
+                    step == LocalNodeSwitchStep::Ready
+                );
+                assert_eq!(
+                    labels
+                        .0
+                        .iter()
+                        .any(|text| text == "Switching to your local node…"),
+                    step == LocalNodeSwitchStep::Switching
+                );
+                if step == LocalNodeSwitchStep::Complete {
+                    assert!(labels
+                        .0
+                        .iter()
+                        .any(|text| text == "Vault moved to your local node"));
+                    assert_eq!(
+                        labels
+                            .0
+                            .iter()
+                            .filter(|text| text.as_str() == "Done")
+                            .count(),
+                        4,
+                        "all three steps plus the Done action: {:?}",
+                        labels.0
+                    );
+                    assert!(!labels
+                        .0
+                        .iter()
+                        .any(|text| text.contains("Connect keeps working")));
+                    let mut messages = Vec::new();
+                    for event in [
+                        iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                        iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+                    ] {
+                        element.as_widget_mut().update(
+                            &mut tree,
+                            &iced::Event::Mouse(event),
+                            Layout::new(&node),
+                            iced::mouse::Cursor::Available(labels.1.expect("Done action").center()),
+                            &renderer,
+                            &mut iced::advanced::clipboard::Null,
+                            &mut iced::advanced::Shell::new(&mut messages),
+                            &iced::Rectangle::with_size(size),
+                        );
+                    }
+                    assert!(
+                        matches!(messages.as_slice(), [NodeSettingsMessage::RecoveryDismiss]),
+                        "Done dismisses the completed checklist"
+                    );
+                }
+                if step == LocalNodeSwitchStep::Switching {
+                    assert!(!labels.0.iter().any(|text| text == "Not now"
+                        || text == "All steps complete. Tenshu reads this Vault from your node."));
+                }
+                if let Ok(directory) = std::env::var("LOCAL_NODE_WIZARD_CAPTURE_DIR") {
+                    std::fs::create_dir_all(&directory).unwrap();
+                    let mut messages = Vec::new();
+                    element.as_widget_mut().update(
+                        &mut tree,
+                        &iced::Event::Window(iced::window::Event::RedrawRequested(
+                            std::time::Instant::now(),
+                        )),
+                        Layout::new(&node),
+                        iced::mouse::Cursor::Unavailable,
+                        &renderer,
+                        &mut iced::advanced::clipboard::Null,
+                        &mut iced::advanced::Shell::new(&mut messages),
+                        &iced::Rectangle::with_size(size),
+                    );
+                    element.as_widget().draw(
+                        &tree,
+                        &mut renderer,
+                        &theme,
+                        &iced::advanced::renderer::Style {
+                            text_color: theme.colors.text.primary,
+                        },
+                        Layout::new(&node),
+                        iced::mouse::Cursor::Unavailable,
+                        &iced::Rectangle::with_size(size),
+                    );
+                    let pixels = renderer.screenshot(
+                        iced::Size::new(1000, 720),
+                        1.0,
+                        theme.colors.general.background,
+                    );
+                    image::save_buffer(
+                        std::path::Path::new(&directory).join(format!("{name}-{theme_name}.png")),
+                        &pixels,
+                        1000,
+                        720,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
             }
         }
     }

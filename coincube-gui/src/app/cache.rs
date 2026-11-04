@@ -172,6 +172,9 @@ pub struct Cache {
     pub background_node_install: BackgroundNodeInstall,
     pub node_history: super::node_history::Status,
     pub node_history_switch_requested: bool,
+    /// Keep the transfer checklist through the backend handoff and its success.
+    /// Presentation only: this never authorizes recovery or an automatic switch.
+    pub local_node_transfer_visible: bool,
     pub network: Network,
     /// The `last_poll_timestamp` when starting the application.
     pub last_poll_at_startup: Option<u32>,
@@ -457,6 +460,7 @@ impl std::default::Default for Cache {
             node_net_stats: None,
             node_history: super::node_history::Status::default(),
             node_history_switch_requested: false,
+            local_node_transfer_visible: false,
             background_node_install: Default::default(),
             network: Network::Bitcoin,
             last_poll_at_startup: None,

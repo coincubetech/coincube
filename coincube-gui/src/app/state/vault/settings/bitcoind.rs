@@ -1421,7 +1421,8 @@ impl State for BitcoindSettingsState {
         // transfer must not leave a disabled "Switch" prompt on an active node,
         // even if an old panel/cache still carries the original request.
         let history_card = history_managed
-            && ((!local_in_use && self.recovery_requested)
+            && (cache.local_node_transfer_visible
+                || (!local_in_use && self.recovery_requested)
                 || recovery_active
                 || cache.node_history.busy);
         let content = view::vault::settings::bitcoind_settings(menu, cache, {
@@ -1567,6 +1568,24 @@ impl State for BitcoindSettingsState {
             if history_managed {
                 if history_card {
                     let synced = cache.node_bitcoind_ibd == Some(false);
+                    use view::vault::settings::LocalNodeSwitchStep;
+                    let switching = self.node_switch_processing || cache.daemon_switch_in_progress;
+                    let can_switch = synced
+                        && !switching
+                        && self.full_config.as_ref().is_some_and(|cfg| {
+                            cfg.pending_bitcoind.is_some()
+                                && matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Esplora(_)))
+                        })
+                        && local_node_serves_vault(cache).is_ok();
+                    let switch_step = if switching {
+                        LocalNodeSwitchStep::Switching
+                    } else if local_in_use && !recovery_in_progress {
+                        LocalNodeSwitchStep::Complete
+                    } else if can_switch {
+                        LocalNodeSwitchStep::Ready
+                    } else {
+                        LocalNodeSwitchStep::Waiting
+                    };
                     setting_panels.push(
                         view::vault::settings::wallet_history_section(
                             &self.recovery_start,
@@ -1577,16 +1596,7 @@ impl State for BitcoindSettingsState {
                                 .node_bitcoind_sync_heights
                                 .map(|(blocks, _)| blocks)
                                 .filter(|_| synced),
-                            synced
-                                && self.full_config.as_ref().is_some_and(|cfg| {
-                                    cfg.pending_bitcoind.is_some()
-                                        && matches!(
-                                            cfg.bitcoin_backend,
-                                            Some(BitcoinBackend::Esplora(_))
-                                        )
-                                })
-                                && !self.node_switch_processing
-                                && !cache.daemon_switch_in_progress,
+                            switch_step,
                         )
                         .map(map_node_msg),
                     );
@@ -4714,6 +4724,7 @@ mod tests {
                     cache.node_history.job = Some(job);
                     cache.node_history.reconciled = true;
                     cache.node_history_switch_requested = true;
+                    cache.local_node_transfer_visible = true;
                     cache.node_bitcoind_sync_progress = Some(1.0);
                     cache.node_bitcoind_sync_heights = Some((974579, 974583));
                 }
@@ -4762,12 +4773,16 @@ mod tests {
             element
                 .as_widget_mut()
                 .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
-            for label in [
-                "Move this Vault to your local node",
-                "Bring this Vault's history to your node",
-                "Start from Connect's history",
+            for (label, visible) in [
+                ("Move this Vault to your local node", expected),
+                ("Vault moved to your local node", local && clicked),
+                (
+                    "Bring this Vault's history to your node",
+                    expected || (local && clicked),
+                ),
+                ("Start from Connect's history", expected),
             ] {
-                assert_eq!(labels.0.iter().any(|text| text == label), expected,
+                assert_eq!(labels.0.iter().any(|text| text == label), visible,
                     "missing/unsupported history controls: local={local} external={external} blake2b={blake2b}: {label}");
             }
             assert_eq!(
@@ -4785,6 +4800,11 @@ mod tests {
                 assert!(labels.0.iter().any(|text| text == "In use · Local Node"));
                 assert!(labels.0.iter().any(|text| text == "Catching up 99.9%"));
                 assert!(!labels.0.iter().any(|text| text == "Switch to local node"));
+                assert!(labels
+                    .0
+                    .iter()
+                    .any(|text| text
+                        == "All steps complete. Tenshu reads this Vault from your node."));
             }
         }
     }
