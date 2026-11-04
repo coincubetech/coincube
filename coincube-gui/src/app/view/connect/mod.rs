@@ -3846,22 +3846,21 @@ mod renewal_banner_tests {
                 .collect();
             if matches!(name, "sign-in" | "sign-up" | "token" | "done") {
                 // The rail sits in its band right under the header, ahead of
-                // the step's own copy, with its three steps in order.
+                // the step's own copy, with its three steps in order. Each
+                // label follows its circle's mark (a number, or a check once
+                // the step is done), so only the labels are compared.
                 let close = labels
                     .iter()
                     .position(|label| label == "Close")
                     .expect("sheet header Close");
-                assert_eq!(
-                    labels.get(close + 1..close + 7).map(|rail| rail.to_vec()),
-                    Some(
-                        ["1", "Email", "2", "Token", "3", "Done"]
-                            .map(String::from)
-                            .to_vec()
-                    ),
-                    "{} rail: {:?}",
-                    name,
-                    labels
-                );
+                let step_labels: Vec<&str> = labels
+                    .iter()
+                    .skip(close + 2)
+                    .step_by(2)
+                    .take(3)
+                    .map(String::as_str)
+                    .collect();
+                assert_eq!(step_labels, AUTH_STEPS, "{} rail: {:?}", name, labels);
                 assert_eq!(rail[..3], AUTH_STEPS, "{} rail order", name);
             } else {
                 assert!(rail.is_empty(), "{} shows the sign-in rail", name);
