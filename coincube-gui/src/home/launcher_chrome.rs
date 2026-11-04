@@ -526,8 +526,8 @@ fn dock_action<'a>(
     .into()
 }
 
-/// Why Import Bitcoin wallet is unavailable: a short caption the dock shows
-/// beside it, and the full reason with its remedy for the hover tooltip.
+/// Why Import Bitcoin wallet is unavailable: a short caption with the reason
+/// and remedy, shown beside it, and the full sentence for the hover tooltip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ImportUnavailable {
     pub(super) caption: &'static str,
@@ -539,7 +539,7 @@ pub(super) struct ImportUnavailable {
 pub(super) fn import_unavailable(projection: &Projection<'_>) -> Option<ImportUnavailable> {
     if projection.network != ChainId::Bitcoin {
         return Some(ImportUnavailable {
-            caption: "Bitcoin mainnet only",
+            caption: "Bitcoin mainnet only · choose it in Network",
             detail: format!(
                 "Import is for Bitcoin mainnet only. The Launcher is on {}: choose \
                  Bitcoin mainnet in the Network menu to import a wallet.",
@@ -548,7 +548,7 @@ pub(super) fn import_unavailable(projection: &Projection<'_>) -> Option<ImportUn
         });
     }
     projection.at_limit().then(|| ImportUnavailable {
-        caption: "No free mainnet slot",
+        caption: "No free mainnet slot · upgrade or delete a Cube",
         detail: format!(
             "Bitcoin mainnet has no free Cube slot on the {} plan. Upgrade, or \
              delete a Bitcoin mainnet Cube, to import a wallet.",
@@ -608,9 +608,9 @@ pub(super) fn dock<'a>(
         quiet,
     );
     // A faded Import says nothing of the network it needs, and the floor
-    // shows every network. A caption beside it names the reason, so it reads
+    // shows every network. A caption beside it gives the reason and remedy, so they read
     // without a pointer (a disabled action takes no focus, and a tooltip
-    // shows only on hover); hovering it gives the full reason and remedy.
+    // shows only on hover); hovering it gives the full sentence.
     let (import, import_caption): (Element<'a, ViewMessage>, _) = match unavailable {
         Some(reason) => (
             tooltip::Tooltip::new(import, dock_tip(reason.detail), tooltip::Position::Top)
@@ -1912,7 +1912,10 @@ mod top_bar_tests {
 
         home.network = ChainId::Testnet4;
         let reason = super::import_unavailable(&launcher_catalog::project(&home)).unwrap();
-        assert_eq!(reason.caption, "Bitcoin mainnet only");
+        assert_eq!(
+            reason.caption,
+            "Bitcoin mainnet only · choose it in Network"
+        );
         let reason = reason.detail;
         assert!(
             reason.starts_with("Import is for Bitcoin mainnet only."),
@@ -1929,7 +1932,10 @@ mod top_bar_tests {
         home.network = ChainId::Bitcoin;
         home.server_cube_limit = Some(4);
         let reason = super::import_unavailable(&launcher_catalog::project(&home)).unwrap();
-        assert_eq!(reason.caption, "No free mainnet slot");
+        assert_eq!(
+            reason.caption,
+            "No free mainnet slot · upgrade or delete a Cube"
+        );
         let reason = reason.detail;
         assert!(
             reason.starts_with("Bitcoin mainnet has no free Cube slot on the"),
@@ -1949,7 +1955,7 @@ mod top_bar_tests {
                 .map(|(_, bounds)| *bounds)
         };
         let import = at("Import Bitcoin wallet").unwrap();
-        let caption = at("Bitcoin mainnet only").unwrap();
+        let caption = at("Bitcoin mainnet only · choose it in Network").unwrap();
         assert!(
             caption.x > import.x + import.width,
             "{:?} {:?}",
@@ -1965,10 +1971,9 @@ mod top_bar_tests {
             .text
             .iter()
             .any(|(value, _)| value == "Import Bitcoin wallet"));
-        assert!(!live
-            .text
-            .iter()
-            .any(|(value, _)| value == "Bitcoin mainnet only" || value == "No free mainnet slot"));
+        assert!(!live.text.iter().any(|(value, _)| value
+            == "Bitcoin mainnet only · choose it in Network"
+            || value == "No free mainnet slot · upgrade or delete a Cube"));
     }
 
     /// App preferences is icon-only on both Launcher bars, and its accessible
