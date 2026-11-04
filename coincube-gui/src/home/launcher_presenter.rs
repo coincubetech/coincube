@@ -1597,7 +1597,8 @@ fn empty_floor<'a>(home: &'a Home, width: f32, available: f32) -> Element<'a, Vi
     let key = launcher_catalog::create_placeholder_key();
     // The dashed Cube floats under the pointer as a resting Cube does; the
     // plus and the words stay put (Robert, 2026-11-03).
-    let lift = home.catalog.lift(&key, std::time::Instant::now());
+    let now = std::time::Instant::now();
+    let lift = home.catalog.lift(&key, now);
     let words = Column::new()
         .push(face_words(
             "Create Cube",
@@ -1668,12 +1669,24 @@ fn empty_floor<'a>(home: &'a Home, width: f32, available: f32) -> Element<'a, Vi
             )))
             .on_exit(ViewMessage::Catalog(CatalogMessage::CubeHover(key, false)))
     };
+    // Network activity fills the sky above the placeholder as it does above
+    // a one-Cube floor, and the placeholder floats into it the same way.
+    let band = home.activity_band(light).and_then(|band| {
+        let (_, sky, _, _) = launcher_scene::bounds(
+            &layout,
+            layout.rest_center(0, 1),
+            launcher_scene::Pose::REST,
+        );
+        let sky = sky - launcher_scene::BOB_HEIGHT * layout.scale;
+        super::launcher_activity::band_layer(&band, sky, now)
+    });
     Stack::new()
         .width(Length::Fill)
         .height(Length::Fixed(height))
         .push(launcher_gpu::stage(
             launcher_gpu::StageData::create_placeholder(&layout, light, lift),
         ))
+        .push(band)
         .push(
             Column::new()
                 .width(Length::Fill)
@@ -4028,6 +4041,35 @@ mod tests {
         home.catalog.activity.enabled = false;
         assert!(!inspect(&home, "launcher-activity-off").contains("NEXT HALVING"));
         assert!(!launcher(&home, "launcher-activity-off-dock").contains("COINCUBE | Connect"));
+    }
+
+    /// With no Cubes the floor holds only the Create placeholder, and the
+    /// sky above it still shows Network activity.
+    #[test]
+    fn network_activity_fills_the_sky_above_the_create_placeholder() {
+        use super::super::launcher_activity::sample_snapshot;
+        let mut home = home_with_floor(0);
+        home.state = super::super::State::NoCube { create_cube: false };
+        assert!(launcher_catalog::project(&home).shows_create_placeholder(home.catalog.mode));
+        let inspect = |home: &Home, name: &str| {
+            capture::inspect_full_window(
+                name,
+                floor_body_in(home, 1100.0),
+                (1440, 1250),
+                "dark",
+                theme::Theme::dark(),
+            )
+        };
+        assert!(!inspect(&home, "launcher-activity-empty-unread").contains("NEXT HALVING"));
+        home.catalog
+            .activity
+            .show_for_test(ChainId::Bitcoin, Ok(sample_snapshot()));
+        let empty = inspect(&home, "launcher-activity-empty");
+        for fact in ["Create Cube", "BLOCK", "#968,412", "NEXT HALVING"] {
+            assert!(empty.contains(fact), "missing {:?}", fact);
+        }
+        home.catalog.activity.enabled = false;
+        assert!(!inspect(&home, "launcher-activity-empty-off").contains("NEXT HALVING"));
     }
 
     #[test]
