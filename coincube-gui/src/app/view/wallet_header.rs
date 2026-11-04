@@ -289,7 +289,7 @@ pub fn wallet_header<'a, M: Clone + 'static>(props: WalletHeaderProps<M>) -> Col
         SyncState::Synced => None,
         SyncState::Syncing { progress, label } => {
             let line = match progress {
-                Some(p) => format!("{} ({:.1}%)", label, 100.0 * p),
+                Some(p) => format!("{} ({:.1}%)", label, crate::utils::syncing_percent(*p)),
                 None => label.clone(),
             };
             Some(
@@ -325,7 +325,7 @@ pub fn wallet_header<'a, M: Clone + 'static>(props: WalletHeaderProps<M>) -> Col
             failing: false,
         } => {
             let line = match progress {
-                Some(p) => format!("{} ({:.1}%)", label, 100.0 * p),
+                Some(p) => format!("{} ({:.1}%)", label, crate::utils::syncing_percent(*p)),
                 None => label.clone(),
             };
             Some(

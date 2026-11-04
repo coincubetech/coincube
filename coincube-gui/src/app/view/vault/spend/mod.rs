@@ -625,7 +625,7 @@ pub fn create_spend_tx<'a>(
                                 match sync_status {
                                     SyncStatus::BlockchainSync(progress) => text(format!(
                                         "Syncing blockchain ({:.2}%)",
-                                        100.0 * *progress
+                                        crate::utils::syncing_percent(*progress)
                                     )),
                                     SyncStatus::WalletFullScan { .. } => text("Syncing"),
                                     SyncStatus::SyncFailing { .. } => text(

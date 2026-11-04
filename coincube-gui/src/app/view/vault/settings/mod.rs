@@ -279,7 +279,7 @@ pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
         page::row("Node backend & sync")
             .accessory(page::status(
                 page::Status::Busy,
-                format!("Syncing {:.1}%", progress * 100.0),
+                format!("Syncing {:.1}%", crate::utils::syncing_percent(progress)),
             ))
             .description(format!(
                 "Block {}. Balances may be out of date.",
@@ -1670,15 +1670,15 @@ pub fn node_backend_status<'a>(
     // Treat it like `processing` so the switch buttons are disabled rather
     // than offering an action that just errors "already in progress".
     let processing = processing || switch_in_progress;
-    // Once the node reports it has left initial block download, treat it as
-    // ready even if `verificationprogress` still pins at 1.0 — otherwise the
-    // syncing copy/button label keep saying "syncing" at 100%.
+    // The estimate can reach (or round to) 100% before the node is ready.
+    // Completion requires both leaving IBD and verifying every known header.
     let initial_syncing = pending_ibd != Some(false);
     // Leaving IBD does not mean a previously synced node has caught up after
     // an outage. Keep its known header gap visible without changing admission.
     let catching_up =
         !initial_syncing && local_heights.is_some_and(|(blocks, headers)| blocks < headers);
-    let still_syncing = initial_syncing || catching_up;
+    let still_syncing =
+        initial_syncing || !local_heights.is_some_and(|(blocks, headers)| blocks >= headers);
     use crate::app::view::settings::page;
     use coincube_ui::component::tenshu::{ActionKind, Tone};
     let _ = active_icon;
@@ -1754,6 +1754,7 @@ pub fn node_backend_status<'a>(
         .unwrap_or_else(|| "Your local node".to_string());
     let mut status_block: Option<coincube_ui::widget::Column<'a, NodeSettingsMessage>> = None;
     if let Some(progress) = pending_progress {
+        let percent = crate::utils::syncing_percent(progress);
         let pace = if progress > 0.98 {
             "This may take a few minutes, depending on the last time it was done, your internet connection, and your computer performance."
         } else if progress > 0.9 {
@@ -1764,7 +1765,7 @@ pub fn node_backend_status<'a>(
         let pending = can_switch_to_bitcoind;
         let desc = if catching_up {
             format!("{name} has finished initial blockchain sync and is catching up with known headers.")
-        } else if initial_syncing {
+        } else if still_syncing {
             let next = if pending && auto_switch_to_pending {
                 "Tenshu will automatically switch to this node once syncing is complete. "
             } else {
@@ -1794,14 +1795,14 @@ pub fn node_backend_status<'a>(
                         } else {
                             "Syncing"
                         },
-                        100.0 * progress
+                        percent
                     ),
                 )
             } else {
                 page::status(page::Status::Ok, "Initial blockchain sync complete")
             });
         if still_syncing {
-            block = block.push(ProgressBar::new(0.0..=1.0, progress as f32).length(Length::Fill));
+            block = block.push(ProgressBar::new(0.0..=100.0, percent as f32).length(Length::Fill));
         }
         if let Some((blocks, headers)) = local_heights {
             block = block.push(
@@ -3574,14 +3575,14 @@ mod tests {
         )
         .await
         .expect("software renderer");
-        for (progress, ibd, switching, pending, recovery, blocks, expected) in [
+        for (progress, ibd, switching, pending, recovery, heights, expected) in [
             (
                 Some(0.975),
                 Some(true),
                 false,
                 true,
                 false,
-                890000,
+                Some((890000, 900000)),
                 "Syncing 97.5%",
             ),
             (
@@ -3590,7 +3591,7 @@ mod tests {
                 true,
                 true,
                 false,
-                900000,
+                Some((900000, 900000)),
                 "Initial blockchain sync complete",
             ),
             (
@@ -3599,7 +3600,7 @@ mod tests {
                 false,
                 false,
                 false,
-                890000,
+                Some((890000, 900000)),
                 "Syncing 97.5%",
             ),
             (
@@ -3608,8 +3609,66 @@ mod tests {
                 false,
                 false,
                 false,
-                899990,
+                Some((899990, 900000)),
                 "Catching up 99.9%",
+            ),
+            // The screenshot's last 143 blocks must never display 100%,
+            // even if Core's estimate itself is already 1.0.
+            (
+                Some(1.0),
+                Some(true),
+                false,
+                true,
+                false,
+                Some((974434, 974577)),
+                "Syncing 99.9%",
+            ),
+            (
+                Some(0.999999),
+                Some(false),
+                false,
+                false,
+                false,
+                Some((899999, 900000)),
+                "Catching up 99.9%",
+            ),
+            // Equal heights alone do not complete initial block download.
+            (
+                Some(1.0),
+                Some(true),
+                false,
+                true,
+                false,
+                Some((900000, 900000)),
+                "Syncing 99.9%",
+            ),
+            // Completion must be confirmed, including the known heights.
+            (
+                Some(1.0),
+                Some(false),
+                false,
+                true,
+                false,
+                None,
+                "Syncing 99.9%",
+            ),
+            (
+                Some(1.0),
+                None,
+                false,
+                true,
+                false,
+                Some((900000, 900000)),
+                "Syncing 99.9%",
+            ),
+            (
+                Some(1.0),
+                Some(false),
+                false,
+                true,
+                false,
+                Some((900000, 900000)),
+                "Initial blockchain sync complete",
             ),
             (
                 None,
@@ -3617,7 +3676,7 @@ mod tests {
                 true,
                 true,
                 false,
-                0,
+                None,
                 "Waiting for the local node to report sync progress…",
             ),
             (
@@ -3626,7 +3685,7 @@ mod tests {
                 false,
                 true,
                 true,
-                900000,
+                Some((900000, 900000)),
                 "Initial blockchain sync complete",
             ),
         ] {
@@ -3638,7 +3697,7 @@ mod tests {
                 },
                 icon::bitcoin_icon(),
                 progress,
-                progress.map(|_| (blocks, 900000)),
+                heights,
                 ibd,
                 None,
                 Some("Loading block index…"),
@@ -3669,14 +3728,19 @@ mod tests {
             );
             // An open node log shows whether or not the node reported progress.
             assert!(labels.0.iter().any(|text| text == "Loading block index…"));
-            if progress.is_some() {
+            assert!(
+                !labels.0.iter().any(|text| text.contains("100.0%")),
+                "ongoing sync must never round to 100%: {:?}",
+                labels.0
+            );
+            if let Some((blocks, headers)) = heights {
                 let expected_blocks = format!(
-                    "Verified blocks: {blocks} / 900000 known headers · {} blocks remaining",
-                    900000 - blocks
+                    "Verified blocks: {blocks} / {headers} known headers · {} blocks remaining",
+                    headers - blocks
                 );
                 assert!(labels.0.iter().any(|text| text == &expected_blocks));
             }
-            if ibd == Some(false) && blocks < 900000 && progress.is_some() {
+            if expected != "Initial blockchain sync complete" {
                 assert!(!labels
                     .0
                     .iter()

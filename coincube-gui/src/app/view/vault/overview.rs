@@ -407,7 +407,7 @@ pub fn vault_overview_view<'a>(
                             .push(
                                 text(format!(
                                     "Your local node is syncing — {:.1}% complete",
-                                    100.0 * progress
+                                    crate::utils::syncing_percent(progress)
                                 ))
                                 .style(theme::text::secondary)
                                 .width(Length::Fill),
