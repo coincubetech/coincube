@@ -185,6 +185,9 @@ impl Default for DefineNode {
 }
 
 impl Step for DefineNode {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Node)
+    }
     fn load_context(&mut self, ctx: &Context) {
         if ctx.bitcoin_config.chain.is_blake2b() {
             self.nodes

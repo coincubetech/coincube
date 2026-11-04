@@ -168,6 +168,9 @@ pub struct Context {
     /// (`CoincubeConnectStep` or `RecoveryKitRestoreStep`) and the
     /// downstream step that copies it into `EsploraConfig.token`.
     pub connect_jwt: Option<zeroize::Zeroizing<String>>,
+    /// The installer was launched with a signed-in Connect session, which
+    /// `CoincubeConnectStep` adopts without showing its sign-in form.
+    pub connect_signed_in_at_launch: bool,
     pub install_node_alongside_connect: bool,
     /// Managed-node flavour chosen on the node-management step. Connect-first
     /// installs persist it for background provisioning after the Vault opens;
@@ -435,6 +438,7 @@ impl Context {
             bitcoind_is_external: true,
             use_coincube_connect: false,
             connect_jwt: None,
+            connect_signed_in_at_launch: false,
             install_node_alongside_connect: false,
             node_flavor: if chain.is_blake2b() {
                 NodeFlavor::KnotsBlake2b

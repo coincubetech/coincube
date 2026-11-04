@@ -39,6 +39,9 @@ impl From<ChooseDescriptorTemplate> for Box<dyn Step> {
     }
 }
 impl Step for ChooseDescriptorTemplate {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Vault)
+    }
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
         if let Message::SelectDescriptorTemplate(template) = message {
             self.template = template;
@@ -86,6 +89,9 @@ impl From<DescriptorTemplateDescription> for Box<dyn Step> {
 }
 
 impl Step for DescriptorTemplateDescription {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Policy)
+    }
     fn load_context(&mut self, ctx: &Context) {
         self.template = ctx.descriptor_template;
         self.show_keychain_tip = !ctx.bitcoin_config.chain.is_blake2b()

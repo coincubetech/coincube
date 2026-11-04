@@ -282,6 +282,9 @@ impl DefineDescriptor {
 }
 
 impl Step for DefineDescriptor {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Keys)
+    }
     fn load_context(&mut self, ctx: &Context) {
         self.chain = ctx.bitcoin_config.chain;
         self.network = ctx.bitcoin_config.network;

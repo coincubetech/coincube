@@ -647,6 +647,9 @@ impl SelectBitcoindTypeStep {
 }
 
 impl Step for SelectBitcoindTypeStep {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Node)
+    }
     fn load_context(&mut self, ctx: &Context) {
         let chain_changed = self.chain != ctx.bitcoin_config.chain;
         self.network = ctx.network;
@@ -1134,6 +1137,9 @@ impl InternalBitcoindStep {
 }
 
 impl Step for InternalBitcoindStep {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Node)
+    }
     fn load_context(&mut self, ctx: &Context) {
         // The flavour the user picked on the node-management step
         // (`Context::node_flavor`, default Knots) is authoritative. We must NOT
