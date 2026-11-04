@@ -708,7 +708,7 @@ a.tbx-chip{color:var(--ink)}
         <!-- ===== Create Vault · wallet alias ===== -->
         <sc-if value="{{ stAlias }}" hint-placeholder-val="{{ false }}">
           <h2 id="cc-h">Give your wallet an alias</h2>
-          <div class="fld"><label for="cc-alias">Wallet alias:</label><input id="cc-alias" class="inp" type="text" value="{{ aliasValue }}"><span class="info">You can change it later in Settings.</span></div>
+          <div class="fld"><label for="cc-alias">Wallet alias:</label><input id="cc-alias" class="inp" type="text" value="{{ vaultAliasValue }}"><span class="info">You can change it later in Settings.</span></div>
         </sc-if>
 
         <!-- ===== DONE ===== -->
@@ -1049,7 +1049,7 @@ class Component extends DCLogic {
       cubeLead: s.net === 'bitcoin' || s.net === 'regtest'
         ? 'A Cube is your account which can contain a Spark wallet, a Vault wallet and other features.'
         : 'A Cube is your account which can contain a Vault wallet and other features.',
-      stDescBackup: step === 'descBackup', stAlias: step === 'alias', aliasValue: b2b ? 'Blake savings Vault' : 'Travel fund Vault',
+      stDescBackup: step === 'descBackup', stAlias: step === 'alias', vaultAliasValue: b2b ? 'Blake savings Vault' : 'Travel fund Vault',
       stDone: step === 'done' || step === 'cubeDone', cubeDoneStep: step === 'cubeDone',
       doneTitle: step === 'cubeDone' ? cubeName + ' created' : 'Vault created',
       doneCta: step === 'cubeDone' ? 'Open the Cube' : 'Back to the Cube',
