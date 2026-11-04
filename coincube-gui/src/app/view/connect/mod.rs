@@ -121,7 +121,7 @@ pub fn connect_panel<'a>(state: &'a ConnectPanel) -> Element<'a, ViewMessage> {
         .width(Length::Fill);
 
     if let Some(step) = auth_step(&acct.step) {
-        col = col.push(auth_progress(step).map(ViewMessage::ConnectAccount));
+        col = col.push(crate::home::restore_frame::stepper(&AUTH_STEPS, step));
         col = col.push(iced::widget::Space::new().height(Length::Fixed(22.0)));
     }
 
@@ -157,14 +157,17 @@ pub fn connect_account_panel<'a>(
         Alignment::Start
     };
 
-    Column::new()
+    let mut col = Column::new()
         .push(header)
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-        .push(body)
         .spacing(0)
         .align_x(col_align)
-        .width(Length::Fill)
-        .into()
+        .width(Length::Fill);
+    if let Some(step) = auth_step(&acct.step) {
+        col = col.push(crate::home::restore_frame::stepper(&AUTH_STEPS, step));
+        col = col.push(iced::widget::Space::new().height(Length::Fixed(22.0)));
+    }
+    col.push(body).into()
 }
 
 /// Intents owned by the shell that mounts the Connect sheet. The account panel
@@ -432,6 +435,13 @@ pub fn connect_sheet<'a>(
         .into()
     };
 
+    // The slot stays when there is no rail so the body keeps its place in
+    // the tree as the flow moves on to the duress check.
+    let rail: Element<ConnectSheetMessage> = match auth_step(&acct.step) {
+        Some(step) if show_auth && !blocked => auth_rail(step),
+        _ => iced::widget::Space::new().width(Length::Fill).into(),
+    };
+
     container(
         Column::new()
             .push(
@@ -445,6 +455,7 @@ pub fn connect_sheet<'a>(
                     }),
             )
             .push(horizontal_rule())
+            .push(rail)
             .push(body)
             .spacing(0)
             .height(Length::Fill),
@@ -868,11 +879,6 @@ fn connect_account_body<'a>(acct: &'a ConnectAccountPanel) -> Element<'a, Connec
         .align_x(col_align)
         .width(Length::Fill);
 
-    if let Some(step) = auth_step(&acct.step) {
-        col = col.push(auth_progress(step));
-        col = col.push(iced::widget::Space::new().height(Length::Fixed(22.0)));
-    }
-
     if let Some(e) = acct.error.as_ref() {
         col = col.push(account_error_card(e));
     }
@@ -997,24 +1003,30 @@ fn connect_benefits<'a>(compact: bool) -> Element<'a, ConnectAccountMessage> {
     list.width(Length::Fill).into()
 }
 
-fn auth_progress<'a>(current: usize) -> Element<'a, ConnectAccountMessage> {
-    let mut row = Row::new().spacing(16);
-    for (index, label) in ["Email", "Token", "Done"].iter().enumerate() {
-        let caption = format!("{}  {label}", index + 1);
-        let item = if index == current {
-            text::p2_bold(caption).color(color::ORANGE)
-        } else {
-            text::p2_regular(caption).style(theme::text::secondary)
-        };
-        row = row.push(item);
-    }
-    row.into()
+const AUTH_STEPS: [&str; 3] = ["Email", "Token", "Done"];
+
+/// The sign-in step rail, in the same 52px band under the sheet header that
+/// Create Cube and Import or restore use, ruled off from the body.
+fn auth_rail<'a, M: 'a>(current: usize) -> Element<'a, M> {
+    Column::new()
+        .push(
+            container(crate::home::restore_frame::stepper(&AUTH_STEPS, current))
+                .width(Length::Fill)
+                .center_y(Length::Fixed(52.0))
+                .padding([0, 28]),
+        )
+        .push(horizontal_rule())
+        .into()
 }
 
+/// The rail position for an auth step. Done is the post-token account check
+/// (`CheckingDuress`): the session is signed in and the sheet moves on to the
+/// account once it passes, so there is no separate confirmation screen.
 fn auth_step(step: &ConnectFlowStep) -> Option<usize> {
     match step {
         ConnectFlowStep::Login { .. } | ConnectFlowStep::Register { .. } => Some(0),
         ConnectFlowStep::OtpVerification { .. } => Some(1),
+        ConnectFlowStep::CheckingDuress { .. } => Some(2),
         _ => None,
     }
 }
@@ -3744,6 +3756,24 @@ mod renewal_banner_tests {
                 ConnectSheetPage::Authentication,
             ),
             (
+                "token",
+                ConnectFlowStep::OtpVerification {
+                    email: "founder@example.com".to_string(),
+                    otp: String::new(),
+                    sending: false,
+                    is_signup: false,
+                    cooldown: 0,
+                },
+                ConnectSheetPage::Authentication,
+            ),
+            (
+                "done",
+                ConnectFlowStep::CheckingDuress {
+                    status: DuressGateStatus::Unreachable,
+                },
+                ConnectSheetPage::Authentication,
+            ),
+            (
                 "signed-out-account",
                 ConnectFlowStep::Login {
                     email: String::new(),
@@ -3797,13 +3827,39 @@ mod renewal_banner_tests {
                 "{} overflows height",
                 name
             );
+            let labels = visible_labels(connect_sheet(&account, page), &renderer);
+            let rail: Vec<&str> = labels
+                .iter()
+                .map(String::as_str)
+                .filter(|label| AUTH_STEPS.contains(label))
+                .collect();
+            if matches!(name, "sign-in" | "sign-up" | "token" | "done") {
+                // The rail sits in its band right under the header, ahead of
+                // the step's own copy, with its three steps in order.
+                let close = labels
+                    .iter()
+                    .position(|label| label == "Close")
+                    .expect("sheet header Close");
+                assert_eq!(
+                    labels.get(close + 1..close + 7).map(|rail| rail.to_vec()),
+                    Some(
+                        ["1", "Email", "2", "Token", "3", "Done"]
+                            .map(String::from)
+                            .to_vec()
+                    ),
+                    "{} rail: {:?}",
+                    name,
+                    labels
+                );
+                assert_eq!(rail[..3], AUTH_STEPS, "{} rail order", name);
+            } else {
+                assert!(rail.is_empty(), "{} shows the sign-in rail", name);
+            }
             if name == "signed-out-account" {
-                let labels = visible_labels(connect_sheet(&account, page), &renderer);
                 assert!(labels.iter().any(|label| label == "Create account"));
                 assert!(labels.iter().any(|label| label == "Recovery services"));
             }
             if name == "signed-out-plan-gate" {
-                let labels = visible_labels(connect_sheet(&account, page), &renderer);
                 assert!(labels.iter().any(|label| label == "Sign in to see this"));
                 assert!(labels.iter().any(|label| label == "Account"));
             }
@@ -4328,6 +4384,13 @@ mod renewal_banner_tests {
                 cleared: true,
             },
         ] {
+            let expected = match &step {
+                ConnectFlowStep::Login { .. } | ConnectFlowStep::Register { .. } => Some(0),
+                ConnectFlowStep::OtpVerification { .. } => Some(1),
+                ConnectFlowStep::CheckingDuress { .. } => Some(2),
+                _ => None,
+            };
+            assert_eq!(auth_step(&step), expected, "{:?}", step);
             account.step = step;
             let _ = connect_account_panel(&account);
         }
