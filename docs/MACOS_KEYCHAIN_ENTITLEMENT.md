@@ -144,6 +144,12 @@ cargo build --release -p coincube-gui
 unzip contrib/release/macos/_coincube.zip
 cp target/release/coincube Tenshu.app/Contents/MacOS/Coincube
 cp contrib/release/macos/embedded.provisionprofile Tenshu.app/Contents/embedded.provisionprofile
+#    The template's Resources/ is empty and Coincube.icns is gitignored, so
+#    generate the icon as CI does. Skip it and the app shows the generic icon;
+#    it is sealed by the signature too, so adding it after step 3 breaks it.
+pip install pillow icnsutil
+python contrib/release/macos/icns-creator.py
+cp contrib/release/macos/Coincube.icns Tenshu.app/Contents/Resources/Coincube.icns
 
 # 3. Sign with the real Developer ID cert. On a Mac with the cert in the login
 #    keychain, native codesign is enough — no rcodesign install needed.
