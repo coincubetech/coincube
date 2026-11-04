@@ -861,7 +861,10 @@ pub struct App {
     fork_connect_client: Option<crate::services::coincube::CoincubeClient>,
     local_feature_valid: bool,
     local_feature_checked_at: Option<std::time::Instant>,
-    local_feature_check_pending: bool,
+    /// The fork feature check in flight, if any. Its answer is applied only
+    /// while this matches: a replaced App's check keeps running, and its
+    /// answer reaches whichever App now holds the tab.
+    local_feature_check: Option<u64>,
     /// Wallet registry — owns the concrete wallet backends and exposes
     /// routing hooks. Holds a [`LiquidBackend`] and an optional
     /// [`SparkBackend`] (present when the cube has a Spark signer and
@@ -3570,7 +3573,7 @@ impl App {
             fork_connect_client: None,
             local_feature_valid: true,
             local_feature_checked_at: None,
-            local_feature_check_pending: false,
+            local_feature_check: None,
             wallet_registry,
             internal_bitcoind,
             cube_settings,
@@ -3849,7 +3852,7 @@ impl App {
                 fork_connect_client: None,
                 local_feature_valid: true,
                 local_feature_checked_at: None,
-                local_feature_check_pending: false,
+                local_feature_check: None,
                 wallet_registry,
                 internal_bitcoind: None,
                 cube_settings,
@@ -5560,7 +5563,7 @@ impl App {
     pub fn on_tick(&mut self) -> Task<Message> {
         let local_feature_task = if self.cache.chain().is_blake2b()
             && !self.requires_connect()
-            && !self.local_feature_check_pending
+            && self.local_feature_check.is_none()
             && self
                 .local_feature_checked_at
                 .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
@@ -8777,8 +8780,11 @@ impl App {
                 }
                 return vault_fp_task;
             }
-            Message::LocalForkFeatureChecked(enabled) => {
-                self.local_feature_check_pending = false;
+            Message::LocalForkFeatureChecked { attempt, enabled } => {
+                if self.local_feature_check != Some(attempt) {
+                    return Task::none();
+                }
+                self.local_feature_check = None;
                 self.local_feature_checked_at = Some(std::time::Instant::now());
                 self.local_feature_valid = enabled;
                 return Task::none();
@@ -10581,7 +10587,10 @@ impl App {
     /// is signed in checks its account's own flag, as its unlock did; every
     /// other fork Cube not served by Connect checks the global flag.
     fn fork_feature_check(&mut self) -> Task<Message> {
-        self.local_feature_check_pending = true;
+        // Unique across App instances, as for the background node install.
+        static NEXT_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let attempt = NEXT_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.local_feature_check = Some(attempt);
         let root = self.datadir.clone();
         let chain = self.cache.chain();
         let client = self.fork_connect_client.clone();
@@ -10599,7 +10608,7 @@ impl App {
                         .is_ok(),
                 }
             },
-            Message::LocalForkFeatureChecked,
+            move |enabled| Message::LocalForkFeatureChecked { attempt, enabled },
         )
     }
 
@@ -10608,7 +10617,7 @@ impl App {
     pub(crate) fn fork_feature_unconfirmed(&self) -> bool {
         self.cache.chain().is_blake2b()
             && !self.requires_connect()
-            && self.local_feature_check_pending
+            && self.local_feature_check.is_some()
             && self.local_feature_checked_at.is_none()
     }
 
@@ -12502,13 +12511,22 @@ pub(crate) mod tests {
             .unwrap();
         let _enter = rt.enter();
         let root = std::env::temp_dir().join(format!("local-revocation-{}", uuid::Uuid::new_v4()));
-        let mut tab = crate::gui::tab::Tab::new(1, crate::gui::tab::State::App(local_app(&root)));
+        let mut app = local_app(&root);
+        drop(app.fork_feature_check());
+        let attempt = app.local_feature_check.expect("a check in flight");
+        let mut tab = crate::gui::tab::Tab::new(1, crate::gui::tab::State::App(app));
         drop(tab.update(crate::gui::tab::Message::Run(
-            Message::LocalForkFeatureChecked(false),
+            Message::LocalForkFeatureChecked {
+                attempt,
+                enabled: false,
+            },
         )));
         assert!(matches!(tab.state, crate::gui::tab::State::Home(_)));
         drop(tab.update(crate::gui::tab::Message::Run(
-            Message::LocalForkFeatureChecked(true),
+            Message::LocalForkFeatureChecked {
+                attempt,
+                enabled: true,
+            },
         )));
         assert!(matches!(tab.state, crate::gui::tab::State::Home(_)));
         std::fs::remove_dir_all(root).unwrap();
@@ -12642,10 +12660,9 @@ pub(crate) mod tests {
             !app.requires_connect(),
             "no Vault, nothing for Connect to serve"
         );
-        assert!(
-            app.local_feature_check_pending,
-            "the feature check starts at once"
-        );
+        let attempt = app
+            .local_feature_check
+            .expect("the feature check starts at once");
 
         assert!(app.fork_feature_unconfirmed());
 
@@ -12660,19 +12677,114 @@ pub(crate) mod tests {
             "no installer before the feature is confirmed"
         );
         drop(tab.update(crate::gui::tab::Message::Run(
-            Message::LocalForkFeatureChecked(true),
+            Message::LocalForkFeatureChecked {
+                attempt,
+                enabled: true,
+            },
         )));
-        let crate::gui::tab::State::App(app) = &tab.state else {
+        let crate::gui::tab::State::App(app) = &mut tab.state else {
             panic!("a signed-out Vault-less fork Cube stays open");
         };
         assert!(!app.fork_feature_unconfirmed());
+        // The next tick's check.
+        drop(app.fork_feature_check());
+        let attempt = app.local_feature_check.expect("a check in flight");
         drop(tab.update(crate::gui::tab::Message::Run(
-            Message::LocalForkFeatureChecked(false),
+            Message::LocalForkFeatureChecked {
+                attempt,
+                enabled: false,
+            },
         )));
         assert!(
             matches!(tab.state, crate::gui::tab::State::Home(_)),
             "a revoked feature closes it"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A replaced App's feature check keeps running, and its answer reaches
+    /// whichever App now holds the tab. That answer is not for this Cube: a
+    /// `true` must not open Create Vault before the Cube's own check answers,
+    /// and a `false` must not close it.
+    #[test]
+    fn another_apps_feature_answer_changes_nothing() {
+        let _guard = crate::app::session::test_guard();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let root =
+            std::env::temp_dir().join(format!("fork-stale-feature-{}", uuid::Uuid::new_v4()));
+        let other_root = root.join("other");
+        let mut other = local_app(&other_root);
+        drop(other.fork_feature_check());
+        let stale = other.local_feature_check.expect("a check in flight");
+        drop(other);
+
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        let signer =
+            coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
+        let cek = Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+            &signer,
+            chain.bitcoin_network(),
+        ));
+        let (app, startup) = App::new_fork_without_wallet(
+            cek,
+            None,
+            Config::new(false),
+            CoincubeDirectory::new(root.clone()),
+            settings::CubeSettings::new("Fork".into(), chain),
+        )
+        .unwrap();
+        drop(startup);
+        let attempt = app
+            .local_feature_check
+            .expect("the feature check starts at once");
+        assert_ne!(attempt, stale, "each check has its own identity");
+
+        let mut tab = crate::gui::tab::Tab::new(1, crate::gui::tab::State::App(app));
+        for enabled in [true, false] {
+            drop(tab.update(crate::gui::tab::Message::Run(
+                Message::LocalForkFeatureChecked {
+                    attempt: stale,
+                    enabled,
+                },
+            )));
+            let crate::gui::tab::State::App(app) = &tab.state else {
+                panic!("another App's answer ({}) closed the Cube", enabled);
+            };
+            assert_eq!(app.local_feature_check, Some(attempt));
+            assert!(app.local_feature_checked_at.is_none());
+            assert!(app.local_feature_valid);
+            assert!(
+                app.fork_feature_unconfirmed(),
+                "Create Vault still waits for this Cube's own check"
+            );
+        }
+
+        // The Cube's own answer still applies.
+        drop(tab.update(crate::gui::tab::Message::Run(
+            Message::LocalForkFeatureChecked {
+                attempt,
+                enabled: true,
+            },
+        )));
+        let crate::gui::tab::State::App(app) = &tab.state else {
+            panic!("the Cube's own `true` keeps it open");
+        };
+        assert_eq!(app.local_feature_check, None);
+        assert!(app.local_feature_checked_at.is_some());
+        assert!(!app.fork_feature_unconfirmed());
+
+        // A repeat of an answered check is no longer current either.
+        drop(tab.update(crate::gui::tab::Message::Run(
+            Message::LocalForkFeatureChecked {
+                attempt,
+                enabled: false,
+            },
+        )));
+        assert!(matches!(tab.state, crate::gui::tab::State::App(_)));
         let _ = std::fs::remove_dir_all(&root);
     }
 
