@@ -736,6 +736,12 @@ impl Installer {
             context.fresh_fork_cube = true;
             context.cube_id = Some(uuid::Uuid::new_v4().to_string());
         }
+        context.in_cube_fork_vault = chain.is_blake2b()
+            && launched_from_app
+            && matches!(user_flow, UserFlow::CreateWallet)
+            && cube_settings
+                .as_ref()
+                .is_some_and(|cube| cube.network == chain && cube.vault_wallet_id.is_none());
         // A claim target is a Cube of its own — its own id, its own Connect
         // Cube, its own datadir (I7) — built from the source Cube's descriptor
         // and seed. Both are settled here rather than collected by a step:
@@ -1875,7 +1881,7 @@ fn require_installable_chain(ctx: &Context) -> Result<(), Error> {
         return Err(Error::Unexpected(reason.to_string()));
     }
     if ctx.bitcoin_config.chain.is_blake2b()
-        && (ctx.use_coincube_connect || !ctx.fresh_fork_cube)
+        && (ctx.use_coincube_connect || !ctx.fork_local_vault_allowed())
         && ctx
             .coincube_client
             .as_ref()
@@ -2875,6 +2881,72 @@ mod pending_rescan_tests {
             crate::chain::ChainId::Bitcoin
         );
         assert!(!root.exists(), "construction must not touch a datadir");
+    }
+
+    /// A Vault created inside an open Bitcoin Blake2b Cube is not a fresh
+    /// fork Cube (the Cube and its master seed exist), but it may still run
+    /// on a local node without Connect. A copy into another Cube is neither.
+    #[test]
+    fn an_in_cube_fork_vault_may_run_without_connect() {
+        let _guard = crate::app::session::test_guard();
+        for chain in [
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let root = std::env::temp_dir().join(format!("fork-in-cube-{}", uuid::Uuid::new_v4()));
+            let cube = crate::app::settings::CubeSettings::new("Fork".into(), chain);
+            let (installer, _) = Installer::build_for_chain(
+                CoincubeDirectory::new(root.clone()),
+                chain,
+                None,
+                UserFlow::CreateWallet,
+                true,
+                Some(cube.clone()),
+                None,
+                None,
+                false,
+                None,
+            );
+            assert!(!installer.context.fresh_fork_cube);
+            assert!(installer.context.in_cube_fork_vault);
+            assert!(installer.context.fork_local_vault_allowed());
+
+            // Launched from Home, or for a Cube that already has a Vault, it
+            // is not a Vault for the open Cube.
+            let (from_home, _) = Installer::build_for_chain(
+                CoincubeDirectory::new(root.clone()),
+                chain,
+                None,
+                UserFlow::CreateWallet,
+                false,
+                Some(cube.clone()),
+                None,
+                None,
+                false,
+                None,
+            );
+            assert!(!from_home.context.in_cube_fork_vault);
+            let mut vaulted = cube;
+            vaulted.vault_wallet_id = Some(crate::app::settings::WalletId::new(
+                "abcd1234".into(),
+                Some(1),
+            ));
+            let (vaulted, _) = Installer::build_for_chain(
+                CoincubeDirectory::new(root.clone()),
+                chain,
+                None,
+                UserFlow::CreateWallet,
+                true,
+                Some(vaulted),
+                None,
+                None,
+                false,
+                None,
+            );
+            assert!(!vaulted.context.in_cube_fork_vault);
+            assert!(!vaulted.context.fork_local_vault_allowed());
+            assert!(!root.exists(), "construction must not touch a datadir");
+        }
     }
 
     #[test]

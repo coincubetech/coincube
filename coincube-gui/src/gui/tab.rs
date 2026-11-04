@@ -1152,6 +1152,66 @@ impl Tab {
 
     /// Emit the pending migration warning once the tab is actually in `App`.
     ///
+    /// Open a Bitcoin Blake2b Cube that has no Vault yet. It lands where a
+    /// Bitcoin Cube without a Vault lands, with Create Vault next, and never
+    /// starts Liquid or Spark. The caller has already opened the session; a
+    /// refusal closes it and returns the reason for the unlock screen.
+    fn open_fork_without_vault(
+        &mut self,
+        cek: Arc<crate::services::connect::crypto::CubeEncryptionKey>,
+        client: Option<crate::services::coincube::CoincubeClient>,
+        config: app::config::Config,
+        datadir: CoincubeDirectory,
+        cube: app::settings::CubeSettings,
+    ) -> Result<Task<Message>, String> {
+        let cube_id = cube.id.clone();
+        match App::new_fork_without_wallet(cek, client, config, datadir, cube) {
+            Ok((app, command)) => {
+                self.state = State::App(app);
+                Ok(command.map(Message::Run))
+            }
+            Err(error) => {
+                app::session::close_cube(&cube_id);
+                Err(crate::user_error::report(&error))
+            }
+        }
+    }
+
+    /// Open the Vault a Bitcoin Blake2b Cube just created from inside itself,
+    /// through the fork loader the unlock screen would use, without asking
+    /// for the PIN again. `None` when the session no longer holds this Cube's
+    /// signer, or its backend needs a Connect session that is gone: the
+    /// caller then falls back to the Cube's own unlock screen.
+    fn open_fork_vault_in_session(
+        &mut self,
+        datadir: CoincubeDirectory,
+        config: app::config::Config,
+        cube: app::settings::CubeSettings,
+        wallet_settings: Option<app::settings::WalletSettings>,
+        client: Option<crate::services::coincube::CoincubeClient>,
+    ) -> Option<Task<Message>> {
+        let signer = app::session::unlocked_signer(&cube.id, cube.master_signer_fingerprint?)?;
+        let wallet_settings = wallet_settings.filter(|w| w.remote_backend_auth.is_none())?;
+        let requires_connect =
+            !crate::chain::has_managed_local_fork(&datadir, cube.network, Some(&wallet_settings));
+        let client = client.filter(|c| c.token().is_some());
+        if requires_connect && client.is_none() {
+            return None;
+        }
+        let cek = Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+            &signer,
+            cube.network.bitcoin_network(),
+        ));
+        let (loader, command) = match client.filter(|_| requires_connect) {
+            Some(client) => {
+                Loader::new_for_chain(datadir, config, wallet_settings, cube, client, cek)
+            }
+            None => Loader::new_local_fork(datadir, config, wallet_settings, cube, cek),
+        };
+        self.state = State::Loader(loader);
+        Some(command.map(Message::Load))
+    }
+
     /// The toast rides on `Message::Run`, and the only arm that handles that is
     /// `(State::App(app), Message::Run(..))` — everything else falls through to
     /// `_ => Task::none()`. Queuing it behind the transition to `Loader` or
@@ -1338,7 +1398,7 @@ impl Tab {
                     return Task::none();
                 }
                 State::Installer(installer)
-                    if installer.context.fresh_fork_cube
+                    if installer.context.fork_local_vault_allowed()
                         && !installer.context.use_coincube_connect =>
                 {
                     installer.context.coincube_client = None;
@@ -1414,6 +1474,11 @@ impl Tab {
             }
             State::Installer(installer) if installer.context.bitcoin_config.chain.is_blake2b() => {
                 installer.stop();
+                // A Vault being built inside an open Cube leaves that Cube
+                // here: its session must not outlive it on Home.
+                if let Some(cube) = &installer.cube_settings {
+                    app::session::close_cube(&cube.id);
+                }
                 let (mut home, startup) = Home::new_for_chain(
                     installer.datadir.clone(),
                     Some(installer.context.bitcoin_config.chain),
@@ -2768,6 +2833,44 @@ impl Tab {
                                     .map(Message::Install);
                             }
                         };
+                        // A Vault created inside an open Cube reopens it from
+                        // that Cube's session, as on Bitcoin.
+                        if i.launched_from_app && i.source_cube.is_none() {
+                            let datadir = i.datadir.clone();
+                            let client = i.context.coincube_client.clone();
+                            let wallet_settings = settings_opt.as_deref().cloned();
+                            if let Some(task) = self.open_fork_vault_in_session(
+                                datadir,
+                                config.clone(),
+                                cube.clone(),
+                                wallet_settings,
+                                client,
+                            ) {
+                                return task;
+                            }
+                            // The Cube's own unlock screen opens a fresh
+                            // session; the one this installer ran under ends.
+                            app::session::close_cube(&cube.id);
+                            let State::Installer(i) = &mut self.state else {
+                                return Task::none();
+                            };
+                            let on_success = crate::pin_entry::PinEntrySuccess::LoadApp {
+                                datadir: i.datadir.clone(),
+                                config,
+                                network: cube.network.bitcoin_network(),
+                                internal_bitcoind: None,
+                                backup: None,
+                                wallet_settings: settings_opt.map(|s| *s),
+                                connect_client: i.context.coincube_client.clone(),
+                            };
+                            self.state = unlock_state(
+                                cube,
+                                i.datadir.path().to_path_buf(),
+                                on_success,
+                                None,
+                            );
+                            return Task::none();
+                        }
                         let on_success = crate::pin_entry::PinEntrySuccess::LoadApp {
                             datadir: i.datadir.clone(),
                             config,
@@ -2940,6 +3043,52 @@ impl Tab {
                                 return Task::none();
                             }
                         }
+                    }
+                    // A Bitcoin Blake2b Cube has no Breez client: go back to it
+                    // from its session, which still holds its master signer.
+                    if let Some(cube) = i
+                        .cube_settings
+                        .clone()
+                        .filter(|cube| cube.network.is_blake2b())
+                    {
+                        let datadir = i.datadir.clone();
+                        let client = i.context.coincube_client.clone();
+                        let destination = i.destination_path();
+                        let reopened = cube
+                            .master_signer_fingerprint
+                            .and_then(|fp| app::session::unlocked_signer(&cube.id, fp))
+                            .zip(
+                                app::Config::from_file(
+                                    &datadir
+                                        .network_directory(cube.network)
+                                        .path()
+                                        .join(app::config::DEFAULT_FILE_NAME),
+                                )
+                                .ok(),
+                            );
+                        if let Some((signer, cfg)) = reopened {
+                            let cek = Arc::new(
+                                crate::services::connect::crypto::CubeEncryptionKey::derive(
+                                    &signer,
+                                    cube.network.bitcoin_network(),
+                                ),
+                            );
+                            let chain = cube.network;
+                            match self.open_fork_without_vault(cek, client, cfg, datadir, cube) {
+                                Ok(task) => return task,
+                                Err(reason) => {
+                                    let (mut home, command) =
+                                        Home::new_for_chain(destination, Some(chain));
+                                    home.set_error(reason);
+                                    self.state = State::Home(home);
+                                    return command.map(Message::Launch);
+                                }
+                            }
+                        }
+                        app::session::close_cube(&cube.id);
+                        let (home, command) = Home::new_for_chain(destination, Some(cube.network));
+                        self.state = State::Home(home);
+                        return command.map(Message::Launch);
                     }
                     // Go back to app without vault using stored cube settings and breez_client
                     if let Some(cube) = &i.cube_settings {
@@ -3291,6 +3440,16 @@ impl Tab {
                         }
                     }
                     app::Message::View(app::view::Message::SetupVault) => {
+                        // The installer would drop a revocation that lands
+                        // on it, so it waits for the Cube's first check.
+                        if app.fork_feature_unconfirmed() {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "Checking Bitcoin Blake2b availability. Try again in a moment."
+                                        .into(),
+                                ),
+                            )));
+                        }
                         if app.cube_settings().bitcoin_import.is_some() {
                             return Task::done(Message::Run(app::Message::View(
                                 app::view::Message::ShowError(
@@ -3504,6 +3663,44 @@ impl Tab {
                             let cube = pin_entry.cube().clone();
                             let pin = pin_entry.pin();
 
+                            if cube.network.is_blake2b() && wallet_settings.is_none() {
+                                let Some(signer) = pin_entry.take_bitcoin_signer() else {
+                                    pin_entry.fail_open(
+                                        "Unlock this Cube again to recover its chain-bound signer"
+                                            .into(),
+                                    );
+                                    return Task::none();
+                                };
+                                app::session::open(cube.id.clone(), pin.clone());
+                                // Kept for the Vault this Cube creates next:
+                                // its installer exit reopens the Cube from the
+                                // session instead of asking for the PIN again.
+                                let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
+                                let fingerprint = signer.fingerprint(&secp);
+                                let key =
+                                    crate::services::connect::crypto::CubeEncryptionKey::derive(
+                                        &signer,
+                                        cube.network.bitcoin_network(),
+                                    );
+                                app::session::store_unlocked_signer(&cube.id, fingerprint, signer);
+                                let client = connect_client.clone();
+                                let (datadir, config) = (datadir.clone(), config.clone());
+                                return match self.open_fork_without_vault(
+                                    Arc::new(key),
+                                    client,
+                                    config,
+                                    datadir,
+                                    cube,
+                                ) {
+                                    Ok(task) => task,
+                                    Err(reason) => {
+                                        if let State::PinEntry(pin_entry) = &mut self.state {
+                                            pin_entry.fail_open(reason);
+                                        }
+                                        Task::none()
+                                    }
+                                };
+                            }
                             if cube.network.is_blake2b() {
                                 let requires_connect = pin_entry.requires_connect();
                                 let client = connect_client.clone().filter(|c| c.token().is_some());
@@ -4021,6 +4218,36 @@ impl Tab {
                             ..
                         } = &unlock.on_success;
                         let cube = unlock.cube().clone();
+                        if wallet_settings.is_none() {
+                            // No Vault yet: open the Cube itself, as a Bitcoin
+                            // Cube without one opens, minus Liquid and Spark.
+                            let Some(signer) =
+                                crate::app::session::unlocked_signer(&cube.id, fingerprint)
+                            else {
+                                crate::app::session::close_cube(&cube.id);
+                                unlock.relocked();
+                                return Task::none();
+                            };
+                            let client = connect_client.clone();
+                            let (datadir, config) = (datadir.clone(), config.clone());
+                            let key = Arc::new(
+                                crate::services::connect::crypto::CubeEncryptionKey::derive(
+                                    &signer,
+                                    cube.network.bitcoin_network(),
+                                ),
+                            );
+                            return match self
+                                .open_fork_without_vault(key, client, config, datadir, cube)
+                            {
+                                Ok(task) => task,
+                                Err(reason) => {
+                                    if let State::PasskeyUnlock(unlock) = &mut self.state {
+                                        unlock.fail_open(reason);
+                                    }
+                                    Task::none()
+                                }
+                            };
+                        }
                         // Every way out below that does not open the Vault
                         // closes the session the assertion just opened, so a
                         // copy that looks locked holds no seed.
@@ -7522,12 +7749,24 @@ mod unlock_routing_tests {
             },
         );
         let id = cube.id.clone();
+        // The copy has a Vault: a Vault-less fork Cube opens without Connect.
+        let mut with_vault = on_success();
+        let crate::pin_entry::PinEntrySuccess::LoadApp {
+            wallet_settings, ..
+        } = &mut with_vault;
+        *wallet_settings = Some(
+            serde_json::from_value(serde_json::json!({
+                "name":"synthetic", "alias":"copy", "descriptor_checksum":"copy-vault",
+                "pinned_at":1700000000
+            }))
+            .unwrap(),
+        );
         let mut tab = super::Tab::new(
             1,
             unlock_state(
                 cube,
                 std::path::PathBuf::from("/tmp/unused"),
-                on_success(),
+                with_vault,
                 None,
             ),
         );
@@ -7554,6 +7793,74 @@ mod unlock_routing_tests {
         assert!(!crate::app::session::is_open());
     }
 
+    /// A passkey Blake2b Cube with no Vault has nothing for Connect to serve:
+    /// a sign-in or sign-out elsewhere drops its client and leaves the prompt
+    /// waiting, as the PIN screen does.
+    #[test]
+    fn a_connect_change_spares_a_vault_less_passkey_open() {
+        use crate::chain::ChainId;
+        let cube = CubeSettings::new("Fork".to_string(), ChainId::BitcoinBlake2b).with_passkey(
+            PasskeyMetadata {
+                credential_id: "Y3JlZC1pZA==".to_string(),
+                rp_id: "coincube.io".to_string(),
+                created_at: 1_786_122_245,
+                label: None,
+            },
+        );
+        let mut success = on_success();
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &mut success;
+        *connect_client = Some(crate::services::coincube::CoincubeClient::for_test(
+            "https://connect.example/",
+        ));
+        let mut tab = super::Tab::new(
+            1,
+            unlock_state(cube, std::path::PathBuf::from("/tmp/unused"), success, None),
+        );
+        drop(tab.invalidate_fork_state(super::AuthChange::LogOut, false, false));
+        let State::PasskeyUnlock(unlock) = &tab.state else {
+            panic!("still at the prompt");
+        };
+        assert!(!unlock.requires_connect());
+        assert!(
+            unlock.error_for_test().is_none(),
+            "the prompt is not failed"
+        );
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &unlock.on_success;
+        assert!(connect_client.is_none(), "the old client is dropped");
+    }
+
+    /// Signed in, a Vault-less passkey Blake2b Cube is held to its account
+    /// as the PIN screen holds it: an account change fails the prompt.
+    #[test]
+    fn a_connect_change_fails_a_signed_in_vault_less_passkey_open() {
+        use crate::chain::ChainId;
+        let cube = CubeSettings::new("Fork".to_string(), ChainId::BitcoinBlake2b).with_passkey(
+            PasskeyMetadata {
+                credential_id: "Y3JlZC1pZA==".to_string(),
+                rp_id: "coincube.io".to_string(),
+                created_at: 1_786_122_245,
+                label: None,
+            },
+        );
+        let mut success = on_success();
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &mut success;
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        client.set_token("account-a");
+        *connect_client = Some(client);
+        let mut tab = super::Tab::new(
+            1,
+            unlock_state(cube, std::path::PathBuf::from("/tmp/unused"), success, None),
+        );
+        drop(tab.invalidate_fork_state(super::AuthChange::LogOut, false, false));
+        let State::PasskeyUnlock(unlock) = &tab.state else {
+            panic!("still at the prompt");
+        };
+        assert!(unlock.error_for_test().is_some(), "the prompt is failed");
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &unlock.on_success;
+        assert!(connect_client.is_none(), "the old client is dropped");
+    }
+
     /// #947 review: a Connect change while a Connect-backed passkey copy is
     /// at its prompt drops the old client and fails the open, as PIN entry
     /// does, so the assertion cannot open it under the previous account.
@@ -7569,10 +7876,23 @@ mod unlock_routing_tests {
             },
         );
         let mut success = on_success();
-        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &mut success;
+        let crate::pin_entry::PinEntrySuccess::LoadApp {
+            connect_client,
+            wallet_settings,
+            ..
+        } = &mut success;
         *connect_client = Some(crate::services::coincube::CoincubeClient::for_test(
             "https://connect.example/",
         ));
+        // A Connect-backed copy has a Vault; a Vault-less one ignores the
+        // change (`a_connect_change_spares_a_vault_less_passkey_open`).
+        *wallet_settings = Some(
+            serde_json::from_value(serde_json::json!({
+                "name":"synthetic", "alias":"copy", "descriptor_checksum":"copy-vault",
+                "pinned_at":1700000000
+            }))
+            .unwrap(),
+        );
         let mut tab = super::Tab::new(
             1,
             unlock_state(cube, std::path::PathBuf::from("/tmp/unused"), success, None),

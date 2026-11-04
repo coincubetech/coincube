@@ -225,6 +225,24 @@ impl PinEntry {
 
     pub(crate) fn requires_connect(&self) -> bool {
         let PinEntrySuccess::LoadApp {
+            wallet_settings,
+            connect_client,
+            ..
+        } = &self.on_success;
+        // A fork Cube without a Vault has no backend to admit yet. Signed
+        // out, it opens under the local feature check; signed in, its
+        // account and feature are checked as for a Connect-backed Vault.
+        self.connect_capable()
+            && (wallet_settings.is_some()
+                || connect_client
+                    .as_ref()
+                    .is_some_and(|client| client.token().is_some()))
+    }
+
+    /// A fork Cube that a Connect session can serve: anything but a Vault
+    /// on the managed local node.
+    fn connect_capable(&self) -> bool {
+        let PinEntrySuccess::LoadApp {
             datadir,
             wallet_settings,
             ..
@@ -250,7 +268,7 @@ impl PinEntry {
         client: crate::services::coincube::CoincubeClient,
         expected_user: u32,
     ) -> bool {
-        if !self.requires_connect()
+        if !self.connect_capable()
             || !crate::chain::same_path(&self.datadir_root, root.path())
             || self.connect_provider.trim_end_matches('/') != client.base_url.trim_end_matches('/')
             || client.token().is_none_or(|token| token.trim().is_empty())

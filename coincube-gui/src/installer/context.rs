@@ -134,6 +134,10 @@ pub struct Context {
     pub recovered_signer: Option<Arc<Signer>>,
     /// A new fork Cube needs its own PIN-bound master seed, even for a watch-only Vault.
     pub fresh_fork_cube: bool,
+    /// A Vault for a Bitcoin Blake2b Cube that is already open: the Cube and
+    /// its master seed exist, and, like a fresh fork Cube, its Vault may run
+    /// on a local node without Connect.
+    pub in_cube_fork_vault: bool,
     pub fresh_fork_seed_backed_up: bool,
     /// How the descriptor being installed was restored, if it was.
     ///
@@ -287,6 +291,12 @@ pub struct Context {
 }
 
 impl Context {
+    /// A Bitcoin Blake2b Vault being built here may run on a local node
+    /// without Connect: a fresh fork Cube, or a Vault for an open one.
+    pub fn fork_local_vault_allowed(&self) -> bool {
+        self.fresh_fork_cube || self.in_cube_fork_vault
+    }
+
     /// The password to encrypt seed material under, preferring the restore PIN
     /// the user just chose over a session PIN inherited from another Cube, and
     /// falling back to the passkey Cube's seed-derived password.
@@ -421,6 +431,7 @@ impl Context {
             hw_is_used: false,
             recovered_signer: None,
             fresh_fork_cube: false,
+            in_cube_fork_vault: false,
             fresh_fork_seed_backed_up: false,
             restore_source: None,
             restored_wallet_birthday: None,

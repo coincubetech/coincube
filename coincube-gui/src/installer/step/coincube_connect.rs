@@ -89,7 +89,7 @@ impl CoincubeConnectStep {
     /// The flow has no Connect step at all, as opposed to one whose token
     /// is already in hand.
     fn never_runs(ctx: &Context) -> bool {
-        (ctx.fresh_fork_cube
+        (ctx.fork_local_vault_allowed()
             && ctx
                 .coincube_client
                 .as_ref()
@@ -126,7 +126,7 @@ impl Step for CoincubeConnectStep {
     ///   * Only a client with a token auto-advances; an unauthenticated
     ///     client still supplies the configured endpoint for the OTP flow.
     fn load_context(&mut self, ctx: &Context) {
-        self.required = ctx.bitcoin_config.chain.is_blake2b() && !ctx.fresh_fork_cube;
+        self.required = ctx.bitcoin_config.chain.is_blake2b() && !ctx.fork_local_vault_allowed();
         // load_context is called when entering this step, not between an OTP
         // response and apply. Re-entering after auth was undone must not reuse
         // a pending token or auto-advance from the previous visit.
@@ -192,7 +192,8 @@ impl Step for CoincubeConnectStep {
     }
 
     fn apply(&mut self, ctx: &mut Context) -> bool {
-        if self.skipped && ctx.bitcoin_config.chain.is_blake2b() && !ctx.fresh_fork_cube {
+        if self.skipped && ctx.bitcoin_config.chain.is_blake2b() && !ctx.fork_local_vault_allowed()
+        {
             self.error = Some("Connect authentication is required for Bitcoin Blake2b".to_string());
             return false;
         }
