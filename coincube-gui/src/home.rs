@@ -10,7 +10,8 @@ use coincube_ui::{
     component::{button, card, notification, spinner, text::*},
     icon, image, theme,
     widget::{
-        action::Action as FocusableAction, modal::Modal, CheckBox, Column, Container, Element, Row,
+        action::Action as FocusableAction, modal::Modal, CheckBox, Column, ColumnExt, Container,
+        Element, Row,
     },
 };
 use coincubed::config::ConfigError;
@@ -468,6 +469,9 @@ pub struct Home {
     restore_hub: bool,
     /// Import or restore shows its Recover with phone path.
     restore_phone: bool,
+    /// Recover with phone's Cube step lists every network's Cubes, not
+    /// only the current network's.
+    restore_all_networks: bool,
     /// Opens a newly created Cube through the ordinary unlock path after the
     /// settings reload makes its row available, so the Cube's own screens
     /// (Create Vault, or an import's descriptor steps) come next.
@@ -663,6 +667,7 @@ impl Home {
                 pending_bitcoin_import: None,
                 restore_hub: false,
                 restore_phone: false,
+                restore_all_networks: false,
                 open_created_cube: None,
                 open_after_registration: None,
                 creating_cube: false,
@@ -1557,6 +1562,9 @@ impl Home {
                         | ViewMessage::CreationKit(_)
                         | ViewMessage::CreationKitUploaded(_)
                         | ViewMessage::CreateNetworkMenu(_)
+                        | ViewMessage::ShowRestoreHub
+                        | ViewMessage::ShowRestorePhone
+                        | ViewMessage::ShowRestoreAllNetworks(_)
                         | ViewMessage::SelectNetwork(_)
                         | ViewMessage::Check
                         | ViewMessage::Run(_)
@@ -1733,6 +1741,32 @@ impl Home {
                 }
                 Task::none()
             }
+            Message::View(ViewMessage::ShowRestoreAllNetworks(all)) => {
+                self.restore_all_networks = all;
+                Task::none()
+            }
+            Message::View(ViewMessage::RestoreWithPhoneOn {
+                chain,
+                cube_id,
+                full_cube,
+            }) => {
+                let switch = if chain == self.network {
+                    Task::none()
+                } else {
+                    self.update_inner(Message::View(ViewMessage::SelectNetwork(chain)))
+                };
+                if self.network != chain {
+                    // The switch was refused; its reason is on screen.
+                    return switch;
+                }
+                Task::batch([
+                    switch,
+                    self.update_inner(Message::View(ViewMessage::RestoreWithPhone {
+                        cube_id,
+                        full_cube,
+                    })),
+                ])
+            }
             Message::View(ViewMessage::CreateNetworkMenu(open)) => {
                 self.create_network_menu = open && self.create_network_menu_editable();
                 if !open {
@@ -1752,6 +1786,7 @@ impl Home {
                 self.pending_bitcoin_import = None;
                 self.restore_hub = true;
                 self.restore_phone = false;
+                self.restore_all_networks = false;
                 if let State::Cubes { create_cube, .. } | State::NoCube { create_cube } =
                     &mut self.state
                 {
@@ -1826,7 +1861,8 @@ impl Home {
                 }
                 self.restore_hub = false;
                 self.restore_phone = false;
-                self.passkey_mode = self.default_passkey_mode();
+                // A passkey can't hold an imported secret: import sets a PIN.
+                self.passkey_mode = false;
                 match &mut self.state {
                     State::Cubes { create_cube, .. } | State::NoCube { create_cube } => {
                         *create_cube = true;
@@ -1856,7 +1892,9 @@ impl Home {
                     .map(|m| Message::View(ViewMessage::PinConfirmInput(m)))
             }
             Message::View(ViewMessage::TogglePasskeyMode(enabled)) => {
-                self.passkey_mode = enabled;
+                // Import sets a PIN only: a passkey can't hold an imported
+                // secret.
+                self.passkey_mode = enabled && self.pending_bitcoin_import.is_none();
                 self.error = None;
                 Task::none()
             }
@@ -2772,11 +2810,10 @@ impl Home {
                 self.open_created_cube = None;
                 self.open_after_registration = None;
                 if network != ChainId::Bitcoin {
-                    // Import or restore is Bitcoin only; leaving Bitcoin
-                    // leaves it, so the next list does not reopen it.
+                    // Import Bitcoin wallet is Bitcoin only: leaving Bitcoin
+                    // drops a pending import. Import or restore itself stays
+                    // open and re-filters for the new network.
                     self.pending_bitcoin_import = None;
-                    self.restore_hub = false;
-                    self.restore_phone = false;
                 }
                 self.error = None;
                 // Clear stale limit from previous network
@@ -5187,12 +5224,19 @@ impl Home {
         );
         // The import path after the Cube: the imported-wallet screens inside
         // it (Source, Review, Scan) finish the import.
-        let steps: &[&str] = if restoring {
-            restore_frame::import_steps(self.passkey_mode)
+        // Recover with phone's first step, its Cube, is drawn here; the
+        // installer draws the rest of the path.
+        let phone = hub && self.restore_phone;
+        let steps: &[&str] = if phone {
+            crate::installer::RestorePath::Phone.steps()
+        } else if restoring {
+            restore_frame::import_steps()
         } else {
             create_cube_steps(self.passkey_mode)
         };
-        let active_step = match (backing_up, self.passkey_mode) {
+        // Import sets a PIN only, so its Cube step has no Passkey after it.
+        let passkey_step = self.passkey_mode && !restoring;
+        let active_step = match (backing_up, passkey_step) {
             (true, true) => 2,
             (true, false) => 1,
             (false, true) if self.creating_cube => 1,
@@ -5264,7 +5308,7 @@ impl Home {
 
         // The Overview has no steps, and the backup screens carry their own
         // actions.
-        let rail = (!hub).then(|| restore_frame::step_rail(steps, active_step));
+        let rail = (!hub || phone).then(|| restore_frame::step_rail(steps, active_step));
         let footer: Option<Element<ViewMessage>> = (!hub && !backing_up).then(|| {
             Row::new()
                 .push(Space::new().width(Length::Fill))
@@ -5310,9 +5354,10 @@ impl Home {
     }
 
     /// The header's network menu is open to changes on Create's first step
-    /// only: not on Import or restore, and not once the Cube is being made.
+    /// and on Import or restore's Overview and Cube steps, where a change
+    /// re-filters; not once a Cube is being made or an import is under way.
     fn create_network_menu_editable(&self) -> bool {
-        !self.showing_import_or_restore()
+        self.pending_bitcoin_import.is_none()
             && !self.creating_cube
             && !matches!(self.state, State::CreationBackup(_))
     }
@@ -5460,6 +5505,30 @@ impl Home {
         self.network == ChainId::Bitcoin && !launcher_catalog::project(self).at_limit()
     }
 
+    /// Why Import Bitcoin wallet is closed on this network, if it is. The
+    /// design opens it on Bitcoin and Bitcoin Blake2b; this build's import
+    /// reads Bitcoin descriptors only, so Blake2b says so.
+    fn bitcoin_import_network_reason(&self) -> Option<&'static str> {
+        match self.network {
+            ChainId::Bitcoin => None,
+            ChainId::BitcoinBlake2b => Some("Not yet on Bitcoin Blake2b in this build."),
+            _ => Some("Bitcoin and Bitcoin Blake2b only."),
+        }
+    }
+
+    /// Recovery Kit and phone restores open Cubes saved on Connect, so they
+    /// need a session. Bitcoin Blake2b Cubes cannot be restored in this
+    /// build: the installer refuses every Blake2b flow but Vault creation.
+    fn connect_restore_reason(&self) -> Option<&'static str> {
+        if self.network.is_blake2b() {
+            Some("Not yet on Bitcoin Blake2b in this build.")
+        } else if !self.connect_account.is_authenticated() {
+            Some("Sign in to Connect")
+        } else {
+            None
+        }
+    }
+
     /// Recover a Vault, where this build turns it on.
     fn recover_vault_offered(&self) -> bool {
         self.connect_account.is_authenticated()
@@ -5467,22 +5536,51 @@ impl Home {
             && feature_flags::RECOVER_VAULT_ENABLED
     }
 
+    /// Connect Cubes on the current network a restore path can open:
+    /// every one for a Recovery Kit, phone-recoverable ones for the phone.
+    fn restorable_here(&self, phone: bool) -> usize {
+        let network = settings::network_to_api_string(self.network);
+        self.remote_cubes
+            .iter()
+            .filter(|cube| cube.network == network)
+            .filter(|cube| !phone || (cube.phone_recoverable && cube.phone_full_cube))
+            .count()
+    }
+
     /// Import or restore's path list (P-Restore's `nav`). A Cube being
-    /// created or backed up keeps the user on its path.
+    /// created or backed up keeps the user on its path. A path closed on
+    /// this network or without Connect says why under its name.
     fn restore_nav(&self, backing_up: bool) -> Element<ViewMessage> {
         let locked = backing_up || self.creating_cube;
-        let item = |id: &'static str, label: &'static str, current: bool, message| {
-            FocusableAction::new(Id::new(id), p2_regular(label), create_journey_focus)
+        let item = |id: &'static str,
+                    label: &'static str,
+                    sub: Option<String>,
+                    current: bool,
+                    message: ViewMessage| {
+            let open = sub.is_none();
+            let content = Column::new()
+                .spacing(2)
+                .push(p2_regular(label).style(move |theme| {
+                    if open || current {
+                        theme::text::primary(theme)
+                    } else {
+                        theme::text::secondary(theme)
+                    }
+                }))
+                .push_maybe(sub.map(|sub| p2_regular(sub).size(12).style(theme::text::secondary)));
+            FocusableAction::new(Id::new(id), content, create_journey_focus)
                 .width(Length::Fill)
                 .padding([10, 12])
                 .style(restore_frame::nav_style(current))
-                .on_press_maybe((!locked && !current).then_some(message))
+                .on_press_maybe((!locked && !current && open).then_some(message))
         };
         let importing = self.pending_bitcoin_import.is_some();
+        let connect_sub = self.connect_restore_reason().map(str::to_owned);
         let mut nav = restore_frame::nav()
             .push(item(
                 RESTORE_OVERVIEW_ID,
                 "Overview",
+                None,
                 self.restore_hub && !importing && !self.restore_phone,
                 ViewMessage::ShowRestoreHub,
             ))
@@ -5490,9 +5588,13 @@ impl Home {
                 item(
                     RESTORE_IMPORT_ID,
                     "Import Bitcoin wallet",
+                    (!importing && self.network != ChainId::Bitcoin)
+                        .then(|| format!("Not on {}", self.network.label())),
                     importing,
                     ViewMessage::ShowImportBitcoin,
                 )
+                // A full plan closes it too, without a line under it: the
+                // Overview says why.
                 .on_press_maybe(
                     (!locked && !importing && self.can_start_bitcoin_import())
                         .then_some(ViewMessage::ShowImportBitcoin),
@@ -5501,6 +5603,7 @@ impl Home {
         nav = nav.push(item(
             RESTORE_KIT_ID,
             "Recovery Kit",
+            connect_sub.clone(),
             false,
             ViewMessage::RestoreFromAnyRecoveryKit,
         ));
@@ -5508,6 +5611,7 @@ impl Home {
             nav = nav.push(item(
                 RESTORE_PHONE_ID,
                 "Recover with phone",
+                connect_sub,
                 self.restore_phone && !importing,
                 ViewMessage::ShowRestorePhone,
             ));
@@ -5516,6 +5620,7 @@ impl Home {
             nav = nav.push(item(
                 RESTORE_RECOVER_VAULT_ID,
                 "Recover a Vault",
+                None,
                 false,
                 ViewMessage::GoToSection(HomeSection::RecoverVault),
             ));
@@ -5523,199 +5628,230 @@ impl Home {
         nav.into()
     }
 
-    /// Import or restore's Overview (P-Restore's hub): the paths, then the
-    /// Cubes on the Connect account with the restore each one offers.
+    /// Import or restore's Overview (P-Restore's hub): every way to bring a
+    /// wallet or Cube in, on the network the header shows.
     fn restore_hub_view(&self) -> Element<ViewMessage> {
-        let rule = || -> Element<ViewMessage> {
-            Container::new(Space::new())
-                .width(Length::Fill)
-                .height(Length::Fixed(1.0))
-                .style(|theme: &theme::Theme| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(theme.colors.shell.line)),
-                    ..Default::default()
-                })
-                .into()
+        let rule = || -> Element<ViewMessage> { restore_frame::full_rule() };
+        let sign_in = || -> Element<ViewMessage> {
+            button::secondary_action(
+                RESTORE_SIGN_IN_ID,
+                Some(icon::person_icon()),
+                "Sign in to Connect",
+                create_journey_focus,
+            )
+            .width(Length::Shrink)
+            .on_press_maybe((!self.connect_account.is_checking_session()).then_some(
+                ViewMessage::GoToSection(HomeSection::Connect(app::menu::ConnectSubMenu::Overview)),
+            ))
+            .into()
         };
+        // A closed path is greyed, with its reason (and remedy) under it.
         let path = |title: &'static str,
                     line: &'static str,
-                    tag: &'static str,
-                    start: Element<'static, ViewMessage>|
+                    why: Option<Element<'static, ViewMessage>>,
+                    tag: Element<'static, ViewMessage>,
+                    start: Option<ViewMessage>,
+                    start_id: &'static str|
          -> Element<ViewMessage> {
+            let open = start.is_some();
+            let muted = move |theme: &theme::Theme| {
+                if open {
+                    theme::text::primary(theme)
+                } else {
+                    theme::text::secondary(theme)
+                }
+            };
             Row::new()
                 .spacing(12)
                 .align_y(Alignment::Center)
-                .padding([12, 0])
+                .padding([14, 0])
                 .push(
                     Column::new()
                         .spacing(3)
                         .width(Length::Fill)
-                        .push(p1_regular(title))
-                        .push(p2_regular(line).style(theme::text::secondary)),
+                        .push(p1_regular(title).style(muted))
+                        .push(p2_regular(line).style(theme::text::secondary))
+                        .push_maybe(why),
                 )
-                .push(create_journey_tag(tag, false))
-                .push(start)
+                .push(tag)
+                .push(
+                    button::secondary_action(start_id, None, "Start", create_journey_focus)
+                        .width(Length::Shrink)
+                        .on_press_maybe(start),
+                )
                 .into()
         };
+        let pill = |label: String, ok: bool| -> Element<'static, ViewMessage> {
+            Container::new(
+                p2_regular(label)
+                    .size(12)
+                    .style(move |theme: &theme::Theme| iced::widget::text::Style {
+                        color: Some(if ok {
+                            theme.colors.shell.good
+                        } else {
+                            theme.colors.shell.muted
+                        }),
+                    }),
+            )
+            .padding([2, 8])
+            .style(move |theme: &theme::Theme| iced::widget::container::Style {
+                border: iced::Border {
+                    color: if ok {
+                        theme.colors.shell.good
+                    } else {
+                        theme.colors.shell.line
+                    },
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+        };
+        let connected = |phone: bool| -> Element<'static, ViewMessage> {
+            let count = self.restorable_here(phone);
+            pill(
+                format!(
+                    "Connected · {count} {} on {}",
+                    if count == 1 { "Cube" } else { "Cubes" },
+                    self.network.label()
+                ),
+                true,
+            )
+        };
         let projection = launcher_catalog::project(self);
+        let import_why: Option<Element<ViewMessage>> =
+            self.bitcoin_import_network_reason().map(|why| {
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(p2_regular(why).size(12).style(theme::text::warning))
+                    .push(
+                        FocusableAction::new(
+                            Id::new(RESTORE_SWITCH_TO_BITCOIN_ID),
+                            p2_regular("Switch to Bitcoin").size(12),
+                            create_journey_focus,
+                        )
+                        .padding(0)
+                        .style(theme::button::link)
+                        .on_press(ViewMessage::SelectNetwork(ChainId::Bitcoin)),
+                    )
+                    .into()
+            });
+        let import_tag = if self.bitcoin_import_network_reason().is_some() {
+            pill(format!("Not on {}", self.network.label()), false)
+        } else {
+            pill("No sign-in".to_string(), false)
+        };
         let mut paths = Column::new().push(rule()).push(path(
             "Import Bitcoin wallet",
-            "Bring an existing Bitcoin wallet into a new Cube.",
-            "Bitcoin only",
-            button::secondary_action(RESTORE_START_IMPORT_ID, None, "Start", create_journey_focus)
-                .width(Length::Shrink)
-                .on_press_maybe(
-                    self.can_start_bitcoin_import()
-                        .then_some(ViewMessage::ShowImportBitcoin),
-                )
-                .into(),
+            "A recovery phrase, descriptor or hardware wallet, as a new Cube's Vault.",
+            import_why,
+            import_tag,
+            self.can_start_bitcoin_import()
+                .then_some(ViewMessage::ShowImportBitcoin),
+            RESTORE_START_IMPORT_ID,
         ));
+        let signed_in = self.connect_account.is_authenticated();
+        let connect_tag = |phone: bool| -> Element<'static, ViewMessage> {
+            if self.network.is_blake2b() {
+                pill(format!("Not on {}", self.network.label()), false)
+            } else if signed_in {
+                connected(phone)
+            } else {
+                sign_in()
+            }
+        };
+        let connect_open = self.connect_restore_reason().is_none();
         paths = paths.push(rule()).push(path(
-            "Restore from Cube Recovery Kit",
-            "Your Recovery Kit and its recovery password.",
-            "Connect sign-in",
-            button::secondary_action(RESTORE_START_KIT_ID, None, "Start", create_journey_focus)
-                .width(Length::Shrink)
-                .on_press(ViewMessage::RestoreFromAnyRecoveryKit)
-                .into(),
+            "Restore from Recovery Kit",
+            "Your Recovery Kit from Connect and its recovery password.",
+            None,
+            connect_tag(false),
+            connect_open.then_some(ViewMessage::RestoreFromAnyRecoveryKit),
+            RESTORE_START_KIT_ID,
         ));
         if feature_flags::OWNER_KEYCHAIN_RECOVERY_ENABLED {
             paths = paths.push(rule()).push(path(
                 "Recover with phone",
-                "Approve on the phone that holds this Cube's backup.",
-                "Connect sign-in",
-                button::secondary_action(
-                    RESTORE_START_PHONE_ID,
-                    None,
-                    "Start",
-                    create_journey_focus,
-                )
-                .width(Length::Shrink)
-                .on_press(ViewMessage::ShowRestorePhone)
-                .into(),
+                "Approve on the phone that holds the Cube's backup.",
+                None,
+                connect_tag(true),
+                connect_open.then_some(ViewMessage::ShowRestorePhone),
+                RESTORE_START_PHONE_ID,
             ));
         }
         if self.recover_vault_offered() {
             paths = paths.push(rule()).push(path(
                 "Recover a Vault",
                 "Vaults you're a keyholder for.",
-                "Connect sign-in",
-                button::secondary_action(
-                    RESTORE_START_RECOVER_VAULT_ID,
-                    None,
-                    "Start",
-                    create_journey_focus,
-                )
-                .width(Length::Shrink)
-                .on_press(ViewMessage::GoToSection(HomeSection::RecoverVault))
-                .into(),
+                None,
+                pill("Connect".to_string(), true),
+                Some(ViewMessage::GoToSection(HomeSection::RecoverVault)),
+                RESTORE_START_RECOVER_VAULT_ID,
             ));
         }
         let mut content = Column::new()
             .spacing(16)
             .max_width(760)
-            .push(h4_bold("Choose what to bring in"))
+            .push(
+                Column::new()
+                    .spacing(4)
+                    .push(h4_bold("Choose what to bring in"))
+                    .push(
+                        p2_regular(format!("Into a new Cube on {}.", self.network.label()))
+                            .style(theme::text::secondary),
+                    ),
+            )
             .push(paths.push(rule()));
-        if self.network == ChainId::Bitcoin && projection.at_limit() {
+        if projection.at_limit() {
             content = content.push(
                 p2_regular(format!(
-                    "Bitcoin mainnet has no free Cube slot on the {} plan. Upgrade, or delete a \
-                     Bitcoin mainnet Cube, to import a wallet.",
-                    projection.tier
+                    "{} of {} Cubes on the {} plan. Upgrade, or delete a Cube, to bring one in.",
+                    projection.total_count, projection.cube_limit, projection.tier
                 ))
                 .style(theme::text::warning),
             );
         }
-        content = content.push(p1_bold("On your Connect account"));
-        if !self.connect_account.is_authenticated() {
-            return content
-                .push(
-                    p2_regular(
-                        "Sign in to Connect to restore a Cube from its Recovery Kit or with \
-                         your phone.",
-                    )
-                    .style(theme::text::secondary),
-                )
-                .push(
-                    button::secondary_action(
-                        RESTORE_SIGN_IN_ID,
-                        Some(icon::person_icon()),
-                        "Sign in to Connect",
-                        create_journey_focus,
-                    )
-                    .width(Length::Shrink)
-                    .on_press_maybe(
-                        (!self.connect_account.is_checking_session()).then_some(
-                            ViewMessage::GoToSection(HomeSection::Connect(
-                                app::menu::ConnectSubMenu::Overview,
-                            )),
+        if !signed_in && !self.network.is_blake2b() {
+            content = content.push(
+                Container::new(
+                    Row::new()
+                        .spacing(10)
+                        .align_y(Alignment::Start)
+                        .push(icon::tooltip_icon().style(theme::text::secondary))
+                        .push(
+                            p2_regular(
+                                "Recovery Kit and phone recovery restore Cubes saved on your \
+                                 Connect account, so they open after you sign in. Use Sign in \
+                                 to Connect next to either one. Wallet import needs no account.",
+                            )
+                            .style(theme::text::secondary),
                         ),
-                    ),
                 )
-                .into();
+                .padding(12)
+                .width(Length::Fill)
+                .style(theme::card::simple),
+            );
         }
-        // Every Connect Cube on this network: the Launcher's search and
-        // network filter narrow its own lists, not this one.
-        let network = settings::network_to_api_string(self.network);
-        let remotes: Vec<&RemoteCube> = self
-            .remote_cubes
-            .iter()
-            .filter(|cube| !self.network.is_blake2b() && cube.network == network)
-            .collect();
-        if remotes.is_empty() {
-            return content
-                .push(
-                    p2_regular(format!(
-                        "No Cubes on your Connect account to restore on {}.",
-                        self.network.label()
-                    ))
-                    .style(theme::text::secondary),
-                )
-                .into();
-        }
-        let mut cubes = Column::new();
-        for cube in remotes {
-            let restore = launcher_catalog::remote_restore(cube);
-            let mut row = Row::new()
-                .spacing(12)
-                .align_y(Alignment::Center)
-                .padding([12, 0])
-                .push(
-                    Column::new()
-                        .spacing(3)
-                        .width(Length::Fill)
-                        .push(p1_regular(cube.name.clone()))
-                        .push(p2_regular(restore.status).style(theme::text::secondary)),
-                );
-            if let Some((message, label)) = restore.action {
-                row = row.push(
-                    button::secondary_action(
-                        Id::from(format!("tenshu.restore:remote:{}", cube.uuid)),
-                        None,
-                        label,
-                        create_journey_focus,
-                    )
-                    .width(Length::Shrink)
-                    .on_press(message),
-                );
-            }
-            cubes = cubes.push(rule()).push(row);
-        }
-        content.push(cubes.push(rule())).into()
+        content.into()
     }
 
-    /// Import or restore's Recover with phone path: the Connect Cubes on
-    /// this network whose backup a paired phone can decrypt.
+    /// Recover with phone's Cube step: the Connect Cubes on this network
+    /// whose backup a paired phone can decrypt, then the count on other
+    /// networks and a switch to list them all. Picking a Cube on another
+    /// network switches to that network.
     fn restore_phone_view(&self) -> Element<ViewMessage> {
         let rule = || -> Element<ViewMessage> { restore_frame::full_rule() };
         let content = Column::new()
             .spacing(16)
             .max_width(760)
-            .push(h4_bold("Recover with phone"))
+            .push(h4_bold("Which Cube?"))
             .push(
-                p2_regular(
-                    "Choose the Cube, then approve its recovery on the phone that holds its \
-                     backup. You set a new PIN for it on this computer.",
-                )
+                p2_regular(format!(
+                    "Cubes on your Connect account · {}",
+                    self.network.label()
+                ))
                 .style(theme::text::secondary),
             );
         if !self.connect_account.is_authenticated() {
@@ -5743,53 +5879,104 @@ impl Home {
                 .into();
         }
         let network = settings::network_to_api_string(self.network);
-        let phones: Vec<&RemoteCube> = self
+        // A descriptor-only phone recovery restores a Vault into an existing
+        // Cube, not a Cube. Blake2b Cubes cannot be restored in this build.
+        let phones: Vec<(ChainId, &RemoteCube)> = self
             .remote_cubes
             .iter()
-            // A descriptor-only phone recovery restores a Vault into an
-            // existing Cube, not a Cube; the Overview's rows still offer it.
-            .filter(|cube| {
-                !self.network.is_blake2b()
-                    && cube.network == network
-                    && cube.phone_recoverable
-                    && cube.phone_full_cube
-            })
+            .filter(|cube| cube.phone_recoverable && cube.phone_full_cube)
+            .filter_map(|cube| restore_chain(&cube.network).map(|chain| (chain, cube)))
+            .filter(|(chain, _)| !chain.is_blake2b())
             .collect();
-        if phones.is_empty() {
-            return content
-                .push(
-                    p2_regular(format!(
-                        "No Cube on your Connect account can be recovered with a phone on {}.",
-                        self.network.label()
-                    ))
-                    .style(theme::text::secondary),
-                )
-                .into();
-        }
-        let mut cubes = Column::new();
-        for cube in phones {
-            cubes = cubes.push(rule()).push(
-                Row::new()
-                    .spacing(12)
+        let here = phones
+            .iter()
+            .filter(|(_, cube)| cube.network == network)
+            .count();
+        let others = phones.len() - here;
+        let shown: Vec<&(ChainId, &RemoteCube)> = phones
+            .iter()
+            .filter(|(_, cube)| self.restore_all_networks || cube.network == network)
+            .collect();
+        let mut column = content;
+        if shown.is_empty() {
+            column = column.push(
+                p2_regular(format!(
+                    "No Cube on your Connect account can be recovered with a phone on {}.",
+                    self.network.label()
+                ))
+                .style(theme::text::secondary),
+            );
+        } else {
+            let light = matches!(
+                self.theme_mode,
+                coincube_ui::theme::palette::ThemeMode::Light
+            );
+            let mut cubes = Column::new();
+            for (chain, cube) in shown {
+                let mut name = Row::new()
+                    .spacing(8)
                     .align_y(Alignment::Center)
-                    .padding([12, 0])
-                    .push(p1_regular(cube.name.clone()).width(Length::Fill))
+                    .push(p1_regular(cube.name.clone()));
+                if *chain != self.network {
+                    name = name
+                        .push(create_journey_coin(*chain, light, 14.0))
+                        .push(create_journey_tag(chain.label(), false));
+                }
+                cubes = cubes.push(rule()).push(
+                    Row::new()
+                        .spacing(12)
+                        .align_y(Alignment::Center)
+                        .padding([12, 0])
+                        .push(Container::new(name).width(Length::Fill))
+                        .push(
+                            button::secondary_action(
+                                Id::from(format!("tenshu.restore:phone:{}", cube.uuid)),
+                                None,
+                                "Recover",
+                                create_journey_focus,
+                            )
+                            .width(Length::Shrink)
+                            .on_press(
+                                ViewMessage::RestoreWithPhoneOn {
+                                    chain: *chain,
+                                    cube_id: cube.id,
+                                    full_cube: cube.phone_full_cube,
+                                },
+                            ),
+                        ),
+                );
+            }
+            column = column.push(cubes.push(rule()));
+        }
+        if others > 0 {
+            column = column.push(
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
                     .push(
-                        button::secondary_action(
-                            Id::from(format!("tenshu.restore:phone:{}", cube.uuid)),
-                            None,
-                            "Recover",
+                        p2_regular(format!("{others} more on other networks"))
+                            .style(theme::text::secondary),
+                    )
+                    .push(p2_regular("·").style(theme::text::secondary))
+                    .push(
+                        FocusableAction::new(
+                            Id::new(RESTORE_ALL_NETWORKS_ID),
+                            p2_regular(if self.restore_all_networks {
+                                format!("Show {} only", self.network.label())
+                            } else {
+                                "Show all networks".to_string()
+                            }),
                             create_journey_focus,
                         )
-                        .width(Length::Shrink)
-                        .on_press(ViewMessage::RestoreWithPhone {
-                            cube_id: cube.id,
-                            full_cube: cube.phone_full_cube,
-                        }),
+                        .padding(0)
+                        .style(theme::button::link)
+                        .on_press(ViewMessage::ShowRestoreAllNetworks(
+                            !self.restore_all_networks,
+                        )),
                     ),
             );
         }
-        content.push(cubes.push(rule())).into()
+        column.into()
     }
 
     /// Home's frame for every screen except the visible Launcher List: the
@@ -6118,6 +6305,24 @@ const RESTORE_KIT_ID: &str = "tenshu.restore:nav:kit";
 const RESTORE_PHONE_ID: &str = "tenshu.restore:nav:phone";
 const RESTORE_START_KIT_ID: &str = "tenshu.restore:start:kit";
 const RESTORE_START_PHONE_ID: &str = "tenshu.restore:start:phone";
+const RESTORE_SWITCH_TO_BITCOIN_ID: &str = "tenshu.restore:switch-to-bitcoin";
+const RESTORE_ALL_NETWORKS_ID: &str = "tenshu.restore:all-networks";
+
+/// The network a Connect Cube's API string names.
+fn restore_chain(api: &str) -> Option<ChainId> {
+    [
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        ChainId::Testnet,
+        ChainId::Testnet4,
+        ChainId::Signet,
+        ChainId::Regtest,
+        ChainId::BitcoinBlake2bTestnet4,
+    ]
+    .iter()
+    .copied()
+    .find(|chain| settings::network_to_api_string(*chain) == api)
+}
 
 fn create_journey_focus(id: Id) -> ViewMessage {
     ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id))
@@ -6505,7 +6710,7 @@ fn create_cube_form<'a>(
     // Styled as a two-label A/B row to match the General Settings toggles
     // (BTC/Sats, Fiat/Bitcoin): left label = toggler off. Passkey sits on the
     // left because it is the default.
-    if feature_flags::PASSKEY_CREATION_AVAILABLE {
+    if feature_flags::PASSKEY_CREATION_AVAILABLE && !importing_bitcoin {
         column = column.push(
             card::simple(
                 Row::new()
@@ -7414,6 +7619,14 @@ pub enum ViewMessage {
     ShowCreateCube(bool),
     /// Open or close the Create sheet's network menu.
     CreateNetworkMenu(bool),
+    /// Recover with phone's Cube step: list every network's Cubes.
+    ShowRestoreAllNetworks(bool),
+    /// Recover with phone for a Cube on another network: switch to it first.
+    RestoreWithPhoneOn {
+        chain: ChainId,
+        cube_id: u64,
+        full_cube: bool,
+    },
     ShowImportBitcoin,
     /// Import or restore's Overview: every way to bring a wallet or Cube in.
     ShowRestoreHub,
@@ -8600,8 +8813,14 @@ mod tests {
         assert!(!home.create_network_menu);
         home.creating_cube = false;
 
-        // Import or restore never changes the network from its header.
+        // Import or restore's Overview re-filters on a change, but an
+        // import under way keeps its network.
         home.restore_hub = true;
+        drop(home.update(Message::View(ViewMessage::CreateNetworkMenu(true))));
+        assert!(home.create_network_menu);
+        drop(home.update(Message::View(ViewMessage::CreateNetworkMenu(false))));
+        home.restore_hub = false;
+        home.pending_bitcoin_import = Some(Box::new(BitcoinImport::pending()));
         drop(home.update(Message::View(ViewMessage::CreateNetworkMenu(true))));
         assert!(!home.create_network_menu);
     }
@@ -9234,8 +9453,12 @@ mod tests {
         let shown = labels(&home);
         for label in [
             "Choose what to bring in",
-            "On your Connect account",
-            "Sign in to Connect to restore a Cube from its Recovery Kit or with your phone.",
+            "Restore from Recovery Kit",
+            "Sign in to Connect",
+            "No sign-in",
+            "Recovery Kit and phone recovery restore Cubes saved on your Connect account, so \
+             they open after you sign in. Use Sign in to Connect next to either one. Wallet \
+             import needs no account.",
         ] {
             assert!(
                 shown.iter().any(|l| l == label),
@@ -9254,6 +9477,107 @@ mod tests {
         let _ = home.update(Message::View(ViewMessage::ShowCreateCube(false)));
         assert!(!home.restore_hub);
         assert!(!home.showing_import_or_restore());
+    }
+
+    /// Changing the network in the header re-filters Import or restore
+    /// instead of closing it. Import Bitcoin wallet closes off Bitcoin, with
+    /// its reason and a way back; Kit and phone wait for Connect sign-in.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_or_restore_refilters_on_a_network_change() {
+        let mut home = home();
+        home.developer_mode = true;
+        home.refresh_displayed_networks();
+        home.state = State::NoCube { create_cube: false };
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        assert!(home.create_network_menu_editable());
+        let _ = home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4)));
+        assert_eq!(home.network, ChainId::Testnet4);
+        assert!(home.restore_hub, "the wizard stays open");
+        assert!(home.showing_import_or_restore());
+        assert!(!home.can_start_bitcoin_import());
+
+        let shown = restore_frame::rendered_labels(home.create_journey_frame()).await;
+        for label in [
+            "Into a new Cube on Testnet4.",
+            "Bitcoin and Bitcoin Blake2b only.",
+            "Switch to Bitcoin",
+            "Not on Testnet4",
+            "Sign in to Connect",
+        ] {
+            assert!(
+                shown.iter().any(|l| l == label),
+                "missing {:?}: {:?}",
+                label,
+                shown
+            );
+        }
+        assert_eq!(home.connect_restore_reason(), Some("Sign in to Connect"));
+
+        // Signed in, Kit and phone open on every non-Blake2b network and
+        // say how many Cubes they can restore here.
+        let mut home = signed_in_home();
+        home.developer_mode = true;
+        home.refresh_displayed_networks();
+        home.state = State::NoCube { create_cube: false };
+        home.network = ChainId::Signet;
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
+        assert_eq!(home.connect_restore_reason(), None);
+        let shown = restore_frame::rendered_labels(home.create_journey_frame()).await;
+        assert!(
+            shown.iter().any(|l| l == "Connected · 0 Cubes on Signet"),
+            "{:?}",
+            shown
+        );
+    }
+
+    /// Recover with phone's Cube step lists this network's Cubes, then
+    /// counts the rest, which "Show all networks" lists.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn phone_cube_step_counts_and_shows_other_networks() {
+        let remote = |id: u64, name: &str, chain: ChainId| RemoteCube {
+            id,
+            uuid: format!("uuid-{id}"),
+            name: name.to_string(),
+            network: settings::network_to_api_string(chain),
+            has_recovery_kit: true,
+            has_encrypted_seed: true,
+            phone_recoverable: true,
+            phone_full_cube: true,
+            encryption_pubkey: None,
+            has_vault: None,
+        };
+        let mut home = signed_in_home();
+        home.state = State::NoCube { create_cube: false };
+        home.remote_cubes = vec![
+            remote(1, "Everyday", ChainId::Bitcoin),
+            remote(2, "Sandbox", ChainId::Signet),
+        ];
+        let _ = home.update(Message::View(ViewMessage::ShowRestorePhone));
+        let shown = restore_frame::rendered_labels(home.create_journey_frame()).await;
+        assert!(shown.iter().any(|l| l == "Everyday"), "{:?}", shown);
+        assert!(!shown.iter().any(|l| l == "Sandbox"), "{:?}", shown);
+        assert!(shown.iter().any(|l| l == "1 more on other networks"));
+        assert!(
+            shown.iter().any(|l| l == "Approve"),
+            "phone rail: {:?}",
+            shown
+        );
+
+        let _ = home.update(Message::View(ViewMessage::ShowRestoreAllNetworks(true)));
+        let shown = restore_frame::rendered_labels(home.create_journey_frame()).await;
+        assert!(shown.iter().any(|l| l == "Sandbox"), "{:?}", shown);
+    }
+
+    /// Import sets a PIN only: a passkey can't hold an imported secret.
+    #[test]
+    fn import_sets_a_pin_only() {
+        let mut home = home();
+        home.state = State::NoCube { create_cube: false };
+        home.passkey_mode = true;
+        let _ = home.update(Message::View(ViewMessage::ShowImportBitcoin));
+        assert!(!home.passkey_mode);
+        let _ = home.update(Message::View(ViewMessage::TogglePasskeyMode(true)));
+        assert!(!home.passkey_mode);
     }
 
     #[test]
@@ -13417,13 +13741,11 @@ mod tests {
     /// Create Vault wizard inside the Cube.
     #[test]
     fn create_cube_header_lists_only_cube_steps() {
-        assert_eq!(
-            create_cube_steps(false),
-            &["Network", "Cube", "Backup", "Done"]
-        );
+        // The network is chosen in the sheet header, not on a step.
+        assert_eq!(create_cube_steps(false), &["Cube", "Backup", "Done"]);
         assert_eq!(
             create_cube_steps(true),
-            &["Network", "Cube", "Passkey", "Backup", "Done"]
+            &["Cube", "Passkey", "Backup", "Done"]
         );
         for vault_step in ["Connect", "Vault", "Policy", "Keys", "Node"] {
             assert!(!create_cube_steps(false).contains(&vault_step));

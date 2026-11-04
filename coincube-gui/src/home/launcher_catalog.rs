@@ -3795,7 +3795,7 @@ mod tests {
         assert!(tree.contains("Full"));
         assert!(tree.contains("Upgrade, or delete a Bitcoin mainnet Cube, to add one."));
 
-        // Import is offered only where the flow exists.
+        // Import or restore opens on every network.
         let mut testnet = home_with(&[("a", "Alpha")]);
         testnet.server_cube_limit = Some(10);
         testnet.network = ChainId::Testnet4;
@@ -3811,7 +3811,7 @@ mod tests {
             theme::Theme::dark(),
         );
         assert!(tree.has(&create_id()));
-        assert!(!tree.has(&import_id()));
+        assert!(tree.has(&import_id()));
     }
 
     #[test]
@@ -5625,7 +5625,7 @@ mod tests {
             ));
             assert!(matches!(
                 activate_chrome(&checking, import_id(), pointer),
-                ViewMessage::ShowImportBitcoin
+                ViewMessage::ShowRestoreHub
             ));
             checking.theme_mode = coincube_ui::theme::palette::ThemeMode::Light;
             let tree = home_tree(
@@ -6563,27 +6563,6 @@ mod tests {
         ));
     }
 
-    /// The Overview lists every Connect Cube on the network, whatever the
-    /// Launcher's search says.
-    #[test]
-    fn the_overview_lists_connect_cubes_whatever_the_search() {
-        let mut home = home_with(&[("a", "Alpha")]);
-        crate::home::tests::enable_btcb2(&mut home);
-        home.remote_cubes = vec![remote("r1", "Elsewhere", true, true, false, false)];
-        catalog(&mut home, CatalogMessage::Query("zzz".to_string()));
-        assert!(project(&home).remotes.is_empty());
-        let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
-        let pressed = press_in_journey(&home, "tenshu.restore:remote:r1");
-        assert!(
-            matches!(
-                pressed.as_slice(),
-                [ViewMessage::RestoreFromRecoveryKit(uuid)] if uuid == "r1"
-            ),
-            "{:?}",
-            pressed
-        );
-    }
-
     /// The design's Recovery Kit and Recover with phone paths: the Kit
     /// path opens the installer's sign-in and Cube picker; the phone path
     /// lists only Cubes a phone can recover.
@@ -6630,7 +6609,8 @@ mod tests {
         assert!(
             matches!(
                 pressed.as_slice(),
-                [ViewMessage::RestoreWithPhone {
+                [ViewMessage::RestoreWithPhoneOn {
+                    chain: ChainId::Bitcoin,
                     cube_id: 7,
                     full_cube: true
                 }]
@@ -6650,14 +6630,17 @@ mod tests {
         assert!(!home.restore_hub && !home.restore_phone);
     }
 
+    /// Changing the network keeps Import or restore open and re-filters
+    /// it; only a pending Bitcoin import is dropped.
     #[test]
-    fn leaving_bitcoin_leaves_import_or_restore() {
+    fn leaving_bitcoin_keeps_import_or_restore_open() {
         let mut home = all_networks();
         let _ = home.update(Message::View(ViewMessage::ShowRestoreHub));
         assert!(home.restore_hub);
         let _ = home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4)));
-        assert!(!home.restore_hub);
-        assert!(!home.showing_import_or_restore());
+        assert!(home.restore_hub);
+        assert!(home.showing_import_or_restore());
+        assert!(home.pending_bitcoin_import.is_none());
     }
 
     /// The plan menu, the activity menu and the Key card: one at a time.

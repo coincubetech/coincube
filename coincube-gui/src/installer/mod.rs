@@ -310,20 +310,22 @@ impl RestorePath {
 
     pub(crate) fn steps(self) -> &'static [&'static str] {
         match self {
-            Self::Kit => &["Sign in", "Cube", "Password", "PIN", "Finish"],
-            Self::Phone => &["Approve", "PIN", "Finish"],
+            Self::Kit => &["Cube", "Password", "PIN", "Done"],
+            Self::Phone => &["Cube", "Approve", "PIN", "Done"],
         }
     }
 
-    /// The stepper index for a step's stage; Finish when it has none.
+    /// The stepper index for a step's stage; Done when it has none. A
+    /// signed-out start lands on the Kit's own sign-in, part of its Cube
+    /// step: the wizard opens Kit restores only after Connect sign-in.
     fn index(self, stage: Option<RestoreStage>) -> usize {
         let label = match stage {
-            Some(RestoreStage::SignIn) => "Sign in",
+            Some(RestoreStage::SignIn) => "Cube",
             Some(RestoreStage::Cube) => "Cube",
             Some(RestoreStage::Password) => "Password",
             Some(RestoreStage::Approve) => "Approve",
             Some(RestoreStage::Pin) => "PIN",
-            None => "Finish",
+            None => "Done",
         };
         let steps = self.steps();
         steps
@@ -1589,7 +1591,8 @@ impl Installer {
     }
 
     /// Import or restore (P-Restore) around a Recovery Kit or phone restore:
-    /// the Launcher's header, path list and stepper over the installer step.
+    /// the same modal sheet as the Launcher's, with its header, path list
+    /// and step rail over the installer step.
     fn restore_frame<'a>(
         &'a self,
         path: RestorePath,
@@ -1597,77 +1600,52 @@ impl Installer {
         content: Element<'a, Message>,
     ) -> Element<'a, Message> {
         use crate::home::restore_frame;
-        use coincube_ui::{
-            component::{button, text::*},
-            icon, theme,
-            widget::{Button, Container, Row},
-        };
-        use iced::{Alignment, Length};
+        use coincube_ui::component::text::*;
+        use iced::Length;
 
         let stage = self
             .steps
             .get(self.current)
             .and_then(|step| step.restore_stage());
         let active = path.index(stage);
-        // Close leaves before anything is written; Finish's steps write the
-        // Cube and keep their own buttons.
-        let close = button::secondary(Some(icon::cross_icon()), "Close")
-            .width(Length::Shrink)
-            .on_press_maybe(stage.is_some().then_some(Message::BackToApp(self.network)));
-        let header = restore_frame::header(
-            chain,
-            restore_frame::network_name(chain),
-            false,
-            Some(close.into()),
+        // Close leaves before anything is written; the steps after PIN
+        // write the Cube and keep their own buttons.
+        let header = restore_frame::sheet_header(
+            "Import or restore",
+            restore_frame::network_chip(chain, false),
+            restore_frame::close_plain(stage.is_some().then_some(Message::BackToApp(self.network))),
         );
-        let nav_item = |label: &'static str, current: bool| {
-            Button::new(p2_regular(label))
-                .width(Length::Fill)
-                .padding([10, 12])
-                .style(restore_frame::nav_style(current))
-        };
         let nav = restore_frame::nav()
-            .push(nav_item("Overview", false))
-            .push(nav_item("Import Bitcoin wallet", false))
-            .push(nav_item("Recovery Kit", path == RestorePath::Kit))
-            .push(nav_item("Recover with phone", path == RestorePath::Phone));
-        let region = Column::new().width(Length::Fill).height(Length::Fill).push(
-            iced::widget::scrollable(
-                Column::new()
-                    .spacing(20)
-                    .padding([24, 28])
-                    .push(h2(path.title()))
-                    .push(restore_frame::stepper(path.steps(), active))
-                    .push(content),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill),
-        );
-        let top_bar = Container::new(
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(icon::cube_outline_icon())
-                .push(p2_regular("Tenshu")),
+            .push(restore_frame::nav_label("Overview", false))
+            .push(restore_frame::nav_label("Import Bitcoin wallet", false))
+            .push(restore_frame::nav_label(
+                "Recovery Kit",
+                path == RestorePath::Kit,
+            ))
+            .push(restore_frame::nav_label(
+                "Recover with phone",
+                path == RestorePath::Phone,
+            ));
+        let body = iced::widget::scrollable(
+            Column::new()
+                .spacing(20)
+                .padding([24, 28])
+                .push(h2(path.title()))
+                .push(content),
         )
-        .center_y(Length::Fixed(64.0))
-        .padding([0, 24])
         .width(Length::Fill)
-        .style(theme::container::shell_rail);
-        let stage = Container::new(
-            Container::new(restore_frame::split(header, nav.into(), region.into()))
-                .style(theme::card::simple)
-                .width(Length::Fill)
-                .max_width(1120),
-        )
-        .padding([28, 24])
-        .center_x(Length::Fill)
-        .height(Length::Fill);
-        Container::new(Column::new().height(Length::Fill).push(top_bar).push(stage))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(theme::container::background)
-            .into()
+        .height(Length::Fill)
+        .into();
+        let region = restore_frame::region(
+            Some(restore_frame::step_rail(path.steps(), active)),
+            body,
+            None,
+        );
+        restore_frame::standalone(restore_frame::sheet(
+            header,
+            restore_frame::with_nav(nav.into(), region),
+            None,
+        ))
     }
 }
 
@@ -4169,15 +4147,14 @@ mod restore_frame_tests {
         let shown = rendered_labels(kit.view()).await;
         for label in [
             "Import or restore",
-            "Bitcoin mainnet",
+            "Bitcoin",
             "Recovery Kit",
             "Recover with phone",
             "Restore from Cube Recovery Kit",
-            "Sign in",
             "Cube",
             "Password",
             "PIN",
-            "Finish",
+            "Done",
             "Close",
         ] {
             assert!(has(&shown, label), "missing {:?} in {:?}", label, shown);
@@ -4292,9 +4269,10 @@ mod restore_frame_tests {
         for label in [
             "Import or restore",
             "Recover with phone",
+            "Cube",
             "Approve",
             "PIN",
-            "Finish",
+            "Done",
         ] {
             assert!(has(&shown, label), "missing {:?} in {:?}", label, shown);
         }

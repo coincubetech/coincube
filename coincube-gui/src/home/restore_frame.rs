@@ -19,15 +19,11 @@ use crate::chain::{ChainId, ChainIdExt};
 
 use super::launcher_coin;
 
-/// The Bitcoin import path. A passkey Cube adds its Passkey step.
-pub(crate) fn import_steps(passkey: bool) -> &'static [&'static str] {
-    if passkey {
-        &[
-            "Cube", "Passkey", "Backup", "Source", "Keys", "Review", "Scan", "Done",
-        ]
-    } else {
-        &["Cube", "Backup", "Source", "Keys", "Review", "Scan", "Done"]
-    }
+/// The Bitcoin import path. Import sets a PIN only: a passkey can't hold
+/// an imported secret. The Cube and its PIN are written first and backed
+/// up before the wallet's keys come in.
+pub(crate) fn import_steps() -> &'static [&'static str] {
+    &["Cube", "Backup", "Source", "Keys", "Review", "Scan", "Done"]
 }
 
 /// The step strip (P-Restore `.steps`): 24px numbered circles with the
@@ -169,17 +165,10 @@ pub(crate) fn network_control<'a, M: Clone + 'static>(
     open: bool,
     focus: impl FnOnce(Id) -> M,
 ) -> Element<'a, M> {
-    let editable = toggle.is_some();
-    let mut chip = Row::new()
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .push(coin(chain, light, 16.0))
-        .push(p2_regular(chain.label()))
-        .push_maybe(network_tag(chain));
-    if !editable {
-        return Container::new(chip).padding([6, 0]).into();
+    if toggle.is_none() {
+        return network_chip(chain, light);
     }
-    chip = chip.push(
+    let chip = chip_row(chain, light).push(
         iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(CHEVRON.as_bytes()))
             .width(Length::Fixed(14.0))
             .height(Length::Fixed(14.0))
@@ -202,9 +191,53 @@ pub(crate) fn network_control<'a, M: Clone + 'static>(
         .into()
 }
 
+fn chip_row<'a, M: 'a>(chain: ChainId, light: bool) -> Row<'a, M> {
+    Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(coin(chain, light, 16.0))
+        .push(p2_regular(chain.label()))
+        .push_maybe(network_tag(chain))
+}
+
+/// The network control once the network is fixed: a static chip.
+pub(crate) fn network_chip<'a, M: 'a>(chain: ChainId, light: bool) -> Element<'a, M> {
+    Container::new(chip_row(chain, light))
+        .padding([6, 0])
+        .into()
+}
+
 /// The header's network control.
 pub(crate) const NETWORK_CONTROL_ID: &str = "tenshu.wizard:network";
 const CHEVRON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10l5 5 5-5"/></svg>"##;
+
+fn close_content<'a, M: 'a>() -> Element<'a, M> {
+    Container::new(
+        Row::new()
+            .push(
+                coincube_ui::icon::cross_icon()
+                    .size(14)
+                    .style(theme::tenshu::text::ink),
+            )
+            .push(coincube_ui::component::tenshu::text::label("Close"))
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .center_y(Length::Fill)
+    .into()
+}
+
+fn close_style(
+    theme: &theme::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    theme::tenshu::button::action(
+        theme,
+        status,
+        theme::tenshu::button::ActionKind::Secondary,
+        theme::tenshu::button::ActionShape::Compact,
+    )
+}
 
 /// The sheet's Close, styled like the Connect and App preferences sheets'.
 pub(crate) fn close_button<'a, M: Clone + 'static>(
@@ -212,34 +245,60 @@ pub(crate) fn close_button<'a, M: Clone + 'static>(
     on_press: Option<M>,
     focus: impl FnOnce(Id) -> M,
 ) -> Element<'a, M> {
-    FocusableAction::new(
-        Id::new(id),
-        Container::new(
-            Row::new()
-                .push(
-                    coincube_ui::icon::cross_icon()
-                        .size(14)
-                        .style(theme::tenshu::text::ink),
-                )
-                .push(coincube_ui::component::tenshu::text::label("Close"))
-                .spacing(6)
-                .align_y(Alignment::Center),
-        )
-        .center_y(Length::Fill),
-        focus,
+    FocusableAction::new(Id::new(id), close_content(), focus)
+        .height(Length::Fixed(36.0))
+        .padding([0, 12])
+        .style(close_style)
+        .on_press_maybe(on_press)
+        .into()
+}
+
+/// Close for screens with no focus routing (the installer, an open Cube).
+pub(crate) fn close_plain<'a, M: Clone + 'a>(on_press: Option<M>) -> Element<'a, M> {
+    iced::widget::Button::new(close_content())
+        .height(Length::Fixed(36.0))
+        .padding([0, 12])
+        .style(close_style)
+        .on_press_maybe(on_press)
+        .into()
+}
+
+/// A path list row with no action of its own: the installer and an open
+/// Cube show where the user is, not a way to leave the path.
+pub(crate) fn nav_label<'a, M: Clone + 'a>(label: &'static str, current: bool) -> Element<'a, M> {
+    iced::widget::Button::new(p2_regular(label))
+        .width(Length::Fill)
+        .padding([10, 12])
+        .style(nav_style(current))
+        .into()
+}
+
+/// The wizard sheet over a plain backdrop, for screens with no Launcher
+/// behind them (the installer's restores, an open Cube's import): the same
+/// dimmed modal presentation, under a bar with the brand.
+pub(crate) fn standalone<'a, M: 'a>(sheet: Element<'a, M>) -> Element<'a, M> {
+    let bar = Container::new(
+        Row::new()
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(coincube_ui::icon::cube_outline_icon())
+            .push(p2_regular("Tenshu")),
     )
-    .height(Length::Fixed(36.0))
-    .padding([0, 12])
-    .style(|theme, status| {
-        theme::tenshu::button::action(
-            theme,
-            status,
-            theme::tenshu::button::ActionKind::Secondary,
-            theme::tenshu::button::ActionShape::Compact,
-        )
-    })
-    .on_press_maybe(on_press)
-    .into()
+    .center_y(Length::Fixed(64.0))
+    .padding([0, 24])
+    .width(Length::Fill)
+    .style(theme::container::shell_rail);
+    let backdrop = Container::new(
+        Column::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(bar)
+            .push(Space::new().width(Length::Fill).height(Length::Fill)),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(theme::container::background);
+    crate::gui::compose_overlay(backdrop.into(), sheet, true)
 }
 
 /// The sheet header: title, a divider and the network control, then Close.
@@ -394,6 +453,50 @@ pub(crate) fn sheet<'a, M: Clone + 'a>(
     }
 }
 
+/// The Done art: Kage holding the sealed Cube, centred. Its background is
+/// transparent; in dark mode a white disc sits behind the orange ensō
+/// circle only, so the ink figure keeps the sheet behind it.
+pub(crate) fn done_art<'a, M: 'a>(light: bool) -> Element<'a, M> {
+    const WIDTH: f32 = 240.0;
+    const HEIGHT: f32 = 360.0;
+    // The ensō in the 320×480 source: centre (165, 140), radius 125.
+    const SCALE: f32 = WIDTH / 320.0;
+    let radius = 122.0 * SCALE;
+    let (cx, cy) = (165.0 * SCALE, 140.0 * SCALE);
+    let art = iced::widget::image(coincube_ui::image::kage_cube_sealed())
+        .width(Length::Fixed(WIDTH))
+        .height(Length::Fixed(HEIGHT));
+    let mut stack = iced::widget::Stack::new()
+        .width(Length::Fixed(WIDTH))
+        .height(Length::Fixed(HEIGHT));
+    if !light {
+        stack = stack.push(
+            Column::new()
+                .push(Space::new().height(Length::Fixed(cy - radius)))
+                .push(
+                    Row::new()
+                        .push(Space::new().width(Length::Fixed(cx - radius)))
+                        .push(
+                            Container::new(Space::new())
+                                .width(Length::Fixed(radius * 2.0))
+                                .height(Length::Fixed(radius * 2.0))
+                                .style(move |_: &theme::Theme| iced::widget::container::Style {
+                                    background: Some(iced::Background::Color(iced::Color::WHITE)),
+                                    border: iced::Border {
+                                        radius: radius.into(),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                }),
+                        ),
+                ),
+        );
+    }
+    Container::new(stack.push(art))
+        .center_x(Length::Fill)
+        .into()
+}
+
 /// The network's coin mark.
 pub(crate) fn coin<'a, M: 'a>(chain: ChainId, light: bool, size: f32) -> Element<'a, M> {
     iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(
@@ -413,30 +516,6 @@ pub(crate) fn rule<'a, M: 'a>(width: f32, height: f32) -> Container<'a, M> {
             background: Some(iced::Background::Color(theme.colors.shell.line)),
             ..Default::default()
         })
-}
-
-/// "Import or restore · (coin) network", then whatever trails it.
-pub(crate) fn header<'a, M: 'a>(
-    chain: ChainId,
-    network: &'a str,
-    light: bool,
-    trailing: Option<Element<'a, M>>,
-) -> Element<'a, M> {
-    Row::new()
-        .align_y(Alignment::Center)
-        .spacing(12)
-        .push(p1_bold("Import or restore"))
-        .push(rule(1.0, 20.0))
-        .push(
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(coin(chain, light, 16.0))
-                .push(p2_regular(network).style(theme::text::secondary)),
-        )
-        .push(Space::new().width(Length::Fill))
-        .push_maybe(trailing)
-        .into()
 }
 
 /// The path list's width and padding.
@@ -468,35 +547,6 @@ pub(crate) fn nav_style(
     }
 }
 
-/// The header over the path list beside the path's own region.
-pub(crate) fn split<'a, M: 'a>(
-    header: Element<'a, M>,
-    nav: Element<'a, M>,
-    region: Element<'a, M>,
-) -> Element<'a, M> {
-    Column::new()
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .push(Container::new(header).padding([16, 28]).width(Length::Fill))
-        .push(full_rule())
-        .push(
-            Row::new()
-                .height(Length::Fill)
-                .push(nav)
-                .push(
-                    Container::new(Space::new())
-                        .width(Length::Fixed(1.0))
-                        .height(Length::Fill)
-                        .style(|theme: &theme::Theme| iced::widget::container::Style {
-                            background: Some(iced::Background::Color(theme.colors.shell.line)),
-                            ..Default::default()
-                        }),
-                )
-                .push(region),
-        )
-        .into()
-}
-
 /// A full-width horizontal rule.
 pub(crate) fn full_rule<'a, M: 'a>() -> Element<'a, M> {
     Container::new(Space::new())
@@ -507,11 +557,6 @@ pub(crate) fn full_rule<'a, M: 'a>() -> Element<'a, M> {
             ..Default::default()
         })
         .into()
-}
-
-/// A network's full name ("Bitcoin mainnet"), as the header shows it.
-pub(crate) fn network_name(chain: ChainId) -> &'static str {
-    super::launcher_chrome::network_name(chain)
 }
 
 /// Every text a view lays out at 1440×900, in tree order.
