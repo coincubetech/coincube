@@ -4015,7 +4015,7 @@ mod tests {
             .activity
             .show_for_test(ChainId::Bitcoin, Err(Unavailable::LocalNodeNotRunning));
         assert!(!inspect(&home, "launcher-activity-unavailable").contains("NEXT HALVING"));
-        assert!(launcher(&home, "launcher-activity-why").contains("Local node isn't running"));
+        assert!(launcher(&home, "launcher-activity-why").contains("Local node didn't answer"));
         // Turned off in App preferences: no band and no dock control.
         home.catalog
             .activity
