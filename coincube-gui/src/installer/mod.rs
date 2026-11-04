@@ -816,6 +816,11 @@ impl Installer {
                     )
                 })
             });
+        context.connect_signed_in_at_launch = context
+            .coincube_client
+            .as_ref()
+            .and_then(|client| client.token())
+            .is_some();
         let context = context;
 
         let restore = RestorePath::of(&user_flow).map(|path| (path, chain));
@@ -3845,8 +3850,8 @@ mod create_vault_frame_tests {
         }
     }
 
-    /// Connect stays on the stepper once it has its token, from the Cube's
-    /// session or the sign-in it just did, although the step then skips.
+    /// Connect stays on the stepper once the user has signed in there,
+    /// although the step then skips.
     #[test]
     fn connect_stays_after_sign_in() {
         for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
@@ -3862,6 +3867,18 @@ mod create_vault_frame_tests {
                 assert_eq!(steps, (FULL.to_vec(), index), "{:?} {:?}", chain, stage);
             }
         }
+        // A Cube that is already signed in passes Connect without showing
+        // it, so the stepper leaves it out from the start.
+        let mut vault = in_cube(ChainId::Bitcoin);
+        vault.context.connect_signed_in_at_launch = true;
+        let without_connect = ["Vault", "Policy", "Keys", "Backup", "Node", "Name", "Done"];
+        assert_eq!(vault.create_vault_steps(), (without_connect.to_vec(), 0));
+        vault.context.connect_jwt = Some(zeroize::Zeroizing::new("jwt".to_string()));
+        assert_eq!(
+            at(&mut vault, VaultStage::Node).create_vault_steps(),
+            (without_connect.to_vec(), 4)
+        );
+
         // Regtest has no Connect step.
         let mut vault = in_cube(ChainId::Regtest);
         let (labels, active) = at(&mut vault, VaultStage::Node).create_vault_steps();

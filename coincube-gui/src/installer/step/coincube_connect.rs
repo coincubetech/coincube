@@ -104,10 +104,11 @@ impl Step for CoincubeConnectStep {
     fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
         Some(crate::installer::VaultStage::Connect)
     }
-    /// A signed-in Cube's token, or the one this step just collected, skips
-    /// the step but not its place on the stepper.
+    /// The token this step collected skips the step but keeps its place
+    /// on the stepper. A session the installer was launched with is adopted
+    /// without the step ever showing, so that one leaves it off.
     fn off_vault_stepper(&self, ctx: &Context) -> bool {
-        Self::never_runs(ctx)
+        Self::never_runs(ctx) || ctx.connect_signed_in_at_launch
     }
     /// Adopt an already-authenticated Connect session forwarded from the
     /// app (`ctx.coincube_client`) the first time this step becomes
