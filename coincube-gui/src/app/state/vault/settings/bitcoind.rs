@@ -546,6 +546,13 @@ impl State for BitcoindSettingsState {
                     self.pending_node_setup = None;
                     self.warning = None;
                     self.full_config = daemon.config().cloned();
+                    if self.full_config.as_ref().is_some_and(|cfg| {
+                        matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_)))
+                    }) {
+                        // The App cleared its switch intent after promotion;
+                        // retire the open panel's copy as well.
+                        self.recovery_requested = false;
+                    }
                     if self.cancel_node_setup_in_flight {
                         self.cancel_node_setup_in_flight = false;
                         if let Some(cfg) = daemon.config() {
@@ -1406,8 +1413,17 @@ impl State for BitcoindSettingsState {
                 crate::node::history::Phase::Complete | crate::node::history::Phase::Cancelled
             )
         });
+        let local_in_use = self
+            .full_config
+            .as_ref()
+            .is_some_and(|cfg| matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_))));
+        // New blocks do not undo a successful backend switch. A completed
+        // transfer must not leave a disabled "Switch" prompt on an active node,
+        // even if an old panel/cache still carries the original request.
         let history_card = history_managed
-            && (self.recovery_requested || recovery_active || cache.node_history.busy);
+            && ((!local_in_use && self.recovery_requested)
+                || recovery_active
+                || cache.node_history.busy);
         let content = view::vault::settings::bitcoind_settings(menu, cache, {
             let mut setting_panels = Vec::new();
             let mut advanced_disclosure = false;
@@ -4619,6 +4635,8 @@ mod tests {
 
     #[tokio::test]
     async fn history_controls_follow_switch_intent_and_advanced_disclosure() {
+        use crate::node::history::{Binding, Phase, Recovery};
+        use coincube_core::miniscript::bitcoin::{hashes::Hash, BlockHash};
         use iced::advanced::{
             layout,
             renderer::Headless,
@@ -4665,6 +4683,8 @@ mod tests {
             (false, false, false, true, true, true, true),
             (true, false, false, false, false, false, false),
             (true, false, false, false, true, false, true),
+            (true, false, false, true, false, false, false),
+            (true, false, false, true, true, false, true),
             (false, true, false, true, true, false, false),
             (false, false, true, true, true, false, false),
         ] {
@@ -4672,6 +4692,31 @@ mod tests {
             let mut cache = cache.clone();
             if local {
                 cfg.bitcoin_backend = Some(BitcoinBackend::Bitcoind(managed.clone()));
+                cfg.pending_bitcoind = None;
+                if clicked {
+                    // The transfer finished at 974579. Four new headers must
+                    // not revive its switch prompt once the node is in use.
+                    let hash = BlockHash::all_zeros();
+                    let mut job = Recovery::new(
+                        Binding {
+                            genesis: hash,
+                            node_instance: "fixture".into(),
+                            endpoint: "fixture".into(),
+                            wallet: "fixture".into(),
+                            descriptor: "fixture".into(),
+                        },
+                        974000,
+                        974579,
+                        hash,
+                    )
+                    .unwrap();
+                    job.phase = Phase::Complete;
+                    cache.node_history.job = Some(job);
+                    cache.node_history.reconciled = true;
+                    cache.node_history_switch_requested = true;
+                    cache.node_bitcoind_sync_progress = Some(1.0);
+                    cache.node_bitcoind_sync_heights = Some((974579, 974583));
+                }
             }
             if external {
                 cfg.pending_bitcoind = Some(bitcoind_config(BitcoindRpcAuth::CookieFile(
@@ -4736,7 +4781,52 @@ mod tests {
                 labels.0.iter().any(|text| text == "Block retention"),
                 retention
             );
+            if local && clicked {
+                assert!(labels.0.iter().any(|text| text == "In use · Local Node"));
+                assert!(labels.0.iter().any(|text| text == "Catching up 99.9%"));
+                assert!(!labels.0.iter().any(|text| text == "Switch to local node"));
+            }
         }
+    }
+
+    #[test]
+    fn successful_local_switch_retires_the_open_panels_recovery_intent() {
+        let cache = Cache {
+            node_history_switch_requested: true,
+            ..Cache::default()
+        };
+        let mut connect = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
+        let node = bitcoind_config(BitcoindRpcAuth::CookieFile(PathBuf::from(
+            "/tmp/bitcoin/.cookie",
+        )));
+        connect.pending_bitcoind = Some(node.clone());
+        let mut state = BitcoindSettingsState::new(Some(connect.clone()), &cache, false, false);
+        assert!(state.recovery_requested);
+
+        // Updating Connect, or a failed switch, must preserve the unfinished
+        // transfer. Only successfully adopting the local backend completes it.
+        let _ = state.update(
+            Some(daemon(Some(connect.clone()))),
+            &cache,
+            Message::DaemonConfigLoaded(Ok(())),
+        );
+        assert!(state.recovery_requested);
+        let _ = state.update(
+            Some(daemon(Some(connect.clone()))),
+            &cache,
+            Message::DaemonConfigLoaded(Err(Error::Unexpected("switch failed".into()))),
+        );
+        assert!(state.recovery_requested);
+
+        let mut local = connect;
+        local.bitcoin_backend = Some(BitcoinBackend::Bitcoind(node));
+        local.pending_bitcoind = None;
+        let _ = state.update(
+            Some(daemon(Some(local))),
+            &cache,
+            Message::DaemonConfigLoaded(Ok(())),
+        );
+        assert!(!state.recovery_requested);
     }
 
     #[test]
