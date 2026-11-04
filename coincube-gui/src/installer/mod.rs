@@ -3687,6 +3687,62 @@ mod restore_frame_tests {
         }
     }
 
+    /// Opt-in frames of every Create Cube step the installer draws, at the
+    /// minimum window in both themes: `LAUNCHER_CAPTURE_DIR=<dir> cargo test
+    /// -p coincube-gui --lib create_steps_capture -- --ignored`.
+    #[test]
+    #[ignore = "writes PNG frames; needs a GPU adapter"]
+    fn create_steps_capture() {
+        use crate::home::launcher_capture::{renderer, save};
+        let Ok(directory) = std::env::var("LAUNCHER_CAPTURE_DIR") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut renderer = renderer().expect("wgpu headless renderer");
+        let size = iced::Size::new(1024.0, 768.0);
+        let mut create = installer(UserFlow::CreateWallet);
+        // The descriptor steps need the policy the Keys step would build.
+        create.context.descriptor = Some(
+            std::str::FromStr::from_str("wsh(or_d(pk([8a550171/48'/1'/0'/2']tpubDFnCs5ZaCqopaNhgLCiXAwbkaBdcnuMt1VFoPsRpUrpidyvzG67MYjkfxw6HnTBhHqeU3xw2ioNBVcWY3jXwGhSyppEQvtn38GsL7RH1eef/<0;1>/*),and_v(v:pkh([8a550171/48'/1'/0'/2']tpubDFnCs5ZaCqopaNhgLCiXAwbkaBdcnuMt1VFoPsRpUrpidyvzG67MYjkfxw6HnTBhHqeU3xw2ioNBVcWY3jXwGhSyppEQvtn38GsL7RH1eef/<2;3>/*),older(52596))))#jz5sm0xn")
+                .unwrap(),
+        );
+        for index in 0..create.steps.len() {
+            create.current = index;
+            create.steps[index].load_context(&create.context);
+            for (appearance, theme) in [
+                ("dark", coincube_ui::theme::Theme::dark()),
+                ("light", coincube_ui::theme::Theme::light()),
+            ] {
+                save(
+                    &mut renderer,
+                    create.view(),
+                    size,
+                    &theme,
+                    directory.join(format!("create-step-{index:02}-{appearance}.png")),
+                );
+            }
+        }
+        // Signed in to Connect, the Node step leads with Connect instead.
+        create.context.use_coincube_connect = true;
+        // `SelectBitcoindTypeStep`'s place in the CreateWallet list.
+        let node = 7;
+        create.current = node;
+        create.steps[node].load_context(&create.context);
+        for (appearance, theme) in [
+            ("dark", coincube_ui::theme::Theme::dark()),
+            ("light", coincube_ui::theme::Theme::light()),
+        ] {
+            save(
+                &mut renderer,
+                create.view(),
+                size,
+                &theme,
+                directory.join(format!("create-step-{node:02}-connect-{appearance}.png")),
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_phone_recovery_runs_in_import_or_restore() {
         let phone = installer(UserFlow::RecoverOwnCubeWithPhone {

@@ -3,10 +3,10 @@ pub mod diagram;
 pub mod inheritance;
 pub mod multisig_security_wallet;
 
-use iced::{widget::Space, Alignment, Length};
+use iced::{alignment, widget::Space, Alignment, Length};
 
 use coincube_ui::{
-    component::text::{h3, p1_regular, p2_regular, Text},
+    component::text::{p1_regular, p2_regular, Text},
     theme,
     widget::{action::Action, *},
 };
@@ -48,16 +48,17 @@ pub fn choose_descriptor_template(
     layout(
         progress,
         None,
-        "Choose wallet type",
+        "Choose a Vault policy",
         Column::new()
-            .max_width(800.0)
-            .align_x(Alignment::Start)
+            .align_x(Alignment::Center)
             .spacing(10)
-            .push(h3("Choose a Vault policy"))
             .push(
                 p2_regular("Choose how your Vault can be spent now and recovered after inactivity. Select a policy to see its keys and recovery timing.")
-                    .style(theme::text::secondary),
+                    .style(theme::text::secondary)
+                    .width(Length::Fill)
+                    .align_x(alignment::Horizontal::Center),
             )
+            .push(Space::new().height(Length::Fixed(6.0)))
             .push(template_card(
                 "simple",
                 ui_instance,
@@ -105,6 +106,12 @@ pub fn choose_descriptor_template(
     )
 }
 
+/// Explanatory copy, centred line by line in the step's column.
+fn centred_copy<'a>(copy: coincube_ui::widget::Text<'a>) -> coincube_ui::widget::Text<'a> {
+    copy.width(Length::Fill)
+        .align_x(alignment::Horizontal::Center)
+}
+
 /// Shared introduction composition. The selected policy is identified by its
 /// heading after the chooser's existing select-and-advance action.
 #[allow(clippy::too_many_arguments)]
@@ -121,38 +128,33 @@ pub(super) fn template_introduction(
     layout(
         progress,
         None,
-        "Introduction",
+        title,
         Column::new()
-            .align_x(Alignment::Start)
-            .max_width(800.0)
+            .align_x(Alignment::Center)
             .spacing(16)
-            .push(h3(title))
-            .push(p1_regular(keys_needed))
-            .push(p2_regular(policy_explanation).style(theme::text::secondary))
+            .push(centred_copy(p1_regular(keys_needed)))
+            .push(centred_copy(
+                p2_regular(policy_explanation).style(theme::text::secondary),
+            ))
             .push(policy_timeline(rows))
-            .push(p2_regular(tip).style(theme::text::secondary))
-            .push(
-                show_keychain_tip.then_some(
+            .push(centred_copy(p2_regular(tip).style(theme::text::secondary)))
+            .push(show_keychain_tip.then(|| {
+                centred_copy(
                     p2_regular("A family member or friend can contribute a Keychain key remotely.")
                         .style(theme::text::secondary),
-                ),
-            )
+                )
+            }))
+            .push(Space::new().height(Length::Fixed(8.0)))
             .push(
-                Row::new()
-                    .width(Length::Fill)
-                    .push(Space::new().width(Length::Fill))
-                    .push(
-                        Action::new(
-                            format!("tenshu.installer.vault.intro.{}.next", ui_instance),
-                            p2_regular("Next"),
-                            Message::FocusAction,
-                        )
-                        .style(theme::button::primary)
-                        .width(Length::Fixed(200.0))
-                        .on_press(Message::Next),
-                    ),
-            )
-            .push(Space::new().height(Length::Fixed(24.0))),
+                Action::new(
+                    format!("tenshu.installer.vault.intro.{}.next", ui_instance),
+                    Container::new(p2_regular("Next")).center_x(Length::Fill),
+                    Message::FocusAction,
+                )
+                .style(theme::button::primary)
+                .width(Length::Fixed(200.0))
+                .on_press(Message::Next),
+            ),
         true,
         Some(Message::Previous),
     )

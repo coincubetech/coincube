@@ -521,18 +521,23 @@ pub fn register_descriptor<'a>(
                     )
                     .width(Length::Fill),
             )
-            .push(created_desc.then_some(checkbox(done)
-                .label("I have registered the descriptor on my device(s)")
-            .on_toggle(Message::UserActionDone)))
-            .push(if !created_desc || (done && !processing) {
-                button::secondary(None, "Next")
-                    .on_press(Message::Next)
-                    .width(Length::Fixed(200.0))
-            } else {
-                button::secondary(None, "Next").width(Length::Fixed(200.0))
-            })
-            .push(Space::new().height(5))
-            .spacing(50),
+            .push(
+                Column::new()
+                    .spacing(24)
+                    .align_x(Alignment::Center)
+                    .width(Length::Fill)
+                    .push(created_desc.then_some(checkbox(done)
+                        .label("I have registered the descriptor on my device(s)")
+                        .on_toggle(Message::UserActionDone)))
+                    .push(if !created_desc || (done && !processing) {
+                        button::secondary(None, "Next")
+                            .on_press(Message::Next)
+                            .width(Length::Fixed(200.0))
+                    } else {
+                        button::secondary(None, "Next").width(Length::Fixed(200.0))
+                    }),
+            )
+            .spacing(40),
         true,
         if !processing {
         Some(Message::Previous)
@@ -628,19 +633,24 @@ pub fn backup_descriptor<'a>(
                     .max_width(1500),
             )
             .push(
-                checkbox(done)
-                    .label("I have backed up my descriptor")
-                    .on_toggle(Message::UserActionDone),
+                Column::new()
+                    .spacing(24)
+                    .align_x(Alignment::Center)
+                    .width(Length::Fill)
+                    .push(
+                        checkbox(done)
+                            .label("I have backed up my descriptor")
+                            .on_toggle(Message::UserActionDone),
+                    )
+                    .push(if done {
+                        button::primary(None, "Next")
+                            .on_press(Message::Next)
+                            .width(Length::Fixed(200.0))
+                    } else {
+                        button::secondary(None, "Next").width(Length::Fixed(200.0))
+                    }),
             )
-            .push(if done {
-                button::primary(None, "Next")
-                    .on_press(Message::Next)
-                    .width(Length::Fixed(200.0))
-            } else {
-                button::secondary(None, "Next").width(Length::Fixed(200.0))
-            })
-            .push(Space::new().height(20.0))
-            .spacing(50),
+            .spacing(40),
         true,
         Some(Message::Previous),
     )
@@ -891,26 +901,24 @@ pub fn define_bitcoin_node<'a>(
         } else {
             Some(Container::new(Space::new().height(Length::Fixed(21.0))))
         })
-        .push(
-            Row::new()
-                .spacing(10)
-                .push(Container::new(
-                    button::secondary(None, "Check connection")
-                        .on_press_maybe(if can_try_ping && !waiting_for_ping_result {
-                            Some(Message::DefineNode(DefineNode::Ping))
-                        } else {
-                            None
-                        })
-                        .width(Length::Fixed(200.0)),
-                ))
-                .push(if is_running.map(|res| res.is_ok()).unwrap_or(false) {
-                    button::secondary(None, "Next")
-                        .on_press(Message::Next)
-                        .width(Length::Fixed(200.0))
+        .push(actions([
+            button::secondary(None, "Check connection")
+                .on_press_maybe(if can_try_ping && !waiting_for_ping_result {
+                    Some(Message::DefineNode(DefineNode::Ping))
                 } else {
-                    button::secondary(None, "Next").width(Length::Fixed(200.0))
-                }),
-        )
+                    None
+                })
+                .width(Length::Fixed(200.0))
+                .into(),
+            if is_running.map(|res| res.is_ok()).unwrap_or(false) {
+                button::secondary(None, "Next")
+                    .on_press(Message::Next)
+                    .width(Length::Fixed(200.0))
+            } else {
+                button::secondary(None, "Next").width(Length::Fixed(200.0))
+            }
+            .into(),
+        ]))
         .spacing(50);
 
     layout(
@@ -1103,21 +1111,23 @@ pub fn define_coincube_connect<'a>(
         } else {
             ("Sign In", "New to COINCUBE | Connect? Create account")
         };
+        // The pitch and its list read as one centred block over the form.
         Column::new()
             .spacing(20)
             .push(text(
                 "Create a free COINCUBE | Connect account to unlock:",
-            ))
+            ).width(Length::Fill).align_x(alignment::Horizontal::Center))
             .push(
-                Column::new()
+                Container::new(Column::new()
                     .spacing(8)
                     .push(text("  •  Hosted Esplora server — use your Vault instantly while your node syncs"))
                     .push(text("  •  Encrypted wallet descriptor backup"))
-                    .push(text("  •  Integration with the companion Keychain mobile app")),
+                    .push(text("  •  Integration with the companion Keychain mobile app")))
+                    .center_x(Length::Fill),
             )
             .push(text(
                 "Enter your email address to receive a verification code.",
-            ))
+            ).width(Length::Fill).align_x(alignment::Horizontal::Center))
             .push(
                 form::Form::new_trimmed("your@email.com", email, |msg| {
                     Message::CoincubeConnect(CoincubeConnectMsg::EmailEdited(msg))
@@ -1128,29 +1138,38 @@ pub fn define_coincube_connect<'a>(
             )
             .push(error.map(|e| text(e).style(theme::text::warning)))
             .push(
-                button::secondary(None, action_label)
-                    .width(Length::Fixed(250.0))
-                    .on_press_maybe(if !processing && email.valid {
-                        Some(Message::CoincubeConnect(CoincubeConnectMsg::RequestOtp))
-                    } else {
-                        None
-                    }),
+                Column::new()
+                    .spacing(8)
+                    .align_x(Alignment::Center)
+                    .width(Length::Fill)
+                    .push(
+                        button::secondary(None, action_label)
+                            .width(Length::Fixed(250.0))
+                            .on_press_maybe(if !processing && email.valid {
+                                Some(Message::CoincubeConnect(CoincubeConnectMsg::RequestOtp))
+                            } else {
+                                None
+                            }),
+                    )
+                    .push(
+                        button::transparent(None, toggle_label)
+                            .on_press(Message::CoincubeConnect(CoincubeConnectMsg::ToggleMode)),
+                    )
+                    .push(allow_skip.then(|| button::transparent(None, "Skip for now")
+                            .on_press(Message::CoincubeConnect(CoincubeConnectMsg::Skip)))),
             )
-            .push(
-                button::transparent(None, toggle_label)
-                    .on_press(Message::CoincubeConnect(CoincubeConnectMsg::ToggleMode)),
-            )
-            .push(Space::new().height(Length::Fixed(10.0)))
-            .push(allow_skip.then(|| button::transparent(None, "Skip for now")
-                    .on_press(Message::CoincubeConnect(CoincubeConnectMsg::Skip))))
             .into()
     } else {
         Column::new()
             .spacing(20)
-            .push(text(format!(
-                "Enter the verification code sent to {}",
-                email.value
-            )))
+            .push(
+                text(format!(
+                    "Enter the verification code sent to {}",
+                    email.value
+                ))
+                .width(Length::Fill)
+                .align_x(alignment::Horizontal::Center),
+            )
             .push(
                 form::Form::new_trimmed("6-digit code", otp, |msg| {
                     Message::CoincubeConnect(CoincubeConnectMsg::OtpEdited(msg))
@@ -1160,15 +1179,14 @@ pub fn define_coincube_connect<'a>(
                 .padding(10),
             )
             .push(error.map(|e| text(e).style(theme::text::warning)))
-            .push(
-                button::secondary(None, "Resend Code")
-                    .width(Length::Fixed(200.0))
-                    .on_press_maybe(if !processing {
-                        Some(Message::CoincubeConnect(CoincubeConnectMsg::ResendOtp))
-                    } else {
-                        None
-                    }),
-            )
+            .push(actions([button::secondary(None, "Resend Code")
+                .width(Length::Fixed(200.0))
+                .on_press_maybe(if !processing {
+                    Some(Message::CoincubeConnect(CoincubeConnectMsg::ResendOtp))
+                } else {
+                    None
+                })
+                .into()]))
             .into()
     };
 
@@ -1531,7 +1549,7 @@ pub fn select_bitcoind_type<'a>(
                 .style(theme::button::secondary)
                 .on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseExternal(false))));
         }
-        let content = Container::new(choices).padding(30);
+        let content = Container::new(choices).padding(30).center_x(Length::Fill);
         return layout(
             progress,
             None,
@@ -1563,7 +1581,7 @@ pub fn select_bitcoind_type<'a>(
         };
         Column::new()
             .spacing(12)
-            .max_width(620)
+            .width(Length::Fill)
             .push(node_option_card(
                 ui_instance,
                 "existing",
@@ -1596,7 +1614,7 @@ pub fn select_bitcoind_type<'a>(
 
         let default_col = Column::new()
             .spacing(20)
-            .max_width(620)
+            .width(Length::Fill)
             .push(text("Start with COINCUBE | Connect").bold())
             .push(text(
                 "Your Vault will use our hosted Esplora server immediately \
@@ -1624,17 +1642,19 @@ pub fn select_bitcoind_type<'a>(
         };
 
         let default_card = Container::new(
-            default_col.push(text(node_description)).push(
-                Action::new(
+            default_col
+                .push(text(node_description))
+                .push(actions([Action::new(
                     format!("tenshu.installer.node.{}.continue", ui_instance),
-                    p1_regular("Continue"),
+                    Container::new(p1_regular("Continue")).center_x(Length::Fill),
                     Message::FocusAction,
                 )
                 .style(theme::button::primary)
+                .width(Length::Fixed(200.0))
                 .on_press(Message::SelectBitcoindType(
                     message::SelectBitcoindTypeMsg::ContinueWithConnect,
-                )),
-            ),
+                ))
+                .into()])),
         )
         .padding(30);
 
@@ -1655,6 +1675,8 @@ pub fn select_bitcoind_type<'a>(
 
         let mut col = Column::new()
             .spacing(30)
+            .width(Length::Fill)
+            .align_x(Alignment::Center)
             .push(default_card)
             .push(advanced_toggle);
 
@@ -1750,15 +1772,12 @@ pub fn start_internal_bitcoind<'a>(
                 Message::InternalBitcoind(message::InternalBitcoindMsg::RegularComputerPreset),
             )));
         }
-        col = col.push(
-            Row::new().push(
-                button::secondary(None, "Download & start")
-                    .width(Length::Fixed(220.0))
-                    .on_press(Message::InternalBitcoind(
-                        message::InternalBitcoindMsg::ConfirmFlavor,
-                    )),
-            ),
-        );
+        col = col.push(actions([button::secondary(None, "Download & start")
+            .width(Length::Fixed(220.0))
+            .on_press(Message::InternalBitcoind(
+                message::InternalBitcoindMsg::ConfirmFlavor,
+            ))
+            .into()]));
         return layout(
             progress,
             None,
@@ -1878,18 +1897,15 @@ pub fn start_internal_bitcoind<'a>(
                 }
             })
             .spacing(50)
-            .push(
-                Row::new().push(
-                    button::secondary(None, "Next")
-                        .width(Length::Fixed(200.0))
-                        .on_press_maybe(if let Some(Ok(_)) = started {
-                            Some(Message::Next)
-                        } else {
-                            None
-                        }),
-                ),
-            )
-            .push(error.map(|e| card::invalid(text(e)))),
+            .push(error.map(|e| card::invalid(text(e))))
+            .push(actions([button::secondary(None, "Next")
+                .width(Length::Fixed(200.0))
+                .on_press_maybe(if let Some(Ok(_)) = started {
+                    Some(Message::Next)
+                } else {
+                    None
+                })
+                .into()])),
         true,
         Some(message::Message::InternalBitcoind(
             message::InternalBitcoindMsg::Previous,
@@ -1978,6 +1994,7 @@ pub fn install_titled<'a>(
                 card::simple(text(caption).style(theme::text::secondary)).padding(10)
             }))
             .spacing(10)
+            .align_x(Alignment::Center)
             .width(Length::Fill),
         true,
         prev_msg,
@@ -2260,14 +2277,16 @@ pub fn backup_mnemonic<'a>(
         email,
         "Reminder: Back Up Your Master Seed",
         Column::new()
-            .push(text(prompt::MNEMONIC_HELP))
             .push(
-                button::secondary(None, "Next")
-                    .on_press(Message::Next)
-                    .width(Length::Fixed(200.0)),
+                text(prompt::MNEMONIC_HELP)
+                    .width(Length::Fill)
+                    .align_x(alignment::Horizontal::Center),
             )
-            .push(Space::new().height(20.0))
-            .spacing(50),
+            .push(actions([button::secondary(None, "Next")
+                .on_press(Message::Next)
+                .width(Length::Fixed(200.0))
+                .into()]))
+            .spacing(40),
         true,
         Some(Message::Previous),
     )
@@ -2452,7 +2471,7 @@ pub fn choose_backend(progress: (usize, usize)) -> Element<'static, Message> {
 }
 
 pub fn login(progress: (usize, usize), connection_step: Element<Message>) -> Element<Message> {
-    layout(
+    layout_start(
         progress,
         None,
         "Sign in to Connect",
@@ -2467,7 +2486,6 @@ pub fn login(progress: (usize, usize), connection_step: Element<Message>) -> Ele
                 ))
                 .push(connection_step),
         ),
-        true,
         Some(Message::Previous),
     )
 }
@@ -2679,20 +2697,20 @@ pub fn wallet_alias<'a>(
                             .size(text::P1_SIZE)
                             .padding(10),
                     )
-                    .push(p2_regular(
-                        "You will be able to change it later in Settings > Wallet",
-                    )),
+                    .push(
+                        p2_regular("You will be able to change it later in Settings > Wallet")
+                            .style(theme::text::secondary),
+                    ),
             )
-            .push(
-                button::secondary(None, "Next")
-                    .width(Length::Fixed(200.0))
-                    .on_press_maybe(if wallet_alias.valid {
-                        Some(Message::Next)
-                    } else {
-                        None
-                    }),
-            )
-            .spacing(50),
+            .push(actions([button::secondary(None, "Next")
+                .width(Length::Fixed(200.0))
+                .on_press_maybe(if wallet_alias.valid {
+                    Some(Message::Next)
+                } else {
+                    None
+                })
+                .into()]))
+            .spacing(40),
         true,
         Some(Message::Previous),
     )
@@ -2735,6 +2753,46 @@ pub(super) fn layout<'a>(
     padding_left: bool,
     previous_message: Option<Message>,
 ) -> Element<'a, Message> {
+    titled_layout(
+        progress,
+        email,
+        title,
+        alignment::Horizontal::Center,
+        content,
+        padding_left,
+        previous_message,
+    )
+}
+
+/// [`layout`] with the title on the column's left edge, for screens whose
+/// content opens with a left-aligned eyebrow the title must line up with.
+pub(super) fn layout_start<'a>(
+    progress: (usize, usize),
+    email: Option<&'a str>,
+    title: &'static str,
+    content: impl Into<Element<'a, Message>>,
+    previous_message: Option<Message>,
+) -> Element<'a, Message> {
+    titled_layout(
+        progress,
+        email,
+        title,
+        alignment::Horizontal::Left,
+        content,
+        true,
+        previous_message,
+    )
+}
+
+fn titled_layout<'a>(
+    progress: (usize, usize),
+    email: Option<&'a str>,
+    title: &'static str,
+    title_align: alignment::Horizontal,
+    content: impl Into<Element<'a, Message>>,
+    padding_left: bool,
+    previous_message: Option<Message>,
+) -> Element<'a, Message> {
     if let Some(path_title) = FRAMED.with(|framed| framed.get()) {
         let mut back = button::secondary(Some(icon::previous_icon()), "Back").width(Length::Shrink);
         if let Some(message) = previous_message {
@@ -2753,61 +2811,57 @@ pub(super) fn layout<'a>(
             .into();
     }
     let mut prev_button =
-        button::secondary(Some(icon::previous_icon()), "Back").width(Length::Fixed(150.0));
+        button::secondary(Some(icon::previous_icon()), "Back").width(Length::Shrink);
     if let Some(msg) = previous_message {
         prev_button = prev_button.on_press(msg);
     }
+    // One centred column per step, as on the Home-owned steps before the
+    // installer: Back and the progress share its top edge, the title is
+    // centred above the content, and the content keeps the column's width.
+    let top = Row::new()
+        .align_y(Alignment::Center)
+        .spacing(16)
+        .push(prev_button)
+        .push(Space::new().width(Length::Fill))
+        .push(email.map(|e| p2_regular(e).style(theme::text::success)))
+        .push((progress.1 > 0).then(|| {
+            p2_regular(format!("{} | {}", progress.0, progress.1)).style(theme::text::secondary)
+        }));
+    let column = Column::new()
+        .width(Length::Fill)
+        .max_width(if padding_left { 760 } else { 960 })
+        .push(top)
+        .push(Space::new().height(Length::Fixed(32.0)))
+        .push(
+            Container::new(h3(title))
+                .width(Length::Fill)
+                .align_x(title_align),
+        )
+        .push(Space::new().height(Length::Fixed(32.0)))
+        .push(content)
+        .push(Space::new().height(Length::Fixed(40.0)));
     Container::new(scrollable(
-        Column::new()
-            .width(Length::Fill)
-            .push(
-                Row::new()
-                    .push(Space::new().width(Length::Fill))
-                    .push(email.map(|e| {
-                        Container::new(p1_regular(e).style(theme::text::success)).padding(20)
-                    })),
-            )
-            .push(Space::new().height(Length::Fixed(50.0)))
-            .push(
-                Row::new()
-                    .align_y(Alignment::Center)
-                    .push(Container::new(prev_button).center_x(Length::FillPortion(2)))
-                    .push(Container::new(h3(title)).width(Length::FillPortion(8)))
-                    .push(if progress.1 > 0 {
-                        Some(
-                            Container::new(text(format!("{} | {}", progress.0, progress.1)))
-                                .center_x(Length::FillPortion(2)),
-                        )
-                    } else {
-                        Some(Container::new(Space::new()).width(Length::FillPortion(2)))
-                    }),
-            )
-            .push(
-                Row::new()
-                    .push(Space::new().width(Length::FillPortion(2)))
-                    .push(
-                        Container::new(
-                            Column::new()
-                                .push(Space::new().height(Length::Fixed(40.0)))
-                                .push(content),
-                        )
-                        .width(Length::FillPortion(if padding_left {
-                            8
-                        } else {
-                            10
-                        })),
-                    )
-                    .push(if padding_left {
-                        Some(Space::new().width(Length::FillPortion(2)))
-                    } else {
-                        None
-                    }),
-            ),
+        Container::new(column)
+            .padding([40, 24])
+            .center_x(Length::Fill),
     ))
     .center_x(Length::Fill)
     .height(Length::Fill)
     .width(Length::Fill)
     .style(theme::container::background)
+    .into()
+}
+
+/// A step's closing actions: one centred row under the content.
+pub(super) fn actions<'a>(
+    buttons: impl IntoIterator<Item = Element<'a, Message>>,
+) -> Element<'a, Message> {
+    Container::new(
+        Row::with_children(buttons)
+            .spacing(12)
+            .align_y(Alignment::Center),
+    )
+    .center_x(Length::Fill)
     .into()
 }
 
@@ -3193,14 +3247,13 @@ pub fn recovery_kit_restore<'a>(
 
     // This screen already shows progress through its own restore phases.
     // The generic installer count describes later PIN/node steps as well.
-    layout(
+    layout_start(
         (0, 0),
         Some(email.value.as_str()).filter(|value| {
             !value.is_empty() && !matches!(phase, RestorePhase::Email | RestorePhase::OtpEntry)
         }),
         title,
         content,
-        true,
         Some(Message::Previous),
     )
 }
