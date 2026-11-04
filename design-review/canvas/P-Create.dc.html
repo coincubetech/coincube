@@ -366,8 +366,6 @@ a.tbx-chip{color:var(--ink)}
           </sc-if>
         </sc-if>
 
-        <!-- ===== CUBE · Bitcoin Blake2b: installer RestorePinSetup ===== -->
-
         <!-- ===== PASSKEY registration overlay ===== -->
         <sc-if value="{{ stPasskey }}" hint-placeholder-val="{{ false }}">
           <h2 id="cc-h">Passkey Registration</h2>
@@ -468,12 +466,10 @@ a.tbx-chip{color:var(--ink)}
           </div>
         </sc-if>
 
-        <!-- Bitcoin Blake2b: installer BackupMnemonic -->
-
-        <!-- ===== CONNECT registration (after the Cube is written) / Blake2b installer Connect step ===== -->
+        <!-- ===== Create Vault · Connect step ===== -->
         <sc-if value="{{ stRegister }}" hint-placeholder-val="{{ false }}">
           <h2 id="cc-h">COINCUBE | Connect</h2>
-          <sc-if value="{{ b2bFam }}" hint-placeholder-val="{{ false }}"><p class="lead">Optional for Bitcoin Blake2b: without Connect, this Vault runs on its own managed node.</p></sc-if>
+          <sc-if value="{{ b2bFam }}" hint-placeholder-val="{{ false }}"><p class="lead">Optional for Bitcoin Blake2b: you can instead run this Vault on its own managed node, chosen on the next step.</p></sc-if>
           <ul class="sum">
             <li><span class="k">Account</span><span class="stt tone-ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M8 12.3l2.8 2.8L16.2 9.6"></path></svg>Signed in · alex@example.test</span></li>
             <li><span class="k">This Cube</span><span class="stt {{ regTone }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ regIcon }}"></path></svg>{{ regText }}</span></li>
@@ -702,10 +698,10 @@ a.tbx-chip{color:var(--ink)}
           </sc-if>
         </sc-if>
 
-        <!-- ===== Bitcoin Blake2b: wallet alias ===== -->
+        <!-- ===== Create Vault · wallet alias ===== -->
         <sc-if value="{{ stAlias }}" hint-placeholder-val="{{ false }}">
           <h2 id="cc-h">Give your wallet an alias</h2>
-          <div class="fld"><label for="cc-alias">Wallet alias:</label><input id="cc-alias" class="inp" type="text" value="Blake savings"><span class="info">You can change it later in Settings.</span></div>
+          <div class="fld"><label for="cc-alias">Wallet alias:</label><input id="cc-alias" class="inp" type="text" value="{{ aliasValue }}"><span class="info">You can change it later in Settings.</span></div>
         </sc-if>
 
         <!-- ===== DONE ===== -->
@@ -717,8 +713,8 @@ a.tbx-chip{color:var(--ink)}
             </sc-for>
           </ul>
           <div class="acts">
-            <a class="btn primary" href="P-Opening.dc.html">Open the Cube</a>
-            <a class="btn" href="P-Launcher.dc.html">Back to Cube list</a>
+            <button type="button" class="btn primary" onClick="{{ doneNext }}">{{ doneCta }}</button>
+            <sc-if value="{{ cubeDoneStep }}" hint-placeholder-val="{{ true }}"><a class="btn" href="P-Launcher.dc.html">Back to Cube list</a></sc-if>
           </div>
         </sc-if>
       </div>
@@ -768,14 +764,15 @@ class Component extends DCLogic {
       regtest: { label: 'Regtest', b2b: false, test: true, tag: 'Regtest' },
       blake2bTestnet4: { label: 'Bitcoin Blake2b Testnet4', b2b: true, test: true, tag: 'Blake2b Testnet4' }
     };
-    // an error lever jumps to the step (and sub-state) it belongs to; errors that only exist on a Bitcoin-family Cube reset the network
+    // an error lever jumps to the step (and sub-state) it belongs to; the node
+    // error only exists on the Bitcoin own-node form, so it resets the network
     const E = {
-      name: { step: 'cube' }, pinIncomplete: { step: 'cube', unlock: 'pin', std: true }, pinConfirm: { step: 'cube', unlock: 'pin', std: true },
-      pinMismatch: { step: 'cube', unlock: 'pin' }, limit: { step: 'cube', std: true }, passkey: { step: 'passkey', unlock: 'passkey', std: true },
-      words: { step: 'backup', bchoice: 'verify', std: true }, kitPassword: { step: 'backup', bchoice: 'kit', std: true },
-      kitSignedOut: { step: 'backup', bchoice: 'kit', std: true }, kitFailed: { step: 'backup', bchoice: 'kit', std: true },
-      noBackupAck: { step: 'backup', bchoice: 'choose', std: true }, register: { step: 'register' }, keys: { step: 'keys' },
-      node: { step: 'backend', backend: 'own', std: true }, download: { step: 'backend', backend: 'installing' }
+      name: { step: 'cube' }, pinIncomplete: { step: 'cube', unlock: 'pin' }, pinConfirm: { step: 'cube', unlock: 'pin' },
+      pinMismatch: { step: 'cube', unlock: 'pin' }, limit: { step: 'cube' }, passkey: { step: 'passkey', unlock: 'passkey' },
+      words: { step: 'backup', bchoice: 'verify' }, kitPassword: { step: 'backup', bchoice: 'kit' },
+      kitSignedOut: { step: 'backup', bchoice: 'kit' }, kitFailed: { step: 'backup', bchoice: 'kit' },
+      noBackupAck: { step: 'backup', bchoice: 'choose' }, register: { step: 'register' }, keys: { step: 'keys' },
+      node: { step: 'backend', backend: 'own' }, download: { step: 'backend', backend: 'installing' }
     };
 
     const fromLevers = () => {
@@ -787,13 +784,14 @@ class Component extends DCLogic {
         if (e.unlock) x.unlock = e.unlock;
         if (e.bchoice) x.bchoice = e.bchoice;
         if (e.backend) x.backend = e.backend;
+        if (x.err === 'node' && NETS[x.net].b2b) x.net = 'bitcoin';
       }
       // a chosen network implies its gate is open
       if (NETS[x.net].test) x.dev = true;
       if (NETS[x.net].b2b) x.b2bAccess = 'grantedBetaOn';
       if (x.step === 'passkey') x.unlock = 'passkey';
-      if (['vaultIntro', 'keys', 'backend'].indexOf(x.step) >= 0 && x.tmpl === 'none') x.tmpl = 'simple';
-      if (NETS[x.net].b2b && x.tmpl === 'none') x.tmpl = 'simple';
+      // Create Vault always builds a Vault; "Not now" leaves the wizard.
+      if (['network', 'cube', 'passkey', 'backup', 'cubeDone'].indexOf(x.step) < 0 && x.tmpl === 'none') x.tmpl = 'simple';
       if (x.step === 'backend' && x.backend === 'advanced') x.adv = true;
       return x;
     };
@@ -808,22 +806,21 @@ class Component extends DCLogic {
     // Two wizards (Robert, 2026-11-03), the same on every network including
     // Bitcoin Blake2b. Create Cube: name with a PIN or passkey, then backup;
     // the new Cube then opens. Create Vault runs from inside that Cube.
-    const CUBE_PATH = ['network', 'cube'].concat(pin ? [] : ['passkey'], ['backup']);
-    const VAULT_PATH = ['vaultType'].concat(s.tmpl === 'none' ? [] : ['vaultIntro', 'keys'], ['register', 'backend', 'alias', 'done']);
-    const inCube = ['network', 'cube', 'passkey', 'backup'].indexOf(s.step) >= 0;
+    const CUBE_PATH = ['network', 'cube'].concat(pin ? [] : ['passkey'], ['backup', 'cubeDone']);
+    const VAULT_PATH = ['vaultType', 'vaultIntro', 'keys', 'register', 'backend', 'alias', 'done'];
+    const inCube = ['network', 'cube', 'passkey', 'backup', 'cubeDone'].indexOf(s.step) >= 0;
     const path = inCube ? CUBE_PATH : VAULT_PATH;
     let step = s.step;
     if (path.indexOf(step) < 0) step = step === 'passkey' ? 'cube' : inCube ? 'network' : 'vaultType';
     const idx = path.indexOf(step);
     const wizardTitle = inCube ? 'Create Cube' : 'Create Vault';
-    // The Create Cube header ends with Done: the Cube opens once it is written.
-    const headerPath = inCube ? path.concat(['cubeDone']) : path;
     const LBL = { network: 'Network', cube: 'Cube', passkey: 'Passkey', backup: 'Backup', cubeDone: 'Done', register: 'Connect', vaultType: 'Vault', vaultIntro: 'Policy', keys: 'Keys', backend: 'Node', alias: 'Name', done: 'Done' };
-    const steps = headerPath.map((k, i) => ({ n: String(i + 1), label: LBL[k], cls: i === idx ? 'cur' : i < idx ? 'done' : '', current: i === idx ? 'step' : 'false', hasRule: i < headerPath.length - 1 }));
+    const steps = path.map((k, i) => ({ n: String(i + 1), label: LBL[k], cls: i === idx ? 'cur' : i < idx ? 'done' : '', current: i === idx ? 'step' : 'false', hasRule: i < path.length - 1 }));
     const to = (k, extra) => go(Object.assign({ step: k, err: 'none' }, extra || {}));
-    // The last Create Cube step opens the Cube, where Create Vault comes next.
-    const next = () => { if (idx < path.length - 1) to(path[idx + 1]); else if (inCube) to('vaultType'); };
-    const back = () => { if (idx > 0) to(path[idx - 1], path[idx - 1] === 'backup' ? { bchoice: 'choose' } : {}); };
+    const next = () => { if (idx < path.length - 1) to(path[idx + 1]); };
+    // Back from the first Create Vault step leaves the wizard for the open
+    // Cube (shown here as the Cube's created screen).
+    const back = () => { if (idx > 0) to(path[idx - 1], path[idx - 1] === 'backup' ? { bchoice: 'choose' } : {}); else if (!inCube) to('cubeDone'); };
 
     const I = {
       ok: 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M8 12.3l2.8 2.8L16.2 9.6',
@@ -874,7 +871,7 @@ class Component extends DCLogic {
 
     // ----- registration -----
     const kitSaved = s.bchoice === 'kit' || s.bchoice === 'saving';
-    const reg = err === 'register' ? ['tone-warn', I.warn, 'Not yet synced to Connect'] : kitSaved && !b2b ? ['tone-ok', I.ok, 'Backed up to Connect — recovery kit ready'] : ['tone-ok', I.ok, 'Registered to Connect — no recovery kit'];
+    const reg = err === 'register' ? ['tone-warn', I.warn, 'Not yet synced to Connect'] : kitSaved ? ['tone-ok', I.ok, 'Backed up to Connect — recovery kit ready'] : ['tone-ok', I.ok, 'Registered to Connect — no recovery kit'];
 
     // ----- templates -----
     const TPL = {
@@ -960,20 +957,23 @@ class Component extends DCLogic {
       if (step === 'vaultType' && s.tmpl === 'none') return go({ tmpl: 'simple' });
       next();
     };
-    const showFoot = step !== 'done' && step !== 'passkey' && !onBackup;
+    const showFoot = step !== 'done' && step !== 'cubeDone' && step !== 'passkey' && !onBackup;
 
     // ----- done -----
-    const vaultOn = s.tmpl !== 'none';
     const backupRow = s.bchoice === 'later' ? ['Backup', 'Backup not confirmed', 'tone-warn']
       : kitSaved ? ['Backup', 'Recovery Kit saved to Connect', 'tone-ok'] : ['Backup', 'Backup confirmed', 'tone-ok'];
-    const nodeRow = !vaultOn ? null : s.backend === 'own' ? ['Node', 'Your own node', ''] : s.backend === 'local' || s.backend === 'installing' ? ['Node', flavorName + ' · syncing', 'tone-muted'] : ['Node', s.installNode ? 'COINCUBE | Connect · local node syncing' : 'COINCUBE | Connect', ''];
-    const summary = [
+    const nodeRow = s.backend === 'own' ? ['Node', 'Your own node', ''] : s.backend === 'local' || s.backend === 'installing' ? ['Node', flavorName + ' · syncing', 'tone-muted'] : ['Node', s.installNode ? 'COINCUBE | Connect · local node syncing' : 'COINCUBE | Connect', ''];
+    // Create Cube ends with the Cube; Create Vault ends with its Vault.
+    const summary = (inCube ? [
       ['Network', N.label + (N.test ? ' · test network' : ''), ''],
       ['Unlock', pin ? 'PIN' : 'Passkey', ''],
       backupRow,
+      ['Connect', reg[2], err === 'register' ? 'tone-warn' : '']
+    ] : [
+      ['Vault', T.name + ' · ' + T.signers + ' keys · synthetic policy', ''],
       ['Connect', reg[2], err === 'register' ? 'tone-warn' : ''],
-      ['Vault', vaultOn ? T.name + ' · ' + T.signers + ' keys · synthetic policy' : 'No Vault configured', vaultOn ? '' : 'tone-muted']
-    ].concat(nodeRow ? [nodeRow] : []).map((r) => ({ k: r[0], v: r[1], tone: r[2] }));
+      nodeRow
+    ]).map((r) => ({ k: r[0], v: r[1], tone: r[2] }));
 
     return {
       themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : ((THEME === 'light' || (THEME !== 'dark' && (P.theme ?? 'dark') === 'light')) ? 'light' : ''),
@@ -1014,7 +1014,7 @@ class Component extends DCLogic {
       // register
       stRegister: step === 'register', errRegister: err === 'register', regTone: reg[0], regIcon: reg[1], regText: reg[2],
       // vault
-      stVaultType: step === 'vaultType', templates, vaultOptional: !b2b, skipVault: () => go({ tmpl: 'none', step: 'done', err: 'none' }),
+      stVaultType: step === 'vaultType', templates, vaultOptional: true, skipVault: () => to('cubeDone'),
       stVaultIntro: step === 'vaultIntro', tplTitle: T.title, tplNeed: T.need, diaRows,
       diaAria: T.rows.map((r) => r[1] + (r[2] > 0 ? ' can spend only after a period of wallet inactivity' : ' can always spend')).join('; '),
       stKeys: step === 'keys', errKeys: err === 'keys', paths, isCustom: tKey === 'custom', descType: b2b ? 'P2WSH (Bitcoin Blake2b Vaults use P2WSH)' : 'Taproot',
@@ -1037,11 +1037,15 @@ class Component extends DCLogic {
       nodeTypes, ntCore: s.nodeType === 'core', ntElectrum: s.nodeType === 'electrum', ntEsplora: s.nodeType === 'esplora',
       checkConn: () => go({ connOk: err !== 'node', err: err === 'node' ? 'node' : 'none' }), connOk: !!s.connOk && err !== 'node', errNode: err === 'node',
       // alias + done
-      stAlias: step === 'alias', stDone: step === 'done',
-      doneTitle: (b2b ? 'Blake savings' : 'Travel fund') + ' created',
+      stAlias: step === 'alias', aliasValue: b2b ? 'Blake savings Vault' : 'Travel fund Vault',
+      stDone: step === 'done' || step === 'cubeDone', cubeDoneStep: step === 'cubeDone',
+      doneTitle: step === 'cubeDone' ? cubeName + ' created' : 'Vault created',
+      doneCta: step === 'cubeDone' ? 'Open the Cube' : 'Back to the Cube',
+      // Opening the new Cube leads to Create Vault; finishing it returns to the Cube.
+      doneNext: () => (step === 'cubeDone' ? to('vaultType') : to('cubeDone')),
       summary,
       // foot
-      showFoot, canBack: idx > 0, back, next: () => next(), footNext,
+      showFoot, canBack: idx > 0 || !inCube, back, next: () => next(), footNext,
       primaryLabel: own[step] || 'Continue', primaryDisabled
     };
   }
