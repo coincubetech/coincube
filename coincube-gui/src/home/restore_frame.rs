@@ -5,13 +5,17 @@
 
 use iced::{widget::Space, Alignment, Length};
 
+use iced::advanced::widget::Id;
+
 use coincube_ui::{
     component::text::*,
     theme,
-    widget::{Column, Container, Element, Row, RowExt},
+    widget::{
+        action::Action as FocusableAction, Column, ColumnExt, Container, Element, Row, RowExt,
+    },
 };
 
-use crate::chain::ChainId;
+use crate::chain::{ChainId, ChainIdExt};
 
 use super::launcher_coin;
 
@@ -26,22 +30,44 @@ pub(crate) fn import_steps(passkey: bool) -> &'static [&'static str] {
     }
 }
 
-/// The step strip: numbered circles joined by rules, done steps edged good
-/// and the current one filled.
+/// The step strip (P-Restore `.steps`): 24px numbered circles with the
+/// label 13px to their right, joined by 20px rules. The current step is
+/// ringed in accent on the selected fill; a completed one is ringed good and
+/// shows a check in place of its number; a step ahead is ringed in line ink
+/// with a muted label.
 pub(crate) fn stepper<'a, M: 'a>(steps: &[&'static str], active: usize) -> Element<'a, M> {
     steps
         .iter()
         .enumerate()
         .fold(
-            Row::new().spacing(3).align_y(Alignment::Center),
+            Row::new().spacing(10).align_y(Alignment::Center),
             |row, (index, label)| {
                 let current = index == active;
                 let done = index < active;
-                let number = Container::new(p2_regular((index + 1).to_string()).size(12))
-                    .width(Length::Fixed(22.0))
-                    .height(Length::Fixed(22.0))
-                    .center_x(Length::Fixed(22.0))
-                    .center_y(Length::Fixed(22.0))
+                let mark: Element<'a, M> = if done {
+                    coincube_ui::icon::check_icon()
+                        .size(12)
+                        .style(|theme: &theme::Theme| iced::widget::text::Style {
+                            color: Some(theme.colors.shell.good),
+                        })
+                        .into()
+                } else {
+                    p2_regular((index + 1).to_string())
+                        .size(12)
+                        .style(move |theme| {
+                            if current {
+                                theme::text::primary(theme)
+                            } else {
+                                theme::text::secondary(theme)
+                            }
+                        })
+                        .into()
+                };
+                let number = Container::new(mark)
+                    .width(Length::Fixed(24.0))
+                    .height(Length::Fixed(24.0))
+                    .center_x(Length::Fixed(24.0))
+                    .center_y(Length::Fixed(24.0))
                     .style(move |theme: &theme::Theme| iced::widget::container::Style {
                         background: current
                             .then_some(iced::Background::Color(theme.colors.shell.selected)),
@@ -54,16 +80,16 @@ pub(crate) fn stepper<'a, M: 'a>(steps: &[&'static str], active: usize) -> Eleme
                                 theme.colors.shell.line
                             },
                             width: 1.0,
-                            radius: 11.0.into(),
+                            radius: 12.0.into(),
                         },
                         ..Default::default()
                     });
                 let row = row.push(
                     Row::new()
-                        .spacing(4)
+                        .spacing(13)
                         .align_y(Alignment::Center)
                         .push(number)
-                        .push(p2_regular(*label).size(11).style(move |theme| {
+                        .push(p2_regular(*label).size(13).style(move |theme| {
                             if current || done {
                                 theme::text::primary(theme)
                             } else {
@@ -72,13 +98,300 @@ pub(crate) fn stepper<'a, M: 'a>(steps: &[&'static str], active: usize) -> Eleme
                         })),
                 );
                 if index + 1 < steps.len() {
-                    row.push(rule(18.0, 1.0))
+                    row.push(rule(20.0, 1.0))
                 } else {
                     row
                 }
             },
         )
         .into()
+}
+
+/// The step rail: the strip in a 52px band over a full-width rule.
+pub(crate) fn step_rail<'a, M: 'a>(steps: &[&'static str], active: usize) -> Element<'a, M> {
+    Column::new()
+        .push(
+            Container::new(stepper(steps, active))
+                .height(Length::Fixed(RAIL_HEIGHT))
+                .center_y(Length::Fixed(RAIL_HEIGHT))
+                .padding([0, 28])
+                .width(Length::Fill),
+        )
+        .push(full_rule())
+        .into()
+}
+
+/// The sheet header's height (`.shead`).
+pub(crate) const HEADER_HEIGHT: f32 = 72.0;
+/// The step rail's band height.
+pub(crate) const RAIL_HEIGHT: f32 = 52.0;
+
+/// The sheet surface (`.sheet`): panel fill, 1px line, 12px radius, the
+/// same as the Connect and App preferences sheets.
+pub(crate) fn sheet_style(theme: &theme::Theme) -> iced::widget::container::Style {
+    let shell = &theme.colors.shell;
+    iced::widget::container::Style {
+        background: Some(iced::Background::Color(shell.panel)),
+        border: iced::Border {
+            color: shell.line,
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// A network's tag beside its name: test networks carry their own name,
+/// as the Launcher's chips do.
+fn network_tag<'a, M: 'a>(chain: ChainId) -> Option<Element<'a, M>> {
+    launcher_coin::is_test_network(chain).then(|| {
+        Container::new(p2_regular(chain.label()).size(12))
+            .padding([2, 6])
+            .style(|theme: &theme::Theme| iced::widget::container::Style {
+                border: iced::Border {
+                    color: theme.colors.shell.muted,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+    })
+}
+
+/// The header's network control: coin mark, network name, test tag and,
+/// when it opens the network menu, a chevron. `toggle` is None once the
+/// network is fixed, and the control is then a static chip.
+pub(crate) fn network_control<'a, M: Clone + 'static>(
+    chain: ChainId,
+    light: bool,
+    toggle: Option<M>,
+    open: bool,
+    focus: impl FnOnce(Id) -> M,
+) -> Element<'a, M> {
+    let editable = toggle.is_some();
+    let mut chip = Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(coin(chain, light, 16.0))
+        .push(p2_regular(chain.label()))
+        .push_maybe(network_tag(chain));
+    if !editable {
+        return Container::new(chip).padding([6, 0]).into();
+    }
+    chip = chip.push(
+        iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(CHEVRON.as_bytes()))
+            .width(Length::Fixed(14.0))
+            .height(Length::Fixed(14.0))
+            .style(|theme: &theme::Theme, _| iced::widget::svg::Style {
+                color: Some(theme.colors.shell.muted),
+            }),
+    );
+    FocusableAction::new(Id::new(NETWORK_CONTROL_ID), chip, focus)
+        .padding([6, 10])
+        .style(move |theme: &theme::Theme, status| {
+            let mut style = theme::button::transparent(theme, status);
+            if open {
+                style.background = Some(iced::Background::Color(theme.colors.shell.selected));
+            }
+            style.text_color = theme.colors.shell.ink;
+            style.border.radius = 8.0.into();
+            style
+        })
+        .on_press_maybe(toggle)
+        .into()
+}
+
+/// The header's network control.
+pub(crate) const NETWORK_CONTROL_ID: &str = "tenshu.wizard:network";
+const CHEVRON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10l5 5 5-5"/></svg>"##;
+
+/// The sheet's Close, styled like the Connect and App preferences sheets'.
+pub(crate) fn close_button<'a, M: Clone + 'static>(
+    id: &'static str,
+    on_press: Option<M>,
+    focus: impl FnOnce(Id) -> M,
+) -> Element<'a, M> {
+    FocusableAction::new(
+        Id::new(id),
+        Container::new(
+            Row::new()
+                .push(
+                    coincube_ui::icon::cross_icon()
+                        .size(14)
+                        .style(theme::tenshu::text::ink),
+                )
+                .push(coincube_ui::component::tenshu::text::label("Close"))
+                .spacing(6)
+                .align_y(Alignment::Center),
+        )
+        .center_y(Length::Fill),
+        focus,
+    )
+    .height(Length::Fixed(36.0))
+    .padding([0, 12])
+    .style(|theme, status| {
+        theme::tenshu::button::action(
+            theme,
+            status,
+            theme::tenshu::button::ActionKind::Secondary,
+            theme::tenshu::button::ActionShape::Compact,
+        )
+    })
+    .on_press_maybe(on_press)
+    .into()
+}
+
+/// The sheet header: title, a divider and the network control, then Close.
+pub(crate) fn sheet_header<'a, M: 'a>(
+    title: &'static str,
+    network: Element<'a, M>,
+    close: Element<'a, M>,
+) -> Element<'a, M> {
+    Container::new(
+        Row::new()
+            .align_y(Alignment::Center)
+            .spacing(16)
+            .push(title_text(title))
+            .push(rule(1.0, 20.0))
+            .push(network)
+            .push(Space::new().width(Length::Fill))
+            .push(close),
+    )
+    .height(Length::Fixed(HEADER_HEIGHT))
+    .center_y(Length::Fixed(HEADER_HEIGHT))
+    .padding(iced::Padding {
+        left: 28.0,
+        right: 24.0,
+        ..iced::Padding::ZERO
+    })
+    .width(Length::Fill)
+    .into()
+}
+
+fn title_text<'a>(title: &'static str) -> iced::widget::Text<'a, theme::Theme> {
+    iced::widget::text(title)
+        .size(20)
+        .font(coincube_ui::font::SEMIBOLD)
+}
+
+/// The network menu, dropped under the header's network control: an
+/// undrawn copy of the title and divider puts it under the chip.
+pub(crate) fn network_menu<'a, M: 'a>(title: &'static str, rows: Element<'a, M>) -> Element<'a, M> {
+    let menu = Container::new(rows)
+        .width(Length::Fixed(340.0))
+        .padding(6)
+        .style(|theme: &theme::Theme| iced::widget::container::Style {
+            background: Some(iced::Background::Color(theme.colors.shell.panel)),
+            border: iced::Border {
+                color: theme.colors.shell.line,
+                width: 1.0,
+                radius: 10.0.into(),
+            },
+            shadow: iced::Shadow {
+                color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+                offset: iced::Vector::new(0.0, 18.0),
+                blur_radius: 40.0,
+            },
+            ..Default::default()
+        });
+    Column::new()
+        .push(Space::new().height(Length::Fixed(HEADER_HEIGHT - 12.0)))
+        .push(
+            Row::new()
+                .spacing(16)
+                .padding(iced::Padding {
+                    left: 28.0,
+                    ..iced::Padding::ZERO
+                })
+                .push(
+                    title_text(title).style(|_: &theme::Theme| iced::widget::text::Style {
+                        color: Some(iced::Color::TRANSPARENT),
+                    }),
+                )
+                .push(Space::new().width(Length::Fixed(1.0)))
+                .push(menu),
+        )
+        .into()
+}
+
+/// A network menu heading ("Live networks", "Test networks").
+pub(crate) fn menu_heading<'a, M: 'a>(label: &'a str) -> Element<'a, M> {
+    Container::new(p2_regular(label).size(12).style(theme::text::secondary))
+        .padding([8, 10])
+        .into()
+}
+
+/// A wizard step's region: the step rail, the scrolled body and the footer
+/// actions, each above a rule.
+pub(crate) fn region<'a, M: 'a>(
+    rail: Option<Element<'a, M>>,
+    body: Element<'a, M>,
+    footer: Option<Element<'a, M>>,
+) -> Element<'a, M> {
+    let mut column = Column::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push_maybe(rail)
+        .push(body);
+    if let Some(footer) = footer {
+        column = column
+            .push(full_rule())
+            .push(Container::new(footer).padding([14, 28]).width(Length::Fill));
+    }
+    column.into()
+}
+
+/// The path list beside a path's region, split by a line-coloured rule.
+pub(crate) fn with_nav<'a, M: 'a>(nav: Element<'a, M>, region: Element<'a, M>) -> Element<'a, M> {
+    Row::new()
+        .height(Length::Fill)
+        .push(nav)
+        .push(
+            Container::new(Space::new())
+                .width(Length::Fixed(1.0))
+                .height(Length::Fill)
+                .style(|theme: &theme::Theme| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(theme.colors.shell.line)),
+                    ..Default::default()
+                }),
+        )
+        .push(region)
+        .into()
+}
+
+/// The wizard sheet: its header over the content, with the network menu
+/// (when open) layered on top. A press outside the open menu closes it.
+pub(crate) fn sheet<'a, M: Clone + 'a>(
+    header: Element<'a, M>,
+    content: Element<'a, M>,
+    menu: Option<(Element<'a, M>, M)>,
+) -> Element<'a, M> {
+    let surface = Container::new(
+        Column::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(header)
+            .push(full_rule())
+            .push(content),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(sheet_style);
+    let stack = iced::widget::Stack::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push(surface);
+    match menu {
+        Some((menu, close)) => stack
+            .push(
+                iced::widget::mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                    .on_press(close),
+            )
+            .push(menu)
+            .into(),
+        None => stack.into(),
+    }
 }
 
 /// The network's coin mark.

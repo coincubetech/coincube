@@ -7,7 +7,7 @@ use iced::{
 
 use coincube_core::{bip39, miniscript::bitcoin::Network};
 use coincube_ui::{
-    component::{button, card, notification, spinner, tenshu::top_bar, text::*},
+    component::{button, card, notification, spinner, text::*},
     icon, image, theme,
     widget::{
         action::Action as FocusableAction, modal::Modal, CheckBox, Column, Container, Element, Row,
@@ -454,9 +454,9 @@ pub struct Home {
     create_cube_name: coincube_ui::component::form::Value<String>,
     create_cube_pin: pin_input::PinInput,
     create_cube_pin_confirm: pin_input::PinInput,
-    /// Presentation only: network selection precedes the existing Cube form.
-    /// No seed, unlock or persistence decision depends on this flag.
-    create_network_confirmed: bool,
+    /// Presentation only: the Create sheet's network menu is open. No seed,
+    /// unlock or persistence decision depends on this flag.
+    create_network_menu: bool,
     /// Keep the Create form open when its network picker triggers a datadir
     /// probe. The probe replaces `State`, including its navigation flag.
     create_network_selection_pending: bool,
@@ -658,7 +658,7 @@ impl Home {
                 create_cube_name: coincube_ui::component::form::Value::default(),
                 create_cube_pin: pin_input::PinInput::new(),
                 create_cube_pin_confirm: pin_input::PinInput::new(),
-                create_network_confirmed: false,
+                create_network_menu: false,
                 create_network_selection_pending: false,
                 pending_bitcoin_import: None,
                 restore_hub: false,
@@ -1357,9 +1357,8 @@ impl Home {
             self.error = None;
             self.server_cube_limit = None;
             // The selected chain has changed under an in-progress Create
-            // journey. Its confirmed step and pending row selection belong to
-            // the old chain, so the post-probe view must start at Network.
-            self.create_network_confirmed = false;
+            // journey. Its pending row selection belongs to the old chain.
+            self.create_network_menu = false;
             self.create_network_selection_pending = false;
             self.state = State::Unchecked;
             return probe_network_datadir(
@@ -1557,8 +1556,7 @@ impl Home {
                         | ViewMessage::CreationKitRequested
                         | ViewMessage::CreationKit(_)
                         | ViewMessage::CreationKitUploaded(_)
-                        | ViewMessage::ConfirmCreateNetwork
-                        | ViewMessage::BackToCreateNetwork
+                        | ViewMessage::CreateNetworkMenu(_)
                         | ViewMessage::SelectNetwork(_)
                         | ViewMessage::Check
                         | ViewMessage::Run(_)
@@ -1693,7 +1691,7 @@ impl Home {
                 self.restore_phone = false;
                 if show {
                     self.pending_bitcoin_import = None;
-                    self.create_network_confirmed = false;
+                    self.create_network_menu = false;
                     self.create_network_selection_pending = false;
                     // Opening the form picks the default afresh: whether the
                     // passkey path can demonstrate a backup depends on the
@@ -1710,7 +1708,7 @@ impl Home {
                     _ => false,
                 };
                 if toggled && !show {
-                    self.create_network_confirmed = false;
+                    self.create_network_menu = false;
                     self.create_network_selection_pending = false;
                     self.pending_bitcoin_import = None;
                     self.create_cube_name = coincube_ui::component::form::Value::default();
@@ -1735,21 +1733,10 @@ impl Home {
                 }
                 Task::none()
             }
-            Message::View(ViewMessage::ConfirmCreateNetwork) => {
-                if matches!(self.active_section, HomeSection::Cubes)
-                    && self.showing_create_form()
-                    && self.pending_bitcoin_import.is_none()
-                    && self.chain_availability(self.network).is_available()
-                {
-                    self.create_network_confirmed = true;
-                    return create_journey_focus_task(Id::new(CREATE_BACK_TO_NETWORKS_ID));
-                }
-                Task::none()
-            }
-            Message::View(ViewMessage::BackToCreateNetwork) => {
-                if !self.creating_cube && self.showing_create_form() {
-                    self.create_network_confirmed = false;
-                    return create_journey_focus_task(create_network_row_id(self.network));
+            Message::View(ViewMessage::CreateNetworkMenu(open)) => {
+                self.create_network_menu = open && self.create_network_menu_editable();
+                if !open {
+                    return create_journey_focus_task(Id::new(restore_frame::NETWORK_CONTROL_ID));
                 }
                 Task::none()
             }
@@ -2760,6 +2747,7 @@ impl Home {
             }
             Message::View(ViewMessage::SelectNetwork(network)) => {
                 self.catalog.network_menu = false;
+                self.create_network_menu = false;
                 if !(self.developer_mode
                     || network == ChainId::Bitcoin
                     || network == ChainId::BitcoinBlake2b
@@ -4975,7 +4963,8 @@ impl Home {
                 passkey_mode: self.passkey_mode,
                 signed_in: self.connect_account.authenticated_client().is_some(),
                 importing_bitcoin: self.pending_bitcoin_import.is_some(),
-                can_import_bitcoin: self.can_start_bitcoin_import(),
+                // Import or restore is reachable wherever Home lets it open.
+                can_import_bitcoin: !self.network.is_blake2b(),
                 submit_in_form,
             },
         )
@@ -4983,8 +4972,9 @@ impl Home {
 
     /// Return the ID of the Connect control actually mounted by Home.
     pub(crate) fn connect_sheet_origin_id(&self) -> Id {
-        // Explicit creation takes precedence over the catalog. Its top bar
-        // retains these IDs; the empty Launcher uses the catalog IDs below.
+        // Explicit creation takes precedence over the catalog. The Create
+        // sheet's signed-out notice carries the sign-in ID; the empty
+        // Launcher uses the catalog IDs below.
         if self.showing_create_journey() {
             return Id::new(if self.connect_account.is_authenticated() {
                 LEGACY_CONNECT_ENTRY_ID
@@ -5173,18 +5163,24 @@ impl Home {
     /// state machines. The controls below dispatch their original messages;
     /// the journey does not hold a second copy of any wallet material.
     fn create_journey_view(&self) -> Element<Message> {
-        self.create_journey_frame().map(Message::View)
+        // Presented like Connect and App preferences: a sheet over the
+        // inert, dimmed Launcher, its top bar left in view. The backdrop
+        // drops the dock, which the sheet would otherwise half cover.
+        crate::gui::compose_overlay(
+            launcher_catalog::launcher_backdrop(self).map(Message::View),
+            self.create_journey_frame().map(Message::View),
+            true,
+        )
     }
 
     /// The journey before it is mapped into Home's messages, so tests can
-    /// press its controls as the user does.
+    /// press its controls as the user does. It is the sheet only; `view`
+    /// lays it over the dimmed Launcher.
     fn create_journey_frame(&self) -> Element<ViewMessage> {
         let backing_up = matches!(self.state, State::CreationBackup(_));
-        // Import or restore (P-Restore) shares this frame. Its import path is
-        // Bitcoin only, so it never shows the network step.
+        // Import or restore (P-Restore) shares this frame.
         let restoring = self.showing_import_or_restore();
         let hub = restoring && self.restore_hub && !backing_up;
-        let selecting_network = !backing_up && !restoring && !self.create_network_confirmed;
         let light = matches!(
             self.theme_mode,
             coincube_ui::theme::palette::ThemeMode::Light
@@ -5196,142 +5192,43 @@ impl Home {
         } else {
             create_cube_steps(self.passkey_mode)
         };
-        let active_step = if restoring {
-            match (backing_up, self.passkey_mode) {
-                (true, true) => 2,
-                (true, false) => 1,
-                (false, true) if self.creating_cube => 1,
-                (false, _) => 0,
-            }
-        } else if selecting_network {
-            0
-        } else if backing_up {
-            if self.passkey_mode {
-                3
-            } else {
-                2
-            }
-        } else if self.passkey_mode && self.creating_cube {
-            2
-        } else {
-            1
+        let active_step = match (backing_up, self.passkey_mode) {
+            (true, true) => 2,
+            (true, false) => 1,
+            (false, true) if self.creating_cube => 1,
+            (false, _) => 0,
         };
-        let progress = restore_frame::stepper(steps, active_step);
 
-        let leave = self.can_leave_create_journey();
-        let brand = FocusableAction::new(
-            Id::new("tenshu.create:brand"),
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(icon::cube_outline_icon())
-                .push(p2_regular("Tenshu")),
+        // The network is chosen in the header, and only before the Cube is
+        // being written; after that the chip is static.
+        let menu_open = self.create_network_menu_editable() && self.create_network_menu;
+        let network = restore_frame::network_control(
+            self.network,
+            light,
+            self.create_network_menu_editable()
+                .then_some(ViewMessage::CreateNetworkMenu(!self.create_network_menu)),
+            menu_open,
             create_journey_focus,
-        )
-        .style(theme::button::transparent)
-        .on_press_maybe(leave.then_some(ViewMessage::ShowCreateCube(false)));
-        // The Launcher's Connect entry. The Connect sheet records these
-        // existing Home focus IDs; its Close/Escape return must land on the
-        // mounted Create top bar.
-        let connect = launcher_chrome::connect_control(
-            self,
-            false,
-            Id::new(if self.connect_account.is_authenticated() {
-                LEGACY_CONNECT_ENTRY_ID
-            } else {
-                LEGACY_CONNECT_SIGN_IN_ID
-            }),
-            Id::new(LEGACY_CONNECT_SIGN_IN_ID),
-            !backing_up && !self.connect_account.is_checking_session(),
         );
-        let top_bar = Container::new(
-            Row::new()
-                .spacing(16)
-                .align_y(Alignment::Center)
-                .push(brand)
-                .push(
-                    button::secondary_action(
-                        "tenshu.create:top-back-to-list",
-                        Some(icon::previous_icon()),
-                        "Back to Cube list",
-                        create_journey_focus,
-                    )
-                    .width(Length::Shrink)
-                    .on_press_maybe(leave.then_some(ViewMessage::ShowCreateCube(false))),
-                )
-                .push(Space::new().width(Length::Fill))
-                .push(connect)
-                .push(
-                    top_bar::preferences(
-                        "tenshu.create:top-app-preferences",
-                        create_journey_focus,
-                        ViewMessage::OpenAppPreferences,
-                    )
-                    .on_press_maybe((!backing_up).then_some(ViewMessage::OpenAppPreferences))
-                    .pressed(self.app_preferences_open),
-                ),
-        )
-        .center_y(Length::Fixed(64.0))
-        .padding([0, 24])
-        .width(Length::Fill)
-        .style(theme::container::shell_rail);
-
-        let mut identity = Row::new()
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .push(p2_regular(
-                if self.create_cube_name.value.trim().is_empty() {
-                    "New Cube"
-                } else {
-                    self.create_cube_name.value.trim()
-                },
-            ))
-            .push(p2_regular("·").style(theme::text::secondary))
-            .push(create_journey_coin(self.network, light, 16.0))
-            .push(p2_regular(self.network.label()).style(theme::text::secondary));
-        if launcher_coin::is_test_network(self.network) {
-            identity = identity.push(create_journey_tag(self.network.label(), false));
-        }
-        let header = if restoring {
-            restore_frame::header(
-                self.network,
-                launcher_chrome::network_name(self.network),
-                light,
-                Some(
-                    // Close returns to the Launcher whenever no Cube is being
-                    // made, including when its catalog is empty.
-                    button::secondary_action(
-                        RESTORE_CLOSE_ID,
-                        Some(icon::cross_icon()),
-                        "Close",
-                        create_journey_focus,
-                    )
-                    .width(Length::Shrink)
-                    .on_press_maybe(
-                        (!backing_up && !self.creating_cube)
-                            .then_some(ViewMessage::ShowCreateCube(false)),
-                    )
-                    .into(),
-                ),
-            )
+        let title = if restoring {
+            "Import or restore"
         } else {
-            Row::new()
-                .align_y(Alignment::Center)
-                .spacing(12)
-                .push(p2_regular("Create Cube"))
-                .push(
-                    Container::new(Space::new())
-                        .width(Length::Fixed(1.0))
-                        .height(Length::Fixed(20.0))
-                        .style(|theme: &theme::Theme| iced::widget::container::Style {
-                            background: Some(iced::Background::Color(theme.colors.shell.line)),
-                            ..Default::default()
-                        }),
-                )
-                .push(identity)
-                .push(Space::new().width(Length::Fill))
-                .into()
+            "Create Cube"
         };
+        let header = restore_frame::sheet_header(
+            title,
+            network,
+            restore_frame::close_button(
+                if restoring {
+                    RESTORE_CLOSE_ID
+                } else {
+                    CREATE_CLOSE_ID
+                },
+                self.can_leave_create_journey()
+                    .then_some(ViewMessage::ShowCreateCube(false)),
+                create_journey_focus,
+            ),
+        );
 
         let body: Element<ViewMessage> = if hub {
             if self.restore_phone {
@@ -5339,159 +5236,6 @@ impl Home {
             } else {
                 self.restore_hub_view()
             }
-        } else if selecting_network {
-            let network_row = |chain: ChainId| -> Element<ViewMessage> {
-                let available = self.chain_availability(chain).is_available();
-                let selected = chain == self.network;
-                let subtitle = if chain.is_blake2b() && !available {
-                    "Bitcoin Blake2b availability could not be verified. Vault creation is disabled."
-                } else {
-                    match chain {
-                        ChainId::Bitcoin => "Spark · Vault",
-                        ChainId::Regtest => "Spark · Vault",
-                        ChainId::BitcoinBlake2b => {
-                            "Vault only. Spark isn't available on Bitcoin Blake2b."
-                        }
-                        ChainId::BitcoinBlake2bTestnet4 => {
-                            "Vault only. Spark isn't available on Bitcoin Blake2b Testnet4."
-                        }
-                        ChainId::Testnet => "Vault only. Spark isn't available on Testnet.",
-                        ChainId::Testnet4 => "Vault only. Spark isn't available on Testnet4.",
-                        ChainId::Signet => "Vault only. Spark isn't available on Signet.",
-                    }
-                };
-                let id = create_network_row_id(chain);
-                let mut name = Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(create_journey_coin(chain, light, 18.0))
-                    .push(p2_regular(chain.label()));
-                if chain.is_blake2b() && !launcher_coin::is_test_network(chain) {
-                    name = name.push(create_journey_tag("Blake2b", true));
-                }
-                if launcher_coin::is_test_network(chain) {
-                    name = name.push(create_journey_tag(chain.label(), false));
-                }
-                let row = FocusableAction::new(
-                    id.clone(),
-                    Row::new()
-                        .spacing(12)
-                        .align_y(Alignment::Center)
-                        .push(if selected {
-                            icon::check_icon()
-                        } else {
-                            icon::dot_icon()
-                        })
-                        .push(
-                            Column::new()
-                                .spacing(3)
-                                .push(name)
-                                .push(p2_regular(subtitle).style(theme::text::secondary)),
-                        ),
-                    create_journey_focus,
-                )
-                .width(Length::Fill)
-                .padding([12, 8])
-                .style(move |theme, status| {
-                    // A selected option stays at normal contrast even though
-                    // activating it only preserves focus.
-                    let mut style = theme::button::transparent(
-                        theme,
-                        if selected {
-                            iced::widget::button::Status::Active
-                        } else {
-                            status
-                        },
-                    );
-                    if selected {
-                        style.background =
-                            Some(iced::Background::Color(theme.colors.shell.selected));
-                        style.text_color = theme.colors.shell.ink;
-                    }
-                    style
-                });
-                row.on_press_maybe(create_network_row_action(chain, available, selected, id))
-                    .into()
-            };
-            let network_rule = || -> Element<ViewMessage> {
-                Container::new(Space::new())
-                    .width(Length::Fill)
-                    .height(Length::Fixed(1.0))
-                    .style(|theme: &theme::Theme| iced::widget::container::Style {
-                        background: Some(iced::Background::Color(theme.colors.shell.line)),
-                        ..Default::default()
-                    })
-                    .into()
-            };
-            let mut live = self
-                .displayed_networks
-                .iter()
-                .copied()
-                .filter(|chain| matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b))
-                .collect::<Vec<_>>();
-            let mut test = self
-                .displayed_networks
-                .iter()
-                .copied()
-                .filter(|chain| !matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b))
-                .collect::<Vec<_>>();
-            // The per-device toggle controls visibility. An enabled device may
-            // still be waiting for feature verification: explain that state
-            // with disabled rows, while SelectNetwork remains fail-closed.
-            if self.connect_account.bitcoin_blake2b_opt_in {
-                if !live.contains(&ChainId::BitcoinBlake2b) {
-                    live.push(ChainId::BitcoinBlake2b);
-                }
-                if self.developer_mode && !test.contains(&ChainId::BitcoinBlake2bTestnet4) {
-                    test.push(ChainId::BitcoinBlake2bTestnet4);
-                }
-            }
-            let mut content = Column::new()
-                .spacing(16)
-                .max_width(680)
-                .push(h4_bold("Network"));
-            if live.len() > 1 {
-                content = content.push(p2_regular("Live networks"));
-            }
-            let mut live_rows = Column::new().spacing(0);
-            for chain in live {
-                live_rows = live_rows.push(network_rule()).push(network_row(chain));
-            }
-            content = content
-                .push(live_rows.push(network_rule()))
-                .push(p2_regular("Test networks"));
-            if self.developer_mode {
-                let mut test_rows = Column::new().spacing(0);
-                for chain in test {
-                    test_rows = test_rows.push(network_rule()).push(network_row(chain));
-                }
-                content = content.push(test_rows.push(network_rule()));
-            }
-            if let Some(error) = &self.error {
-                content = content.push(p2_regular(error).style(theme::text::error));
-            }
-            if !self.developer_mode {
-                content = content.push(
-                    Row::new()
-                        .spacing(12)
-                        .align_y(Alignment::Center)
-                        .push(
-                            p2_regular("Test networks appear when Developer mode is on.")
-                                .style(theme::text::secondary),
-                        )
-                        .push(
-                            button::secondary_action(
-                                "tenshu.create:app-preferences",
-                                None,
-                                "App preferences",
-                                create_journey_focus,
-                            )
-                            .width(Length::Shrink)
-                            .on_press(ViewMessage::OpenAppPreferences),
-                        ),
-                );
-            }
-            content.into()
         } else if let State::CreationBackup(step) = &self.state {
             // Wide enough for the 4×150 word grid and its gutters.
             Container::new(creation_backup_view(
@@ -5510,214 +5254,204 @@ impl Home {
         } else {
             self.creation_form(false)
         };
-
-        let divider = || -> Element<ViewMessage> {
-            Container::new(Space::new())
-                .width(Length::Fill)
-                .height(Length::Fixed(1.0))
-                .style(|theme: &theme::Theme| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(theme.colors.shell.line)),
-                    ..Default::default()
-                })
-                .into()
-        };
-
-        // Import or restore puts its title over the path list as well, so
-        // the header leaves this column there.
-        let (header, mut region) = if restoring {
-            (
-                Some(header),
-                Column::new().width(Length::Fill).height(Length::Fill),
-            )
-        } else {
-            (
-                None,
-                Column::new()
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .push(Container::new(header).padding([16, 28]).width(Length::Fill))
-                    .push(divider()),
-            )
-        };
-        // The Overview has no steps; its slot stays so the body below keeps
-        // its place in the tree across a switch to a path.
-        let progress: Element<ViewMessage> = if hub {
-            Space::new().width(Length::Fill).into()
-        } else {
-            Column::new()
-                .push(
-                    Container::new(progress)
-                        .padding([14, 28])
-                        .width(Length::Fill),
-                )
-                .push(divider())
-                .into()
-        };
-        region = region.push(progress);
-        // Keep this child slot present for live and test networks. Inserting
-        // it only for test chains rebuilds the following scrollable by index,
-        // discarding its focused row and scroll offset during a switch.
-        let test_strip: Element<ViewMessage> = if launcher_coin::is_test_network(self.network) {
-            Column::new()
-                .push(
-                    Container::new(
-                        Container::new(
-                            Row::new()
-                                .spacing(8)
-                                .align_y(Alignment::Center)
-                                .push(create_journey_tag(self.network.label(), false))
-                                .push(p2_regular("Test network")),
-                        )
-                        .padding([8, 27])
-                        .width(Length::Fill)
-                        .style(|theme: &theme::Theme| {
-                            iced::widget::container::Style {
-                                background: Some(iced::Background::Color(
-                                    theme.colors.shell.background,
-                                )),
-                                ..Default::default()
-                            }
-                        }),
-                    )
-                    .padding([0, 1])
-                    .width(Length::Fill),
-                )
-                .push(divider())
-                .into()
-        } else {
-            // Shrink lays out at zero height while remaining non-void to
-            // Column::push; Fixed(0) would make Column omit this child.
-            Space::new().width(Length::Fill).into()
-        };
-        region = region.push(test_strip);
-        let region = region.push(
-            // Every step's column is centred in the card, so a narrow form
+        let body: Element<ViewMessage> =
+            // Every step's column is centred in the sheet, so a narrow form
             // does not leave a dead gutter on its right.
             scrollable(Container::new(body).padding(28).center_x(Length::Fill))
                 .id(Id::new(CREATE_BODY_SCROLL_ID))
-                .height(Length::Fill),
-        );
-        let region = if hub {
+                .height(Length::Fill)
+                .into();
+
+        // The Overview has no steps, and the backup screens carry their own
+        // actions.
+        let rail = (!hub).then(|| restore_frame::step_rail(steps, active_step));
+        let footer: Option<Element<ViewMessage>> = (!hub && !backing_up).then(|| {
+            Row::new()
+                .push(Space::new().width(Length::Fill))
+                .push(
+                    button::primary_action(
+                        "tenshu.create:cube-submit",
+                        None,
+                        if self.creating_cube {
+                            "Creating…"
+                        } else {
+                            "Create Cube"
+                        },
+                        create_journey_focus,
+                    )
+                    .width(Length::Shrink)
+                    .on_press_maybe(
+                        create_cube_can_submit(
+                            &self.create_cube_name,
+                            &self.create_cube_pin,
+                            &self.create_cube_pin_confirm,
+                            self.passkey_mode,
+                            self.creating_cube,
+                        )
+                        .then_some(ViewMessage::CreateCube),
+                    ),
+                )
+                .into()
+        });
+        let region = restore_frame::region(rail, body, footer);
+        // Import or restore: its path list beside the path.
+        let content = if restoring {
+            restore_frame::with_nav(self.restore_nav(backing_up), region)
+        } else {
             region
-        } else if restoring && !backing_up {
-            region.push(divider()).push(
-                Container::new(
-                    Row::new().push(Space::new().width(Length::Fill)).push(
-                        button::primary_action(
-                            "tenshu.create:cube-submit",
-                            None,
-                            if self.creating_cube {
-                                "Creating…"
-                            } else {
-                                "Create Cube"
-                            },
-                            create_journey_focus,
-                        )
-                        .width(Length::Shrink)
-                        .on_press_maybe(
-                            create_cube_can_submit(
-                                &self.create_cube_name,
-                                &self.create_cube_pin,
-                                &self.create_cube_pin_confirm,
-                                self.passkey_mode,
-                                self.creating_cube,
-                            )
-                            .then_some(ViewMessage::CreateCube),
-                        ),
-                    ),
-                )
-                .padding([14, 28])
-                .width(Length::Fill),
+        };
+        let menu = menu_open.then(|| {
+            (
+                restore_frame::network_menu(title, self.create_network_menu_rows(light)),
+                ViewMessage::CreateNetworkMenu(false),
             )
-        } else if selecting_network {
-            region.push(divider()).push(
-                Container::new(
-                    Row::new().push(Space::new().width(Length::Fill)).push(
-                        button::primary_action(
-                            "tenshu.create:network-continue",
-                            None,
-                            "Continue",
-                            create_journey_focus,
-                        )
-                        .width(Length::Shrink)
-                        .on_press_maybe(
-                            self.chain_availability(self.network)
-                                .is_available()
-                                .then_some(ViewMessage::ConfirmCreateNetwork),
-                        ),
+        });
+        restore_frame::sheet(header, content, menu)
+    }
+
+    /// The header's network menu is open to changes on Create's first step
+    /// only: not on Import or restore, and not once the Cube is being made.
+    fn create_network_menu_editable(&self) -> bool {
+        !self.showing_import_or_restore()
+            && !self.creating_cube
+            && !matches!(self.state, State::CreationBackup(_))
+    }
+
+    /// The network menu's rows, as the Network step listed them: Live
+    /// networks, then Test networks while Developer mode is on.
+    fn create_network_menu_rows(&self, light: bool) -> Element<ViewMessage> {
+        let network_row = |chain: ChainId| -> Element<ViewMessage> {
+            let available = self.chain_availability(chain).is_available();
+            let selected = chain == self.network;
+            let subtitle = if chain.is_blake2b() && !available {
+                "Bitcoin Blake2b availability could not be verified. Vault creation is disabled."
+            } else {
+                match chain {
+                    ChainId::Bitcoin => "Spark · Vault",
+                    ChainId::Regtest => "Spark · Vault",
+                    ChainId::BitcoinBlake2b => {
+                        "Vault only. Spark isn't available on Bitcoin Blake2b."
+                    }
+                    ChainId::BitcoinBlake2bTestnet4 => {
+                        "Vault only. Spark isn't available on Bitcoin Blake2b Testnet4."
+                    }
+                    ChainId::Testnet => "Vault only. Spark isn't available on Testnet.",
+                    ChainId::Testnet4 => "Vault only. Spark isn't available on Testnet4.",
+                    ChainId::Signet => "Vault only. Spark isn't available on Signet.",
+                }
+            };
+            let id = create_network_row_id(chain);
+            let mut name = Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(create_journey_coin(chain, light, 18.0))
+                .push(p2_regular(chain.label()));
+            if chain.is_blake2b() && !launcher_coin::is_test_network(chain) {
+                name = name.push(create_journey_tag("Blake2b", true));
+            }
+            if launcher_coin::is_test_network(chain) {
+                name = name.push(create_journey_tag(chain.label(), false));
+            }
+            let row = FocusableAction::new(
+                id.clone(),
+                Row::new()
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .push(
+                        Container::new(selected.then(icon::check_icon)).width(Length::Fixed(16.0)),
+                    )
+                    .push(
+                        Column::new()
+                            .spacing(3)
+                            .push(name)
+                            .push(p2_regular(subtitle).size(12).style(theme::text::secondary)),
                     ),
-                )
-                .padding([14, 28])
-                .width(Length::Fill),
+                create_journey_focus,
             )
-        } else if !backing_up {
-            region.push(divider()).push(
+            .width(Length::Fill)
+            .padding([8, 10])
+            .style(move |theme, status| {
+                // A selected option stays at normal contrast even though
+                // activating it only closes the menu.
+                let mut style = theme::button::transparent(
+                    theme,
+                    if selected {
+                        iced::widget::button::Status::Active
+                    } else {
+                        status
+                    },
+                );
+                if selected {
+                    style.background = Some(iced::Background::Color(theme.colors.shell.selected));
+                    style.text_color = theme.colors.shell.ink;
+                }
+                style.border.radius = 6.0.into();
+                style
+            });
+            row.on_press_maybe(create_network_row_action(chain, available, selected))
+                .into()
+        };
+        let mut live = self
+            .displayed_networks
+            .iter()
+            .copied()
+            .filter(|chain| matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b))
+            .collect::<Vec<_>>();
+        let mut test = self
+            .displayed_networks
+            .iter()
+            .copied()
+            .filter(|chain| !matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b))
+            .collect::<Vec<_>>();
+        // The per-device toggle controls visibility. An enabled device may
+        // still be waiting for feature verification: explain that state
+        // with disabled rows, while SelectNetwork remains fail-closed.
+        if self.connect_account.bitcoin_blake2b_opt_in {
+            if !live.contains(&ChainId::BitcoinBlake2b) {
+                live.push(ChainId::BitcoinBlake2b);
+            }
+            if self.developer_mode && !test.contains(&ChainId::BitcoinBlake2bTestnet4) {
+                test.push(ChainId::BitcoinBlake2bTestnet4);
+            }
+        }
+        let mut rows = Column::new()
+            .spacing(2)
+            .push(restore_frame::menu_heading("Live networks"));
+        for chain in live {
+            rows = rows.push(network_row(chain));
+        }
+        if self.developer_mode {
+            rows = rows.push(restore_frame::menu_heading("Test networks"));
+            for chain in test {
+                rows = rows.push(network_row(chain));
+            }
+        } else {
+            rows = rows.push(
                 Container::new(
                     Row::new()
+                        .spacing(12)
                         .align_y(Alignment::Center)
                         .push(
-                            button::secondary_action(
-                                CREATE_BACK_TO_NETWORKS_ID,
-                                Some(icon::previous_icon()),
-                                "Back",
-                                create_journey_focus,
-                            )
-                            .width(Length::Shrink)
-                            .on_press_maybe(
-                                (!self.creating_cube).then_some(ViewMessage::BackToCreateNetwork),
-                            ),
+                            p2_regular("Test networks appear when Developer mode is on.")
+                                .size(12)
+                                .style(theme::text::secondary)
+                                .width(Length::Fill),
                         )
-                        .push(Space::new().width(Length::Fill))
                         .push(
-                            button::primary_action(
-                                "tenshu.create:cube-submit",
+                            button::secondary_action(
+                                "tenshu.create:app-preferences",
                                 None,
-                                if self.creating_cube {
-                                    "Creating…"
-                                } else {
-                                    "Create Cube"
-                                },
+                                "App preferences",
                                 create_journey_focus,
                             )
                             .width(Length::Shrink)
-                            .on_press_maybe(
-                                create_cube_can_submit(
-                                    &self.create_cube_name,
-                                    &self.create_cube_pin,
-                                    &self.create_cube_pin_confirm,
-                                    self.passkey_mode,
-                                    self.creating_cube,
-                                )
-                                .then_some(ViewMessage::CreateCube),
-                            ),
+                            .on_press(ViewMessage::OpenAppPreferences),
                         ),
                 )
-                .padding([14, 28])
-                .width(Length::Fill),
-            )
-        } else {
-            region
-        };
-        // Import or restore: its title over a path list beside the path.
-        let region: Element<ViewMessage> = if let Some(header) = header {
-            restore_frame::split(header, self.restore_nav(backing_up), region.into())
-        } else {
-            region.into()
-        };
-        let stage = Container::new(
-            Container::new(region)
-                .style(theme::card::simple)
-                .width(Length::Fill)
-                .max_width(if restoring { 1120 } else { 940 }),
-        )
-        .padding([28, 24])
-        .center_x(Length::Fill)
-        .height(Length::Fill);
-        Container::new(Column::new().height(Length::Fill).push(top_bar).push(stage))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(theme::container::background)
-            .into()
+                .padding([8, 10]),
+            );
+        }
+        rows.into()
     }
 
     /// Import Bitcoin wallet is open while Bitcoin mainnet is current and
@@ -6371,7 +6105,8 @@ fn global_settings_view(home: &Home) -> Element<Message> {
 const LEGACY_CONNECT_SIGN_IN_ID: &str = "tenshu.launcher.legacy:connect:sign-in";
 const LEGACY_CONNECT_ENTRY_ID: &str = "tenshu.launcher.legacy:connect:entry";
 pub(crate) const CREATE_BODY_SCROLL_ID: &str = "tenshu.create:body";
-const CREATE_BACK_TO_NETWORKS_ID: &str = "tenshu.create:back-to-networks";
+const CREATE_CLOSE_ID: &str = "tenshu.create:close";
+const CREATE_IMPORT_OR_RESTORE_ID: &str = "tenshu.create:import-or-restore";
 const RESTORE_CLOSE_ID: &str = "tenshu.restore:close";
 const RESTORE_OVERVIEW_ID: &str = "tenshu.restore:nav:overview";
 const RESTORE_IMPORT_ID: &str = "tenshu.restore:nav:import";
@@ -6403,14 +6138,13 @@ fn create_network_row_action(
     chain: ChainId,
     available: bool,
     selected: bool,
-    id: Id,
 ) -> Option<ViewMessage> {
     if !available {
         None
     } else if selected {
-        // An enabled no-op focus action keeps the current row in Tab order
-        // without restarting a network probe or changing creation state.
-        Some(create_journey_focus(id))
+        // The current row stays in Tab order; choosing it again only closes
+        // the menu, without restarting a network probe.
+        Some(ViewMessage::CreateNetworkMenu(false))
     } else {
         Some(ViewMessage::SelectNetwork(chain))
     }
@@ -6642,9 +6376,9 @@ fn connect_status_row<'a>(account: &ConnectAccountPanel) -> Element<'a, Message>
 /// Vault is created later, from inside the Cube, by its own wizard.
 fn create_cube_steps(passkey_mode: bool) -> &'static [&'static str] {
     if passkey_mode {
-        &["Network", "Cube", "Passkey", "Backup", "Done"]
+        &["Cube", "Passkey", "Backup", "Done"]
     } else {
-        &["Network", "Cube", "Backup", "Done"]
+        &["Cube", "Backup", "Done"]
     }
 }
 
@@ -6704,9 +6438,9 @@ fn create_cube_form<'a>(
             p1_regular(if importing_bitcoin {
                 "Create and back up your Cube first, then import the public descriptors for your existing Bitcoin wallet. Your original wallet signers remain necessary to spend."
             } else if spark_available {
-                "A Cube is your account which can contain a Spark wallet, a Vault wallet and other features."
+                "A Cube is an account. It holds a Spark wallet and a Vault."
             } else {
-                "A Cube is your account which can contain a Vault wallet and other features."
+                "A Cube is an account. On this network it holds a Vault."
             })
             .style(theme::text::secondary),
         );
@@ -6729,9 +6463,9 @@ fn create_cube_form<'a>(
                             .push(icon::cloud_slash_icon().style(theme::text::warning))
                             .push(
                                 p2_regular(
-                                    "You're signed out. This Cube will be saved on this device \
+                                    "You're signed out, so this Cube is saved on this computer \
                                      only. Sign in to Connect to sync it to your other devices \
-                                     and the Keychain mobile app.",
+                                     and the Keychain app.",
                                 )
                                 .style(theme::text::secondary),
                             ),
@@ -6741,11 +6475,18 @@ fn create_cube_form<'a>(
                             .align_y(Alignment::Center)
                             .push(Space::new().width(Length::Fill))
                             .push(
-                                button::secondary(None, "Sign In")
-                                    .on_press(ViewMessage::GoToSection(HomeSection::Connect(
-                                        app::menu::ConnectSubMenu::Overview,
-                                    )))
-                                    .width(Length::Fixed(140.0)),
+                                // Opens the Connect sign-in sheet over this
+                                // one; its Close returns focus here.
+                                button::secondary_action(
+                                    LEGACY_CONNECT_SIGN_IN_ID,
+                                    None,
+                                    "Sign in",
+                                    create_journey_focus,
+                                )
+                                .on_press(ViewMessage::GoToSection(HomeSection::Connect(
+                                    app::menu::ConnectSubMenu::Overview,
+                                )))
+                                .width(Length::Shrink),
                             ),
                     ),
             )
@@ -6903,9 +6644,23 @@ fn create_cube_form<'a>(
     }
     if !importing_bitcoin && can_import_bitcoin {
         column = column.push(
-            button::secondary(None, "Import Bitcoin wallet")
-                .on_press_maybe((!creating_cube).then_some(ViewMessage::ShowImportBitcoin))
-                .width(Length::Fixed(200.0)),
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(
+                    p2_regular("Already have a wallet or a Recovery Kit?")
+                        .style(theme::text::secondary),
+                )
+                .push(
+                    FocusableAction::new(
+                        Id::new(CREATE_IMPORT_OR_RESTORE_ID),
+                        p2_regular("Import or restore instead"),
+                        create_journey_focus,
+                    )
+                    .padding(0)
+                    .style(theme::button::link)
+                    .on_press_maybe((!creating_cube).then_some(ViewMessage::ShowRestoreHub)),
+                ),
         );
     }
 
@@ -7657,8 +7412,8 @@ pub enum ViewMessage {
     /// Dismiss the recovery-method picker without choosing.
     CloseRecoveryMethodPicker,
     ShowCreateCube(bool),
-    ConfirmCreateNetwork,
-    BackToCreateNetwork,
+    /// Open or close the Create sheet's network menu.
+    CreateNetworkMenu(bool),
     ShowImportBitcoin,
     /// Import or restore's Overview: every way to bring a wallet or Cube in.
     ShowRestoreHub,
@@ -8704,13 +8459,13 @@ mod tests {
         home.network = ChainId::BitcoinBlake2b;
         home.state = State::NoCube { create_cube: true };
 
-        // The network step leads to the Cube step, as on Bitcoin. Nothing
-        // starts the Vault installer: the Vault is created inside the Cube.
-        let next = drain(home.update(Message::View(ViewMessage::ConfirmCreateNetwork)));
+        // The sheet opens on the Cube step, as on Bitcoin. Nothing starts
+        // the Vault installer: the Vault is created inside the Cube.
+        let next = drain(home.update(Message::View(ViewMessage::CreateNetworkMenu(true))));
         assert!(!next
             .iter()
             .any(|message| matches!(message, Message::Install(..))));
-        assert!(home.create_network_confirmed);
+        assert!(home.create_network_menu);
         assert!(home.error.is_none());
 
         drop(home.update(Message::View(ViewMessage::CubeNameEdited("Fork".into()))));
@@ -8824,40 +8579,44 @@ mod tests {
     }
 
     #[test]
-    fn create_step_navigation_restores_focus_to_mounted_action() {
+    fn create_network_menu_opens_on_the_cube_step_only() {
         let mut home = home();
         home.state = State::NoCube { create_cube: true };
-        let continue_messages =
-            drain(home.update(Message::View(ViewMessage::ConfirmCreateNetwork)));
-        assert!(home.create_network_confirmed);
+        drop(home.update(Message::View(ViewMessage::CreateNetworkMenu(true))));
+        assert!(home.create_network_menu);
+        // Closing returns focus to the header's network control.
+        let close_messages =
+            drain(home.update(Message::View(ViewMessage::CreateNetworkMenu(false))));
+        assert!(!home.create_network_menu);
         assert!(matches!(
-            continue_messages.as_slice(),
+            close_messages.as_slice(),
             [Message::View(ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id)))]
-                if id == &Id::new(CREATE_BACK_TO_NETWORKS_ID)
+                if id == &Id::new(restore_frame::NETWORK_CONTROL_ID)
         ));
 
-        let back_messages = drain(home.update(Message::View(ViewMessage::BackToCreateNetwork)));
-        assert!(!home.create_network_confirmed);
-        assert!(matches!(
-            back_messages.as_slice(),
-            [Message::View(ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(id)))]
-                if id == &create_network_row_id(ChainId::Bitcoin)
-        ));
+        // Once the Cube is being written the chip is static.
+        home.creating_cube = true;
+        drop(home.update(Message::View(ViewMessage::CreateNetworkMenu(true))));
+        assert!(!home.create_network_menu);
+        home.creating_cube = false;
+
+        // Import or restore never changes the network from its header.
+        home.restore_hub = true;
+        drop(home.update(Message::View(ViewMessage::CreateNetworkMenu(true))));
+        assert!(!home.create_network_menu);
     }
 
     #[test]
     fn selected_create_network_remains_keyboard_actionable_without_reprobing() {
-        let id = Id::new("tenshu.create:network:mainnet");
         assert!(matches!(
-            create_network_row_action(ChainId::Bitcoin, true, true, id.clone()),
-            Some(ViewMessage::Catalog(launcher_catalog::CatalogMessage::Focus(target)))
-                if target == id
+            create_network_row_action(ChainId::Bitcoin, true, true),
+            Some(ViewMessage::CreateNetworkMenu(false))
         ));
         assert!(matches!(
-            create_network_row_action(ChainId::Signet, true, false, id.clone()),
+            create_network_row_action(ChainId::Signet, true, false),
             Some(ViewMessage::SelectNetwork(ChainId::Signet))
         ));
-        assert!(create_network_row_action(ChainId::Bitcoin, false, true, id).is_none());
+        assert!(create_network_row_action(ChainId::Bitcoin, false, true).is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8907,6 +8666,7 @@ mod tests {
         home.state = State::NoCube { create_cube: true };
         home.developer_mode = true;
         home.refresh_displayed_networks();
+        home.create_network_menu = true;
         let mut element = home.create_journey_view();
         let renderer = <iced::Renderer as Headless>::new(
             coincube_ui::font::REGULAR,
@@ -8961,8 +8721,8 @@ mod tests {
         assert_eq!(initially_focused, Some(focused_id.clone()));
         drop(element);
 
-        // A switch across live/test groups adds a visible strip, but the
-        // Create body stays at the same tree index and retains row focus.
+        // A switch across live/test groups changes the header's tag, but the
+        // open menu stays at the same tree index and retains row focus.
         home.network = ChainId::Testnet4;
         let mut element = home.create_journey_view();
         tree.diff(element.as_widget());
@@ -9081,7 +8841,6 @@ mod tests {
             create_cube: true,
             source: ChainId::Bitcoin,
         };
-        home.create_network_confirmed = true;
         home.create_cube_name.value = "Travel".into();
         home.creating_cube = true;
         assert!(!home.can_leave_create_journey());
@@ -9095,7 +8854,6 @@ mod tests {
             }
         ));
         assert_eq!(home.create_cube_name.value, "Travel");
-        assert!(home.create_network_confirmed);
 
         home.creating_cube = false;
         assert!(home.can_leave_create_journey());
@@ -9252,7 +9010,8 @@ mod tests {
                 ),
             ] {
                 home.network = chain;
-                home.create_network_confirmed = confirmed;
+                // The old Network step is the header's open menu.
+                home.create_network_menu = !confirmed && backup.is_none();
                 home.state = match backup {
                     Some(step) => State::CreationBackup(step),
                     None => State::NoCube { create_cube: true },
@@ -11369,6 +11128,7 @@ mod tests {
             ChainId::Regtest,
         ];
 
+        home.create_network_menu = true;
         let networks = inspect(home.create_journey_view());
         assert!(networks.contains("Spark · Vault"));
         for chain in ["Testnet", "Testnet4", "Signet"] {
@@ -11376,20 +11136,15 @@ mod tests {
         }
         assert!(!networks.contains("Liquid"));
 
-        home.create_network_confirmed = true;
+        home.create_network_menu = false;
         let cube = inspect(home.create_journey_view());
-        assert!(cube.contains(
-            "A Cube is your account which can contain a Spark wallet, a Vault wallet and other \
-             features."
-        ));
+        assert!(cube.contains("A Cube is an account. It holds a Spark wallet and a Vault."));
         assert!(!cube.contains("Liquid"));
 
         // Without Spark on the network, the Cube copy does not promise it.
         home.network = ChainId::Testnet4;
         let cube = inspect(home.create_journey_view());
-        assert!(cube.contains(
-            "A Cube is your account which can contain a Vault wallet and other features."
-        ));
+        assert!(cube.contains("A Cube is an account. On this network it holds a Vault."));
         assert!(!cube.contains("Spark wallet"));
 
         let words: [String; 12] = Default::default();
@@ -14260,11 +14015,11 @@ mod chain_identity_open_tests {
         home.recovery_words[0] = "synthetic".into();
         home.state = State::CreationBackup(CreationBackupStep::Choice);
         home.creating_cube = true;
-        home.create_network_confirmed = true;
+        home.create_network_menu = true;
         home.create_network_selection_pending = true;
         drop(home.reload_global_settings());
         assert_eq!(home.network, ChainId::Bitcoin);
-        assert!(!home.create_network_confirmed);
+        assert!(!home.create_network_menu);
         assert!(!home.create_network_selection_pending);
         assert!(matches!(home.state, State::Unchecked));
         drop(home.update(Message::Checked {
@@ -14272,7 +14027,7 @@ mod chain_identity_open_tests {
             res: Ok(State::NoCube { create_cube: false }),
         }));
         assert!(!home.showing_create_journey());
-        assert!(!home.create_network_confirmed);
+        assert!(!home.create_network_menu);
         assert!(home.creation_backup_words.is_none());
         assert!(home.recovery_words.iter().all(String::is_empty));
         assert!(!home.creating_cube);
