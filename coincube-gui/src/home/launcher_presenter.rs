@@ -1598,37 +1598,7 @@ fn empty_floor<'a>(home: &'a Home, width: f32, available: f32) -> Element<'a, Vi
     // The dashed Cube floats under the pointer as a resting Cube does; the
     // plus and the words stay put (Robert, 2026-11-03).
     let lift = home.catalog.lift(&key, std::time::Instant::now());
-    let (_, center_y) = layout.rest_center(0, 1);
-    let content = Column::new()
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Alignment::Center)
-        .push(Space::new().height(Length::Fixed(
-            (center_y - layout.rows_top() - 22.0).max(0.0),
-        )))
-        .push(
-            Container::new(icon::plus_icon().size(28))
-                .center_x(Length::Fixed(44.0))
-                .center_y(Length::Fixed(44.0))
-                .style(move |theme: &theme::Theme| container::Style {
-                    background: Some(iced::Background::Color(if at_limit {
-                        theme.colors.shell.line
-                    } else {
-                        theme.colors.shell.accent
-                    })),
-                    text_color: Some(if at_limit {
-                        theme.colors.shell.muted
-                    } else {
-                        theme::tenshu::ON_ACCENT
-                    }),
-                    border: iced::Border {
-                        radius: 22.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-        )
-        .push(Space::new().height(Length::Fill))
+    let words = Column::new()
         .push(face_words(
             "Create Cube",
             20.0,
@@ -1645,6 +1615,41 @@ fn empty_floor<'a>(home: &'a Home, width: f32, available: f32) -> Element<'a, Vi
             coincube_ui::font::REGULAR,
             true,
         ));
+    // The plus sits beside the words, below the Cube, so nothing covers
+    // the wireframe (Robert, 2026-11-03).
+    let content = Column::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Center)
+        .push(Space::new().height(Length::Fill))
+        .push(
+            Row::new()
+                .spacing(16)
+                .align_y(Alignment::Center)
+                .push(words)
+                .push(
+                    Container::new(icon::plus_icon().size(28))
+                        .center_x(Length::Fixed(44.0))
+                        .center_y(Length::Fixed(44.0))
+                        .style(move |theme: &theme::Theme| container::Style {
+                            background: Some(iced::Background::Color(if at_limit {
+                                theme.colors.shell.line
+                            } else {
+                                theme.colors.shell.accent
+                            })),
+                            text_color: Some(if at_limit {
+                                theme.colors.shell.muted
+                            } else {
+                                theme::tenshu::ON_ACCENT
+                            }),
+                            border: iced::Border {
+                                radius: 22.0.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                ),
+        );
     let create = Action::new(empty_create_id(), content, focus)
         .width(Length::Fixed(layout.slot()))
         .height(Length::Fixed(layout.slot_height()))
