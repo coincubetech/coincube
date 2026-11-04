@@ -13714,7 +13714,7 @@ mod tests {
         let cube = CubeSettings::new("Opened".to_string(), Network::Bitcoin);
         let id = cube.id.clone();
 
-        let out = drain(home.update(Message::CubeCreated(Ok(cube))));
+        let out = drain(home.update(Message::CubeCreated(Ok(cube.clone()))));
         assert!(
             !out.iter()
                 .any(|m| matches!(m, Message::CubeRemoteRegistered { .. })),
@@ -13723,7 +13723,38 @@ mod tests {
         );
         assert_eq!(home.open_created_cube.as_ref(), Some(&id));
         assert!(home.open_after_registration.is_none());
+        assert_checked_list_opens(&mut home, cube);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reloaded list that holds the created Cube hands it to the unlock
+    /// path, once.
+    fn assert_checked_list_opens(home: &mut Home, cube: CubeSettings) {
+        let id = cube.id.clone();
+        let checked = |cube: CubeSettings| Message::Checked {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![cube],
+                create_cube: false,
+                source: ChainId::Bitcoin,
+            }),
+        };
+        let out = drain(home.update(checked(cube.clone())));
+        assert!(
+            out.iter().any(|m| matches!(
+                m,
+                Message::Run(_, _, ChainId::Bitcoin, opened) if opened.id == id
+            )),
+            "the created Cube opens from the checked list: {:?}",
+            out
+        );
+        assert!(home.open_created_cube.is_none());
+        let again = drain(home.update(checked(cube)));
+        assert!(
+            !again.iter().any(|m| matches!(m, Message::Run(..))),
+            "a later reload does not open it again: {:?}",
+            again
+        );
     }
 
     /// Signed in, the Cube opens only after its registration result lands.
@@ -13736,7 +13767,7 @@ mod tests {
         let cube = CubeSettings::new("Registering".to_string(), Network::Bitcoin);
         let id = cube.id.clone();
 
-        let out = drain(home.update(Message::CubeCreated(Ok(cube))));
+        let out = drain(home.update(Message::CubeCreated(Ok(cube.clone()))));
         assert!(
             out.iter()
                 .any(|m| matches!(m, Message::CubeRemoteRegistered { .. })),
@@ -13753,6 +13784,7 @@ mod tests {
         });
         assert!(home.open_after_registration.is_none());
         assert_eq!(home.open_created_cube.as_ref(), Some(&id));
+        assert_checked_list_opens(&mut home, cube);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
