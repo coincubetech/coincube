@@ -85,9 +85,29 @@ async fn send_otp(client: CoincubeClient, email: String, is_signup: bool) -> Res
     .map_err(|e| e.to_string())
 }
 
+impl CoincubeConnectStep {
+    /// The flow has no Connect step at all, as opposed to one whose token
+    /// is already in hand.
+    fn never_runs(ctx: &Context) -> bool {
+        (ctx.fresh_fork_cube
+            && ctx
+                .coincube_client
+                .as_ref()
+                .and_then(|c| c.token())
+                .is_none())
+            || ctx.network == coincube_core::miniscript::bitcoin::Network::Regtest
+            || ctx.remote_backend.is_some()
+    }
+}
+
 impl Step for CoincubeConnectStep {
     fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
         Some(crate::installer::VaultStage::Connect)
+    }
+    /// A signed-in Cube's token, or the one this step just collected, skips
+    /// the step but not its place on the stepper.
+    fn off_vault_stepper(&self, ctx: &Context) -> bool {
+        Self::never_runs(ctx)
     }
     /// Adopt an already-authenticated Connect session forwarded from the
     /// app (`ctx.coincube_client`) the first time this step becomes
@@ -159,9 +179,7 @@ impl Step for CoincubeConnectStep {
     }
 
     fn skip(&self, ctx: &Context) -> bool {
-        (ctx.fresh_fork_cube && ctx.coincube_client.as_ref().and_then(|c| c.token()).is_none())
-            || ctx.network == coincube_core::miniscript::bitcoin::Network::Regtest
-            || ctx.remote_backend.is_some()
+        Self::never_runs(ctx)
             // An earlier step (today: `RecoveryKitRestoreStep`) has
             // already collected the user's JWT for the same Connect
             // account, so re-authenticating here would just be a

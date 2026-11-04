@@ -91,6 +91,12 @@ pub trait Step {
     fn vault_stage(&self) -> Option<super::VaultStage> {
         None
     }
+    /// Whether the Create Vault stepper leaves this step out. A step that
+    /// skips itself once it has done its work overrides this, so the
+    /// stepper keeps it after it has run.
+    fn off_vault_stepper(&self, ctx: &Context) -> bool {
+        self.skip(ctx)
+    }
 }
 
 pub struct Final {

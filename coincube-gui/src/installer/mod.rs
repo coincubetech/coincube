@@ -1097,6 +1097,8 @@ impl Installer {
             Final::new().into(),
         ];
         self.proposal_settings = Some(settings);
+        // The proposal hand-off and review are not Create Vault stages.
+        self.create_vault = false;
         self.current = 0;
         self.steps[0].load_context(&self.context);
         self.steps[0].load()
@@ -1541,7 +1543,7 @@ impl Installer {
         vault_stepper(
             self.steps
                 .iter()
-                .map(|step| (step.vault_stage(), step.skip(&self.context))),
+                .map(|step| (step.vault_stage(), step.off_vault_stepper(&self.context))),
             self.current,
         )
     }
@@ -3840,6 +3842,68 @@ mod create_vault_frame_tests {
                 chain
             );
             assert_eq!(active, 4, "{:?}", chain);
+        }
+    }
+
+    /// Connect stays on the stepper once it has its token, from the Cube's
+    /// session or the sign-in it just did, although the step then skips.
+    #[test]
+    fn connect_stays_after_sign_in() {
+        for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
+            let mut vault = in_cube(chain);
+            vault.context.connect_jwt = Some(zeroize::Zeroizing::new("jwt".to_string()));
+            vault.context.use_coincube_connect = true;
+            for &(index, stage) in &[
+                (5, VaultStage::Node),
+                (6, VaultStage::Name),
+                (7, VaultStage::Done),
+            ] {
+                let steps = at(&mut vault, stage).create_vault_steps();
+                assert_eq!(steps, (FULL.to_vec(), index), "{:?} {:?}", chain, stage);
+            }
+        }
+        // Regtest has no Connect step.
+        let mut vault = in_cube(ChainId::Regtest);
+        let (labels, active) = at(&mut vault, VaultStage::Node).create_vault_steps();
+        assert_eq!(
+            labels,
+            ["Vault", "Policy", "Keys", "Backup", "Node", "Name", "Done"]
+        );
+        assert_eq!(active, 4);
+    }
+
+    /// Bitcoin Blake2b and the in-Cube Vault restore keep the installer's
+    /// layout.
+    #[test]
+    fn only_create_vault_is_framed() {
+        let root = || {
+            CoincubeDirectory::new(
+                std::env::temp_dir().join(format!("create-vault-{}", uuid::Uuid::new_v4())),
+            )
+        };
+        let flows = [
+            (ChainId::BitcoinBlake2b, UserFlow::CreateWallet),
+            (ChainId::Bitcoin, UserFlow::RestoreVaultFromRecoveryKit),
+            (ChainId::Bitcoin, UserFlow::AddWallet),
+        ];
+        for (chain, flow) in flows.iter().cloned() {
+            let name = format!("{:?} {:?}", chain, flow);
+            match Installer::try_new_for_chain(
+                root(),
+                chain,
+                None,
+                flow,
+                true,
+                None,
+                None,
+                None,
+                false,
+                None,
+            ) {
+                Ok((installer, _)) => assert!(!installer.create_vault, "{}", name),
+                // Refused before it is built: nothing to frame.
+                Err(_) => assert!(chain.is_blake2b(), "{}", name),
+            }
         }
     }
 
