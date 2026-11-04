@@ -3440,6 +3440,16 @@ impl Tab {
                         }
                     }
                     app::Message::View(app::view::Message::SetupVault) => {
+                        // The installer would drop a revocation that lands
+                        // on it, so it waits for the Cube's first check.
+                        if app.fork_feature_unconfirmed() {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "Checking Bitcoin Blake2b availability. Try again in a moment."
+                                        .into(),
+                                ),
+                            )));
+                        }
                         if app.cube_settings().bitcoin_import.is_some() {
                             return Task::done(Message::Run(app::Message::View(
                                 app::view::Message::ShowError(
@@ -7815,6 +7825,38 @@ mod unlock_routing_tests {
             unlock.error_for_test().is_none(),
             "the prompt is not failed"
         );
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &unlock.on_success;
+        assert!(connect_client.is_none(), "the old client is dropped");
+    }
+
+    /// Signed in, a Vault-less passkey Blake2b Cube is held to its account
+    /// as the PIN screen holds it: an account change fails the prompt.
+    #[test]
+    fn a_connect_change_fails_a_signed_in_vault_less_passkey_open() {
+        use crate::chain::ChainId;
+        let cube = CubeSettings::new("Fork".to_string(), ChainId::BitcoinBlake2b).with_passkey(
+            PasskeyMetadata {
+                credential_id: "Y3JlZC1pZA==".to_string(),
+                rp_id: "coincube.io".to_string(),
+                created_at: 1_786_122_245,
+                label: None,
+            },
+        );
+        let mut success = on_success();
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &mut success;
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        client.set_token("account-a");
+        *connect_client = Some(client);
+        let mut tab = super::Tab::new(
+            1,
+            unlock_state(cube, std::path::PathBuf::from("/tmp/unused"), success, None),
+        );
+        drop(tab.invalidate_fork_state(super::AuthChange::LogOut, false, false));
+        let State::PasskeyUnlock(unlock) = &tab.state else {
+            panic!("still at the prompt");
+        };
+        assert!(unlock.error_for_test().is_some(), "the prompt is failed");
         let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &unlock.on_success;
         assert!(connect_client.is_none(), "the old client is dropped");
     }

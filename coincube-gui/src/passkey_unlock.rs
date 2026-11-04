@@ -392,12 +392,17 @@ impl PasskeyUnlock {
         let PinEntrySuccess::LoadApp {
             datadir,
             wallet_settings,
+            connect_client,
             ..
         } = &self.on_success;
-        // A Cube with no Vault has no backend for Connect to serve: an
-        // unrelated sign-in or sign-out must not fail its unlock screen.
+        // As the PIN screen: a Cube with no Vault is Connect-backed only
+        // while it holds a signed-in client. Signed out, an unrelated sign-in
+        // or sign-out must not fail its unlock screen.
         self.cube.network.is_blake2b()
-            && wallet_settings.is_some()
+            && (wallet_settings.is_some()
+                || connect_client
+                    .as_ref()
+                    .is_some_and(|client| client.token().is_some()))
             && !crate::chain::has_managed_local_fork(
                 datadir,
                 self.cube.network,

@@ -3698,23 +3698,7 @@ impl App {
         // passkey unlock reaches here without the PIN screen's check, and a
         // revoked feature must close the Cube before it is used. Signed in,
         // the account's own flag is checked, as the PIN screen does.
-        app.local_feature_check_pending = true;
-        let root = app.datadir.clone();
-        let chain = app.cache.chain();
-        let feature_client = app.fork_connect_client.clone();
-        let feature = Task::perform(
-            async move {
-                match feature_client {
-                    Some(client) => crate::chain::require_connect_feature(chain, &client, &root)
-                        .await
-                        .is_ok(),
-                    None => crate::chain::require_local_feature(chain, None, &root)
-                        .await
-                        .is_ok(),
-                }
-            },
-            Message::LocalForkFeatureChecked,
-        );
+        let feature = app.fork_feature_check();
         Ok((app, Task::batch([task, feature])))
     }
 
@@ -5581,18 +5565,7 @@ impl App {
                 .local_feature_checked_at
                 .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
         {
-            self.local_feature_check_pending = true;
-            let root = self.datadir.clone();
-            let chain = self.cache.chain();
-            let client = self.fork_connect_client.clone();
-            Task::perform(
-                async move {
-                    crate::chain::require_local_feature(chain, client, &root)
-                        .await
-                        .is_ok()
-                },
-                Message::LocalForkFeatureChecked,
-            )
+            self.fork_feature_check()
         } else {
             Task::none()
         };
@@ -10604,6 +10577,41 @@ impl App {
     /// A new authenticated startup is required; an old authority is never reused.
     /// Local wallet authority comes from its admitted managed node, independently
     /// of Connect sessions. Account changes only withdraw Connect services.
+    /// Start one check of this fork Cube's feature. A Vault-less Cube that
+    /// is signed in checks its account's own flag, as its unlock did; every
+    /// other fork Cube not served by Connect checks the global flag.
+    fn fork_feature_check(&mut self) -> Task<Message> {
+        self.local_feature_check_pending = true;
+        let root = self.datadir.clone();
+        let chain = self.cache.chain();
+        let client = self.fork_connect_client.clone();
+        let account = self.daemon.is_none();
+        Task::perform(
+            async move {
+                match client {
+                    Some(client) if account => {
+                        crate::chain::require_connect_feature(chain, &client, &root)
+                            .await
+                            .is_ok()
+                    }
+                    client => crate::chain::require_local_feature(chain, client, &root)
+                        .await
+                        .is_ok(),
+                }
+            },
+            Message::LocalForkFeatureChecked,
+        )
+    }
+
+    /// A fork Cube whose feature check has not answered yet: nothing that
+    /// leaves the App (Create Vault) may start until it has.
+    pub(crate) fn fork_feature_unconfirmed(&self) -> bool {
+        self.cache.chain().is_blake2b()
+            && !self.requires_connect()
+            && self.local_feature_check_pending
+            && self.local_feature_checked_at.is_none()
+    }
+
     pub(crate) fn local_feature_revoked(&self) -> bool {
         self.cache.chain().is_blake2b() && !self.requires_connect() && !self.local_feature_valid
     }
@@ -12639,14 +12647,25 @@ pub(crate) mod tests {
             "the feature check starts at once"
         );
 
+        assert!(app.fork_feature_unconfirmed());
+
         let mut tab = crate::gui::tab::Tab::new(1, crate::gui::tab::State::App(app));
+        // Create Vault waits for the first answer: the installer would drop
+        // a revocation that lands on it.
+        drop(tab.update(crate::gui::tab::Message::Run(Message::View(
+            view::Message::SetupVault,
+        ))));
+        assert!(
+            matches!(tab.state, crate::gui::tab::State::App(_)),
+            "no installer before the feature is confirmed"
+        );
         drop(tab.update(crate::gui::tab::Message::Run(
             Message::LocalForkFeatureChecked(true),
         )));
-        assert!(
-            matches!(tab.state, crate::gui::tab::State::App(_)),
-            "a signed-out Vault-less fork Cube stays open"
-        );
+        let crate::gui::tab::State::App(app) = &tab.state else {
+            panic!("a signed-out Vault-less fork Cube stays open");
+        };
+        assert!(!app.fork_feature_unconfirmed());
         drop(tab.update(crate::gui::tab::Message::Run(
             Message::LocalForkFeatureChecked(false),
         )));
