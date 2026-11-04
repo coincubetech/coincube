@@ -301,6 +301,9 @@ impl RegisterDescriptor {
 }
 
 impl Step for RegisterDescriptor {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Register)
+    }
     fn load_context(&mut self, ctx: &Context) {
         // we reset device registered set if the descriptor have changed.
         if self.descriptor != ctx.descriptor {
@@ -439,6 +442,9 @@ pub struct BackupDescriptor {
 }
 
 impl Step for BackupDescriptor {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Backup)
+    }
     fn subscription(&self, _hws: &HardwareWallets) -> Subscription<Message> {
         if let Some(modal) = &self.modal {
             if let Some(sub) = modal.subscription() {

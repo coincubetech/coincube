@@ -333,6 +333,75 @@ impl RestorePath {
     }
 }
 
+/// The heading of the Vault wizard run from inside an open Cube.
+pub(crate) const CREATE_VAULT_TITLE: &str = "Create Vault";
+
+/// Where a step sits on the Create Vault stepper: the installer's
+/// `CreateWallet` flow launched from inside an open Cube. Several steps can
+/// share a stage, and the stepper shows a stage once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultStage {
+    Vault,
+    Policy,
+    Keys,
+    Backup,
+    Register,
+    Connect,
+    Node,
+    Name,
+    Done,
+}
+
+impl VaultStage {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Vault => "Vault",
+            Self::Policy => "Policy",
+            Self::Keys => "Keys",
+            Self::Backup => "Backup",
+            Self::Register => "Register",
+            Self::Connect => "Connect",
+            Self::Node => "Node",
+            Self::Name => "Name",
+            Self::Done => "Done",
+        }
+    }
+
+    /// Whether a Create Vault can pass without this stage: Register runs
+    /// only for a hardware key and Connect only without a Connect session or
+    /// on regtest. Every other stage runs in every Create Vault, even where
+    /// the context cannot tell yet: before Keys builds the descriptor, the
+    /// Node and Name steps report themselves skipped.
+    fn optional(self) -> bool {
+        matches!(self, Self::Register | Self::Connect)
+    }
+}
+
+/// The Create Vault stepper's labels and the current step's place on it.
+/// An optional stage drops out when the context skips its steps, and
+/// consecutive steps of one stage share a label. A current step with no
+/// stage keeps the stage before it.
+fn vault_stepper(
+    stages: impl IntoIterator<Item = (Option<VaultStage>, bool)>,
+    current: usize,
+) -> (Vec<&'static str>, usize) {
+    let mut labels: Vec<&'static str> = Vec::new();
+    let mut active = 0;
+    for (index, (stage, skipped)) in stages.into_iter().enumerate() {
+        let Some(stage) = stage else { continue };
+        if skipped && stage.optional() && index != current {
+            continue;
+        }
+        if labels.last() != Some(&stage.label()) {
+            labels.push(stage.label());
+        }
+        if index <= current {
+            active = labels.len() - 1;
+        }
+    }
+    (labels, active)
+}
+
 /// What a claim needs to put the user back in the Cube they started from.
 ///
 /// Deliberately **not** `Clone`: it owns `Arc`s to the source Cube's live SDK
@@ -366,6 +435,9 @@ pub struct Installer {
     steps: Vec<Box<dyn Step>>,
     /// A Cube restore drawn in Import or restore (P-Restore), and its chain.
     restore: Option<(RestorePath, crate::chain::ChainId)>,
+    /// Create Vault from inside an open Cube, drawn under its own heading
+    /// and stepper. Bitcoin Blake2b keeps the installer's layout.
+    create_vault: bool,
     hws: HardwareWallets,
     signer: Arc<Mutex<Signer>>,
     fork_install_task: Option<iced::task::Handle>,
@@ -747,8 +819,11 @@ impl Installer {
         let context = context;
 
         let restore = RestorePath::of(&user_flow).map(|path| (path, chain));
+        let create_vault =
+            launched_from_app && matches!(user_flow, UserFlow::CreateWallet) && !chain.is_blake2b();
         let mut installer = Installer {
             restore,
+            create_vault,
             navigation_error: None,
             claim_target_saved: false,
             network,
@@ -1429,6 +1504,8 @@ impl Installer {
 
         let content = if let Some((path, chain)) = self.restore {
             self.restore_frame(path, chain, content)
+        } else if self.create_vault {
+            self.create_vault_frame(content)
         } else {
             content
         };
@@ -1449,12 +1526,50 @@ impl Installer {
             .expect("There is always a step");
         let _framed = self
             .restore
-            .map(|(path, _)| view::FramedGuard::enter(path.title()));
+            .map(|(path, _)| path.title())
+            .or(self.create_vault.then_some(CREATE_VAULT_TITLE))
+            .map(view::FramedGuard::enter);
         step.view(
             &self.hws,
             self.progress(),
             self.context.remote_backend.user_email(),
         )
+    }
+
+    /// The Create Vault stepper for the current step.
+    fn create_vault_steps(&self) -> (Vec<&'static str>, usize) {
+        vault_stepper(
+            self.steps
+                .iter()
+                .map(|step| (step.vault_stage(), step.skip(&self.context))),
+            self.current,
+        )
+    }
+
+    /// Create Vault around the installer step: its heading and stepper over
+    /// the step, which leaves out its own progress row.
+    fn create_vault_frame<'a>(&'a self, content: Element<'a, Message>) -> Element<'a, Message> {
+        use crate::home::restore_frame;
+        use coincube_ui::{component::text::h2, theme, widget::Container};
+        use iced::Length;
+
+        let (steps, active) = self.create_vault_steps();
+        let column = Column::new()
+            .spacing(20)
+            .width(Length::Fill)
+            .max_width(960)
+            .push(h2(CREATE_VAULT_TITLE))
+            .push(restore_frame::stepper(&steps, active))
+            .push(content);
+        Container::new(iced::widget::scrollable(
+            Container::new(column)
+                .padding([40, 24])
+                .center_x(Length::Fill),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(theme::container::background)
+        .into()
     }
 
     /// Import or restore (P-Restore) around a Recovery Kit or phone restore:
@@ -3594,6 +3709,240 @@ mod connect_activation_tests;
 
 #[cfg(test)]
 mod claim_target_tests;
+
+#[cfg(test)]
+mod create_vault_frame_tests {
+    use super::*;
+    use crate::chain::ChainId;
+    use crate::home::restore_frame::rendered_labels;
+
+    const FULL: [&str; 8] = [
+        "Vault", "Policy", "Keys", "Backup", "Connect", "Node", "Name", "Done",
+    ];
+
+    /// Create Vault as the open Cube's "Create Vault" button launches it.
+    fn in_cube(chain: ChainId) -> Installer {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("create-vault-{}", uuid::Uuid::new_v4())),
+        );
+        Installer::try_new_for_chain(
+            root,
+            chain,
+            None,
+            UserFlow::CreateWallet,
+            true,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("a Create Vault fixture installer")
+        .0
+    }
+
+    fn at(installer: &mut Installer, stage: VaultStage) -> &mut Installer {
+        installer.current = installer
+            .steps
+            .iter()
+            .position(|step| step.vault_stage() == Some(stage))
+            .expect("the stage has a step");
+        installer
+    }
+
+    #[test]
+    fn stages_skip_and_merge() {
+        use VaultStage::*;
+        let stages = [
+            (None, false),
+            (Some(Vault), false),
+            (Some(Backup), false),
+            (Some(Backup), false),
+            (Some(Register), true),
+            (Some(Connect), false),
+            (Some(Node), true),
+            (Some(Name), true),
+            (Some(Done), false),
+        ];
+        let (labels, active) = vault_stepper(stages, 3);
+        // Register drops out; Node and Name stay although the context skips
+        // them before there is a descriptor.
+        assert_eq!(
+            labels,
+            ["Vault", "Backup", "Connect", "Node", "Name", "Done"]
+        );
+        assert_eq!(active, 1);
+        // A step without a stage keeps the stage before it; the first one
+        // sits on the first stage.
+        assert_eq!(vault_stepper(stages, 0).1, 0);
+        // The current step is shown even when the context would skip it.
+        let (labels, active) = vault_stepper(stages, 4);
+        assert_eq!(
+            labels,
+            ["Vault", "Backup", "Register", "Connect", "Node", "Name", "Done"]
+        );
+        assert_eq!(active, 2);
+        // A skipped Connect drops out too.
+        let mut stages = stages;
+        stages[5].1 = true;
+        let (labels, active) = vault_stepper(stages, 7);
+        assert_eq!(labels, ["Vault", "Backup", "Node", "Name", "Done"]);
+        assert_eq!(active, 3);
+    }
+
+    #[test]
+    fn bitcoin_and_testnet4_follow_the_step_list() {
+        for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
+            let mut vault = in_cube(chain);
+            assert!(vault.create_vault, "{:?}", chain);
+            assert_eq!(
+                vault.create_vault_steps(),
+                (FULL.to_vec(), 0),
+                "{:?}",
+                chain
+            );
+            for (index, stage) in [
+                VaultStage::Vault,
+                VaultStage::Policy,
+                VaultStage::Keys,
+                VaultStage::Backup,
+                VaultStage::Connect,
+                VaultStage::Node,
+                VaultStage::Name,
+                VaultStage::Done,
+            ]
+            .iter()
+            .copied()
+            .enumerate()
+            {
+                let steps = at(&mut vault, stage).create_vault_steps();
+                assert_eq!(steps, (FULL.to_vec(), index), "{:?} {:?}", chain, stage);
+            }
+
+            // The descriptor backup is the second Backup step: still Backup.
+            vault.current = vault
+                .steps
+                .iter()
+                .rposition(|step| step.vault_stage() == Some(VaultStage::Backup))
+                .unwrap();
+            assert_eq!(vault.create_vault_steps().1, 3, "{:?}", chain);
+
+            // A hardware key adds its Register step after Backup.
+            vault.context.hw_is_used = true;
+            let (labels, active) = at(&mut vault, VaultStage::Register).create_vault_steps();
+            assert_eq!(
+                labels,
+                [
+                    "Vault", "Policy", "Keys", "Backup", "Register", "Connect", "Node", "Name",
+                    "Done"
+                ],
+                "{:?}",
+                chain
+            );
+            assert_eq!(active, 4, "{:?}", chain);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_vault_draws_its_heading_and_stepper() {
+        let mut vault = in_cube(ChainId::Bitcoin);
+        let shown = rendered_labels(vault.view()).await;
+        assert!(shown.iter().any(|t| t == CREATE_VAULT_TITLE), "{:?}", shown);
+        for label in FULL {
+            assert!(
+                shown.iter().any(|t| t == label),
+                "missing {:?} in {:?}",
+                label,
+                shown
+            );
+        }
+        // The installer's own "n | total" progress row stays out.
+        assert!(!shown.iter().any(|t| t.contains(" | ")), "{:?}", shown);
+        // So does the restore frame.
+        assert!(
+            !shown.iter().any(|t| t == "Import or restore"),
+            "{:?}",
+            shown
+        );
+
+        // The Name step's own title still shows under the heading.
+        let shown = rendered_labels(at(&mut vault, VaultStage::Name).view()).await;
+        assert!(
+            shown.iter().any(|t| t == "Give your wallet an alias"),
+            "{:?}",
+            shown
+        );
+    }
+
+    /// Opt-in frames of every Create Vault step: `LAUNCHER_CAPTURE_DIR=<dir>
+    /// cargo test -p coincube-gui --lib create_vault_capture -- --ignored`.
+    #[test]
+    #[ignore = "writes PNG frames; needs a GPU adapter"]
+    fn create_vault_capture() {
+        use crate::home::launcher_capture::{renderer, save};
+        let Ok(directory) = std::env::var("LAUNCHER_CAPTURE_DIR") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut renderer = renderer().expect("wgpu headless renderer");
+        let size = iced::Size::new(1024.0, 768.0);
+        let mut vault = in_cube(ChainId::Bitcoin);
+        // The steps after Keys need the policy it would build.
+        vault.context.descriptor = Some(
+            std::str::FromStr::from_str("wsh(or_d(pk([8a550171/48'/1'/0'/2']tpubDFnCs5ZaCqopaNhgLCiXAwbkaBdcnuMt1VFoPsRpUrpidyvzG67MYjkfxw6HnTBhHqeU3xw2ioNBVcWY3jXwGhSyppEQvtn38GsL7RH1eef/<0;1>/*),and_v(v:pkh([8a550171/48'/1'/0'/2']tpubDFnCs5ZaCqopaNhgLCiXAwbkaBdcnuMt1VFoPsRpUrpidyvzG67MYjkfxw6HnTBhHqeU3xw2ioNBVcWY3jXwGhSyppEQvtn38GsL7RH1eef/<2;3>/*),older(52596))))#jz5sm0xn")
+                .unwrap(),
+        );
+        for index in 0..vault.steps.len() {
+            if vault.steps[index].skip(&vault.context) {
+                continue;
+            }
+            vault.current = index;
+            vault.steps[index].load_context(&vault.context);
+            for (appearance, theme) in [
+                ("dark", coincube_ui::theme::Theme::dark()),
+                ("light", coincube_ui::theme::Theme::light()),
+            ] {
+                save(
+                    &mut renderer,
+                    vault.view(),
+                    size,
+                    &theme,
+                    directory.join(format!("create-vault-step-{:02}-{}.png", index, appearance)),
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fresh_install_keeps_the_installer_layout() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("create-vault-{}", uuid::Uuid::new_v4())),
+        );
+        let fresh = Installer::try_new_for_chain(
+            root,
+            ChainId::Bitcoin,
+            None,
+            UserFlow::CreateWallet,
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap()
+        .0;
+        assert!(!fresh.create_vault);
+        let shown = rendered_labels(fresh.view()).await;
+        assert!(
+            !shown.iter().any(|t| t == CREATE_VAULT_TITLE),
+            "{:?}",
+            shown
+        );
+        assert!(shown.iter().any(|t| t.contains(" | ")), "{:?}", shown);
+    }
+}
 
 #[cfg(test)]
 mod restore_frame_tests {

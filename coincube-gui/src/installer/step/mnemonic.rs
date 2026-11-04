@@ -35,6 +35,9 @@ impl From<BackupMnemonic> for Box<dyn Step> {
 }
 
 impl Step for BackupMnemonic {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Backup)
+    }
     fn load_context(&mut self, ctx: &Context) {
         self.fresh_fork_cube = ctx.fresh_fork_cube;
     }

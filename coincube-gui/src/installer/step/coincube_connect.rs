@@ -86,6 +86,9 @@ async fn send_otp(client: CoincubeClient, email: String, is_signup: bool) -> Res
 }
 
 impl Step for CoincubeConnectStep {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Connect)
+    }
     /// Adopt an already-authenticated Connect session forwarded from the
     /// app (`ctx.coincube_client`) the first time this step becomes
     /// active. When a Vault is set up from Home while signed in, the

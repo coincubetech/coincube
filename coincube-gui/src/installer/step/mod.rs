@@ -86,6 +86,11 @@ pub trait Step {
     fn restore_stage(&self) -> Option<super::RestoreStage> {
         None
     }
+    /// Where this step sits on the Create Vault stepper, if it is one of
+    /// that wizard's steps.
+    fn vault_stage(&self) -> Option<super::VaultStage> {
+        None
+    }
 }
 
 pub struct Final {
@@ -140,6 +145,9 @@ impl Default for Final {
 }
 
 impl Step for Final {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Done)
+    }
     fn load_context(&mut self, ctx: &Context) {
         self.claim_setup = ctx.claim_source.is_some();
         self.internal_bitcoind.clone_from(&ctx.internal_bitcoind);
