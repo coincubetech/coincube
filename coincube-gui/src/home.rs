@@ -6811,8 +6811,6 @@ fn create_cube_form<'a>(
     );
 
     // PIN or passkey info section
-    column = column.push(Space::new().height(Length::Fixed(10.0)));
-
     if passkey_mode {
         // Passkey mode: no PIN needed — biometric auth replaces it
         let description = if cfg!(target_os = "macos") {
@@ -6843,18 +6841,30 @@ fn create_cube_form<'a>(
             .style(theme::text::secondary),
         );
     } else {
-        // PIN setup section
-        column = column.push(Space::new().height(Length::Fixed(10.0)));
-
-        let pin_label = p1_regular("Enter PIN:").style(theme::text::secondary);
-        column = column.push(pin_label);
-        column = column.push(pin.view().map(ViewMessage::PinInput));
-
-        column = column.push(Space::new().height(Length::Fixed(20.0)));
-
-        let pin_confirm_label = p1_regular("Confirm PIN:").style(theme::text::secondary);
-        column = column.push(pin_confirm_label);
-        column = column.push(pin_confirm.view().map(ViewMessage::PinConfirmInput));
+        // Enter and Confirm sit side by side, using the Launcher unlock
+        // face's compact row (276px each), and wrap onto two lines where
+        // the form is narrower than both — the 500px Bitcoin-import form.
+        let pin_field = |label: &'static str, input: Element<'a, ViewMessage>| {
+            Column::new()
+                .spacing(8)
+                .width(Length::Fixed(276.0))
+                .push(p1_regular(label).style(theme::text::secondary))
+                .push(input)
+        };
+        column = column.push(
+            Row::new()
+                .spacing(32)
+                .push(pin_field(
+                    "Enter PIN:",
+                    pin.face_view().map(ViewMessage::PinInput),
+                ))
+                .push(pin_field(
+                    "Confirm PIN:",
+                    pin_confirm.face_view().map(ViewMessage::PinConfirmInput),
+                ))
+                .wrap()
+                .vertical_spacing(20),
+        );
     }
 
     column = column.push(Space::new().height(Length::Fixed(10.0)));
