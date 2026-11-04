@@ -830,8 +830,11 @@ impl Installer {
         let context = context;
 
         let restore = RestorePath::of(&user_flow).map(|path| (path, chain));
-        let create_vault =
-            launched_from_app && matches!(user_flow, UserFlow::CreateWallet) && !chain.is_blake2b();
+        // A Vault created inside an open Cube, Bitcoin Blake2b included: its
+        // steps carry the same stages. A fresh fork install is not framed.
+        let create_vault = launched_from_app
+            && matches!(user_flow, UserFlow::CreateWallet)
+            && (!chain.is_blake2b() || context.in_cube_fork_vault);
         let mut installer = Installer {
             restore,
             create_vault,
@@ -3961,8 +3964,42 @@ mod create_vault_frame_tests {
         assert_eq!(active, 4);
     }
 
-    /// Bitcoin Blake2b and the in-Cube Vault restore keep the installer's
-    /// layout.
+    /// A Vault created inside an open Bitcoin Blake2b Cube gets the same
+    /// Create Vault frame as Bitcoin's. Signed out, it may run on a local
+    /// node, so Connect is off its stepper.
+    #[test]
+    fn an_in_cube_blake2b_vault_is_framed() {
+        let _guard = crate::app::session::test_guard();
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let root = std::env::temp_dir().join(format!("create-vault-{}", uuid::Uuid::new_v4()));
+            let cube = crate::app::settings::CubeSettings::new("Fork".into(), chain);
+            let (installer, _) = Installer::build_for_chain(
+                CoincubeDirectory::new(root.clone()),
+                chain,
+                None,
+                UserFlow::CreateWallet,
+                true,
+                Some(cube),
+                None,
+                None,
+                false,
+                None,
+            );
+            assert!(installer.context.in_cube_fork_vault);
+            assert!(installer.create_vault, "{:?}", chain);
+            let (labels, _) = installer.create_vault_steps();
+            assert_eq!(
+                labels,
+                ["Vault", "Policy", "Keys", "Backup", "Node", "Name", "Done"],
+                "{:?}",
+                chain
+            );
+            assert!(!root.exists(), "construction must not touch a datadir");
+        }
+    }
+
+    /// A Bitcoin Blake2b install that is not inside an open Cube, and the
+    /// in-Cube Vault restore, keep the installer's layout.
     #[test]
     fn only_create_vault_is_framed() {
         let root = || {
