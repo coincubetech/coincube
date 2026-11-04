@@ -2119,6 +2119,16 @@ fn body_style(theme: &theme::Theme) -> container::Style {
 /// The visible Launcher: compact top bar, one scrolling floor or List body,
 /// and the pinned dock. Both bodies consume the same catalog projection.
 pub(super) fn launcher_view(home: &Home) -> Element<'_, ViewMessage> {
+    launcher_screen(home, true)
+}
+
+/// The Launcher under a wizard sheet: the same top bar and body, without
+/// the dock, which the sheet would half cover. It is drawn inert.
+pub(super) fn launcher_backdrop(home: &Home) -> Element<'_, ViewMessage> {
+    launcher_screen(home, false)
+}
+
+fn launcher_screen(home: &Home, with_dock: bool) -> Element<'_, ViewMessage> {
     let projection = project(home);
     // `.quiet`: the bars mute while a Cube's face is up, as in every
     // non-browse phase of the prototype.
@@ -2156,9 +2166,12 @@ pub(super) fn launcher_view(home: &Home) -> Element<'_, ViewMessage> {
         .height(Length::Fill)
         .push(super::launcher_chrome::top_bar(home, &projection, quiet))
         .push(rule::horizontal(1))
-        .push(body)
-        .push(rule::horizontal(1))
-        .push(dock);
+        .push(body);
+    let screen = if with_dock {
+        screen.push(rule::horizontal(1)).push(dock)
+    } else {
+        screen
+    };
     Container::new(
         iced::widget::Stack::new()
             .width(Length::Fill)
@@ -5262,7 +5275,7 @@ mod tests {
         assert!(!home.showing_create_journey());
         drop(home.update(Message::View(ViewMessage::ShowCreateCube(true))));
         assert!(home.showing_create_journey());
-        assert!(!home.create_network_confirmed);
+        assert!(!home.create_network_menu);
         // The test networks' Cubes are still a list to go back to.
         assert!(home.can_leave_create_journey());
 
@@ -5316,7 +5329,6 @@ mod tests {
 
         let mut typing = empty_bitcoin();
         drop(typing.update(Message::View(ViewMessage::ShowCreateCube(true))));
-        typing.create_network_confirmed = true;
         drop(typing.update(Message::View(ViewMessage::CubeNameEdited(
             "Half typed".into(),
         ))));

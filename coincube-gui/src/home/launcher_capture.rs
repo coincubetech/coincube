@@ -814,7 +814,6 @@ fn launcher_capture_create_form() {
         };
         let mut home = home(light);
         home.state = State::NoCube { create_cube: true };
-        home.create_network_confirmed = true;
         home.passkey_mode = false;
         for (width, height) in [(1024.0, 768.0), (1440.0, 900.0)] {
             save(
@@ -825,6 +824,16 @@ fn launcher_capture_create_form() {
                 directory.join(format!("{appearance}-create-form-{width}.png")),
             );
         }
+        // The header's network menu, open over the Cube step.
+        home.create_network_menu = true;
+        save(
+            &mut renderer,
+            home.create_journey_view(),
+            Size::new(1440.0, 900.0),
+            &palette,
+            directory.join(format!("{appearance}-create-network-menu.png")),
+        );
+        home.create_network_menu = false;
         // The 500px Bitcoin-import form, where the two PIN fields stack.
         let _ = home.update(super::Message::View(super::ViewMessage::ShowImportBitcoin));
         home.passkey_mode = false;
