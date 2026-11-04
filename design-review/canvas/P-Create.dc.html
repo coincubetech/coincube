@@ -322,7 +322,7 @@ a.tbx-chip{color:var(--ink)}
         <!-- ===== CUBE (name + unlock method, source order) ===== -->
         <sc-if value="{{ stCubeStd }}" hint-placeholder-val="{{ false }}">
           <h2 id="cc-h">Create a new Cube</h2>
-          <p class="lead">A Cube is your account which can contain a Spark wallet, a Liquid wallet, a Vault wallet and other features.</p>
+          <p class="lead">{{ cubeLead }}</p>
           <sc-if value="{{ errLimit }}" hint-placeholder-val="{{ false }}">
             <div class="alert" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg><div><b>Cube limit reached</b><span>Cube limit reached ([USED]/[LIMIT]) for the [PLAN NAME] plan. Upgrade your Connect account to create more Cubes.</span></div></div>
           </sc-if>
@@ -698,6 +698,13 @@ a.tbx-chip{color:var(--ink)}
           </sc-if>
         </sc-if>
 
+        <!-- ===== Create Vault · descriptor backup (installer BackupDescriptor) ===== -->
+        <sc-if value="{{ stDescBackup }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Back up your Vault descriptor</h2>
+          <p class="lead">The descriptor is your Vault's public map of keys and spending paths. Keep a copy with your key backups: with it, your keys can recover this Vault in any compatible wallet.</p>
+          <div class="acts"><button type="button" class="btn">Save descriptor file</button></div>
+        </sc-if>
+
         <!-- ===== Create Vault · wallet alias ===== -->
         <sc-if value="{{ stAlias }}" hint-placeholder-val="{{ false }}">
           <h2 id="cc-h">Give your wallet an alias</h2>
@@ -807,14 +814,15 @@ class Component extends DCLogic {
     // Bitcoin Blake2b. Create Cube: name with a PIN or passkey, then backup;
     // the new Cube then opens. Create Vault runs from inside that Cube.
     const CUBE_PATH = ['network', 'cube'].concat(pin ? [] : ['passkey'], ['backup', 'cubeDone']);
-    const VAULT_PATH = ['vaultType', 'vaultIntro', 'keys', 'register', 'backend', 'alias', 'done'];
+    // As the app's framed Create Vault: its Backup is the descriptor backup.
+    const VAULT_PATH = ['vaultType', 'vaultIntro', 'keys', 'descBackup', 'register', 'backend', 'alias', 'done'];
     const inCube = ['network', 'cube', 'passkey', 'backup', 'cubeDone'].indexOf(s.step) >= 0;
     const path = inCube ? CUBE_PATH : VAULT_PATH;
     let step = s.step;
     if (path.indexOf(step) < 0) step = step === 'passkey' ? 'cube' : inCube ? 'network' : 'vaultType';
     const idx = path.indexOf(step);
     const wizardTitle = inCube ? 'Create Cube' : 'Create Vault';
-    const LBL = { network: 'Network', cube: 'Cube', passkey: 'Passkey', backup: 'Backup', cubeDone: 'Done', register: 'Connect', vaultType: 'Vault', vaultIntro: 'Policy', keys: 'Keys', backend: 'Node', alias: 'Name', done: 'Done' };
+    const LBL = { network: 'Network', cube: 'Cube', passkey: 'Passkey', backup: 'Backup', cubeDone: 'Done', descBackup: 'Backup', register: 'Connect', vaultType: 'Vault', vaultIntro: 'Policy', keys: 'Keys', backend: 'Node', alias: 'Name', done: 'Done' };
     const steps = path.map((k, i) => ({ n: String(i + 1), label: LBL[k], cls: i === idx ? 'cur' : i < idx ? 'done' : '', current: i === idx ? 'step' : 'false', hasRule: i < path.length - 1 }));
     const to = (k, extra) => go(Object.assign({ step: k, err: 'none' }, extra || {}));
     const next = () => { if (idx < path.length - 1) to(path[idx + 1]); };
@@ -943,7 +951,7 @@ class Component extends DCLogic {
     const own = {
       network: 'Continue',
       cube: 'Create Cube',
-      register: 'Continue', vaultType: 'Continue', vaultIntro: 'Next', keys: 'Continue',
+      register: 'Continue', descBackup: 'Continue', vaultType: 'Continue', vaultIntro: 'Next', keys: 'Continue',
       backend: s.backend === 'local' ? 'Download & start' : s.backend === 'installing' ? 'Continue' : s.backend === 'own' ? 'Continue' : 'Continue',
       alias: 'Finalize installation', backup: 'Continue'
     };
@@ -1037,7 +1045,11 @@ class Component extends DCLogic {
       nodeTypes, ntCore: s.nodeType === 'core', ntElectrum: s.nodeType === 'electrum', ntEsplora: s.nodeType === 'esplora',
       checkConn: () => go({ connOk: err !== 'node', err: err === 'node' ? 'node' : 'none' }), connOk: !!s.connOk && err !== 'node', errNode: err === 'node',
       // alias + done
-      stAlias: step === 'alias', aliasValue: b2b ? 'Blake savings Vault' : 'Travel fund Vault',
+      // As the app: Spark is named only where it runs (Bitcoin, Regtest).
+      cubeLead: s.net === 'bitcoin' || s.net === 'regtest'
+        ? 'A Cube is your account which can contain a Spark wallet, a Vault wallet and other features.'
+        : 'A Cube is your account which can contain a Vault wallet and other features.',
+      stDescBackup: step === 'descBackup', stAlias: step === 'alias', aliasValue: b2b ? 'Blake savings Vault' : 'Travel fund Vault',
       stDone: step === 'done' || step === 'cubeDone', cubeDoneStep: step === 'cubeDone',
       doneTitle: step === 'cubeDone' ? cubeName + ' created' : 'Vault created',
       doneCta: step === 'cubeDone' ? 'Open the Cube' : 'Back to the Cube',
