@@ -101,6 +101,8 @@ pub struct Snapshot {
 /// Why nothing is shown. The dock's selector says it in words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unavailable {
+    /// The managed node is not set up for the network, not running, or its
+    /// RPC failed: the read cannot tell these apart, so the label does not.
     LocalNodeNotRunning,
     /// The public explorer for the network did not answer.
     Unreachable(Via),
@@ -113,13 +115,13 @@ pub enum Unavailable {
 impl Unavailable {
     pub(super) fn label(self) -> &'static str {
         match self {
-            Unavailable::LocalNodeNotRunning => "Local node isn't running",
+            Unavailable::LocalNodeNotRunning => "Local node didn't answer",
             Unavailable::Unreachable(Via::MempoolSpace) => "mempool.space is unreachable",
             Unavailable::Unreachable(_) => "COINCUBE | Connect is unreachable",
             Unavailable::NeitherAnswered(Via::MempoolSpace) => {
-                "No local node, and mempool.space is unreachable"
+                "Local node and mempool.space didn't answer"
             }
-            Unavailable::NeitherAnswered(_) => "No local node, and Connect is unreachable",
+            Unavailable::NeitherAnswered(_) => "Local node and Connect didn't answer",
             Unavailable::NoSource => "No public explorer for this network",
         }
     }
@@ -127,7 +129,8 @@ impl Unavailable {
 
 /// Why Automatic shows nothing once the local node has not answered: the
 /// public explorer failed too, or the network has none and only a running
-/// node could have served it.
+/// node could have served it. A failed local read is not proof the node is
+/// stopped, so neither label says so.
 fn automatic_unavailable(chain: ChainId) -> Unavailable {
     match public_source(chain) {
         Some((via, _)) => Unavailable::NeitherAnswered(via),
@@ -1198,11 +1201,11 @@ mod tests {
         // and on regtest, which has no explorer, the node it needs.
         assert_eq!(
             automatic_unavailable(ChainId::Bitcoin).label(),
-            "No local node, and Connect is unreachable"
+            "Local node and Connect didn't answer"
         );
         assert_eq!(
             automatic_unavailable(ChainId::Signet).label(),
-            "No local node, and mempool.space is unreachable"
+            "Local node and mempool.space didn't answer"
         );
         assert_eq!(
             automatic_unavailable(ChainId::Regtest),
