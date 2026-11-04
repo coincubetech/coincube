@@ -468,9 +468,14 @@ pub struct Home {
     restore_hub: bool,
     /// Import or restore shows its Recover with phone path.
     restore_phone: bool,
-    /// Opens a newly created import Cube through the ordinary unlock path
-    /// after the settings reload makes its row available.
-    open_created_import_cube: Option<String>,
+    /// Opens a newly created Cube through the ordinary unlock path after the
+    /// settings reload makes its row available, so the Cube's own screens
+    /// (Create Vault, or an import's descriptor steps) come next.
+    open_created_cube: Option<String>,
+    /// A newly created Cube whose Connect registration is still in flight.
+    /// It opens once the result lands: leaving Home first would drop that
+    /// result, and the Cube would never be marked synced.
+    open_after_registration: Option<String>,
     creating_cube: bool,
     /// UUID pre-generated on the first creation attempt and reused on retries
     /// so that each logical cube has a stable client-side identifier.
@@ -658,7 +663,8 @@ impl Home {
                 pending_bitcoin_import: None,
                 restore_hub: false,
                 restore_phone: false,
-                open_created_import_cube: None,
+                open_created_cube: None,
+                open_after_registration: None,
                 creating_cube: false,
                 pending_cube_id: None,
                 ghost_import: None,
@@ -2165,8 +2171,8 @@ impl Home {
                         // The operation identity is now durable on this exact
                         // Cube. A fresh creation must not reuse it.
                         self.pending_bitcoin_import = None;
-                        self.open_created_import_cube =
-                            cube.bitcoin_import.as_ref().map(|_| cube.id.clone());
+                        self.open_created_cube = None;
+                        self.open_after_registration = None;
                         // Clear any previous error state
                         self.error = None;
                         // Reset form fields
@@ -2203,6 +2209,7 @@ impl Home {
                                  skipping the post-creation registration",
                                 cube.id
                             );
+                            self.open_created_cube = Some(cube.id.clone());
                             reload_task
                         } else if ghost_claim.as_ref().is_some_and(|(uuid, account)| {
                             *uuid == cube.id && *account != self.connect_account_id()
@@ -2216,6 +2223,7 @@ impl Home {
                                  not registering it with the current account",
                                 cube.id
                             );
+                            self.open_created_cube = Some(cube.id.clone());
                             reload_task
                         } else if let Some(client) = self.connect_account.authenticated_client() {
                             let cube_id = cube.id.clone();
@@ -2232,6 +2240,7 @@ impl Home {
                                 has_vault: cube.vault_wallet_id.is_some().then_some(true),
                                 spark_stable_balance: cube.spark_stable_balance,
                             };
+                            self.open_after_registration = Some(cube.id.clone());
                             let register_task = Task::perform(
                                 async move {
                                     client.register_cube(req).await.map_err(|e| e.to_string())
@@ -2244,6 +2253,7 @@ impl Home {
                             );
                             Task::batch([reload_task, register_task])
                         } else {
+                            self.open_created_cube = Some(cube.id.clone());
                             reload_task
                         }
                     }
@@ -2299,37 +2309,49 @@ impl Home {
                 cube_id,
                 network,
                 result,
-            } => match result {
-                Ok(resp) => {
-                    log::info!(
-                        "[LAUNCHER] Cube {} registered remotely (server ID: {})",
-                        resp.uuid,
-                        resp.id
-                    );
-                    self.cube_sync_errors.remove(&cube_id);
-                    let network_dir = self.datadir_path.network_directory(network);
-                    let owner = self.connect_owner();
-                    Task::perform(
-                        async move {
-                            settings::mark_cube_synced(&network_dir, &cube_id, owner)
-                                .await
-                                .ok();
-                        },
-                        |_| Message::View(ViewMessage::Check),
-                    )
+            } => {
+                let open = self.open_after_registration.as_ref() == Some(&cube_id);
+                if open {
+                    self.open_after_registration = None;
+                    self.open_created_cube = Some(cube_id.clone());
                 }
-                Err(e) => {
-                    log::warn!(
-                        "[LAUNCHER] Failed to register cube {} remotely: {}",
-                        cube_id,
-                        e
-                    );
-                    // Keep the reason: this is the only signal the Cubes list
-                    // has that the Cube is not merely mid-sync.
-                    self.cube_sync_errors.insert(cube_id, e);
-                    Task::none()
+                match result {
+                    Ok(resp) => {
+                        log::info!(
+                            "[LAUNCHER] Cube {} registered remotely (server ID: {})",
+                            resp.uuid,
+                            resp.id
+                        );
+                        self.cube_sync_errors.remove(&cube_id);
+                        let network_dir = self.datadir_path.network_directory(network);
+                        let owner = self.connect_owner();
+                        Task::perform(
+                            async move {
+                                settings::mark_cube_synced(&network_dir, &cube_id, owner)
+                                    .await
+                                    .ok();
+                            },
+                            |_| Message::View(ViewMessage::Check),
+                        )
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[LAUNCHER] Failed to register cube {} remotely: {}",
+                            cube_id,
+                            e
+                        );
+                        // Keep the reason: this is the only signal the Cubes list
+                        // has that the Cube is not merely mid-sync.
+                        self.cube_sync_errors.insert(cube_id, e);
+                        // The Cube still opens; the catch-up sync registers it.
+                        if open {
+                            self.reload()
+                        } else {
+                            Task::none()
+                        }
+                    }
                 }
-            },
+            }
             Message::CatchUpSyncFinished(Err(())) => {
                 // The round never ran, so it has no verdict to give. Keep the
                 // reasons already on record: wiping them here would drop a
@@ -2758,7 +2780,8 @@ impl Home {
                         && self.showing_create_form()
                         && self.pending_bitcoin_import.is_none();
                 self.network = network;
-                self.open_created_import_cube = None;
+                self.open_created_cube = None;
+                self.open_after_registration = None;
                 if network != ChainId::Bitcoin {
                     // Import or restore is Bitcoin only; leaving Bitcoin
                     // leaves it, so the next list does not reopen it.
@@ -2963,10 +2986,10 @@ impl Home {
                     // a pending pick never outlives this checked list.
                     let pending = self.catalog.pending_select.take();
                     if let (Some(id), State::Cubes { cubes, .. }) =
-                        (&self.open_created_import_cube, &self.state)
+                        (&self.open_created_cube, &self.state)
                     {
                         if let Some(index) = cubes.iter().position(|cube| &cube.id == id) {
-                            self.open_created_import_cube = None;
+                            self.open_created_cube = None;
                             return self.update_inner(Message::View(ViewMessage::Run(index)));
                         }
                     }
@@ -4966,6 +4989,7 @@ impl Home {
             &self.create_cube_pin_confirm,
             &self.error,
             CreateCubeFormOptions {
+                spark_available: crate::app::features::spark(self.network).is_available(),
                 creating_cube: self.creating_cube,
                 passkey_mode: self.passkey_mode,
                 signed_in: self.connect_account.authenticated_client().is_some(),
@@ -5185,10 +5209,9 @@ impl Home {
             self.theme_mode,
             coincube_ui::theme::palette::ThemeMode::Light
         );
-        // Match the prototype's route through the installer without claiming
-        // that Home owns its later steps. The fork has its own ordered path.
         // The import path after the Cube: the imported-wallet screens inside
-        // it (Source, Review, Scan) finish the import.
+        // it (Source, Review, Scan) finish the import. The fork still routes
+        // through the Vault installer and shows its ordered path.
         let steps: &[&str] = if restoring {
             restore_frame::import_steps(self.passkey_mode)
         } else if blake2b {
@@ -5196,15 +5219,8 @@ impl Home {
                 "Network", "PIN", "Vault", "Policy", "Keys", "Seed", "Connect", "Node", "Name",
                 "Done",
             ]
-        } else if self.passkey_mode {
-            &[
-                "Network", "Cube", "Passkey", "Backup", "Connect", "Vault", "Policy", "Keys",
-                "Node", "Done",
-            ]
         } else {
-            &[
-                "Network", "Cube", "Backup", "Connect", "Vault", "Policy", "Keys", "Node", "Done",
-            ]
+            create_cube_steps(self.passkey_mode)
         };
         let active_step = if restoring {
             match (backing_up, self.passkey_mode) {
@@ -6669,8 +6685,19 @@ fn connect_status_row<'a>(account: &ConnectAccountPanel) -> Element<'a, Message>
     coincube_ui::component::session_status::indicator(account.is_checking_session())
 }
 
+/// The Create Cube journey's steps. It ends once the Cube is written: the
+/// Vault is created later, from inside the Cube, by its own wizard.
+fn create_cube_steps(passkey_mode: bool) -> &'static [&'static str] {
+    if passkey_mode {
+        &["Network", "Cube", "Passkey", "Backup", "Done"]
+    } else {
+        &["Network", "Cube", "Backup", "Done"]
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CreateCubeFormOptions {
+    spark_available: bool,
     creating_cube: bool,
     passkey_mode: bool,
     signed_in: bool,
@@ -6701,6 +6728,7 @@ fn create_cube_form<'a>(
 ) -> Element<'a, ViewMessage> {
     use coincube_ui::component::form;
     let CreateCubeFormOptions {
+        spark_available,
         creating_cube,
         passkey_mode,
         signed_in,
@@ -6722,8 +6750,10 @@ fn create_cube_form<'a>(
         .push(
             p1_regular(if importing_bitcoin {
                 "Create and back up your Cube first, then import the public descriptors for your existing Bitcoin wallet. Your original wallet signers remain necessary to spend."
-            } else {
+            } else if spark_available {
                 "A Cube is your account which can contain a Spark wallet, a Vault wallet and other features."
+            } else {
+                "A Cube is your account which can contain a Vault wallet and other features."
             })
             .style(theme::text::secondary),
         );
@@ -11310,6 +11340,7 @@ mod tests {
             &pin,
             &None,
             CreateCubeFormOptions {
+                spark_available: true,
                 creating_cube: false,
                 passkey_mode: false,
                 signed_in: true,
@@ -11324,6 +11355,7 @@ mod tests {
             &pin_input::PinInput::new(),
             &Some("form error".to_string()),
             CreateCubeFormOptions {
+                spark_available: false,
                 creating_cube: true,
                 passkey_mode: true,
                 signed_in: false,
@@ -11380,6 +11412,14 @@ mod tests {
              features."
         ));
         assert!(!cube.contains("Liquid"));
+
+        // Without Spark on the network, the Cube copy does not promise it.
+        home.network = ChainId::Testnet4;
+        let cube = inspect(home.create_journey_view());
+        assert!(cube.contains(
+            "A Cube is your account which can contain a Vault wallet and other features."
+        ));
+        assert!(!cube.contains("Spark wallet"));
 
         let words: [String; 12] = Default::default();
         let recovery = inspect(recovery_input_view(&words, None, false).map(Message::View));
@@ -13644,6 +13684,107 @@ mod tests {
             out
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Create Cube journey ends with the Cube. Vault steps belong to the
+    /// Create Vault wizard inside the Cube.
+    #[test]
+    fn create_cube_header_lists_only_cube_steps() {
+        assert_eq!(
+            create_cube_steps(false),
+            &["Network", "Cube", "Backup", "Done"]
+        );
+        assert_eq!(
+            create_cube_steps(true),
+            &["Network", "Cube", "Passkey", "Backup", "Done"]
+        );
+        for vault_step in ["Connect", "Vault", "Policy", "Keys", "Node"] {
+            assert!(!create_cube_steps(false).contains(&vault_step));
+            assert!(!create_cube_steps(true).contains(&vault_step));
+        }
+    }
+
+    /// A newly created Cube opens next, so its Create Vault screen follows
+    /// the Create Cube journey. Signed out, nothing waits on Connect.
+    #[test]
+    fn a_created_cube_opens_once_written() {
+        let dir = tmp_datadir("open-created-signed-out");
+        let mut home = home_with_datadir(&dir);
+        let cube = CubeSettings::new("Opened".to_string(), Network::Bitcoin);
+        let id = cube.id.clone();
+
+        let out = drain(home.update(Message::CubeCreated(Ok(cube.clone()))));
+        assert!(
+            !out.iter()
+                .any(|m| matches!(m, Message::CubeRemoteRegistered { .. })),
+            "a signed-out Cube is not registered: {:?}",
+            out
+        );
+        assert_eq!(home.open_created_cube.as_ref(), Some(&id));
+        assert!(home.open_after_registration.is_none());
+        assert_checked_list_opens(&mut home, cube);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reloaded list that holds the created Cube hands it to the unlock
+    /// path, once.
+    fn assert_checked_list_opens(home: &mut Home, cube: CubeSettings) {
+        let id = cube.id.clone();
+        let checked = |cube: CubeSettings| Message::Checked {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![cube],
+                create_cube: false,
+                source: ChainId::Bitcoin,
+            }),
+        };
+        let out = drain(home.update(checked(cube.clone())));
+        assert!(
+            out.iter().any(|m| matches!(
+                m,
+                Message::Run(_, _, ChainId::Bitcoin, opened) if opened.id == id
+            )),
+            "the created Cube opens from the checked list: {:?}",
+            out
+        );
+        assert!(home.open_created_cube.is_none());
+        let again = drain(home.update(checked(cube)));
+        assert!(
+            !again.iter().any(|m| matches!(m, Message::Run(..))),
+            "a later reload does not open it again: {:?}",
+            again
+        );
+    }
+
+    /// Signed in, the Cube opens only after its registration result lands.
+    /// Leaving Home first would drop that result, so a registered Cube would
+    /// never be marked synced. A failed registration still opens it.
+    #[test]
+    fn a_created_cube_waits_for_its_registration_before_opening() {
+        let dir = tmp_datadir("open-created-signed-in");
+        let mut home = signed_in_home_with_datadir(&dir);
+        let cube = CubeSettings::new("Registering".to_string(), Network::Bitcoin);
+        let id = cube.id.clone();
+
+        let out = drain(home.update(Message::CubeCreated(Ok(cube.clone()))));
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, Message::CubeRemoteRegistered { .. })),
+            "a signed-in Cube is registered: {:?}",
+            out
+        );
+        assert!(home.open_created_cube.is_none());
+        assert_eq!(home.open_after_registration.as_ref(), Some(&id));
+
+        let _ = home.update(Message::CubeRemoteRegistered {
+            cube_id: id.clone(),
+            network: ChainId::Bitcoin,
+            result: Err("offline".to_string()),
+        });
+        assert!(home.open_after_registration.is_none());
+        assert_eq!(home.open_created_cube.as_ref(), Some(&id));
+        assert_checked_list_opens(&mut home, cube);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
