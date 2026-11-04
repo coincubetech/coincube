@@ -15,6 +15,9 @@ pub struct WalletAlias {
 }
 
 impl Step for WalletAlias {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Name)
+    }
     /// The alias names the *Vault wallet* ("My Vault Bitcoin wallet"), and
     /// `ctx.wallet_alias` is only ever read by the wallet-creating install
     /// paths. A seed-only restore has no wallet to name, so asking is a prompt
