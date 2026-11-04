@@ -13417,13 +13417,11 @@ mod tests {
     /// Create Vault wizard inside the Cube.
     #[test]
     fn create_cube_header_lists_only_cube_steps() {
-        assert_eq!(
-            create_cube_steps(false),
-            &["Network", "Cube", "Backup", "Done"]
-        );
+        // The network is chosen in the sheet header, not on a step.
+        assert_eq!(create_cube_steps(false), &["Cube", "Backup", "Done"]);
         assert_eq!(
             create_cube_steps(true),
-            &["Network", "Cube", "Passkey", "Backup", "Done"]
+            &["Cube", "Passkey", "Backup", "Done"]
         );
         for vault_step in ["Connect", "Vault", "Policy", "Keys", "Node"] {
             assert!(!create_cube_steps(false).contains(&vault_step));
