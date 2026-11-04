@@ -216,7 +216,7 @@ impl Panels {
 
     #[allow(clippy::too_many_arguments)]
     fn new_without_vault(
-        breez_client: Arc<BreezClient>,
+        breez_client: Option<Arc<BreezClient>>,
         spark_backend: Option<Arc<crate::app::wallets::SparkBackend>>,
         wallet: Option<Arc<Wallet>>,
         datadir: &CoincubeDirectory,
@@ -227,20 +227,20 @@ impl Panels {
         cube_network: String,
         bitcoin_import: Option<Box<settings::BitcoinImport>>,
     ) -> Panels {
-        // NO VAULT - All vault panels are None, but Liquid panels always work
+        // NO VAULT - All vault panels are None. Liquid panels work whenever
+        // the Cube has a Breez client; a Bitcoin Blake2b Cube has none.
         // The UI layer prevents navigation to vault panels when has_vault=false
 
-        let default_fiat_currency = Self::default_fiat_currency(datadir, network, &cube_id);
-        let liquid_backend = Arc::new(LiquidBackend::new(breez_client.clone()));
-        let swaps_path = Self::swaps_path(datadir, network, &cube_id);
-        let initial_balance_masked = Self::initial_balance_masked(datadir, network, &cube_id);
+        let default_fiat_currency = Self::default_fiat_currency(datadir, chain, &cube_id);
+        let liquid_backend = breez_client
+            .as_ref()
+            .map(|client| Arc::new(LiquidBackend::new(client.clone())));
+        let swaps_path = Self::swaps_path(datadir, chain, &cube_id);
+        let initial_balance_masked = Self::initial_balance_masked(datadir, chain, &cube_id);
 
         Self {
             current: Menu::Cube(crate::app::menu::CubeSubMenu::Overview),
-            activity: state::activity::Activity::new(
-                Some(liquid_backend.clone()),
-                spark_backend.clone(),
-            ),
+            activity: state::activity::Activity::new(liquid_backend.clone(), spark_backend.clone()),
             imported_bitcoin: bitcoin_import.map(|import| {
                 let mut panel = state::imported_bitcoin::ImportedBitcoinPanel::new(
                     datadir.network_directory(chain),
@@ -257,7 +257,7 @@ impl Panels {
                     liquid_backend.clone(),
                     spark_backend.clone(),
                     datadir.clone(),
-                    network,
+                    chain,
                     cube_id.clone(),
                     initial_balance_masked,
                 )
@@ -266,23 +266,23 @@ impl Panels {
                     liquid_backend.clone(),
                     spark_backend.clone(),
                     datadir.clone(),
-                    network,
+                    chain,
                     cube_id.clone(),
                     initial_balance_masked,
                 )
             },
-            liquid_overview: Some(LiquidOverview::new(
-                liquid_backend.clone(),
-                swaps_path.clone(),
-            )),
-            liquid_send: Some(LiquidSend::new(liquid_backend.clone())),
-            liquid_swap: Some(LiquidSwap::new(liquid_backend.clone(), swaps_path.clone())),
-            liquid_receive: Some(LiquidReceive::new(liquid_backend.clone())),
-            liquid_transactions: Some(LiquidTransactions::new(
-                liquid_backend.clone(),
-                swaps_path.clone(),
-            )),
-            liquid_settings: Some(LiquidSettings::new(liquid_backend.clone())),
+            liquid_overview: liquid_backend
+                .clone()
+                .map(|backend| LiquidOverview::new(backend, swaps_path.clone())),
+            liquid_send: liquid_backend.clone().map(LiquidSend::new),
+            liquid_swap: liquid_backend
+                .clone()
+                .map(|backend| LiquidSwap::new(backend, swaps_path.clone())),
+            liquid_receive: liquid_backend.clone().map(LiquidReceive::new),
+            liquid_transactions: liquid_backend
+                .clone()
+                .map(|backend| LiquidTransactions::new(backend, swaps_path.clone())),
+            liquid_settings: liquid_backend.clone().map(LiquidSettings::new),
             spark_overview: state::SparkOverview::new(spark_backend.clone()),
             spark_send: state::SparkSend::new(spark_backend.clone()),
             spark_receive: state::SparkReceive::new(spark_backend.clone()),
@@ -315,7 +315,8 @@ impl Panels {
                 false,
             ),
             p2p: match breez_client
-                .liquid_signer()
+                .as_ref()
+                .and_then(|client| client.liquid_signer())
                 .map(|s| s.lock().expect("signer lock").mnemonic_str())
             {
                 Some(mnemonic) if !mnemonic.is_empty() => {
@@ -3650,12 +3651,75 @@ impl App {
                 coincubed::connect::AdmissionError::InvalidBackend.into(),
             )));
         }
-        let config_arc = Arc::new(config);
-        let liquid_backend = Arc::new(LiquidBackend::new(breez_client.clone()));
-        let wallet_registry = crate::app::wallets::WalletRegistry::with_spark(
-            liquid_backend.clone(),
-            spark_backend.clone(),
+        let cube_encryption_key = derive_cube_encryption_key(&breez_client, network);
+        Ok(Self::without_wallet(
+            Some(breez_client),
+            spark_backend,
+            config,
+            datadir,
+            network,
+            cube_settings,
+            cube_encryption_key,
+        ))
+    }
+
+    /// A Bitcoin Blake2b Cube that has no Vault yet. It opens like a Bitcoin
+    /// Cube without one, with Create Vault next, but never starts Liquid or
+    /// Spark: none of their SDKs serve this chain. The encryption key comes
+    /// from the master signer the unlock verified.
+    pub fn new_fork_without_wallet(
+        cube_encryption_key: Arc<crate::services::connect::crypto::CubeEncryptionKey>,
+        client: Option<crate::services::coincube::CoincubeClient>,
+        config: Config,
+        datadir: CoincubeDirectory,
+        cube_settings: settings::CubeSettings,
+    ) -> Result<(App, Task<Message>), Error> {
+        if !cube_settings.network.is_blake2b() || cube_settings.vault_wallet_id.is_some() {
+            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+                coincubed::connect::AdmissionError::WrongChain.into(),
+            )));
+        }
+        let network = cube_settings.network.bitcoin_network();
+        let (mut app, task) = Self::without_wallet(
+            None,
+            None,
+            config,
+            datadir,
+            network,
+            cube_settings,
+            Some(cube_encryption_key),
         );
+        if let Some(client) = client.filter(|c| c.token().is_some()) {
+            app.panels.connect.install_admitted_client(client.clone());
+            app.cache.has_connect_session = true;
+            app.fork_connect_client = Some(client);
+        }
+        Ok((app, task))
+    }
+
+    fn without_wallet(
+        breez_client: Option<Arc<BreezClient>>,
+        spark_backend: Option<Arc<crate::app::wallets::SparkBackend>>,
+        config: Config,
+        datadir: CoincubeDirectory,
+        network: coincube_core::miniscript::bitcoin::Network,
+        cube_settings: settings::CubeSettings,
+        cube_encryption_key: Option<Arc<crate::services::connect::crypto::CubeEncryptionKey>>,
+    ) -> (App, Task<Message>) {
+        let fork = cube_settings.network.is_blake2b();
+        let (breez_client, spark_backend) = if fork {
+            (None, None)
+        } else {
+            (breez_client, spark_backend)
+        };
+        let config_arc = Arc::new(config);
+        let wallet_registry = match &breez_client {
+            Some(client) => crate::app::wallets::WalletRegistry::with_spark(
+                Arc::new(LiquidBackend::new(client.clone())),
+                spark_backend.clone(),
+            ),
+            None => crate::app::wallets::WalletRegistry::vault_only(),
+        };
         // Load bitcoin_unit and display_mode from settings if available
         let network_dir = datadir.network_directory(cube_settings.network);
         let settings_file = settings::Settings::from_file(&network_dir).ok();
@@ -3709,7 +3773,7 @@ impl App {
             cube_settings.network,
             cube_settings.id.clone(),
             cube_settings.name.clone(),
-            settings::network_to_api_string(network),
+            cube_settings.api_network_string(),
             cube_settings.bitcoin_import.clone(),
         );
         panels.global_home.imported_installed = cube_settings
@@ -3735,9 +3799,12 @@ impl App {
             .connect
             .set_spark_stable_balance(cube_settings.spark_stable_balance);
         let mut cache = cache;
-        cache.cube_encryption_key = derive_cube_encryption_key(&breez_client, network);
+        if fork {
+            cache.clear_btcb2_fiat();
+        }
+        cache.cube_encryption_key = cube_encryption_key;
         cache.connect_transport_key =
-            load_connect_transport_key(&datadir.network_directory(network));
+            load_connect_transport_key(&datadir.network_directory(cube_settings.network));
         cache.has_p2p = panels.p2p.is_some();
         // See the sibling assignment in `App::new`: probe the on-disk Liquid
         // state (not the live connection) for the "wallet exists on this machine"
@@ -3745,7 +3812,7 @@ impl App {
         // disconnected even for a funded on-disk wallet, which would wrongly
         // hide the rail.
         cache.liquid_gate.local_state_exists =
-            crate::app::breez_liquid::local_state_exists(datadir.path(), network);
+            !fork && crate::app::breez_liquid::local_state_exists(datadir.path(), network);
         panels.show_liquid(cache.liquid_gate);
         cache.p2p_test_coordinator = panels
             .p2p
@@ -3764,7 +3831,7 @@ impl App {
             ))),
         ]);
 
-        Ok((
+        (
             Self {
                 transfer_destination: None,
                 panels: Box::new(panels),
@@ -3773,7 +3840,7 @@ impl App {
                 wallet: None,
                 local_mcp: Default::default(),
                 imported_kit_metadata: Default::default(),
-                breez_client: Some(breez_client),
+                breez_client,
                 fork_connect_client: None,
                 local_feature_valid: true,
                 local_feature_checked_at: None,
@@ -3836,7 +3903,7 @@ impl App {
                 deferred_connect_stream_triggers: Vec::new(),
             },
             cmd,
-        ))
+        )
     }
 
     pub fn wallet_id(&self) -> Option<WalletId> {
@@ -12464,6 +12531,88 @@ pub(crate) mod tests {
             app.fork_connect_client = Some(client);
         }
         app
+    }
+
+    /// A Bitcoin Blake2b Cube without a Vault opens like a Bitcoin Cube
+    /// without one, with no Liquid or Spark anywhere: no Breez client, no
+    /// Spark backend, no Liquid or P2P panels, and no Spark on its Overview.
+    #[test]
+    fn a_fork_cube_without_a_vault_opens_without_liquid_or_spark() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("fork-no-vault-{}", uuid::Uuid::new_v4()));
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        let signer =
+            coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
+        let cek = Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+            &signer,
+            chain.bitcoin_network(),
+        ));
+        let (app, startup) = App::new_fork_without_wallet(
+            cek,
+            None,
+            Config::new(false),
+            CoincubeDirectory::new(root.clone()),
+            settings::CubeSettings::new("Fork".into(), chain),
+        )
+        .expect("a Vault-less fork Cube opens");
+        drop(startup);
+
+        assert!(app.wallet.is_none());
+        assert!(app.breez_client.is_none());
+        assert!(app.spark_backend().is_none());
+        assert!(app.panels.liquid_overview.is_none());
+        assert!(app.panels.liquid_send.is_none());
+        assert!(app.panels.p2p.is_none());
+        assert!(app.cache.cube_encryption_key.is_some());
+        assert_eq!(app.cache.chain(), chain);
+        assert!(!app.cache.has_vault);
+
+        let overview = crate::app::view::shared::landing::capture::inspect(
+            "fork-no-vault-overview",
+            app.view(),
+            (1280, 800),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        );
+        assert!(overview.contains("Create Vault"), "Create Vault comes next");
+        assert!(!overview.contains("Spark"), "no Spark on a fork Cube");
+        assert!(!overview.contains("Liquid"), "no Liquid on a fork Cube");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The fork constructor refuses a Bitcoin Cube and a fork Cube that
+    /// already has a Vault: both have their own way in.
+    #[test]
+    fn the_fork_no_vault_constructor_refuses_other_cubes() {
+        let root =
+            std::env::temp_dir().join(format!("fork-no-vault-refuse-{}", uuid::Uuid::new_v4()));
+        let signer =
+            coincube_core::signer::MasterSigner::generate(bitcoin::Network::Bitcoin).unwrap();
+        let cek = Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+            &signer,
+            bitcoin::Network::Bitcoin,
+        ));
+        let bitcoin = settings::CubeSettings::new("Bitcoin".into(), crate::chain::ChainId::Bitcoin);
+        assert!(App::new_fork_without_wallet(
+            cek.clone(),
+            None,
+            Config::new(false),
+            CoincubeDirectory::new(root.clone()),
+            bitcoin,
+        )
+        .is_err());
+        let mut vaulted =
+            settings::CubeSettings::new("Fork".into(), crate::chain::ChainId::BitcoinBlake2b);
+        vaulted.vault_wallet_id = Some(settings::WalletId::new("abcd1234".into(), Some(1)));
+        assert!(App::new_fork_without_wallet(
+            cek,
+            None,
+            Config::new(false),
+            CoincubeDirectory::new(root.clone()),
+            vaulted,
+        )
+        .is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A Bitcoin Blake2b Cube App (`fork_app`) whose Vault is recorded on the Cube, signed in to an

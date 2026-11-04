@@ -1534,14 +1534,29 @@ impl Home {
         }
         self.refresh_displayed_networks();
         if self.network.is_blake2b() {
-            // Explicitly supported launcher actions only. No legacy seed-only,
-            // passkey, recovery, phone restore or duress completion route.
+            // Explicitly supported launcher actions only: the Create Cube
+            // journey (name, PIN or passkey, backup) and opening a Cube. Its
+            // Vault is created from inside the Cube. No import, seed
+            // recovery, Recovery Kit restore, phone restore or duress
+            // completion route.
             let allowed = match &message {
                 Message::View(view) => matches!(
                     view,
                     ViewMessage::CreateCube
-                        | ViewMessage::CreateWallet
                         | ViewMessage::ShowCreateCube(_)
+                        | ViewMessage::CubeNameEdited(_)
+                        | ViewMessage::PinInput(_)
+                        | ViewMessage::PinConfirmInput(_)
+                        | ViewMessage::TogglePasskeyMode(_)
+                        | ViewMessage::CreationBackup(_)
+                        | ViewMessage::CreationBackupBypassRequested
+                        | ViewMessage::CreationBackupChoiceRequested
+                        | ViewMessage::CreationBackupAcknowledgeBypass(_)
+                        | ViewMessage::CreationBackupBypassConfirmed
+                        | ViewMessage::CancelCreationBackup
+                        | ViewMessage::CreationKitRequested
+                        | ViewMessage::CreationKit(_)
+                        | ViewMessage::CreationKitUploaded(_)
                         | ViewMessage::ConfirmCreateNetwork
                         | ViewMessage::BackToCreateNetwork
                         | ViewMessage::SelectNetwork(_)
@@ -1568,22 +1583,32 @@ impl Home {
                 | Message::ConnectSignedInBubble
                 | Message::CatchUpSyncFinished(_)
                 | Message::CubeRemoteRegistered { .. }
-                | Message::CubeRemoteUpdated { .. } => true,
+                | Message::CubeRemoteUpdated { .. }
+                | Message::CubeCreated(_)
+                | Message::PasskeyWindowId(_)
+                | Message::PasskeyWebviewUpdate(_)
+                | Message::PasskeyCeremonyResult(_)
+                | Message::CancelPasskeyCeremony
+                | Message::NativePasskeyTick => true,
                 _ => false,
             };
             if !allowed {
-                self.set_error(
-                    "Bitcoin Blake2b supports a PIN-protected Vault using a local node or Connect",
-                );
+                self.set_error("Bitcoin Blake2b Cubes can't be imported or restored here yet");
                 return Task::none();
             }
+            // Nothing on the Create Cube journey runs while this chain is
+            // unavailable: no seed, keystore or passkey work starts.
             if matches!(
                 &message,
                 Message::View(
                     ViewMessage::CreateCube
-                        | ViewMessage::CreateWallet
                         | ViewMessage::ShowCreateCube(true)
                         | ViewMessage::Run(_)
+                        | ViewMessage::TogglePasskeyMode(_)
+                        | ViewMessage::CreationBackup(_)
+                        | ViewMessage::CreationBackupBypassConfirmed
+                        | ViewMessage::CreationKitRequested
+                        | ViewMessage::CreationKit(_)
                 )
             ) {
                 if let Some(reason) = self.chain_availability(self.network).reason() {
@@ -1591,24 +1616,6 @@ impl Home {
                     return Task::none();
                 }
             }
-        }
-        // BTCB2 Cubes use the Vault installer, never the seed-only Liquid/Spark flow.
-        if self.network.is_blake2b()
-            && matches!(
-                &message,
-                Message::View(
-                    ViewMessage::CreateCube
-                        | ViewMessage::CreateWallet
-                        | ViewMessage::ShowCreateCube(true)
-                )
-            )
-        {
-            return Task::done(Message::Install(
-                self.datadir_path.clone(),
-                self.network,
-                UserFlow::CreateWallet,
-                self.connect_account.authenticated_client(),
-            ));
         }
         match message {
             Message::View(ViewMessage::Check) => self.on_focus(),
@@ -1734,12 +1741,6 @@ impl Home {
                     && self.pending_bitcoin_import.is_none()
                     && self.chain_availability(self.network).is_available()
                 {
-                    // Bitcoin Blake2b's PIN is collected by the first
-                    // RestorePinSetupStep in the existing Vault installer.
-                    // Continue straight there; Home has no PIN form to show.
-                    if self.network.is_blake2b() {
-                        return Task::done(Message::View(ViewMessage::CreateWallet));
-                    }
                     self.create_network_confirmed = true;
                     return create_journey_focus_task(Id::new(CREATE_BACK_TO_NETWORKS_ID));
                 }
@@ -3124,7 +3125,9 @@ impl Home {
             }
             Message::View(ViewMessage::SubmitRecovery) => {
                 if self.network.is_blake2b() {
-                    self.set_error("Bitcoin Blake2b supports Vault creation only");
+                    self.set_error(
+                        "Bitcoin Blake2b Cubes can't be restored from a recovery phrase yet",
+                    );
                     return Task::none();
                 }
                 let words = self.recovery_words.join(" ");
@@ -4336,10 +4339,6 @@ impl Home {
         credential_id: String,
         prf_output: &zeroize::Zeroizing<[u8; 32]>,
     ) -> Task<Message> {
-        if self.network.is_blake2b() {
-            self.set_error("Bitcoin Blake2b supports Vault creation only");
-            return Task::none();
-        }
         // Derive the signer, take its fingerprint, and keep the phrase only for
         // the duration of the step.
         //
@@ -4462,10 +4461,6 @@ impl Home {
     /// reconciled by the same catch-up sync that already handles a Cube
     /// registered from another device.
     fn submit_creation_kit(&mut self) -> Task<Message> {
-        if self.network.is_blake2b() {
-            self.set_error("Bitcoin Blake2b supports Vault creation only");
-            return Task::none();
-        }
         use crate::services::recovery::MIN_PASSWORD_LEN;
 
         let Some(client) = self.connect_account.authenticated_client() else {
@@ -4647,10 +4642,6 @@ impl Home {
         bypass: Option<creation_gate::CreationBackupBypass>,
         recovery_kit: Option<creation_gate::CreationRecoveryKit>,
     ) -> Task<Message> {
-        if self.network.is_blake2b() {
-            self.set_error("Bitcoin Blake2b supports Vault creation only");
-            return Task::none();
-        }
         let Some(pending) = self.pending_passkey_cube.clone() else {
             self.error = Some(
                 "This passkey Cube's registration was lost before it could be saved. \
@@ -4784,10 +4775,6 @@ impl Home {
         bypass: Option<creation_gate::CreationBackupBypass>,
         recovery_kit: Option<creation_gate::CreationRecoveryKit>,
     ) -> Task<Message> {
-        if self.network.is_blake2b() {
-            self.set_error("Bitcoin Blake2b supports Vault creation only");
-            return Task::none();
-        }
         let Some(words) = self.creation_backup_words.clone() else {
             return self.lose_creation_seed();
         };
@@ -4977,12 +4964,6 @@ impl Home {
     }
 
     fn creation_form(&self, submit_in_form: bool) -> Element<ViewMessage> {
-        if self.network.is_blake2b() {
-            return Column::new().spacing(16)
-                .push(text("Create a Bitcoin Blake2b Vault. Other wallet and recovery flows are unavailable."))
-                .push(button::primary(None, "Create Vault").on_press(ViewMessage::CreateWallet))
-                .into();
-        }
         create_cube_form(
             &self.create_cube_name,
             &self.create_cube_pin,
@@ -5204,21 +5185,14 @@ impl Home {
         let restoring = self.showing_import_or_restore();
         let hub = restoring && self.restore_hub && !backing_up;
         let selecting_network = !backing_up && !restoring && !self.create_network_confirmed;
-        let blake2b = self.network.is_blake2b();
         let light = matches!(
             self.theme_mode,
             coincube_ui::theme::palette::ThemeMode::Light
         );
         // The import path after the Cube: the imported-wallet screens inside
-        // it (Source, Review, Scan) finish the import. The fork still routes
-        // through the Vault installer and shows its ordered path.
+        // it (Source, Review, Scan) finish the import.
         let steps: &[&str] = if restoring {
             restore_frame::import_steps(self.passkey_mode)
-        } else if blake2b {
-            &[
-                "Network", "PIN", "Vault", "Policy", "Keys", "Seed", "Connect", "Node", "Name",
-                "Done",
-            ]
         } else {
             create_cube_steps(self.passkey_mode)
         };
@@ -5232,9 +5206,7 @@ impl Home {
         } else if selecting_network {
             0
         } else if backing_up {
-            if blake2b {
-                5
-            } else if self.passkey_mode {
+            if self.passkey_mode {
                 3
             } else {
                 2
@@ -5393,8 +5365,11 @@ impl Home {
                     match chain {
                         ChainId::Bitcoin => "Spark · Vault",
                         ChainId::Regtest => "Spark · Vault",
-                        ChainId::BitcoinBlake2b | ChainId::BitcoinBlake2bTestnet4 => {
-                            "Bitcoin Blake2b supports Vault creation only"
+                        ChainId::BitcoinBlake2b => {
+                            "Vault only. Spark isn't available on Bitcoin Blake2b."
+                        }
+                        ChainId::BitcoinBlake2bTestnet4 => {
+                            "Vault only. Spark isn't available on Bitcoin Blake2b Testnet4."
                         }
                         ChainId::Testnet => "Vault only. Spark isn't available on Testnet.",
                         ChainId::Testnet4 => "Vault only. Spark isn't available on Testnet4.",
@@ -5530,12 +5505,6 @@ impl Home {
                             .width(Length::Shrink)
                             .on_press(ViewMessage::OpenAppPreferences),
                         ),
-                );
-            }
-            if self.network.is_blake2b() {
-                content = content.push(
-                    p2_regular("Bitcoin Blake2b supports Vault creation only.")
-                        .style(theme::text::secondary),
                 );
             }
             content.into()
@@ -5683,7 +5652,7 @@ impl Home {
                         button::primary_action(
                             "tenshu.create:network-continue",
                             None,
-                            if blake2b { "Create Vault" } else { "Continue" },
+                            "Continue",
                             create_journey_focus,
                         )
                         .width(Length::Shrink)
@@ -5697,7 +5666,7 @@ impl Home {
                 .padding([14, 28])
                 .width(Length::Fill),
             )
-        } else if !backing_up && !blake2b {
+        } else if !backing_up {
             region.push(divider()).push(
                 Container::new(
                     Row::new()
@@ -8735,32 +8704,40 @@ mod tests {
     }
 
     #[test]
-    fn blake2b_create_navigation_keeps_the_vault_gate() {
+    fn blake2b_create_goes_through_the_cube_journey() {
         let mut home = home();
         enable_btcb2(&mut home);
         home.network = ChainId::BitcoinBlake2b;
         home.state = State::NoCube { create_cube: true };
 
+        // The network step leads to the Cube step, as on Bitcoin. Nothing
+        // starts the Vault installer: the Vault is created inside the Cube.
         let next = drain(home.update(Message::View(ViewMessage::ConfirmCreateNetwork)));
-        assert!(next
+        assert!(!next
             .iter()
-            .any(|message| matches!(message, Message::View(ViewMessage::CreateWallet))));
-        assert!(!home.create_network_confirmed);
+            .any(|message| matches!(message, Message::Install(..))));
+        assert!(home.create_network_confirmed);
         assert!(home.error.is_none());
-        assert!(drain(home.update(Message::View(ViewMessage::CreateWallet)))
-            .iter()
-            .any(|message| matches!(
-                message,
-                Message::Install(_, ChainId::BitcoinBlake2b, UserFlow::CreateWallet, _)
-            )));
 
-        // The new stage controls cannot enable the seed-only Cube route.
-        assert!(drain(home.update(Message::View(ViewMessage::CreateCube)))
+        drop(home.update(Message::View(ViewMessage::CubeNameEdited("Fork".into()))));
+        assert_eq!(home.create_cube_name.value, "Fork");
+        drop(home.update(Message::View(ViewMessage::TogglePasskeyMode(false))));
+        assert!(
+            home.error.is_none(),
+            "PIN or passkey is a Cube choice here too"
+        );
+
+        // An incomplete Cube form creates nothing and installs nothing.
+        assert!(!drain(home.update(Message::View(ViewMessage::CreateCube)))
             .iter()
-            .any(|message| matches!(
-                message,
-                Message::Install(_, ChainId::BitcoinBlake2b, UserFlow::CreateWallet, _)
-            )));
+            .any(|message| matches!(message, Message::Install(..))));
+
+        // The fresh-fork installer route is gone from Home.
+        assert!(
+            !drain(home.update(Message::View(ViewMessage::CreateWallet)))
+                .iter()
+                .any(|message| matches!(message, Message::Install(..)))
+        );
     }
 
     #[test]
@@ -14142,11 +14119,14 @@ mod chain_identity_open_tests {
             create_cube: false,
             source: ChainId::BitcoinBlake2b,
         };
-        let produced = drain(home.update(Message::View(ViewMessage::CreateCube)));
-        assert!(produced.iter().any(|message| matches!(
-            message,
-            Message::Install(_, ChainId::BitcoinBlake2b, UserFlow::CreateWallet, None)
-        )));
+        // Signed out, the Create Cube journey opens as on Bitcoin; the
+        // Vault comes later, from inside the Cube.
+        let produced = drain(home.update(Message::View(ViewMessage::ShowCreateCube(true))));
+        assert!(!produced
+            .iter()
+            .any(|message| matches!(message, Message::Install(..))));
+        assert!(home.error.is_none());
+        assert!(home.showing_create_form());
         home.connect_account.bitcoin_blake2b_opt_in = false;
         home.refresh_displayed_networks();
         assert!(!home.displayed_networks.contains(&ChainId::BitcoinBlake2b));
@@ -14355,21 +14335,12 @@ mod chain_identity_open_tests {
                 }
                 assert_eq!(home.network, ChainId::BitcoinBlake2b);
                 assert!(!dir.join("bitcoin-blake2b").exists());
-                assert!(matches!(
-                    drain(home.update(Message::View(ViewMessage::CreateWallet))).as_slice(),
-                    [Message::Install(
-                        _,
-                        ChainId::BitcoinBlake2b,
-                        UserFlow::CreateWallet,
-                        Some(_)
-                    )]
-                ));
+                // Creation is the Cube journey; import and restore stay closed.
                 for event in [
+                    ViewMessage::CreateWallet,
                     ViewMessage::ImportWallet,
                     ViewMessage::SubmitRecovery,
                     ViewMessage::RestoreFromRecoveryKit("synthetic".into()),
-                    ViewMessage::TogglePasskeyMode(true),
-                    ViewMessage::CreationBackupBypassConfirmed,
                 ] {
                     assert!(drain(home.update(Message::View(event))).is_empty());
                 }

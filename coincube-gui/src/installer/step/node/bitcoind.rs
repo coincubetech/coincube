@@ -652,7 +652,7 @@ impl Step for SelectBitcoindTypeStep {
         self.network = ctx.network;
         self.chain = ctx.bitcoin_config.chain;
         self.connect_authenticated = ctx.use_coincube_connect;
-        self.local_available = ctx.fresh_fork_cube;
+        self.local_available = ctx.fork_local_vault_allowed();
         if self.chain.is_blake2b() {
             // Do not inspect or inherit the Bitcoin family's global node config.
             // Connect opens the Vault immediately; the isolated local node is
@@ -746,7 +746,7 @@ impl Step for SelectBitcoindTypeStep {
     fn apply(&mut self, ctx: &mut Context) -> bool {
         if ctx.bitcoin_config.chain.is_blake2b() {
             if !self.use_connect {
-                if self.use_external || !ctx.fresh_fork_cube {
+                if self.use_external || !ctx.fork_local_vault_allowed() {
                     return false;
                 }
                 ctx.node_flavor = NodeFlavor::KnotsBlake2b;
