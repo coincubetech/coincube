@@ -793,3 +793,47 @@ fn launcher_capture_empty_modes() {
         home.catalog.hover.clear();
     }
 }
+
+/// The Create form's PIN step, signed out, at the minimum window and a
+/// 1440px window: Enter and Confirm PIN side by side under the name.
+#[test]
+#[ignore = "writes PNG frames; needs a GPU adapter"]
+fn launcher_capture_create_form() {
+    let Ok(directory) = std::env::var("LAUNCHER_CAPTURE_DIR") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut renderer = renderer().expect("wgpu headless renderer");
+    for light in [false, true] {
+        let appearance = if light { "light" } else { "dark" };
+        let palette = if light {
+            theme::Theme::light()
+        } else {
+            theme::Theme::dark()
+        };
+        let mut home = home(light);
+        home.state = State::NoCube { create_cube: true };
+        home.create_network_confirmed = true;
+        home.passkey_mode = false;
+        for (width, height) in [(1024.0, 768.0), (1440.0, 900.0)] {
+            save(
+                &mut renderer,
+                home.create_journey_view(),
+                Size::new(width, height),
+                &palette,
+                directory.join(format!("{appearance}-create-form-{width}.png")),
+            );
+        }
+        // The 500px Bitcoin-import form, where the two PIN fields stack.
+        let _ = home.update(super::Message::View(super::ViewMessage::ShowImportBitcoin));
+        home.passkey_mode = false;
+        save(
+            &mut renderer,
+            home.create_journey_view(),
+            Size::new(1440.0, 900.0),
+            &palette,
+            directory.join(format!("{appearance}-create-form-import.png")),
+        );
+    }
+}
