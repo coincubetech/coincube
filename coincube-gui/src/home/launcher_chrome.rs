@@ -5,7 +5,7 @@
 
 use iced::{
     advanced::widget::Id,
-    widget::{button as iced_button, container, mouse_area, svg, text, Space},
+    widget::{button as iced_button, container, mouse_area, svg, text, tooltip, Space},
     Alignment, Border, Color, Length, Padding,
 };
 
@@ -526,6 +526,52 @@ fn dock_action<'a>(
     .into()
 }
 
+/// Why Import Bitcoin wallet is unavailable: a short caption with the reason
+/// and remedy, shown beside it, and the full sentence for the hover tooltip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ImportUnavailable {
+    pub(super) caption: &'static str,
+    pub(super) detail: String,
+}
+
+/// `None` while Import is open. Import is Bitcoin mainnet only and needs a
+/// free Cube slot there.
+pub(super) fn import_unavailable(projection: &Projection<'_>) -> Option<ImportUnavailable> {
+    if projection.network != ChainId::Bitcoin {
+        return Some(ImportUnavailable {
+            caption: "Bitcoin mainnet only · choose it in Network",
+            detail: format!(
+                "Import is for Bitcoin mainnet only. The Launcher is on {}: choose \
+                 Bitcoin mainnet in the Network menu to import a wallet.",
+                network_name(projection.network)
+            ),
+        });
+    }
+    projection.at_limit().then(|| ImportUnavailable {
+        caption: "No free mainnet slot · upgrade or delete a Cube",
+        detail: format!(
+            "Bitcoin mainnet has no free Cube slot on the {} plan. Upgrade, or \
+             delete a Bitcoin mainnet Cube, to import a wallet.",
+            projection.tier
+        ),
+    })
+}
+
+/// A dock control's tooltip, in the shared top bar's menu bubble.
+fn dock_tip<'a>(label: String) -> Element<'a, ViewMessage> {
+    Container::new(
+        text(label)
+            .size(12)
+            .style(|theme: &theme::Theme| text::Style {
+                color: Some(theme.colors.shell.muted),
+            }),
+    )
+    .max_width(320.0)
+    .padding([6, 10])
+    .style(theme::container::shell_menu)
+    .into()
+}
+
 fn small_link<'a>(id: Id, label: &'static str, message: ViewMessage) -> Element<'a, ViewMessage> {
     Action::new(id, words(label, 13.0, font::MEDIUM, Ink::Accent), focus)
         .padding([4.0, 6.0])
@@ -550,15 +596,30 @@ pub(super) fn dock<'a>(
         (!at_limit).then_some(ViewMessage::ShowCreateCube(true)),
         quiet,
     );
+    let unavailable = import_unavailable(projection);
     let import = dock_action(
         launcher_catalog::import_id(),
         IMPORT,
         "Import Bitcoin wallet",
         false,
-        (!at_limit && projection.network == ChainId::Bitcoin)
+        unavailable
+            .is_none()
             .then_some(ViewMessage::ShowImportBitcoin),
         quiet,
     );
+    // A faded Import says nothing of the network it needs, and the floor
+    // shows every network. A caption beside it gives the reason and remedy, so they read
+    // without a pointer (a disabled action takes no focus, and a tooltip
+    // shows only on hover); hovering it gives the full sentence.
+    let (import, import_caption): (Element<'a, ViewMessage>, _) = match unavailable {
+        Some(reason) => (
+            tooltip::Tooltip::new(import, dock_tip(reason.detail), tooltip::Position::Top)
+                .gap(8)
+                .into(),
+            Some(words(reason.caption, 12.0, font::REGULAR, Ink::Muted)),
+        ),
+        None => (import, None),
+    };
     let recover = (home.connect_account.is_authenticated()
         && !home.network.is_blake2b()
         && feature_flags::RECOVER_VAULT_ENABLED)
@@ -577,6 +638,7 @@ pub(super) fn dock<'a>(
             .height(Length::Fill)
             .push(create)
             .push(import)
+            .push(import_caption)
             .push(recover)
             .push(Space::new().width(Length::Fill))
             .push(plan_button(home, projection))
@@ -1835,6 +1897,83 @@ mod top_bar_tests {
             .as_widget_mut()
             .operate(&mut tree, Layout::new(&node), &renderer, &mut probe);
         (node.bounds(), probe)
+    }
+
+    /// Import names why it is unavailable: another network is current, or
+    /// Bitcoin mainnet has no free Cube slot. Open, it has no reason.
+    #[test]
+    fn import_says_why_it_is_unavailable() {
+        let mut home = home(false);
+        home.server_cube_limit = Some(10);
+        assert_eq!(
+            super::import_unavailable(&launcher_catalog::project(&home)),
+            None
+        );
+
+        home.network = ChainId::Testnet4;
+        let reason = super::import_unavailable(&launcher_catalog::project(&home)).unwrap();
+        assert_eq!(
+            reason.caption,
+            "Bitcoin mainnet only · choose it in Network"
+        );
+        let reason = reason.detail;
+        assert!(
+            reason.starts_with("Import is for Bitcoin mainnet only."),
+            "{}",
+            reason
+        );
+        assert!(
+            reason.contains("The Launcher is on Bitcoin Testnet4"),
+            "{}",
+            reason
+        );
+        assert!(reason.contains("Network menu"), "{}", reason);
+
+        home.network = ChainId::Bitcoin;
+        home.server_cube_limit = Some(4);
+        let reason = super::import_unavailable(&launcher_catalog::project(&home)).unwrap();
+        assert_eq!(
+            reason.caption,
+            "No free mainnet slot · upgrade or delete a Cube"
+        );
+        let reason = reason.detail;
+        assert!(
+            reason.starts_with("Bitcoin mainnet has no free Cube slot on the"),
+            "{}",
+            reason
+        );
+
+        // The dock shows the caption right of Import while it is unavailable,
+        // so the reason reads without a pointer, and none while it is open.
+        home.network = ChainId::Testnet4;
+        let projection = launcher_catalog::project(&home);
+        let (_, live) = probe(super::dock(&home, &projection, false));
+        let at = |value: &str| {
+            live.text
+                .iter()
+                .find(|(text, _)| text == value)
+                .map(|(_, bounds)| *bounds)
+        };
+        let import = at("Import Bitcoin wallet").unwrap();
+        let caption = at("Bitcoin mainnet only · choose it in Network").unwrap();
+        assert!(
+            caption.x > import.x + import.width,
+            "{:?} {:?}",
+            import,
+            caption
+        );
+
+        home.network = ChainId::Bitcoin;
+        home.server_cube_limit = Some(10);
+        let projection = launcher_catalog::project(&home);
+        let (_, live) = probe(super::dock(&home, &projection, false));
+        assert!(live
+            .text
+            .iter()
+            .any(|(value, _)| value == "Import Bitcoin wallet"));
+        assert!(!live.text.iter().any(|(value, _)| value
+            == "Bitcoin mainnet only · choose it in Network"
+            || value == "No free mainnet slot · upgrade or delete a Cube"));
     }
 
     /// App preferences is icon-only on both Launcher bars, and its accessible
