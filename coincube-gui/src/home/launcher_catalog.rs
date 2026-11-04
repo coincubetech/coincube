@@ -5525,7 +5525,7 @@ mod tests {
         drop(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Testnet4))));
         assert!(home.catalog.pending_select.is_some());
         // An import finished during the probe opens its own Cube first.
-        home.open_created_import_cube = Some("t2".into());
+        home.open_created_cube = Some("t2".into());
         drop(home.update(Message::Checked {
             for_chain: ChainId::Testnet4,
             res: Ok(State::Cubes {
