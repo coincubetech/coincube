@@ -57,8 +57,6 @@ pub fn pin_entry_view<'a>(pin: &'a PinInput, error: Option<&'a str>) -> Element<
     let mut col = Column::new()
         .spacing(20)
         .width(Length::Fill)
-        .push(header("Enter PIN", wrap))
-        .push(Space::new().height(Length::Fixed(16.0)))
         .push(
             Row::new()
                 .width(Length::Fill)
@@ -142,29 +140,31 @@ pub fn pin_entry_view<'a>(pin: &'a PinInput, error: Option<&'a str>) -> Element<
 }
 
 /// Intro screen with security warning + "I understand" checkbox.
+///
+/// `note` is caller-specific copy shown above the checkbox, so the actions
+/// stay the last thing on the screen.
 pub fn intro_view<M: Clone + 'static>(
     checked: bool,
+    note: Option<Element<'static, M>>,
     on: fn(BackupWalletMessage) -> M,
 ) -> Element<'static, M> {
     let primary_color = color::ORANGE;
     Column::new()
         .spacing(20)
         .width(Length::Fill)
-        .push(header("Back up your wallet", on))
-        .push(Space::new().height(Length::Fixed(16.0)))
         .push(
             Row::new()
                 .width(Length::Fill)
                 .align_y(Alignment::Center)
                 .push(Space::new().width(Length::Fill))
-                .push(icon::file_earmark_icon().size(140).color(primary_color))
+                .push(icon::file_earmark_icon().size(96).color(primary_color))
                 .push(Space::new().width(Length::Fill))
         )
-        .push(Space::new().height(Length::Fixed(16.0)))
         .push(
             Container::new(
                 Column::new()
                     .align_x(Alignment::Center)
+                    .max_width(600)
                     .push(
                         text("You will be shown 12 words. Write them down numbered in the same order shown and keep them in a safe place.")
                             .size(20)
@@ -181,11 +181,14 @@ pub fn intro_view<M: Clone + 'static>(
                             .align_x(iced::alignment::Horizontal::Center)
                     )
             )
-            .padding(20)
             .width(Length::Fill)
             .align_x(iced::alignment::Horizontal::Center)
         )
-        .push(Space::new().height(Length::Fixed(16.0)))
+        .push(note.map(|note| {
+            Container::new(note)
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+        }))
         .push(
             Row::new()
                 .width(Length::Fill)
@@ -267,7 +270,6 @@ pub fn recovery_phrase_view<'a, M: Clone + 'a>(
     Column::new()
         .spacing(20)
         .width(Length::Fill)
-        .push(header("Your Recovery Phrase", on))
         .push(
             Row::new()
                 .width(Length::Fill)
@@ -371,8 +373,6 @@ pub fn verification_view<'a, M: Clone + 'a>(
     let all_filled = word_inputs.iter().all(|w| !w.trim().is_empty());
 
     let mut content = Column::new().spacing(20).width(Length::Fill);
-
-    content = content.push(header("Verify Your Recovery Phrase", on));
 
     content = content.push(
         Row::new()
@@ -651,7 +651,7 @@ pub fn dispatch<'a>(
     match state {
         BackupSeedState::None => None,
         BackupSeedState::PinEntry { error } => Some(pin_entry_view(pin, error.as_deref())),
-        BackupSeedState::Intro(checked) => Some(intro_view(*checked, wrap)),
+        BackupSeedState::Intro(checked) => Some(intro_view(*checked, None, wrap)),
         BackupSeedState::RecoveryPhrase => {
             // Without a loaded mnemonic we can't show anything useful —
             // bail back to the normal settings page. This shouldn't happen
