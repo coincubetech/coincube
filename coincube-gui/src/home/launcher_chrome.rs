@@ -526,22 +526,34 @@ fn dock_action<'a>(
     .into()
 }
 
-/// Why Import Bitcoin wallet is unavailable, or `None` while it is open.
-/// Import is Bitcoin mainnet only and needs a free Cube slot there.
-pub(super) fn import_unavailable(projection: &Projection<'_>) -> Option<String> {
+/// Why Import Bitcoin wallet is unavailable: a short caption the dock shows
+/// beside it, and the full reason with its remedy for the hover tooltip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ImportUnavailable {
+    pub(super) caption: &'static str,
+    pub(super) detail: String,
+}
+
+/// `None` while Import is open. Import is Bitcoin mainnet only and needs a
+/// free Cube slot there.
+pub(super) fn import_unavailable(projection: &Projection<'_>) -> Option<ImportUnavailable> {
     if projection.network != ChainId::Bitcoin {
-        return Some(format!(
-            "Import is for Bitcoin mainnet only. The Launcher is on {}: choose \
-             Bitcoin mainnet in the Network menu to import a wallet.",
-            network_name(projection.network)
-        ));
+        return Some(ImportUnavailable {
+            caption: "Bitcoin mainnet only",
+            detail: format!(
+                "Import is for Bitcoin mainnet only. The Launcher is on {}: choose \
+                 Bitcoin mainnet in the Network menu to import a wallet.",
+                network_name(projection.network)
+            ),
+        });
     }
-    projection.at_limit().then(|| {
-        format!(
+    projection.at_limit().then(|| ImportUnavailable {
+        caption: "No free mainnet slot",
+        detail: format!(
             "Bitcoin mainnet has no free Cube slot on the {} plan. Upgrade, or \
              delete a Bitcoin mainnet Cube, to import a wallet.",
             projection.tier
-        )
+        ),
     })
 }
 
@@ -596,12 +608,17 @@ pub(super) fn dock<'a>(
         quiet,
     );
     // A faded Import says nothing of the network it needs, and the floor
-    // shows every network, so hovering it names the reason.
-    let import: Element<'a, ViewMessage> = match unavailable {
-        Some(reason) => tooltip::Tooltip::new(import, dock_tip(reason), tooltip::Position::Top)
-            .gap(8)
-            .into(),
-        None => import,
+    // shows every network. A caption beside it names the reason, so it reads
+    // without a pointer (a disabled action takes no focus, and a tooltip
+    // shows only on hover); hovering it gives the full reason and remedy.
+    let (import, import_caption): (Element<'a, ViewMessage>, _) = match unavailable {
+        Some(reason) => (
+            tooltip::Tooltip::new(import, dock_tip(reason.detail), tooltip::Position::Top)
+                .gap(8)
+                .into(),
+            Some(words(reason.caption, 12.0, font::REGULAR, Ink::Muted)),
+        ),
+        None => (import, None),
     };
     let recover = (home.connect_account.is_authenticated()
         && !home.network.is_blake2b()
@@ -621,6 +638,7 @@ pub(super) fn dock<'a>(
             .height(Length::Fill)
             .push(create)
             .push(import)
+            .push(import_caption)
             .push(recover)
             .push(Space::new().width(Length::Fill))
             .push(plan_button(home, projection))
@@ -1882,8 +1900,7 @@ mod top_bar_tests {
     }
 
     /// Import names why it is unavailable: another network is current, or
-    /// Bitcoin mainnet has no free Cube slot. Open, it has no reason, and the
-    /// dock still draws and labels it either way.
+    /// Bitcoin mainnet has no free Cube slot. Open, it has no reason.
     #[test]
     fn import_says_why_it_is_unavailable() {
         let mut home = home(false);
@@ -1895,6 +1912,8 @@ mod top_bar_tests {
 
         home.network = ChainId::Testnet4;
         let reason = super::import_unavailable(&launcher_catalog::project(&home)).unwrap();
+        assert_eq!(reason.caption, "Bitcoin mainnet only");
+        let reason = reason.detail;
         assert!(
             reason.starts_with("Import is for Bitcoin mainnet only."),
             "{}",
@@ -1910,19 +1929,46 @@ mod top_bar_tests {
         home.network = ChainId::Bitcoin;
         home.server_cube_limit = Some(4);
         let reason = super::import_unavailable(&launcher_catalog::project(&home)).unwrap();
+        assert_eq!(reason.caption, "No free mainnet slot");
+        let reason = reason.detail;
         assert!(
             reason.starts_with("Bitcoin mainnet has no free Cube slot on the"),
             "{}",
             reason
         );
 
+        // The dock shows the caption right of Import while it is unavailable,
+        // so the reason reads without a pointer, and none while it is open.
         home.network = ChainId::Testnet4;
+        let projection = launcher_catalog::project(&home);
+        let (_, live) = probe(super::dock(&home, &projection, false));
+        let at = |value: &str| {
+            live.text
+                .iter()
+                .find(|(text, _)| text == value)
+                .map(|(_, bounds)| *bounds)
+        };
+        let import = at("Import Bitcoin wallet").unwrap();
+        let caption = at("Bitcoin mainnet only").unwrap();
+        assert!(
+            caption.x > import.x + import.width,
+            "{:?} {:?}",
+            import,
+            caption
+        );
+
+        home.network = ChainId::Bitcoin;
+        home.server_cube_limit = Some(10);
         let projection = launcher_catalog::project(&home);
         let (_, live) = probe(super::dock(&home, &projection, false));
         assert!(live
             .text
             .iter()
             .any(|(value, _)| value == "Import Bitcoin wallet"));
+        assert!(!live
+            .text
+            .iter()
+            .any(|(value, _)| value == "Bitcoin mainnet only" || value == "No free mainnet slot"));
     }
 
     /// App preferences is icon-only on both Launcher bars, and its accessible
