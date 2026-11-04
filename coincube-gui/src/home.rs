@@ -7,7 +7,7 @@ use iced::{
 
 use coincube_core::{bip39, miniscript::bitcoin::Network};
 use coincube_ui::{
-    component::{button, card, notification, spinner, text::*},
+    component::{button, card, notification, spinner, tenshu::top_bar, text::*},
     icon, image, theme,
     widget::{
         action::Action as FocusableAction, modal::Modal, CheckBox, Column, Container, Element, Row,
@@ -5230,34 +5230,19 @@ impl Home {
         )
         .style(theme::button::transparent)
         .on_press_maybe(leave.then_some(ViewMessage::ShowCreateCube(false)));
-        let connect_label = if self.connect_account.is_authenticated() {
-            "Signed in"
-        } else if self.connect_account.is_checking_session() {
-            "Checking…"
-        } else {
-            "Sign in"
-        };
-        let connect = FocusableAction::new(
-            // The Connect sheet records these existing Home focus IDs. Its
-            // Close/Escape return must land on the mounted Create top bar.
+        // The Launcher's Connect entry. The Connect sheet records these
+        // existing Home focus IDs; its Close/Escape return must land on the
+        // mounted Create top bar.
+        let connect = launcher_chrome::connect_control(
+            self,
+            false,
             Id::new(if self.connect_account.is_authenticated() {
                 LEGACY_CONNECT_ENTRY_ID
             } else {
                 LEGACY_CONNECT_SIGN_IN_ID
             }),
-            Row::new()
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .push(icon::person_icon())
-                .push(p2_regular("Connect"))
-                .push(p2_regular(connect_label).style(theme::text::secondary)),
-            create_journey_focus,
-        )
-        .style(theme::button::transparent)
-        .on_press_maybe(
-            (!backing_up && !self.connect_account.is_checking_session()).then_some(
-                ViewMessage::GoToSection(HomeSection::Connect(app::menu::ConnectSubMenu::Overview)),
-            ),
+            Id::new(LEGACY_CONNECT_SIGN_IN_ID),
+            !backing_up && !self.connect_account.is_checking_session(),
         );
         let top_bar = Container::new(
             Row::new()
@@ -5277,14 +5262,13 @@ impl Home {
                 .push(Space::new().width(Length::Fill))
                 .push(connect)
                 .push(
-                    button::secondary_action(
+                    top_bar::preferences(
                         "tenshu.create:top-app-preferences",
-                        Some(icon::settings_icon()),
-                        "App preferences",
                         create_journey_focus,
+                        ViewMessage::OpenAppPreferences,
                     )
-                    .width(Length::Shrink)
-                    .on_press_maybe((!backing_up).then_some(ViewMessage::OpenAppPreferences)),
+                    .on_press_maybe((!backing_up).then_some(ViewMessage::OpenAppPreferences))
+                    .pressed(self.app_preferences_open),
                 ),
         )
         .center_y(Length::Fixed(64.0))

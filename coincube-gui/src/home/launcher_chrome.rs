@@ -254,6 +254,25 @@ pub(super) fn network_option_id(chain: ChainId) -> Id {
 }
 
 fn connect_entry<'a>(home: &Home, quiet: bool) -> Element<'a, ViewMessage> {
+    connect_control(
+        home,
+        quiet,
+        launcher_catalog::connect_id(),
+        launcher_catalog::sign_in_id(),
+        true,
+    )
+}
+
+/// The Launcher's Connect entry under the caller's focus ids, so another bar
+/// (Create Cube) draws the same control. `enabled` gates the press on top of
+/// the entry's own rule.
+pub(super) fn connect_control<'a>(
+    home: &Home,
+    quiet: bool,
+    entry_id: Id,
+    sign_in_id: Id,
+    enabled: bool,
+) -> Element<'a, ViewMessage> {
     let account = &home.connect_account;
     let overview = ViewMessage::GoToSection(HomeSection::Connect(
         crate::app::menu::ConnectSubMenu::Overview,
@@ -278,13 +297,13 @@ fn connect_entry<'a>(home: &Home, quiet: bool) -> Element<'a, ViewMessage> {
             "Signed in"
         };
         (
-            launcher_catalog::connect_id(),
+            entry_id,
             row.push(words(state, 12.0, font::REGULAR, Ink::Muted)),
             Some(overview),
         )
     } else if account.is_checking_session() {
         (
-            launcher_catalog::connect_id(),
+            entry_id,
             Row::new()
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -297,7 +316,7 @@ fn connect_entry<'a>(home: &Home, quiet: bool) -> Element<'a, ViewMessage> {
     } else {
         // `.tbtn.out .who`: the sign-in call to action in accent ink.
         (
-            launcher_catalog::sign_in_id(),
+            sign_in_id,
             Row::new()
                 .spacing(8)
                 .align_y(Alignment::Center)
@@ -312,7 +331,7 @@ fn connect_entry<'a>(home: &Home, quiet: bool) -> Element<'a, ViewMessage> {
         .height(Length::Fixed(32.0))
         .padding([0.0, 10.0])
         .style(|theme, status| bar_button(theme, status, false))
-        .on_press_maybe(message)
+        .on_press_maybe(message.filter(|_| enabled))
         .into()
 }
 
