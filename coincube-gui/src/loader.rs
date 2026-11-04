@@ -1050,6 +1050,7 @@ pub async fn load_application(
         unswept_notice: None,
         node_history: crate::app::node_history::Status::default(),
         node_history_switch_requested: false,
+        local_node_transfer_visible: false,
         background_node_install: Default::default(),
         connect_transport_key: None,
         cube_encryption_key: None,

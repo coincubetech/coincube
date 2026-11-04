@@ -7304,6 +7304,7 @@ impl App {
                     });
                 if managed && missing && self.cache.node_bitcoind_ibd == Some(false) {
                     self.cache.node_history_switch_requested = true;
+                    self.cache.local_node_transfer_visible = true;
                     self.auto_switch_suppressed = false;
                 }
                 if let Some(panel) = self.panels.vault_settings.as_mut() {
@@ -7319,6 +7320,7 @@ impl App {
                 // session, including a previously enabled automatic switch.
                 self.auto_switch_suppressed = true;
                 self.cache.node_history_switch_requested = false;
+                self.cache.local_node_transfer_visible = false;
                 if let Some(panel) = self.panels.vault_settings.as_mut() {
                     return panel.update(self.daemon.clone(), &self.cache, message);
                 }
@@ -8621,6 +8623,7 @@ impl App {
                     self.node_history_pending = None;
                     self.cache.node_history = node_history::Status::default();
                     self.cache.node_history_switch_requested = false;
+                    self.cache.local_node_transfer_visible = false;
                 }
                 self.wallet = Some(wallet.clone());
                 self.imported_kit_metadata
@@ -10708,6 +10711,32 @@ impl App {
         self.daemon_switch_in_progress = true;
         // Mirror into the cache so the Node settings view reflects it.
         self.cache.daemon_switch_in_progress = true;
+        match &cfg.bitcoin_backend {
+            Some(coincubed::config::BitcoinBackend::Bitcoind(local))
+                if self
+                    .daemon
+                    .as_ref()
+                    .and_then(|d| d.config())
+                    .is_some_and(|old| {
+                        matches!(
+                            old.bitcoin_backend,
+                            Some(coincubed::config::BitcoinBackend::Esplora(_))
+                        )
+                    })
+                    && crate::node::retention::is_managed_endpoint(
+                        &self.cache.datadir_path,
+                        self.cache.network,
+                        self.cache.chain(),
+                        local,
+                    ) =>
+            {
+                self.cache.local_node_transfer_visible = true
+            }
+            Some(coincubed::config::BitcoinBackend::Esplora(_)) => {
+                self.cache.local_node_transfer_visible = false;
+            }
+            _ => {}
+        }
         let old_daemon = self.daemon.clone();
         let chain = cfg.bitcoin_config.chain;
         let connect_client = self.fork_connect_client.clone();
@@ -17398,6 +17427,83 @@ mod settings_navigation_integration_tests {
 mod local_node_sync_tests {
     use super::*;
     use coincubed::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
+
+    #[test]
+    fn local_node_wizard_survives_failure_and_success_until_dismissed() {
+        let root = std::env::temp_dir().join(format!("switch-checklist-{}", uuid::Uuid::new_v4()));
+        let _guard = crate::app::session::test_guard();
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let pending = BitcoindConfig {
+            addr: "127.0.0.1:8332".parse().unwrap(),
+            rpc_auth: BitcoindRpcAuth::CookieFile(
+                crate::node::bitcoind::internal_bitcoind_cookie_path(
+                    &crate::node::bitcoind::internal_bitcoind_datadir(&app.cache.datadir_path),
+                    &app.cache.network,
+                ),
+            ),
+        };
+        let mut connect = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        connect.pending_bitcoind = Some(pending.clone());
+        app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(
+            connect.clone(),
+            None,
+        )));
+        let mut local = connect.clone();
+        local.bitcoin_backend = Some(BitcoinBackend::Bitcoind(pending));
+        local.pending_bitcoind = None;
+
+        drop(app.spawn_daemon_switch(local.clone()));
+        assert!(app.cache.local_node_transfer_visible);
+        assert!(app.cache.daemon_switch_in_progress);
+        drop(app.update(Message::DaemonRestarted(DaemonRestart::Failed {
+            error: Error::Config("fixture switch failure".into()),
+            recovered: app.daemon.clone(),
+        })));
+        assert!(
+            app.cache.local_node_transfer_visible,
+            "retain retry after failure"
+        );
+        assert!(!app.cache.daemon_switch_in_progress);
+
+        drop(app.spawn_daemon_switch(local.clone()));
+        drop(
+            app.update(Message::DaemonRestarted(DaemonRestart::Started(Arc::new(
+                EmbeddedDaemon::unstarted_for_test(local, None),
+            )))),
+        );
+        assert!(
+            app.cache.local_node_transfer_visible,
+            "keep completed steps visible"
+        );
+        assert!(
+            !app.cache.node_history_switch_requested,
+            "presentation is not switch consent"
+        );
+        assert!(!app.cache.daemon_switch_in_progress);
+        drop(app.set_current_panel(Menu::Vault(menu::VaultSubMenu::Transactions(None))));
+        drop(
+            app.set_current_panel(Menu::Vault(menu::VaultSubMenu::Settings(Some(
+                menu::SettingsOption::Node,
+            )))),
+        );
+        assert!(
+            app.cache.local_node_transfer_visible,
+            "navigation preserves the result"
+        );
+        drop(app.update(Message::View(view::Message::Settings(
+            view::SettingsMessage::NodeSettings(view::NodeSettingsMessage::RecoveryDismiss),
+        ))));
+        assert!(!app.cache.local_node_transfer_visible);
+
+        app.cache.local_node_transfer_visible = true;
+        drop(app.spawn_daemon_switch(connect));
+        assert!(
+            !app.cache.local_node_transfer_visible,
+            "leaving the local node clears the result"
+        );
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[tokio::test]
     async fn manual_recovery_switch_survives_navigation_and_honors_cancellation() {
