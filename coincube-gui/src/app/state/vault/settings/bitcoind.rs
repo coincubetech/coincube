@@ -1011,7 +1011,9 @@ impl State for BitcoindSettingsState {
                                 self.warning = Some(Error::Unexpected(format!(
                                     "Bitcoin node is still syncing ({:.1}%). \
                                      Please wait until sync is complete before switching.",
-                                    cache.node_bitcoind_sync_progress.unwrap_or(0.0) * 100.0
+                                    crate::utils::syncing_percent(
+                                        cache.node_bitcoind_sync_progress.unwrap_or(0.0)
+                                    )
                                 )));
                                 return Task::none();
                             }
