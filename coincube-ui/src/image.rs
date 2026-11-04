@@ -333,6 +333,16 @@ pub fn asset_network_logo<'a, M: 'a>(
     .into()
 }
 
+const KAGE_CUBE_SEALED: &[u8] = include_bytes!("../static/images/kage/kage-cube-sealed.png");
+static KAGE_CUBE_SEALED_HANDLE: LazyLock<iced::widget::image::Handle> =
+    LazyLock::new(|| iced::widget::image::Handle::from_bytes(KAGE_CUBE_SEALED));
+
+/// Kage holding the sealed Cube (Sumi-e), on a transparent background:
+/// the wizards' Done art. 320×480, drawn at 240×360.
+pub fn kage_cube_sealed() -> iced::widget::image::Handle {
+    KAGE_CUBE_SEALED_HANDLE.clone()
+}
+
 #[cfg(test)]
 mod asset_logo_tests {
     use super::*;

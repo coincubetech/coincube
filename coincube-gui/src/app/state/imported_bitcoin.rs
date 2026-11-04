@@ -3162,7 +3162,6 @@ impl ImportedBitcoinPanel {
         passkey: bool,
     ) -> Element<'a, view::Message> {
         use crate::home::restore_frame;
-        use coincube_ui::widget::{Button, Container};
         use iced::{widget::Space, Alignment, Length};
 
         let light = matches!(
@@ -3170,7 +3169,8 @@ impl ImportedBitcoinPanel {
             coincube_ui::theme::palette::ThemeMode::Light
         );
         let step = self.journey_step();
-        let steps = restore_frame::import_steps(passkey);
+        let _ = passkey;
+        let steps = restore_frame::import_steps();
         let active = steps
             .iter()
             .position(|label| *label == step.label())
@@ -3231,119 +3231,73 @@ impl ImportedBitcoinPanel {
                     .into(),
             ),
         };
-        let nav_item = |label: &'static str, current: bool| {
-            Button::new(p2_regular(label))
-                .width(Length::Fill)
-                .padding([10, 12])
-                .style(restore_frame::nav_style(current))
-        };
         // The Cube now exists, so the import is the only path left open.
         let nav = restore_frame::nav()
-            .push(nav_item("Overview", false))
-            .push(nav_item("Import Bitcoin wallet", true));
-        let region = Column::new()
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .push(
-                iced::widget::scrollable(
-                    Column::new()
-                        .spacing(20)
-                        .padding([24, 28])
-                        .push(h2("Import Bitcoin wallet"))
-                        .push(restore_frame::stepper(steps, active))
-                        .push(form),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill),
-            )
-            .push(restore_frame::full_rule())
-            .push(
-                Container::new(actions)
-                    .padding([14, 28])
-                    .width(Length::Fill),
-            );
+            .push(restore_frame::nav_label("Overview", false))
+            .push(restore_frame::nav_label("Import Bitcoin wallet", true));
+        let body = iced::widget::scrollable(
+            Column::new()
+                .spacing(20)
+                .padding([24, 28])
+                .push_maybe((step != JourneyStep::Done).then(|| h2("Import Bitcoin wallet")))
+                .push(form),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+        let region = restore_frame::region(
+            Some(restore_frame::step_rail(steps, active)),
+            body,
+            Some(actions),
+        );
         // Close returns to the Cube; the Vault page reopens an unfinished
         // import. Done has its own Open Cube.
-        let close = (step != JourneyStep::Done).then(|| {
-            button::secondary(Some(coincube_ui::icon::cross_icon()), "Close")
-                .width(Length::Shrink)
-                .on_press_maybe(
-                    (!self.writing_setup() && self.keys_stored != KeysStored::Storing)
-                        .then_some(view::Message::ImportedBitcoin(ImportMessage::LeaveJourney)),
-                )
-                .into()
-        });
-        let header = restore_frame::header(
-            self.chain(),
-            restore_frame::network_name(self.chain()),
-            light,
+        let close: Element<'a, view::Message> = if step != JourneyStep::Done {
+            restore_frame::close_plain(
+                (!self.writing_setup() && self.keys_stored != KeysStored::Storing)
+                    .then_some(view::Message::ImportedBitcoin(ImportMessage::LeaveJourney)),
+            )
+        } else {
+            Space::new().into()
+        };
+        let header = restore_frame::sheet_header(
+            "Import or restore",
+            restore_frame::network_chip(self.chain(), light),
             close,
         );
-        let top_bar = Container::new(
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(coincube_ui::icon::cube_outline_icon())
-                .push(p2_regular("Tenshu"))
-                .push(Space::new().width(Length::Fill))
-                .push(p2_regular(cache.cube_name.as_str()).style(theme::text::secondary)),
-        )
-        .center_y(Length::Fixed(64.0))
-        .padding([0, 24])
-        .width(Length::Fill)
-        .style(theme::container::shell_rail);
-        let stage = Container::new(
-            Container::new(restore_frame::split(header, nav.into(), region.into()))
-                .style(theme::card::simple)
-                .width(Length::Fill)
-                .max_width(1120),
-        )
-        .padding([28, 24])
-        .center_x(Length::Fill)
-        .height(Length::Fill);
-        Container::new(Column::new().height(Length::Fill).push(top_bar).push(stage))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(theme::container::background)
-            .into()
+        restore_frame::standalone(restore_frame::sheet(
+            header,
+            restore_frame::with_nav(nav.into(), region),
+            None,
+        ))
     }
 
-    /// Done: what was imported and what is left to the user.
+    /// Done: the Sumi-e art, "[Cube] is ready" and one short line. Only a
+    /// stalled scan or a failed key store adds its own retry.
     fn done_content<'a>(&'a self, cache: &'a Cache) -> Element<'a, view::Message> {
-        let summary = self
-            .import
-            .active_attachment()
-            .map(|wallet| wallet_summary(&wallet.descriptor));
-        let mut content = Column::new()
-            .spacing(16)
-            .push(h3(format!("{} is ready", cache.cube_name)));
+        let light = matches!(
+            cache.theme_mode,
+            coincube_ui::theme::palette::ThemeMode::Light
+        );
         let ready = self.is_ready();
-        if let Some((script, threshold, _)) = summary {
-            content = content.push(
-                p1_regular(format!(
-                    "Imported wallet · {} · {script} · {threshold}. {} To spend, sign with your original wallet or hardware device.",
-                    crate::home::restore_frame::network_name(self.chain()),
-                    if ready {
-                        "Receive, Activity and Tools work on it in this Cube."
-                    } else {
-                        "Receive, Activity and Tools work on it once the history scan completes."
-                    },
-                ))
-                .style(theme::text::secondary),
-            );
-        }
         let stalled = matches!(
             ScanDisplay::from_info(self.info.as_ref(), self.sync_failed),
             ScanDisplay::Retrying | ScanDisplay::NeedsAttention
         );
-        content
-            .push(p1_regular(if ready {
-                "Balance and history: from the completed scan"
-            } else if stalled {
-                "Balance and history: the scan stopped before it finished. Retry it here or from the Vault page."
-            } else {
-                "Balance and history: the scan is still running. They appear in the Vault when it finishes."
-            }))
+        let line = if ready {
+            "Your wallet is now this Cube's Vault. Open it to receive or review its history."
+        } else if stalled {
+            "The history scan stopped before it finished. Retry it here or from the Vault page."
+        } else {
+            "Your wallet is now this Cube's Vault. Its history appears when the scan finishes."
+        };
+        Column::new()
+            .spacing(16)
+            .width(iced::Length::Fill)
+            .align_x(iced::Alignment::Center)
+            .push(crate::home::restore_frame::done_art(light))
+            .push(h3(format!("{} is ready", cache.cube_name)))
+            .push(p1_regular(line).style(theme::text::secondary))
             .push_maybe((!ready && stalled).then(|| {
                 button::secondary(
                     None,
@@ -3358,15 +3312,19 @@ impl ImportedBitcoinPanel {
                     view::Message::ImportedBitcoin(ImportMessage::RetrySynchronization),
                 ))
             }))
-            .push_maybe(self.keys_line())
             .push_maybe(matches!(self.keys_stored, KeysStored::Failed(_)).then(|| {
-                button::secondary(None, "Store keys again")
-                    .width(iced::Length::Shrink)
-                    .on_press(view::Message::ImportedBitcoin(ImportMessage::RetryStoreKeys))
+                Column::new()
+                    .spacing(8)
+                    .align_x(iced::Alignment::Center)
+                    .push_maybe(self.keys_line())
+                    .push(
+                        button::secondary(None, "Store keys again")
+                            .width(iced::Length::Shrink)
+                            .on_press(view::Message::ImportedBitcoin(
+                                ImportMessage::RetryStoreKeys,
+                            )),
+                    )
             }))
-            .push(p1_regular(
-                "Recovery Kit: update it from Cube settings to include this wallet",
-            ))
             .into()
     }
 
@@ -5188,7 +5146,7 @@ mod tests {
             &shown,
             &[
                 "Import or restore",
-                "Bitcoin mainnet",
+                "Bitcoin",
                 "Overview",
                 "Import Bitcoin wallet",
                 "Cube",
@@ -5199,13 +5157,14 @@ mod tests {
                 "Review wallet",
                 "Use a new Vault instead",
                 "Close",
-                "Family savings",
             ],
             // The Cube's own menu and the pre-redesign title stay out.
             &["Passkey", "Import a Bitcoin wallet", "Vault", "Open Cube"],
         );
+        // Import sets a PIN only, so even a passkey Cube's rail has no
+        // Passkey step.
         let passkey = rendered_labels(panel.journey_view(&cache, true)).await;
-        assert_labels(&passkey, &["Passkey"], &[]);
+        assert_labels(&passkey, &["Cube"], &["Passkey"]);
 
         // Close returns to the Cube, whose Vault page reopens the import.
         let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
@@ -5266,10 +5225,16 @@ mod tests {
             &early,
             &[
                 "Family savings is ready",
-                "Balance and history: the scan is still running. They appear in the Vault when it finishes.",
+                "Your wallet is now this Cube's Vault. Its history appears when the scan finishes.",
                 "Open Cube",
             ],
-            &["Continue", "Close"],
+            // Done has no Back, tag chips or summary list.
+            &[
+                "Continue",
+                "Close",
+                "Back",
+                "Recovery Kit: update it from Cube settings to include this wallet",
+            ],
         );
 
         // A stopped scan says so on Done and offers its retry there.
@@ -5278,17 +5243,10 @@ mod tests {
         assert_labels(
             &stalled,
             &[
-                "Balance and history: the scan stopped before it finished. Retry it here or from the Vault page.",
+                "The history scan stopped before it finished. Retry it here or from the Vault page.",
                 panel.synchronization_action_label(),
             ],
-            &["Balance and history: the scan is still running. They appear in the Vault when it finishes."],
-        );
-        assert!(
-            stalled
-                .iter()
-                .any(|text| text.contains("once the history scan completes")),
-            "{:?}",
-            stalled
+            &["Your wallet is now this Cube's Vault. Its history appears when the scan finishes."],
         );
         panel.sync_failed = false;
 
@@ -5300,7 +5258,7 @@ mod tests {
         let done = rendered_labels(panel.journey_view(&cache, false)).await;
         assert_labels(
             &done,
-            &["Balance and history: from the completed scan"],
+            &["Your wallet is now this Cube's Vault. Open it to receive or review its history."],
             &[],
         );
         panel.busy = true;
