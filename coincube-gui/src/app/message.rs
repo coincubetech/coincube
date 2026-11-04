@@ -81,7 +81,12 @@ pub enum Message {
         identities: Vec<(usize, crate::services::branta::LookupResult)>,
     },
     Tick,
-    LocalForkFeatureChecked(bool),
+    /// Answer to the fork feature check `attempt` (see
+    /// `App::fork_feature_check`); `enabled` is false when the feature is off.
+    LocalForkFeatureChecked {
+        attempt: u64,
+        enabled: bool,
+    },
     UpdateDaemonCache(Result<DaemonCache, Error>),
     CacheUpdated,
     /// Outcome of clearing a restored Vault's pending-rescan marker after a
