@@ -2471,7 +2471,7 @@ pub fn choose_backend(progress: (usize, usize)) -> Element<'static, Message> {
 }
 
 pub fn login(progress: (usize, usize), connection_step: Element<Message>) -> Element<Message> {
-    layout(
+    layout_start(
         progress,
         None,
         "Sign in to Connect",
@@ -2486,7 +2486,6 @@ pub fn login(progress: (usize, usize), connection_step: Element<Message>) -> Ele
                 ))
                 .push(connection_step),
         ),
-        true,
         Some(Message::Previous),
     )
 }
@@ -2754,6 +2753,46 @@ pub(super) fn layout<'a>(
     padding_left: bool,
     previous_message: Option<Message>,
 ) -> Element<'a, Message> {
+    titled_layout(
+        progress,
+        email,
+        title,
+        alignment::Horizontal::Center,
+        content,
+        padding_left,
+        previous_message,
+    )
+}
+
+/// [`layout`] with the title on the column's left edge, for screens whose
+/// content opens with a left-aligned eyebrow the title must line up with.
+pub(super) fn layout_start<'a>(
+    progress: (usize, usize),
+    email: Option<&'a str>,
+    title: &'static str,
+    content: impl Into<Element<'a, Message>>,
+    previous_message: Option<Message>,
+) -> Element<'a, Message> {
+    titled_layout(
+        progress,
+        email,
+        title,
+        alignment::Horizontal::Left,
+        content,
+        true,
+        previous_message,
+    )
+}
+
+fn titled_layout<'a>(
+    progress: (usize, usize),
+    email: Option<&'a str>,
+    title: &'static str,
+    title_align: alignment::Horizontal,
+    content: impl Into<Element<'a, Message>>,
+    padding_left: bool,
+    previous_message: Option<Message>,
+) -> Element<'a, Message> {
     if let Some(path_title) = FRAMED.with(|framed| framed.get()) {
         let mut back = button::secondary(Some(icon::previous_icon()), "Back").width(Length::Shrink);
         if let Some(message) = previous_message {
@@ -2794,8 +2833,9 @@ pub(super) fn layout<'a>(
         .push(top)
         .push(Space::new().height(Length::Fixed(32.0)))
         .push(
-            Container::new(h3(title).align_x(iced::alignment::Horizontal::Center))
-                .center_x(Length::Fill),
+            Container::new(h3(title))
+                .width(Length::Fill)
+                .align_x(title_align),
         )
         .push(Space::new().height(Length::Fixed(32.0)))
         .push(content)
@@ -3207,14 +3247,13 @@ pub fn recovery_kit_restore<'a>(
 
     // This screen already shows progress through its own restore phases.
     // The generic installer count describes later PIN/node steps as well.
-    layout(
+    layout_start(
         (0, 0),
         Some(email.value.as_str()).filter(|value| {
             !value.is_empty() && !matches!(phase, RestorePhase::Email | RestorePhase::OtpEntry)
         }),
         title,
         content,
-        true,
         Some(Message::Previous),
     )
 }
