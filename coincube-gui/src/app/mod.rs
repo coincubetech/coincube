@@ -3694,7 +3694,28 @@ impl App {
             app.cache.has_connect_session = true;
             app.fork_connect_client = Some(client);
         }
-        Ok((app, task))
+        // Check the fork's feature now rather than at the first tick: a
+        // passkey unlock reaches here without the PIN screen's check, and a
+        // revoked feature must close the Cube before it is used. Signed in,
+        // the account's own flag is checked, as the PIN screen does.
+        app.local_feature_check_pending = true;
+        let root = app.datadir.clone();
+        let chain = app.cache.chain();
+        let feature_client = app.fork_connect_client.clone();
+        let feature = Task::perform(
+            async move {
+                match feature_client {
+                    Some(client) => crate::chain::require_connect_feature(chain, &client, &root)
+                        .await
+                        .is_ok(),
+                    None => crate::chain::require_local_feature(chain, None, &root)
+                        .await
+                        .is_ok(),
+                }
+            },
+            Message::LocalForkFeatureChecked,
+        );
+        Ok((app, Task::batch([task, feature])))
     }
 
     fn without_wallet(
@@ -10588,12 +10609,13 @@ impl App {
     }
 
     pub(crate) fn requires_connect(&self) -> bool {
+        // A fork Cube with no Vault has no backend that a Connect session
+        // serves: it stays open signed out, under the local feature check.
         self.cache.chain().is_blake2b()
-            && !self
-                .daemon
-                .as_ref()
-                .and_then(|d| d.config())
-                .is_some_and(|cfg| crate::chain::is_managed_local_fork(cfg, &self.datadir))
+            && self.daemon.as_ref().is_some_and(|d| {
+                !d.config()
+                    .is_some_and(|cfg| crate::chain::is_managed_local_fork(cfg, &self.datadir))
+            })
     }
 
     pub(crate) fn on_local_auth_change(&mut self, originated: bool) {
@@ -12577,6 +12599,61 @@ pub(crate) mod tests {
         assert!(overview.contains("Create Vault"), "Create Vault comes next");
         assert!(!overview.contains("Spark"), "no Spark on a fork Cube");
         assert!(!overview.contains("Liquid"), "no Liquid on a fork Cube");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Through the Tab, as the unlock routes reach it: a signed-out,
+    /// Vault-less fork Cube stays open, because nothing in it needs a Connect
+    /// session. Its feature check runs at once, and a revoked feature closes it.
+    #[test]
+    fn a_signed_out_fork_cube_without_a_vault_stays_open_until_its_feature_is_revoked() {
+        let _guard = crate::app::session::test_guard();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let root = std::env::temp_dir().join(format!("fork-no-vault-tab-{}", uuid::Uuid::new_v4()));
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        let signer =
+            coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
+        let cek = Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+            &signer,
+            chain.bitcoin_network(),
+        ));
+        let (app, startup) = App::new_fork_without_wallet(
+            cek,
+            None,
+            Config::new(false),
+            CoincubeDirectory::new(root.clone()),
+            settings::CubeSettings::new("Fork".into(), chain),
+        )
+        .unwrap();
+        drop(startup);
+        assert!(
+            !app.requires_connect(),
+            "no Vault, nothing for Connect to serve"
+        );
+        assert!(
+            app.local_feature_check_pending,
+            "the feature check starts at once"
+        );
+
+        let mut tab = crate::gui::tab::Tab::new(1, crate::gui::tab::State::App(app));
+        drop(tab.update(crate::gui::tab::Message::Run(
+            Message::LocalForkFeatureChecked(true),
+        )));
+        assert!(
+            matches!(tab.state, crate::gui::tab::State::App(_)),
+            "a signed-out Vault-less fork Cube stays open"
+        );
+        drop(tab.update(crate::gui::tab::Message::Run(
+            Message::LocalForkFeatureChecked(false),
+        )));
+        assert!(
+            matches!(tab.state, crate::gui::tab::State::Home(_)),
+            "a revoked feature closes it"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

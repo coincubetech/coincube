@@ -1398,7 +1398,7 @@ impl Tab {
                     return Task::none();
                 }
                 State::Installer(installer)
-                    if installer.context.fresh_fork_cube
+                    if installer.context.fork_local_vault_allowed()
                         && !installer.context.use_coincube_connect =>
                 {
                     installer.context.coincube_client = None;
@@ -1474,6 +1474,11 @@ impl Tab {
             }
             State::Installer(installer) if installer.context.bitcoin_config.chain.is_blake2b() => {
                 installer.stop();
+                // A Vault being built inside an open Cube leaves that Cube
+                // here: its session must not outlive it on Home.
+                if let Some(cube) = &installer.cube_settings {
+                    app::session::close_cube(&cube.id);
+                }
                 let (mut home, startup) = Home::new_for_chain(
                     installer.datadir.clone(),
                     Some(installer.context.bitcoin_config.chain),
@@ -2843,6 +2848,9 @@ impl Tab {
                             ) {
                                 return task;
                             }
+                            // The Cube's own unlock screen opens a fresh
+                            // session; the one this installer ran under ends.
+                            app::session::close_cube(&cube.id);
                             let State::Installer(i) = &mut self.state else {
                                 return Task::none();
                             };
@@ -3077,6 +3085,7 @@ impl Tab {
                                 }
                             }
                         }
+                        app::session::close_cube(&cube.id);
                         let (home, command) = Home::new_for_chain(destination, Some(cube.network));
                         self.state = State::Home(home);
                         return command.map(Message::Launch);
