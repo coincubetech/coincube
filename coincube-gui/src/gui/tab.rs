@@ -7783,6 +7783,42 @@ mod unlock_routing_tests {
         assert!(!crate::app::session::is_open());
     }
 
+    /// A passkey Blake2b Cube with no Vault has nothing for Connect to serve:
+    /// a sign-in or sign-out elsewhere drops its client and leaves the prompt
+    /// waiting, as the PIN screen does.
+    #[test]
+    fn a_connect_change_spares_a_vault_less_passkey_open() {
+        use crate::chain::ChainId;
+        let cube = CubeSettings::new("Fork".to_string(), ChainId::BitcoinBlake2b).with_passkey(
+            PasskeyMetadata {
+                credential_id: "Y3JlZC1pZA==".to_string(),
+                rp_id: "coincube.io".to_string(),
+                created_at: 1_786_122_245,
+                label: None,
+            },
+        );
+        let mut success = on_success();
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &mut success;
+        *connect_client = Some(crate::services::coincube::CoincubeClient::for_test(
+            "https://connect.example/",
+        ));
+        let mut tab = super::Tab::new(
+            1,
+            unlock_state(cube, std::path::PathBuf::from("/tmp/unused"), success, None),
+        );
+        drop(tab.invalidate_fork_state(super::AuthChange::LogOut, false, false));
+        let State::PasskeyUnlock(unlock) = &tab.state else {
+            panic!("still at the prompt");
+        };
+        assert!(!unlock.requires_connect());
+        assert!(
+            unlock.error_for_test().is_none(),
+            "the prompt is not failed"
+        );
+        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &unlock.on_success;
+        assert!(connect_client.is_none(), "the old client is dropped");
+    }
+
     /// #947 review: a Connect change while a Connect-backed passkey copy is
     /// at its prompt drops the old client and fails the open, as PIN entry
     /// does, so the assertion cannot open it under the previous account.
@@ -7798,10 +7834,23 @@ mod unlock_routing_tests {
             },
         );
         let mut success = on_success();
-        let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } = &mut success;
+        let crate::pin_entry::PinEntrySuccess::LoadApp {
+            connect_client,
+            wallet_settings,
+            ..
+        } = &mut success;
         *connect_client = Some(crate::services::coincube::CoincubeClient::for_test(
             "https://connect.example/",
         ));
+        // A Connect-backed copy has a Vault; a Vault-less one ignores the
+        // change (`a_connect_change_spares_a_vault_less_passkey_open`).
+        *wallet_settings = Some(
+            serde_json::from_value(serde_json::json!({
+                "name":"synthetic", "alias":"copy", "descriptor_checksum":"copy-vault",
+                "pinned_at":1700000000
+            }))
+            .unwrap(),
+        );
         let mut tab = super::Tab::new(
             1,
             unlock_state(cube, std::path::PathBuf::from("/tmp/unused"), success, None),

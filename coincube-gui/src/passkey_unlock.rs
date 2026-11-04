@@ -394,7 +394,10 @@ impl PasskeyUnlock {
             wallet_settings,
             ..
         } = &self.on_success;
+        // A Cube with no Vault has no backend for Connect to serve: an
+        // unrelated sign-in or sign-out must not fail its unlock screen.
         self.cube.network.is_blake2b()
+            && wallet_settings.is_some()
             && !crate::chain::has_managed_local_fork(
                 datadir,
                 self.cube.network,
