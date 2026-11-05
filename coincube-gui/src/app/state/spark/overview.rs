@@ -158,9 +158,9 @@ impl SparkOverview {
 
         let mut content = iced::widget::Column::new().push(overview);
         // Only beside a balance: not under "Connecting" or a bridge error.
-        // Inside the overview's own 16px inset, like the balance above it.
+        // The shared page gutter aligns activity with the balance and head.
         if let Some(recent) = recent_activity.filter(|_| status_connected) {
-            content = content.push(iced::widget::container(recent).padding([0, 16]));
+            content = content.push(recent);
         }
         content.into()
     }

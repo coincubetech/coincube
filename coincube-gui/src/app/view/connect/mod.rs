@@ -2074,7 +2074,7 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
             )
             .color(color::GREY_3),
         );
-        return container(col).padding(16).into();
+        return container(col).padding([16, 0]).into();
     }
 
     let mut col = Column::new()
