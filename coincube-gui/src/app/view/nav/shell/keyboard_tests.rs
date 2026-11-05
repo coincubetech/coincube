@@ -576,12 +576,10 @@ fn signed_in_connect_chip_opens_account_sheet_intent() {
 }
 
 /// The connection chip is the third control (after the brand and the account
-/// chip) in every state, under one id. A rejected device's only fix is the
-/// Re-register button on Cube Settings → About, so that state routes there.
-/// Every other state opens Node settings where the Cube has the Vault scope
-/// (a Vault or an imported Bitcoin wallet), else Settings' first tab.
+/// chip) in every state, under one id. Every state opens Cube Settings →
+/// Connections, which owns live updates and device registration.
 #[test]
-fn connection_chip_routes_to_reregistration_or_node_settings() {
+fn connection_chip_routes_to_cube_connections_in_every_state() {
     load_fonts();
     let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
         coincube_ui::font::REGULAR,
@@ -592,6 +590,8 @@ fn connection_chip_routes_to_reregistration_or_node_settings() {
     static REJECTED: ConnectionStatus = ConnectionStatus::DeviceRejected;
     static CONNECTING: ConnectionStatus = ConnectionStatus::Connecting;
     static CONNECTED: ConnectionStatus = ConnectionStatus::Connected;
+    static ERROR: ConnectionStatus = ConnectionStatus::Error(String::new());
+    static INACTIVE: ConnectionStatus = ConnectionStatus::Inactive;
     let size = Size::new(1024.0, 768.0);
     // Focus after brand and account chip: the third shell control.
     let third_focus = |status: &'static ConnectionStatus, has_vault, has_imported_bitcoin| {
@@ -636,30 +636,75 @@ fn connection_chip_routes_to_reregistration_or_node_settings() {
         (focused, sent)
     };
 
-    assert_eq!(
-        DEVICE_REJECTED_ROUTE,
-        Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections))
-    );
-    let node = Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Node)));
-    let first_tab = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General));
-    for (status, has_vault, has_imported_bitcoin, to) in [
-        (&REJECTED, true, false, &DEVICE_REJECTED_ROUTE),
-        (&REJECTED, false, false, &DEVICE_REJECTED_ROUTE),
-        (&CONNECTING, true, false, &node),
-        (&CONNECTED, true, false, &node),
-        (&CONNECTED, false, true, &node),
-        (&CONNECTED, false, false, &first_tab),
+    let connections = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections));
+    for status in [&REJECTED, &CONNECTING, &CONNECTED, &ERROR, &INACTIVE] {
+        for (has_vault, has_imported_bitcoin) in [(true, false), (false, true), (false, false)] {
+            let (focused, sent) = third_focus(status, has_vault, has_imported_bitcoin);
+            assert_eq!(focused, Some(Id::new(CONNECTION_ID)));
+            assert!(
+                matches!(sent.as_slice(), [Message::Menu(menu)] if menu == &connections),
+                "{:?} vault={} imported={}: {:?}",
+                status,
+                has_vault,
+                has_imported_bitcoin,
+                sent
+            );
+        }
+    }
+}
+
+/// Longer Connect labels fit beside the account and preferences controls at
+/// the minimum desktop width, in both appearances.
+#[test]
+fn connection_chip_fits_the_shell_in_every_state() {
+    use crate::app::view::shared::landing::capture;
+    static STATES: [ConnectionStatus; 5] = [
+        ConnectionStatus::Connected,
+        ConnectionStatus::Connecting,
+        ConnectionStatus::Error(String::new()),
+        ConnectionStatus::DeviceRejected,
+        ConnectionStatus::Inactive,
+    ];
+    for (appearance, palette) in [
+        ("dark", theme::Theme::dark()),
+        ("light", theme::Theme::light()),
     ] {
-        let (focused, sent) = third_focus(status, has_vault, has_imported_bitcoin);
-        assert_eq!(focused, Some(Id::new(CONNECTION_ID)));
-        assert!(
-            matches!(sent.as_slice(), [Message::Menu(menu)] if menu == to),
-            "{:?} vault={} imported={}: {:?}",
-            status,
-            has_vault,
-            has_imported_bitcoin,
-            sent
-        );
+        for (index, status) in STATES.iter().enumerate() {
+            let mut ctx = fixture_context();
+            ctx.connect_authenticated = true;
+            ctx.connect_stream_status = status;
+            for width in [1024, 1440] {
+                let inspection = capture::inspect_full_window(
+                    &format!("connect-badge-{index}"),
+                    top_bar_with_privacy(
+                        &ctx,
+                        Some(BalancePrivacyChrome {
+                            privacy: BalancePrivacy::Shown,
+                            busy: false,
+                            interactive: true,
+                        }),
+                    ),
+                    (width, 768),
+                    appearance,
+                    palette,
+                );
+                assert!(inspection.contains("Connect:"));
+                let bounds = |id: &'static str| {
+                    inspection
+                        .focus
+                        .iter()
+                        .find(|(actual, _)| *actual == Id::new(id))
+                        .unwrap()
+                        .1
+                };
+                let account = bounds("tenshu.connect.account");
+                let connection = bounds(CONNECTION_ID);
+                let preferences = bounds(APP_PREFERENCES_ID);
+                assert!(account.x + account.width <= connection.x);
+                assert!(connection.x + connection.width <= preferences.x);
+                assert!(connection.height <= TOP_BAR_HEIGHT);
+            }
+        }
     }
 }
 
@@ -706,27 +751,6 @@ fn connection_chip_keeps_focus_across_a_status_change() {
         focus_snapshot(&mut element, &mut tree, &node, &renderer).focused,
         vec![Id::new(CONNECTION_ID)]
     );
-}
-
-#[test]
-fn connection_route_prefers_node_settings_and_keeps_the_rejected_device_fix() {
-    let node = Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Node)));
-    let first_tab = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General));
-    for status in [
-        ConnectionStatus::Connected,
-        ConnectionStatus::Connecting,
-        ConnectionStatus::Error("socket closed".to_string()),
-        ConnectionStatus::Inactive,
-    ] {
-        assert_eq!(connection_route(&status, true), node, "{status:?}");
-        assert_eq!(connection_route(&status, false), first_tab, "{status:?}");
-    }
-    for has_vault_scope in [true, false] {
-        assert_eq!(
-            connection_route(&ConnectionStatus::DeviceRejected, has_vault_scope),
-            DEVICE_REJECTED_ROUTE
-        );
-    }
 }
 
 #[test]

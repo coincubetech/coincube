@@ -1,17 +1,21 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::futures::SinkExt;
+use iced::futures::{SinkExt, StreamExt};
 use tokio::sync::RwLock;
 
 use crate::services::connect::client::auth::AccessTokenResponse;
 
 use super::connect_v1::{
     realtime_service_client::RealtimeServiceClient, stream_envelope::Body, ClientAck, ClientHello,
-    DevicePlatform, Pong, StreamEnvelope,
+    DevicePlatform, Ping, Pong, StreamEnvelope,
 };
 use super::interceptor::AuthInterceptor;
 use super::ConnectStreamMessage;
+
+#[cfg(test)]
+#[path = "stream_tests.rs"]
+mod transport_tests;
 
 /// Configuration for the realtime gRPC stream.
 #[derive(Debug, Clone)]
@@ -27,7 +31,8 @@ pub struct ConnectStreamConfig {
 /// Creates a persistent gRPC realtime stream following the Iced `stream::channel` pattern.
 ///
 /// Automatically reconnects with exponential backoff on disconnection.
-/// Sends `ClientHello` on connect, `ClientAck` for session events, and `Pong` for pings.
+/// Sends `ClientHello` on connect, heartbeats while idle, `ClientAck` for session
+/// events, and `Pong` for server pings.
 pub fn connect_stream(
     data: &ConnectStreamConfig,
 ) -> impl iced::futures::Stream<Item = ConnectStreamMessage> + 'static {
@@ -43,7 +48,12 @@ pub fn connect_stream(
 
             loop {
                 let mut rejected = false;
-                match super::create_channel(&config.grpc_url).await {
+                let grpc_channel =
+                    tokio::time::timeout(CONNECT_TIMEOUT, super::create_channel(&config.grpc_url))
+                        .await
+                        .map_err(|_| "Connect transport connection timed out".to_owned())
+                        .and_then(|result| result.map_err(|e| e.to_string()));
+                match grpc_channel {
                     Ok(grpc_channel) => {
                         let access_token = config.tokens.read().await.access_token.clone();
                         let interceptor = AuthInterceptor::new(&access_token);
@@ -61,12 +71,16 @@ pub fn connect_stream(
                                 last_seen_event_seq: last_seen_seq,
                             })),
                         };
-                        if tx.send(hello).await.is_err() {
-                            break;
-                        }
-
-                        let outbound = tokio_stream::wrappers::ReceiverStream::new(rx);
-                        match client.connect(outbound).await {
+                        let outbound = outbound_stream(hello, rx);
+                        let response =
+                            tokio::time::timeout(CONNECT_TIMEOUT, client.connect(outbound))
+                                .await
+                                .unwrap_or_else(|_| {
+                                    Err(tonic::Status::deadline_exceeded(
+                                        "Connect opening handshake timed out",
+                                    ))
+                                });
+                        match response {
                             Ok(response) => {
                                 log::info!("[CONNECT GRPC] Stream connected");
                                 if let Err(e) = channel.send(ConnectStreamMessage::Connected).await
@@ -86,7 +100,15 @@ pub fn connect_stream(
 
                                 let mut inbound = response.into_inner();
                                 loop {
-                                    match inbound.message().await {
+                                    let message =
+                                        tokio::time::timeout(HEARTBEAT_TIMEOUT, inbound.message())
+                                            .await
+                                            .unwrap_or_else(|_| {
+                                                Err(tonic::Status::deadline_exceeded(
+                                                    "Connect live updates stopped responding",
+                                                ))
+                                            });
+                                    match message {
                                         Ok(Some(envelope)) => match envelope.body {
                                             Some(Body::SessionEvent(event)) => {
                                                 if let Err(e) = tx
@@ -219,6 +241,9 @@ pub fn connect_stream(
                                                 break;
                                             }
                                             log::error!("[CONNECT GRPC] Stream error: {}", e);
+                                            let _ = channel
+                                                .send(ConnectStreamMessage::Error(e.to_string()))
+                                                .await;
                                             break;
                                         }
                                     }
@@ -335,6 +360,38 @@ pub fn connect_stream(
     )
 }
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// The server waits for an event or a client ping before sending its opening
+/// response. An up-to-date, quiet account can otherwise wait forever in
+/// `client.connect`. Send Hello first, then an immediate Ping and regular idle
+/// heartbeats. Keep these on the request body: a gRPC request deadline would
+/// also terminate a healthy, long-lived stream.
+fn outbound_stream(
+    hello: StreamEnvelope,
+    rx: tokio::sync::mpsc::Receiver<StreamEnvelope>,
+) -> impl iced::futures::Stream<Item = StreamEnvelope> + Send + 'static {
+    let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let heartbeats = iced::futures::stream::unfold(interval, |mut interval| async move {
+        interval.tick().await;
+        Some((
+            StreamEnvelope {
+                body: Some(Body::Ping(Ping {
+                    ts_unix_ms: chrono::Utc::now().timestamp_millis(),
+                })),
+            },
+            interval,
+        ))
+    });
+    iced::futures::stream::once(async move { hello }).chain(iced::futures::stream::select(
+        tokio_stream::wrappers::ReceiverStream::new(rx),
+        heartbeats,
+    ))
+}
+
 /// How often a rejected device id is re-checked. Long enough not to load the
 /// API with ids that are really gone, short enough that a server-side blip
 /// misread as "not found" heals on its own.
@@ -384,6 +441,43 @@ fn jittered(d: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn outbound_sends_hello_then_pings_even_without_wallet_events() {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let outbound = outbound_stream(
+            StreamEnvelope {
+                body: Some(Body::ClientHello(ClientHello::default())),
+            },
+            rx,
+        );
+        iced::futures::pin_mut!(outbound);
+        assert!(matches!(
+            outbound.next().await.unwrap().body,
+            Some(Body::ClientHello(_))
+        ));
+        let start = tokio::time::Instant::now();
+        assert!(matches!(
+            outbound.next().await.unwrap().body,
+            Some(Body::Ping(_))
+        ));
+        assert_eq!(start.elapsed(), Duration::ZERO);
+
+        tx.send(StreamEnvelope {
+            body: Some(Body::ClientAck(ClientAck { event_seq: 42 })),
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            outbound.next().await.unwrap().body,
+            Some(Body::ClientAck(ClientAck { event_seq: 42 }))
+        ));
+        assert!(matches!(
+            outbound.next().await.unwrap().body,
+            Some(Body::Ping(_))
+        ));
+        assert_eq!(start.elapsed(), HEARTBEAT_INTERVAL);
+    }
 
     #[test]
     fn only_permission_denied_is_a_device_rejection() {
