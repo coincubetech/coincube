@@ -1072,10 +1072,10 @@ mod step_tests {
 
     /// The reported bug: inside the Create Vault frame the modal was laid out
     /// against the step's small bounds, which clipped the sheet below the
-    /// grid, so the pattern step's Continue was never on screen. Mounted as
-    /// the editor mounts it, over a base smaller than the sheet, Continue
-    /// must sit inside the minimum window and take focus once the pattern
-    /// is complete.
+    /// grid, so the pattern step's Continue was never on screen. Over a base
+    /// the size of that step, a window-covering modal keeps every column and
+    /// Continue inside the minimum window once the pattern is complete. The
+    /// editor's own test checks that it mounts its modals this way.
     #[test]
     fn pattern_continue_is_on_screen_over_a_small_base() {
         use iced::advanced::widget::{operation, operation::focusable, Operation};
