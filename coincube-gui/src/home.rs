@@ -2827,6 +2827,10 @@ impl Home {
                 // refuses the other routes too.
                 if matches!(self.state, State::CreationBackup(_)) || self.creating_cube {
                     self.catalog.pending_select = None;
+                    self.set_error(
+                        "Finish or cancel creating this Cube before switching networks."
+                            .to_string(),
+                    );
                     return Task::none();
                 }
                 if !(self.developer_mode
@@ -4876,6 +4880,7 @@ impl Home {
         // matching the existing failure path. A Cube opened later than its
         // creation would surprise the user, so a pending auto-open goes too.
         self.open_created_cube = None;
+        self.open_after_registration = None;
         self.state = State::Cubes {
             cubes,
             create_cube: true,
@@ -13829,16 +13834,18 @@ mod tests {
         );
         assert!(cubes_on_disk(&dir).is_empty());
 
-        // The network can't change under the unwritten Cube.
+        // The network can't change under the unwritten Cube. Developer mode
+        // makes Signet selectable, so only the creation guard refuses it.
         home.state = State::CreationBackup(CreationBackupStep::Choice);
+        home.developer_mode = true;
         let network = home.network;
-        let other = if network == ChainId::Bitcoin {
-            ChainId::BitcoinBlake2b
-        } else {
-            ChainId::Bitcoin
-        };
-        let _ = home.update(Message::View(ViewMessage::SelectNetwork(other)));
+        assert_ne!(network, ChainId::Signet);
+        assert!(
+            drain(home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Signet))))
+                .is_empty()
+        );
         assert_eq!(home.network, network);
+        assert!(home.error.is_some(), "the refusal says why");
         assert_eq!(step(&home), CreationBackupStep::Choice);
         let _ = std::fs::remove_dir_all(&dir);
     }
