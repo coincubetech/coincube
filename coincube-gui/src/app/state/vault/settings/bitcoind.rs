@@ -1605,6 +1605,8 @@ impl State for BitcoindSettingsState {
                             view::vault::settings::rolling_retention_section(
                                 &self.retention_days,
                                 &cache.node_history,
+                                cache.node_bitcoind_pruning,
+                                cache.node_bitcoind_sync_heights.map(|(blocks, _)| blocks),
                             )
                             .map(map_node_msg),
                         );
@@ -1628,6 +1630,8 @@ impl State for BitcoindSettingsState {
                             view::vault::settings::rolling_retention_section(
                                 &self.retention_days,
                                 &cache.node_history,
+                                cache.node_bitcoind_pruning,
+                                cache.node_bitcoind_sync_heights.map(|(blocks, _)| blocks),
                             )
                             .map(map_node_msg),
                         );

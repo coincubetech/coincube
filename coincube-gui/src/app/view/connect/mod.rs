@@ -1070,7 +1070,12 @@ fn login_ux<'a>(email: &'a str, loading: bool) -> Element<'a, ConnectAccountMess
                 .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-        .push(text::p2_medium("Email").style(theme::text::primary))
+        .push(
+            text::p2_medium("Email")
+                .style(theme::text::primary)
+                .width(Length::Fill)
+                .align_x(Alignment::Start),
+        )
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
             TextInput::new("you@example.test", email)
@@ -1137,7 +1142,12 @@ fn register_ux<'a>(
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
         .push(connect_benefits(true))
         .push(iced::widget::Space::new().height(Length::Fixed(18.0)))
-        .push(text::p2_medium("Email").style(theme::text::primary))
+        .push(
+            text::p2_medium("Email")
+                .style(theme::text::primary)
+                .width(Length::Fill)
+                .align_x(Alignment::Start),
+        )
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
             TextInput::new("you@example.test", email)
@@ -1150,7 +1160,12 @@ fn register_ux<'a>(
                 .padding(15),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-        .push(text::p2_medium("Promo or referral code (optional)").style(theme::text::primary))
+        .push(
+            text::p2_medium("Promo or referral code (optional)")
+                .style(theme::text::primary)
+                .width(Length::Fill)
+                .align_x(Alignment::Start),
+        )
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         // Optional promo/referral code (server-driven campaign engine, v2).
         // Redeemed automatically once the new account authenticates. Locked

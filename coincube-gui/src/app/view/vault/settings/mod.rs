@@ -1764,29 +1764,27 @@ pub fn node_backend_status<'a>(
         };
         let pending = can_switch_to_bitcoind;
         let desc = if catching_up {
-            format!("{name} has finished initial blockchain sync and is catching up with known headers.")
+            Some(format!("{name} is catching up with known headers."))
         } else if still_syncing {
             let next = if pending && auto_switch_to_pending {
                 "Tenshu will automatically switch to this node once syncing is complete. "
             } else {
                 ""
             };
-            format!("{name} is syncing the blockchain. {next}{pace}")
-        } else if switch_in_progress {
-            format!("{name} has finished initial blockchain sync. The wallet backend switch is still in progress.")
+            Some(format!("{name} is syncing the blockchain. {next}{pace}"))
         } else if pending && recovery_in_progress {
-            format!("{name} is synced. Bring this Vault's history over below, then switch.")
+            Some("Bring this Vault's history over below, then switch.".to_string())
         } else if pending {
-            format!("{name} has finished initial blockchain sync and is ready to use.")
+            (!switch_in_progress)
+                .then(|| "Ready to switch this Vault to your local node.".to_string())
         } else {
-            format!("{name} has finished initial blockchain sync.")
+            None
         };
 
-        let mut block = Column::new()
-            .spacing(6)
-            .width(Length::Fill)
-            .push(if still_syncing {
-                page::status(
+        let mut block = Column::new().spacing(6).width(Length::Fill);
+        if still_syncing {
+            block = block
+                .push(page::status(
                     page::Status::Busy,
                     format!(
                         "{} {:.1}%",
@@ -1797,12 +1795,8 @@ pub fn node_backend_status<'a>(
                         },
                         percent
                     ),
-                )
-            } else {
-                page::status(page::Status::Ok, "Initial blockchain sync complete")
-            });
-        if still_syncing {
-            block = block.push(ProgressBar::new(0.0..=100.0, percent as f32).length(Length::Fill));
+                ))
+                .push(ProgressBar::new(0.0..=100.0, percent as f32).length(Length::Fill));
         }
         if let Some((blocks, headers)) = local_heights {
             block = block.push(
@@ -1813,7 +1807,9 @@ pub fn node_backend_status<'a>(
                 .size(14),
             );
         }
-        block = block.push(page::muted(desc));
+        if let Some(desc) = desc {
+            block = block.push(page::muted(desc));
+        }
         if let Some(log) = pending_bitcoind_log.filter(|_| show_log) {
             block = block.push(coincube_ui::component::tenshu::mono(log).size(12));
         }
@@ -1858,10 +1854,15 @@ pub fn node_backend_status<'a>(
             Some(flavor) => format!("Local node · {flavor}"),
             None => "Local node".to_string(),
         };
+        let mut node_row = page::row(label);
+        if pending_progress.is_some() && !still_syncing {
+            node_row =
+                node_row.accessory(page::status(page::Status::Ok, "Blockchain sync complete"));
+        }
         rows.push(
             node_actions
                 .into_iter()
-                .fold(page::row(label).line(block).top(), |row, action| {
+                .fold(node_row.line(block).top(), |row, action| {
                     row.control(action)
                 })
                 .into(),
@@ -3076,39 +3077,82 @@ pub fn wallet_history_section<'a>(
 pub fn rolling_retention_section<'a>(
     days: &'a form::Value<String>,
     status: &'a crate::app::node_history::Status,
+    pruning: Option<crate::app::local_switch::NodePruning>,
+    local_tip: Option<u64>,
 ) -> Element<'a, NodeSettingsMessage> {
+    use crate::app::local_switch::NodePruning;
     use crate::app::view::settings::page;
     use coincube_ui::component::tenshu::ActionKind;
     let policy = status.policy.as_ref().filter(|policy| !policy.temporary);
-    let current = policy
-        .map(|policy| format!("Keeping the most recent {} days of blocks.", policy.days))
+    let current = match pruning {
+        Some(NodePruning::Unpruned) => {
+            "Pruning is off · all downloaded blocks are retained.".into()
+        }
+        Some(NodePruning::Pruned { prune_height }) => match local_tip {
+            Some(tip) if tip >= prune_height => {
+                let count = tip - prune_height + 1;
+                let unit = if count == 1 { "block" } else { "blocks" };
+                format!("{count} {unit} retained · blocks {prune_height}–{tip}.")
+            }
+            _ => format!(
+                "Blocks retained from height {prune_height} · waiting for the current node height."
+            ),
+        },
+        None => "Waiting for the node to report its pruning depth…".into(),
+    };
+    let policy_description = policy
+        .map(|policy| format!("Current target: {} days of blocks.", policy.days))
         .unwrap_or_else(|| {
-            "Automatic: keeps recent blocks within your node's storage target.".into()
+            if status
+                .policy
+                .as_ref()
+                .is_some_and(|policy| policy.temporary)
+            {
+                "Blocks are temporarily retained for wallet history recovery.".into()
+            } else {
+                "No day-based retention window is set.".into()
+            }
         });
     let valid = days
         .value
         .parse::<u32>()
         .is_ok_and(|days| (1..=3650).contains(&days));
-    let row = page::row("Keep more history")
-        .description(current)
-        .description(
-            "Choose a rolling window only if you need older blocks. It downloads them and can use hundreds of GB. To return to automatic pruning, apply a storage-size target in node resources.",
-        )
+    let current_row = page::row("Current pruning depth").description(current);
+    let row = page::row("Retention window")
+        .description(policy_description)
         .line(
-            Container::new(form::Form::new_trimmed(
-                "Days to keep, for example 180 or 365",
-                days,
-                NodeSettingsMessage::RetentionDaysEdited,
-            ))
-            .max_width(320),
+            Container::new(Column::new()
+                .spacing(6)
+                .push(page::muted("Days to retain"))
+                .push(
+                    Row::new()
+                        .spacing(12)
+                        .align_y(Alignment::Center)
+                        .push(
+                            Container::new(form::Form::new_trimmed(
+                                "For example, 180 or 365",
+                                days,
+                                NodeSettingsMessage::RetentionDaysEdited,
+                            ))
+                            .max_width(320),
+                        )
+                        .push(page::plain_button(
+                            "Apply",
+                            ActionKind::Secondary,
+                            (!status.busy && valid).then_some(NodeSettingsMessage::RetentionApply),
+                        )),
+                ))
+                .max_width(400),
         )
-        .control(page::plain_button(
-            "Apply",
-            ActionKind::Secondary,
-            (!status.busy && valid).then_some(NodeSettingsMessage::RetentionApply),
-        ))
+        .description(
+            "Keeps a rolling window of blocks. Older blocks are downloaded if needed and can use hundreds of GB. To return to automatic pruning, apply a storage target in Node resources.",
+        )
         .top();
-    page::group("Block retention", None, page::rows([row.into()]))
+    page::group(
+        "Block retention",
+        None,
+        page::rows([current_row.into(), row.into()]),
+    )
 }
 
 /// The "Node resources" panel: tune the managed node's prune target and mempool
@@ -3646,7 +3690,7 @@ mod tests {
                 true,
                 false,
                 Some((900000, 900000)),
-                "Initial blockchain sync complete",
+                "Blockchain sync complete",
             ),
             (
                 Some(0.975),
@@ -3722,7 +3766,7 @@ mod tests {
                 true,
                 false,
                 Some((900000, 900000)),
-                "Initial blockchain sync complete",
+                "Blockchain sync complete",
             ),
             (
                 None,
@@ -3740,7 +3784,7 @@ mod tests {
                 true,
                 true,
                 Some((900000, 900000)),
-                "Initial blockchain sync complete",
+                "Blockchain sync complete",
             ),
         ] {
             let mut element = node_backend_status(
@@ -3794,11 +3838,11 @@ mod tests {
                 );
                 assert!(labels.0.iter().any(|text| text == &expected_blocks));
             }
-            if expected != "Initial blockchain sync complete" {
+            if expected != "Blockchain sync complete" {
                 assert!(!labels
                     .0
                     .iter()
-                    .any(|text| text == "Initial blockchain sync complete"));
+                    .any(|text| text == "Blockchain sync complete"));
             }
             if switching {
                 assert!(labels
@@ -3820,6 +3864,233 @@ mod tests {
                 assert!(labels.0.iter().any(|text| {
                     text.contains("Bring this Vault's history over below, then switch")
                 }));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn node_retention_reports_actual_depth_separately_from_target() {
+        use crate::app::{local_switch::NodePruning, node_history::Status};
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+
+        #[derive(Default)]
+        struct Labels(Vec<(String, iced::Rectangle)>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, text: &str) {
+                self.0.push((text.to_owned(), bounds));
+            }
+        }
+        for bytes in [
+            coincube_ui::font::REGULAR_BYTES,
+            coincube_ui::font::MEDIUM_BYTES,
+            coincube_ui::font::BOLD_BYTES,
+            coincube_ui::font::BOOTSTRAP_ICONS_BYTE,
+        ] {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(std::borrow::Cow::Borrowed(bytes));
+        }
+        let mut renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let days = value("", true);
+        for (scenario, pruning, tip, target, expected) in [
+            (
+                "pruned",
+                Some(NodePruning::Pruned {
+                    prune_height: 970000,
+                }),
+                Some(974597),
+                None,
+                "4598 blocks retained · blocks 970000–974597.",
+            ),
+            (
+                "rolling",
+                Some(NodePruning::Pruned {
+                    prune_height: 970000,
+                }),
+                Some(974597),
+                Some(180),
+                "4598 blocks retained · blocks 970000–974597.",
+            ),
+            (
+                "single-block",
+                Some(NodePruning::Pruned {
+                    prune_height: 974597,
+                }),
+                Some(974597),
+                None,
+                "1 block retained · blocks 974597–974597.",
+            ),
+            (
+                "unpruned",
+                Some(NodePruning::Unpruned),
+                Some(974597),
+                None,
+                "Pruning is off · all downloaded blocks are retained.",
+            ),
+            (
+                "unknown",
+                None,
+                None,
+                None,
+                "Waiting for the node to report its pruning depth…",
+            ),
+            (
+                "unknown-tip",
+                Some(NodePruning::Pruned {
+                    prune_height: 970000,
+                }),
+                None,
+                None,
+                "Blocks retained from height 970000 · waiting for the current node height.",
+            ),
+        ] {
+            let status = Status {
+                policy: target.map(|days| crate::node::retention::Policy {
+                    version: 1,
+                    days,
+                    previous_size_mb: 15000,
+                    temporary: false,
+                    keep_from: None,
+                }),
+                ..Status::default()
+            };
+            for (appearance, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                for width in [760, 1200] {
+                    let mut element: Element<NodeSettingsMessage> = Container::new(
+                        Column::new()
+                            .push(node_backend_status(
+                                "Local Node",
+                                icon::bitcoin_icon(),
+                                Some(1.0),
+                                Some((974597, 974597)),
+                                Some(false),
+                                Some("/Satoshi:29.0.0/"),
+                                Some("Node log"),
+                                false,
+                                true,
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                None,
+                            ))
+                            .push(rolling_retention_section(&days, &status, pruning, tip)),
+                    )
+                    .padding(24)
+                    .width(Length::Fill)
+                    .into();
+                    let size = iced::Size::new(width as f32, 650.0);
+                    let mut tree = Tree::new(element.as_widget());
+                    let node = element.as_widget_mut().layout(
+                        &mut tree,
+                        &renderer,
+                        &layout::Limits::new(iced::Size::ZERO, size),
+                    );
+                    let mut labels = Labels::default();
+                    element.as_widget_mut().operate(
+                        &mut tree,
+                        Layout::new(&node),
+                        &renderer,
+                        &mut labels,
+                    );
+                    assert!(
+                        labels.0.iter().any(|(text, _)| text == expected),
+                        "{}: {}",
+                        scenario,
+                        expected
+                    );
+                    assert!(!labels
+                        .0
+                        .iter()
+                        .any(|(text, _)| text.contains("has finished initial")));
+                    assert!(!labels.0.iter().any(|(text, _)| text == "Keep more history"));
+                    assert_eq!(
+                        labels
+                            .0
+                            .iter()
+                            .any(|(text, _)| text == "Current target: 180 days of blocks."),
+                        target.is_some()
+                    );
+                    let bounds =
+                        |label: &str| labels.0.iter().find(|(text, _)| text == label).unwrap().1;
+                    let title = bounds("Local node · Bitcoin Core 29.0.0");
+                    let complete = bounds("Blockchain sync complete");
+                    assert!(complete.x > title.x + title.width);
+                    assert!((complete.center_y() - title.center_y()).abs() < 2.0);
+                    for (text, bounds) in &labels.0 {
+                        assert!(
+                            bounds.x >= 0.0 && bounds.x + bounds.width <= size.width + 1.0,
+                            "{}/{}: text exceeds width: {}: {:?}",
+                            scenario,
+                            width,
+                            text,
+                            bounds
+                        );
+                    }
+                    if matches!(scenario, "pruned" | "rolling") {
+                        if let Ok(directory) = std::env::var("NODE_SETTINGS_PREVIEW_DIR") {
+                            let viewport = iced::Rectangle::with_size(size);
+                            element.as_widget_mut().update(
+                                &mut tree,
+                                &iced::Event::Window(iced::window::Event::RedrawRequested(
+                                    std::time::Instant::now(),
+                                )),
+                                Layout::new(&node),
+                                iced::mouse::Cursor::Unavailable,
+                                &renderer,
+                                &mut iced::advanced::clipboard::Null,
+                                &mut iced::advanced::Shell::new(&mut Vec::new()),
+                                &viewport,
+                            );
+                            iced::advanced::Renderer::reset(&mut renderer, viewport);
+                            element.as_widget().draw(
+                                &tree,
+                                &mut renderer,
+                                &theme,
+                                &iced::advanced::renderer::Style {
+                                    text_color: theme.colors.text.primary,
+                                },
+                                Layout::new(&node),
+                                iced::mouse::Cursor::Unavailable,
+                                &viewport,
+                            );
+                            let pixels = renderer.screenshot(
+                                iced::Size::new(width, 650),
+                                1.0,
+                                theme.colors.general.background,
+                            );
+                            image::save_buffer(
+                                std::path::Path::new(&directory)
+                                    .join(format!("node-{scenario}-{appearance}-{width}.png")),
+                                &pixels,
+                                width,
+                                650,
+                                image::ColorType::Rgba8,
+                            )
+                            .expect("save node settings preview");
+                        }
+                    }
+                }
             }
         }
     }
