@@ -2174,6 +2174,13 @@ impl Home {
             }
             Message::View(ViewMessage::CreationKit(msg)) => self.update_creation_kit(msg),
             Message::View(ViewMessage::CreationKitUploaded(result)) => {
+                // Only the upload this step is waiting on counts.
+                if !matches!(
+                    self.state,
+                    State::CreationBackup(CreationBackupStep::KitUploading)
+                ) {
+                    return Task::none();
+                }
                 match result {
                     Ok(evidence) => {
                         // The Kit is on Connect. Back to the hub, which shows
@@ -2312,7 +2319,8 @@ impl Home {
                     }
                     Err(e) => {
                         self.ghost_claim = None;
-                        // Retain pending_cube_id so a retry reuses the same UUID.
+                        // Retain pending_cube_id so a retry reuses the same UUID,
+                        // unless a Kit was saved for it (`abandon_creation_backup`).
                         // Clear recovery words on error too
                         for word in &mut self.recovery_words {
                             word.clear();
@@ -2813,6 +2821,14 @@ impl Home {
             Message::View(ViewMessage::SelectNetwork(network)) => {
                 self.catalog.network_menu = false;
                 self.create_network_menu = false;
+                // Not while a Cube is mid-creation: its seed, passkey and any
+                // Recovery Kit were made for this network, and the write reads
+                // `self.network`. The header menu is closed in the step; this
+                // refuses the other routes too.
+                if matches!(self.state, State::CreationBackup(_)) || self.creating_cube {
+                    self.catalog.pending_select = None;
+                    return Task::none();
+                }
                 if !(self.developer_mode
                     || network == ChainId::Bitcoin
                     || network == ChainId::BitcoinBlake2b
@@ -4856,8 +4872,10 @@ impl Home {
         self.creating_cube = false;
         self.error = None;
         // Back to the create form the user came from. `pending_cube_id` is
-        // deliberately kept: a retry reuses the same UUID, matching the
-        // existing failure path.
+        // kept unless a Kit was saved (above): a retry reuses the same UUID,
+        // matching the existing failure path. A Cube opened later than its
+        // creation would surprise the user, so a pending auto-open goes too.
+        self.open_created_cube = None;
         self.state = State::Cubes {
             cubes,
             create_cube: true,
@@ -13437,6 +13455,7 @@ mod tests {
             "the Kit must be offered to a PIN Cube as well"
         );
         type_kit_password(&mut home, "correct horse battery staple");
+        home.state = State::CreationBackup(CreationBackupStep::KitUploading);
 
         let uploaded = drain(
             home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
@@ -13586,6 +13605,7 @@ mod tests {
         let _ = drain(home.update(Message::View(ViewMessage::CreationKitRequested)));
         assert_eq!(step(&home), CreationBackupStep::KitPassword);
         type_kit_password(&mut home, "correct horse battery staple");
+        home.state = State::CreationBackup(CreationBackupStep::KitUploading);
         assert!(drain(
             home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
                 kit_evidence(5),
@@ -13652,6 +13672,7 @@ mod tests {
         confirm_seed_from_hub(&mut home);
         let _ = drain(home.update(Message::View(ViewMessage::CreationKitRequested)));
         type_kit_password(&mut home, "correct horse battery staple");
+        home.state = State::CreationBackup(CreationBackupStep::KitUploading);
         let _ = drain(
             home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
                 kit_evidence(21),
@@ -13729,6 +13750,7 @@ mod tests {
         assert!(kit_uuid.is_some());
         let _ = drain(home.update(Message::View(ViewMessage::CreationKitRequested)));
         type_kit_password(&mut home, "correct horse battery staple");
+        home.state = State::CreationBackup(CreationBackupStep::KitUploading);
         let _ = drain(
             home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
                 kit_evidence(31),
@@ -13760,6 +13782,64 @@ mod tests {
         assert_eq!(step(&home), CreationBackupStep::Choice);
         let _ = home.update(Message::View(ViewMessage::CreationBackupBypassConfirmed));
         assert!(cubes_on_disk(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The hub's guards hold even for messages its screens don't send: an
+    /// acknowledged bypass with a Kit already saved, a network switch, and a
+    /// Kit result the step isn't waiting for.
+    #[test]
+    fn the_backup_hub_refuses_messages_that_would_discard_or_misfile_a_backup() {
+        let dir = tmp_datadir("hub-guards");
+        let mut home = signed_in_home_with_datadir(&dir);
+        passkey_create_form(&mut home, "Guarded");
+        let _ = drain(webview_registration(&mut home, "cred", 13));
+
+        // A stray Kit result outside the upload is ignored.
+        let _ = drain(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+                kit_evidence(40),
+            )))),
+        );
+        assert_eq!(home.creation_backup_hub(), CreationBackupHub::default());
+
+        // Acknowledge the bypass, then make a Kit from there.
+        let _ = home.update(Message::View(ViewMessage::CreationBackupBypassRequested));
+        let _ = home.update(Message::View(ViewMessage::CreationBackupAcknowledgeBypass(
+            true,
+        )));
+        let _ = drain(home.update(Message::View(ViewMessage::CreationKitRequested)));
+        assert_eq!(step(&home), CreationBackupStep::KitPassword);
+        type_kit_password(&mut home, "correct horse battery staple");
+        // The upload itself is Connect's; stand in for it having started.
+        home.state = State::CreationBackup(CreationBackupStep::KitUploading);
+        let _ = drain(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+                kit_evidence(41),
+            )))),
+        );
+        assert!(home.creation_backup_hub().kit_saved);
+
+        // Even forced back onto an acknowledged bypass, confirming it must not
+        // write "no backup" over the Kit.
+        home.state = State::CreationBackup(CreationBackupStep::Bypass { acknowledged: true });
+        assert!(
+            drain(home.update(Message::View(ViewMessage::CreationBackupBypassConfirmed)))
+                .is_empty()
+        );
+        assert!(cubes_on_disk(&dir).is_empty());
+
+        // The network can't change under the unwritten Cube.
+        home.state = State::CreationBackup(CreationBackupStep::Choice);
+        let network = home.network;
+        let other = if network == ChainId::Bitcoin {
+            ChainId::BitcoinBlake2b
+        } else {
+            ChainId::Bitcoin
+        };
+        let _ = home.update(Message::View(ViewMessage::SelectNetwork(other)));
+        assert_eq!(home.network, network);
+        assert_eq!(step(&home), CreationBackupStep::Choice);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -13896,6 +13976,7 @@ mod tests {
 
         // The upload's result, fed in directly — the network half is the
         // Connect client's, not this state machine's.
+        home.state = State::CreationBackup(CreationBackupStep::KitUploading);
         let uploaded = drain(
             home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
                 kit_evidence(42),
@@ -13956,6 +14037,7 @@ mod tests {
         let _ = drain(webview_registration(&mut home, "cred", 11));
         let _ = drain(home.update(Message::View(ViewMessage::CreationKitRequested)));
         type_kit_password(&mut home, "correct horse battery staple");
+        home.state = State::CreationBackup(CreationBackupStep::KitUploading);
 
         let out = drain(
             home.update(Message::View(ViewMessage::CreationKitUploaded(Err(
@@ -14044,6 +14126,7 @@ mod tests {
         let _ = drain(home.update(Message::View(ViewMessage::CreationKitRequested)));
         type_kit_password(&mut home, "correct horse battery staple");
         assert!(!home.creation_kit_password.is_empty());
+        home.state = State::CreationBackup(CreationBackupStep::KitUploading);
 
         let uploaded = drain(
             home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
