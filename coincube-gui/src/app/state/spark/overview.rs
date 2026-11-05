@@ -140,6 +140,17 @@ impl SparkOverview {
         };
 
         let status_connected = matches!(status, SparkStatus::Connected(_));
+        // The share popover shows only while the address it opened with is
+        // still the Cube's.
+        let lightning_share = self
+            .lightning_share
+            .as_ref()
+            .filter(|share| {
+                self.backend.is_some()
+                    && matches!(&lightning_address,
+                        SparkLightningAddress::Ready(address) if *address == share.address)
+            })
+            .map(|share| (share.address.as_str(), share.qr.as_ref()));
         let overview = SparkOverviewView {
             status,
             recent_transactions: &self.recent_transactions,
@@ -152,6 +163,7 @@ impl SparkOverview {
             display_mode: cache.display_mode,
             mask_amounts: cache.balance_amounts_masked(),
             lightning_address,
+            lightning_share,
         }
         .render()
         .map(view::Message::SparkOverview);
@@ -165,9 +177,8 @@ impl SparkOverview {
         content.into()
     }
 
-    /// The Spark page as App mounts it. The share panel covers the whole
-    /// page, rather than inheriting the address button's bounds, and shows
-    /// only while the address it opened with is still the Cube's.
+    /// The Spark page as App mounts it, with the share popover under the
+    /// address button while it is open.
     pub fn view_with_lightning_share<'a>(
         &'a self,
         menu: &'a Menu,
@@ -176,33 +187,13 @@ impl SparkOverview {
         recent_activity: impl Fn() -> Element<'a, view::Message> + 'a,
         detail: impl Fn() -> Option<Element<'a, view::Message>> + 'a,
     ) -> Element<'a, view::Message> {
-        let share = self.lightning_share.as_ref().filter(|share| {
-            self.backend.is_some()
-                && matches!(&lightning_address,
-                    SparkLightningAddress::Ready(address) if *address == share.address)
-        });
-        let page = view::dashboard_with_detail(
+        view::dashboard_with_detail(
             menu,
             cache,
             move || Self::page_head(cache),
             move || self.page_body(cache, lightning_address.clone(), Some(recent_activity())),
             detail,
-        );
-        if let Some(share) = share {
-            let panel = view::spark::overview::lightning_share_panel(
-                &cache.cube_id,
-                &share.address,
-                share.qr.as_ref(),
-            )
-            .map(view::Message::SparkOverview);
-            coincube_ui::widget::modal::Modal::new(page, panel)
-                .on_blur(Some(view::Message::SparkOverview(
-                    view::SparkOverviewMessage::CloseLightningShare,
-                )))
-                .into()
-        } else {
-            page
-        }
+        )
     }
 
     #[cfg(test)]
@@ -390,6 +381,9 @@ impl State for SparkOverview {
                 view::SparkOverviewMessage::CopyLightningAddress(address) => {
                     return Task::done(Message::View(view::Message::Clipboard(address)));
                 }
+                view::SparkOverviewMessage::SaveLightningQr(address) => {
+                    return save_lightning_qr(address);
+                }
                 view::SparkOverviewMessage::ChangeLightningAddress => {
                     // The change form opens on the address's own Settings
                     // tab, after the route has switched to it.
@@ -453,6 +447,70 @@ fn lightning_address_settings() -> Menu {
 /// The Spark page's head actions, labelled: **Swap BTC ⇄ USDB** once
 /// `swap_enabled` (S3), then **Wallet settings**, which opens Settings ›
 /// Spark › Balances & conversion.
+/// A Lightning address's QR code as PNG bytes: black modules on white, 16px
+/// each, inside the four-module quiet zone scanners expect. Encoded as the
+/// share popover encodes it (the bare address, medium error correction).
+pub fn lightning_qr_png(address: &str) -> Result<Vec<u8>, String> {
+    const MODULE_PX: u32 = 16;
+    const QUIET_MODULES: u32 = 4;
+    let code = qrcode::QrCode::with_error_correction_level(address, qrcode::EcLevel::M)
+        .map_err(|e| e.to_string())?;
+    let modules = code.width() as u32;
+    let colors = code.to_colors();
+    let side = (modules + 2 * QUIET_MODULES) * MODULE_PX;
+    let image = image::GrayImage::from_fn(side, side, |x, y| {
+        let (mx, my) = (x / MODULE_PX, y / MODULE_PX);
+        let dark = (QUIET_MODULES..QUIET_MODULES + modules).contains(&mx)
+            && (QUIET_MODULES..QUIET_MODULES + modules).contains(&my)
+            && colors[((my - QUIET_MODULES) * modules + (mx - QUIET_MODULES)) as usize]
+                == qrcode::Color::Dark;
+        image::Luma([if dark { 0 } else { 255 }])
+    });
+    let mut png = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    Ok(png.into_inner())
+}
+
+/// Ask where to save the address's QR code, then write it there. Cancelling
+/// the dialog does nothing; a failure says so in a toast.
+fn save_lightning_qr(address: String) -> Task<Message> {
+    let name = address.split('@').next().unwrap_or("lightning");
+    let file_name = format!("{name}-lightning-address.png");
+    Task::perform(
+        async move {
+            let png = lightning_qr_png(&address)?;
+            let Some(handle) = rfd::AsyncFileDialog::new()
+                .set_title("Save QR image")
+                .set_file_name(file_name)
+                .add_filter("PNG Image", &["png"])
+                .save_file()
+                .await
+            else {
+                return Ok(false);
+            };
+            std::fs::write(handle.path(), png).map_err(|e| e.to_string())?;
+            Ok(true)
+        },
+        |result: Result<bool, String>| result,
+    )
+    .then(|result| match result {
+        Ok(true) => Task::done(Message::View(view::Message::ShowToast(
+            log::Level::Info,
+            "QR image saved".to_owned(),
+        ))),
+        Ok(false) => Task::none(),
+        Err(e) => {
+            tracing::error!("Saving the Lightning address QR image failed: {e}");
+            Task::done(Message::View(view::Message::ShowToast(
+                log::Level::Error,
+                "Couldn't save the QR image".to_owned(),
+            )))
+        }
+    })
+}
+
 fn head_actions<'a>(
     cube_id: &str,
     swap_enabled: bool,
@@ -646,6 +704,25 @@ fn parse_method(raw: &str) -> SparkPaymentMethod {
 
 #[cfg(test)]
 mod tests {
+    /// The saved QR image is a square PNG: white quiet zone, dark finder
+    /// pattern in the top-left module just inside it.
+    #[test]
+    fn lightning_qr_png_draws_the_address_inside_a_quiet_zone() {
+        let png = super::lightning_qr_png("sats@coincube.io").expect("address encodes");
+        let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+            .expect("a PNG")
+            .to_luma8();
+        let modules =
+            qrcode::QrCode::with_error_correction_level("sats@coincube.io", qrcode::EcLevel::M)
+                .expect("address encodes")
+                .width() as u32;
+        assert_eq!(image.width(), image.height());
+        assert_eq!(image.width(), (modules + 8) * 16);
+        assert_eq!(image.get_pixel(0, 0).0, [255]);
+        assert_eq!(image.get_pixel(4 * 16 - 1, 4 * 16 - 1).0, [255]);
+        assert_eq!(image.get_pixel(4 * 16, 4 * 16).0, [0]);
+    }
+
     /// Swap shows on mainnet only and opens the Swap screen; Wallet settings
     /// opens Settings › Spark › Balances & conversion.
     #[test]

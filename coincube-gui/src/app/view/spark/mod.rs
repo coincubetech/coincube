@@ -232,6 +232,8 @@ pub enum SparkOverviewMessage {
     CloseLightningShare,
     /// Copy the shared Lightning address.
     CopyLightningAddress(String),
+    /// Save the shared Lightning address's QR code as a PNG.
+    SaveLightningQr(String),
     /// Open Settings › Spark › Lightning address with its change form.
     ChangeLightningAddress,
     /// Open Settings › Spark › Lightning address, where the claim form lives.

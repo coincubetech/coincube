@@ -2,7 +2,7 @@
 //!
 //! The Spark wallet page (Tenshu v175 W2, board `P-Spark`):
 //! - "Total balance" with the Lightning address button beside it, which
-//!   opens the share panel ([`lightning_share_panel`]), then one asset row
+//!   opens the share popover under it ([`lightning_share_panel`]), then one asset row
 //!   per balance: Bitcoin, and US Dollar while the wallet holds USDB
 //!   ([`spark_assets`]).
 //! - "Recent activity", mounted by App from Activity.
@@ -20,7 +20,7 @@ use coincube_ui::{
     component::{amount::*, text::*},
     icon, theme,
     theme::tenshu::size,
-    widget::{action::Action, *},
+    widget::{action::Action, floating::Floating, *},
 };
 use iced::{
     widget::{qr_code, Column, Container, QRCode, Row},
@@ -121,6 +121,8 @@ pub struct SparkOverviewView<'a> {
     pub display_mode: DisplayMode,
     pub mask_amounts: bool,
     pub lightning_address: SparkLightningAddress,
+    /// The open share popover: its address and that address's QR code.
+    pub lightning_share: Option<(&'a str, Option<&'a qr_code::Data>)>,
 }
 
 /// What the Spark page knows about the Cube's Lightning address. It drives
@@ -146,10 +148,12 @@ pub fn full_lightning_address(raw: &str) -> String {
 }
 
 /// The button beside "Total balance": the address and an invitation to share
-/// it, or to claim one. Never masked; an address is not an amount.
+/// it, or to claim one. Never masked; an address is not an amount. `open`
+/// keeps its accent border while the share popover hangs from it.
 fn lightning_address_button<'a>(
     cube_id: &str,
     address: &SparkLightningAddress,
+    open: bool,
 ) -> Option<Element<'a, SparkOverviewMessage>> {
     let (control, title, subtitle, trailing, press) = match address {
         SparkLightningAddress::Unknown => return None,
@@ -219,7 +223,7 @@ fn lightning_address_button<'a>(
             Container::new(content.height(Length::Fixed(40.0))).padding([10, 12]),
             SparkOverviewMessage::FocusAction,
         )
-        .style(lightning_address_button_style)
+        .style(move |theme, status| lightning_address_button_style(theme, status, open))
         .focus_radius(12.0)
         .on_press(press)
         .into(),
@@ -233,10 +237,11 @@ fn accent_text(theme: &theme::Theme) -> iced::widget::text::Style {
 }
 
 /// The address button's surface: a panel card whose border takes the accent
-/// under the pointer.
+/// under the pointer and while its popover is open.
 fn lightning_address_button_style(
     theme: &theme::Theme,
     status: iced::widget::button::Status,
+    open: bool,
 ) -> iced::widget::button::Style {
     use iced::widget::button::Status;
     let shell = &theme.colors.shell;
@@ -244,7 +249,7 @@ fn lightning_address_button_style(
         background: Some(iced::Background::Color(shell.panel)),
         text_color: shell.ink,
         border: iced::Border {
-            color: if matches!(status, Status::Hovered | Status::Pressed) {
+            color: if open || matches!(status, Status::Hovered | Status::Pressed) {
                 shell.accent_ink
             } else {
                 shell.line
@@ -256,14 +261,15 @@ fn lightning_address_button_style(
     }
 }
 
-/// The share panel the address button opens, drawn as a modal over the page:
-/// the address as a QR code (encoded exactly as Spark › Receive encodes it,
-/// the bare address), a copy action and the way to a different name.
+/// The share popover the address button opens, anchored under it: the
+/// address as a QR code (encoded exactly as Spark › Receive encodes it, the
+/// bare address), copy and save actions and the way to a different name.
 pub fn lightning_share_panel<'a>(
     cube_id: &str,
     address: &'a str,
     qr: Option<&'a qr_code::Data>,
 ) -> Element<'a, SparkOverviewMessage> {
+    let has_qr = qr.is_some();
     let qr: Element<'a, SparkOverviewMessage> = match qr {
         Some(qr) => Container::new(QRCode::<theme::Theme>::new(qr).total_size(184))
             .width(Length::Fill)
@@ -301,8 +307,8 @@ pub fn lightning_share_panel<'a>(
                 .width(Length::Fill)
                 .align_x(Alignment::Center),
         )
-        .push(
-            ActionButton::new(
+        .push({
+            let copy = ActionButton::new(
                 landing_control_id(cube_id, "Spark", "ln-copy"),
                 "Copy address",
                 ActionKind::Primary,
@@ -313,8 +319,25 @@ pub fn lightning_share_panel<'a>(
             .width(Length::Fill)
             .on_press(SparkOverviewMessage::CopyLightningAddress(
                 address.to_owned(),
-            )),
-        )
+            ));
+            let mut actions = Row::new().spacing(12).push(copy);
+            // Saving needs the QR code; without one, copying is the only way.
+            if has_qr {
+                actions = actions.push(
+                    ActionButton::new(
+                        landing_control_id(cube_id, "Spark", "ln-save-qr"),
+                        "Save QR image",
+                        ActionKind::Secondary,
+                        SparkOverviewMessage::FocusAction,
+                    )
+                    .icon(icon::import_icon())
+                    .compact()
+                    .width(Length::Fill)
+                    .on_press(SparkOverviewMessage::SaveLightningQr(address.to_owned())),
+                );
+            }
+            actions
+        })
         .push(iced::widget::rule::horizontal(1))
         .push(
             Row::new()
@@ -386,6 +409,7 @@ impl<'a> SparkOverviewView<'a> {
                 self.cube_id,
                 self.last_error,
                 &self.lightning_address,
+                self.lightning_share,
             ),
         }
     }
@@ -405,6 +429,7 @@ fn connected_view<'a>(
     cube_id: &str,
     last_error: Option<&str>,
     lightning_address: &SparkLightningAddress,
+    lightning_share: Option<(&'a str, Option<&'a qr_code::Data>)>,
 ) -> Element<'a, SparkOverviewMessage> {
     use crate::app::breez_spark::assets::stable_token_as_sats_u128;
 
@@ -570,10 +595,24 @@ fn connected_view<'a>(
     // The Lightning address sits beside the total while both fit at their
     // own widths, else on its own line below it (`fit_row`).
     let total_row: Element<'a, SparkOverviewMessage> =
-        match lightning_address_button(cube_id, lightning_address) {
+        match lightning_address_button(cube_id, lightning_address, lightning_share.is_some()) {
             Some(button) => fit_row(total_col, button).gap(16.0).into(),
             None => total_col.into(),
         };
+    // The share popover hangs from the button's trailing edge and covers the
+    // rows below it rather than pushing them down.
+    let total_row: Element<'a, SparkOverviewMessage> = match lightning_share {
+        Some((address, qr)) => Column::new()
+            .push(total_row)
+            .push(
+                Floating::new(lightning_share_panel(cube_id, address, qr))
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .gap(8.0)
+                    .on_dismiss(SparkOverviewMessage::CloseLightningShare),
+            )
+            .into(),
+        None => total_row,
+    };
     let balance_section = landing_balance_section(
         Column::new()
             .spacing(16)
@@ -849,10 +888,11 @@ mod tests {
     }
 
     #[test]
-    fn lightning_share_panel_offers_the_qr_copy_and_change() {
+    fn lightning_share_panel_offers_the_qr_copy_save_and_change() {
         let qr = qr_code::Data::new(ADDRESS).expect("address fits a QR code");
         let copy = landing_control_id("synthetic-cube", "Spark", "ln-copy");
         let change = landing_control_id("synthetic-cube", "Spark", "ln-change");
+        let save = landing_control_id("synthetic-cube", "Spark", "ln-save-qr");
         for (appearance, theme) in [
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
@@ -872,9 +912,9 @@ mod tests {
                 assert!(mounted.contains(line), "{}", line);
             }
             assert!(!mounted.contains("QR unavailable"));
-            // The app has no save-QR helper yet.
-            assert!(!mounted.contains("Save QR image"));
+            assert!(mounted.contains("Save QR image"));
             assert!(mounted.has_focus(copy.clone()));
+            assert!(mounted.has_focus(save.clone()));
             assert!(mounted.has_focus(change.clone()));
             for pointer in [false, true] {
                 let copied = capture::activate(panel(), copy.clone(), (1024, 768), pointer);
@@ -885,6 +925,15 @@ mod tests {
                     ),
                     "{:?}",
                     copied
+                );
+                let saved = capture::activate(panel(), save.clone(), (1024, 768), pointer);
+                assert!(
+                    matches!(
+                        saved.last(),
+                        Some(SparkOverviewMessage::SaveLightningQr(address)) if address == ADDRESS
+                    ),
+                    "{:?}",
+                    saved
                 );
                 let changed = capture::activate(panel(), change.clone(), (1024, 768), pointer);
                 assert!(
@@ -905,13 +954,16 @@ mod tests {
             );
             assert!(without_qr.contains("QR unavailable"));
             assert!(without_qr.contains(ADDRESS));
+            assert!(!without_qr.contains("Save QR image"));
         }
     }
 
     #[test]
-    fn lightning_share_overlays_the_whole_spark_page() {
-        use iced::advanced::{layout, overlay, renderer::Headless, widget::Tree, Layout};
-        use iced::{Rectangle, Size, Vector};
+    fn lightning_share_hangs_under_the_address_button() {
+        use iced::advanced::{
+            clipboard::Null, layout, overlay, renderer::Headless, widget::Tree, Layout, Shell,
+        };
+        use iced::{keyboard, mouse, Event, Point, Rectangle, Size, Vector};
 
         for bytes in coincube_ui::font::load() {
             iced::advanced::graphics::text::font_system()
@@ -925,26 +977,28 @@ mod tests {
             balance_sats: 25_053,
             usdb_balance: None,
         };
-        for (appearance, theme) in [
-            ("dark", theme::Theme::dark()),
-            ("light", theme::Theme::light()),
-        ] {
-            for (width, height) in [(1024, 768), (1440, 900)] {
-                let body = synthetic_overview_with(
+        let page = |share: bool| -> Element<'_, SparkOverviewMessage> {
+            let body = SparkOverviewView {
+                lightning_share: share.then_some((ADDRESS, Some(&qr))),
+                ..synthetic_view(
                     SparkStatus::Connected(snapshot.clone()),
                     &[],
                     None,
                     None,
                     ready(),
-                );
-                let page = iced::widget::scrollable(body)
-                    .width(Length::Fill)
-                    .height(Length::Fill);
-                let panel = lightning_share_panel("synthetic-cube", ADDRESS, Some(&qr));
-                let mut element: Element<'_, SparkOverviewMessage> =
-                    coincube_ui::widget::modal::Modal::new(page, panel)
-                        .on_blur(Some(SparkOverviewMessage::CloseLightningShare))
-                        .into();
+                )
+            }
+            .render();
+            iced::widget::scrollable(body)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        };
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for (width, height) in [(1024, 768), (1440, 900)] {
                 let size = Size::new(width as f32, height as f32);
                 let viewport = Rectangle::with_size(size);
                 let mut renderer =
@@ -954,15 +1008,38 @@ mod tests {
                         Some("tiny-skia"),
                     ))
                     .expect("software renderer");
-                let mut tree = Tree::new(element.as_widget());
-                let node = element.as_widget_mut().layout(
-                    &mut tree,
-                    &renderer,
-                    &layout::Limits::new(Size::ZERO, size),
-                );
-                assert_eq!(node.size(), size, "modal base fills Spark page");
+                let limits = layout::Limits::new(Size::ZERO, size);
 
-                let mut modal = element
+                // The closed page, for the layout the popover must not move.
+                let mut closed = page(false);
+                let mut closed_tree = Tree::new(closed.as_widget());
+                let closed_node =
+                    closed
+                        .as_widget_mut()
+                        .layout(&mut closed_tree, &renderer, &limits);
+                let closed_text =
+                    capture_text(&mut closed, &mut closed_tree, &closed_node, &renderer);
+
+                let mut element = page(true);
+                let mut tree = Tree::new(element.as_widget());
+                let node = element
+                    .as_widget_mut()
+                    .layout(&mut tree, &renderer, &limits);
+                let open_text = capture_text(&mut element, &mut tree, &node, &renderer);
+                for entry in &closed_text {
+                    assert!(
+                        open_text.contains(entry),
+                        "the popover moves nothing on the page: {:?}",
+                        entry
+                    );
+                }
+
+                let button = closed_text
+                    .iter()
+                    .find(|(text, _)| text == "Share")
+                    .map(|(_, bounds)| *bounds)
+                    .expect("Share on the address button");
+                let mut popover = element
                     .as_widget_mut()
                     .overlay(
                         &mut tree,
@@ -972,18 +1049,75 @@ mod tests {
                         Vector::ZERO,
                     )
                     .map(overlay::Nested::new)
-                    .expect("share panel overlay");
-                let overlay_node = modal.layout(&renderer, size);
-                let dialog_bounds = overlay_node
-                    .children()
-                    .first()
-                    .expect("dialog layout")
-                    .bounds();
-                assert_eq!(overlay_node.size(), size, "whole-page scrim");
-                assert!(dialog_bounds.x >= 0.0 && dialog_bounds.y >= 0.0);
-                assert!(dialog_bounds.x + dialog_bounds.width <= size.width);
-                assert!(dialog_bounds.y + dialog_bounds.height <= size.height);
-                drop(modal);
+                    .expect("share popover overlay");
+                let overlay_node = popover.layout(&renderer, size);
+                // Overlays from several widgets come back as one page-wide
+                // group; the popover is the tallest node narrower than it.
+                fn narrow_nodes(node: &layout::Node, width: f32, found: &mut Vec<Rectangle>) {
+                    if node.bounds().width < width {
+                        found.push(node.bounds());
+                    } else {
+                        for child in node.children() {
+                            narrow_nodes(child, width, found);
+                        }
+                    }
+                }
+                let mut narrow = Vec::new();
+                narrow_nodes(&overlay_node, size.width, &mut narrow);
+                let panel = narrow
+                    .into_iter()
+                    .max_by(|a, b| a.height.total_cmp(&b.height))
+                    .expect("popover node");
+                assert_eq!(panel.width, 380.0, "the popover keeps its own width");
+                assert!(panel.height < size.height / 1.2, "not a whole-page scrim");
+                assert!(panel.y > button.y + button.height, "hangs below the button");
+                assert!(panel.y < button.y + button.height + 40.0, "close under it");
+                assert!(
+                    (panel.x + panel.width) > button.x + button.width
+                        && (panel.x + panel.width) <= size.width,
+                    "trailing edge under the button's: {:?} {:?}",
+                    panel,
+                    button
+                );
+
+                let mut send = |event: Event, at: Point| {
+                    let mut messages = Vec::new();
+                    let mut shell = Shell::new(&mut messages);
+                    popover.update(
+                        &event,
+                        Layout::new(&overlay_node),
+                        mouse::Cursor::Available(at),
+                        &renderer,
+                        &mut Null,
+                        &mut shell,
+                    );
+                    let captured = shell.is_event_captured();
+                    (messages, captured)
+                };
+                let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+                let (inside, _) = send(press.clone(), panel.center());
+                assert!(inside.is_empty(), "{:?}", inside);
+                let (outside, captured) = send(press, Point::new(10.0, size.height - 10.0));
+                assert!(captured, "a dismissing press goes no further");
+                assert!(matches!(
+                    outside.as_slice(),
+                    [SparkOverviewMessage::CloseLightningShare]
+                ));
+                let escape = Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                    physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+                    location: keyboard::Location::Standard,
+                    modifiers: keyboard::Modifiers::default(),
+                    text: None,
+                    repeat: false,
+                });
+                let (escaped, _) = send(escape, panel.center());
+                assert!(matches!(
+                    escaped.as_slice(),
+                    [SparkOverviewMessage::CloseLightningShare]
+                ));
+                drop(popover);
 
                 if let Ok(directory) = std::env::var("R06A_CAPTURE_DIR") {
                     std::fs::create_dir_all(&directory).expect("capture directory");
@@ -997,10 +1131,10 @@ mod tests {
                         &theme,
                         &style,
                         Layout::new(&node),
-                        iced::mouse::Cursor::Unavailable,
+                        mouse::Cursor::Unavailable,
                         &viewport,
                     );
-                    if let Some(mut modal) = element
+                    if let Some(mut popover) = element
                         .as_widget_mut()
                         .overlay(
                             &mut tree,
@@ -1011,13 +1145,13 @@ mod tests {
                         )
                         .map(overlay::Nested::new)
                     {
-                        let overlay_node = modal.layout(&renderer, size);
-                        modal.draw(
+                        let overlay_node = popover.layout(&renderer, size);
+                        popover.draw(
                             &mut renderer,
                             &theme,
                             &style,
                             Layout::new(&overlay_node),
-                            iced::mouse::Cursor::Unavailable,
+                            mouse::Cursor::Unavailable,
                         );
                     }
                     let pixels = renderer.screenshot(
@@ -1027,17 +1161,48 @@ mod tests {
                     );
                     image::save_buffer(
                         std::path::Path::new(&directory).join(format!(
-                            "spark-share-modal-{appearance}-{width}x{height}-synthetic.png"
+                            "spark-share-popover-{appearance}-{width}x{height}-synthetic.png"
                         )),
                         &pixels,
                         width,
                         height,
                         image::ColorType::Rgba8,
                     )
-                    .expect("save modal capture");
+                    .expect("save popover capture");
                 }
             }
         }
+    }
+
+    /// Every text on the page with its bounds, popover content included.
+    fn capture_text(
+        element: &mut Element<'_, SparkOverviewMessage>,
+        tree: &mut iced::advanced::widget::Tree,
+        node: &iced::advanced::layout::Node,
+        renderer: &iced::Renderer,
+    ) -> Vec<(String, iced::Rectangle)> {
+        use iced::advanced::{widget::operation::Operation, Layout};
+
+        #[derive(Default)]
+        struct Texts(Vec<(String, iced::Rectangle)>);
+        impl Operation for Texts {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(
+                &mut self,
+                _id: Option<&iced::advanced::widget::Id>,
+                bounds: iced::Rectangle,
+                text: &str,
+            ) {
+                self.0.push((text.to_owned(), bounds));
+            }
+        }
+        let mut texts = Texts::default();
+        element
+            .as_widget_mut()
+            .operate(tree, Layout::new(node), renderer, &mut texts);
+        texts.0
     }
 
     fn tx(
@@ -1173,6 +1338,16 @@ mod tests {
         last_error: Option<&'a str>,
         lightning_address: SparkLightningAddress,
     ) -> Element<'a, SparkOverviewMessage> {
+        synthetic_view(status, rows, price, last_error, lightning_address).render()
+    }
+
+    fn synthetic_view<'a>(
+        status: SparkStatus,
+        rows: &'a [SparkRecentTransaction],
+        price: Option<f64>,
+        last_error: Option<&'a str>,
+        lightning_address: SparkLightningAddress,
+    ) -> SparkOverviewView<'a> {
         SparkOverviewView {
             status,
             recent_transactions: rows,
@@ -1185,8 +1360,8 @@ mod tests {
             display_mode: DisplayMode::BitcoinNative,
             mask_amounts: false,
             lightning_address,
+            lightning_share: None,
         }
-        .render()
     }
 
     #[test]
@@ -1223,6 +1398,7 @@ mod tests {
                 display_mode: DisplayMode::BitcoinNative,
                 mask_amounts: true,
                 lightning_address: ready(),
+                lightning_share: None,
             }
             .render(),
             (1024, 768),
