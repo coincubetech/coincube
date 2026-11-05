@@ -550,8 +550,10 @@ pub struct Home {
     /// creation; both are recorded on the Cube when both are done.
     creation_seed_confirmed: bool,
     /// The Kit made during this creation, held until Continue writes the Cube
-    /// with it. `Some` only after Connect confirmed it is holding the seed.
-    creation_kit_evidence: Option<creation_gate::CreationRecoveryKit>,
+    /// with it. Paired with the account that registered it, captured before
+    /// upload, so a later account switch cannot misattribute the registration.
+    /// `Some` only after Connect confirmed it is holding the seed.
+    creation_kit_evidence: Option<(u32, creation_gate::CreationRecoveryKit)>,
     /// Active passkey ceremony (webview open, awaiting IPC result).
     passkey_ceremony: Option<PasskeyCeremony>,
     /// Active native macOS passkey ceremony (uses AuthenticationServices).
@@ -4408,7 +4410,20 @@ impl Home {
             return Task::none();
         }
         let backed_up = self.creation_seed_confirmed;
-        let kit = self.creation_kit_evidence.clone();
+        if let Some((account_id, _)) = &self.creation_kit_evidence {
+            if Some(*account_id) != self.connect_account_id() {
+                self.error = Some(
+                    "Sign back in to the Connect account you used to create this Recovery Kit \
+                     before continuing. Nothing was written."
+                        .to_string(),
+                );
+                return Task::none();
+            }
+        }
+        let kit = self
+            .creation_kit_evidence
+            .as_ref()
+            .map(|(_, evidence)| evidence.clone());
         if !backed_up && kit.is_none() {
             return Task::none();
         }
@@ -4572,6 +4587,12 @@ impl Home {
             );
             return Task::none();
         };
+        let Some(account_id) = self.connect_account_id() else {
+            self.creation_kit_error = Some(
+                "Your Connect account is still loading. Please try again in a moment.".to_string(),
+            );
+            return Task::none();
+        };
         let Some(words) = self.creation_backup_words.clone() else {
             // The seed is what the Kit is *for*; without it there is nothing to
             // encrypt and the Cube must not be written.
@@ -4682,11 +4703,14 @@ impl Home {
                         .to_string());
                 }
 
-                Ok(creation_gate::CreationRecoveryKit {
-                    at: created_at.timestamp(),
-                    cube_id: registered,
-                    has_seed: outcome.now_has_seed,
-                })
+                Ok((
+                    account_id,
+                    creation_gate::CreationRecoveryKit {
+                        at: created_at.timestamp(),
+                        cube_id: registered,
+                        has_seed: outcome.now_has_seed,
+                    },
+                ))
             },
             |result| Message::View(ViewMessage::CreationKitUploaded(result)),
         )
@@ -5397,18 +5421,23 @@ impl Home {
             }
         } else if let State::CreationBackup(step) = &self.state {
             // Wide enough for the 4×150 word grid and its gutters.
-            Container::new(creation_backup_view(
-                step,
-                self.creation_backup_words.as_ref().map(|w| w.as_slice()),
-                self.creating_cube,
-                self.creating_passkey_cube(),
-                &self.creation_kit_password,
-                &self.creation_kit_confirm,
-                self.creation_kit_acknowledged,
-                self.creation_kit_error.as_deref(),
-                self.can_create_recovery_kit(),
-                self.creation_backup_hub(),
-            ))
+            Container::new(
+                Column::new()
+                    .spacing(24)
+                    .push(self.error.as_ref().map(|e| card::simple(text(e))))
+                    .push(creation_backup_view(
+                        step,
+                        self.creation_backup_words.as_ref().map(|w| w.as_slice()),
+                        self.creating_cube,
+                        self.creating_passkey_cube(),
+                        &self.creation_kit_password,
+                        &self.creation_kit_confirm,
+                        self.creation_kit_acknowledged,
+                        self.creation_kit_error.as_deref(),
+                        self.can_create_recovery_kit(),
+                        self.creation_backup_hub(),
+                    )),
+            )
             .max_width(760)
             .into()
         } else {
@@ -7701,10 +7730,10 @@ pub enum ViewMessage {
     /// over, exactly as [`Self::CreationBackup`] is for the backup wizard.
     /// Variants belonging to Settings alone are inert here.
     CreationKit(RecoveryKitMessage),
-    /// The Kit upload finished. `Ok` carries the evidence to persist on the
-    /// Cube; `Err` returns the user to the password screen with the reason and
-    /// **nothing written**.
-    CreationKitUploaded(Result<creation_gate::CreationRecoveryKit, String>),
+    /// The Kit upload finished. `Ok` carries the registering account ID and
+    /// evidence to persist on the Cube; `Err` returns the user to the password
+    /// screen with the reason and **nothing written**.
+    CreationKitUploaded(Result<(u32, creation_gate::CreationRecoveryKit), String>),
     ImportWallet,
     CreateWallet,
     /// W13 — launch the installer in "restore from Cube Recovery Kit"
@@ -13463,9 +13492,10 @@ mod tests {
         home.state = State::CreationBackup(CreationBackupStep::KitUploading);
 
         let uploaded = drain(
-            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok((
+                7,
                 kit_evidence(77),
-            )))),
+            ))))),
         );
         assert!(
             uploaded.is_empty(),
@@ -13612,9 +13642,10 @@ mod tests {
         type_kit_password(&mut home, "correct horse battery staple");
         home.state = State::CreationBackup(CreationBackupStep::KitUploading);
         assert!(drain(
-            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok((
+                7,
                 kit_evidence(5),
-            ))))
+            )))))
         )
         .is_empty());
         assert_eq!(step(&home), CreationBackupStep::Choice);
@@ -13639,6 +13670,135 @@ mod tests {
             creation_gate::evaluate_for_cube(cube, None),
             creation_gate::CreationGate::Satisfied
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Kit belongs to its registering account even if the session changes
+    /// before the upload result arrives. Both creation paths must refuse to
+    /// write it under another account, including with a confirmed seed phrase.
+    #[test]
+    fn backup_hub_requires_the_kits_registering_account() {
+        for passkey in [false, true] {
+            for switch_during_upload in [false, true] {
+                let dir = tmp_datadir("hub-kit-account");
+                let mut home = signed_in_home_with_datadir(&dir);
+                if passkey {
+                    passkey_create_form(&mut home, "AccountBound");
+                    let _ = drain(webview_registration(&mut home, "cred", 19));
+                } else {
+                    enter_backup_step(&mut home, "AccountBound", "4321");
+                }
+                confirm_seed_from_hub(&mut home);
+                home.state = State::CreationBackup(CreationBackupStep::KitUploading);
+                if switch_during_upload {
+                    home.connect_account.user.as_mut().unwrap().id = 8;
+                }
+                let _ = drain(
+                    home.update(Message::View(ViewMessage::CreationKitUploaded(Ok((
+                        7,
+                        kit_evidence(42),
+                    ))))),
+                );
+                assert_eq!(
+                    home.creation_kit_evidence.as_ref().map(|(id, _)| *id),
+                    Some(7)
+                );
+                home.connect_account.user.as_mut().unwrap().id = 8;
+                let pending_id = home.pending_cube_id;
+
+                for signed_out in [false, true] {
+                    if signed_out {
+                        home.connect_account.user = None;
+                        assert_eq!(home.connect_account_id(), None);
+                    }
+                    assert!(
+                        drain(home.update(Message::View(ViewMessage::CreationBackupContinue)))
+                            .is_empty()
+                    );
+                    assert_eq!(step(&home), CreationBackupStep::Choice);
+                    assert!(home.error.as_deref().unwrap().contains("Sign back in"));
+                    assert!(!home.creating_cube);
+                    assert_eq!(home.pending_cube_id, pending_id);
+                    assert!(home.creation_kit_evidence.is_some());
+                    assert!(home.creation_backup_words.is_some());
+                    assert!(cubes_on_disk(&dir).is_empty());
+                }
+
+                // Signing back in to the registering account can finish the
+                // same Cube with both backups and the correct Connect owner.
+                if passkey {
+                    home.connect_account.step = ConnectFlowStep::Dashboard;
+                    home.connect_account.user = Some(User {
+                        id: 7,
+                        email: "founder@example.com".to_string(),
+                        email_verified: Some(true),
+                    });
+                    let out =
+                        drain(home.update(Message::View(ViewMessage::CreationBackupContinue)));
+                    let [Message::CubeCreated(Ok(cube))] = out.as_slice() else {
+                        panic!("expected one successful CubeCreated, got {:?}", out);
+                    };
+                    assert!(cube.remote_synced);
+                    assert!(cube.backed_up);
+                    assert_eq!(
+                        cube.connect_owner.as_ref().map(|owner| owner.user_id),
+                        Some(7)
+                    );
+                    assert_eq!(
+                        cube.creation_recovery_kit.as_ref().map(|kit| kit.cube_id),
+                        Some(42)
+                    );
+                    let _ = drain(home.update(Message::CubeCreated(Ok(cube.clone()))));
+                } else {
+                    let _ = home.update(Message::View(ViewMessage::CancelCreationBackup));
+                }
+                assert!(
+                    home.creation_kit_evidence.is_none(),
+                    "the registering account is cleared too"
+                );
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn backup_hub_shows_why_another_account_cannot_continue() {
+        let dir = tmp_datadir("hub-kit-account-warning");
+        let mut home = signed_in_home_with_datadir(&dir);
+        home.state = State::CreationBackup(CreationBackupStep::Choice);
+        home.creation_kit_evidence = Some((8, kit_evidence(42)));
+        drop(home.finish_creation_backup());
+
+        let shown = restore_frame::rendered_labels(home.create_journey_frame()).await;
+        assert!(shown.iter().any(|label| Some(label) == home.error.as_ref()));
+        assert!(home.error.as_deref().unwrap().contains("Sign back in"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An authenticated client without its user record cannot identify the
+    /// registering account, so no registration or upload may start yet.
+    #[test]
+    fn a_creation_kit_waits_for_the_connect_account_to_load() {
+        let dir = tmp_datadir("kit-account-loading");
+        let mut home = signed_in_home_with_datadir(&dir);
+        passkey_create_form(&mut home, "Loading");
+        let _ = drain(webview_registration(&mut home, "cred", 20));
+        let _ = home.update(Message::View(ViewMessage::CreationKitRequested));
+        type_kit_password(&mut home, "correct horse battery staple");
+        home.connect_account
+            .install_shared_client(home.connect_account.client.clone());
+        home.connect_account.user = None;
+        assert!(home.can_create_recovery_kit());
+        assert!(drain(home.submit_creation_kit()).is_empty());
+        assert_eq!(step(&home), CreationBackupStep::KitPassword);
+        assert!(!home.creating_cube);
+        assert!(home
+            .creation_kit_error
+            .as_deref()
+            .unwrap()
+            .contains("still loading"));
+        assert!(home.creation_kit_evidence.is_none());
+        assert!(cubes_on_disk(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -13679,9 +13839,10 @@ mod tests {
         type_kit_password(&mut home, "correct horse battery staple");
         home.state = State::CreationBackup(CreationBackupStep::KitUploading);
         let _ = drain(
-            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok((
+                7,
                 kit_evidence(21),
-            )))),
+            ))))),
         );
         let out = drain(home.update(Message::View(ViewMessage::CreationBackupContinue)));
         let [Message::CubeCreated(result)] = out.as_slice() else {
@@ -13757,9 +13918,10 @@ mod tests {
         type_kit_password(&mut home, "correct horse battery staple");
         home.state = State::CreationBackup(CreationBackupStep::KitUploading);
         let _ = drain(
-            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok((
+                7,
                 kit_evidence(31),
-            )))),
+            ))))),
         );
         let _ = home.update(Message::View(ViewMessage::CancelCreationBackup));
         assert_eq!(home.pending_cube_id, None);
@@ -13802,9 +13964,10 @@ mod tests {
 
         // A stray Kit result outside the upload is ignored.
         let _ = drain(
-            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok((
+                7,
                 kit_evidence(40),
-            )))),
+            ))))),
         );
         assert_eq!(home.creation_backup_hub(), CreationBackupHub::default());
 
@@ -13819,9 +13982,10 @@ mod tests {
         // The upload itself is Connect's; stand in for it having started.
         home.state = State::CreationBackup(CreationBackupStep::KitUploading);
         let _ = drain(
-            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok((
+                7,
                 kit_evidence(41),
-            )))),
+            ))))),
         );
         assert!(home.creation_backup_hub().kit_saved);
 
@@ -13985,9 +14149,10 @@ mod tests {
         // Connect client's, not this state machine's.
         home.state = State::CreationBackup(CreationBackupStep::KitUploading);
         let uploaded = drain(
-            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok((
+                7,
                 kit_evidence(42),
-            )))),
+            ))))),
         );
         assert!(
             uploaded.is_empty(),
@@ -14136,9 +14301,10 @@ mod tests {
         home.state = State::CreationBackup(CreationBackupStep::KitUploading);
 
         let uploaded = drain(
-            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok((
+                7,
                 kit_evidence(1),
-            )))),
+            ))))),
         );
         assert!(
             uploaded.is_empty(),
