@@ -60,6 +60,9 @@ pub struct DummyBitcoind {
     /// (always empty) mempool answers are trusted. Set to `false` to model
     /// Esplora, whose mempool reads are always empty whatever is in it.
     pub sees_mempool: bool,
+    /// What the next `sync_wallet` reports as a reorg's common ancestor, the way
+    /// Electrum/Esplora hand it over. Reported once, then `None`.
+    pub sync_reorg_ancestor: Option<BlockChainTip>,
 }
 
 /// The endpoint [`DummyBitcoind`] reports by default.
@@ -102,6 +105,7 @@ impl DummyBitcoind {
             walks_ancestors: true,
             history_sync: Default::default(),
             sees_mempool: true,
+            sync_reorg_ancestor: None,
         }
     }
 }
@@ -192,7 +196,7 @@ impl BitcoinInterface for DummyBitcoind {
         _receive_index: bip32::ChildNumber,
         _change_index: bip32::ChildNumber,
     ) -> Result<Option<BlockChainTip>, String> {
-        Ok(None)
+        Ok(self.sync_reorg_ancestor.take())
     }
 
     fn received_coins(
