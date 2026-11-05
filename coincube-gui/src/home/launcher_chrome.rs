@@ -211,6 +211,25 @@ pub(crate) fn network_name(chain: ChainId) -> &'static str {
     }
 }
 
+/// A Network menu row's count: this device's Cubes, then the network's
+/// Connect-only Cubes when it has any ("5 + 2 in Connect"), so the menu adds
+/// up to the per-network limit the dock and the Create gate count.
+fn network_menu_count(projection: &Projection<'_>, chain: ChainId, local: usize) -> String {
+    if projection.unread.contains(&chain) {
+        return "Unavailable".to_string();
+    }
+    let remote = projection
+        .usage
+        .iter()
+        .find(|usage| usage.chain == chain)
+        .map_or(0, |usage| usage.remote);
+    if remote > 0 {
+        format!("{local} + {remote} in Connect")
+    } else {
+        local.to_string()
+    }
+}
+
 /// A network's menu name (`CH.menu`), for the Network chip and menu.
 pub(super) fn network_menu_name(chain: ChainId) -> &'static str {
     match chain {
@@ -545,13 +564,18 @@ fn dock_action<'a>(
     .into()
 }
 
-/// "[N] of [N] Cubes on the [plan] plan" while the plan has no Cube slot
-/// left: Create Cube and Import or restore are both closed then.
+/// "[network]: [N] of [N] Cubes on the [plan] plan" while the plan has no
+/// Cube slot left on the current network: Create Cube and Import or restore
+/// are both closed then. The limit is per network, so the copy names it —
+/// a bare ratio under "All networks" reads as a total across every network.
 pub(super) fn plan_full(projection: &Projection<'_>) -> Option<String> {
     projection.at_limit().then(|| {
         format!(
-            "{} of {} Cubes on the {} plan",
-            projection.total_count, projection.cube_limit, projection.tier
+            "{}: {} of {} Cubes on the {} plan",
+            network_name(projection.network),
+            projection.total_count,
+            projection.cube_limit,
+            projection.tier
         )
     })
 }
@@ -1341,9 +1365,14 @@ fn brand_footprint<'a, M: 'a>() -> Element<'a, M> {
         .into()
 }
 
-/// `.menu`: 272px under the chip, one `.mi` row per listed network and the
-/// filter note. Only the shown network's Cubes are loaded, so only its row
-/// carries a count. A click outside it closes it.
+/// The Network menu's width: wide enough for "Bitcoin Blake2b mainnet" beside
+/// a "7 + 7 in Connect" count on one line.
+const NETWORK_MENU_WIDTH: f32 = 320.0;
+
+/// `.menu`: 320px under the chip, one `.mi` row per listed network and the
+/// filter note. Each row counts the network's Cubes against its plan limit:
+/// the ones on this device, plus "+ N in Connect" for Cubes registered in
+/// Connect but not here, which use a slot too. A click outside it closes it.
 pub(super) fn network_layer<'a>(
     home: &Home,
     projection: &Projection<'_>,
@@ -1372,11 +1401,7 @@ pub(super) fn network_layer<'a>(
             ))
             .push(Space::new().width(Length::Fill))
             .push(words(
-                if projection.unread.contains(&chain) {
-                    "Unavailable".to_string()
-                } else {
-                    count.to_string()
-                },
+                network_menu_count(projection, chain, *count),
                 12.0,
                 font::REGULAR,
                 Ink::Muted,
@@ -1438,7 +1463,7 @@ pub(super) fn network_layer<'a>(
             Ink::Muted,
         ));
     let menu = Container::new(rows.push(note))
-        .width(Length::Fixed(272.0))
+        .width(Length::Fixed(NETWORK_MENU_WIDTH))
         .padding(6)
         .style(|theme: &theme::Theme| container::Style {
             background: Some(iced::Background::Color(theme.colors.shell.panel)),
@@ -1908,7 +1933,7 @@ mod top_bar_tests {
         assert_eq!(
             caption,
             format!(
-                "{} of 4 Cubes on the {} plan",
+                "Bitcoin mainnet: {} of 4 Cubes on the {} plan",
                 projection.total_count, projection.tier
             )
         );
@@ -1928,6 +1953,60 @@ mod top_bar_tests {
             shown
         );
         assert!(at("Upgrade plan").is_some());
+    }
+
+    /// The Network menu counts Connect-only Cubes beside this device's, so a
+    /// network at its limit adds up to the dock's "N of N", on one line even
+    /// for the longest network name.
+    #[test]
+    fn network_menu_counts_cubes_only_in_connect() {
+        let mut home = home(false);
+        home.server_cube_limit = Some(7);
+        home.remote_cubes = ["r1", "r2", "r3"]
+            .iter()
+            .map(|uuid| super::super::RemoteCube {
+                id: 42,
+                uuid: (*uuid).to_string(),
+                name: format!("Remote {uuid}"),
+                network: crate::app::settings::network_to_api_string(ChainId::Bitcoin),
+                has_recovery_kit: true,
+                has_encrypted_seed: true,
+                phone_recoverable: false,
+                phone_full_cube: false,
+                encryption_pubkey: None,
+                has_vault: None,
+            })
+            .collect();
+        home.catalog.network_menu = true;
+        let projection = launcher_catalog::project(&home);
+        assert_eq!(
+            super::plan_full(&projection).unwrap(),
+            format!(
+                "Bitcoin mainnet: 7 of 7 Cubes on the {} plan",
+                projection.tier
+            )
+        );
+        assert_eq!(
+            super::network_menu_count(&projection, ChainId::Bitcoin, 4),
+            "4 + 3 in Connect"
+        );
+        assert_eq!(
+            super::network_menu_count(&projection, ChainId::Testnet4, 2),
+            "2"
+        );
+
+        let (_, live) = probe(super::network_layer(&home, &projection).unwrap());
+        let at = |value: &str| {
+            live.text
+                .iter()
+                .find(|(text, _)| text == value)
+                .map(|(_, bounds)| *bounds)
+                .unwrap_or_else(|| panic!("{:?} not shown", value))
+        };
+        let name = at("Bitcoin mainnet");
+        let count = at("4 + 3 in Connect");
+        assert!(count.height <= name.height + 1.0, "{:?} {:?}", name, count);
+        assert!(count.x > name.x + name.width, "{:?} {:?}", name, count);
     }
 
     /// App preferences is icon-only on both Launcher bars, and its accessible
