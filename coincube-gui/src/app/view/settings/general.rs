@@ -1,7 +1,6 @@
 use iced::widget::{mouse_area, Column, Container, Row, Space};
 use iced::{Alignment, Length};
 
-use coincube_ui::color;
 use coincube_ui::component::tenshu::{
     segment, segmented, select, setting_row, toggle, SegmentSize, Tone,
 };
@@ -908,27 +907,6 @@ fn escrow_copy(tier: Option<EscrowTier>, spark: bool) -> &'static str {
              seed."
         }
     }
-}
-
-/// Small rounded "pill" badge naming a Recovery-Kit backup method in use
-/// (e.g. "Password", "Keychain"). Subtle translucent-orange fill + orange
-/// border, but the label uses the **theme's primary text colour** (not orange)
-/// so it stays high-contrast in both dark and light mode — orange-on-orange was
-/// unreadable, especially on the light warm-paper background.
-pub(crate) fn backup_pill<'a>(label: &'static str) -> Element<'a, Message> {
-    iced::widget::container(text(label).size(12).bold())
-        .padding([3, 10])
-        .style(|t: &theme::Theme| iced::widget::container::Style {
-            text_color: Some(t.colors.text.primary),
-            background: Some(iced::Background::Color(color::TRANSPARENT_ORANGE)),
-            border: iced::Border {
-                radius: 10.0.into(),
-                width: 1.0,
-                color: color::ORANGE,
-            },
-            ..Default::default()
-        })
-        .into()
 }
 
 /// Which halves a single backup method holds. A method is "enabled" (in use)
