@@ -1,19 +1,27 @@
 name: Functional Tests
 
 on:
-  push:
+  pull_request:
     branches:
       - master
-  pull_request:
+      - redesign
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+      - converted_to_draft
   workflow_dispatch:
 
 # A newer push to the same branch/PR supersedes the run in flight.
 concurrency:
-  group: integration-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: batch-${{ github.workflow }}-${{ github.ref }}-${{ github.event.action == 'edited' && github.event.changes.base == null && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   functional-tests:
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
