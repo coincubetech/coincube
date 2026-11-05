@@ -86,6 +86,11 @@ pub trait Step {
     fn restore_stage(&self) -> Option<super::RestoreStage> {
         None
     }
+    /// A restore's Done: the restored Cube is written and waits for Open
+    /// Cube. Only a restore's final step reaches it.
+    fn restore_done(&self) -> bool {
+        false
+    }
     /// Where this step sits on the Create Vault stepper, if it is one of
     /// that wizard's steps.
     fn vault_stage(&self) -> Option<super::VaultStage> {
@@ -121,6 +126,11 @@ pub struct Final {
     /// `Some` once the vault-create round-trip resolves. Drives the
     /// success caption in the Final view.
     connect_vault_outcome: Option<ConnectVaultOutcome>,
+    /// A Recovery Kit or phone restore ends on a Done screen: the restored
+    /// Cube opens from its Open Cube, not as soon as it is written.
+    restore_done_screen: bool,
+    /// Every write has finished and Done waits for Open Cube.
+    restored: bool,
 }
 
 impl Final {
@@ -140,7 +150,29 @@ impl Final {
             connect_vault_timelock_days: None,
             vault_fingerprint: None,
             connect_vault_outcome: None,
+            restore_done_screen: false,
+            restored: false,
         }
+    }
+
+    /// The final step of a Recovery Kit or phone restore, which ends on
+    /// Done ("[Cube] is restored") with Open Cube.
+    pub fn restored() -> Self {
+        Self {
+            restore_done_screen: true,
+            ..Self::new()
+        }
+    }
+
+    fn exit(&self) -> Task<Message> {
+        let internal_bitcoind = self.internal_bitcoind.clone();
+        let settings = self.wallet_settings.clone();
+        Task::perform(
+            async move { (settings, internal_bitcoind) },
+            |(settings, internal_bitcoind)| {
+                Message::Exit(settings.map(Box::new), internal_bitcoind)
+            },
+        )
     }
 }
 
@@ -153,6 +185,9 @@ impl Default for Final {
 impl Step for Final {
     fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
         Some(crate::installer::VaultStage::Done)
+    }
+    fn restore_done(&self) -> bool {
+        self.restored
     }
     fn load_context(&mut self, ctx: &Context) {
         self.claim_setup = ctx.claim_source.is_some();
@@ -216,15 +251,20 @@ impl Step for Final {
                         warn!("Missing redemption info for token '{}'.", pk.token);
                     }
                 }
+                // A restore waits on its Done screen for Open Cube.
+                if self.restore_done_screen {
+                    self.restored = true;
+                    return Task::none();
+                }
                 // Now exit the installer whether or not any redemption errors occurred.
-                let internal_bitcoind = self.internal_bitcoind.clone();
-                let settings = self.wallet_settings.clone();
-                return Task::perform(
-                    async move { (settings, internal_bitcoind) },
-                    |(settings, internal_bitcoind)| {
-                        Message::Exit(settings.map(Box::new), internal_bitcoind)
-                    },
-                );
+                return self.exit();
+            }
+            Message::OpenRestoredCube => {
+                if !self.restored || self.generating {
+                    return Task::none();
+                }
+                self.generating = true;
+                return self.exit();
             }
             Message::Installed(_, res) => match res {
                 Err(e) => {
@@ -377,7 +417,12 @@ impl Step for Final {
                 if out.members_added == 1 { "" } else { "s" }
             )
         });
-        if self.claim_setup {
+        if self.restored {
+            view::restored(
+                self.cube_name.as_deref().unwrap_or("Your Cube"),
+                self.warning.as_ref(),
+            )
+        } else if self.claim_setup {
             view::claim_setup_install(progress, email, self.generating, self.warning.as_ref())
         } else {
             view::install(
