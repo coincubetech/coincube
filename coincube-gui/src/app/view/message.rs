@@ -158,6 +158,9 @@ pub enum Message {
     OpenAppPreferences,
     /// Lock through the tab's secure lifecycle, then show the Launcher.
     LockCubeToLauncher,
+    /// An import that never finished: lock this Cube and ask to delete it
+    /// from the Launcher, through the Launcher's own delete confirmation.
+    DeleteUnfinishedCube,
     ToggleCubeSwitcher,
     AskCubeLock,
     CancelCubeLock,

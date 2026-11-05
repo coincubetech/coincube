@@ -3321,10 +3321,14 @@ impl GUI {
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
                 if matches!(
                     inner.as_ref(),
-                    tab::Message::LockCubeToLauncher | tab::Message::LockCube
+                    tab::Message::LockCubeToLauncher
+                        | tab::Message::LockCube
+                        | tab::Message::LockCubeToDelete
                 ) =>
             {
-                let to_launcher = matches!(inner.as_ref(), tab::Message::LockCubeToLauncher)
+                let delete = matches!(inner.as_ref(), tab::Message::LockCubeToDelete);
+                let to_launcher = delete
+                    || matches!(inner.as_ref(), tab::Message::LockCubeToLauncher)
                     || self.panes.get(pane_id).is_some_and(|pane| {
                         let owner =
                             pane.tabs.iter().find(|tab| tab.id == tab_id).and_then(
@@ -3399,7 +3403,11 @@ impl GUI {
                             pane.close_tab_in_background(index);
                             crate::app::session::close(); // zeroizes signer/PIN
                             self.focus = Some(pane_id);
-                            let task = pane.focus_launcher(&self.config);
+                            let task = if delete {
+                                pane.focus_launcher_to_delete(cube_id, chain, &self.config)
+                            } else {
+                                pane.focus_launcher(&self.config)
+                            };
                             // Lock makes the Launcher the primary tab even if
                             // a legacy layout retained an unrelated Cube.
                             if pane.focused_tab > 0 {

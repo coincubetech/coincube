@@ -2011,6 +2011,11 @@ impl ImportedBitcoinPanel {
             }
             ImportMessage::LeaveJourney => {
                 if !self.writing_setup() && self.keys_stored != KeysStored::Storing {
+                    // Closing an import that never installed its wallet
+                    // abandons it: the Cube made for it goes too, through
+                    // the Launcher's delete confirmation, where the user can
+                    // still keep it. A finished import only closes.
+                    let abandoned = !self.adding_keys && self.can_delete_cube();
                     self.journey = false;
                     // Typed words do not outlive the screen they were typed on.
                     if let Some(keys) = &mut self.keys {
@@ -2022,6 +2027,9 @@ impl ImportedBitcoinPanel {
                     if self.adding_keys {
                         self.adding_keys = false;
                         self.keys = None;
+                    }
+                    if abandoned {
+                        return Task::done(Message::View(view::Message::DeleteUnfinishedCube));
                     }
                 }
                 Task::none()
@@ -3104,7 +3112,8 @@ impl ImportedBitcoinPanel {
                                 ImportMessage::Abandon,
                             )),
                         ),
-                    ),
+                    )
+                    .push(self.delete_cube_button()),
             )
             .push_maybe(
                 self.error
@@ -3250,8 +3259,9 @@ impl ImportedBitcoinPanel {
             body,
             Some(actions),
         );
-        // Close returns to the Cube; the Vault page reopens an unfinished
-        // import. Done has its own Open Cube.
+        // Close before the wallet is installed asks the Launcher to delete
+        // the Cube made for the import; a kept Cube's Vault page reopens it.
+        // Done has its own Open Cube.
         let close: Element<'a, view::Message> = if step != JourneyStep::Done {
             restore_frame::close_plain(
                 (!self.writing_setup() && self.keys_stored != KeysStored::Storing)
@@ -3328,6 +3338,25 @@ impl ImportedBitcoinPanel {
             .into()
     }
 
+    /// This Cube was created for the import. Until a wallet is installed
+    /// in it, the user can delete it instead of keeping an empty Cube; the
+    /// Launcher's delete confirmation does the deleting.
+    fn delete_cube_button(&self) -> Element<'_, view::Message> {
+        button::secondary(None, "Delete this Cube")
+            .width(iced::Length::Shrink)
+            .on_press_maybe(
+                self.can_delete_cube()
+                    .then_some(view::Message::DeleteUnfinishedCube),
+            )
+            .into()
+    }
+
+    fn can_delete_cube(&self) -> bool {
+        !self.busy
+            && self.import.active_attachment().is_none()
+            && matches!(self.keys_stored, KeysStored::None | KeysStored::Failed(_))
+    }
+
     /// Source, or Review once the form parses: the step's form and its
     /// action row.
     fn setup_step(&self) -> (Element<'_, view::Message>, Element<'_, view::Message>) {
@@ -3343,6 +3372,7 @@ impl ImportedBitcoinPanel {
                             .then_some(view::Message::ImportedBitcoin(ImportMessage::Abandon)),
                     ),
             )
+            .push(self.delete_cube_button())
             .push(iced::widget::Space::new().width(iced::Length::Fill));
         if self.review.is_none() {
             content = content.push(p1_regular("Use your existing Bitcoin wallet in this Cube. The descriptor describes the wallet; you add its keys on the next step.").style(theme::text::secondary));
@@ -5156,6 +5186,7 @@ mod tests {
                 "Done",
                 "Review wallet",
                 "Use a new Vault instead",
+                "Delete this Cube",
                 "Close",
             ],
             // The Cube's own menu and the pre-redesign title stay out.
@@ -5166,13 +5197,20 @@ mod tests {
         let passkey = rendered_labels(panel.journey_view(&cache, true)).await;
         assert_labels(&passkey, &["Cube"], &["Passkey"]);
 
-        // Close returns to the Cube, whose Vault page reopens the import.
-        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        // Close abandons an import that never installed its wallet: it asks
+        // the Launcher to delete the Cube. Kept there, the Cube's Vault page
+        // reopens the import.
+        let task = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(asks_to_delete_the_cube(task).await);
         assert!(!panel.journey_open());
         let resume = rendered_labels(panel.resume_view()).await;
         assert_labels(
             &resume,
-            &["Finish importing your Bitcoin wallet", "Continue import"],
+            &[
+                "Finish importing your Bitcoin wallet",
+                "Continue import",
+                "Delete this Cube",
+            ],
             &["Review wallet"],
         );
         let _ = panel.update_view(ImportMessage::ResumeJourney, None, 0);
@@ -5182,6 +5220,27 @@ mod tests {
         panel.busy = true;
         let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
         assert!(panel.journey_open());
+    }
+
+    #[test]
+    fn the_cube_can_be_deleted_only_until_a_wallet_is_installed() {
+        let directory = NetworkDirectory::new(std::env::temp_dir().join("import-journey-delete"));
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "cube-1".into(), BitcoinImport::pending());
+        assert!(panel.can_delete_cube());
+        panel.busy = true;
+        assert!(!panel.can_delete_cube());
+        panel.busy = false;
+        panel.keys_stored = KeysStored::Storing;
+        assert!(!panel.can_delete_cube());
+        panel.keys_stored = KeysStored::Stored(1);
+        assert!(!panel.can_delete_cube());
+        panel.keys_stored = KeysStored::Failed("synthetic".into());
+        assert!(panel.can_delete_cube());
+
+        // An installed wallet makes it a Cube with a wallet, deleted only
+        // from the Launcher.
+        assert!(!ready_import_panel().can_delete_cube());
     }
 
     #[tokio::test]
@@ -5262,8 +5321,29 @@ mod tests {
             &[],
         );
         panel.busy = true;
-        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        let task = panel.update_view(ImportMessage::LeaveJourney, None, 0);
         assert!(!panel.journey_open());
+        // A finished import only closes; its Cube is never offered for
+        // deletion.
+        assert!(!asks_to_delete_the_cube(task).await);
+        panel.busy = false;
+        panel.journey = true;
+        let task = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(!asks_to_delete_the_cube(task).await);
+        assert!(!panel.can_delete_cube());
+    }
+
+    async fn asks_to_delete_the_cube(task: Task<Message>) -> bool {
+        use iced_runtime::futures::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return false;
+        };
+        stream.collect::<Vec<_>>().await.iter().any(|action| {
+            matches!(
+                action,
+                iced_runtime::Action::Output(Message::View(view::Message::DeleteUnfinishedCube))
+            )
+        })
     }
 
     /// Import or restore's Source, Review, Scan and Done through the wgpu

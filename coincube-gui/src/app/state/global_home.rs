@@ -514,6 +514,28 @@ impl GlobalHome {
         self.spark_backend.is_none() || self.spark_balance_loaded
     }
 
+    /// A loaded Spark or Liquid balance is not zero. A balance still
+    /// loading, or one whose fetch failed, does not count.
+    pub(crate) fn holds_loaded_funds(&self) -> bool {
+        let spark = self.spark_balance_loaded
+            && (self.spark_balance > Amount::ZERO
+                || self.spark_btc_balance > Amount::ZERO
+                || self
+                    .spark_usdb_balance
+                    .as_ref()
+                    .is_some_and(|usdb| usdb.balance > 0));
+        let liquid = self.liquid_balance_loaded && self.liquid_balance > Amount::ZERO;
+        let usdt = self.usdt_balance_loaded && self.usdt_balance > 0;
+        spark || liquid || usdt
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_loaded_spark_balance_for_test(&mut self, sats: u64) {
+        self.spark_btc_balance = Amount::from_sat(sats);
+        self.spark_balance = Amount::from_sat(sats);
+        self.spark_balance_loaded = true;
+    }
+
     /// Fallback poll for the Spark balance while it is still loading.
     /// `tokio::sync::broadcast` doesn't replay events fired before iced
     /// subscribed, so a `Synced` arriving during the bridge-init /
@@ -4470,6 +4492,49 @@ mod tests {
             "cube".to_string(),
             false,
         )
+    }
+
+    #[test]
+    fn only_a_loaded_non_zero_balance_holds_funds() {
+        let mut home = panel();
+        assert!(!home.holds_loaded_funds());
+
+        // Still loading: an unconfirmed reading is not counted.
+        home.spark_balance = Amount::from_sat(5_000);
+        home.liquid_balance = Amount::from_sat(5_000);
+        home.usdt_balance = 5_000;
+        assert!(!home.holds_loaded_funds());
+
+        // Loaded at zero.
+        let mut home = panel();
+        home.spark_balance_loaded = true;
+        home.liquid_balance_loaded = true;
+        home.usdt_balance_loaded = true;
+        assert!(!home.holds_loaded_funds());
+
+        let mut spark = panel();
+        spark.set_loaded_spark_balance_for_test(1);
+        assert!(spark.holds_loaded_funds());
+
+        let mut usdb = panel();
+        usdb.spark_balance_loaded = true;
+        usdb.spark_usdb_balance = Some(coincube_spark_protocol::UsdbBalanceSnapshot {
+            token_identifier: "btkn1test".into(),
+            balance: 1,
+            decimals: 6,
+            ticker: "USDB".into(),
+        });
+        assert!(usdb.holds_loaded_funds());
+
+        let mut liquid = panel();
+        liquid.liquid_balance_loaded = true;
+        liquid.liquid_balance = Amount::from_sat(1);
+        assert!(liquid.holds_loaded_funds());
+
+        let mut usdt = panel();
+        usdt.usdt_balance_loaded = true;
+        usdt.usdt_balance = 1;
+        assert!(usdt.holds_loaded_funds());
     }
 
     /// Drive one home message through the real `State::update`.

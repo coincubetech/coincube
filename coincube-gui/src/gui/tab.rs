@@ -550,6 +550,9 @@ pub enum Message {
     HomeDevicePreference(crate::app::settings::preferences::PreferenceChange),
     /// Explicitly lock the Cube and return to the Launcher in this tab.
     LockCubeToLauncher,
+    /// [`Self::LockCubeToLauncher`], then open the Launcher's delete
+    /// confirmation for that Cube (an import abandoned before it finished).
+    LockCubeToDelete,
     /// Completion of an authenticated fork installer generation.
     ForkInstallCompleted(u64, installer::Message),
 }
@@ -1980,7 +1983,10 @@ impl Tab {
         // replaces the App (Lock Cube, Set up Vault), as leaving its tab
         // would. Taken before the App goes; started after, without waiting.
         let nickname_flush = match (&self.state, &message) {
-            (State::App(app), Message::LockCube | Message::LockCubeToLauncher)
+            (
+                State::App(app),
+                Message::LockCube | Message::LockCubeToLauncher | Message::LockCubeToDelete,
+            )
             | (
                 State::App(app),
                 Message::Run(app::Message::View(
@@ -2010,9 +2016,14 @@ impl Tab {
                 self.state = State::Home(home);
                 task.map(Message::Launch)
             }
-            (State::App(app), Message::LockCubeToLauncher) => {
+            (
+                State::App(app),
+                message @ (Message::LockCubeToLauncher | Message::LockCubeToDelete),
+            ) => {
                 let datadir = app.datadir().clone();
                 let chain = app.cube_settings().network;
+                let delete = matches!(message, Message::LockCubeToDelete)
+                    .then(|| app.cube_settings().id.clone());
                 // Stop owned services as well as revoking Claim before this
                 // App is dropped. GUI dispatch already closed same-Cube
                 // siblings across panes.
@@ -2020,7 +2031,21 @@ impl Tab {
                 app.stop_in_background();
                 let (home, command) = Home::new_for_chain(datadir, Some(chain));
                 self.state = State::Home(home);
-                command.map(Message::Launch)
+                let command = command.map(Message::Launch);
+                match delete {
+                    // Not chained: the Launcher's startup includes Connect
+                    // requests, and the confirmation waits only for its list.
+                    Some(cube_id) => Task::batch([
+                        command,
+                        Task::done(Message::Launch(home::Message::View(
+                            home::ViewMessage::DeleteCube(home::DeleteCubeMessage::ShowModalFor {
+                                cube_id,
+                                chain,
+                            }),
+                        ))),
+                    ]),
+                    None => command,
+                }
             }
             (State::App(app), Message::LockCube) => {
                 // Order matters. Zeroize the session PIN first, then drop the
@@ -3550,6 +3575,20 @@ impl Tab {
                     ),
                     app::Message::View(app::view::Message::LockCubeToLauncher) => {
                         Task::done(Message::LockCubeToLauncher)
+                    }
+                    app::Message::View(app::view::Message::DeleteUnfinishedCube) => {
+                        // Deleting the Cube would leave its Spark or Liquid
+                        // funds without it. A balance still loading does not
+                        // stop it; the Launcher still asks for the PIN.
+                        if app.holds_loaded_wallet_funds() {
+                            Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    UNFINISHED_CUBE_HOLDS_FUNDS.to_string(),
+                                ),
+                            )))
+                        } else {
+                            Task::done(Message::LockCubeToDelete)
+                        }
                     }
                     app::Message::View(app::view::Message::DuressLockRemote) => {
                         // Phase 7b: remote duress activation. Lock the running
@@ -8903,6 +8942,150 @@ mod opening_tests {
         assert!(matches!(tab.state, State::Home(_)));
         crate::app::session::close();
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// Why an unfinished import's Cube was kept rather than deleted.
+const UNFINISHED_CUBE_HOLDS_FUNDS: &str =
+    "This Cube holds Spark or Liquid funds, so it was not deleted. Move them to another wallet first.";
+
+#[cfg(test)]
+mod lock_to_delete_tests {
+    use super::*;
+
+    /// An import abandoned before it finished locks its Cube and asks the
+    /// Launcher for that Cube's delete confirmation.
+    #[test]
+    fn deleting_an_unfinished_cube_locks_it_and_asks_the_launcher() {
+        std::thread::Builder::new()
+            .name("lock-to-delete".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::app::session::test_guard();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let path =
+                    std::env::temp_dir().join(format!("lock-to-delete-{}", uuid::Uuid::new_v4()));
+                let (app, _) = crate::app::shell_tests::bitcoin_app(&path);
+                let cube_id = app.cube_settings().id.clone();
+                let cube_chain = app.cube_settings().network;
+                let mut tab = Tab::new(1, State::App(app));
+                let task = tab.update(Message::LockCubeToDelete);
+                assert!(matches!(tab.state, State::Home(_)));
+                assert!(!crate::app::session::is_open());
+                let mut asked = false;
+                if let Some(stream) = iced_runtime::task::into_stream(task) {
+                    use iced_runtime::futures::futures::StreamExt;
+                    let mut stream = Box::pin(stream);
+                    let _ = runtime.block_on(tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        async {
+                            while let Some(action) = stream.next().await {
+                                if let iced_runtime::Action::Output(Message::Launch(
+                                    home::Message::View(home::ViewMessage::DeleteCube(
+                                        home::DeleteCubeMessage::ShowModalFor {
+                                            cube_id: id,
+                                            chain,
+                                        },
+                                    )),
+                                )) = action
+                                {
+                                    asked = id == cube_id && chain == cube_chain;
+                                    break;
+                                }
+                            }
+                        },
+                    ));
+                }
+                assert!(asked, "the Launcher is asked to delete this Cube");
+                let _ = std::fs::remove_dir_all(&path);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod unfinished_cube_funds_tests {
+    use super::*;
+
+    /// A Cube whose loaded Spark balance is not zero stays open: Delete
+    /// this Cube, or Close on an abandoned import, says why instead of
+    /// locking it for deletion.
+    #[test]
+    fn a_cube_holding_funds_is_kept_rather_than_deleted() {
+        std::thread::Builder::new()
+            .name("unfinished-cube-funds".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::app::session::test_guard();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let path = std::env::temp_dir()
+                    .join(format!("unfinished-cube-funds-{}", uuid::Uuid::new_v4()));
+                let outputs = |tab: &mut Tab| {
+                    let task = tab.update(Message::Run(app::Message::View(
+                        app::view::Message::DeleteUnfinishedCube,
+                    )));
+                    let mut outputs = Vec::new();
+                    if let Some(stream) = iced_runtime::task::into_stream(task) {
+                        use iced_runtime::futures::futures::StreamExt;
+                        let mut stream = Box::pin(stream);
+                        let _ = runtime.block_on(tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            async {
+                                while let Some(action) = stream.next().await {
+                                    // App-bound output is tagged with the
+                                    // App's generation.
+                                    if let iced_runtime::Action::Output(message) = action {
+                                        outputs.push(match message {
+                                            Message::AppAsync(_, inner) => *inner,
+                                            message => message,
+                                        });
+                                    }
+                                }
+                            },
+                        ));
+                    }
+                    outputs
+                };
+
+                let (mut app, _) = crate::app::shell_tests::bitcoin_app(&path);
+                app.set_loaded_spark_balance_for_test(1_000);
+                let mut tab = Tab::new(1, State::App(app));
+                let sent = outputs(&mut tab);
+                assert!(matches!(tab.state, State::App(_)));
+                assert!(!sent
+                    .iter()
+                    .any(|message| matches!(message, Message::LockCubeToDelete)));
+                assert!(sent.iter().any(|message| matches!(
+                    message,
+                    Message::Run(app::Message::View(app::view::Message::ShowError(error)))
+                        if error == UNFINISHED_CUBE_HOLDS_FUNDS
+                )));
+                drop(tab);
+
+                // No balance loaded: the Launcher's confirmation decides.
+                let unloaded = path.join("unloaded");
+                let (app, _) = crate::app::shell_tests::bitcoin_app(&unloaded);
+                let mut tab = Tab::new(2, State::App(app));
+                let sent = outputs(&mut tab);
+                assert!(sent
+                    .iter()
+                    .any(|message| matches!(message, Message::LockCubeToDelete)));
+                drop(tab);
+                let _ = std::fs::remove_dir_all(&path);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
 

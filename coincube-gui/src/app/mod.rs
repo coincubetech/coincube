@@ -3938,6 +3938,19 @@ impl App {
         self.wallet_registry.spark().cloned()
     }
 
+    /// A loaded Spark or Liquid balance is not zero. Deleting the Cube
+    /// would leave those funds without it.
+    pub fn holds_loaded_wallet_funds(&self) -> bool {
+        self.panels.global_home.holds_loaded_funds()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_loaded_spark_balance_for_test(&mut self, sats: u64) {
+        self.panels
+            .global_home
+            .set_loaded_spark_balance_for_test(sats);
+    }
+
     /// Returns a clone of the authenticated coincube-api client (with JWT set),
     /// or `None` if the user has not logged in yet.
     pub fn authenticated_coincube_client(
