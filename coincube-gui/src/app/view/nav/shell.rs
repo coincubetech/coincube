@@ -36,6 +36,18 @@ use iced::{
 pub const DEVICE_REJECTED_ROUTE: Menu =
     Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections));
 
+/// Whether `menu` is a Settings route, whichever scope it is in. The
+/// sidebar then selects Settings rather than the wallet the scope names.
+pub fn is_settings(menu: &Menu) -> bool {
+    matches!(
+        menu,
+        Menu::Cube(CubeSubMenu::Settings(_))
+            | Menu::Vault(VaultSubMenu::Settings(_))
+            | Menu::Spark(SparkSubMenu::Settings(_))
+            | Menu::Liquid(LiquidSubMenu::Settings(_))
+    )
+}
+
 pub const FULL_WIDTH: f32 = 248.0;
 pub const COMPACT_WIDTH: f32 = 208.0;
 pub const TOP_BAR_HEIGHT: f32 = bar::HEIGHT;
@@ -731,13 +743,15 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     // than the focus ring's 4px outer extent at its first and last actions.
     let mut middle: Column<Message> = Column::new().spacing(4).padding([6, 10]);
     middle = middle.push(section("Wallets"));
+    // Settings scoped to a wallet highlights Settings, not the wallet.
+    let settings_active = is_settings(menu);
     if !ctx.network.is_blake2b() {
         let spark_reason = features::spark(ctx.network).reason().map(str::to_owned);
         middle = middle.push(nav_row_with_key(
             "Spark".to_owned(),
             wallet_label("Spark", ctx.spark_alias),
             Some(NavIcon::Glyph(glyph::SPARK_STROKE)),
-            matches!(menu, Menu::Spark(_)),
+            matches!(menu, Menu::Spark(_)) && !settings_active,
             spark_reason
                 .is_none()
                 .then_some(Message::Menu(Menu::Spark(SparkSubMenu::Overview))),
@@ -750,7 +764,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
             "Vault".to_owned(),
             wallet_label("Vault", ctx.vault_alias),
             Some(NavIcon::Glyph(glyph::SHIELD)),
-            matches!(menu, Menu::Vault(_)),
+            matches!(menu, Menu::Vault(_)) && !settings_active,
             Some(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
             false,
             None,
@@ -770,7 +784,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
         middle = middle.push(nav_row(
             "Liquid",
             Some(NavIcon::Glyph(glyph::DROPLET)),
-            matches!(menu, Menu::Liquid(_)),
+            matches!(menu, Menu::Liquid(_)) && !settings_active,
             liquid_reason
                 .is_none()
                 .then_some(Message::Menu(Menu::Liquid(LiquidSubMenu::Overview))),
@@ -800,13 +814,6 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
             }
         }
     }
-    let settings_active = matches!(
-        menu,
-        Menu::Cube(CubeSubMenu::Settings(_))
-            | Menu::Vault(VaultSubMenu::Settings(_))
-            | Menu::Spark(SparkSubMenu::Settings(_))
-            | Menu::Liquid(LiquidSubMenu::Settings(_))
-    );
     let foot = column![
         rule::horizontal(1),
         container(nav_row(
@@ -1023,5 +1030,34 @@ mod short_cube_name_tests {
         );
         // Line breaks and other spacing still read as one space each.
         assert_eq!(short_cube_name("Every\nday\tCube"), "Every day Cube");
+    }
+}
+
+#[cfg(test)]
+mod settings_selection_tests {
+    use super::*;
+    use crate::app::menu::{SettingsOption, SparkSettingsOption};
+
+    /// Settings scoped to Spark or Vault is still Settings: the sidebar
+    /// selects Settings there, and the wallet row only on the wallet's pages.
+    #[test]
+    fn wallet_scoped_settings_count_as_settings() {
+        for menu in [
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections)),
+            Menu::Spark(SparkSubMenu::Settings(Some(
+                SparkSettingsOption::LightningAddress,
+            ))),
+            Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Node))),
+            Menu::Vault(VaultSubMenu::Settings(None)),
+        ] {
+            assert!(is_settings(&menu), "{:?}", menu);
+        }
+        for menu in [
+            Menu::Spark(SparkSubMenu::Overview),
+            Menu::Vault(VaultSubMenu::Overview),
+            Menu::Cube(CubeSubMenu::Overview),
+        ] {
+            assert!(!is_settings(&menu), "{:?}", menu);
+        }
     }
 }
