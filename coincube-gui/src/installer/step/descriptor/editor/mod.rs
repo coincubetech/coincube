@@ -899,7 +899,11 @@ impl Step for DefineDescriptor {
             }
         };
         if let Some(modal) = &self.modal {
+            // The step sits in the Create Vault frame's scrolled column, whose
+            // bounds are smaller than the Border Wallet sheet: lay the modal
+            // out against the window so its footer is never clipped.
             Modal::new(content, modal.view(hws))
+                .cover_window()
                 .on_blur(if modal.processing() {
                     None
                 } else {
