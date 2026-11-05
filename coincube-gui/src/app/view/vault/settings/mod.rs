@@ -212,110 +212,44 @@ pub fn import_export<'a>(
     dashboard(menu, cache, content)
 }
 
-/// Vault → Settings → Connections: the Connect account, the Cube service
-/// session and the node backend, with the Node tab one click away.
+/// Vault → Settings → Connections: the node backend's health with Node
+/// settings one click away, and one row for the Cube's Connect session that
+/// opens Cube › Connections.
 pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
     use crate::app::view::settings::page;
-    use crate::app::ConnectionStatus;
-    let account = Row::new()
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .push(page::muted("Connect account"))
-        .push(if cache.connect_authenticated {
-            page::status(page::Status::Ok, "Signed in")
-        } else {
-            page::status(page::Status::Unknown, "Signed out")
-        })
-        .push(Space::new().width(Length::Fill))
-        .push(page::link(
-            "tenshu.settings.vault-connections.connect",
-            if cache.connect_authenticated {
-                "Manage in Connect"
-            } else {
-                "Sign in"
-            },
-            if cache.connect_authenticated {
-                Message::OpenConnectSwitchAccount
-            } else {
-                Message::OpenConnectSignIn
-            },
-        ));
-    let session = match (&cache.connect_stream_status, cache.connect_authenticated) {
-        (_, false) => page::row("Cube service session")
-            .accessory(page::status(page::Status::Unknown, "Not checked"))
-            .description("Checked after sign-in."),
-        // The realtime stream says nothing about registration; that comes
-        // from the Cube's Connect id.
-        (ConnectionStatus::Connected, true) => page::row("Cube service session")
-            .accessory(page::status(page::Status::Ok, "Connected"))
-            .description(if cache.current_cube_server_id.is_some() {
-                "Realtime connection open. This Cube is registered with Connect."
-            } else {
-                "Realtime connection open. This Cube is not registered with Connect yet."
-            }),
-        (ConnectionStatus::DeviceRejected, true) => page::row("Cube service session")
-            .accessory(page::status(page::Status::Bad, "Device not recognized"))
-            .description(crate::app::DEVICE_REJECTED_HINT)
-            .control(page::button(
-                "tenshu.settings.vault.reregister",
-                "Re-register…",
-                Some(Message::Menu(
-                    crate::app::view::nav::shell::DEVICE_REJECTED_ROUTE,
-                )),
-            )),
-        (ConnectionStatus::Error(e), true) => page::row("Cube service session")
-            .accessory(page::status(page::Status::Bad, "Reconnect required"))
-            .description(e.clone()),
-        (_, true) => page::row("Cube service session")
-            .accessory(page::status(page::Status::Busy, "Connecting…"))
-            .description("Re-authenticates this Cube only. Never rescans."),
-    };
     let progress = cache.sync_progress();
+    let block = coincube_ui::component::amount::group_digits(&cache.blockheight().to_string(), ",");
     let node = if progress >= 1.0 {
-        page::row("Node backend & sync")
+        page::row("Node backend and sync")
             .accessory(page::status(page::Status::Ok, "Synced"))
-            .description(format!("Block {}.", cache.blockheight()))
+            .description(format!("Synced to block {block}."))
     } else {
-        page::row("Node backend & sync")
+        page::row("Node backend and sync")
             .accessory(page::status(
                 page::Status::Busy,
                 format!("Syncing {:.1}%", crate::utils::syncing_percent(progress)),
             ))
-            .description(format!(
-                "Block {}. Balances may be out of date.",
-                cache.blockheight()
-            ))
-    };
+            .description(format!("At block {block}. Balances may be out of date."))
+    }
+    .control(page::button(
+        "tenshu.settings.vault-connections.node",
+        "Node settings",
+        Some(Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
+            crate::app::menu::SettingsOption::Node,
+        ))))),
+    ));
     // The App wraps this in the dashboard (`connect_settings_content`).
-    Column::new()
-        .width(Length::Fill)
-        .push(page::note(
-            coincube_ui::component::tenshu::Tone::Muted,
-            account,
-            None,
-        ))
-        .push(page::group(
-            "Health",
-            None,
-            page::rows([session.into(), node.into()]),
-        ))
-        .push(page::group(
-            "Node",
-            None,
-            page::rows(
-                [page::row("Backend, sync status, Tor, resources and rescan")
-                    .description("Node settings live in the Node tab of this Vault's Settings.")
-                    .control(page::button(
-                        "tenshu.settings.vault-connections.node",
-                        "Open Node",
-                        Some(Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
-                            crate::app::menu::SettingsOption::Node,
-                        ))))),
-                    ))
-                    .into()],
+    page::group(
+        "Health",
+        None,
+        page::rows([
+            node.into(),
+            crate::app::view::settings::connections::cube_connections_row(
+                cache,
+                "tenshu.settings.vault-connections.cube",
             ),
-        ))
-        .into()
+        ]),
+    )
 }
 
 pub fn plaintext_export_review<'a>() -> Element<'a, Message> {
@@ -3396,6 +3330,52 @@ mod tests {
         node::bitcoind::NodeResources,
     };
     use std::{net::SocketAddr, path::PathBuf};
+
+    /// Vault › Connections: the node row with a thousands separator and its
+    /// own Node settings button, then the Cube connections link; no Connect
+    /// account box and no section that only points at Node.
+    #[test]
+    fn vault_connections_shows_node_health_and_links_to_cube_connections() {
+        use crate::app::view::shared::landing::capture;
+        let mut cache = Cache {
+            connect_authenticated: true,
+            connect_stream_status: crate::app::ConnectionStatus::Connected,
+            ..Cache::default()
+        };
+        cache.daemon_cache.blockheight = 974_600;
+        cache.daemon_cache.sync_progress = 1.0;
+        let probe = capture::inspect(
+            "vault-connections",
+            connections(&cache),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        );
+        for label in [
+            "Node backend and sync",
+            "Synced to block 974,600.",
+            "Node settings",
+            "Connect account and this device",
+            "Cube connections",
+        ] {
+            assert!(probe.contains(label), "{}", label);
+        }
+        for gone in ["Cube service session", "Open Node", "Manage in Connect"] {
+            assert!(!probe.contains(gone), "{}", gone);
+        }
+        let sent = capture::activate(
+            connections(&cache),
+            iced::advanced::widget::Id::new("tenshu.settings.vault-connections.node"),
+            (1440, 900),
+            true,
+        );
+        assert!(sent.iter().any(|m| matches!(
+            m,
+            Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
+                crate::app::menu::SettingsOption::Node
+            ))))
+        )));
+    }
 
     fn value(text: &str, valid: bool) -> form::Value<String> {
         form::Value {

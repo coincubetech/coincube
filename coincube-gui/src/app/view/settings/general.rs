@@ -362,7 +362,15 @@ fn data_exports_section<'a>(menu: &'a Menu, cache: &'a cache::Cache) -> Element<
             ))
             .into(),
     ]);
-    dashboard(menu, cache, page::group("Data & exports", None, rows))
+    // No heading: it would only repeat the tab name.
+    dashboard(
+        menu,
+        cache,
+        Column::new()
+            .width(Length::Fill)
+            .push(Space::new().height(Length::Fixed(page::GROUP_GAP)))
+            .push(rows),
+    )
 }
 
 pub const DATA_BACKUP_ID: &str = "tenshu.settings.data.backup";

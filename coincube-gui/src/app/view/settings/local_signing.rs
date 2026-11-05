@@ -41,16 +41,16 @@ pub fn section<'a>(
         return dashboard(
             menu,
             cache,
-            page::group(
-                "Keychain",
-                None,
-                page::rows([page::row("This Vault has no Keychain key")
+            // No heading: it would only repeat the tab name.
+            Column::new()
+                .width(Length::Fill)
+                .push(Space::new().height(Length::Fixed(page::GROUP_GAP)))
+                .push(page::rows([page::row("This Vault has no Keychain key")
                     .description(
                         "Phones sign with a key from the COINCUBE Keychain app, and that key \
                          can only be added when a Vault is created.",
                     )
-                    .into()]),
-            ),
+                    .into()])),
         );
     }
     let mut col = Column::new()

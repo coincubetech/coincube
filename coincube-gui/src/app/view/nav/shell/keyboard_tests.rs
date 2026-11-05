@@ -638,7 +638,7 @@ fn connection_chip_routes_to_reregistration_or_node_settings() {
 
     assert_eq!(
         DEVICE_REJECTED_ROUTE,
-        Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About))
+        Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections))
     );
     let node = Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Node)));
     let first_tab = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General));

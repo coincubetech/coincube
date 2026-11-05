@@ -1776,8 +1776,11 @@ mod tests {
                     appearance,
                     palette,
                 );
-                assert!(inspection.contains("Pair a client"));
-                assert!(inspection.contains("A local connection is not a private one"));
+                assert!(inspection.contains("Paired clients"));
+                assert!(inspection.contains("Local is not private."));
+                assert!(inspection.contains("Shared with the client"));
+                assert!(inspection.contains("Never shared"));
+                assert!(!inspection.contains("Your AI provider may receive financial information"));
                 assert!(!inspection.contains("TENSHU_MCP_CREDENTIAL"));
             }
         };

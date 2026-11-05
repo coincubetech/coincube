@@ -7,9 +7,10 @@
 //! - Conversion: the max price change, read-only, and Swap by hand.
 //! - The Spark nickname field.
 //!
-//! and the Connections tab, whose "Spark bridge" row shows whether the
-//! Spark bridge subprocess is reachable (`get_info` round-trip
-//! successful on the last reload).
+//! and the Connections tab, whose "Spark wallet service" row says in plain
+//! words whether the Spark bridge subprocess is reachable (`get_info`
+//! round-trip successful on the last reload), with the engineering detail
+//! behind "Technical details".
 //!
 //! The Lightning address tab lives in [`lightning_address`] and
 //! is rendered by `App::view` directly so it can pass a borrow of the
@@ -24,13 +25,12 @@ use coincube_ui::{
     widget::{Column, Container, Element, Row},
 };
 use iced::widget::Space;
-use iced::{Alignment, Length};
+use iced::Length;
 
 use crate::app::cache::Cache;
 use crate::app::state::spark::settings::nickname_fits;
 use crate::app::view::settings::page;
 use crate::app::view::{Message, SparkSettingsMessage};
-use crate::app::ConnectionStatus;
 
 /// Coarse status the panel knows about. Only "Unavailable" needs
 /// its own rendering branch; the other variants all render the
@@ -133,84 +133,64 @@ impl SparkSettingsView {
             .into()
     }
 
-    /// The Connections tab: the Connect account, the Cube service session and
-    /// the Spark bridge, then the bridge diagnostics.
-    pub fn render_connections<'a>(self, cache: &'a Cache) -> Element<'a, Message> {
-        let account = Row::new()
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .push(page::muted("Connect account"))
-            .push(if cache.connect_authenticated {
-                page::status(page::Status::Ok, "Signed in")
-            } else {
-                page::status(page::Status::Unknown, "Signed out")
-            })
-            .push(Space::new().width(Length::Fill))
-            .push(page::link(
-                "tenshu.settings.spark.manage-connect",
-                if cache.connect_authenticated {
-                    "Manage in Connect"
-                } else {
-                    "Sign in"
-                },
-                if cache.connect_authenticated {
-                    Message::OpenConnectSwitchAccount
-                } else {
-                    Message::OpenConnectSignIn
-                },
-            ));
-        let session = match (&cache.connect_stream_status, cache.connect_authenticated) {
-            (_, false) => page::row("Cube service session")
-                .accessory(page::status(page::Status::Unknown, "Not checked"))
-                .description("Checked after sign-in."),
-            // The realtime stream says nothing about registration; that comes
-            // from the Cube's Connect id.
-            (ConnectionStatus::Connected, true) => page::row("Cube service session")
-                .accessory(page::status(page::Status::Ok, "Connected"))
-                .description(if cache.current_cube_server_id.is_some() {
-                    "Realtime connection open. This Cube is registered with Connect."
-                } else {
-                    "Realtime connection open. This Cube is not registered with Connect yet."
-                }),
-            (ConnectionStatus::DeviceRejected, true) => page::row("Cube service session")
-                .accessory(page::status(page::Status::Bad, "Device not recognized"))
-                .description(crate::app::DEVICE_REJECTED_HINT)
-                .control(page::button(
-                    "tenshu.settings.spark.reregister",
-                    "Re-register…",
-                    Some(Message::Menu(
-                        crate::app::view::nav::shell::DEVICE_REJECTED_ROUTE,
-                    )),
-                )),
-            (ConnectionStatus::Error(e), true) => page::row("Cube service session")
-                .accessory(page::status(page::Status::Bad, "Reconnect required"))
-                .description(e.clone()),
-            (_, true) => page::row("Cube service session")
-                .accessory(page::status(page::Status::Busy, "Connecting…"))
-                .description("Re-authenticates this Cube only. Never rescans."),
-        };
+    /// The Connections tab: Spark's own health in plain words, the bridge
+    /// detail behind "Technical details", and one row for the Cube's Connect
+    /// session that opens Cube › Connections.
+    pub fn render_connections<'a>(
+        self,
+        cache: &'a Cache,
+        technical_details_open: bool,
+    ) -> Element<'a, Message> {
         let (_, _, headline, detail) = bridge_status_copy(&self.status);
         let kind = match self.status {
             SparkSettingsStatus::Connected => page::Status::Ok,
             SparkSettingsStatus::Loading => page::Status::Busy,
             SparkSettingsStatus::Error(_) | SparkSettingsStatus::Unavailable => page::Status::Bad,
         };
-        let bridge = page::row("Spark bridge")
+        let mut service = page::row("Spark wallet service")
             .accessory(page::status(kind, headline))
-            .description(detail);
-        Column::new()
-            .width(Length::Fill)
-            .push(page::note(
-                coincube_ui::component::tenshu::Tone::Muted,
-                account,
-                None,
+            .description(service_summary(&self.status))
+            .line(page::link(
+                TECHNICAL_DETAILS_ID,
+                if technical_details_open {
+                    "Hide technical details"
+                } else {
+                    "Technical details"
+                },
+                Message::SparkSettings(SparkSettingsMessage::ToggleTechnicalDetails),
             ))
-            .push(page::group(
-                "Health",
-                None,
-                page::rows([session.into(), bridge.into()]),
-            ))
-            .into()
+            .top();
+        if technical_details_open {
+            service = service.line(
+                Container::new(page::muted(detail).font(coincube_ui::font::MONO_REGULAR))
+                    .max_width(560),
+            );
+        }
+        page::group(
+            "Health",
+            None,
+            page::rows([
+                service.into(),
+                crate::app::view::settings::connections::cube_connections_row(
+                    cache,
+                    "tenshu.settings.spark.cube-connections",
+                ),
+            ]),
+        )
+    }
+}
+
+pub const TECHNICAL_DETAILS_ID: &str = "tenshu.settings.spark.technical-details";
+
+/// Spark's health in plain words, under "Spark wallet service".
+fn service_summary(status: &SparkSettingsStatus) -> &'static str {
+    match status {
+        SparkSettingsStatus::Connected => "Running. Payments and balances are up to date.",
+        SparkSettingsStatus::Loading => "Checking that the Spark wallet service is running.",
+        SparkSettingsStatus::Error(_) => {
+            "Not responding. Payments and balances may be out of date until Tenshu restarts it."
+        }
+        SparkSettingsStatus::Unavailable => "Spark isn't set up for this Cube.",
     }
 }
 
@@ -403,15 +383,15 @@ fn bridge_status_copy(
         SparkSettingsStatus::Loading => (
             "●",
             color::GREY_3,
-            "Checking bridge…",
-            "Waiting for the first get_info round-trip.".to_string(),
+            "Checking…",
+            "Bridge subprocess · JSON-RPC over stdio. Waiting for the first get_info round-trip."
+                .to_string(),
         ),
         SparkSettingsStatus::Connected => (
             "✓",
             color::GREEN,
             "Connected",
-            "The Spark bridge subprocess is reachable and \
-             responding to JSON-RPC requests over stdio."
+            "Bridge subprocess · JSON-RPC over stdio. The last get_info round-trip succeeded."
                 .to_string(),
         ),
         SparkSettingsStatus::Error(err) => (
@@ -419,8 +399,8 @@ fn bridge_status_copy(
             color::RED,
             "Disconnected",
             format!(
-                "The last get_info call failed. Restarting the cube \
-                 re-spawns the bridge. Error: {}",
+                "Bridge subprocess · JSON-RPC over stdio. The last get_info call failed; \
+                 restarting the Cube re-spawns the bridge. Error: {}",
                 err
             ),
         ),
@@ -428,8 +408,8 @@ fn bridge_status_copy(
             "✗",
             color::RED,
             "Unavailable",
-            "No Spark signer configured, or the bridge subprocess \
-             failed to spawn."
+            "Bridge subprocess · JSON-RPC over stdio. No Spark signer is configured, or the \
+             bridge subprocess failed to spawn."
                 .to_string(),
         ),
     }
@@ -633,6 +613,59 @@ mod tests {
         assert!(held.contains("waiting while a swap out of USDB settles"));
     }
 
+    /// Spark › Connections: Spark's own health in plain words, the bridge
+    /// detail only behind Technical details, and one link row to Cube ›
+    /// Connections instead of the account box.
+    #[test]
+    fn spark_connections_speaks_plainly_and_folds_the_bridge_detail() {
+        let cache = Cache {
+            connect_authenticated: true,
+            connect_stream_status: crate::app::ConnectionStatus::Connected,
+            ..Cache::default()
+        };
+        let view = || SparkSettingsView {
+            status: SparkSettingsStatus::Connected,
+            stable_balance_active: Some(false),
+            stable_balance_saving: false,
+            auto_convert: None,
+            swap_available: true,
+        };
+        let inspect = |content| {
+            crate::app::view::shared::landing::capture::inspect(
+                "spark-settings-connections",
+                content,
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            )
+        };
+        let closed = inspect(view().render_connections(&cache, false));
+        for label in [
+            "Spark wallet service",
+            "Running. Payments and balances are up to date.",
+            "Technical details",
+            "Connect account and this device",
+            "Cube connections",
+        ] {
+            assert!(closed.contains(label), "{}", label);
+        }
+        for gone in ["JSON-RPC", "Cube service session", "Manage in Connect"] {
+            assert!(!closed.contains(gone), "{}", gone);
+        }
+        let open = inspect(view().render_connections(&cache, true));
+        assert!(open.contains("Bridge subprocess · JSON-RPC over stdio"));
+        let toggled = crate::app::view::shared::landing::capture::activate(
+            view().render_connections(&cache, false),
+            iced::advanced::widget::Id::new(TECHNICAL_DETAILS_ID),
+            (1440, 900),
+            true,
+        );
+        assert!(toggled.iter().any(|m| matches!(
+            m,
+            Message::SparkSettings(SparkSettingsMessage::ToggleTechnicalDetails)
+        )));
+    }
+
     #[test]
     fn stable_balance_toggle_state_only_enables_when_loaded_available_and_idle() {
         assert_eq!(
@@ -661,7 +694,7 @@ mod tests {
         let loading = bridge_status_copy(&SparkSettingsStatus::Loading);
         assert_eq!(loading.0, "●");
         assert_eq!(loading.1, color::GREY_3);
-        assert_eq!(loading.2, "Checking bridge…");
+        assert_eq!(loading.2, "Checking…");
 
         let connected = bridge_status_copy(&SparkSettingsStatus::Connected);
         assert_eq!(connected.0, "✓");
