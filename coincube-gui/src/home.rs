@@ -476,6 +476,9 @@ pub struct Home {
     /// settings reload makes its row available, so the Cube's own screens
     /// (Create Vault, or an import's descriptor steps) come next.
     open_created_cube: Option<String>,
+    /// A Cube whose unfinished import asked to delete it. Its delete
+    /// confirmation opens once the checked list has its row.
+    delete_after_check: Option<String>,
     /// A newly created Cube whose Connect registration is still in flight.
     /// It opens once the result lands: leaving Home first would drop that
     /// result, and the Cube would never be marked synced.
@@ -669,6 +672,7 @@ impl Home {
                 restore_phone: false,
                 restore_all_networks: false,
                 open_created_cube: None,
+                delete_after_check: None,
                 open_after_registration: None,
                 creating_cube: false,
                 pending_cube_id: None,
@@ -2681,6 +2685,22 @@ impl Home {
                     Task::none()
                 }
             },
+            Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModalFor(id))) => {
+                let index = match &self.state {
+                    State::Cubes { cubes, .. } => cubes.iter().position(|cube| cube.id == id),
+                    _ => None,
+                };
+                match index {
+                    Some(index) => self.update_inner(Message::View(ViewMessage::DeleteCube(
+                        DeleteCubeMessage::ShowModal(index),
+                    ))),
+                    // The list is still loading, or predates the Cube.
+                    None => {
+                        self.delete_after_check = Some(id);
+                        self.reload()
+                    }
+                }
+            }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModal(i))) => {
                 if let State::Cubes { cubes, .. } = &self.state {
                     if let Some(cube) = cubes.get(i) {
@@ -3011,6 +3031,16 @@ impl Home {
                     // Taken before the import's own Open returns early, so
                     // a pending pick never outlives this checked list.
                     let pending = self.catalog.pending_select.take();
+                    if let (Some(id), State::Cubes { cubes, .. }) =
+                        (&self.delete_after_check, &self.state)
+                    {
+                        if let Some(index) = cubes.iter().position(|cube| &cube.id == id) {
+                            self.delete_after_check = None;
+                            return self.update_inner(Message::View(ViewMessage::DeleteCube(
+                                DeleteCubeMessage::ShowModal(index),
+                            )));
+                        }
+                    }
                     if let (Some(id), State::Cubes { cubes, .. }) =
                         (&self.open_created_cube, &self.state)
                     {
@@ -7702,6 +7732,8 @@ pub enum ViewMessage {
 #[derive(Debug, Clone)]
 pub enum DeleteCubeMessage {
     ShowModal(usize),
+    /// [`Self::ShowModal`] for a Cube ID, once the list has its row.
+    ShowModalFor(String),
     ShowRemoteModal(String), // uuid of remote-only cube
     CloseModal,
     Confirm(String), // Cube ID
@@ -11873,6 +11905,59 @@ mod tests {
             );
             assert_eq!(disabled.text_color.a, 0.5, "{name} disabled label");
         }
+    }
+
+    #[test]
+    fn an_abandoned_import_opens_the_delete_confirmation_for_its_cube() {
+        let other = cube("other", "Other", Network::Bitcoin);
+        let unfinished = cube("unfinished", "Unfinished", Network::Bitcoin);
+
+        // The list already has the row: the confirmation opens at once.
+        let mut home = home();
+        home.network = ChainId::Bitcoin;
+        home.state = State::Cubes {
+            cubes: vec![other.clone(), unfinished.clone()],
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        };
+        let _ = home.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::ShowModalFor("unfinished".into()),
+        )));
+        assert_eq!(
+            home.delete_cube_modal.as_ref().map(|m| m.cube.id.as_str()),
+            Some("unfinished")
+        );
+
+        // A Launcher that is still loading opens it once the checked list
+        // has the row, and only for that Cube.
+        let mut home = self::home();
+        home.network = ChainId::Bitcoin;
+        let _ = home.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::ShowModalFor("unfinished".into()),
+        )));
+        assert!(home.delete_cube_modal.is_none());
+        let _ = home.update(Message::Checked {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![other.clone()],
+                create_cube: false,
+                source: ChainId::Bitcoin,
+            }),
+        });
+        assert!(home.delete_cube_modal.is_none());
+        let _ = home.update(Message::Checked {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![other, unfinished],
+                create_cube: false,
+                source: ChainId::Bitcoin,
+            }),
+        });
+        assert_eq!(
+            home.delete_cube_modal.as_ref().map(|m| m.cube.id.as_str()),
+            Some("unfinished")
+        );
+        assert!(home.delete_after_check.is_none());
     }
 
     #[test]

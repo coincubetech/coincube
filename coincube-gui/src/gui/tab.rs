@@ -550,6 +550,9 @@ pub enum Message {
     HomeDevicePreference(crate::app::settings::preferences::PreferenceChange),
     /// Explicitly lock the Cube and return to the Launcher in this tab.
     LockCubeToLauncher,
+    /// [`Self::LockCubeToLauncher`], then open the Launcher's delete
+    /// confirmation for that Cube (an import abandoned before it finished).
+    LockCubeToDelete,
     /// Completion of an authenticated fork installer generation.
     ForkInstallCompleted(u64, installer::Message),
 }
@@ -1980,7 +1983,10 @@ impl Tab {
         // replaces the App (Lock Cube, Set up Vault), as leaving its tab
         // would. Taken before the App goes; started after, without waiting.
         let nickname_flush = match (&self.state, &message) {
-            (State::App(app), Message::LockCube | Message::LockCubeToLauncher)
+            (
+                State::App(app),
+                Message::LockCube | Message::LockCubeToLauncher | Message::LockCubeToDelete,
+            )
             | (
                 State::App(app),
                 Message::Run(app::Message::View(
@@ -2010,9 +2016,14 @@ impl Tab {
                 self.state = State::Home(home);
                 task.map(Message::Launch)
             }
-            (State::App(app), Message::LockCubeToLauncher) => {
+            (
+                State::App(app),
+                message @ (Message::LockCubeToLauncher | Message::LockCubeToDelete),
+            ) => {
                 let datadir = app.datadir().clone();
                 let chain = app.cube_settings().network;
+                let delete = matches!(message, Message::LockCubeToDelete)
+                    .then(|| app.cube_settings().id.clone());
                 // Stop owned services as well as revoking Claim before this
                 // App is dropped. GUI dispatch already closed same-Cube
                 // siblings across panes.
@@ -2020,7 +2031,20 @@ impl Tab {
                 app.stop_in_background();
                 let (home, command) = Home::new_for_chain(datadir, Some(chain));
                 self.state = State::Home(home);
-                command.map(Message::Launch)
+                let command = command.map(Message::Launch);
+                match delete {
+                    // Not chained: the Launcher's startup includes Connect
+                    // requests, and the confirmation waits only for its list.
+                    Some(cube_id) => Task::batch([
+                        command,
+                        Task::done(Message::Launch(home::Message::View(
+                            home::ViewMessage::DeleteCube(home::DeleteCubeMessage::ShowModalFor(
+                                cube_id,
+                            )),
+                        ))),
+                    ]),
+                    None => command,
+                }
             }
             (State::App(app), Message::LockCube) => {
                 // Order matters. Zeroize the session PIN first, then drop the
@@ -3550,6 +3574,9 @@ impl Tab {
                     ),
                     app::Message::View(app::view::Message::LockCubeToLauncher) => {
                         Task::done(Message::LockCubeToLauncher)
+                    }
+                    app::Message::View(app::view::Message::DeleteUnfinishedCube) => {
+                        Task::done(Message::LockCubeToDelete)
                     }
                     app::Message::View(app::view::Message::DuressLockRemote) => {
                         // Phase 7b: remote duress activation. Lock the running
@@ -8903,6 +8930,62 @@ mod opening_tests {
         assert!(matches!(tab.state, State::Home(_)));
         crate::app::session::close();
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod lock_to_delete_tests {
+    use super::*;
+
+    /// An import abandoned before it finished locks its Cube and asks the
+    /// Launcher for that Cube's delete confirmation.
+    #[test]
+    fn deleting_an_unfinished_cube_locks_it_and_asks_the_launcher() {
+        std::thread::Builder::new()
+            .name("lock-to-delete".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::app::session::test_guard();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let path =
+                    std::env::temp_dir().join(format!("lock-to-delete-{}", uuid::Uuid::new_v4()));
+                let (app, _) = crate::app::shell_tests::bitcoin_app(&path);
+                let cube_id = app.cube_settings().id.clone();
+                let mut tab = Tab::new(1, State::App(app));
+                let task = tab.update(Message::LockCubeToDelete);
+                assert!(matches!(tab.state, State::Home(_)));
+                assert!(!crate::app::session::is_open());
+                let mut asked = false;
+                if let Some(stream) = iced_runtime::task::into_stream(task) {
+                    use iced_runtime::futures::futures::StreamExt;
+                    let mut stream = Box::pin(stream);
+                    let _ = runtime.block_on(tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        async {
+                            while let Some(action) = stream.next().await {
+                                if let iced_runtime::Action::Output(Message::Launch(
+                                    home::Message::View(home::ViewMessage::DeleteCube(
+                                        home::DeleteCubeMessage::ShowModalFor(id),
+                                    )),
+                                )) = action
+                                {
+                                    asked = id == cube_id;
+                                    break;
+                                }
+                            }
+                        },
+                    ));
+                }
+                assert!(asked, "the Launcher is asked to delete this Cube");
+                let _ = std::fs::remove_dir_all(&path);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
 

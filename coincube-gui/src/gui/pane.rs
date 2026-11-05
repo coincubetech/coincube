@@ -341,6 +341,36 @@ impl Pane {
         )
     }
 
+    /// [`Self::focus_launcher`], then the Launcher's delete confirmation for
+    /// `cube_id`: an import abandoned before it finished leaves a Cube the
+    /// user may not want.
+    pub(crate) fn focus_launcher_to_delete(
+        &mut self,
+        cube_id: String,
+        cfg: &Config,
+    ) -> Task<Message> {
+        let focus = self.focus_launcher(cfg);
+        let Some(tab_id) = self
+            .tabs
+            .iter()
+            .find(|t| matches!(&t.state, tab::State::Home(_)))
+            .map(|t| t.id)
+        else {
+            return focus;
+        };
+        Task::batch([
+            focus,
+            Task::done(Message::tab(
+                tab_id,
+                tab::Message::Launch(crate::home::Message::View(
+                    crate::home::ViewMessage::DeleteCube(
+                        crate::home::DeleteCubeMessage::ShowModalFor(cube_id),
+                    ),
+                )),
+            )),
+        ])
+    }
+
     pub fn close_tab(&mut self, i: usize) {
         self.close_tab_with(i, false);
     }
