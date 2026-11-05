@@ -1795,15 +1795,8 @@ pub fn wallet_activity_detail<'a>(
 /// Whether a wallet page at `width` keeps the detail pane beside it; below
 /// this it slides over the page from the right edge instead.
 pub fn wallet_detail_beside(width: f32) -> bool {
-    width
-        >= RECENT_ROWS_MIN_WIDTH
-            + 2.0 * (super::page_gutter(width) + WALLET_PAGE_INSET)
-            + 1.0
-            + SELECTED_DETAIL_WIDTH
+    width >= RECENT_ROWS_MIN_WIDTH + 2.0 * super::page_gutter(width) + 1.0 + SELECTED_DETAIL_WIDTH
 }
-
-/// The Vault and Spark overviews' own side padding inside the page.
-const WALLET_PAGE_INSET: f32 = 16.0;
 
 // `.tr.w5` on a wallet page: Time 44, Wallet 112, Details (at least 160 here),
 // Amount 128 and Status 132, 12px apart. The row's 12px insets bleed past the
@@ -4640,16 +4633,14 @@ mod tests {
         assert!(!wallet_detail_beside(816.0));
         // 1440 window: page rows and the 420px pane side by side.
         assert!(wallet_detail_beside(1192.0));
-        // The overview's 16px insets and the rule count, and the rows' own
+        // The shared page gutters and the rule count, and the rows' own
         // insets bleed past them: at the edge the details column keeps its
         // 160px.
         for edge in [1100.0, 1150.0, 1170.0] {
-            let details = edge
-                - SELECTED_DETAIL_WIDTH
-                - 1.0
-                - 2.0 * (super::super::page_gutter(edge) + WALLET_PAGE_INSET)
-                + 2.0 * ROW_INSET
-                - (44.0 + 112.0 + 128.0 + 132.0 + 4.0 * 12.0 + 2.0 * ROW_INSET);
+            let details =
+                edge - SELECTED_DETAIL_WIDTH - 1.0 - 2.0 * super::super::page_gutter(edge)
+                    + 2.0 * ROW_INSET
+                    - (44.0 + 112.0 + 128.0 + 132.0 + 4.0 * 12.0 + 2.0 * ROW_INSET);
             assert_eq!(wallet_detail_beside(edge), details >= 160.0, "{edge}");
         }
     }

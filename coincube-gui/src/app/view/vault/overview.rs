@@ -437,7 +437,6 @@ pub fn vault_overview_view<'a>(
             .push(Space::new().height(Length::Fixed(40.0)))
             .spacing(20),
     )
-    .padding([0, 16])
     .into()
 }
 

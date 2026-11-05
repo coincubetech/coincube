@@ -423,7 +423,7 @@ pub fn liquid_overview_view<'a>(
         );
     }
 
-    Container::new(content).padding([0, 16]).into()
+    content.into()
 }
 
 pub fn placeholder<'a, T: Into<Element<'a, LiquidOverviewMessage>>>(
