@@ -2069,6 +2069,7 @@ dependencies = [
  "pgp",
  "prost 0.13.5",
  "prost-types 0.13.5",
+ "qrcode",
  "rand 0.8.5",
  "rcgen",
  "reqwest 0.12.18",

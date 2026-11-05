@@ -110,6 +110,8 @@ reqwest = { version = "0.12.18", default-features = false, features = [
 reqwest-sse = "0.1"
 rust-ini = "0.21"
 rfd = "0.15.1"
+# Same version iced's QR widget encodes with; renders the saved QR image.
+qrcode = { version = "0.13", default-features = false }
 fs4 = { version = "0.13", features = ["sync"] }
 
 # Used for opening URLs in browser

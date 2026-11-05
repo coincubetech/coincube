@@ -8,6 +8,10 @@
 //! Focus operations still reach the content in place, so Tab moves from the
 //! control that opened it straight into it. Events and drawing go through
 //! the overlay only, so nothing is handled twice.
+//!
+//! A popover anchored under its control narrows to its own width
+//! ([`Floating::align_x`]), keeps a [`Floating::gap`] from the control and
+//! closes on a press outside it or Escape ([`Floating::on_dismiss`]).
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::overlay;
@@ -15,6 +19,8 @@ use iced::advanced::renderer;
 use iced::advanced::widget::tree::Tree;
 use iced::advanced::widget::{Operation, Widget};
 use iced::advanced::{Clipboard, Shell};
+use iced::alignment::Horizontal;
+use iced::keyboard::{self, key};
 use iced::{mouse, Event, Length, Point, Rectangle, Size, Vector};
 
 use crate::theme::Theme;
@@ -22,12 +28,41 @@ use crate::widget::{Element, Renderer};
 
 pub struct Floating<'a, Message> {
     content: Element<'a, Message>,
+    align_x: Option<Horizontal>,
+    gap: f32,
+    on_dismiss: Option<Message>,
 }
 
 impl<'a, Message> Floating<'a, Message> {
     pub fn new(content: impl Into<Element<'a, Message>>) -> Self {
         Self {
             content: content.into(),
+            align_x: None,
+            gap: 0.0,
+            on_dismiss: None,
+        }
+    }
+
+    /// Lays the content out at its own width, placed across the width it is
+    /// given, instead of stretched across it.
+    pub fn align_x(self, align_x: Horizontal) -> Self {
+        Self {
+            align_x: Some(align_x),
+            ..self
+        }
+    }
+
+    /// The room left between the preceding row and the content.
+    pub fn gap(self, gap: f32) -> Self {
+        Self { gap, ..self }
+    }
+
+    /// Sets the message produced by a press outside the content (which goes
+    /// no further) or by an Escape the content leaves unhandled.
+    pub fn on_dismiss(self, on_dismiss: Message) -> Self {
+        Self {
+            on_dismiss: Some(on_dismiss),
+            ..self
         }
     }
 }
@@ -36,7 +71,17 @@ fn content_limits(width: f32) -> layout::Limits {
     layout::Limits::new(Size::ZERO, Size::new(width, f32::INFINITY))
 }
 
-impl<Message> Widget<Message, Theme, Renderer> for Floating<'_, Message> {
+/// Where the content sits inside the `width` it is given.
+fn content_offset(align_x: Option<Horizontal>, gap: f32, width: f32, content: Size) -> Vector {
+    let x = match align_x {
+        None | Some(Horizontal::Left) => 0.0,
+        Some(Horizontal::Center) => ((width - content.width) / 2.0).max(0.0),
+        Some(Horizontal::Right) => (width - content.width).max(0.0),
+    };
+    Vector::new(x, gap)
+}
+
+impl<Message: Clone> Widget<Message, Theme, Renderer> for Floating<'_, Message> {
     fn children(&self) -> Vec<Tree> {
         vec![Tree::new(&self.content)]
     }
@@ -61,7 +106,8 @@ impl<Message> Widget<Message, Theme, Renderer> for Floating<'_, Message> {
             renderer,
             &content_limits(width),
         );
-        layout::Node::with_children(Size::new(width, 0.0), vec![content])
+        let offset = content_offset(self.align_x, self.gap, width, content.size());
+        layout::Node::with_children(Size::new(width, 0.0), vec![content.translate(offset)])
     }
 
     fn operate(
@@ -120,6 +166,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Floating<'_, Message> {
             tree: &mut tree.children[0],
             position: bounds.position() + translation,
             width: bounds.width,
+            on_dismiss: self.on_dismiss.as_ref(),
         })))
     }
 }
@@ -129,9 +176,10 @@ struct Overlay<'a, 'b, Message> {
     tree: &'b mut Tree,
     position: Point,
     width: f32,
+    on_dismiss: Option<&'b Message>,
 }
 
-impl<Message> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, '_, Message> {
+impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, '_, Message> {
     fn layout(&mut self, renderer: &Renderer, _bounds: Size) -> layout::Node {
         self.content
             .as_widget_mut()
@@ -148,6 +196,15 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, '_, Mes
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
     ) {
+        if let Some(message) = self.on_dismiss {
+            if let Event::Mouse(mouse::Event::ButtonPressed(_)) = event {
+                if !cursor.is_over(layout.bounds()) {
+                    shell.publish(message.clone());
+                    shell.capture_event();
+                    return;
+                }
+            }
+        }
         self.content.as_widget_mut().update(
             self.tree,
             event,
@@ -158,6 +215,22 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, '_, Mes
             shell,
             &layout.bounds(),
         );
+        // Focused content (a text field, say) gets the first refusal.
+        if let Some(message) = self.on_dismiss {
+            if !shell.is_event_captured()
+                && matches!(
+                    event,
+                    Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: keyboard::Key::Named(key::Named::Escape),
+                        repeat: false,
+                        ..
+                    })
+                )
+            {
+                shell.publish(message.clone());
+                shell.capture_event();
+            }
+        }
     }
 
     fn draw(
@@ -211,7 +284,7 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, '_, Mes
     }
 }
 
-impl<'a, Message: 'a> From<Floating<'a, Message>> for Element<'a, Message> {
+impl<'a, Message: Clone + 'a> From<Floating<'a, Message>> for Element<'a, Message> {
     fn from(floating: Floating<'a, Message>) -> Self {
         Self::new(floating)
     }
