@@ -2805,6 +2805,7 @@ impl Home {
                         cube: rc.clone(),
                         deleting: false,
                         error: None,
+                        typed_name: String::new(),
                     });
                 }
                 Task::none()
@@ -2820,11 +2821,38 @@ impl Home {
                     .map(|uuid| focus_remote_delete_opener(self, uuid))
                     .unwrap_or_else(Task::none)
             }
+            Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::RemoteNameInput(name))) => {
+                if let Some(modal) = &mut self.delete_remote_cube_modal {
+                    if !modal.deleting {
+                        modal.typed_name = name;
+                    }
+                }
+                Task::none()
+            }
+            Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::RestoreInstead(uuid))) => {
+                let Some(modal) = self
+                    .delete_remote_cube_modal
+                    .take_if(|modal| !modal.deleting && modal.cube.uuid == uuid)
+                else {
+                    return Task::none();
+                };
+                match launcher_catalog::remote_restore(&modal.cube).action {
+                    Some((restore, _)) => self.update_inner(Message::View(restore)),
+                    None => Task::none(),
+                }
+            }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ConfirmRemoteDelete(
                 uuid,
             ))) => {
-                if let Some(modal) = &mut self.delete_remote_cube_modal {
-                    modal.deleting = true;
+                // The view only offers Delete once the name matches; a stale
+                // press for another Cube, or one before that, does nothing.
+                match &mut self.delete_remote_cube_modal {
+                    Some(modal)
+                        if !modal.deleting && modal.cube.uuid == uuid && modal.name_confirmed() =>
+                    {
+                        modal.deleting = true;
+                    }
+                    _ => return Task::none(),
                 }
                 if let Some(client) = self.connect_account.authenticated_client() {
                     Task::perform(
@@ -7959,6 +7987,9 @@ pub enum DeleteCubeMessage {
     // Remote-only cube deletion
     ConfirmRemoteDelete(String), // uuid
     CloseRemoteModal,
+    RemoteNameInput(String),
+    /// Close the remote delete and start that Cube's restore instead.
+    RestoreInstead(String), // uuid
 }
 
 struct DeleteCubeModal {
@@ -7994,6 +8025,8 @@ struct DeleteRemoteCubeModal {
     cube: RemoteCube,
     deleting: bool,
     error: Option<String>,
+    /// The name typed to confirm deleting a Cube Connect could restore.
+    typed_name: String,
 }
 
 fn delete_modal_focus(id: Id) -> ViewMessage {
@@ -8075,74 +8108,219 @@ const DELETE_LOCAL_CONFIRM_ID: &str = "tenshu.delete-cube:confirm";
 const DELETE_REMOTE_CANCEL_ID: &str = "tenshu.delete-remote-cube:cancel";
 const DELETE_REMOTE_CONFIRM_ID: &str = "tenshu.delete-remote-cube:confirm";
 
+const DELETE_REMOTE_NAME_ID: &str = "tenshu.delete-remote-cube:name";
+const DELETE_REMOTE_RESTORE_ID: &str = "tenshu.delete-remote-cube:restore";
+
+fn delete_modal_callout(theme: &theme::Theme) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        background: Some(iced::Background::Color(theme.colors.shell.background)),
+        border: iced::Border {
+            color: theme.colors.shell.line,
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn delete_modal_warn_icon(theme: &theme::Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(theme.colors.shell.warn),
+    }
+}
+
 impl DeleteRemoteCubeModal {
+    /// Connect holds a way to restore this Cube here (the test the ghost's
+    /// edge uses), so deleting it may take the Cube's only backup with it.
+    fn restorable(&self) -> bool {
+        launcher_catalog::remote_restore(&self.cube)
+            .action
+            .is_some()
+    }
+
+    /// A restorable Cube is confirmed by typing its name as the Launcher
+    /// shows it; one with nothing to restore needs only the button.
+    fn name_confirmed(&self) -> bool {
+        !self.restorable() || self.typed_name.trim() == catalog_display_name(&self.cube.name)
+    }
+
     fn view(&self) -> Element<Message> {
         let display_name = catalog_display_name(&self.cube.name);
-        let mut col = Column::new()
-            .spacing(10)
-            .push(Container::new(
-                h4_bold(format!("Delete Remote Cube \"{}\"", display_name))
-                    .style(delete_modal_danger_text)
-                    .width(Length::Fill),
-            ))
-            .push(text(
-                "This Cube exists on the Connect server but not on this device. \
-                 Deleting it will permanently remove it and free a Cube slot.",
-            ))
-            .push(Row::new())
-            .push(Row::new())
-            .push(text("WARNING: This cannot be undone."))
+        let restore = launcher_catalog::remote_restore(&self.cube);
+        let restorable = restore.action.is_some();
+        let network = ChainId::from_api_str(&self.cube.network)
+            .map(|chain| chain.label())
+            .unwrap_or("Unknown network");
+        let backup = match &restore.action {
+            Some((ViewMessage::RestoreWithPhone { .. }, _)) => "Phone recovery in Connect",
+            Some(_) => "Recovery Kit in Connect",
+            None => "No Recovery Kit in Connect",
+        };
+
+        let header = Row::new()
+            .spacing(16)
+            .align_y(Alignment::Center)
+            .push(launcher_presenter::ghost_avatar(44.0))
             .push(
-                p1_regular(
-                    "If another device still has this Cube locally, \
-                     it will re-sync to Connect the next time it opens, \
-                     consuming a Cube slot again. To permanently free the slot, \
-                     delete the Cube on all devices.",
-                )
-                .style(theme::text::secondary),
+                Column::new()
+                    .spacing(6)
+                    .width(Length::Fill)
+                    .push(h4_bold(format!(
+                        "Delete \u{201c}{}\u{201d} from Connect?",
+                        display_name
+                    )))
+                    .push(
+                        p2_regular(format!("{} \u{b7} {}", network, backup))
+                            .style(theme::text::secondary),
+                    ),
             );
 
-        if let Some(err) = &self.error {
-            col = col
-                .push(notification::warning(err.to_string(), err.to_string()).width(Length::Fill));
+        let consequence = |line: &'static str| {
+            Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .push(icon::dash_circle_icon().style(theme::text::secondary))
+                .push(p1_regular(line))
+        };
+        let consequences = Column::new()
+            .spacing(8)
+            .push(consequence("Its Cube slot is freed"))
+            .push_maybe(
+                restorable.then(|| consequence("You can\u{2019}t restore it from Connect anymore")),
+            )
+            .push(consequence(
+                "Its members, Lightning address and Vault monitoring end",
+            ));
+
+        let mut col = Column::new()
+            .spacing(0)
+            .push(header)
+            .push(Space::new().height(24.0))
+            .push(p1_regular(
+                "It\u{2019}s only in your Connect account, not on this device. \
+                 This can\u{2019}t be undone.",
+            ))
+            .push(Space::new().height(16.0))
+            .push(iced::widget::rule::horizontal(1))
+            .push(Space::new().height(14.0))
+            .push(consequences);
+
+        if restorable {
+            let restore_btn = button::secondary_compact_action(
+                DELETE_REMOTE_RESTORE_ID,
+                None,
+                "Restore instead",
+                delete_modal_focus,
+            )
+            .on_press_maybe((!self.deleting).then(|| {
+                ViewMessage::DeleteCube(DeleteCubeMessage::RestoreInstead(self.cube.uuid.clone()))
+            }));
+            col = col.push(Space::new().height(18.0)).push(
+                Container::new(
+                    Row::new()
+                        .spacing(12)
+                        .align_y(Alignment::Center)
+                        .push(icon::warning_icon().style(delete_modal_warn_icon))
+                        .push(
+                            Column::new()
+                                .width(Length::Fill)
+                                .spacing(2)
+                                .push(p1_bold("Is Connect its only backup?"))
+                                .push(p2_regular(
+                                    "Without its recovery phrase or another device, any funds \
+                                     in this Cube will be lost. Restore it first if you\u{2019}re \
+                                     not sure.",
+                                )),
+                        )
+                        .push(restore_btn),
+                )
+                .padding([12, 14])
+                .width(Length::Fill)
+                .style(delete_modal_callout),
+            );
         }
 
-        let mut delete_btn = button::secondary_action(
+        col = col.push(Space::new().height(12.0)).push(
+            p2_regular(
+                "On another device too? Delete it there, or it registers again \
+                 and takes the slot back.",
+            )
+            .style(theme::text::secondary),
+        );
+
+        if restorable {
+            use coincube_ui::widget::TextInput;
+            let mut input = TextInput::new(&display_name, &self.typed_name)
+                .id(DELETE_REMOTE_NAME_ID)
+                .padding(12)
+                .size(16);
+            if !self.deleting {
+                input = input
+                    .on_input(|s| ViewMessage::DeleteCube(DeleteCubeMessage::RemoteNameInput(s)));
+            }
+            col = col
+                .push(Space::new().height(20.0))
+                .push(p1_medium(format!("Type {} to confirm", display_name)))
+                .push(Space::new().height(8.0))
+                .push(input);
+        }
+
+        if let Some(err) = &self.error {
+            let message = match err.as_str() {
+                "Cube not found on server" => {
+                    "It\u{2019}s already gone from Connect. Another device may have deleted it."
+                        .to_string()
+                }
+                "Not authenticated with Connect" => {
+                    "You\u{2019}re signed out of Connect. Sign in again, then delete. \
+                     Nothing was deleted."
+                        .to_string()
+                }
+                other => other.to_string(),
+            };
+            col = col
+                .push(Space::new().height(16.0))
+                .push(notification::warning(message.clone(), message).width(Length::Fill));
+        }
+
+        let delete_btn = button::secondary_action(
             DELETE_REMOTE_CONFIRM_ID,
             None,
-            "Delete Remote Cube",
+            if self.deleting {
+                "Deleting\u{2026}"
+            } else {
+                "Delete from Connect"
+            },
             delete_modal_focus,
         )
-        .width(Length::Fixed(250.0))
-        .style(delete_modal_danger_button);
-        if !self.deleting {
-            delete_btn = delete_btn.on_press(ViewMessage::DeleteCube(
-                DeleteCubeMessage::ConfirmRemoteDelete(self.cube.uuid.clone()),
-            ));
-        }
+        .width(Length::Fixed(200.0))
+        .style(delete_modal_danger_button)
+        .on_press_maybe((!self.deleting && self.name_confirmed()).then(|| {
+            ViewMessage::DeleteCube(DeleteCubeMessage::ConfirmRemoteDelete(
+                self.cube.uuid.clone(),
+            ))
+        }));
 
-        let mut cancel_btn =
+        let cancel_btn =
             button::secondary_action(DELETE_REMOTE_CANCEL_ID, None, "Cancel", delete_modal_focus)
-                .width(Length::Fixed(120.0));
-        if !self.deleting {
-            cancel_btn =
-                cancel_btn.on_press(ViewMessage::DeleteCube(DeleteCubeMessage::CloseRemoteModal));
-        }
+                .width(Length::Fixed(120.0))
+                .on_press_maybe(
+                    (!self.deleting)
+                        .then_some(ViewMessage::DeleteCube(DeleteCubeMessage::CloseRemoteModal)),
+                );
 
-        col = col.push(
-            Container::new(if self.deleting {
-                Row::new().spacing(10).push(text("Deleting..."))
-            } else {
-                Row::new().spacing(10).push(cancel_btn).push(delete_btn)
-            })
-            .align_x(Horizontal::Center)
-            .width(Length::Fill),
+        col = col.push(Space::new().height(24.0)).push(
+            Row::new()
+                .spacing(10)
+                .push(Space::new().width(Length::Fill))
+                .push(cancel_btn)
+                .push(delete_btn),
         );
 
         Into::<Element<ViewMessage>>::into(
             Container::new(col)
-                .padding([28.0, 32.0])
-                .width(Length::Fixed(700.0))
+                .padding([32.0, 32.0])
+                .width(Length::Fixed(560.0))
                 .style(delete_modal_card),
         )
         .map(Message::View)
@@ -10591,6 +10769,19 @@ mod tests {
             Some(modal) if modal.cube.uuid == "remote-a" && !modal.deleting
         ));
 
+        // Connect could restore this Cube, so Delete waits for its name.
+        let _ = home.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::ConfirmRemoteDelete("remote-a".to_string()),
+        )));
+        assert!(matches!(
+            &home.delete_remote_cube_modal,
+            Some(modal) if !modal.deleting && modal.error.is_none()
+        ));
+        let typed =
+            catalog_display_name(&home.delete_remote_cube_modal.as_ref().unwrap().cube.name);
+        let _ = home.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::RemoteNameInput(typed),
+        )));
         let _ = home.update(Message::View(ViewMessage::DeleteCube(
             DeleteCubeMessage::ConfirmRemoteDelete("remote-a".to_string()),
         )));
@@ -10603,6 +10794,34 @@ mod tests {
 
         let _ = home.update(Message::View(ViewMessage::DeleteCube(
             DeleteCubeMessage::CloseRemoteModal,
+        )));
+        assert!(home.delete_remote_cube_modal.is_none());
+    }
+
+    #[test]
+    fn remote_delete_asks_for_the_name_only_when_connect_could_restore_it() {
+        let restorable = remote_cube("remote-a", "Remote A", Network::Bitcoin);
+        let mut bare = remote_cube("remote-b", "Remote B", Network::Bitcoin);
+        bare.has_recovery_kit = false;
+        bare.has_encrypted_seed = false;
+        let modal = |cube: RemoteCube, typed: &str| DeleteRemoteCubeModal {
+            cube,
+            deleting: false,
+            error: None,
+            typed_name: typed.to_string(),
+        };
+
+        assert!(!modal(restorable.clone(), "").name_confirmed());
+        assert!(!modal(restorable.clone(), "Remote").name_confirmed());
+        assert!(modal(restorable.clone(), " Remote A ").name_confirmed());
+        assert!(modal(bare, "").name_confirmed());
+
+        // Restore instead closes the delete and hands over to the restore.
+        let mut home = home();
+        home.remote_cubes = vec![restorable.clone()];
+        home.delete_remote_cube_modal = Some(modal(restorable, ""));
+        let _ = home.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::RestoreInstead("remote-a".to_string()),
         )));
         assert!(home.delete_remote_cube_modal.is_none());
     }
@@ -11957,12 +12176,14 @@ mod tests {
             cube: remote.clone(),
             deleting: false,
             error: Some("server refused".to_string()),
+            typed_name: String::new(),
         }
         .view();
         let _ = DeleteRemoteCubeModal {
             cube: remote.clone(),
             deleting: true,
             error: None,
+            typed_name: String::new(),
         }
         .view();
         let _ = RecoveryMethodModal { cube: remote }.view();
@@ -11986,6 +12207,7 @@ mod tests {
             cube: remote_cube("remote-b", "Remote B", Network::Bitcoin),
             deleting: false,
             error: None,
+            typed_name: String::new(),
         });
         home.view();
         home.delete_remote_cube_modal = None;
@@ -12015,6 +12237,7 @@ mod tests {
             cube: remote_cube("remote-a", "Remote A", Network::Bitcoin),
             deleting,
             error: None,
+            typed_name: "Remote A".to_string(),
         };
         let size = (1024, 768);
         let local_cancel = Id::new(DELETE_LOCAL_CANCEL_ID);
@@ -12320,6 +12543,7 @@ mod tests {
             cube: remote_cube.clone(),
             deleting: false,
             error: None,
+            typed_name: String::new(),
         });
         assert!(has_focus_operation(home.update(Message::View(
             ViewMessage::DeleteCube(DeleteCubeMessage::CloseRemoteModal)
@@ -12395,11 +12619,14 @@ mod tests {
                 cube: remote.clone(),
                 deleting: false,
                 error: None,
+                typed_name: String::new(),
             }
             .view(),
         );
-        assert!(delete_remote_labels.contains(&"Delete Remote Cube \"Family Cube\"".into()));
-        assert!(delete_remote_labels.contains(&"Delete Remote Cube".into()));
+        assert!(delete_remote_labels
+            .contains(&"Delete \u{201c}Family Cube\u{201d} from Connect?".into()));
+        assert!(delete_remote_labels.contains(&"Delete from Connect".into()));
+        assert!(delete_remote_labels.contains(&"Type Family Cube to confirm".into()));
         let recovery_labels = labels(
             RecoveryMethodModal {
                 cube: remote.clone(),
