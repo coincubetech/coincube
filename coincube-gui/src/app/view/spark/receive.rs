@@ -518,9 +518,7 @@ fn lightning_address_body<'a>(
                         .width(Length::Fixed(80.0)),
                 ),
         )
-        .push(p2_regular(
-            "Anyone can pay this address while this app is open and active.",
-        ))
+        .push(p2_regular("Anyone can send you bitcoin with this address."))
         .push(
             button::transparent_border(None, "Change in Settings")
                 .on_press(lightning_address_settings()),
@@ -1069,7 +1067,7 @@ fn phase_body<'a>(
                 ),
                 SparkReceiveMethod::LightningAddress => (
                     "Lightning address",
-                    "Anyone can pay this address while this app is open and active.",
+                    "Anyone can send you bitcoin with this address.",
                 ),
                 SparkReceiveMethod::Spark => (
                     "Spark address",

@@ -1292,6 +1292,15 @@ impl ConnectCubePanel {
                 self.ln_change_confirm_pending = None;
             }
 
+            ConnectCubeMessage::SaveLightningAddress => {
+                // Request validates and stages the name; an invalid one stays
+                // unstaged and nothing is sent.
+                let _ = self.update_message(ConnectCubeMessage::RequestChangeLightningAddress);
+                if self.ln_change_confirm_pending.is_some() {
+                    return self.update_message(ConnectCubeMessage::ConfirmChangeLightningAddress);
+                }
+            }
+
             ConnectCubeMessage::ConfirmChangeLightningAddress => {
                 if self.ln_changing {
                     return iced::Task::none();
@@ -1989,7 +1998,13 @@ impl ConnectCubePanel {
     }
 }
 
-/// Validate a lightning address username client-side.
+/// Validate a lightning address username client-side, with the server's
+/// rules (coincube-api `lightning_address.go`): lowercase letters, digits and
+/// `._-`, starting and ending with a letter or digit, no two of `._-` in a
+/// row. Input is lowercased as it is typed, so uppercase never reaches here
+/// from the form; it is still rejected rather than silently accepted.
+/// Reserved names are only known to the server and come back from the
+/// availability check.
 fn validate_ln_username(username: &str) -> Option<String> {
     if username.is_empty() {
         return Some("Username is required".to_string());
@@ -2000,15 +2015,16 @@ fn validate_ln_username(username: &str) -> Option<String> {
     if username.len() > 64 {
         return Some("Username must be at most 64 characters".to_string());
     }
-    if !username.chars().next().unwrap().is_ascii_alphanumeric() {
+    let plain = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    if !username.chars().next().is_some_and(plain) {
         return Some("Must start with a letter or number".to_string());
     }
-    if !username.chars().last().unwrap().is_ascii_alphanumeric() {
+    if !username.chars().last().is_some_and(plain) {
         return Some("Must end with a letter or number".to_string());
     }
     let special = ['.', '_', '-'];
     for c in username.chars() {
-        if !c.is_ascii_alphanumeric() && !special.contains(&c) {
+        if !plain(c) && !special.contains(&c) {
             return Some(format!("Invalid character: '{}'", c));
         }
     }
@@ -2317,6 +2333,10 @@ mod tests {
             Some("No consecutive special characters allowed")
         );
         assert!(validate_ln_username("abc-123_def.xyz").is_none());
+        // The server only accepts lowercase; the form lowercases as you type.
+        assert!(validate_ln_username("Abc").is_some());
+        assert!(validate_ln_username("abC").is_some());
+        assert!(validate_ln_username("aBc").is_some());
     }
 
     /// `ConnectPanel::update` calls `register_cube` on every account message
@@ -2618,6 +2638,21 @@ mod tests {
         assert_eq!(panel.ln_change_confirm_pending.as_deref(), Some("newname"));
         let _ = panel.update_message(ConnectCubeMessage::DismissChangeConfirmation);
         assert!(panel.ln_change_confirm_pending.is_none());
+        // Settings' Save skips the modal: it stages and confirms in one step
+        // (here reaching the Spark check, as no Spark client is set).
+        assert!(panel.ln_claim_error.is_none());
+        let _ = panel.update_message(ConnectCubeMessage::SaveLightningAddress);
+        assert!(panel.ln_change_confirm_pending.is_none());
+        assert_eq!(
+            panel.ln_claim_error.as_deref(),
+            Some("Spark wallet is not available on this cube")
+        );
+        // An unchanged or invalid name sends nothing.
+        panel.ln_claim_error = None;
+        panel.ln_username_error = Some("Must end with a letter or number".into());
+        let _ = panel.update_message(ConnectCubeMessage::SaveLightningAddress);
+        assert!(panel.ln_claim_error.is_none() && !panel.ln_changing);
+        panel.ln_username_error = None;
         let _ = panel.update_message(ConnectCubeMessage::CancelEditLightningAddress);
         assert!(!panel.ln_editing);
         assert!(panel.ln_username_input.is_empty());

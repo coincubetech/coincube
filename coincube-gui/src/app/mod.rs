@@ -10903,19 +10903,21 @@ impl App {
             Menu::Spark(menu::SparkSubMenu::Settings(Some(
                 menu::SparkSettingsOption::LightningAddress,
             ))) => {
-                let address = if authenticated {
-                    view::spark::settings::lightning_address::lightning_address_ux(
-                        &self.panels.connect.cube,
+                // No heading repeats the tab name; the form heads itself.
+                if authenticated {
+                    Some(
+                        view::spark::settings::lightning_address::settings_view(
+                            &self.panels.connect.cube,
+                        )
+                        .map(view::Message::ConnectCube),
                     )
-                    .map(view::Message::ConnectCube)
                 } else {
-                    sign_in_prompt::sign_in_prompt("claim a Lightning Address")
-                };
-                Some(view::settings::page::group(
-                    "Lightning address",
-                    None,
-                    address,
-                ))
+                    Some(view::settings::page::group(
+                        "Your Lightning address",
+                        None,
+                        sign_in_prompt::sign_in_prompt("claim a Lightning Address"),
+                    ))
+                }
             }
             // The avatar flow opens inline under Cube identity on Display &
             // appearance, rather than replacing the page.

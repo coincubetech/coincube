@@ -2239,6 +2239,11 @@ pub enum ConnectCubeMessage {
     DismissChangeConfirmation,
     /// User confirmed the swap — fires the PUT + SDK delete+register chain.
     ConfirmChangeLightningAddress,
+    /// "Save new address" on Spark › Settings › Lightning address. That form
+    /// states what happens to the old address before Save, so it changes the
+    /// address without the confirmation modal: the same checks as
+    /// `RequestChangeLightningAddress`, then `ConfirmChangeLightningAddress`.
+    SaveLightningAddress,
     /// Terminal result of the change chain. The outcome variants
     /// distinguish server-side rejection (address unchanged) from
     /// server-committed-but-SDK-out-of-sync (the new address is
