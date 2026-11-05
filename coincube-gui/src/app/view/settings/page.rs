@@ -37,6 +37,39 @@ pub fn muted<'a>(content: impl Into<Cow<'a, str>>) -> Text<'a> {
     tenshu::caption(content.into()).size(13)
 }
 
+/// A compact illustrated step shared by backup authentication and Recovery Kit.
+/// The supporting image has a fixed slot so long instructions wrap beside it.
+pub fn illustrated_flow<'a, M: 'a>(
+    title: &'a str,
+    detail: &'a str,
+    art: iced::widget::image::Handle,
+) -> Column<'a, M> {
+    Column::new()
+        .width(Length::Fill)
+        .max_width(640)
+        .spacing(24)
+        .push(Space::new().height(8))
+        .push(
+            Row::new()
+                .width(Length::Fill)
+                .spacing(24)
+                .align_y(Alignment::Center)
+                .push(
+                    Column::new()
+                        .width(Length::Fill)
+                        .spacing(6)
+                        .push(tenshu::heading(title))
+                        .push(tenshu::body(detail).style(theme::tenshu::text::muted)),
+                )
+                .push(
+                    iced::widget::image(art)
+                        .width(88)
+                        .height(88)
+                        .content_fit(iced::ContentFit::Contain),
+                ),
+        )
+}
+
 /// A group: heading, an optional intro line and the content, 32px below what
 /// precedes it.
 pub fn group<'a, M: 'a>(

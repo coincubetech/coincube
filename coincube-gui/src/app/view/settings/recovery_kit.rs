@@ -30,34 +30,15 @@ fn flow<'a, M: 'a>(
     detail: &'a str,
     removing: bool,
 ) -> Column<'a, M, theme::Theme, iced::Renderer> {
-    Column::new()
-        .width(Length::Fill)
-        .max_width(640)
-        .spacing(24)
-        .push(Space::new().height(8))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .spacing(24)
-                .align_y(Alignment::Center)
-                .push(
-                    Column::new()
-                        .width(Length::Fill)
-                        .spacing(6)
-                        .push(tenshu::heading(title))
-                        .push(tenshu::body(detail).style(theme::tenshu::text::muted)),
-                )
-                .push(
-                    iced::widget::image(if removing {
-                        image::recovery_kit_withdrawn()
-                    } else {
-                        image::recovery_kit_protected()
-                    })
-                    .width(88)
-                    .height(88)
-                    .content_fit(iced::ContentFit::Contain),
-                ),
-        )
+    page::illustrated_flow(
+        title,
+        detail,
+        if removing {
+            image::recovery_kit_withdrawn()
+        } else {
+            image::recovery_kit_protected()
+        },
+    )
 }
 
 fn error_note<'a, M: 'a>(message: &'a str) -> Element<'a, M> {
@@ -97,10 +78,10 @@ fn actions<'a, M: Clone + 'a>(
 }
 
 pub fn pin_entry_view<'a>(pin: &'a PinInput, error: Option<&'a str>) -> Element<'a, Message> {
-    let mut content = flow(
+    let mut content = page::illustrated_flow(
         "Confirm your Cube PIN",
         "Enter your Cube PIN to unlock your Master Seed Phrase. We'll encrypt it on-device before uploading.",
-        false,
+        image::pin_unlock_lock(),
     ).push(Column::new().spacing(8).push(tenshu::label("Cube PIN"))
         .push(pin.face_view().map(|m| wrap(RecoveryKitMessage::PinInput(m)))));
     if let Some(error) = error {

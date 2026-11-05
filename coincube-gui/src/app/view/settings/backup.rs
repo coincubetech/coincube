@@ -73,9 +73,10 @@ fn error_note<'a, M: 'a>(message: &'a str) -> Element<'a, M> {
 
 /// Reuse the Launcher's compact PIN fields, including masking and digit focus.
 pub fn pin_entry_view<'a>(pin: &'a PinInput, error: Option<&'a str>) -> Element<'a, Message> {
-    let mut content = flow(
+    let mut content = page::illustrated_flow(
         "Unlock your seed phrase",
         "Enter your Cube PIN to unlock and display your 12-word recovery phrase.",
+        coincube_ui::image::pin_unlock_lock(),
     )
     .push(
         Column::new()

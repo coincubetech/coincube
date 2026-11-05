@@ -355,6 +355,16 @@ static RECOVERY_KIT_WITHDRAWN: LazyLock<iced::widget::image::Handle> = LazyLock:
     )
 });
 
+static PIN_UNLOCK_LOCK: LazyLock<iced::widget::image::Handle> = LazyLock::new(|| {
+    iced::widget::image::Handle::from_bytes(
+        include_bytes!("../static/images/recovery/pin-lock.png").as_slice(),
+    )
+});
+
+pub fn pin_unlock_lock() -> iced::widget::image::Handle {
+    PIN_UNLOCK_LOCK.clone()
+}
+
 pub fn recovery_kit_protected() -> iced::widget::image::Handle {
     RECOVERY_KIT_PROTECTED.clone()
 }
