@@ -300,19 +300,28 @@ impl SparkClient {
         let bridge_path = resolve_bridge_path()?;
         debug!("spawning Spark bridge at {:?}", bridge_path);
 
-        let mut child = Command::new(&bridge_path)
+        let mut command = Command::new(&bridge_path);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
-                SparkClientError::BridgeUnavailable(format!(
-                    "failed to spawn {}: {}",
-                    bridge_path.display(),
-                    e
-                ))
-            })?;
+            .kill_on_drop(true);
+        // The bridge is a console-subsystem binary and the release gui has no
+        // console, so without this Windows opens an empty console window for
+        // it. Deliberately not `node::detach_spawned_process`: the bridge must
+        // die with the gui (`kill_on_drop`), not outlive it like bitcoind/Tor.
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command.spawn().map_err(|e| {
+            SparkClientError::BridgeUnavailable(format!(
+                "failed to spawn {}: {}",
+                bridge_path.display(),
+                e
+            ))
+        })?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
             SparkClientError::BridgeUnavailable("bridge stdin was not piped".to_string())
