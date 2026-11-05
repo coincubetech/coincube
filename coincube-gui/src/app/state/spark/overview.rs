@@ -15,13 +15,13 @@ use coincube_core::miniscript::bitcoin::Amount;
 use coincube_spark_protocol::PaymentSummary;
 use coincube_ui::component::tenshu::PageHead;
 use coincube_ui::widget::Element;
-use iced::Task;
+use iced::{widget::qr_code, Task};
 
 use crate::app::cache::Cache;
 use crate::app::menu::{Menu, SparkSubMenu};
 use crate::app::message::Message;
 use crate::app::state::{redirect, State};
-use crate::app::view::spark::overview::SparkLandingAvailability;
+use crate::app::view::spark::overview::{SparkLandingAvailability, SparkLightningAddress};
 use crate::app::view::spark::{
     SparkOverviewView, SparkPaymentMethod, SparkRecentTransaction, SparkStatus,
 };
@@ -52,6 +52,14 @@ pub struct SparkOverview {
     /// "Stable" badge next to the balance in the overview.
     stable_balance_active: Option<bool>,
     stable_balance_saving: bool,
+    /// The open share panel: the address it shows and that address's QR.
+    lightning_share: Option<LightningShare>,
+}
+
+/// The share panel's content, fixed when it opens.
+struct LightningShare {
+    address: String,
+    qr: Option<qr_code::Data>,
 }
 
 impl SparkOverview {
@@ -64,6 +72,7 @@ impl SparkOverview {
             loading: false,
             stable_balance_active: None,
             stable_balance_saving: false,
+            lightning_share: None,
         }
     }
 
@@ -83,19 +92,13 @@ impl SparkOverview {
         )
     }
 
-    /// Mount the shared Connect address form on the Spark landing without
-    /// copying account or address state into this panel.
-    pub fn view_with_address<'a>(
-        &'a self,
-        menu: &'a Menu,
-        cache: &'a Cache,
-        address: Option<Element<'a, view::Message>>,
-    ) -> Element<'a, view::Message> {
+    /// The page without App's mounts (Activity, the Cube's address).
+    fn view_alone<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
         view::dashboard_headed(
             menu,
             cache,
             Self::page_head(cache),
-            self.page_body(cache, address, None),
+            self.page_body(cache, SparkLightningAddress::Unknown, None),
         )
     }
 
@@ -113,12 +116,12 @@ impl SparkOverview {
             )
     }
 
-    /// The balance, "Recent activity" (from Activity, mounted by App) and
-    /// the landing's address.
+    /// The balance with the Lightning address beside it, then "Recent
+    /// activity" (from Activity, mounted by App).
     pub fn page_body<'a>(
         &'a self,
         cache: &'a Cache,
-        address: Option<Element<'a, view::Message>>,
+        lightning_address: SparkLightningAddress,
         recent_activity: Option<Element<'a, view::Message>>,
     ) -> Element<'a, view::Message> {
         let fiat_converter: Option<FiatAmountConverter> =
@@ -148,6 +151,7 @@ impl SparkOverview {
             btc_usd_price: cache.btc_usd_price,
             display_mode: cache.display_mode,
             mask_amounts: cache.balance_amounts_masked(),
+            lightning_address,
         }
         .render()
         .map(view::Message::SparkOverview);
@@ -158,39 +162,54 @@ impl SparkOverview {
         if let Some(recent) = recent_activity.filter(|_| status_connected) {
             content = content.push(iced::widget::container(recent).padding([0, 16]));
         }
-        if let Some(address) = address.filter(|_| self.backend.is_some()) {
-            content = content.push(view::spark::overview::spark_landing_context(address));
-        }
         content.into()
     }
 
-    /// The address confirmation must cover the full Spark page, rather than
-    /// inherit the compact address row's bounds as its modal viewport.
-    pub fn view_with_address_overlay<'a>(
+    /// The Spark page as App mounts it. The share panel covers the whole
+    /// page, rather than inheriting the address button's bounds, and shows
+    /// only while the address it opened with is still the Cube's.
+    pub fn view_with_lightning_share<'a>(
         &'a self,
         menu: &'a Menu,
         cache: &'a Cache,
-        address: impl Fn() -> Element<'a, view::Message> + 'a,
+        lightning_address: SparkLightningAddress,
         recent_activity: impl Fn() -> Element<'a, view::Message> + 'a,
         detail: impl Fn() -> Option<Element<'a, view::Message>> + 'a,
-        confirmation: Option<Element<'a, view::Message>>,
     ) -> Element<'a, view::Message> {
+        let share = self.lightning_share.as_ref().filter(|share| {
+            self.backend.is_some()
+                && matches!(&lightning_address,
+                    SparkLightningAddress::Ready(address) if *address == share.address)
+        });
         let page = view::dashboard_with_detail(
             menu,
             cache,
             move || Self::page_head(cache),
-            move || self.page_body(cache, Some(address()), Some(recent_activity())),
+            move || self.page_body(cache, lightning_address.clone(), Some(recent_activity())),
             detail,
         );
-        if let Some(confirmation) = confirmation.filter(|_| self.backend.is_some()) {
-            coincube_ui::widget::modal::Modal::new(page, confirmation)
-                .on_blur(Some(view::Message::ConnectCube(
-                    view::ConnectCubeMessage::DismissChangeConfirmation,
+        if let Some(share) = share {
+            let panel = view::spark::overview::lightning_share_panel(
+                &cache.cube_id,
+                &share.address,
+                share.qr.as_ref(),
+            )
+            .map(view::Message::SparkOverview);
+            coincube_ui::widget::modal::Modal::new(page, panel)
+                .on_blur(Some(view::Message::SparkOverview(
+                    view::SparkOverviewMessage::CloseLightningShare,
                 )))
                 .into()
         } else {
             page
         }
+    }
+
+    #[cfg(test)]
+    pub fn lightning_share_for_tests(&self) -> Option<&str> {
+        self.lightning_share
+            .as_ref()
+            .map(|share| share.address.as_str())
     }
 
     #[cfg(test)]
@@ -234,7 +253,7 @@ impl State for SparkOverview {
         menu: &'a Menu,
         cache: &'a Cache,
     ) -> Element<'a, crate::app::view::Message> {
-        self.view_with_address(menu, cache, None)
+        self.view_alone(menu, cache)
     }
 
     fn reload(
@@ -360,6 +379,31 @@ impl State for SparkOverview {
                 view::SparkOverviewMessage::FlipDisplayMode => {
                     return Task::done(Message::View(view::Message::FlipDisplayMode));
                 }
+                view::SparkOverviewMessage::ShareLightningAddress(address) => {
+                    // Encoded as Spark › Receive encodes it: the bare address.
+                    let qr = qr_code::Data::new(&address).ok();
+                    self.lightning_share = Some(LightningShare { address, qr });
+                }
+                view::SparkOverviewMessage::CloseLightningShare => {
+                    self.lightning_share = None;
+                }
+                view::SparkOverviewMessage::CopyLightningAddress(address) => {
+                    return Task::done(Message::View(view::Message::Clipboard(address)));
+                }
+                view::SparkOverviewMessage::ChangeLightningAddress => {
+                    // The change form opens on the address's own Settings
+                    // tab, after the route has switched to it.
+                    self.lightning_share = None;
+                    return redirect(lightning_address_settings()).chain(Task::done(
+                        Message::View(view::Message::ConnectCube(
+                            view::ConnectCubeMessage::BeginEditLightningAddress,
+                        )),
+                    ));
+                }
+                view::SparkOverviewMessage::ClaimLightningAddress => {
+                    self.lightning_share = None;
+                    return redirect(lightning_address_settings());
+                }
             }
         }
         Task::none()
@@ -368,6 +412,42 @@ impl State for SparkOverview {
     fn subscription(&self) -> iced::Subscription<Message> {
         iced::Subscription::none()
     }
+
+    /// Leaving the page closes the share panel; it never reopens on return.
+    fn close(&mut self) -> Task<Message> {
+        self.lightning_share = None;
+        Task::none()
+    }
+}
+
+/// What the Spark page shows for the Cube's Lightning address. Signed out, it
+/// offers the claim (Settings asks to sign in first). Signed in, an address
+/// is unknown until the Cube's registration says whether it has one.
+pub fn lightning_address_for(
+    authenticated: bool,
+    cube: &crate::app::state::connect::ConnectCubePanel,
+) -> SparkLightningAddress {
+    let address = cube
+        .lightning_address
+        .as_ref()
+        .and_then(|value| value.lightning_address.as_deref())
+        .filter(|address| !address.trim().is_empty());
+    match address {
+        _ if !authenticated => SparkLightningAddress::Unclaimed,
+        Some(address) => {
+            SparkLightningAddress::Ready(view::spark::overview::full_lightning_address(address))
+        }
+        None if cube.server_cube_id.is_some() => SparkLightningAddress::Unclaimed,
+        None => SparkLightningAddress::Unknown,
+    }
+}
+
+/// Settings › Spark › Lightning address: where the address is claimed and
+/// changed.
+fn lightning_address_settings() -> Menu {
+    Menu::Spark(SparkSubMenu::Settings(Some(
+        crate::app::menu::SparkSettingsOption::LightningAddress,
+    )))
 }
 
 /// The Spark page's head actions, labelled: **Swap BTC ⇄ USDB** once
@@ -914,6 +994,52 @@ mod tests {
         assert_eq!(
             availability_with_backend(&panel),
             SparkLandingAvailability::Unavailable
+        );
+    }
+
+    /// Signed out, the page offers the claim; signed in, the Cube's address,
+    /// the claim once registration shows there is none, and nothing before.
+    #[test]
+    fn spark_page_address_follows_the_connect_cube() {
+        use crate::app::state::connect::ConnectCubePanel;
+        use crate::services::coincube::LightningAddress;
+        let mut cube = ConnectCubePanel::new(
+            None,
+            "synthetic-cube".into(),
+            "Test Cube".into(),
+            "bitcoin".into(),
+            false,
+        );
+        assert_eq!(
+            lightning_address_for(false, &cube),
+            SparkLightningAddress::Unclaimed
+        );
+        assert_eq!(
+            lightning_address_for(true, &cube),
+            SparkLightningAddress::Unknown
+        );
+        cube.server_cube_id = Some(7);
+        assert_eq!(
+            lightning_address_for(true, &cube),
+            SparkLightningAddress::Unclaimed
+        );
+        cube.lightning_address = Some(LightningAddress {
+            lightning_address: Some("sats".into()),
+        });
+        assert_eq!(
+            lightning_address_for(true, &cube),
+            SparkLightningAddress::Ready("sats@coincube.io".into())
+        );
+        cube.lightning_address = Some(LightningAddress {
+            lightning_address: Some("sats@coincube.io".into()),
+        });
+        assert_eq!(
+            lightning_address_for(true, &cube),
+            SparkLightningAddress::Ready("sats@coincube.io".into())
+        );
+        assert_eq!(
+            lightning_address_for(false, &cube),
+            SparkLightningAddress::Unclaimed
         );
     }
 }

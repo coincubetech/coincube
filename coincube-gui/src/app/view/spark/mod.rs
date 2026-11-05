@@ -226,6 +226,16 @@ pub enum SparkOverviewMessage {
     /// Forwarded to the top-level handler to flip the global
     /// fiat-native ↔ bitcoin-native display mode.
     FlipDisplayMode,
+    /// Open the share panel for this Lightning address.
+    ShareLightningAddress(String),
+    /// Close the share panel (Escape or a press outside it).
+    CloseLightningShare,
+    /// Copy the shared Lightning address.
+    CopyLightningAddress(String),
+    /// Open Settings › Spark › Lightning address with its change form.
+    ChangeLightningAddress,
+    /// Open Settings › Spark › Lightning address, where the claim form lives.
+    ClaimLightningAddress,
 }
 
 /// View-level messages for the Spark Transactions panel.

@@ -11082,33 +11082,18 @@ impl App {
             self.panels.current,
             Menu::Spark(menu::SparkSubMenu::Overview)
         ) {
-            // The Spark landing reuses the Connect-owned address form and its
-            // confirmation. No second address or auth state lives in Overview.
-            let connect = &self.panels.connect;
-            let address = move || {
-                if connect.account.is_authenticated() {
-                    view::spark::overview::spark_landing_address(&connect.cube)
-                } else {
-                    view::connect::sign_in_prompt::sign_in_prompt("claim a Lightning Address")
-                }
-            };
+            // The Spark page shows the Connect-owned address beside its
+            // balance; claiming and changing it happen in Settings. No second
+            // address or auth state lives in Overview.
+            let lightning_address = state::spark::overview::lightning_address_for(
+                self.panels.connect.account.is_authenticated(),
+                &self.panels.connect.cube,
+            );
             let (activity, cache) = (&self.panels.activity, &self.cache);
-            let confirmation = self
-                .panels
-                .connect
-                .account
-                .is_authenticated()
-                .then(|| {
-                    view::spark::settings::lightning_address::lightning_address_confirmation(
-                        &self.panels.connect.cube,
-                    )
-                })
-                .flatten()
-                .map(|dialog| dialog.map(view::Message::ConnectCube));
-            self.panels.spark_overview.view_with_address_overlay(
+            self.panels.spark_overview.view_with_lightning_share(
                 &self.panels.current,
                 &self.cache,
-                address,
+                lightning_address,
                 move || {
                     view::activity::recent_activity(
                         activity,
@@ -11124,7 +11109,6 @@ impl App {
                         view::activity::WalletFilter::Spark,
                     )
                 },
-                confirmation,
             )
         } else if let (Menu::Vault(menu::VaultSubMenu::Overview), Some(panel), false) = (
             &self.panels.current,
@@ -17419,6 +17403,83 @@ mod settings_navigation_integration_tests {
         }));
         assert_eq!(app.cube_settings.spark_alias, None);
         assert_eq!(side_panel_spark_row(&app), ["Spark"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The Spark page's share panel leads to Settings › Spark › Lightning
+    /// address with the change form open, and the claim button to the same
+    /// tab with the form closed. Either way the panel is gone on return.
+    #[test]
+    fn spark_lightning_share_change_and_claim_open_the_address_settings() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("spark-ln-share-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let overview = Menu::Spark(menu::SparkSubMenu::Overview);
+        let address_settings = Menu::Spark(menu::SparkSubMenu::Settings(Some(
+            menu::SparkSettingsOption::LightningAddress,
+        )));
+        let spark = |message| Message::View(view::Message::SparkOverview(message));
+        drop(app.set_current_panel(overview.clone()));
+
+        drop(
+            app.update(spark(view::SparkOverviewMessage::ShareLightningAddress(
+                "sats@coincube.io".into(),
+            ))),
+        );
+        assert_eq!(
+            app.panels.spark_overview.lightning_share_for_tests(),
+            Some("sats@coincube.io")
+        );
+        let copied = outputs(
+            app.update(spark(view::SparkOverviewMessage::CopyLightningAddress(
+                "sats@coincube.io".into(),
+            ))),
+        );
+        assert!(matches!(
+            copied.as_slice(),
+            [Message::View(view::Message::Clipboard(text))] if text == "sats@coincube.io"
+        ));
+        drop(app.update(spark(view::SparkOverviewMessage::CloseLightningShare)));
+        assert_eq!(app.panels.spark_overview.lightning_share_for_tests(), None);
+
+        drop(
+            app.update(spark(view::SparkOverviewMessage::ShareLightningAddress(
+                "sats@coincube.io".into(),
+            ))),
+        );
+        let change = outputs(app.update(spark(view::SparkOverviewMessage::ChangeLightningAddress)));
+        assert_eq!(app.panels.spark_overview.lightning_share_for_tests(), None);
+        assert!(
+            matches!(
+                change.as_slice(),
+                [
+                    Message::View(view::Message::Menu(menu)),
+                    Message::View(view::Message::ConnectCube(
+                        view::ConnectCubeMessage::BeginEditLightningAddress
+                    )),
+                ] if *menu == address_settings
+            ),
+            "{:?}",
+            change
+        );
+        for message in change {
+            drop(app.update(message));
+        }
+        assert_eq!(app.panels.current, address_settings);
+        assert!(app.panels.connect.cube.ln_editing);
+
+        drop(app.update(Message::View(view::Message::Menu(overview))));
+        app.panels.connect.cube.ln_editing = false;
+        let claim = outputs(app.update(spark(view::SparkOverviewMessage::ClaimLightningAddress)));
+        assert!(matches!(
+            claim.as_slice(),
+            [Message::View(view::Message::Menu(menu))] if *menu == address_settings
+        ));
+        for message in claim {
+            drop(app.update(message));
+        }
+        assert_eq!(app.panels.current, address_settings);
+        assert!(!app.panels.connect.cube.ln_editing);
         let _ = std::fs::remove_dir_all(root);
     }
 }

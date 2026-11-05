@@ -519,7 +519,7 @@ fn lightning_address_body<'a>(
                 ),
         )
         .push(p2_regular(
-            "Anyone can pay this address while this app is open and active.",
+            "Anyone with a Lightning wallet can pay this address, even while Tenshu is closed.",
         ))
         .push(
             button::transparent_border(None, "Change in Settings")
@@ -1069,7 +1069,7 @@ fn phase_body<'a>(
                 ),
                 SparkReceiveMethod::LightningAddress => (
                     "Lightning address",
-                    "Anyone can pay this address while this app is open and active.",
+                    "Anyone with a Lightning wallet can pay this address, even while Tenshu is closed.",
                 ),
                 SparkReceiveMethod::Spark => (
                     "Spark address",
