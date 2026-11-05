@@ -7,9 +7,8 @@ use iced::{
     Alignment, Background, Border, Color, Length, Size,
 };
 
-use coincube_ui::theme::{palette::ThemeMode, Theme};
+use coincube_ui::theme::Theme;
 use coincube_ui::{
-    color,
     component::text::{caption, p2_regular, Text},
     theme,
     widget::*,
@@ -33,19 +32,12 @@ pub struct PolicyRow<'a> {
 }
 
 fn surface(t: &Theme) -> Color {
-    if matches!(t.mode, ThemeMode::Light) {
-        color::LIGHT_CARD_BG
-    } else {
-        color::GREY_5
-    }
+    t.colors.shell.panel
 }
 
+/// The key boxes sit on the page's own background, inset in the panel.
 fn key_surface(t: &Theme) -> Color {
-    if matches!(t.mode, ThemeMode::Light) {
-        color::LIGHT_SURFACE
-    } else {
-        color::GREY_6
-    }
+    t.colors.shell.background
 }
 
 fn badge<'a>(number: u32, key_color: Color) -> Element<'a, Message> {
@@ -93,30 +85,51 @@ fn policy_box<'a>(row: &PolicyRow<'a>) -> Element<'a, Message> {
     .into()
 }
 
-fn spend_bar<'a>(label: &'static str, bar_color: Color, width: Length) -> Element<'a, Message> {
+/// What a policy can do in a window of time. Spendable windows take the
+/// shell's good tint; a timelocked one is not an error, so it stays neutral:
+/// a line-coloured outline and muted label, as an unavailable control is.
+#[derive(Clone, Copy)]
+enum Window {
+    Spendable,
+    Locked,
+}
+
+fn spend_bar<'a>(label: &'static str, window: Window, width: Length) -> Element<'a, Message> {
     Container::new(
-        Row::new()
-            .width(Length::Fill)
-            .align_y(Alignment::Center)
-            .push(Space::new().width(Length::Fill))
-            .push(
-                caption(label)
-                    .style(theme::text::adaptive(bar_color))
-                    .bold(),
-            )
-            .push(Space::new().width(Length::Fill)),
+        p2_regular(label)
+            .size(13)
+            .font(coincube_ui::font::MEDIUM)
+            .style(move |t: &Theme| iced::widget::text::Style {
+                color: Some(match window {
+                    Window::Spendable => t.colors.shell.good,
+                    Window::Locked => t.colors.shell.muted,
+                }),
+            }),
     )
     .width(width)
-    .center_y(Length::Fixed(38.0))
-    .padding([0, 7])
-    .style(move |t| {
-        let adapted = theme::text::adapt_color(bar_color, t);
+    .center_x(width)
+    .center_y(Length::Fixed(32.0))
+    .padding([0, 8])
+    .style(move |t: &Theme| {
+        let shell = &t.colors.shell;
         container::Style {
-            background: Some(Background::Color(Color { a: 0.16, ..adapted })),
+            background: Some(Background::Color(match window {
+                Window::Spendable => Color {
+                    a: 0.10,
+                    ..shell.good
+                },
+                Window::Locked => Color::TRANSPARENT,
+            })),
             border: Border {
-                color: Color { a: 0.5, ..adapted },
+                color: match window {
+                    Window::Spendable => Color {
+                        a: 0.35,
+                        ..shell.good
+                    },
+                    Window::Locked => shell.line,
+                },
                 width: 1.0,
-                radius: 8.0.into(),
+                radius: 6.0.into(),
             },
             ..Default::default()
         }
@@ -126,7 +139,7 @@ fn spend_bar<'a>(label: &'static str, bar_color: Color, width: Length) -> Elemen
 
 fn spend_window<'a>(timelock: Timelock, compact: bool) -> Element<'a, Message> {
     match timelock {
-        Timelock::None => spend_bar("CAN SPEND", color::GREEN, Length::Fill),
+        Timelock::None => spend_bar("Can spend", Window::Spendable, Length::Fill),
         Timelock::After(fraction) => {
             // The segments communicate relative activation order, not a block
             // count. Keep both labels readable on the narrower wide layout.
@@ -136,13 +149,13 @@ fn spend_window<'a>(timelock: Timelock, compact: bool) -> Element<'a, Message> {
                 .spacing(6)
                 .width(Length::Fill)
                 .push(spend_bar(
-                    "CAN'T SPEND (TIMELOCKED)",
-                    color::RED,
+                    "Can't spend (timelocked)",
+                    Window::Locked,
                     Length::FillPortion(locked),
                 ))
                 .push(spend_bar(
-                    "CAN SPEND",
-                    color::GREEN,
+                    "Can spend",
+                    Window::Spendable,
                     Length::FillPortion(100 - locked),
                 ))
                 .into()
@@ -218,8 +231,9 @@ fn diagram_content<'a>(rows: &[PolicyRow<'a>], available_width: f32) -> Element<
     .style(|t| container::Style {
         background: Some(Background::Color(surface(t))),
         border: Border {
-            radius: 16.0.into(),
-            ..Default::default()
+            color: t.colors.shell.line,
+            width: 1.0,
+            radius: 12.0.into(),
         },
         ..Default::default()
     })

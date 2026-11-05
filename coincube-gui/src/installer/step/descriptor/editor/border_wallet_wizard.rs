@@ -27,10 +27,8 @@ use rand::{rngs::OsRng, seq::SliceRandom};
 use zeroize::{Zeroize, Zeroizing};
 
 use coincube_ui::{
-    color,
     component::{
         button, form,
-        modal::{self},
         text::{p1_bold, p1_regular, text},
     },
     icon, theme,
@@ -40,6 +38,7 @@ use coincube_ui::{
 use std::sync::{Arc, Mutex};
 
 use crate::{
+    home::restore_frame,
     hw::HardwareWallets,
     installer::{
         descriptor::{Key, KeySource},
@@ -51,6 +50,24 @@ use crate::{
 
 /// The global Tab handler reveals focus here after the outer app scroll area.
 pub(crate) const BORDER_WALLET_GRID_SCROLL_ID: &str = "tenshu.border-wallet.grid-scroll";
+
+/// The numbered stages on the sheet's rail.
+const STAGES: [&str; 4] = ["Phrase", "Pattern", "Checksum", "Confirm"];
+/// The sheet header's height, as the Create Cube sheet's.
+const HEADER_HEIGHT: f32 = 64.0;
+/// Footer actions match the header's Close.
+const FOOTER_ACTION_HEIGHT: f32 = 36.0;
+/// Width of the text steps' sheet.
+const SHEET_WIDTH: f32 = 560.0;
+/// A grid cell's width: four letters at 11 px with room for the focus ring.
+const CELL_WIDTH: f32 = 46.0;
+/// The pattern sheet fits the row numbers, sixteen cells, the embedded
+/// scrollbar and the body padding, and stays inside the 1024 px minimum
+/// window less the modal margin.
+const GRID_SHEET_WIDTH: f32 = 920.0;
+/// The pattern sheet grows with the window up to this height; the grid
+/// scrolls within it.
+const GRID_SHEET_MAX_HEIGHT: f32 = 860.0;
 
 /// Wizard step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -387,6 +404,9 @@ impl BorderWalletWizard {
         message: Option<BorderWalletWizardMessage>,
     ) -> Action<'a, Message> {
         button::primary_action(id, None, label, Message::FocusAction)
+            .width(Length::Shrink)
+            .height(Length::Fixed(FOOTER_ACTION_HEIGHT))
+            .padding([0, 16])
             .on_press_maybe(message.map(Message::BorderWalletWizard))
     }
 
@@ -399,36 +419,35 @@ impl BorderWalletWizard {
             .on_press_maybe(message.map(Message::BorderWalletWizard))
     }
 
+    /// Back in the sheet's footer, drawn as the sheet's Close is.
     fn back_control<'a>(id: &'static str, message: Message) -> Action<'a, Message> {
         Action::new(
             id,
-            Row::new()
-                .spacing(8)
-                .align_y(Vertical::Center)
-                .push(icon::previous_icon())
-                .push(text("Back")),
+            Container::new(
+                Row::new()
+                    .spacing(6)
+                    .align_y(Vertical::Center)
+                    .push(
+                        icon::previous_icon()
+                            .size(14)
+                            .style(theme::tenshu::text::ink),
+                    )
+                    .push(coincube_ui::component::tenshu::text::label("Back")),
+            )
+            .center_y(Length::Fill),
             Message::FocusAction,
         )
-        .padding(8)
+        .height(Length::Fixed(FOOTER_ACTION_HEIGHT))
+        .padding([0, 12])
         .style(|theme, status| {
-            let mut style = theme::button::transparent(theme, status);
-            style.text_color = theme.colors.shell.ink;
-            style
+            theme::tenshu::button::action(
+                theme,
+                status,
+                theme::tenshu::button::ActionKind::Secondary,
+                theme::tenshu::button::ActionShape::Compact,
+            )
         })
         .on_press(message)
-    }
-
-    fn modal_style(theme: &theme::Theme) -> iced::widget::container::Style {
-        iced::widget::container::Style {
-            background: Some(iced::Background::Color(theme.colors.shell.panel)),
-            border: iced::Border {
-                color: theme.colors.shell.line,
-                width: 1.0,
-                radius: 12.0.into(),
-            },
-            text_color: Some(theme.colors.shell.ink),
-            ..Default::default()
-        }
     }
 
     fn grid_cell_style(
@@ -444,7 +463,7 @@ impl BorderWalletWizard {
                 shell.panel
             })),
             text_color: if selected {
-                iced::color!(0x201407)
+                theme::tenshu::ON_ACCENT
             } else {
                 shell.ink
             },
@@ -463,71 +482,101 @@ impl BorderWalletWizard {
         }
     }
 
-    /// The intro explains the flow; the four numbered stages start with Phrase.
-    fn progress(&self) -> Element<Message> {
+    /// The four numbered stages, as the Create Cube sheet's step strip. The
+    /// intro explains the flow and has none.
+    fn rail(&self) -> Option<Element<Message>> {
         let current = match self.step {
-            WizardStep::Intro | WizardStep::RecoveryPhrase => 0,
+            WizardStep::Intro => return None,
+            WizardStep::RecoveryPhrase => 0,
             WizardStep::Grid => 1,
             WizardStep::Checksum => 2,
             WizardStep::Confirm => 3,
         };
-        let labels = ["Phrase", "Pattern", "Checksum", "Confirm"];
-        let mut steps = Column::new().spacing(4).width(Length::Fill);
-        for (index, label) in labels.iter().enumerate() {
-            let number = Container::new(text(format!("{}", index + 1)).size(11))
-                .center_x(Length::Fixed(20.0))
-                .center_y(Length::Fixed(20.0))
-                .style(move |theme: &theme::Theme| iced::widget::container::Style {
-                    background: (index == current)
-                        .then_some(iced::Background::Color(theme.colors.shell.selected)),
-                    border: iced::Border {
-                        color: if index < current {
-                            theme.colors.shell.good
-                        } else if index == current {
-                            theme.colors.shell.accent
-                        } else {
-                            theme.colors.shell.line
-                        },
-                        width: 1.0,
-                        radius: 10.0.into(),
-                    },
-                    text_color: Some(if index < current {
-                        theme.colors.shell.good
-                    } else if index == current {
-                        theme.colors.shell.accent_ink
-                    } else {
-                        theme.colors.shell.muted
-                    }),
-                    ..Default::default()
-                });
-            let name = text(if index == current {
-                format!("{} · Step {} of 4", label, index + 1)
-            } else {
-                label.to_string()
-            })
-            .size(12)
-            .style(move |theme: &theme::Theme| iced::widget::text::Style {
-                color: Some(if index == current {
-                    theme.colors.shell.ink
-                } else {
-                    theme.colors.shell.muted
-                }),
-            });
-            steps = steps.push(
-                Row::new()
-                    .spacing(6)
-                    .align_y(Vertical::Center)
-                    .push(number)
-                    .push(name),
-            );
+        Some(
+            Container::new(restore_frame::stepper(&STAGES, current))
+                .padding([14, 24])
+                .width(Length::Fill)
+                .into(),
+        )
+    }
+
+    /// A step's sheet: header with the title and Close, the stage rail, the
+    /// body, and a footer pinned under it with Back on the left and the
+    /// step's action on the right. The footer stays on screen however tall
+    /// the body is: the pattern step's grid scrolls inside the body.
+    fn sheet<'a>(
+        &'a self,
+        title: &'static str,
+        width: f32,
+        body: Element<'a, Message>,
+        back: Action<'a, Message>,
+        primary: Action<'a, Message>,
+    ) -> Element<'a, Message> {
+        let fills = self.step == WizardStep::Grid;
+        let header = Container::new(
+            Row::new()
+                .align_y(Vertical::Center)
+                .push(
+                    iced::widget::text(title)
+                        .size(20)
+                        .font(coincube_ui::font::SEMIBOLD),
+                )
+                .push(Space::new().width(Length::Fill))
+                .push(restore_frame::close_button(
+                    "border-wallet.close",
+                    Some(Message::Close),
+                    Message::FocusAction,
+                )),
+        )
+        .height(Length::Fixed(HEADER_HEIGHT))
+        .center_y(Length::Fixed(HEADER_HEIGHT))
+        .padding([0, 24])
+        .width(Length::Fill);
+        let body = Container::new(body)
+            .padding([20, 24])
+            .width(Length::Fill)
+            .height(if fills { Length::Fill } else { Length::Shrink });
+        let footer = Container::new(
+            Row::new()
+                .align_y(Vertical::Center)
+                .push(back)
+                .push(Space::new().width(Length::Fill))
+                .push(primary),
+        )
+        .padding([14, 24])
+        .width(Length::Fill);
+        let mut column = Column::new()
+            .width(Length::Fill)
+            .push(header)
+            .push(restore_frame::full_rule());
+        if let Some(rail) = self.rail() {
+            column = column.push(rail).push(restore_frame::full_rule());
         }
-        steps.into()
+        let column = column
+            .push(body)
+            .push(restore_frame::full_rule())
+            .push(footer);
+        let sheet = Container::new(column)
+            .width(Length::Fixed(width))
+            .style(restore_frame::sheet_style);
+        if fills {
+            sheet
+                .height(Length::Fill)
+                .max_height(GRID_SHEET_MAX_HEIGHT)
+                .into()
+        } else {
+            sheet.into()
+        }
+    }
+
+    fn error_line(&self) -> Option<Element<Message>> {
+        self.error
+            .as_ref()
+            .map(|e| p1_regular(e.as_str()).style(theme::text::error).into())
     }
 
     fn view_intro(&self) -> Element<Message> {
-        let header = modal::header(Some("Border Wallet".to_string()), Some(|| Message::Close));
-
-        let description = Column::new()
+        let body = Column::new()
             .spacing(8)
             .push(p1_bold("What is a Border Wallet?"))
             .push(p1_regular(
@@ -552,49 +601,29 @@ impl BorderWalletWizard {
                  Write them down and store them securely.",
             ));
 
-        let next_btn = Self::primary_control(
-            "border-wallet.intro.start",
-            "Get Started",
-            Some(BorderWalletWizardMessage::Next),
-        );
-
-        // Footer: [Back] [spacer] [Get Started]. Intro is the first step
-        // of the wizard, so "Back" returns the user to the
-        // Select-key-source picker for this slot (via
-        // `DefineDescriptor::ReopenKeyModal`) rather than dropping
-        // them all the way back to the descriptor editor.
-        let footer = Row::new()
-            .push(Self::back_control(
+        // Intro is the first step of the wizard, so "Back" returns the user
+        // to the Select-key-source picker for this slot (via
+        // `DefineDescriptor::ReopenKeyModal`) rather than dropping them all
+        // the way back to the descriptor editor.
+        self.sheet(
+            "Border Wallet",
+            SHEET_WIDTH,
+            body.into(),
+            Self::back_control(
                 "border-wallet.intro.back",
                 Message::DefineDescriptor(message::DefineDescriptor::ReopenKeyModal(
                     self.coordinates.clone(),
                 )),
-            ))
-            .push(Space::new().width(Length::Fill))
-            .push(next_btn)
-            .align_y(Vertical::Center);
-
-        let col = Column::new()
-            .spacing(15)
-            .push(header)
-            .push(description)
-            .push(footer)
-            .width(500);
-
-        Container::new(col)
-            .padding(20)
-            .style(Self::modal_style)
-            .into()
+            ),
+            Self::primary_control(
+                "border-wallet.intro.start",
+                "Get Started",
+                Some(BorderWalletWizardMessage::Next),
+            ),
+        )
     }
 
     fn view_recovery_phrase(&self) -> Element<Message> {
-        let header = modal::header(Some("Recovery Phrase".to_string()), Some(|| Message::Close));
-
-        let back_btn = Self::back_control(
-            "border-wallet.phrase.back",
-            self.wizard_msg(BorderWalletWizardMessage::Previous),
-        );
-
         let generate_label: &'static str = if self.allow_random_grid_phrase {
             "Generate Random Phrase"
         } else {
@@ -639,48 +668,32 @@ impl BorderWalletWizard {
             word_rows = word_rows.push(row_widget);
         }
 
-        let error_text: Option<Element<Message>> = self
-            .error
-            .as_ref()
-            .map(|e| p1_regular(e.as_str()).color(color::RED).into());
-
-        let next_btn = Self::primary_control(
-            "border-wallet.phrase.next",
-            "Next",
-            self.phrase_valid.then_some(BorderWalletWizardMessage::Next),
-        )
-        .width(Length::Fill);
-
-        let mut col = Column::new()
+        let body = Column::new()
             .spacing(12)
-            .push(header)
-            .push(self.progress())
             .push(p1_regular(
                 "Enter or generate the 12-word recovery phrase that will seed the word grid.",
             ))
             .push(generate_btn)
-            .push(word_rows);
+            .push(word_rows)
+            .push(self.error_line());
 
-        if let Some(err) = error_text {
-            col = col.push(err);
-        }
-
-        col = col.push(Row::new().spacing(10).push(back_btn).push(next_btn));
-
-        Container::new(col.width(550))
-            .padding(20)
-            .style(Self::modal_style)
-            .into()
+        self.sheet(
+            "Recovery Phrase",
+            SHEET_WIDTH,
+            body.into(),
+            Self::back_control(
+                "border-wallet.phrase.back",
+                self.wizard_msg(BorderWalletWizardMessage::Previous),
+            ),
+            Self::primary_control(
+                "border-wallet.phrase.next",
+                "Continue",
+                self.phrase_valid.then_some(BorderWalletWizardMessage::Next),
+            ),
+        )
     }
 
     fn view_grid(&self) -> Element<Message> {
-        let header = modal::header(Some("Select Pattern".to_string()), Some(|| Message::Close));
-
-        let back_btn = Self::back_control(
-            "border-wallet.pattern.back",
-            self.wizard_msg(BorderWalletWizardMessage::Previous),
-        );
-
         let status = p1_bold(format!(
             "Selected: {} / {} cells",
             self.pattern.len(),
@@ -710,16 +723,18 @@ impl BorderWalletWizard {
                 column_numbers = column_numbers.push(
                     text(format!("{}", col_idx + 1))
                         .size(10)
-                        .width(46)
-                        .align_x(Horizontal::Center),
+                        .width(CELL_WIDTH)
+                        .align_x(Horizontal::Center)
+                        .style(theme::text::secondary),
                 );
             }
             for row_idx in 0..WordGrid::ROWS {
-                let mut row_widget = Row::new().spacing(4).push(
+                let mut row_widget = Row::new().spacing(4).align_y(Vertical::Center).push(
                     text(format!("{}", row_idx + 1))
                         .size(10)
                         .width(24)
-                        .align_x(Horizontal::Right),
+                        .align_x(Horizontal::Right)
+                        .style(theme::text::secondary),
                 );
                 for col_idx in 0..WordGrid::COLS {
                     let word = grid.word_at(row_idx, col_idx).unwrap_or("???");
@@ -750,7 +765,7 @@ impl BorderWalletWizard {
                     .style(move |theme, status| Self::grid_cell_style(theme, status, is_selected))
                     .focus_radius(4.0)
                     .on_press(self.wizard_msg(BorderWalletWizardMessage::ToggleCellSelection(r, c)))
-                    .width(46)
+                    .width(CELL_WIDTH)
                     .height(28);
 
                     row_widget = row_widget.push(cell_btn);
@@ -760,6 +775,7 @@ impl BorderWalletWizard {
             grid_col = grid_col.push(Space::new().height(4));
             Column::new()
                 .spacing(4)
+                .height(Length::Fill)
                 .push(column_numbers)
                 .push(
                     scrollable(grid_col)
@@ -767,68 +783,57 @@ impl BorderWalletWizard {
                         // Embed the scrollbar beside the last column instead
                         // of floating over its text and focus ring.
                         .spacing(4)
-                        .height(360),
+                        .height(Length::Fill),
                 )
                 .into()
         } else {
             p1_regular("No grid available").into()
         };
 
-        let error_text: Option<Element<Message>> = self
-            .error
-            .as_ref()
-            .map(|e| p1_regular(e.as_str()).color(color::RED).into());
-
-        let next_btn = Self::primary_control(
-            "border-wallet.pattern.next",
-            "Next",
-            self.pattern
-                .is_complete()
-                .then_some(BorderWalletWizardMessage::Next),
-        )
-        .width(Length::Fill);
-
-        let mut col = Column::new()
-            .spacing(10)
-            .push(header)
-            .push(self.progress())
+        let body = Column::new()
+            .spacing(12)
+            .height(Length::Fill)
             .push(p1_regular(
                 "Select 11 cells from the grid in order. This pattern is your key \u{2014} remember it exactly.",
             ))
             .push(
                 Row::new()
                     .spacing(10)
+                    .align_y(Vertical::Center)
                     .push(status)
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        text(format!(
+                            "{} rows × {} columns · first four letters shown",
+                            WordGrid::ROWS,
+                            WordGrid::COLS
+                        ))
+                        .size(12)
+                        .style(theme::text::secondary),
+                    )
                     .push(undo_btn)
                     .push(clear_btn),
             )
-            .push(p1_regular(format!(
-                "{} rows × {} columns · first four letters shown · selected numbers show order",
-                WordGrid::ROWS,
-                WordGrid::COLS
-            )))
-            .push(grid_content);
+            .push(grid_content)
+            .push(self.error_line());
 
-        if let Some(err) = error_text {
-            col = col.push(err);
-        }
-
-        col = col.push(Row::new().spacing(10).push(back_btn).push(next_btn));
-
-        Container::new(col.width(850))
-            .padding(20)
-            .style(Self::modal_style)
-            .into()
+        self.sheet(
+            "Select Pattern",
+            GRID_SHEET_WIDTH,
+            body.into(),
+            Self::back_control(
+                "border-wallet.pattern.back",
+                self.wizard_msg(BorderWalletWizardMessage::Previous),
+            ),
+            Self::primary_control(
+                "border-wallet.pattern.next",
+                "Continue",
+                pattern_can_continue(&self.pattern).then_some(BorderWalletWizardMessage::Next),
+            ),
+        )
     }
 
     fn view_checksum(&self) -> Element<Message> {
-        let header = modal::header(Some("Checksum & Key".to_string()), Some(|| Message::Close));
-
-        let back_btn = Self::back_control(
-            "border-wallet.checksum.back",
-            self.wizard_msg(BorderWalletWizardMessage::Previous),
-        );
-
         let checksum_word = self.checksum_word.as_deref().unwrap_or("???");
 
         let enrollment_display = if let Some(enrollment) = &self.enrollment {
@@ -848,17 +853,8 @@ impl BorderWalletWizard {
             Column::new().push(p1_regular("No enrollment data"))
         };
 
-        let next_btn = Self::primary_control(
-            "border-wallet.checksum.next",
-            "Next",
-            Some(BorderWalletWizardMessage::Next),
-        )
-        .width(Length::Fill);
-
-        let col = Column::new()
+        let body = Column::new()
             .spacing(12)
-            .push(header)
-            .push(self.progress())
             .push(p1_bold(format!("Checksum word: \"{}\"", checksum_word)))
             .push(p1_regular(
                 "This is the only word you need to memorize. The checksum word is \
@@ -866,24 +862,25 @@ impl BorderWalletWizard {
                  your pattern. Together with the recovery phrase and your pattern, it \
                  forms the three components needed to reconstruct this key.",
             ))
-            .push(enrollment_display)
-            .push(Row::new().spacing(10).push(back_btn).push(next_btn))
-            .width(500);
+            .push(enrollment_display);
 
-        Container::new(col)
-            .padding(20)
-            .style(Self::modal_style)
-            .into()
+        self.sheet(
+            "Checksum & Key",
+            SHEET_WIDTH,
+            body.into(),
+            Self::back_control(
+                "border-wallet.checksum.back",
+                self.wizard_msg(BorderWalletWizardMessage::Previous),
+            ),
+            Self::primary_control(
+                "border-wallet.checksum.next",
+                "Continue",
+                Some(BorderWalletWizardMessage::Next),
+            ),
+        )
     }
 
     fn view_confirm(&self) -> Element<Message> {
-        let header = modal::header(Some("Confirm".to_string()), Some(|| Message::Close));
-
-        let back_btn = Self::back_control(
-            "border-wallet.confirm.back",
-            self.wizard_msg(BorderWalletWizardMessage::Previous),
-        );
-
         let fingerprint = self
             .enrollment
             .as_ref()
@@ -892,7 +889,7 @@ impl BorderWalletWizard {
 
         let checksum_word = self.checksum_word.as_deref().unwrap_or("???");
 
-        let warning = Column::new()
+        let body = Column::new()
             .spacing(8)
             .push(p1_bold("Important \u{2014} Read carefully"))
             .push(p1_regular(
@@ -917,26 +914,27 @@ impl BorderWalletWizard {
             ))
             .push(p1_bold(format!("Key fingerprint: {}", fingerprint)));
 
-        let confirm_btn = Self::primary_control(
-            "border-wallet.confirm.enroll",
-            "Confirm & Enroll Key",
-            Some(BorderWalletWizardMessage::ConfirmEnrollment),
+        self.sheet(
+            "Confirm",
+            SHEET_WIDTH,
+            body.into(),
+            Self::back_control(
+                "border-wallet.confirm.back",
+                self.wizard_msg(BorderWalletWizardMessage::Previous),
+            ),
+            Self::primary_control(
+                "border-wallet.confirm.enroll",
+                "Confirm & Enroll Key",
+                Some(BorderWalletWizardMessage::ConfirmEnrollment),
+            ),
         )
-        .width(Length::Fill);
-
-        let col = Column::new()
-            .spacing(15)
-            .push(header)
-            .push(self.progress())
-            .push(warning)
-            .push(Row::new().spacing(10).push(back_btn).push(confirm_btn))
-            .width(500);
-
-        Container::new(col)
-            .padding(20)
-            .style(Self::modal_style)
-            .into()
     }
+}
+
+/// The pattern step's Continue is enabled exactly when the full ordered
+/// pattern is chosen; [`BorderWalletWizard::on_next`] checks it again.
+fn pattern_can_continue(pattern: &OrderedPattern) -> bool {
+    pattern.is_complete()
 }
 
 /// Zeroize recovery phrase words when the wizard is dropped so they don't
@@ -994,6 +992,183 @@ impl super::DescriptorEditModal for BorderWalletWizard {
 }
 
 #[cfg(test)]
+mod step_tests {
+    use super::*;
+
+    /// A public BIP39 test vector: a synthetic grid fixture, never a user's
+    /// recovery phrase.
+    fn wizard_on_grid() -> BorderWalletWizard {
+        let grid = GridRecoveryPhrase::from_phrase(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap()
+        .generate_grid();
+        BorderWalletWizard {
+            network: Network::Regtest,
+            coordinates: Vec::new(),
+            step: WizardStep::Grid,
+            phrase_words: vec![form::Value::default(); 12],
+            phrase_valid: false,
+            grid: Some(grid),
+            pattern: OrderedPattern::new(),
+            grid_focus_ids: BorderWalletWizard::grid_focus_ids(),
+            checksum_word: None,
+            enrollment: None,
+            allow_random_grid_phrase: true,
+            signer: None,
+            phrase_source: GridSeedSource::Independent,
+            error: None,
+        }
+    }
+
+    /// The wizard's handling of `message`, as its `update` dispatches it.
+    fn send(wizard: &mut BorderWalletWizard, message: BorderWalletWizardMessage) {
+        let _ = match message {
+            BorderWalletWizardMessage::Next => wizard.on_next(),
+            BorderWalletWizardMessage::Previous => wizard.on_previous(),
+            BorderWalletWizardMessage::ToggleCellSelection(row, col) => {
+                wizard.on_toggle_cell(row, col)
+            }
+            _ => unreachable!("not used by these tests"),
+        };
+    }
+
+    #[test]
+    fn full_pattern_continues_to_checksum_and_back() {
+        let mut wizard = wizard_on_grid();
+        for col in 0..(PATTERN_LENGTH as u8 - 1) {
+            send(
+                &mut wizard,
+                BorderWalletWizardMessage::ToggleCellSelection(3, col),
+            );
+        }
+        assert!(!pattern_can_continue(&wizard.pattern), "10 of 11 cells");
+        send(&mut wizard, BorderWalletWizardMessage::Next);
+        assert_eq!(wizard.step, WizardStep::Grid, "an incomplete pattern stays");
+        assert!(wizard.error.is_some());
+
+        send(
+            &mut wizard,
+            BorderWalletWizardMessage::ToggleCellSelection(4, 0),
+        );
+        assert!(pattern_can_continue(&wizard.pattern), "11 of 11 cells");
+        send(&mut wizard, BorderWalletWizardMessage::Next);
+        assert_eq!(wizard.step, WizardStep::Checksum);
+        assert!(wizard.error.is_none());
+        assert!(wizard.checksum_word.is_some() && wizard.enrollment.is_some());
+
+        send(&mut wizard, BorderWalletWizardMessage::Next);
+        assert_eq!(wizard.step, WizardStep::Confirm);
+        send(&mut wizard, BorderWalletWizardMessage::Previous);
+        assert_eq!(wizard.step, WizardStep::Checksum);
+        send(&mut wizard, BorderWalletWizardMessage::Previous);
+        assert_eq!(wizard.step, WizardStep::Grid);
+        assert_eq!(
+            wizard.pattern.len(),
+            PATTERN_LENGTH,
+            "Back keeps the pattern"
+        );
+    }
+
+    /// The reported bug: inside the Create Vault frame the modal was laid out
+    /// against the step's small bounds, which clipped the sheet below the
+    /// grid, so the pattern step's Continue was never on screen. Over a base
+    /// the size of that step, a window-covering modal keeps every column and
+    /// Continue inside the minimum window once the pattern is complete. The
+    /// editor's own test checks that it mounts its modals this way.
+    #[test]
+    fn pattern_continue_is_on_screen_over_a_small_base() {
+        use iced::advanced::widget::{operation, operation::focusable, Operation};
+        use iced::{Rectangle, Size};
+        use iced_runtime::user_interface::{Cache, UserInterface};
+
+        struct Find {
+            last_column: Id,
+            next: Option<Rectangle>,
+            cell: Option<Rectangle>,
+        }
+        impl Operation for Find {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn focusable(
+                &mut self,
+                id: Option<&Id>,
+                bounds: Rectangle,
+                _: &mut dyn focusable::Focusable,
+            ) {
+                if id == Some(&Id::new("border-wallet.pattern.next")) {
+                    self.next = Some(bounds);
+                } else if id == Some(&self.last_column) {
+                    self.cell = Some(bounds);
+                }
+            }
+        }
+
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let mut renderer = iced::futures::executor::block_on(
+            <iced::Renderer as iced::advanced::renderer::Headless>::new(
+                coincube_ui::font::REGULAR,
+                iced::Pixels(14.0),
+                Some("tiny-skia"),
+            ),
+        )
+        .unwrap();
+        let window = Size::new(1024.0, 768.0);
+
+        let mut wizard = wizard_on_grid();
+        for col in 0..PATTERN_LENGTH as u8 {
+            send(
+                &mut wizard,
+                BorderWalletWizardMessage::ToggleCellSelection(0, col),
+            );
+        }
+        // The Policy step's height in the screenshot that reported the bug.
+        let base = Container::new(text("Set keys"))
+            .width(Length::Fixed(668.0))
+            .height(Length::Fixed(488.0));
+        let element: Element<'_, Message> =
+            coincube_ui::widget::modal::Modal::new(base, wizard.view_grid())
+                .cover_window()
+                .into();
+        let last_column = wizard.grid_focus_ids[WordGrid::COLS - 1].clone();
+        let mut ui = UserInterface::build(element, window, Cache::new(), &mut renderer);
+        let mut find = Find {
+            last_column,
+            next: None,
+            cell: None,
+        };
+        ui.operate(&renderer, &mut operation::black_box(&mut find));
+        let next = find.next.expect("the pattern step's Continue is enabled");
+        let cell = find.cell.expect("column 16 is laid out");
+        // A sheet narrower than the grid squeezes its last columns to
+        // nothing; Continue is right-aligned in the footer, so a 16th column
+        // past its right edge is cut off by the sheet.
+        assert_eq!(cell.width, CELL_WIDTH, "column 16 is squeezed");
+        assert!(
+            cell.x + cell.width <= next.x + next.width,
+            "column 16 at {:?} overflows the sheet (Continue at {:?})",
+            cell,
+            next
+        );
+        assert!(
+            next.x >= 0.0
+                && next.y >= 0.0
+                && next.x + next.width <= window.width
+                && next.y + next.height <= window.height,
+            "Continue at {:?} is outside the {:?} window",
+            next,
+            window
+        );
+    }
+}
+
+#[cfg(test)]
 mod presentation_tests {
     use super::*;
     use coincube_ui::widget::action;
@@ -1009,6 +1184,11 @@ mod presentation_tests {
     };
     use iced::futures::StreamExt;
     use iced::{keyboard, mouse, Event, Rectangle, Size, Vector};
+
+    /// The grid fills the sheet, so its viewport can end on a fractional
+    /// pixel while scroll offsets snap to whole ones: a revealed cell's ring
+    /// may sit up to half a pixel short of the 4 px margin at the bottom.
+    const SNAP: f32 = 0.5;
 
     #[derive(Default)]
     struct FocusTargets(Vec<Id>);
@@ -1133,14 +1313,28 @@ mod presentation_tests {
 
     fn capture(
         path: &std::path::Path,
-        element: &Element<'_, Message>,
-        tree: &Tree,
+        element: &mut Element<'_, Message>,
+        tree: &mut Tree,
         node: &layout::Node,
         renderer: &mut iced::Renderer,
         theme: &theme::Theme,
         size: Size,
     ) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Buttons settle their status on a redraw; until then they draw as
+        // disabled.
+        element.as_widget_mut().update(
+            tree,
+            &Event::Window(iced::window::Event::RedrawRequested(
+                iced::time::Instant::now(),
+            )),
+            Layout::new(node),
+            mouse::Cursor::Unavailable,
+            renderer,
+            &mut Null,
+            &mut Shell::new(&mut Vec::new()),
+            &Rectangle::with_size(size),
+        );
         iced::advanced::Renderer::reset(renderer, Rectangle::with_size(size));
         let style = iced::advanced::renderer::Style {
             text_color: theme.colors.shell.ink,
@@ -1200,9 +1394,9 @@ mod presentation_tests {
                 phrase_source: GridSeedSource::Independent,
                 error: None,
             };
-            let previous = wizard.grid_focus_ids[11 * WordGrid::COLS + 15].clone();
-            let target = wizard.grid_focus_ids[12 * WordGrid::COLS].clone();
             let mut element: Element<'_, Message> = Container::new(wizard.view_grid())
+                // The modal lays the sheet out in the window less its margin.
+                .padding(coincube_ui::widget::modal::WINDOW_MARGIN)
                 .center_x(Length::Fill)
                 .center_y(Length::Fill)
                 .into();
@@ -1259,13 +1453,20 @@ mod presentation_tests {
             let first_bounds = top.screen_bounds();
             let top_viewport = top.viewport.unwrap();
             assert!(first_bounds.y >= top_viewport.y + 4.0);
+            // The grid fills the sheet, so its height follows the window:
+            // Tab from the last fully visible row's last cell must scroll.
+            let row_pitch = first_bounds.height + 4.0;
+            let visible_rows = ((top_viewport.height - 8.0) / row_pitch).floor() as usize;
+            assert!(visible_rows >= 8, "the grid shows {} rows", visible_rows);
+            let previous = wizard.grid_focus_ids[(visible_rows - 1) * WordGrid::COLS + 15].clone();
+            let target = wizard.grid_focus_ids[visible_rows * WordGrid::COLS].clone();
             if let Ok(directory) = std::env::var("BORDER_WALLET_CAPTURE_DIR") {
                 capture(
                     &std::path::Path::new(&directory).join(format!(
                         "border-wallet-synthetic-top-left-{name}-1024x768.png"
                     )),
-                    &element,
-                    &tree,
+                    &mut element,
+                    &mut tree,
                     &node,
                     &mut renderer,
                     &theme,
@@ -1296,7 +1497,9 @@ mod presentation_tests {
             let before_bounds = before.screen_bounds();
             let viewport = before.viewport.unwrap();
             assert!(before_bounds.y >= viewport.y + 4.0);
-            assert!(before_bounds.y + before_bounds.height <= viewport.y + viewport.height - 4.0);
+            assert!(
+                before_bounds.y + before_bounds.height <= viewport.y + viewport.height - 4.0 + SNAP
+            );
 
             // This is the global Tab path: keep the outer shell reveal and
             // then reveal the focused cell in the nested Border Wallet grid.
@@ -1321,7 +1524,7 @@ mod presentation_tests {
             let focused = after.screen_bounds();
             let viewport = after.viewport.unwrap();
             assert!(focused.y >= viewport.y + 4.0);
-            assert!(focused.y + focused.height <= viewport.y + viewport.height - 4.0);
+            assert!(focused.y + focused.height <= viewport.y + viewport.height - 4.0 + SNAP);
 
             let key = keyboard::Key::Named(keyboard::key::Named::Enter);
             let press = Event::Keyboard(keyboard::Event::KeyPressed {
@@ -1352,8 +1555,8 @@ mod presentation_tests {
                     .filter(|message| matches!(
                         message,
                         Message::BorderWalletWizard(
-                            BorderWalletWizardMessage::ToggleCellSelection(12, 0)
-                        )
+                            BorderWalletWizardMessage::ToggleCellSelection(row, 0)
+                        ) if *row as usize == visible_rows
                     ))
                     .count(),
                 1,
@@ -1412,7 +1615,7 @@ mod presentation_tests {
             assert!(final_row_bounds.y >= final_row_viewport.y + 4.0);
             assert!(
                 final_row_bounds.y + final_row_bounds.height
-                    <= final_row_viewport.y + final_row_viewport.height - 4.0
+                    <= final_row_viewport.y + final_row_viewport.height - 4.0 + SNAP
             );
 
             let last_cell = wizard.grid_focus_ids[WordGrid::TOTAL_CELLS - 1].clone();
@@ -1440,7 +1643,7 @@ mod presentation_tests {
             let focused = bottom.screen_bounds();
             let viewport = bottom.viewport.unwrap();
             assert!(focused.y >= viewport.y + 4.0);
-            assert!(focused.y + focused.height <= viewport.y + viewport.height - 4.0);
+            assert!(focused.y + focused.height <= viewport.y + viewport.height - 4.0 + SNAP);
             assert!(
                 focused.x + focused.width + 4.0 <= viewport.x + viewport.width - 10.0,
                 "column 16 focus ring must clear the 10 px embedded scrollbar"
@@ -1451,8 +1654,8 @@ mod presentation_tests {
                     &std::path::Path::new(&directory).join(format!(
                         "border-wallet-synthetic-bottom-right-{name}-1024x768.png"
                     )),
-                    &element,
-                    &tree,
+                    &mut element,
+                    &mut tree,
                     &node,
                     &mut renderer,
                     &theme,
@@ -1466,6 +1669,8 @@ mod presentation_tests {
                     .to_string(),
             );
             let mut error_element: Element<'_, Message> = Container::new(wizard.view_grid())
+                // The modal lays the sheet out in the window less its margin.
+                .padding(coincube_ui::widget::modal::WINDOW_MARGIN)
                 .center_x(Length::Fill)
                 .center_y(Length::Fill)
                 .into();
@@ -1482,13 +1687,55 @@ mod presentation_tests {
                     &std::path::Path::new(&directory).join(format!(
                         "border-wallet-synthetic-error-line-{name}-1024x768.png"
                     )),
-                    &error_element,
-                    &error_tree,
+                    &mut error_element,
+                    &mut error_tree,
                     &error_node,
                     &mut renderer,
                     &theme,
                     size,
                 );
+            }
+
+            // The full pattern enables Continue; Checksum and Confirm follow.
+            drop(error_element);
+            if let Ok(directory) = std::env::var("BORDER_WALLET_CAPTURE_DIR") {
+                wizard.error = None;
+                for col in 0..PATTERN_LENGTH as u8 {
+                    let _ = wizard.on_toggle_cell(3, col);
+                }
+                for step in ["complete", "checksum", "confirm"] {
+                    if step != "complete" {
+                        let _ = wizard.on_next();
+                    }
+                    let view = match wizard.step {
+                        WizardStep::Grid => wizard.view_grid(),
+                        WizardStep::Checksum => wizard.view_checksum(),
+                        _ => wizard.view_confirm(),
+                    };
+                    let mut element: Element<'_, Message> = Container::new(view)
+                        .padding(coincube_ui::widget::modal::WINDOW_MARGIN)
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill)
+                        .into();
+                    let mut tree = Tree::new(element.as_widget());
+                    let node = element.as_widget_mut().layout(
+                        &mut tree,
+                        &renderer,
+                        &layout::Limits::new(Size::ZERO, size),
+                    );
+                    capture(
+                        &std::path::Path::new(&directory).join(format!(
+                            "border-wallet-synthetic-{}-{}-1024x768.png",
+                            step, name
+                        )),
+                        &mut element,
+                        &mut tree,
+                        &node,
+                        &mut renderer,
+                        &theme,
+                        size,
+                    );
+                }
             }
         }
     }

@@ -1,5 +1,5 @@
 use iced::{
-    widget::{tooltip, Container, Space},
+    widget::{tooltip, Container},
     Alignment, Length,
 };
 
@@ -22,7 +22,7 @@ use crate::installer::{
             template::diagram::{PolicyRow, Timelock},
             undefined_key,
         },
-        layout,
+        layout_with_actions,
     },
 };
 
@@ -70,7 +70,7 @@ pub fn custom_template<'a>(
     valid: bool,
 ) -> Element<'a, Message> {
     let prim_keys_fixed = primary_path.keys.len() < 2; // can only delete a primary key if there are 2 or more
-    layout(
+    layout_with_actions(
         progress,
         None,
         "Set keys",
@@ -262,24 +262,22 @@ pub fn custom_template<'a>(
                     Message::DefineDescriptor(message::DefineDescriptor::Path(sn_index + 1, msg))
                 })
             }))
-            .push(Space::new().height(10))
-            .push(
-                Row::new()
-                    .push(
-                        button::secondary(None, "Clear All")
-                            .width(Length::Fixed(200.0))
-                            .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
-                    )
-                    .push(Space::new().width(Length::Fill))
-                    .push(
-                        button::primary(None, "Continue")
-                            .width(Length::Fixed(200.0))
-                            .on_press_maybe(if valid { Some(Message::Next) } else { None }),
-                    ),
-            )
-            .push(Space::new().height(100.0))
             .spacing(20),
         true,
         Some(Message::Previous),
+        Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .push(
+                button::secondary(None, "Clear All")
+                    .width(Length::Shrink)
+                    .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
+            )
+            .push(
+                button::primary(None, "Continue")
+                    .width(Length::Shrink)
+                    .on_press_maybe(if valid { Some(Message::Next) } else { None }),
+            )
+            .into(),
     )
 }

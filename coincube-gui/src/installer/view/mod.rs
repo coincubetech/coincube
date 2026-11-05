@@ -2780,6 +2780,32 @@ pub(super) fn layout<'a>(
         content,
         padding_left,
         previous_message,
+        None,
+    )
+}
+
+/// [`layout`] with the step's closing actions. In a frame they share one
+/// footer row with Back: Back on the left, the actions on the right, as the
+/// Create Cube sheet's footer has them. Otherwise they close the content,
+/// right-aligned.
+pub(super) fn layout_with_actions<'a>(
+    progress: (usize, usize),
+    email: Option<&'a str>,
+    title: &'static str,
+    content: impl Into<Element<'a, Message>>,
+    padding_left: bool,
+    previous_message: Option<Message>,
+    actions: Element<'a, Message>,
+) -> Element<'a, Message> {
+    titled_layout(
+        progress,
+        email,
+        title,
+        alignment::Horizontal::Center,
+        content,
+        padding_left,
+        previous_message,
+        Some(actions),
     )
 }
 
@@ -2800,9 +2826,11 @@ pub(super) fn layout_start<'a>(
         content,
         true,
         previous_message,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn titled_layout<'a>(
     progress: (usize, usize),
     email: Option<&'a str>,
@@ -2811,24 +2839,49 @@ fn titled_layout<'a>(
     content: impl Into<Element<'a, Message>>,
     padding_left: bool,
     previous_message: Option<Message>,
+    actions: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     if let Some(path_title) = FRAMED.with(|framed| framed.get()) {
         let mut back = button::secondary(Some(icon::previous_icon()), "Back").width(Length::Shrink);
         if let Some(message) = previous_message {
             back = back.on_press(message);
         }
-        // The frame already heads the page with the path's title.
+        // The frame already heads the page with the path's title. The step's
+        // title sits on its content, and Back shares the footer row with the
+        // step's actions.
         return Column::new()
             .spacing(24)
             .max_width(800)
             .push(email.map(|email| {
                 p2_regular(format!("Signed in as {email}")).style(theme::text::secondary)
             }))
-            .push((title != path_title).then(|| h3(title)))
-            .push(content)
-            .push(back)
+            .push(
+                Column::new()
+                    .spacing(12)
+                    .push((title != path_title).then(|| {
+                        iced::widget::text(title)
+                            .size(text::H4_SIZE)
+                            .font(coincube_ui::font::SEMIBOLD)
+                    }))
+                    .push(content),
+            )
+            .push(
+                Row::new()
+                    .align_y(Alignment::Center)
+                    .push(back)
+                    .push(Space::new().width(Length::Fill))
+                    .push(actions),
+            )
             .into();
     }
+    let content: Element<'a, Message> = match actions {
+        Some(actions) => Column::new()
+            .spacing(20)
+            .push(content)
+            .push(Container::new(actions).align_right(Length::Fill))
+            .into(),
+        None => content.into(),
+    };
     let mut prev_button =
         button::secondary(Some(icon::previous_icon()), "Back").width(Length::Shrink);
     if let Some(msg) = previous_message {

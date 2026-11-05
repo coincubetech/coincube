@@ -899,7 +899,11 @@ impl Step for DefineDescriptor {
             }
         };
         if let Some(modal) = &self.modal {
+            // The step sits in the Create Vault frame's scrolled column, whose
+            // bounds are smaller than the Border Wallet sheet: lay the modal
+            // out against the window so its footer is never clipped.
             Modal::new(content, modal.view(hws))
+                .cover_window()
                 .on_blur(if modal.processing() {
                     None
                 } else {
@@ -1044,6 +1048,119 @@ mod tests {
 
     use crate::installer::step::descriptor::editor::key::{SelectKeySource, SelectedKey};
     use crate::{dir::CoincubeDirectory, installer::descriptor::KeySource};
+
+    /// The Border Wallet pattern sheet, opened from the real editor and drawn
+    /// inside the Create Vault frame, keeps all 16 grid columns and its
+    /// Continue inside the minimum window once the pattern is complete. The
+    /// editor's modal must cover the window: against the step's own bounds
+    /// the sheet is squeezed and the last columns collapse to nothing.
+    #[test]
+    fn border_wallet_pattern_sheet_fits_the_create_vault_frame() {
+        use border_wallet_wizard::BorderWalletWizardMessage as Bw;
+        use iced::advanced::widget::{operation, operation::focusable, Id, Operation};
+        use iced::{Rectangle, Size};
+        use iced_runtime::user_interface::{Cache, UserInterface};
+
+        #[derive(Default)]
+        struct Probe {
+            next: Option<Rectangle>,
+            column_16: Vec<Rectangle>,
+        }
+        impl Operation for Probe {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, bounds: Rectangle, value: &str) {
+                if value == "16" {
+                    self.column_16.push(bounds);
+                }
+            }
+            fn focusable(
+                &mut self,
+                id: Option<&Id>,
+                bounds: Rectangle,
+                _: &mut dyn focusable::Focusable,
+            ) {
+                if id == Some(&Id::new("border-wallet.pattern.next")) {
+                    self.next = Some(bounds);
+                }
+            }
+        }
+
+        let network = coincube_core::miniscript::bitcoin::Network::Regtest;
+        let dir = CoincubeDirectory::new(PathBuf::new());
+        let signer = Arc::new(Mutex::new(Signer::generate(network).unwrap()));
+        let mut step = DefineDescriptor::new(network, signer);
+        step.load_template(DescriptorTemplate::SimpleInheritance);
+        let mut hws = HardwareWallets::new(dir, network);
+        let mut send = |step: &mut DefineDescriptor, message: Message| {
+            let _ = step.update(&mut hws, message);
+        };
+        send(
+            &mut step,
+            Message::DefineDescriptor(message::DefineDescriptor::OpenBorderWalletWizard(vec![(
+                0, 0,
+            )])),
+        );
+        send(&mut step, Message::BorderWalletWizard(Bw::Next));
+        // A public BIP39 test vector, never a user's recovery phrase.
+        let words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        for (index, word) in words.split(' ').enumerate() {
+            send(
+                &mut step,
+                Message::BorderWalletWizard(Bw::PhraseWordEdited(index, word.to_string())),
+            );
+        }
+        send(&mut step, Message::BorderWalletWizard(Bw::Next));
+        for col in 0..coincube_core::border_wallet::PATTERN_LENGTH as u8 {
+            send(
+                &mut step,
+                Message::BorderWalletWizard(Bw::ToggleCellSelection(0, col)),
+            );
+        }
+
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let mut renderer = iced::futures::executor::block_on(
+            <iced::Renderer as iced::advanced::renderer::Headless>::new(
+                coincube_ui::font::REGULAR,
+                iced::Pixels(14.0),
+                Some("tiny-skia"),
+            ),
+        )
+        .unwrap();
+        let window = Size::new(1024.0, 768.0);
+        let _framed =
+            crate::installer::view::FramedGuard::enter(crate::installer::CREATE_VAULT_TITLE);
+        // As the Create Vault frame draws a step: inside its scrolled column.
+        let element: Element<'_, Message> = iced::widget::scrollable(
+            coincube_ui::widget::Container::new(step.view(&hws, (0, 0), None)).padding([40, 24]),
+        )
+        .into();
+        let mut ui = UserInterface::build(element, window, Cache::new(), &mut renderer);
+        let mut probe = Probe::default();
+        ui.operate(&renderer, &mut operation::black_box(&mut probe));
+        let next = probe.next.expect("the pattern step's Continue is enabled");
+        assert!(
+            next.x >= 0.0
+                && next.y >= 0.0
+                && next.x + next.width <= window.width
+                && next.y + next.height <= window.height,
+            "Continue at {:?} is outside the {:?} window",
+            next,
+            window
+        );
+        // "16" is both the last column's header (46 px) and row 16's label.
+        assert!(
+            probe.column_16.iter().any(|bounds| bounds.width == 46.0),
+            "column 16 is squeezed: {:?}",
+            probe.column_16
+        );
+    }
 
     #[test]
     fn fork_descriptor_refuses_taproot_messages_and_stale_state() {
