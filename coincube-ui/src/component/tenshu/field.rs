@@ -101,6 +101,7 @@ pub struct TextField<'a, M> {
     on_submit: Option<M>,
     on_paste: Option<Box<dyn Fn(String) -> M + 'a>>,
     suffix: Option<Cow<'a, str>>,
+    suffix_segment_width: Option<f32>,
     hint: Option<Cow<'a, str>>,
     trailing_hint: Option<Cow<'a, str>>,
     notice: Option<Cow<'a, str>>,
@@ -134,6 +135,7 @@ pub fn text_field<'a, M: Clone + 'static>(
         on_submit: None,
         on_paste: None,
         suffix: None,
+        suffix_segment_width: None,
         hint: None,
         trailing_hint: None,
         notice: None,
@@ -198,6 +200,14 @@ impl<'a, M: Clone + 'static> TextField<'a, M> {
     /// A unit drawn inside the right edge, such as "sats".
     pub fn suffix(mut self, suffix: impl Into<Cow<'a, str>>) -> Self {
         self.suffix = Some(suffix.into());
+        self
+    }
+
+    /// A fixed domain or unit in its own trailing segment. Reserves `width`
+    /// for the segment so long input values scroll clear of the suffix.
+    pub fn segmented_suffix(mut self, suffix: impl Into<Cow<'a, str>>, width: f32) -> Self {
+        self.suffix = Some(suffix.into());
+        self.suffix_segment_width = Some(width);
         self
     }
 
@@ -353,6 +363,7 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
             on_submit,
             on_paste,
             suffix,
+            suffix_segment_width,
             hint,
             trailing_hint,
             notice,
@@ -368,10 +379,16 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
         let enabled = on_input.is_some();
         let invalid = error.is_some();
         let clear = clear.filter(|_| enabled && !value.is_empty());
-        let field_radius = size.radius();
+        let field_radius = if suffix_segment_width.is_some() {
+            radius::CONTROL
+        } else {
+            size.radius()
+        };
 
         let right = match (&suffix, &clear) {
-            (Some(_), _) => SUFFIX_ROOM,
+            (Some(_), _) => {
+                suffix_segment_width.map_or(SUFFIX_ROOM, |width| width + size.padding_x())
+            }
             (None, Some(_)) => size.padding_x() + CLEAR_SIZE + 4.0,
             (None, None) => size.padding_x(),
         };
@@ -393,7 +410,13 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
                 left: size.padding_x(),
             })
             .width(Length::Fill)
-            .style(move |theme, status| style::field(theme, status, field_radius, invalid));
+            .style(move |theme, status| {
+                let mut appearance = style::field(theme, status, field_radius, invalid);
+                if suffix_segment_width.is_some() {
+                    appearance.background = iced::Background::Color(theme.colors.shell.panel);
+                }
+                appearance
+            });
         if magnifier {
             input = input.icon(Icon {
                 font: BOOTSTRAP_ICONS,
@@ -413,8 +436,48 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
             input = input.on_submit(on_submit);
         }
 
-        let overlay: Option<Element<'a, M>> = match (suffix, &clear) {
-            (Some(suffix), _) => Some(
+        let overlay: Option<Element<'a, M>> = match (suffix, &clear, suffix_segment_width) {
+            (Some(suffix), _, Some(segment_width)) => {
+                let segment = Row::new()
+                    .push(
+                        Container::new(iced::widget::Space::new())
+                            .width(1)
+                            .height(Length::Fill)
+                            .style(style::divider),
+                    )
+                    .push(
+                        Container::new(note(suffix, Tone::Muted, size))
+                            .padding([0, 14])
+                            .center_y(Length::Fill),
+                    );
+                Some(
+                    Container::new(
+                        Container::new(segment)
+                            .width(segment_width)
+                            .height(Length::Fill)
+                            .style(move |theme: &Theme| iced::widget::container::Style {
+                                background: Some(iced::Background::Color(
+                                    theme.colors.shell.background,
+                                )),
+                                border: iced::Border {
+                                    radius: iced::border::Radius {
+                                        top_right: field_radius - 2.0,
+                                        bottom_right: field_radius - 2.0,
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }),
+                    )
+                    .padding(2)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(alignment::Horizontal::Right)
+                    .into(),
+                )
+            }
+            (Some(suffix), _, None) => Some(
                 Container::new(
                     iced::widget::text(suffix)
                         .shaping(Shaping::Advanced)
@@ -429,7 +492,7 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
                 .align_y(alignment::Vertical::Center)
                 .into(),
             ),
-            (None, Some((clear_id, message))) => {
+            (None, Some((clear_id, message)), _) => {
                 let glyph = Container::new(icon::cross_icon().size(size::ICON_SMALL))
                     .width(Length::Fill)
                     .height(Length::Fill)
@@ -462,7 +525,7 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
                         .into(),
                 )
             }
-            (None, None) => None,
+            (None, None, _) => None,
         };
 
         let input: Element<'a, M> = if enabled {
