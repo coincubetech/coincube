@@ -6835,10 +6835,7 @@ fn create_cube_form<'a>(
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(icon::cross_icon().style(theme::text::error))
-                .push(
-                    p2_regular("Doesn't match the PIN you entered. Check the Confirm PIN digits.")
-                        .style(theme::text::error),
-                )
+                .push(p2_regular("Doesn't match the PIN you entered.").style(theme::text::error))
                 .into(),
             CreatePinMatch::Match => Row::new()
                 .spacing(8)
