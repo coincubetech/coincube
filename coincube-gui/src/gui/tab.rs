@@ -2038,9 +2038,10 @@ impl Tab {
                     Some(cube_id) => Task::batch([
                         command,
                         Task::done(Message::Launch(home::Message::View(
-                            home::ViewMessage::DeleteCube(home::DeleteCubeMessage::ShowModalFor(
+                            home::ViewMessage::DeleteCube(home::DeleteCubeMessage::ShowModalFor {
                                 cube_id,
-                            )),
+                                chain,
+                            }),
                         ))),
                     ]),
                     None => command,
@@ -8955,6 +8956,7 @@ mod lock_to_delete_tests {
                     std::env::temp_dir().join(format!("lock-to-delete-{}", uuid::Uuid::new_v4()));
                 let (app, _) = crate::app::shell_tests::bitcoin_app(&path);
                 let cube_id = app.cube_settings().id.clone();
+                let cube_chain = app.cube_settings().network;
                 let mut tab = Tab::new(1, State::App(app));
                 let task = tab.update(Message::LockCubeToDelete);
                 assert!(matches!(tab.state, State::Home(_)));
@@ -8969,11 +8971,14 @@ mod lock_to_delete_tests {
                             while let Some(action) = stream.next().await {
                                 if let iced_runtime::Action::Output(Message::Launch(
                                     home::Message::View(home::ViewMessage::DeleteCube(
-                                        home::DeleteCubeMessage::ShowModalFor(id),
+                                        home::DeleteCubeMessage::ShowModalFor {
+                                            cube_id: id,
+                                            chain,
+                                        },
                                     )),
                                 )) = action
                                 {
-                                    asked = id == cube_id;
+                                    asked = id == cube_id && chain == cube_chain;
                                     break;
                                 }
                             }

@@ -3404,7 +3404,7 @@ impl GUI {
                             crate::app::session::close(); // zeroizes signer/PIN
                             self.focus = Some(pane_id);
                             let task = if delete {
-                                pane.focus_launcher_to_delete(cube_id, &self.config)
+                                pane.focus_launcher_to_delete(cube_id, chain, &self.config)
                             } else {
                                 pane.focus_launcher(&self.config)
                             };

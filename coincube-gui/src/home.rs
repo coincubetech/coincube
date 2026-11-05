@@ -1548,6 +1548,12 @@ impl Home {
             // recovery, Recovery Kit restore, phone restore or duress
             // completion route.
             let allowed = match &message {
+                // An unfinished import's Cube is never on this chain; its
+                // request switches the Launcher to the Cube's network.
+                Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModalFor {
+                    chain,
+                    ..
+                })) => !chain.is_blake2b(),
                 Message::View(view) => matches!(
                     view,
                     ViewMessage::CreateCube
@@ -2685,21 +2691,26 @@ impl Home {
                     Task::none()
                 }
             },
-            Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModalFor(id))) => {
-                let index = match &self.state {
-                    State::Cubes { cubes, .. } => cubes.iter().position(|cube| cube.id == id),
-                    _ => None,
+            Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModalFor {
+                cube_id,
+                chain,
+            })) => {
+                // The Launcher may be listing another network. Its probe
+                // then reads the Cube's network.
+                let load = if chain == self.network {
+                    self.reload()
+                } else {
+                    self.update_inner(Message::View(ViewMessage::SelectNetwork(chain)))
                 };
-                match index {
-                    Some(index) => self.update_inner(Message::View(ViewMessage::DeleteCube(
-                        DeleteCubeMessage::ShowModal(index),
-                    ))),
-                    // The list is still loading, or predates the Cube.
-                    None => {
-                        self.delete_after_check = Some(id);
-                        self.reload()
-                    }
+                if self.network != chain {
+                    // The switch was refused; its reason is on screen.
+                    return load;
                 }
+                // Never the row already listed: a retained Launcher may hold
+                // one from before the import moved on, and the delete checks
+                // its snapshot against the Cube's current settings.
+                self.delete_after_check = Some(cube_id);
+                load
             }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModal(i))) => {
                 if let State::Cubes { cubes, .. } = &self.state {
@@ -2828,6 +2839,7 @@ impl Home {
                         && self.pending_bitcoin_import.is_none();
                 self.network = network;
                 self.open_created_cube = None;
+                self.delete_after_check = None;
                 self.open_after_registration = None;
                 if network != ChainId::Bitcoin {
                     // Import Bitcoin wallet is Bitcoin only: leaving Bitcoin
@@ -2982,6 +2994,7 @@ impl Home {
                 Err(e) => {
                     self.catalog.pending_select = None;
                     self.create_network_selection_pending = false;
+                    self.delete_after_check = None;
                     self.error = Some(e.to_string());
                     Task::none()
                 }
@@ -3031,14 +3044,15 @@ impl Home {
                     // Taken before the import's own Open returns early, so
                     // a pending pick never outlives this checked list.
                     let pending = self.catalog.pending_select.take();
-                    if let (Some(id), State::Cubes { cubes, .. }) =
-                        (&self.delete_after_check, &self.state)
-                    {
-                        if let Some(index) = cubes.iter().position(|cube| &cube.id == id) {
-                            self.delete_after_check = None;
-                            return self.update_inner(Message::View(ViewMessage::DeleteCube(
-                                DeleteCubeMessage::ShowModal(index),
-                            )));
+                    // One checked list answers the request: a Cube missing
+                    // from it is not asked about by a later reload.
+                    if let Some(id) = self.delete_after_check.take() {
+                        if let State::Cubes { cubes, .. } = &self.state {
+                            if let Some(index) = cubes.iter().position(|cube| cube.id == id) {
+                                return self.update_inner(Message::View(ViewMessage::DeleteCube(
+                                    DeleteCubeMessage::ShowModal(index),
+                                )));
+                            }
                         }
                     }
                     if let (Some(id), State::Cubes { cubes, .. }) =
@@ -7732,8 +7746,12 @@ pub enum ViewMessage {
 #[derive(Debug, Clone)]
 pub enum DeleteCubeMessage {
     ShowModal(usize),
-    /// [`Self::ShowModal`] for a Cube ID, once the list has its row.
-    ShowModalFor(String),
+    /// [`Self::ShowModal`] for a Cube on `chain`, once a list checked after
+    /// this request has its row.
+    ShowModalFor {
+        cube_id: String,
+        chain: ChainId,
+    },
     ShowRemoteModal(String), // uuid of remote-only cube
     CloseModal,
     Confirm(String), // Cube ID
@@ -11911,53 +11929,71 @@ mod tests {
     fn an_abandoned_import_opens_the_delete_confirmation_for_its_cube() {
         let other = cube("other", "Other", Network::Bitcoin);
         let unfinished = cube("unfinished", "Unfinished", Network::Bitcoin);
+        let ask = || {
+            Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModalFor {
+                cube_id: "unfinished".into(),
+                chain: ChainId::Bitcoin,
+            }))
+        };
+        let checked = |chain: ChainId, cubes: Vec<CubeSettings>| Message::Checked {
+            for_chain: chain,
+            res: Ok(State::Cubes {
+                cubes,
+                create_cube: false,
+                source: chain,
+            }),
+        };
+        let asked = |home: &Home| {
+            home.delete_cube_modal
+                .as_ref()
+                .map(|m| (m.cube.id.clone(), m.cube.name.clone()))
+        };
+        let fresh = Some(("unfinished".to_string(), "Unfinished".to_string()));
 
-        // The list already has the row: the confirmation opens at once.
+        // A listed row may predate the import's later stages: the
+        // confirmation waits for a list checked after the request.
         let mut home = home();
         home.network = ChainId::Bitcoin;
+        let mut stale = unfinished.clone();
+        stale.name = "Stale".into();
         home.state = State::Cubes {
-            cubes: vec![other.clone(), unfinished.clone()],
+            cubes: vec![other.clone(), stale],
             create_cube: false,
             source: ChainId::Bitcoin,
         };
-        let _ = home.update(Message::View(ViewMessage::DeleteCube(
-            DeleteCubeMessage::ShowModalFor("unfinished".into()),
-        )));
-        assert_eq!(
-            home.delete_cube_modal.as_ref().map(|m| m.cube.id.as_str()),
-            Some("unfinished")
-        );
+        let _ = home.update(ask());
+        assert!(home.delete_cube_modal.is_none());
+        let _ = home.update(checked(
+            ChainId::Bitcoin,
+            vec![other.clone(), unfinished.clone()],
+        ));
+        assert_eq!(asked(&home), fresh);
+        assert!(home.delete_after_check.is_none());
 
-        // A Launcher that is still loading opens it once the checked list
-        // has the row, and only for that Cube.
+        // A Launcher left on another network, Bitcoin Blake2b included,
+        // switches to the Cube's network; that network's list opens it.
+        let mut home = self::home();
+        home.network = ChainId::BitcoinBlake2b;
+        let _ = home.update(ask());
+        assert_eq!(home.network, ChainId::Bitcoin);
+        assert!(home.error.is_none());
+        let _ = home.update(checked(ChainId::BitcoinBlake2b, vec![]));
+        assert!(home.delete_cube_modal.is_none());
+        let _ = home.update(checked(
+            ChainId::Bitcoin,
+            vec![other.clone(), unfinished.clone()],
+        ));
+        assert_eq!(asked(&home), fresh);
+
+        // One checked list answers the request. A Cube missing from it is
+        // not asked about by a later reload that lists it.
         let mut home = self::home();
         home.network = ChainId::Bitcoin;
-        let _ = home.update(Message::View(ViewMessage::DeleteCube(
-            DeleteCubeMessage::ShowModalFor("unfinished".into()),
-        )));
-        assert!(home.delete_cube_modal.is_none());
-        let _ = home.update(Message::Checked {
-            for_chain: ChainId::Bitcoin,
-            res: Ok(State::Cubes {
-                cubes: vec![other.clone()],
-                create_cube: false,
-                source: ChainId::Bitcoin,
-            }),
-        });
-        assert!(home.delete_cube_modal.is_none());
-        let _ = home.update(Message::Checked {
-            for_chain: ChainId::Bitcoin,
-            res: Ok(State::Cubes {
-                cubes: vec![other, unfinished],
-                create_cube: false,
-                source: ChainId::Bitcoin,
-            }),
-        });
-        assert_eq!(
-            home.delete_cube_modal.as_ref().map(|m| m.cube.id.as_str()),
-            Some("unfinished")
-        );
+        let _ = home.update(ask());
+        let _ = home.update(checked(ChainId::Bitcoin, vec![other.clone()]));
         assert!(home.delete_after_check.is_none());
+        let _ = home.update(checked(ChainId::Bitcoin, vec![other, unfinished]));
+        assert!(home.delete_cube_modal.is_none());
     }
 
     #[test]

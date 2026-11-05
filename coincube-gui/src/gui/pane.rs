@@ -25,6 +25,59 @@ pub enum Message {
 }
 
 #[cfg(test)]
+mod launcher_delete_tests {
+    use super::*;
+    use crate::{chain::ChainId, dir::CoincubeDirectory, home};
+
+    /// The GUI's lock path asks the Launcher for the Cube's delete
+    /// confirmation on the Cube's network, not the one it is listing.
+    #[test]
+    fn focus_launcher_to_delete_names_the_cubes_network() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("launcher-delete-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (home, startup) = home::Home::new_for_chain(root.clone(), Some(ChainId::Signet));
+        drop(startup);
+        let mut pane = Pane::new_with_tab(tab::State::Home(home));
+        let task = pane.focus_launcher_to_delete(
+            "unfinished".into(),
+            ChainId::Bitcoin,
+            &Config::new(root, None),
+        );
+        let mut asked = None;
+        if let Some(stream) = iced_runtime::task::into_stream(task) {
+            use iced_runtime::futures::futures::StreamExt;
+            let mut stream = Box::pin(stream);
+            let _ = runtime.block_on(tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                async {
+                    while let Some(action) = stream.next().await {
+                        if let iced_runtime::Action::Output(Message::Tab(_, inner)) = action {
+                            if let tab::Message::Launch(home::Message::View(
+                                home::ViewMessage::DeleteCube(
+                                    home::DeleteCubeMessage::ShowModalFor { cube_id, chain },
+                                ),
+                            )) = *inner
+                            {
+                                asked = Some((cube_id, chain));
+                                break;
+                            }
+                        }
+                    }
+                },
+            ));
+        }
+        assert_eq!(asked, Some(("unfinished".to_string(), ChainId::Bitcoin)));
+        drop(pane);
+        std::fs::remove_dir_all(path).ok();
+    }
+}
+
+#[cfg(test)]
 mod copy_owner_tests {
     use super::*;
     use crate::{dir::CoincubeDirectory, home};
@@ -342,11 +395,12 @@ impl Pane {
     }
 
     /// [`Self::focus_launcher`], then the Launcher's delete confirmation for
-    /// `cube_id`: an import abandoned before it finished leaves a Cube the
-    /// user may not want.
+    /// `cube_id` on `chain`: an import abandoned before it finished leaves a
+    /// Cube the user may not want.
     pub(crate) fn focus_launcher_to_delete(
         &mut self,
         cube_id: String,
+        chain: crate::chain::ChainId,
         cfg: &Config,
     ) -> Task<Message> {
         let focus = self.focus_launcher(cfg);
@@ -364,7 +418,7 @@ impl Pane {
                 tab_id,
                 tab::Message::Launch(crate::home::Message::View(
                     crate::home::ViewMessage::DeleteCube(
-                        crate::home::DeleteCubeMessage::ShowModalFor(cube_id),
+                        crate::home::DeleteCubeMessage::ShowModalFor { cube_id, chain },
                     ),
                 )),
             )),
