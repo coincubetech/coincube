@@ -401,32 +401,6 @@ fn recovery_section<'a>(
 
     let backed_up = cache.current_cube_backed_up;
     let seed_start: Message = SettingsMessage::BackupMasterSeed(BackupWalletMessage::Start).into();
-    let lead = if backed_up {
-        page::lead(
-            page::Status::Ok,
-            "Seed phrase confirmed",
-            "Your seed phrase is confirmed",
-            "The three-word check was saved for this Cube.",
-            page::button(
-                SEED_LEAD_ID,
-                "Reveal seed phrase…",
-                Some(seed_start.clone()),
-            ),
-        )
-    } else {
-        page::lead(
-            page::Status::Warn,
-            "Backup not confirmed",
-            "Confirm your seed phrase",
-            "Losing this computer could mean losing the Cube.",
-            page::primary(
-                SEED_LEAD_ID,
-                "Confirm seed phrase",
-                Some(seed_start.clone()),
-            ),
-        )
-    };
-
     let seed_row = page::row("Seed phrase")
         .accessory(if backed_up {
             page::status(page::Status::Ok, "Confirmed")
@@ -434,18 +408,18 @@ fn recovery_section<'a>(
             page::status(page::Status::Warn, "Not confirmed")
         })
         .description("12 words, written down offline.")
-        .control(page::button(
-            SEED_REVEAL_ID,
-            "Reveal seed phrase…",
-            Some(seed_start),
-        ));
+        .control(if backed_up {
+            page::button(SEED_REVEAL_ID, "Reveal seed phrase…", Some(seed_start))
+        } else {
+            page::primary(SEED_REVEAL_ID, "Confirm seed phrase", Some(seed_start))
+        });
 
     let mut methods = vec![seed_row.into()];
     if let Some(rk) = recovery_kit {
         methods.push(recovery_kit_row(cache, rk));
     }
 
-    let mut col = Column::new().width(Length::Fill).push(lead);
+    let mut col = Column::new().width(Length::Fill);
     if let Some(notice) = cache.unswept_recovery_notice() {
         col = col.push(page::note(Tone::Muted, page::muted(notice), None));
     }
@@ -488,7 +462,6 @@ fn recovery_section<'a>(
     dashboard(menu, cache, col)
 }
 
-pub const SEED_LEAD_ID: &str = "tenshu.settings.backup.lead";
 pub const SEED_REVEAL_ID: &str = "tenshu.settings.backup.seed";
 pub const KIT_PRIMARY_ID: &str = "tenshu.settings.backup.kit";
 pub const KIT_REMOVE_ID: &str = "tenshu.settings.backup.kit-remove";
@@ -1763,6 +1736,59 @@ fn drift_warning_line(d: &DescriptorDrift) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backup_page_has_one_seed_action_in_each_confirmation_state() {
+        use crate::app::state::preferences::BalancePrivacy;
+        use crate::app::state::settings::general::BackupSeedState;
+        use crate::app::view::{nav::shell::capture_tests, shared::landing::capture};
+        let menu = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery));
+        let pin = crate::pin_input::PinInput::new();
+        for (appearance, palette) in capture_tests::themes() {
+            for confirmed in [false, true] {
+                let mut cache = capture_tests::cache(appearance == "light", BalancePrivacy::Shown);
+                cache.current_cube_backed_up = confirmed;
+                let inspection = capture::inspect_full_window(
+                    if confirmed {
+                        "seed-overview-confirmed"
+                    } else {
+                        "seed-overview-unconfirmed"
+                    },
+                    recovery_section(
+                        &menu,
+                        &cache,
+                        &BackupSeedState::None,
+                        &pin,
+                        None,
+                        None,
+                        None,
+                    ),
+                    (1024, 768),
+                    appearance,
+                    palette,
+                );
+                let action = if confirmed {
+                    "Reveal seed phrase…"
+                } else {
+                    "Confirm seed phrase"
+                };
+                assert_eq!(
+                    inspection
+                        .text
+                        .iter()
+                        .filter(|(value, _)| value == action)
+                        .count(),
+                    1
+                );
+                assert!(inspection.contains(if confirmed {
+                    "Confirmed"
+                } else {
+                    "Not confirmed"
+                }));
+                assert!(!inspection.contains("Your seed phrase is confirmed"));
+            }
+        }
+    }
+
     use super::*;
 
     #[derive(Default)]
