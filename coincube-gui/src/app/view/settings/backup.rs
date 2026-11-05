@@ -109,19 +109,18 @@ pub fn intro_view<M: Clone + 'static>(
 ) -> Element<'static, M> {
     flow(
         "Back up your seed phrase",
-        "You will be shown 12 words. Write them down numbered in the same order shown and keep them in a safe place.",
+        "You'll see 12 words. Write them on paper, numbered, in the order shown. They restore this Cube on any computer.",
     )
     .push(
-        Column::new()
-            .spacing(8)
-            .push(tenshu::label("Do not share these words with anyone.")
-                .style(|t| theme::tenshu::text::tone(t, Tone::Warn)))
-            .push(tenshu::body("Without them, you will not be able to restore your wallet if you lose your computer.")),
+        tenshu::label(
+            "Anyone who sees these words can take your bitcoin. Don't photograph them, type them or share them with anyone, COINCUBE included.",
+        )
+        .style(|t| theme::tenshu::text::tone(t, Tone::Warn)),
     )
     .push(note)
     .push(
         CheckBox::new(checked)
-            .label("I understand that if I lose these words, my funds cannot be recovered.")
+            .label("I understand that if I lose these words, my funds can't be recovered.")
             .on_toggle(move |_| on(BackupWalletMessage::ToggleBackupIntroCheck))
             .style(theme::checkbox::primary)
             .text_size(14)
@@ -129,7 +128,7 @@ pub fn intro_view<M: Clone + 'static>(
             .spacing(10)
             .width(Length::Fill),
     )
-    .push(actions("Cancel", "Show recovery phrase", checked, BackupWalletMessage::NextStep, on))
+    .push(actions("Cancel", "Show seed phrase", checked, BackupWalletMessage::NextStep, on))
     .into()
 }
 
@@ -163,10 +162,10 @@ pub fn recovery_phrase_view<'a, M: Clone + 'a>(
     }
     flow(
         "Write down your seed phrase",
-        "Write these words down in order and keep them offline. Anyone with these words can access your wallet.",
+        "Write each word next to its number, then check the spelling. Keep the paper offline: anyone with these words can take your bitcoin.",
     )
     .push(grid)
-    .push(actions("Back", "I've written them down", true, BackupWalletMessage::NextStep, on))
+    .push(actions("Back", "I've written it down", true, BackupWalletMessage::NextStep, on))
     .into()
 }
 
@@ -180,7 +179,7 @@ pub fn verification_view<'a, M: Clone + 'a>(
 ) -> Element<'a, M> {
     let mut content = flow(
         "Confirm your seed phrase",
-        "To make sure you saved your recovery phrase correctly, please enter the correct words.",
+        "Type the word for each number from your paper.",
     );
     let mut fields = Column::new().spacing(16).width(Length::Fill).max_width(360);
     for (i, &word_idx) in word_indices.iter().enumerate() {
