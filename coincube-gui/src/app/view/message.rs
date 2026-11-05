@@ -496,17 +496,19 @@ pub enum SettingsMessage {
     ExportWallet,
     ImportWallet,
     AboutSection,
-    /// Triggered by the "Re-register this device" button on the
-    /// Settings → About page's Connect-device card. Clears the cached
+    /// Install Cube › Settings › Connections (Connect account, this device,
+    /// Re-register).
+    ConnectionsSection,
+    /// Triggered by the "Re-register" button under Troubleshooting on
+    /// Cube › Settings › Connections. Clears the cached
     /// `device_id` and re-runs `ensure_device_registered`, getting a
     /// fresh `SignerDevice` row server-side. Useful when a device id
     /// is suspect (compromise, machine swap) or the row went stale on
     /// the API and signing started 404'ing.
     ReregisterConnectDevice,
     /// Settled result of the re-registration RPC: the new registration on
-    /// success, or a user-facing error string. Routed straight to the About
-    /// settings state so it can refresh its banner without going through the
-    /// catchall update path.
+    /// success, or a user-facing error string. Routed to the Connections
+    /// settings state so it can show the result line.
     ConnectDeviceReregistered(Result<ReregisteredDevice, String>),
     RegisterWallet,
     FingerprintAliasEdited(Fingerprint, String),

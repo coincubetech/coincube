@@ -32,9 +32,9 @@ use iced::{
     Alignment, Length,
 };
 
-/// Where a rejected device is re-registered (Cube Settings → About).
+/// Where a rejected device is re-registered (Cube Settings → Connections).
 pub const DEVICE_REJECTED_ROUTE: Menu =
-    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::About));
+    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections));
 
 pub const FULL_WIDTH: f32 = 248.0;
 pub const COMPACT_WIDTH: f32 = 208.0;

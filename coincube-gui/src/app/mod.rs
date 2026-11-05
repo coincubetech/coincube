@@ -5018,6 +5018,9 @@ impl App {
                     menu::CubeSettingsOption::DataExports => {
                         Some(view::SettingsMessage::DataExportsSection)
                     }
+                    menu::CubeSettingsOption::Connections => {
+                        Some(view::SettingsMessage::ConnectionsSection)
+                    }
                     menu::CubeSettingsOption::About => Some(view::SettingsMessage::AboutSection),
                     menu::CubeSettingsOption::Stats => {
                         Some(view::SettingsMessage::InstallStatsSection)
@@ -5925,7 +5928,7 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        // Observe, don't consume: the About settings state still needs the
+        // Observe, don't consume: the Connections settings state still needs the
         // result to render its banner, so it keeps its normal route.
         let health = match &message {
             Message::View(view::Message::Settings(
@@ -5940,7 +5943,7 @@ impl App {
         }
     }
 
-    /// A successful Settings → About re-register hands back the new device
+    /// A successful Settings → Connections re-register hands back the new device
     /// id. Swap it into the stream config: the subscription is keyed on
     /// `device_id`, so a stream stopped by `DeviceRejected` (or one still
     /// using the stale id) is replaced by one that says hello with the new id.
@@ -12437,7 +12440,7 @@ pub(crate) mod tests {
             ConnectionStatus::DeviceRejected
         );
 
-        // The rejected chip's route opens the About state, which owns the
+        // The rejected chip's route opens the Connections state, which owns the
         // Re-register action: pressing it there starts the registration RPC.
         app.cache.connect_grpc_url = Some("https://grpc.example.invalid".into());
         app.cache.connect_tokens = app

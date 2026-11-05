@@ -1,159 +1,128 @@
-use iced::widget::{Column, Row, Space};
+//! Cube › Settings › About: the installed versions as a plain list, with one
+//! action to copy them. Device ID, account and stream status live in
+//! Connections.
+
+use iced::widget::Space;
 use iced::{Alignment, Length};
 
-use coincube_ui::component::{badge, button, card, separation, text::*};
-use coincube_ui::{
-    icon,
-    widget::{ColumnExt, Element},
-};
+use coincube_ui::widget::{Column, Element, Row};
 
 use crate::app::cache;
-use crate::app::menu::Menu;
-use crate::app::state::settings::about::AboutSettingsState;
+use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
 use crate::app::view::dashboard;
-use crate::app::view::message::{Message, SettingsMessage};
+use crate::app::view::message::Message;
+use crate::app::view::settings::page;
+
+pub const COPY_VERSIONS_ID: &str = "tenshu.settings.about.copy-versions";
+pub const OPEN_CONNECTIONS_ID: &str = "tenshu.settings.about.connections";
 
 pub fn about_section<'a>(
     menu: &'a Menu,
     cache: &'a cache::Cache,
-    coincubed_version: Option<&String>,
-    state: &'a AboutSettingsState,
+    coincubed_version: Option<&'a str>,
 ) -> Element<'a, Message> {
-    let content = card::simple(
-        Column::new()
-            .push(
-                Row::new()
-                    .push(badge::badge(icon::tooltip_icon()))
-                    .push(text("Version").bold())
-                    .padding(10)
-                    .spacing(20)
-                    .align_y(Alignment::Center)
-                    .width(Length::Fill),
-            )
-            .push(separation().width(Length::Fill))
-            .push(Space::new().height(Length::Fixed(10.0)))
-            .push(
-                Row::new().push(Space::new().width(Length::Fill)).push(
-                    Column::new()
-                        .push(text(format!("Tenshu v{}", crate::VERSION)).bold())
-                        .push(
-                            text(format!("coincube-gui v{}", crate::VERSION))
-                                .style(coincube_ui::theme::text::secondary),
-                        )
-                        .push_maybe(coincubed_version.map(|version| {
-                            text(format!("coincubed v{}", version))
-                                .style(coincube_ui::theme::text::secondary)
-                        })),
-                ),
-            ),
-    );
-
-    let mut col = Column::new()
-        .spacing(20)
-        .push(super::header("About", SettingsMessage::AboutSection))
-        .push(content)
-        .width(Length::Fill);
-
-    // Connect Device card — only meaningful when this cube is signed
-    // in to Connect (device_id populated). For local-daemon installs
-    // we keep the About section minimal.
-    if let Some(device_id) = &cache.connect_device_id {
-        col = col.push(connect_device_card(cache, device_id, state));
-    }
-
-    dashboard(menu, cache, col)
+    dashboard(menu, cache, about_content(coincubed_version))
 }
 
-fn connect_device_card<'a>(
-    cache: &'a cache::Cache,
-    device_id: &'a str,
-    state: &'a AboutSettingsState,
-) -> Element<'a, Message> {
-    let mut body = Column::new()
-        .push(
-            Row::new()
-                .push(badge::badge(icon::cube_icon()))
-                .push(text("Connect Device").bold())
-                .padding(10)
-                .spacing(20)
-                .align_y(Alignment::Center)
-                .width(Length::Fill),
-        )
-        .push(separation().width(Length::Fill))
-        .push(Space::new().height(Length::Fixed(10.0)))
-        .push(
-            Row::new()
-                .push(
-                    Column::new()
-                        .push(text("Device ID").bold())
-                        .width(Length::FillPortion(1)),
-                )
-                .push(
-                    text(device_id)
-                        .style(coincube_ui::theme::text::secondary)
-                        .width(Length::FillPortion(2)),
-                )
-                .padding([6, 10])
-                .spacing(20),
-        );
-    if let Some(email) = &cache.connect_email {
-        body = body.push(
-            Row::new()
-                .push(
-                    Column::new()
-                        .push(text("Account").bold())
-                        .width(Length::FillPortion(1)),
-                )
-                .push(
-                    text(email.clone())
-                        .style(coincube_ui::theme::text::secondary)
-                        .width(Length::FillPortion(2)),
-                )
-                .padding([6, 10])
-                .spacing(20),
-        );
+/// The (label, value) pairs shown and copied, in order. The wallet service
+/// only appears when this Cube runs it locally.
+fn versions(coincubed_version: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut versions = vec![
+        ("Tenshu", crate::VERSION.to_string()),
+        ("Interface", format!("coincube-gui {}", crate::VERSION)),
+    ];
+    if let Some(version) = coincubed_version {
+        versions.push(("Wallet service", format!("coincubed {version}")));
     }
-    body = body.push(
-        Row::new()
-            .push(
-                Column::new()
-                    .push(text("Stream").bold())
-                    .width(Length::FillPortion(1)),
-            )
-            .push(
-                text(cache.connect_stream_status.tooltip())
-                    .style(coincube_ui::theme::text::secondary)
-                    .width(Length::FillPortion(2)),
-            )
-            .padding([6, 10])
-            .spacing(20),
-    );
+    versions
+}
 
-    // Re-register row: button + inline status banner.
-    let reregister_btn = if state.reregistering {
-        button::secondary(None, "Re-registering…")
-    } else {
-        button::secondary(None, "Re-register this device")
-            .on_press(Message::Settings(SettingsMessage::ReregisterConnectDevice))
-    };
-    let banner: Option<Element<'a, Message>> = match &state.reregister_status {
-        Some(Ok(new_id)) => Some(
-            text(format!("Re-registered. New device ID: {}", new_id))
-                .style(coincube_ui::theme::text::primary)
-                .into(),
-        ),
-        Some(Err(e)) => Some(
-            text(format!("Re-registration failed: {}", e))
-                .style(coincube_ui::theme::text::error)
-                .into(),
-        ),
-        None => None,
-    };
-    let mut footer = Column::new().padding(10).spacing(8).push(reregister_btn);
-    if let Some(b) = banner {
-        footer = footer.push(b);
+/// What "Copy version details" puts on the clipboard: one "Label: value"
+/// line per version, as a support request would quote them.
+pub fn version_details(coincubed_version: Option<&str>) -> String {
+    versions(coincubed_version)
+        .into_iter()
+        .map(|(label, value)| format!("{label}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn about_content<'a>(coincubed_version: Option<&'a str>) -> Element<'a, Message> {
+    let head = Row::new()
+        .align_y(Alignment::Center)
+        .push(page::heading("Version"))
+        .push(Space::new().width(Length::Fill))
+        .push(page::button(
+            COPY_VERSIONS_ID,
+            "Copy version details",
+            Some(Message::Clipboard(version_details(coincubed_version))),
+        ));
+    let rows = versions(coincubed_version)
+        .into_iter()
+        .map(|(label, value)| page::row(label).control(page::muted(value)).into());
+    let moved = Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(page::muted(
+            "Device ID, account and stream status now live in Connections, beside the other \
+             health checks.",
+        ))
+        .push(page::link(
+            OPEN_CONNECTIONS_ID,
+            "Open Connections",
+            Message::Menu(Menu::Cube(CubeSubMenu::Settings(
+                CubeSettingsOption::Connections,
+            ))),
+        ));
+    Column::new()
+        .width(Length::Fill)
+        .push(Space::new().height(Length::Fixed(page::GROUP_GAP)))
+        .push(head)
+        .push(Space::new().height(Length::Fixed(12.0)))
+        .push(page::rows(rows))
+        .push(Space::new().height(Length::Fixed(12.0)))
+        .push(moved)
+        .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn about_lists_versions_and_copies_them_without_device_details() {
+        let probe = capture::inspect(
+            "settings-about",
+            about_content(Some("0.9.0-dev")),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        );
+        for label in [
+            "Version",
+            "Copy version details",
+            "Tenshu",
+            "Interface",
+            "Wallet service",
+            "coincubed 0.9.0-dev",
+        ] {
+            assert!(probe.contains(label), "{}", label);
+        }
+        assert!(!probe.contains("Device ID") || probe.contains("now live in Connections"));
+        assert!(!probe.contains("Re-register"));
+
+        let copied = capture::activate(
+            about_content(Some("0.9.0-dev")),
+            iced::advanced::widget::Id::new(COPY_VERSIONS_ID),
+            (1440, 900),
+            true,
+        );
+        assert!(copied.iter().any(|m| matches!(
+            m,
+            Message::Clipboard(details) if details == &version_details(Some("0.9.0-dev"))
+        )));
+        assert!(version_details(Some("0.9.0-dev")).ends_with("Wallet service: coincubed 0.9.0-dev"));
+        assert!(!version_details(None).contains("Wallet service"));
     }
-    body = body.push(footer);
-
-    card::simple(body).into()
 }
