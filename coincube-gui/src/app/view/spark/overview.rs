@@ -1,40 +1,41 @@
 //! View renderer for [`crate::app::state::spark::overview::SparkOverview`].
 //!
 //! The Spark wallet page (Tenshu v175 W2, board `P-Spark`):
-//! - "Total balance", then one asset row per balance: Bitcoin, and US
-//!   Dollar while the wallet holds USDB ([`spark_assets`]).
+//! - "Total balance" with the Lightning address button beside it, which
+//!   opens the share panel ([`lightning_share_panel`]), then one asset row
+//!   per balance: Bitcoin, and US Dollar while the wallet holds USDB
+//!   ([`spark_assets`]).
 //! - "Recent activity", mounted by App from Activity.
-//! - The Lightning Address block. The Stable Balance control lives in
-//!   Settings › Spark › Balances & conversion.
+//!
+//! Claiming and changing the address happen in Settings › Spark › Lightning
+//! address, as does the Stable Balance control (Balances & conversion).
 
 use coincube_core::miniscript::bitcoin::Amount;
 
 use crate::app::wallets::DomainPaymentStatus;
-use coincube_ui::component::tenshu::{asset_row, AmountVisibility, BalanceValue, Figure};
+use coincube_ui::component::tenshu::{
+    asset_row, fit_row, ActionButton, ActionKind, AmountVisibility, BalanceValue, Figure,
+};
 use coincube_ui::{
-    component::{amount::*, button, text::*},
-    theme,
+    component::{amount::*, text::*},
+    icon, theme,
     theme::tenshu::size,
-    widget::*,
+    widget::{action::Action, *},
 };
 use iced::{
-    widget::{Column, Container, Row},
+    widget::{qr_code, Column, Container, QRCode, Row},
     Alignment, Length,
 };
 
 use crate::app::settings::display::DisplayMode;
-use crate::app::state::connect::ConnectCubePanel;
 use crate::app::state::spark::overview::SparkBalanceSnapshot;
 use crate::app::view::shared::landing::{
-    amount_cell, landing_balance_section, landing_button, landing_control_id, AmountCell,
-    AmountTier,
+    amount_cell, landing_balance_section, landing_button, landing_card_style, landing_control_id,
+    AmountCell, AmountTier,
 };
-use crate::app::view::spark::settings::lightning_address::{
-    lightning_address_body, LN_ADDRESS_DOMAIN,
-};
+use crate::app::view::spark::settings::lightning_address::LN_ADDRESS_DOMAIN;
 use crate::app::view::vault::fiat::FiatAmount;
 use crate::app::view::wallet_header::{wallet_header, HeaderVariant, SyncState, WalletHeaderProps};
-use crate::app::view::ConnectCubeMessage;
 use crate::app::view::{FiatAmountConverter, SparkOverviewMessage};
 
 /// High-level status of the Spark backend for the current cube.
@@ -119,81 +120,224 @@ pub struct SparkOverviewView<'a> {
     pub btc_usd_price: Option<f64>,
     pub display_mode: DisplayMode,
     pub mask_amounts: bool,
+    pub lightning_address: SparkLightningAddress,
 }
 
-/// Ready-address row for the Overview footprint. Editing, claiming and
-/// confirmation use the existing Connect-owned component unchanged.
-pub fn spark_landing_address<'a>(
-    state: &'a ConnectCubePanel,
-) -> Element<'a, crate::app::view::Message> {
-    let address = state
-        .lightning_address
-        .as_ref()
-        .and_then(|value| value.lightning_address.as_deref());
-    if state.ln_editing
-        || state.ln_change_confirm_pending.is_some()
-        || state.ln_reconcile_needs_reregister.is_some()
-        || address.is_none()
-    {
-        return lightning_address_body(state).map(crate::app::view::Message::ConnectCube);
-    }
+/// What the Spark page knows about the Cube's Lightning address. It drives
+/// the button beside "Total balance".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SparkLightningAddress {
+    /// Not known yet (the Cube's registration is still in flight): no button,
+    /// rather than a claim prompt that flips to the address a moment later.
+    Unknown,
+    /// None claimed, or signed out: the button leads to the claim form.
+    Unclaimed,
+    /// The full address, domain included.
+    Ready(String),
+}
 
-    let raw_address = address.expect("checked above");
-    let address = if raw_address.contains('@') {
-        raw_address.to_owned()
+/// The full Lightning address for a stored value that may be a bare username.
+pub fn full_lightning_address(raw: &str) -> String {
+    if raw.contains('@') {
+        raw.to_owned()
     } else {
-        format!("{raw_address}{LN_ADDRESS_DOMAIN}")
-    };
-    let short_address = crate::utils::truncate_middle(&address, 15, 12);
-    let row: Element<'a, ConnectCubeMessage> = Container::new(
-        Row::new()
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push(
-                Column::new()
-                    .spacing(4)
-                    .width(Length::Fill)
-                    .push(h4_bold("Lightning Address"))
-                    .push(
-                        text("Receive to a readable address")
-                            .size(P2_SIZE)
-                            .style(theme::text::secondary),
-                    ),
-            )
-            .push(text(short_address).size(P2_SIZE))
-            .push(
-                button::secondary_compact_action(
-                    landing_control_id(&state.cube_uuid, "Spark", "ln-copy"),
-                    None,
-                    "Copy",
-                    ConnectCubeMessage::FocusAction,
-                )
-                .on_press(ConnectCubeMessage::CopyToClipboard(address)),
-            )
-            .push(
-                button::secondary_compact_action(
-                    landing_control_id(&state.cube_uuid, "Spark", "ln-change"),
-                    None,
-                    "Change",
-                    ConnectCubeMessage::FocusAction,
-                )
-                .on_press(ConnectCubeMessage::BeginEditLightningAddress),
-            ),
-    )
-    .padding(16)
-    .width(Length::Fill)
-    .style(crate::app::view::shared::landing::landing_card_style)
-    .into();
-    row.map(crate::app::view::Message::ConnectCube)
+        format!("{raw}{LN_ADDRESS_DOMAIN}")
+    }
 }
 
-/// Context below Spark's recent activity: the Lightning Address block. The
-/// address form is supplied by the Connect owner so its validation,
-/// confirmation, and account gate stay shared.
-pub fn spark_landing_context<'a>(
-    address: Element<'a, crate::app::view::Message>,
-) -> Element<'a, crate::app::view::Message> {
-    Column::new().padding([16, 16]).push(address).into()
+/// The button beside "Total balance": the address and an invitation to share
+/// it, or to claim one. Never masked; an address is not an amount.
+fn lightning_address_button<'a>(
+    cube_id: &str,
+    address: &SparkLightningAddress,
+) -> Option<Element<'a, SparkOverviewMessage>> {
+    let (control, title, subtitle, trailing, press) = match address {
+        SparkLightningAddress::Unknown => return None,
+        SparkLightningAddress::Unclaimed => (
+            "ln-claim",
+            "Claim your Lightning address".to_owned(),
+            "Get paid to a readable address",
+            None,
+            SparkOverviewMessage::ClaimLightningAddress,
+        ),
+        SparkLightningAddress::Ready(address) => (
+            "ln-share",
+            crate::utils::truncate_middle(address, 18, 14),
+            "Your Lightning address · share it to get paid",
+            Some("Share"),
+            SparkOverviewMessage::ShareLightningAddress(address.clone()),
+        ),
+    };
+    let bolt = Container::new(
+        icon::lightning_icon()
+            .size(20)
+            .color(theme::tenshu::ON_ACCENT),
+    )
+    .width(Length::Fixed(40.0))
+    .height(Length::Fixed(40.0))
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
+    .style(|theme: &theme::Theme| iced::widget::container::Style {
+        background: Some(iced::Background::Color(theme.colors.shell.accent)),
+        border: iced::Border {
+            radius: 10.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let mut content = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .push(bolt)
+        .push(
+            Column::new()
+                .spacing(2)
+                .push(p1_bold(title).wrapping(iced::widget::text::Wrapping::None))
+                .push(
+                    text(subtitle)
+                        .size(P2_SIZE)
+                        .style(theme::text::secondary)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                ),
+        );
+    if let Some(label) = trailing {
+        content = content.push(iced::widget::rule::vertical(1)).push(
+            Row::new()
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .push(icon::share_icon().size(size::ICON_SMALL).style(accent_text))
+                .push(
+                    p2_regular(label)
+                        .font(coincube_ui::font::SEMIBOLD)
+                        .style(accent_text),
+                ),
+        );
+    }
+    Some(
+        Action::new(
+            landing_control_id(cube_id, "Spark", control),
+            Container::new(content.height(Length::Fixed(40.0))).padding([10, 12]),
+            SparkOverviewMessage::FocusAction,
+        )
+        .style(lightning_address_button_style)
+        .focus_radius(12.0)
+        .on_press(press)
+        .into(),
+    )
+}
+
+fn accent_text(theme: &theme::Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(theme.colors.shell.accent_ink),
+    }
+}
+
+/// The address button's surface: a panel card whose border takes the accent
+/// under the pointer.
+fn lightning_address_button_style(
+    theme: &theme::Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    use iced::widget::button::Status;
+    let shell = &theme.colors.shell;
+    iced::widget::button::Style {
+        background: Some(iced::Background::Color(shell.panel)),
+        text_color: shell.ink,
+        border: iced::Border {
+            color: if matches!(status, Status::Hovered | Status::Pressed) {
+                shell.accent_ink
+            } else {
+                shell.line
+            },
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// The share panel the address button opens, drawn as a modal over the page:
+/// the address as a QR code (encoded exactly as Spark › Receive encodes it,
+/// the bare address), a copy action and the way to a different name.
+pub fn lightning_share_panel<'a>(
+    cube_id: &str,
+    address: &'a str,
+    qr: Option<&'a qr_code::Data>,
+) -> Element<'a, SparkOverviewMessage> {
+    let qr: Element<'a, SparkOverviewMessage> = match qr {
+        Some(qr) => Container::new(QRCode::<theme::Theme>::new(qr).total_size(184))
+            .width(Length::Fill)
+            .align_x(Alignment::Center)
+            .into(),
+        None => p2_regular("QR unavailable · copy the address instead.")
+            .style(theme::text::secondary)
+            .into(),
+    };
+    let change = ActionButton::new(
+        landing_control_id(cube_id, "Spark", "ln-change"),
+        "Change address",
+        ActionKind::Quiet,
+        SparkOverviewMessage::FocusAction,
+    )
+    .on_press(SparkOverviewMessage::ChangeLightningAddress);
+    let panel = Column::new()
+        .spacing(16)
+        .push(
+            Column::new()
+                .spacing(4)
+                .push(h4_bold("Get paid over Lightning"))
+                .push(
+                    text(
+                        "Anyone with a Lightning wallet can send you bitcoin at this \
+                         address, even while Tenshu is closed.",
+                    )
+                    .size(P2_SIZE)
+                    .style(theme::text::secondary),
+                ),
+        )
+        .push(qr)
+        .push(
+            Container::new(text(address).size(18))
+                .width(Length::Fill)
+                .align_x(Alignment::Center),
+        )
+        .push(
+            ActionButton::new(
+                landing_control_id(cube_id, "Spark", "ln-copy"),
+                "Copy address",
+                ActionKind::Primary,
+                SparkOverviewMessage::FocusAction,
+            )
+            .icon(icon::copy_icon())
+            .compact()
+            .width(Length::Fill)
+            .on_press(SparkOverviewMessage::CopyLightningAddress(
+                address.to_owned(),
+            )),
+        )
+        .push(iced::widget::rule::horizontal(1))
+        .push(
+            Row::new()
+                .align_y(Alignment::Center)
+                .push(
+                    text("Want a different name?")
+                        .size(P2_SIZE)
+                        .style(theme::text::secondary)
+                        .width(Length::Fill),
+                )
+                .push(change),
+        );
+    Container::new(panel)
+        .padding(20)
+        .width(Length::Fixed(380.0))
+        .style(|theme: &theme::Theme| iced::widget::container::Style {
+            border: iced::Border {
+                radius: 12.0.into(),
+                ..landing_card_style(theme).border
+            },
+            ..landing_card_style(theme)
+        })
+        .into()
 }
 
 /// The balances the Spark page lists, in order. Bitcoin always, unless the
@@ -241,6 +385,7 @@ impl<'a> SparkOverviewView<'a> {
                 self.mask_amounts,
                 self.cube_id,
                 self.last_error,
+                &self.lightning_address,
             ),
         }
     }
@@ -259,6 +404,7 @@ fn connected_view<'a>(
     mask_amounts: bool,
     cube_id: &str,
     last_error: Option<&str>,
+    lightning_address: &SparkLightningAddress,
 ) -> Element<'a, SparkOverviewMessage> {
     use crate::app::breez_spark::assets::stable_token_as_sats_u128;
 
@@ -421,10 +567,17 @@ fn connected_view<'a>(
             }
         });
     }
+    // The Lightning address sits beside the total while both fit at their
+    // own widths, else on its own line below it (`fit_row`).
+    let total_row: Element<'a, SparkOverviewMessage> =
+        match lightning_address_button(cube_id, lightning_address) {
+            Some(button) => fit_row(total_col, button).gap(16.0).into(),
+            None => total_col.into(),
+        };
     let balance_section = landing_balance_section(
         Column::new()
             .spacing(16)
-            .push(total_col)
+            .push(total_row)
             .push(iced::widget::rule::horizontal(1))
             .push(rows),
     );
@@ -481,12 +634,14 @@ fn row_display_amount(tx: &SparkRecentTransaction) -> Amount {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::view;
     use crate::app::view::shared::landing::capture;
-    use crate::app::{
-        state::connect::ConnectCubePanel, view,
-        view::spark::settings::lightning_address::lightning_address_confirmation,
-    };
-    use crate::services::coincube::LightningAddress;
+
+    const ADDRESS: &str = "sats@coincube.io";
+
+    fn ready() -> SparkLightningAddress {
+        SparkLightningAddress::Ready(ADDRESS.into())
+    }
 
     /// The Spark page under its pinned head, at the top and scrolled (Tenshu
     /// v175 L3). Opt-in: `TOP_BAR_CAPTURE_DIR=<dir> cargo test -p
@@ -501,16 +656,6 @@ mod tests {
             return;
         };
         let mut renderer = capture_tests::renderer();
-        let mut connect = ConnectCubePanel::new(
-            None,
-            "synthetic-cube".into(),
-            "Everyday".into(),
-            "bitcoin".into(),
-            false,
-        );
-        connect.lightning_address = Some(LightningAddress {
-            lightning_address: Some("sats@coincube.io".into()),
-        });
         // Both balances, so the US Dollar row shows (W2).
         let snapshot = SparkBalanceSnapshot {
             balance_sats: 25_053,
@@ -552,9 +697,9 @@ mod tests {
                     Ok((Vec::clone(&payments), false)),
                 ),
             ));
-            let (cache, activity, connect, snapshot) = (&cache, &activity, &connect, &snapshot);
+            let (cache, activity, snapshot) = (&cache, &activity, &snapshot);
             // As App mounts the page (`state::spark::overview`
-            // `view_with_address_overlay`, `page_body`).
+            // `view_with_lightning_share`, `page_body`).
             capture_tests::save_page_head_frames(
                 &mut renderer,
                 &directory,
@@ -573,11 +718,12 @@ mod tests {
                         move || {
                             Column::new()
                                 .push(
-                                    synthetic_overview(
+                                    synthetic_overview_with(
                                         SparkStatus::Connected(snapshot.clone()),
                                         &[],
                                         Some(80_000.0),
                                         None,
+                                        ready(),
                                     )
                                     .map(view::Message::SparkOverview),
                                 )
@@ -592,7 +738,6 @@ mod tests {
                                     ))
                                     .padding([0, 16]),
                                 )
-                                .push(spark_landing_context(spark_landing_address(connect)))
                                 .into()
                         },
                         || None,
@@ -603,110 +748,168 @@ mod tests {
     }
 
     #[test]
-    fn spark_landing_mounts_the_address_and_its_confirmation() {
-        let mut connect = ConnectCubePanel::new(
-            None,
-            "synthetic-cube".into(),
-            "Test Cube".into(),
-            "bitcoin".into(),
-            false,
-        );
-        connect.lightning_address = Some(LightningAddress {
-            lightning_address: Some("sats@coincube.io".into()),
-        });
+    fn spark_page_offers_its_lightning_address_beside_the_balance() {
         let snapshot = SparkBalanceSnapshot {
             balance_sats: 25_053,
             usdb_balance: None,
         };
-        for bytes in coincube_ui::font::load() {
-            iced::advanced::graphics::text::font_system()
-                .write()
-                .expect("font system")
-                .load_font(bytes);
-        }
+        let share = landing_control_id("synthetic-cube", "Spark", "ln-share");
+        let claim = landing_control_id("synthetic-cube", "Spark", "ln-claim");
         for (appearance, theme) in [
             ("dark", theme::Theme::dark()),
             ("light", theme::Theme::light()),
         ] {
             for size in [(1024, 768), (1440, 900)] {
-                let address = spark_landing_address(&connect);
+                let page = |address| {
+                    synthetic_overview_with(
+                        SparkStatus::Connected(snapshot.clone()),
+                        &[],
+                        None,
+                        None,
+                        address,
+                    )
+                };
                 let mounted = capture::inspect(
-                    "spark-context-ready",
-                    Column::new()
-                        .push(
-                            synthetic_overview(
-                                SparkStatus::Connected(snapshot.clone()),
-                                &[],
-                                None,
-                                None,
-                            )
-                            .map(view::Message::SparkOverview),
-                        )
-                        .push(spark_landing_context(address))
-                        .into(),
+                    "spark-address-ready",
+                    page(ready()),
                     size,
                     appearance,
                     theme,
                 );
-                assert!(mounted.contains("sats@coincube.io"));
-                assert!(mounted.contains("Receive to a readable address"));
-                // The Stable Balance control moved to Settings (W2).
-                assert!(!mounted.contains("Stable Balance"));
-                assert!(!mounted.has_focus(landing_control_id(
-                    "synthetic-cube",
-                    "Spark",
-                    "stable-balance-toggle"
-                )));
+                assert!(mounted.contains("Total balance"));
+                assert!(mounted.contains(ADDRESS));
+                assert!(mounted.contains("Your Lightning address · share it to get paid"));
+                assert!(mounted.contains("Share"));
+                assert!(mounted.has_focus(share.clone()));
+                // The old card below the activity, and its inline editing,
+                // are gone from the page.
+                assert!(!mounted.contains("Receive to a readable address"));
+                assert!(!mounted.contains("Change your Lightning Address"));
                 for control in ["ln-copy", "ln-change"] {
-                    assert!(mounted.has_focus(landing_control_id(
+                    assert!(!mounted.has_focus(landing_control_id(
                         "synthetic-cube",
                         "Spark",
                         control
                     )));
                 }
                 for pointer in [false, true] {
+                    let emitted = capture::activate(page(ready()), share.clone(), size, pointer);
+                    assert!(
+                        matches!(
+                            emitted.last(),
+                            Some(SparkOverviewMessage::ShareLightningAddress(address)) if address == ADDRESS
+                        ),
+                        "{:?}",
+                        emitted
+                    );
+                }
+
+                let unclaimed = capture::inspect(
+                    "spark-address-unclaimed",
+                    page(SparkLightningAddress::Unclaimed),
+                    size,
+                    appearance,
+                    theme,
+                );
+                assert!(unclaimed.contains("Claim your Lightning address"));
+                assert!(!unclaimed.contains("Share"));
+                assert!(!unclaimed.has_focus(share.clone()));
+                for pointer in [false, true] {
                     let emitted = capture::activate(
-                        spark_landing_address(&connect),
-                        landing_control_id("synthetic-cube", "Spark", "ln-change"),
+                        page(SparkLightningAddress::Unclaimed),
+                        claim.clone(),
                         size,
                         pointer,
                     );
-                    assert!(emitted.iter().any(|message| matches!(
-                        message,
-                        view::Message::ConnectCube(ConnectCubeMessage::BeginEditLightningAddress)
-                    )));
+                    assert!(
+                        matches!(
+                            emitted.last(),
+                            Some(SparkOverviewMessage::ClaimLightningAddress)
+                        ),
+                        "{:?}",
+                        emitted
+                    );
                 }
 
-                connect.ln_editing = true;
-                connect.ln_username_input = "newname".into();
-                connect.ln_change_confirm_pending = Some("newname".into());
-                let editing = capture::inspect(
-                    "spark-context-address-editing",
-                    spark_landing_context(spark_landing_address(&connect)),
+                // Unknown until the Cube's registration answers: no button
+                // that would flip from "Claim" to the address.
+                let unknown = capture::inspect(
+                    "spark-address-unknown",
+                    page(SparkLightningAddress::Unknown),
                     size,
                     appearance,
                     theme,
                 );
-                assert!(editing.contains("Change your Lightning Address"));
-                let confirmation = capture::inspect(
-                    "spark-context-address-confirmation",
-                    lightning_address_confirmation(&connect)
-                        .expect("pending address confirmation")
-                        .map(view::Message::ConnectCube),
-                    size,
-                    appearance,
-                    theme,
-                );
-                assert!(confirmation.contains("Change your Lightning Address?"));
-                assert!(confirmation.contains("Yes, change it"));
-                connect.ln_editing = false;
-                connect.ln_change_confirm_pending = None;
+                assert!(unknown.contains("Total balance"));
+                assert!(!unknown.contains("Lightning address"));
+                assert!(!unknown.has_focus(share.clone()));
+                assert!(!unknown.has_focus(claim.clone()));
             }
         }
     }
 
     #[test]
-    fn address_confirmation_overlays_the_whole_spark_page() {
+    fn lightning_share_panel_offers_the_qr_copy_and_change() {
+        let qr = qr_code::Data::new(ADDRESS).expect("address fits a QR code");
+        let copy = landing_control_id("synthetic-cube", "Spark", "ln-copy");
+        let change = landing_control_id("synthetic-cube", "Spark", "ln-change");
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            let panel = || lightning_share_panel("synthetic-cube", ADDRESS, Some(&qr));
+            let mounted =
+                capture::inspect("spark-share-panel", panel(), (1024, 768), appearance, theme);
+            for line in [
+                "Get paid over Lightning",
+                "Anyone with a Lightning wallet can send you bitcoin at this address, even \
+                 while Tenshu is closed.",
+                ADDRESS,
+                "Copy address",
+                "Want a different name?",
+                "Change address",
+            ] {
+                assert!(mounted.contains(line), "{}", line);
+            }
+            assert!(!mounted.contains("QR unavailable"));
+            // The app has no save-QR helper yet.
+            assert!(!mounted.contains("Save QR image"));
+            assert!(mounted.has_focus(copy.clone()));
+            assert!(mounted.has_focus(change.clone()));
+            for pointer in [false, true] {
+                let copied = capture::activate(panel(), copy.clone(), (1024, 768), pointer);
+                assert!(
+                    matches!(
+                        copied.last(),
+                        Some(SparkOverviewMessage::CopyLightningAddress(address)) if address == ADDRESS
+                    ),
+                    "{:?}",
+                    copied
+                );
+                let changed = capture::activate(panel(), change.clone(), (1024, 768), pointer);
+                assert!(
+                    matches!(
+                        changed.last(),
+                        Some(SparkOverviewMessage::ChangeLightningAddress)
+                    ),
+                    "{:?}",
+                    changed
+                );
+            }
+            let without_qr = capture::inspect(
+                "spark-share-panel-no-qr",
+                lightning_share_panel("synthetic-cube", ADDRESS, None),
+                (1024, 768),
+                appearance,
+                theme,
+            );
+            assert!(without_qr.contains("QR unavailable"));
+            assert!(without_qr.contains(ADDRESS));
+        }
+    }
+
+    #[test]
+    fn lightning_share_overlays_the_whole_spark_page() {
         use iced::advanced::{layout, overlay, renderer::Headless, widget::Tree, Layout};
         use iced::{Rectangle, Size, Vector};
 
@@ -717,18 +920,7 @@ mod tests {
                 .load_font(bytes);
         }
 
-        let mut connect = ConnectCubePanel::new(
-            None,
-            "synthetic-cube".into(),
-            "Test Cube".into(),
-            "bitcoin".into(),
-            false,
-        );
-        connect.lightning_address = Some(LightningAddress {
-            lightning_address: Some("sats@coincube.io".into()),
-        });
-        connect.ln_editing = true;
-        connect.ln_change_confirm_pending = Some("newname".into());
+        let qr = qr_code::Data::new(ADDRESS).expect("address fits a QR code");
         let snapshot = SparkBalanceSnapshot {
             balance_sats: 25_053,
             usdb_balance: None,
@@ -738,28 +930,20 @@ mod tests {
             ("light", theme::Theme::light()),
         ] {
             for (width, height) in [(1024, 768), (1440, 900)] {
-                let body = Column::new()
-                    .push(
-                        synthetic_overview(
-                            SparkStatus::Connected(snapshot.clone()),
-                            &[],
-                            None,
-                            None,
-                        )
-                        .map(view::Message::SparkOverview),
-                    )
-                    .push(spark_landing_context(spark_landing_address(&connect)));
+                let body = synthetic_overview_with(
+                    SparkStatus::Connected(snapshot.clone()),
+                    &[],
+                    None,
+                    None,
+                    ready(),
+                );
                 let page = iced::widget::scrollable(body)
                     .width(Length::Fill)
                     .height(Length::Fill);
-                let dialog = lightning_address_confirmation(&connect)
-                    .expect("pending change")
-                    .map(view::Message::ConnectCube);
-                let mut element: Element<'_, view::Message> =
-                    coincube_ui::widget::modal::Modal::new(page, dialog)
-                        .on_blur(Some(view::Message::ConnectCube(
-                            ConnectCubeMessage::DismissChangeConfirmation,
-                        )))
+                let panel = lightning_share_panel("synthetic-cube", ADDRESS, Some(&qr));
+                let mut element: Element<'_, SparkOverviewMessage> =
+                    coincube_ui::widget::modal::Modal::new(page, panel)
+                        .on_blur(Some(SparkOverviewMessage::CloseLightningShare))
                         .into();
                 let size = Size::new(width as f32, height as f32);
                 let viewport = Rectangle::with_size(size);
@@ -788,7 +972,7 @@ mod tests {
                         Vector::ZERO,
                     )
                     .map(overlay::Nested::new)
-                    .expect("address confirmation overlay");
+                    .expect("share panel overlay");
                 let overlay_node = modal.layout(&renderer, size);
                 let dialog_bounds = overlay_node
                     .children()
@@ -843,7 +1027,7 @@ mod tests {
                     );
                     image::save_buffer(
                         std::path::Path::new(&directory).join(format!(
-                            "spark-address-modal-{appearance}-{width}x{height}-synthetic.png"
+                            "spark-share-modal-{appearance}-{width}x{height}-synthetic.png"
                         )),
                         &pixels,
                         width,
@@ -973,6 +1157,22 @@ mod tests {
         price: Option<f64>,
         last_error: Option<&'a str>,
     ) -> Element<'a, SparkOverviewMessage> {
+        synthetic_overview_with(
+            status,
+            rows,
+            price,
+            last_error,
+            SparkLightningAddress::Unknown,
+        )
+    }
+
+    fn synthetic_overview_with<'a>(
+        status: SparkStatus,
+        rows: &'a [SparkRecentTransaction],
+        price: Option<f64>,
+        last_error: Option<&'a str>,
+        lightning_address: SparkLightningAddress,
+    ) -> Element<'a, SparkOverviewMessage> {
         SparkOverviewView {
             status,
             recent_transactions: rows,
@@ -984,6 +1184,7 @@ mod tests {
             btc_usd_price: price,
             display_mode: DisplayMode::BitcoinNative,
             mask_amounts: false,
+            lightning_address,
         }
         .render()
     }
@@ -1021,6 +1222,7 @@ mod tests {
                 btc_usd_price: Some(50_000.0),
                 display_mode: DisplayMode::BitcoinNative,
                 mask_amounts: true,
+                lightning_address: ready(),
             }
             .render(),
             (1024, 768),
@@ -1031,6 +1233,8 @@ mod tests {
         for amount in ["12,345,678", "98,765,432", "2.50"] {
             assert!(!mounted.contains(amount), "hidden Spark amount {}", amount);
         }
+        // An address is not an amount: hiding balances leaves it readable.
+        assert!(mounted.contains(ADDRESS));
     }
 
     #[test]
