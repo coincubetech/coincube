@@ -3260,11 +3260,15 @@ pub fn global_home_view<'a>(
             }),
         );
 
+    // A Cube with no wallet yet has nothing to total; the Wallets cards
+    // carry the create/restore actions on their own.
+    let has_any_wallet = has_spark || has_liquid || has_vault || has_imported_bitcoin;
+
     let overview = Container::new(
         Column::new()
             .spacing(12)
-            .push(total_balance_block)
-            .push(Space::new().height(Length::Fixed(20.0)))
+            .push_maybe(has_any_wallet.then_some(total_balance_block))
+            .push_maybe(has_any_wallet.then(|| Space::new().height(Length::Fixed(20.0))))
             .push(
                 Row::new()
                     .spacing(8)
@@ -3707,6 +3711,17 @@ mod tests {
                     theme,
                 );
                 assert!(!zero.contains("No wallet balance has loaded successfully"));
+
+                let mut empty = fixture.config(0, None, None);
+                empty.has_vault = false;
+                empty.has_spark = false;
+                empty.has_liquid = false;
+                empty.has_imported_bitcoin = false;
+                let no_wallets =
+                    capture::inspect("hub-no-wallets", overview(empty), outer, appearance, theme);
+                assert!(!no_wallets.contains("Total balance"));
+                assert!(!no_wallets.contains("No wallet balance has loaded successfully"));
+                assert!(no_wallets.contains("Create Vault"));
             }
         }
     }
