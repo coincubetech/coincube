@@ -250,9 +250,6 @@ pub struct ConnectCubePanel {
     /// True when the claimed-address card is rendered in its in-place
     /// edit form. The unclaimed flow leaves this `false`.
     pub ln_editing: bool,
-    /// `Some(new_username)` while the destructive-action confirmation
-    /// modal is showing for a proposed username change.
-    pub ln_change_confirm_pending: Option<String>,
     /// True during the PUT + SDK delete + SDK register chain. Distinct
     /// from `ln_claiming` so view code can spinner-gate the
     /// edit form independently of the unclaimed-flow claim button.
@@ -329,7 +326,6 @@ impl ConnectCubePanel {
             ln_claiming: false,
             ln_checking: false,
             ln_editing: false,
-            ln_change_confirm_pending: None,
             ln_changing: false,
             ln_reregistering: false,
             ln_check_version: 0,
@@ -428,7 +424,6 @@ impl ConnectCubePanel {
         self.ln_claiming = false;
         self.ln_checking = false;
         self.ln_editing = false;
-        self.ln_change_confirm_pending = None;
         self.ln_changing = false;
         self.ln_reregistering = false;
         self.ln_check_version += 1;
@@ -1246,7 +1241,6 @@ impl ConnectCubePanel {
                 self.ln_username_available = None;
                 self.ln_username_error = None;
                 self.ln_claim_error = None;
-                self.ln_change_confirm_pending = None;
             }
 
             ConnectCubeMessage::CancelEditLightningAddress => {
@@ -1254,7 +1248,6 @@ impl ConnectCubePanel {
                     return iced::Task::none();
                 }
                 self.ln_editing = false;
-                self.ln_change_confirm_pending = None;
                 self.ln_username_input.clear();
                 self.ln_username_available = None;
                 self.ln_username_error = None;
@@ -1266,48 +1259,22 @@ impl ConnectCubePanel {
                 self.ln_checking = false;
             }
 
-            ConnectCubeMessage::RequestChangeLightningAddress => {
+            ConnectCubeMessage::SaveLightningAddress => {
                 if self.ln_changing {
                     return iced::Task::none();
                 }
-                let proposed = self.ln_username_input.trim().to_string();
-                let valid_format = self.ln_username_error.is_none() && !proposed.is_empty();
+                let new_username = self.ln_username_input.trim().to_string();
+                let valid_format = self.ln_username_error.is_none() && !new_username.is_empty();
                 let available = self.ln_username_available == Some(true);
                 let current_username = self
                     .lightning_address
                     .as_ref()
                     .and_then(|la| la.lightning_address.as_deref())
-                    .and_then(|addr| addr.split('@').next())
-                    .map(|u| u.to_string());
-                let differs = current_username
-                    .as_deref()
-                    .map(|u| u != proposed)
-                    .unwrap_or(true);
-                if valid_format && available && differs {
-                    self.ln_change_confirm_pending = Some(proposed);
-                }
-            }
-
-            ConnectCubeMessage::DismissChangeConfirmation => {
-                self.ln_change_confirm_pending = None;
-            }
-
-            ConnectCubeMessage::SaveLightningAddress => {
-                // Request validates and stages the name; an invalid one stays
-                // unstaged and nothing is sent.
-                let _ = self.update_message(ConnectCubeMessage::RequestChangeLightningAddress);
-                if self.ln_change_confirm_pending.is_some() {
-                    return self.update_message(ConnectCubeMessage::ConfirmChangeLightningAddress);
-                }
-            }
-
-            ConnectCubeMessage::ConfirmChangeLightningAddress => {
-                if self.ln_changing {
+                    .and_then(|addr| addr.split('@').next());
+                let differs = current_username.is_none_or(|u| u != new_username);
+                if !(valid_format && available && differs) {
                     return iced::Task::none();
                 }
-                let Some(new_username) = self.ln_change_confirm_pending.take() else {
-                    return iced::Task::none();
-                };
                 let Some(client) = self.client.clone() else {
                     return iced::Task::none();
                 };
@@ -1416,7 +1383,6 @@ impl ConnectCubePanel {
                     LightningAddressChangeOutcome::Ok(addr) => {
                         self.lightning_address = Some(addr);
                         self.ln_editing = false;
-                        self.ln_change_confirm_pending = None;
                         self.ln_username_input.clear();
                         self.ln_username_available = None;
                         self.ln_username_error = None;
@@ -1434,7 +1400,6 @@ impl ConnectCubePanel {
                         // so the user can retry the SDK side.
                         self.lightning_address = Some(addr);
                         self.ln_editing = false;
-                        self.ln_change_confirm_pending = None;
                         self.ln_username_input.clear();
                         self.ln_username_available = None;
                         self.ln_username_error = None;
@@ -2634,15 +2599,10 @@ mod tests {
         panel.ln_username_input = "newname".to_string();
         panel.ln_username_available = Some(true);
         panel.ln_username_error = None;
-        let _ = panel.update_message(ConnectCubeMessage::RequestChangeLightningAddress);
-        assert_eq!(panel.ln_change_confirm_pending.as_deref(), Some("newname"));
-        let _ = panel.update_message(ConnectCubeMessage::DismissChangeConfirmation);
-        assert!(panel.ln_change_confirm_pending.is_none());
-        // Settings' Save skips the modal: it stages and confirms in one step
-        // (here reaching the Spark check, as no Spark client is set).
+        // Save sends the change in one step, with no confirmation (here
+        // reaching the Spark check, as no Spark client is set).
         assert!(panel.ln_claim_error.is_none());
         let _ = panel.update_message(ConnectCubeMessage::SaveLightningAddress);
-        assert!(panel.ln_change_confirm_pending.is_none());
         assert_eq!(
             panel.ln_claim_error.as_deref(),
             Some("Spark wallet is not available on this cube")
