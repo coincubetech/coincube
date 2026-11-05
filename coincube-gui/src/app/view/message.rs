@@ -2235,17 +2235,10 @@ pub enum ConnectCubeMessage {
     BeginEditLightningAddress,
     /// Drop edit mode, clear the input, abort any pending availability check.
     CancelEditLightningAddress,
-    /// User clicked "Change" on the edit form — open the destructive
-    /// confirmation modal with the proposed new username.
-    RequestChangeLightningAddress,
-    /// User backed out of the confirmation modal.
-    DismissChangeConfirmation,
-    /// User confirmed the swap — fires the PUT + SDK delete+register chain.
-    ConfirmChangeLightningAddress,
-    /// "Save new address" on Spark › Settings › Lightning address. That form
-    /// states what happens to the old address before Save, so it changes the
-    /// address without the confirmation modal: the same checks as
-    /// `RequestChangeLightningAddress`, then `ConfirmChangeLightningAddress`.
+    /// "Save new address" on Spark › Settings › Lightning address: validates
+    /// the new username, then fires the PUT + SDK delete+register chain. The
+    /// form states what happens to the old address before Save, so there is
+    /// no confirmation step.
     SaveLightningAddress,
     /// Terminal result of the change chain. The outcome variants
     /// distinguish server-side rejection (address unchanged) from
