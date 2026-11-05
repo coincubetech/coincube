@@ -686,7 +686,7 @@ fn connection_chip_fits_the_shell_in_every_state() {
                     ),
                     (width, 768),
                     appearance,
-                    palette.clone(),
+                    palette,
                 );
                 assert!(inspection.contains("Connect:"));
                 let bounds = |id: &'static str| {
