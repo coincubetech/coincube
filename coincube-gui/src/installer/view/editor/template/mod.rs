@@ -13,7 +13,10 @@ use coincube_ui::{
 
 use self::diagram::{policy_timeline, PolicyRow};
 use crate::installer::context::DescriptorTemplate;
-use crate::installer::{message::Message, view::layout};
+use crate::installer::{
+    message::Message,
+    view::{layout, layout_with_actions},
+};
 
 /// Selecting a policy advances to its introduction in the existing installer
 /// step. Keep the card action on that real selection message.
@@ -106,12 +109,6 @@ pub fn choose_descriptor_template(
     )
 }
 
-/// Explanatory copy, centred line by line in the step's column.
-fn centred_copy<'a>(copy: coincube_ui::widget::Text<'a>) -> coincube_ui::widget::Text<'a> {
-    copy.width(Length::Fill)
-        .align_x(alignment::Horizontal::Center)
-}
-
 /// Shared introduction composition. The selected policy is identified by its
 /// heading after the chooser's existing select-and-advance action.
 #[allow(clippy::too_many_arguments)]
@@ -125,38 +122,42 @@ pub(super) fn template_introduction(
     tip: &'static str,
     rows: Vec<PolicyRow<'static>>,
 ) -> Element<'static, Message> {
-    layout(
+    layout_with_actions(
         progress,
         None,
         title,
         Column::new()
-            .align_x(Alignment::Center)
-            .spacing(16)
-            .push(centred_copy(p1_regular(keys_needed)))
-            .push(centred_copy(
-                p2_regular(policy_explanation).style(theme::text::secondary),
-            ))
-            .push(policy_timeline(rows))
-            .push(centred_copy(p2_regular(tip).style(theme::text::secondary)))
-            .push(show_keychain_tip.then(|| {
-                centred_copy(
-                    p2_regular("A family member or friend can contribute a Keychain key remotely.")
-                        .style(theme::text::secondary),
-                )
-            }))
-            .push(Space::new().height(Length::Fixed(8.0)))
+            .spacing(20)
+            // What the policy needs and does reads as the title's lead.
             .push(
-                Action::new(
-                    format!("tenshu.installer.vault.intro.{}.next", ui_instance),
-                    Container::new(p2_regular("Next")).center_x(Length::Fill),
-                    Message::FocusAction,
-                )
-                .style(theme::button::primary)
-                .width(Length::Fixed(200.0))
-                .on_press(Message::Next),
+                Column::new()
+                    .spacing(6)
+                    .push(p1_regular(keys_needed))
+                    .push(p2_regular(policy_explanation).style(theme::text::secondary)),
+            )
+            .push(policy_timeline(rows))
+            .push(
+                Column::new()
+                    .spacing(6)
+                    .push(p2_regular(tip).style(theme::text::secondary))
+                    .push(show_keychain_tip.then(|| {
+                        p2_regular(
+                            "A family member or friend can contribute a Keychain key remotely.",
+                        )
+                        .style(theme::text::secondary)
+                    })),
             ),
         true,
         Some(Message::Previous),
+        Action::new(
+            format!("tenshu.installer.vault.intro.{}.next", ui_instance),
+            Container::new(p2_regular("Next")).center_x(Length::Shrink),
+            Message::FocusAction,
+        )
+        .style(theme::button::primary)
+        .padding([8, 24])
+        .on_press(Message::Next)
+        .into(),
     )
 }
 

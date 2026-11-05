@@ -1,4 +1,4 @@
-use iced::{widget::Space, Alignment, Length};
+use iced::{Alignment, Length};
 
 use coincube_ui::{
     color,
@@ -20,7 +20,7 @@ use crate::installer::{
             template::diagram::{PolicyRow, Timelock},
             undefined_key,
         },
-        layout,
+        layout_with_actions,
     },
 };
 
@@ -94,7 +94,7 @@ pub fn two_of_three_inheritance_template<'a>(
     inheritance_path: &'a Path,
     valid: bool,
 ) -> Element<'a, Message> {
-    layout(
+    layout_with_actions(
         progress,
         None,
         "Set keys",
@@ -221,35 +221,32 @@ pub fn two_of_three_inheritance_template<'a>(
                     }
                 }),
             )
-            .push(Space::new().height(10))
-            .push(
-                Row::new()
-                    .push(
-                        button::secondary(None, "Clear All")
-                            .width(Length::Fixed(120.0))
-                            .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
-                    )
-                    .push(Space::new().width(40))
-                    .push(
-                        button::secondary(None, "Customize")
-                            .width(Length::Fixed(120.0))
-                            .on_press(Message::DefineDescriptor(
-                                message::DefineDescriptor::ChangeTemplate(
-                                    context::DescriptorTemplate::Custom,
-                                ),
-                            )),
-                    )
-                    .push(Space::new().width(Length::Fill))
-                    .push(
-                        button::primary(None, "Continue")
-                            .width(Length::Fixed(200.0))
-                            .on_press_maybe(if valid { Some(Message::Next) } else { None }),
-                    ),
-            )
-            .push(Space::new().height(100.0))
             .spacing(20),
         true,
         Some(Message::Previous),
+        Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .push(
+                button::secondary(None, "Clear All")
+                    .width(Length::Shrink)
+                    .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
+            )
+            .push(
+                button::secondary(None, "Customize")
+                    .width(Length::Shrink)
+                    .on_press(Message::DefineDescriptor(
+                        message::DefineDescriptor::ChangeTemplate(
+                            context::DescriptorTemplate::Custom,
+                        ),
+                    )),
+            )
+            .push(
+                button::primary(None, "Continue")
+                    .width(Length::Shrink)
+                    .on_press_maybe(if valid { Some(Message::Next) } else { None }),
+            )
+            .into(),
     )
 }
 
@@ -266,7 +263,7 @@ pub fn inheritance_template<'a>(
     } else {
         None
     };
-    layout(
+    layout_with_actions(
         progress,
         None,
         "Set keys",
@@ -350,33 +347,31 @@ pub fn inheritance_template<'a>(
                 )
                 .map(|msg| Message::DefineDescriptor(message::DefineDescriptor::Path(1, msg))),
             )
-            .push(Space::new().height(10))
-            .push(
-                Row::new()
-                    .push(
-                        button::secondary(None, "Clear All")
-                            .width(Length::Fixed(120.0))
-                            .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
-                    )
-                    .push(Space::new().width(40))
-                    .push(
-                        button::secondary(None, "Customize")
-                            .width(Length::Fixed(120.0))
-                            .on_press(Message::DefineDescriptor(
-                                message::DefineDescriptor::ChangeTemplate(
-                                    context::DescriptorTemplate::Custom,
-                                ),
-                            )),
-                    )
-                    .push(Space::new().width(Length::Fill))
-                    .push(
-                        button::primary(None, "Continue")
-                            .width(Length::Fixed(200.0))
-                            .on_press_maybe(if valid { Some(Message::Next) } else { None }),
-                    ),
-            )
             .spacing(20),
         true,
         Some(Message::Previous),
+        Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .push(
+                button::secondary(None, "Clear All")
+                    .width(Length::Shrink)
+                    .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
+            )
+            .push(
+                button::secondary(None, "Customize")
+                    .width(Length::Shrink)
+                    .on_press(Message::DefineDescriptor(
+                        message::DefineDescriptor::ChangeTemplate(
+                            context::DescriptorTemplate::Custom,
+                        ),
+                    )),
+            )
+            .push(
+                button::primary(None, "Continue")
+                    .width(Length::Shrink)
+                    .on_press_maybe(if valid { Some(Message::Next) } else { None }),
+            )
+            .into(),
     )
 }
