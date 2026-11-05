@@ -1,4 +1,5 @@
 pub mod about;
+pub mod connections;
 pub mod general;
 mod install_stats;
 pub mod keychain_backfill;
@@ -13,6 +14,7 @@ use iced::Task;
 use coincube_ui::widget::Element;
 
 use about::AboutSettingsState;
+use connections::ConnectionsSettingsState;
 use general::{GeneralSettingsState, SettingsSection};
 use install_stats::InstallStatsState;
 
@@ -208,6 +210,16 @@ impl SettingsState {
                     .map(|s| s.reload(daemon, None))
                     .unwrap_or_else(Task::none)
             }
+            Message::View(view::Message::Settings(view::SettingsMessage::ConnectionsSection)) => {
+                // Re-opening the tab keeps the last Re-register result.
+                if !self.setting.as_ref().is_some_and(|s| {
+                    s.as_any()
+                        .is_some_and(|a| a.is::<ConnectionsSettingsState>())
+                }) {
+                    self.setting = Some(ConnectionsSettingsState::default().into());
+                }
+                Task::none()
+            }
             Message::View(view::Message::Settings(view::SettingsMessage::InstallStatsSection)) => {
                 self.setting = Some(InstallStatsState::default().into());
                 self.setting
@@ -259,6 +271,7 @@ impl State for SettingsState {
             | view::SettingsMessage::DataExportsSection
             | view::SettingsMessage::RecoverySection
             | view::SettingsMessage::AboutSection
+            | view::SettingsMessage::ConnectionsSection
             | view::SettingsMessage::InstallStatsSection,
         )) = &message
         {

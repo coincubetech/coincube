@@ -54,6 +54,8 @@ pub struct SparkSettings {
     auto_convert: Option<coincube_spark_protocol::AutoConvertState>,
     /// "Turn off auto-convert?" is open.
     confirm_off: bool,
+    /// Connections shows the bridge's technical details.
+    technical_details_open: bool,
 }
 
 impl SparkSettings {
@@ -71,6 +73,7 @@ impl SparkSettings {
             nickname_input: None,
             auto_convert: None,
             confirm_off: false,
+            technical_details_open: false,
         }
     }
 
@@ -143,7 +146,7 @@ impl State for SparkSettings {
                 crate::app::menu::SparkSettingsOption::Connections
             )))
         ) {
-            view.render_connections(cache)
+            view.render_connections(cache, self.technical_details_open)
         } else {
             Column::new()
                 .width(Length::Fill)
@@ -296,6 +299,9 @@ impl State for SparkSettings {
                     // A lost answer leaves the switch unknown, and turning it
                     // on resets the breaker: read the bridge's state either way.
                     return self.fetch_auto_convert();
+                }
+                crate::app::view::SparkSettingsMessage::ToggleTechnicalDetails => {
+                    self.technical_details_open = !self.technical_details_open;
                 }
                 crate::app::view::SparkSettingsMessage::NicknameEdited(input) => {
                     self.nickname_input = Some(input);

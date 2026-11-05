@@ -492,6 +492,11 @@ pub fn copy_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F759}')
 }
 
+/// Share (`box-arrow-up`): an arrow leaving a tray.
+pub fn share_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F1C6}')
+}
+
 pub fn list_ul_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F478}')
 }

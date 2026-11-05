@@ -226,6 +226,16 @@ pub enum SparkOverviewMessage {
     /// Forwarded to the top-level handler to flip the global
     /// fiat-native ↔ bitcoin-native display mode.
     FlipDisplayMode,
+    /// Open the share panel for this Lightning address.
+    ShareLightningAddress(String),
+    /// Close the share panel (Escape or a press outside it).
+    CloseLightningShare,
+    /// Copy the shared Lightning address.
+    CopyLightningAddress(String),
+    /// Open Settings › Spark › Lightning address with its change form.
+    ChangeLightningAddress,
+    /// Open Settings › Spark › Lightning address, where the claim form lives.
+    ClaimLightningAddress,
 }
 
 /// View-level messages for the Spark Transactions panel.
@@ -285,6 +295,9 @@ pub enum SparkSettingsMessage {
     AutoConvertOffRequested,
     /// Keep auto-convert: close the question.
     AutoConvertOffCancelled,
+    /// Show or hide the Spark wallet service's technical details on
+    /// Connections.
+    ToggleTechnicalDetails,
     /// The user typed in the Spark nickname field on Balances & conversion.
     NicknameEdited(String),
     /// Return in the nickname field, or leaving the tab with a typed name.

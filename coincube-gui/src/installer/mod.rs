@@ -974,7 +974,7 @@ impl Installer {
                         InternalBitcoindStep::new(&context.coincube_directory).into(),
                         DefineNode::new(crate::node::NodeType::Esplora).into(),
                         WalletAlias::default().into(),
-                        Final::new().into(),
+                        Final::restored().into(),
                     ],
                     // W15 — running-app Vault restore: the current Cube
                     // already has its seed on disk, we just need the
@@ -1048,7 +1048,7 @@ impl Installer {
                                 InternalBitcoindStep::new(&context.coincube_directory).into(),
                                 DefineNode::new(crate::node::NodeType::Esplora).into(),
                                 WalletAlias::default().into(),
-                                Final::new().into(),
+                                Final::restored().into(),
                             ]
                         } else {
                             // Vault-only: descriptor → watch-only Vault. Mirror
@@ -1610,10 +1610,22 @@ impl Installer {
         let active = path.index(stage);
         // Close leaves before anything is written; the steps after PIN
         // write the Cube and keep their own buttons.
+        // Done: the restored Cube waits for Open Cube, the footer's only
+        // action; there is no Back or Close.
+        let done = self
+            .steps
+            .get(self.current)
+            .is_some_and(|step| step.restore_done());
         let header = restore_frame::sheet_header(
             "Import or restore",
             restore_frame::network_chip(chain, false),
-            restore_frame::close_plain(stage.is_some().then_some(Message::BackToApp(self.network))),
+            if done {
+                iced::widget::Space::new().into()
+            } else {
+                restore_frame::close_plain(
+                    stage.is_some().then_some(Message::BackToApp(self.network)),
+                )
+            },
         );
         let nav = restore_frame::nav()
             .push(restore_frame::nav_label("Overview", false))
@@ -1630,16 +1642,26 @@ impl Installer {
             Column::new()
                 .spacing(20)
                 .padding([24, 28])
-                .push(h2(path.title()))
+                .push((!done).then(|| h2(path.title())))
                 .push(content),
         )
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
+        let footer = done.then(|| {
+            coincube_ui::widget::Row::new()
+                .push(iced::widget::Space::new().width(Length::Fill))
+                .push(
+                    coincube_ui::component::button::primary(None, "Open Cube")
+                        .width(Length::Shrink)
+                        .on_press(Message::OpenRestoredCube),
+                )
+                .into()
+        });
         let region = restore_frame::region(
             Some(restore_frame::step_rail(path.steps(), active)),
             body,
-            None,
+            footer,
         );
         restore_frame::standalone(restore_frame::sheet(
             header,
@@ -4257,6 +4279,42 @@ mod restore_frame_tests {
                 directory.join(format!("create-step-{node:02}-connect-{appearance}.png")),
             );
         }
+    }
+
+    /// A Recovery Kit or phone restore ends on Done: "[Cube] is restored"
+    /// with Open Cube as the only action, and the Cube opens from it, not
+    /// as soon as it is written.
+    #[tokio::test]
+    async fn a_restore_ends_on_done_and_opens_from_open_cube() {
+        for flow in [
+            UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
+            UserFlow::RecoverOwnCubeWithPhone {
+                cube_id: 7,
+                full_cube: true,
+            },
+        ] {
+            let mut restore = installer(flow);
+            restore.current = restore.steps.len() - 1;
+            let mut hws = HardwareWallets::new(restore.datadir.clone(), Network::Bitcoin);
+            let step = restore.steps.last_mut().unwrap();
+            drop(step.update(&mut hws, Message::AllKeysRedeemed));
+            assert!(step.restore_done(), "Done waits for Open Cube");
+            let shown = rendered_labels(restore.view()).await;
+            for label in ["Your Cube is restored", "Open Cube", "Done"] {
+                assert!(has(&shown, label), "missing {:?} in {:?}", label, shown);
+            }
+            for label in ["Close", "Back", "Restore from Cube Recovery Kit"] {
+                assert!(!has(&shown, label), "unexpected {:?} in {:?}", label, shown);
+            }
+        }
+        // Other flows still exit as soon as the install finishes.
+        let mut plain = Final::new();
+        let mut hws = HardwareWallets::new(
+            CoincubeDirectory::new(std::env::temp_dir()),
+            Network::Bitcoin,
+        );
+        drop(plain.update(&mut hws, Message::AllKeysRedeemed));
+        assert!(!plain.restore_done());
     }
 
     #[tokio::test]

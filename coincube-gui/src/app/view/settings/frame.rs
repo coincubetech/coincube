@@ -90,7 +90,7 @@ struct RouteChoice {
 
 /// Where choosing `target` in the scope switch goes from `menu`: the tab of
 /// the same name when `target` has one (Data & exports is in Cube and Vault,
-/// Connections in Vault and Spark), else `target`'s first tab. Choosing the
+/// Connections in all three), else `target`'s first tab. Choosing the
 /// current scope stays on the current tab.
 fn scope_route(menu: &Menu, target: RouteScope, cache: &Cache) -> Menu {
     if route_scope(menu) == Some(target) {
@@ -119,6 +119,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                 (CubeSettingsOption::Recovery, "Backup & protection", "backup"),
                 (CubeSettingsOption::PaymentChecks, "Payment checks", "payment-checks"),
                 (CubeSettingsOption::AiAccess, "AI access", "ai-access"),
+                (CubeSettingsOption::Connections, "Connections", "connections"),
                 (CubeSettingsOption::DataExports, "Data & exports", "data"),
             ];
             if crate::feature_flags::CUBE_MEMBERS_UI_ENABLED {
@@ -143,6 +144,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
                         "backup" => "tenshu.settings.route.cube.backup",
                         "payment-checks" => "tenshu.settings.route.cube.payment-checks",
                         "ai-access" => "tenshu.settings.route.cube.ai-access",
+                        "connections" => "tenshu.settings.route.cube.connections",
                         "data" => "tenshu.settings.route.cube.data",
                         "stats" => "tenshu.settings.route.cube.stats",
                         "about" => "tenshu.settings.route.cube.about",
@@ -449,6 +451,7 @@ mod tests {
             "Backup & protection",
             "Payment checks",
             "AI access",
+            "Connections",
             "Data & exports",
         ];
         if crate::feature_flags::CUBE_MEMBERS_UI_ENABLED {
@@ -534,10 +537,10 @@ mod tests {
             scope_route(&vault_data, RouteScope::Cube, &cache),
             cube_data
         );
-        // No Connections tab in Cube, and no Data & exports in Spark.
+        // Cube has Connections too; Spark has no Data & exports.
         assert_eq!(
             scope_route(&spark_connections, RouteScope::Cube, &cache),
-            RouteScope::Cube.landing()
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections))
         );
         assert_eq!(
             scope_route(&vault_data, RouteScope::Spark, &cache),

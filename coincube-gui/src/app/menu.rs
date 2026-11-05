@@ -39,6 +39,10 @@ pub enum CubeSettingsOption {
     PaymentChecks,
     /// Cube-wide entry points for recovery and Vault-specific files.
     DataExports,
+    /// The Connect account, this device's registration and realtime
+    /// stream, and the Re-register action. Shared by every wallet in the
+    /// Cube; the Vault and Spark Connections tabs link here.
+    Connections,
     About,
     Stats,
     /// Avatar questionnaire / generation / reveal / management. Renders
@@ -122,7 +126,7 @@ pub enum SparkSettingsOption {
     General,
     /// Lightning address claim / manage page, on its own tab.
     LightningAddress,
-    /// Connect account, Cube service session and Spark bridge health.
+    /// Spark wallet service health, and a link to Cube › Connections.
     Connections,
 }
 
@@ -154,7 +158,7 @@ pub enum SettingsOption {
     /// this vault specifically (the persisted record is scoped to the
     /// vault's id fingerprint).
     LocalSigning,
-    /// Connect account, Cube service session and node backend health.
+    /// Node backend health, and a link to Cube › Connections.
     Connections,
 }
 

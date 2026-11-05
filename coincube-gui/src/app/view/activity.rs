@@ -912,6 +912,19 @@ fn column_frame(width: f32, detail_beside: bool) -> Frame {
     }
 }
 
+/// Where the header and filters sit. They run above the list and its detail
+/// pane, so an open pane takes no width from them: they start on the rows' left
+/// edge and end where they do with it closed, and opening a row never reflows
+/// them.
+fn head_frame(width: f32, rows: Frame) -> Frame {
+    let right = column_frame(width, false).right;
+    Frame {
+        left: rows.left,
+        column: width - rows.left - right,
+        right,
+    }
+}
+
 /// `.day`: a relative name, then the date in the muted ink.
 fn day_heading(day: Option<NaiveDate>, today: NaiveDate) -> (String, String) {
     let Some(day) = day else {
@@ -2483,9 +2496,10 @@ fn render_at_width<'a>(
             }),
         );
     }
+    let head = head_frame(width, frame);
     column![
-        header(activity, cache, shown, loaded, frame),
-        filters_bar(activity, frame),
+        header(activity, cache, shown, loaded, head),
+        filters_bar(activity, head),
         split
     ]
     .width(Length::Fill)
@@ -2961,6 +2975,94 @@ mod tests {
             .find(|width| detail_beside_list(*width))
             .unwrap();
         assert!(column_frame(first, true).column + 2.0 * ROW_INSET >= MIN_ACTIVITY_ROWS_WIDTH);
+    }
+
+    #[test]
+    fn opening_a_row_leaves_the_header_and_filters_on_their_rows() {
+        let cache = Cache::default();
+        let mut activity = Activity::new(None, None);
+        let payment = spark_payment();
+        let id = Entry::spark(payment.clone()).id;
+        drop(activity.update(
+            None,
+            &cache,
+            crate::app::message::Message::ActivitySparkLoaded(0, Ok((vec![payment], false))),
+        ));
+        let fields = [
+            "tenshu.activity.filter.wallet",
+            "tenshu.activity.filter.direction",
+            "tenshu.activity.filter.status",
+            "tenshu.activity.filter.dates",
+            "tenshu.activity.filter.search",
+        ];
+        // 816 is the 1024px minimum window, 1192 the canvas's 1440, and 1265 the
+        // 1513px window whose date and search fields dropped to a second row.
+        for pane in [816_u32, 952, 1100, 1160, 1192, 1265, 1500, 1800, 2312] {
+            let mut measure = |selected: bool| {
+                activity.selected_id = selected.then(|| id.clone());
+                let mounted = mount(
+                    if selected {
+                        "r09-activity-filters-open"
+                    } else {
+                        "r09-activity-filters-closed"
+                    },
+                    render_at_width(&activity, &cache, pane as f32),
+                    (pane + 248, 900),
+                    "dark",
+                    coincube_ui::theme::Theme::dark(),
+                    pane,
+                );
+                let bounds = |id: Id| {
+                    mounted
+                        .focus
+                        .iter()
+                        .find_map(|(actual, bounds)| (*actual == id).then_some(*bounds))
+                        .unwrap_or_else(|| panic!("{:?} mounted at {}", id, pane))
+                };
+                let count = mounted
+                    .text
+                    .iter()
+                    .find_map(|(text, bounds)| (text == "Showing 1 of 1").then_some(*bounds))
+                    .expect("rendered the count");
+                (
+                    fields.map(|field| bounds(Id::from(field))),
+                    bounds(row_focus_id(&id)),
+                    count,
+                )
+            };
+            let (closed, closed_row, closed_count) = measure(false);
+            let (open, open_row, open_count) = measure(true);
+            for (index, field) in fields.iter().enumerate() {
+                assert_eq!(open[index].y, closed[index].y, "{} at {}", field, pane);
+            }
+            assert_eq!(open_row.y, closed_row.y, "the row moved at {}", pane);
+            assert_eq!(open_count.y, closed_count.y, "the count moved at {}", pane);
+            let right = |bounds: iced::Rectangle| bounds.x + bounds.width;
+            assert_eq!(right(open[4]), right(closed[4]), "search end at {}", pane);
+            assert_eq!(
+                right(open_count),
+                right(closed_count),
+                "count end at {}",
+                pane
+            );
+            if detail_beside_list(pane as f32) {
+                // Wherever the pane can sit beside the list, one row of filters
+                // fits above it.
+                assert!(
+                    open.iter().all(|field| field.y == open[0].y),
+                    "{:?} at {}",
+                    open,
+                    pane
+                );
+                // And it stays on the rows' left edge.
+                assert_eq!(
+                    open[0].x,
+                    column_frame(pane as f32, true).left,
+                    "filters' start at {}",
+                    pane
+                );
+            }
+        }
     }
 
     #[test]

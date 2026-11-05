@@ -113,6 +113,17 @@ fn cube_settings_items() -> Vec<SubItem> {
             },
         ),
         SubItem::new(
+            "Connections",
+            settings_icon,
+            Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections)),
+            |m| {
+                matches!(
+                    m,
+                    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections))
+                )
+            },
+        ),
+        SubItem::new(
             "Stats",
             graph_icon,
             Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Stats)),

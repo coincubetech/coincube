@@ -6642,6 +6642,39 @@ struct CreateCubeFormOptions {
     submit_in_form: bool,
 }
 
+/// Live comparison of the Create form's two PIN fields, shown as the user
+/// types so a mismatch is caught before they press Create Cube.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreatePinMatch {
+    /// The first PIN is incomplete, or the confirmation agrees so far.
+    Pending,
+    /// A confirmation digit differs from the one entered above it.
+    Mismatch,
+    /// Both PINs are complete and equal.
+    Match,
+}
+
+fn create_cube_pin_match(
+    pin: &pin_input::PinInput,
+    pin_confirm: &pin_input::PinInput,
+) -> CreatePinMatch {
+    if !pin.is_complete() {
+        return CreatePinMatch::Pending;
+    }
+    let differs = pin
+        .digits
+        .iter()
+        .zip(pin_confirm.digits.iter())
+        .any(|(entered, confirmed)| !confirmed.is_empty() && entered != confirmed);
+    if differs {
+        CreatePinMatch::Mismatch
+    } else if pin_confirm.is_complete() {
+        CreatePinMatch::Match
+    } else {
+        CreatePinMatch::Pending
+    }
+}
+
 fn create_cube_can_submit(
     cube_name: &coincube_ui::component::form::Value<String>,
     pin: &pin_input::PinInput,
@@ -6652,7 +6685,7 @@ fn create_cube_can_submit(
     !creating_cube
         && cube_name.valid
         && !cube_name.value.trim().is_empty()
-        && (passkey_mode || (pin.is_complete() && pin_confirm.is_complete()))
+        && (passkey_mode || create_cube_pin_match(pin, pin_confirm) == CreatePinMatch::Match)
 }
 
 fn create_cube_form<'a>(
@@ -6839,6 +6872,24 @@ fn create_cube_form<'a>(
                 .wrap()
                 .vertical_spacing(20),
         );
+        // The status line keeps its height while empty so the form doesn't
+        // shift when the result appears.
+        let status: Element<'a, ViewMessage> = match create_cube_pin_match(pin, pin_confirm) {
+            CreatePinMatch::Mismatch => Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(icon::cross_icon().style(theme::text::error))
+                .push(p2_regular("Doesn't match the PIN you entered.").style(theme::text::error))
+                .into(),
+            CreatePinMatch::Match => Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(icon::check_icon().style(theme::text::success))
+                .push(p2_regular("PINs match").style(theme::text::success))
+                .into(),
+            CreatePinMatch::Pending => Space::new().into(),
+        };
+        column = column.push(Container::new(status).height(Length::Fixed(20.0)));
     }
 
     column = column.push(Space::new().height(Length::Fixed(10.0)));
@@ -9160,6 +9211,60 @@ mod tests {
             &home.create_cube_pin_confirm,
             true,
             true,
+        ));
+    }
+
+    #[test]
+    fn create_pin_match_is_checked_while_typing() {
+        fn pin(digits: [&str; 4]) -> pin_input::PinInput {
+            let mut input = pin_input::PinInput::new();
+            input.digits = digits.map(str::to_string);
+            input
+        }
+        let entered = pin(["2", "4", "2", "1"]);
+
+        // Nothing to compare until the first PIN is complete.
+        assert_eq!(
+            create_cube_pin_match(&pin(["2", "4", "", ""]), &pin(["9", "", "", ""])),
+            CreatePinMatch::Pending
+        );
+        // A confirmation that agrees so far is not yet a result.
+        assert_eq!(
+            create_cube_pin_match(&entered, &pin(["2", "4", "", ""])),
+            CreatePinMatch::Pending
+        );
+        // The first differing digit is a mismatch, before the field is full.
+        assert_eq!(
+            create_cube_pin_match(&entered, &pin(["2", "4", "1", ""])),
+            CreatePinMatch::Mismatch
+        );
+        assert_eq!(
+            create_cube_pin_match(&entered, &pin(["2", "4", "1", "7"])),
+            CreatePinMatch::Mismatch
+        );
+        assert_eq!(
+            create_cube_pin_match(&entered, &pin(["2", "4", "2", "1"])),
+            CreatePinMatch::Match
+        );
+
+        // Create Cube stays disabled until the PINs match.
+        let mut home = home();
+        home.create_cube_name.value = "Travel".into();
+        home.create_cube_name.valid = true;
+        let mismatched = pin(["2", "4", "1", "7"]);
+        assert!(!create_cube_can_submit(
+            &home.create_cube_name,
+            &entered,
+            &mismatched,
+            false,
+            false,
+        ));
+        assert!(create_cube_can_submit(
+            &home.create_cube_name,
+            &entered,
+            &pin(["2", "4", "2", "1"]),
+            false,
+            false,
         ));
     }
 

@@ -53,6 +53,8 @@ pub enum Message {
     Skip,
     Previous,
     BackToApp(Network),
+    /// A Recovery Kit or phone restore's Done: open the restored Cube.
+    OpenRestoredCube,
     Install,
     Close,
     Reload,

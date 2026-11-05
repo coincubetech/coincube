@@ -14,7 +14,11 @@ pub struct Modal<'a, Message, Theme, Renderer> {
     base: Element<'a, Message, Theme, Renderer>,
     modal: Element<'a, Message, Theme, Renderer>,
     on_blur: Option<Message>,
+    cover_window: bool,
 }
+
+/// The gap a window-covering modal keeps from the window's edges.
+pub const WINDOW_MARGIN: f32 = 24.0;
 
 impl<'a, Message, Theme, Renderer> Modal<'a, Message, Theme, Renderer> {
     /// Returns a new [`Modal`]
@@ -26,6 +30,18 @@ impl<'a, Message, Theme, Renderer> Modal<'a, Message, Theme, Renderer> {
             base: base.into(),
             modal: modal.into(),
             on_blur: None,
+            cover_window: false,
+        }
+    }
+
+    /// Dims the whole window and lays the modal out against it, less
+    /// [`WINDOW_MARGIN`], instead of against the base's bounds. For a base
+    /// that is only part of a page (a step inside a scrolled frame), whose
+    /// bounds would otherwise clip a taller or wider modal.
+    pub fn cover_window(self) -> Self {
+        Self {
+            cover_window: true,
+            ..self
         }
     }
 
@@ -115,6 +131,7 @@ where
             tree: &mut state.children[1],
             size: layout.bounds().size(),
             on_blur: self.on_blur.clone(),
+            cover_window: self.cover_window,
         })))
     }
 
@@ -147,6 +164,7 @@ struct Overlay<'a, 'b, Message, Theme, Renderer> {
     tree: &'b mut Tree,
     size: Size,
     on_blur: Option<Message>,
+    cover_window: bool,
 }
 
 impl<'a, 'b, Message, Theme, Renderer> overlay::Overlay<Message, Theme, Renderer>
@@ -155,7 +173,24 @@ where
     Renderer: advanced::Renderer,
     Message: Clone,
 {
-    fn layout(&mut self, renderer: &Renderer, _bounds: Size) -> layout::Node {
+    fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
+        if self.cover_window {
+            let inner = Size::new(
+                (bounds.width - 2.0 * WINDOW_MARGIN).max(0.0),
+                (bounds.height - 2.0 * WINDOW_MARGIN).max(0.0),
+            );
+            let limits = layout::Limits::new(Size::ZERO, inner)
+                .width(Length::Fill)
+                .height(Length::Fill);
+            let child = self
+                .content
+                .as_widget_mut()
+                .layout(self.tree, renderer, &limits)
+                .align(Alignment::Center, Alignment::Center, inner)
+                .translate(Vector::new(WINDOW_MARGIN, WINDOW_MARGIN));
+            return layout::Node::with_children(bounds, vec![child]);
+        }
+
         let limits = layout::Limits::new(Size::ZERO, self.size)
             .width(Length::Fill)
             .height(Length::Fill);
@@ -409,6 +444,43 @@ mod tests {
             text: None,
             repeat: false,
         })
+    }
+
+    /// A modal over a base smaller than itself: by default the base's bounds
+    /// clip it; `cover_window` lays it out against the window instead.
+    #[test]
+    fn cover_window_lays_the_modal_out_against_the_window() {
+        use overlay::Overlay as _;
+        let renderer = renderer();
+        let window = Size::new(1024.0, 768.0);
+        let base = Size::new(600.0, 400.0);
+        for cover_window in [false, true] {
+            let mut content: Element<'static, Message, Theme, crate::widget::Renderer> =
+                container(text("Sheet"))
+                    .width(Length::Fixed(900.0))
+                    .height(Length::Fixed(700.0))
+                    .into();
+            let mut tree = Tree::new(&content);
+            let mut overlay = Overlay {
+                position: Point::new(200.0, 300.0),
+                content: &mut content,
+                tree: &mut tree,
+                size: base,
+                on_blur: None,
+                cover_window,
+            };
+            let node = overlay.layout(&renderer, window);
+            let sheet = node.children()[0].bounds();
+            if cover_window {
+                assert_eq!(node.bounds(), Rectangle::with_size(window));
+                assert_eq!(sheet.size(), Size::new(900.0, 700.0));
+                assert_eq!(sheet.x, (window.width - 900.0) / 2.0);
+                assert_eq!(sheet.y, (window.height - 700.0) / 2.0);
+            } else {
+                assert_eq!(node.bounds().size(), base);
+                assert_eq!(sheet.size(), base, "the base clips the sheet");
+            }
+        }
     }
 
     #[test]

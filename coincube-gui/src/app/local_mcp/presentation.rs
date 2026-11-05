@@ -107,57 +107,96 @@ pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
     use crate::app::view::settings::page;
     let mut rows: Vec<Ui<'_>> = paired_client_rows(settings);
     let available = cfg!(any(unix, windows)) && supported;
+    let pair = if settings.pairing_open {
+        page::button(PAIR_OPEN_ID, "Close", Some(message(Message::TogglePairing)))
+    } else {
+        page::primary(
+            PAIR_OPEN_ID,
+            "Pair a client",
+            available.then(|| message(Message::TogglePairing)),
+        )
+    };
+    // State first: an empty list says so, with the way to pair beside it.
     rows.push(
-        page::row("Pair a client")
-            .description("Pair once; access lasts until you revoke it. Each client gets only the Vault and permissions you choose.")
-            .control(if settings.pairing_open {
-                page::button(PAIR_OPEN_ID, "Close", Some(message(Message::TogglePairing)))
-            } else {
-                page::primary(
-                    PAIR_OPEN_ID,
-                    "Open AI access",
-                    available.then(|| message(Message::TogglePairing)),
-                )
-            })
-            .into(),
+        page::row(if rows.is_empty() {
+            "No clients paired"
+        } else {
+            "Pair another client"
+        })
+        .description(PAIR_HINT)
+        .control(pair)
+        .into(),
     );
-    let mut content = Column::new().width(Length::Fill);
+    let mut clients = Column::new().width(Length::Fill);
     if let Some(error) = settings.pairing_error {
-        content = content.push(page::note(Tone::Bad, text(error).size(13), None));
-        content = content.push(Space::new().height(Length::Fixed(12.0)));
+        clients = clients.push(page::note(Tone::Bad, text(error).size(13), None));
+        clients = clients.push(Space::new().height(Length::Fixed(12.0)));
     }
-    content = content.push(page::note(
-        Tone::Warn,
-        column![
-            heading("Your AI provider may receive financial information"),
-            muted("The connection is local, but your AI client may send what it reads to its provider. History shares activity order, coarse type and confirmed status, but omits exact transaction amounts, times, block heights and chain ids. This reduces metadata; it does not guarantee anonymity. Balances and policy shape are included when selected. Pair only a client you trust. Never paste its private configuration into a chat."),
-        ]
-        .spacing(5),
-        None,
-    ));
-    content = content.push(page::rows(rows));
+    clients = clients.push(page::rows(rows));
     if !available {
-        content = content.push(page::note(
+        clients = clients.push(page::note(
             Tone::Warn,
             text("AI access currently supports a Bitcoin Vault served by the embedded daemon on macOS, Linux and Windows. This wallet is unavailable for MCP.").size(13),
             None,
         ));
     } else if settings.pairing_open {
-        content = content.push(
+        clients = clients.push(
             container(pairing_card(settings))
                 .padding(iced::Padding::default().top(16.0))
                 .width(Length::Fill),
         );
     }
-    content = content.push(page::caption(
-        "A local connection is not a private one: anything a paired client reads can be sent to its AI provider. Locking this Cube pauses a client; its pairing stays until you revoke it.",
-    ));
-    page::group(
-        "AI access",
-        Some("Let the AI you already use read this Cube through Tenshu's local connection. Access is scoped to one active embedded Vault. Seeds, keys, PINs, passwords and passkeys never enter the conversation.".into()),
-        content,
-    )
+
+    let list = |title: &'static str, items: &'static [&'static str]| -> Ui<'_> {
+        items
+            .iter()
+            .fold(
+                Column::new()
+                    .spacing(6)
+                    .width(Length::FillPortion(1))
+                    .push(text(title).size(13).font(font::SEMIBOLD)),
+                |column, item| column.push(muted(*item)),
+            )
+            .into()
+    };
+    let reads = Column::new()
+        .width(Length::Fill)
+        .push(page::rule())
+        .push(
+            container(
+                row![
+                    list("Shared with the client", SHARED),
+                    list("Never shared", NEVER_SHARED)
+                ]
+                .spacing(32)
+                .width(Length::Fill),
+            )
+            .padding([12, 0]),
+        )
+        .push(page::rule())
+        .push(page::note(Tone::Warn, muted(CAUTION), None));
+
+    Column::new()
+        .width(Length::Fill)
+        .push(Space::new().height(Length::Fixed(page::GROUP_GAP)))
+        .push(page::muted(INTRO))
+        .push(page::group("Paired clients", None, clients))
+        .push(page::group("What a paired client can read", None, reads))
+        .into()
 }
+
+const INTRO: &str = "Let an AI client you already use read this Cube through Tenshu's local connection. Each client gets one embedded Vault and only the permissions you choose.";
+const PAIR_HINT: &str =
+    "Pair once; access lasts until you revoke it. Locking this Cube pauses every client.";
+const SHARED: &[&str] = &[
+    "Activity order, coarse type and confirmed status",
+    "Balances and policy shape, only when you allow them",
+];
+const NEVER_SHARED: &[&str] = &[
+    "Seeds, keys, PINs, passwords and passkeys",
+    "Exact transaction amounts, times, block heights and chain IDs",
+];
+pub(super) const CAUTION: &str = "Local is not private. Anything a client reads can be sent to its AI provider. Less metadata is not anonymity. Pair only clients you trust, and never paste a client's private configuration into a chat.";
 
 const PAIR_OPEN_ID: &str = "tenshu.ai-access.open";
 
@@ -1058,4 +1097,47 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
 #[cfg(feature = "mcp-proposals")]
 pub(super) fn paired_clients(settings: &Settings) -> Ui<'_> {
     crate::app::view::settings::page::rows(paired_client_rows(settings))
+}
+
+#[cfg(test)]
+mod ai_access_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+
+    /// State first: an empty Cube says "No clients paired" beside "Pair a
+    /// client", then what a client can and can't read, then one caution.
+    #[test]
+    fn an_empty_cube_leads_with_its_state_and_lists_what_is_shared() {
+        let settings = Settings::default();
+        let probe = capture::inspect(
+            "ai-access-empty",
+            view_for_cube(&settings, true),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for label in [
+            "Paired clients",
+            "No clients paired",
+            "Pair a client",
+            "Locking this Cube pauses every client.",
+            "Shared with the client",
+            "Never shared",
+            "Seeds, keys, PINs, passwords and passkeys",
+            "Local is not private.",
+        ] {
+            assert!(probe.contains(label), "{}", label);
+        }
+        assert!(!probe.contains("Your AI provider may receive financial information"));
+        assert!(!probe.contains("Open AI access"));
+        let opened = capture::activate(
+            view_for_cube(&settings, true),
+            iced::advanced::widget::Id::new(PAIR_OPEN_ID),
+            (1440, 900),
+            true,
+        );
+        assert!(opened
+            .iter()
+            .any(|m| matches!(m, view::Message::LocalMcp(Message::TogglePairing))));
+    }
 }
