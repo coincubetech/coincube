@@ -255,8 +255,10 @@ pub enum CreationBackupStep {
     /// to the Cube as a [`creation_gate::CreationBackupBypass`].
     Bypass { acknowledged: bool },
 
-    /// Choosing *how* to back up. The entry point for every Cube, whichever
-    /// unlock method it uses.
+    /// The backup hub: Seed phrase and Recovery Kit, either or both. Each
+    /// method's screens return here when they finish, and Continue writes the
+    /// Cube with whatever evidence was collected. The entry point for every
+    /// Cube, whichever unlock method it uses.
     Choice,
     /// Choosing the Recovery Kit's recovery password. The fields themselves
     /// live on [`Home`] (`creation_kit_password` and friends) rather than in
@@ -543,6 +545,13 @@ pub struct Home {
     creation_kit_acknowledged: bool,
     /// Failure from the Kit upload, shown on the password screen.
     creation_kit_error: Option<String>,
+    /// The backup hub's progress: the seed phrase was written down and its
+    /// challenge words typed back. Either this or a Kit lets Continue finish
+    /// creation; both are recorded on the Cube when both are done.
+    creation_seed_confirmed: bool,
+    /// The Kit made during this creation, held until Continue writes the Cube
+    /// with it. `Some` only after Connect confirmed it is holding the seed.
+    creation_kit_evidence: Option<creation_gate::CreationRecoveryKit>,
     /// Active passkey ceremony (webview open, awaiting IPC result).
     passkey_ceremony: Option<PasskeyCeremony>,
     /// Active native macOS passkey ceremony (uses AuthenticationServices).
@@ -701,6 +710,8 @@ impl Home {
                 creation_kit_confirm: zeroize::Zeroizing::new(String::new()),
                 creation_kit_acknowledged: false,
                 creation_kit_error: None,
+                creation_seed_confirmed: false,
+                creation_kit_evidence: None,
                 passkey_ceremony: None,
                 #[cfg(target_os = "macos")]
                 native_passkey_ceremony: None,
@@ -2149,6 +2160,7 @@ impl Home {
                         CreationBackupStep::Choice | CreationBackupStep::Bypass { .. }
                     )
                 ) || !self.can_create_recovery_kit()
+                    || self.creation_kit_evidence.is_some()
                 {
                     return Task::none();
                 }
@@ -2160,14 +2172,14 @@ impl Home {
             Message::View(ViewMessage::CreationKitUploaded(result)) => {
                 match result {
                     Ok(evidence) => {
-                        // The Kit is on Connect. Only now is the Cube written —
-                        // and it is written with the evidence, so it opens.
+                        // The Kit is on Connect. Back to the hub, which shows
+                        // it as backed up; Continue there writes the Cube with
+                        // this evidence (and the phrase's, if confirmed too).
                         self.scrub_creation_kit();
-                        if self.creating_passkey_cube() {
-                            self.finalize_passkey_cube_creation(false, None, Some(evidence))
-                        } else {
-                            self.finalize_cube_creation(false, None, Some(evidence))
-                        }
+                        self.creating_cube = false;
+                        self.creation_kit_evidence = Some(evidence);
+                        self.state = State::CreationBackup(CreationBackupStep::Choice);
+                        Task::none()
                     }
                     Err(e) => {
                         // Nothing was written. Back to the password screen with
@@ -2181,6 +2193,7 @@ impl Home {
                     }
                 }
             }
+            Message::View(ViewMessage::CreationBackupContinue) => self.finish_creation_backup(),
             Message::View(ViewMessage::CancelCreationBackup) => {
                 self.abandon_creation_backup();
                 Task::none()
@@ -4211,7 +4224,9 @@ impl Home {
             // Stepping back off the first phrase screen returns to the choice,
             // where the other two exits are.
             (CreationBackupStep::Choice, BackupWalletMessage::NextStep) => {
-                self.state = State::CreationBackup(CreationBackupStep::Intro(false));
+                if !self.creation_seed_confirmed {
+                    self.state = State::CreationBackup(CreationBackupStep::Intro(false));
+                }
                 Task::none()
             }
             (CreationBackupStep::Intro(_), BackupWalletMessage::PreviousStep) => {
@@ -4260,10 +4275,12 @@ impl Home {
                 });
 
                 if all_correct {
-                    // Same evidence, either shape of Cube; only the write
-                    // differs (a passkey Cube has no seed file or device
-                    // secret to mint).
-                    self.finalize_backed_up_cube()
+                    // Back to the hub, which now shows the phrase as
+                    // confirmed. The Cube is written by Continue there, so a
+                    // Recovery Kit can still be added first.
+                    self.creation_seed_confirmed = true;
+                    self.state = State::CreationBackup(CreationBackupStep::Choice);
+                    Task::none()
                 } else {
                     self.state = State::CreationBackup(CreationBackupStep::Verification {
                         word_indices: *word_indices,
@@ -4327,21 +4344,35 @@ impl Home {
             _ => Vec::new(),
         };
         self.creation_backup_words = Some(zeroize::Zeroizing::new(words));
+        self.creation_seed_confirmed = false;
+        self.creation_kit_evidence = None;
         self.state = State::CreationBackup(CreationBackupStep::Choice);
     }
 
-    /// Finish creation with the **written-phrase** exit, whichever unlock
-    /// method the Cube uses.
+    /// Continue from the backup hub: write the Cube with every backup the user
+    /// finished there, the confirmed phrase, the Kit, or both. Does nothing
+    /// until at least one is done; "I'll do this later" is the other way out.
     ///
     /// The two finalizers differ only in what they write — a PIN Cube gets a
     /// device secret and a sealed seed file, a passkey Cube gets neither — so
-    /// the wizard that produced the evidence does not need to know which it is
-    /// talking to.
-    fn finalize_backed_up_cube(&mut self) -> Task<Message> {
+    /// the hub does not need to know which it is talking to.
+    fn finish_creation_backup(&mut self) -> Task<Message> {
+        if !matches!(
+            self.state,
+            State::CreationBackup(CreationBackupStep::Choice)
+        ) || self.creating_cube
+        {
+            return Task::none();
+        }
+        let backed_up = self.creation_seed_confirmed;
+        let kit = self.creation_kit_evidence.clone();
+        if !backed_up && kit.is_none() {
+            return Task::none();
+        }
         if self.creating_passkey_cube() {
-            self.finalize_passkey_cube_creation(true, None, None)
+            self.finalize_passkey_cube_creation(backed_up, None, kit)
         } else {
-            self.finalize_cube_creation(true, None, None)
+            self.finalize_cube_creation(backed_up, None, kit)
         }
     }
 
@@ -4644,6 +4675,14 @@ impl Home {
         self.passkey_registration_succeeded(credential_id, prf_output)
     }
 
+    /// What the backup hub has collected for the Cube being created.
+    fn creation_backup_hub(&self) -> CreationBackupHub {
+        CreationBackupHub {
+            seed_confirmed: self.creation_seed_confirmed,
+            kit_saved: self.creation_kit_evidence.is_some(),
+        }
+    }
+
     /// Whether the creation-backup step on screen belongs to a passkey Cube.
     fn creating_passkey_cube(&self) -> bool {
         self.pending_passkey_cube.is_some()
@@ -4767,6 +4806,8 @@ impl Home {
         let cubes = std::mem::take(&mut self.creation_backup_cubes);
         self.scrub_creation_seed();
         self.scrub_creation_kit();
+        self.creation_seed_confirmed = false;
+        self.creation_kit_evidence = None;
         // A registered-but-unsaved passkey credential goes with it. The
         // credential itself stays in the platform authenticator — harmless,
         // since nothing references it — but this process must not still be
@@ -4998,7 +5039,6 @@ impl Home {
                 spark_available: crate::app::features::spark(self.network).is_available(),
                 creating_cube: self.creating_cube,
                 passkey_mode: self.passkey_mode,
-                signed_in: self.connect_account.authenticated_client().is_some(),
                 importing_bitcoin: self.pending_bitcoin_import.is_some(),
                 // Import or restore is reachable wherever Home lets it open.
                 can_import_bitcoin: !self.network.is_blake2b(),
@@ -5292,6 +5332,7 @@ impl Home {
                 self.creation_kit_acknowledged,
                 self.creation_kit_error.as_deref(),
                 self.can_create_recovery_kit(),
+                self.creation_backup_hub(),
             ))
             .max_width(760)
             .into()
@@ -5306,37 +5347,48 @@ impl Home {
                 .height(Length::Fill)
                 .into();
 
-        // The Overview has no steps, and the backup screens carry their own
-        // actions.
+        // The Overview has no steps. The backup hub has a footer; the
+        // method screens it opens carry their own actions.
         let rail = (!hub || phone).then(|| restore_frame::step_rail(steps, active_step));
-        let footer: Option<Element<ViewMessage>> = (!hub && !backing_up).then(|| {
-            Row::new()
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    button::primary_action(
-                        "tenshu.create:cube-submit",
-                        None,
-                        if self.creating_cube {
-                            "Creating…"
-                        } else {
-                            "Create Cube"
-                        },
-                        create_journey_focus,
-                    )
-                    .width(Length::Shrink)
-                    .on_press_maybe(
-                        create_cube_can_submit(
-                            &self.create_cube_name,
-                            &self.create_cube_pin,
-                            &self.create_cube_pin_confirm,
-                            self.passkey_mode,
-                            self.creating_cube,
+        let on_backup_hub = matches!(
+            self.state,
+            State::CreationBackup(CreationBackupStep::Choice)
+        );
+        let footer: Option<Element<ViewMessage>> = if on_backup_hub {
+            Some(creation_choice_footer(
+                self.creating_cube,
+                self.creation_backup_hub(),
+            ))
+        } else {
+            (!hub && !backing_up).then(|| {
+                Row::new()
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        button::primary_action(
+                            "tenshu.create:cube-submit",
+                            None,
+                            if self.creating_cube {
+                                "Creating…"
+                            } else {
+                                "Create Cube"
+                            },
+                            create_journey_focus,
                         )
-                        .then_some(ViewMessage::CreateCube),
-                    ),
-                )
-                .into()
-        });
+                        .width(Length::Shrink)
+                        .on_press_maybe(
+                            create_cube_can_submit(
+                                &self.create_cube_name,
+                                &self.create_cube_pin,
+                                &self.create_cube_pin_confirm,
+                                self.passkey_mode,
+                                self.creating_cube,
+                            )
+                            .then_some(ViewMessage::CreateCube),
+                        ),
+                    )
+                    .into()
+            })
+        };
         let region = restore_frame::region(rail, body, footer);
         // Import or restore: its path list beside the path.
         let content = if restoring {
@@ -6074,17 +6126,34 @@ impl Home {
                                     self.recovery_active_index,
                                     self.creating_cube,
                                 ),
-                                State::CreationBackup(step) => creation_backup_view(
-                                    step,
-                                    self.creation_backup_words.as_ref().map(|w| w.as_slice()),
-                                    self.creating_cube,
-                                    self.creating_passkey_cube(),
-                                    &self.creation_kit_password,
-                                    &self.creation_kit_confirm,
-                                    self.creation_kit_acknowledged,
-                                    self.creation_kit_error.as_deref(),
-                                    self.can_create_recovery_kit(),
-                                ),
+                                State::CreationBackup(step) => {
+                                    let view = creation_backup_view(
+                                        step,
+                                        self.creation_backup_words.as_ref().map(|w| w.as_slice()),
+                                        self.creating_cube,
+                                        self.creating_passkey_cube(),
+                                        &self.creation_kit_password,
+                                        &self.creation_kit_confirm,
+                                        self.creation_kit_acknowledged,
+                                        self.creation_kit_error.as_deref(),
+                                        self.can_create_recovery_kit(),
+                                        self.creation_backup_hub(),
+                                    );
+                                    // No sheet footer here, so the hub's
+                                    // actions sit under it.
+                                    if matches!(step, CreationBackupStep::Choice) {
+                                        Column::new()
+                                            .spacing(24)
+                                            .push(view)
+                                            .push(creation_choice_footer(
+                                                self.creating_cube,
+                                                self.creation_backup_hub(),
+                                            ))
+                                            .into()
+                                    } else {
+                                        view
+                                    }
+                                }
                                 State::Cubes { create_cube, .. } => {
                                     if *create_cube {
                                         self.creation_form(true)
@@ -6592,7 +6661,6 @@ struct CreateCubeFormOptions {
     spark_available: bool,
     creating_cube: bool,
     passkey_mode: bool,
-    signed_in: bool,
     importing_bitcoin: bool,
     can_import_bitcoin: bool,
     submit_in_form: bool,
@@ -6623,7 +6691,6 @@ fn create_cube_form<'a>(
         spark_available,
         creating_cube,
         passkey_mode,
-        signed_in,
         importing_bitcoin,
         can_import_bitcoin,
         submit_in_form,
@@ -6649,57 +6716,6 @@ fn create_cube_form<'a>(
             })
             .style(theme::text::secondary),
         );
-
-    // When signed out, the cube is created and stored locally but is NOT
-    // registered with the Connect server (see the `authenticated_client()`
-    // gate in the CreateCube handler). It therefore won't appear on paired
-    // mobile signers (the Keychain app) until the user signs in, which
-    // triggers the catch-up sync. Surface that up front so the absence on
-    // mobile isn't a surprise.
-    if !signed_in {
-        column = column.push(
-            Container::new(
-                Column::new()
-                    .spacing(10)
-                    .push(
-                        Row::new()
-                            .spacing(10)
-                            .align_y(Alignment::Center)
-                            .push(icon::cloud_slash_icon().style(theme::text::warning))
-                            .push(
-                                p2_regular(
-                                    "You're signed out, so this Cube is saved on this computer \
-                                     only. Sign in to Connect to sync it to your other devices \
-                                     and the Keychain app.",
-                                )
-                                .style(theme::text::secondary),
-                            ),
-                    )
-                    .push(
-                        Row::new()
-                            .align_y(Alignment::Center)
-                            .push(Space::new().width(Length::Fill))
-                            .push(
-                                // Opens the Connect sign-in sheet over this
-                                // one; its Close returns focus here.
-                                button::secondary_action(
-                                    LEGACY_CONNECT_SIGN_IN_ID,
-                                    None,
-                                    "Sign in",
-                                    create_journey_focus,
-                                )
-                                .on_press(ViewMessage::GoToSection(HomeSection::Connect(
-                                    app::menu::ConnectSubMenu::Overview,
-                                )))
-                                .width(Length::Shrink),
-                            ),
-                    ),
-            )
-            .padding(12)
-            .width(Length::Fill)
-            .style(theme::card::simple),
-        );
-    }
 
     // Unlock-method toggle — hidden entirely when the passkey feature is off,
     // and on every platform but macOS regardless. The Windows Hello and
@@ -6754,22 +6770,6 @@ fn create_cube_form<'a>(
              you'll use a FIDO2 security key to unlock it."
         };
         column = column.push(p1_regular(description).style(theme::text::secondary));
-        // The recovery story, stated at the moment the choice is made.
-        //
-        // This is the positive claim that replaces the device-bound one. A
-        // passkey Cube skips the creation-time written-phrase step entirely, so
-        // without this sentence a user would leave creation with no idea what
-        // their backup is — and the honest answer is not "your passkey", which
-        // reaches a second Mac only if iCloud Keychain happens to be on
-        // (**I11**).
-        column = column.push(
-            p1_regular(
-                "Your backup is your Recovery Kit. Create one in Settings \u{2014} it \
-                 carries this Cube's master seed, encrypted with a recovery password \
-                 only you know, so you can restore the Cube even without your passkey.",
-            )
-            .style(theme::text::secondary),
-        );
     } else {
         // Enter and Confirm sit side by side, using the Launcher unlock
         // face's compact row (276px each), and wrap onto two lines where
@@ -6952,53 +6952,18 @@ fn creation_backup_view<'a>(
     kit_acknowledged: bool,
     kit_error: Option<&'a str>,
     kit_available: bool,
+    hub: CreationBackupHub,
 ) -> Element<'a, ViewMessage> {
     use crate::app::view::settings::backup;
 
-    // "I'll do this later", offered on every screen of the step. The gate is
-    // not armed yet (unit 3b), so this is currently the difference between a
-    // Cube that records a bypass and one that does not — but it is written as
-    // the real escape hatch it will be.
-    let bypass_link = || {
-        button::transparent(None, "I'll do this later")
-            .on_press_maybe((!saving).then_some(ViewMessage::CreationBackupBypassRequested))
-    };
-
-    let with_bypass = |inner: Element<'a, ViewMessage>| -> Element<'a, ViewMessage> {
-        Column::new()
-            .width(Length::Fill)
-            .align_x(Alignment::Center)
-            .spacing(20)
-            .push(inner)
-            .push(bypass_link())
-            .into()
-    };
-
+    // The method screens return to the hub (their Back or Cancel), where
+    // "I'll do this later" and Cancel live; they don't repeat them.
     match step {
-        CreationBackupStep::Intro(checked) => Column::new()
-            .width(Length::Fill)
-            .align_x(Alignment::Center)
-            .spacing(20)
-            .push(backup::intro_view(
-                *checked,
-                Some(
-                    Container::new(
-                        p1_regular(creation_gate::NOT_A_BACKUP_COPY)
-                            .style(theme::text::secondary)
-                            .align_x(iced::alignment::Horizontal::Center),
-                    )
-                    .max_width(560)
-                    .into(),
-                ),
-                ViewMessage::CreationBackup,
-            ))
-            .push(bypass_link())
-            .into(),
+        CreationBackupStep::Intro(checked) => {
+            backup::intro_view(*checked, None, ViewMessage::CreationBackup)
+        }
         CreationBackupStep::Phrase => match words {
-            Some(words) => with_bypass(backup::recovery_phrase_view(
-                words,
-                ViewMessage::CreationBackup,
-            )),
+            Some(words) => backup::recovery_phrase_view(words, ViewMessage::CreationBackup),
             // Only reachable if the seed was scrubbed underneath the view;
             // `update_creation_backup` turns the same condition into an error
             // and abandons. Render nothing rather than an empty word grid.
@@ -7008,17 +6973,17 @@ fn creation_backup_view<'a>(
             word_indices,
             word_inputs,
             error,
-        } => with_bypass(backup::verification_view(
+        } => backup::verification_view(
             word_indices,
             word_inputs,
             error.as_deref(),
             saving,
             ViewMessage::CreationBackup,
-        )),
+        ),
         CreationBackupStep::Bypass { acknowledged } => {
             creation_backup_bypass_view(*acknowledged, is_passkey)
         }
-        CreationBackupStep::Choice => creation_choice_view(saving, is_passkey, kit_available),
+        CreationBackupStep::Choice => creation_choice_view(saving, is_passkey, kit_available, hub),
         CreationBackupStep::KitPassword => {
             // The Settings Kit flow's own screen, message-generic so both
             // places apply the same length, strength and acknowledgement gates.
@@ -7054,94 +7019,161 @@ fn creation_backup_view<'a>(
     }
 }
 
-/// How do you want to back this Cube up? The entry point for every creation,
-/// PIN and passkey alike.
+/// What the backup hub has collected so far for the Cube being created.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CreationBackupHub {
+    seed_confirmed: bool,
+    kit_saved: bool,
+}
+
+impl CreationBackupHub {
+    fn any(self) -> bool {
+        self.seed_confirmed || self.kit_saved
+    }
+}
+
+const CREATE_BACKUP_SEED_ID: &str = "tenshu.create:backup-seed";
+const CREATE_BACKUP_KIT_ID: &str = "tenshu.create:backup-kit";
+const CREATE_BACKUP_CANCEL_ID: &str = "tenshu.create:backup-cancel";
+const CREATE_BACKUP_LATER_ID: &str = "tenshu.create:backup-later";
+const CREATE_BACKUP_CONTINUE_ID: &str = "tenshu.create:backup-continue";
+
+/// The backup hub: Seed phrase and Recovery Kit as two rows, named and worded
+/// as in Settings › Backup methods. Either or both; each one's screens return
+/// here, its row then shows the result, and the footer's Continue writes the
+/// Cube (see [`Home::finish_creation_backup`]).
 ///
-/// Three exits, in the order of how much protection they give:
-///
-/// 1. **Write the phrase down** — verified on the spot, works with no account
-///    and no network, and restores through the app's own 12-word grid. Offered
-///    for both unlock methods, which is only possible because both derive a
-///    12-word mnemonic.
-/// 2. **Recovery Kit** — the master seed encrypted under a recovery password
-///    and held by Connect. Needs an account, so it is hidden when signed out
-///    rather than shown as a button that cannot work.
-/// 3. **Later** — the recorded acknowledgement. Last, and named for what it
-///    actually is.
+/// The Recovery Kit needs a Connect account, so a signed-out row offers
+/// Sign in in place of its action. This is the one place creation asks for it:
+/// the moment it decides where a backup can go.
 fn creation_choice_view(
     saving: bool,
     is_passkey: bool,
     kit_available: bool,
+    hub: CreationBackupHub,
 ) -> Element<'static, ViewMessage> {
-    let mut options = Column::new().align_x(Alignment::Center).spacing(12).push(
-        button::primary(None, "Write down my recovery phrase")
+    use crate::app::view::settings::page;
+
+    let seed_row = page::row("Seed phrase").description("12 words, written down offline.");
+    let seed_row = if hub.seed_confirmed {
+        seed_row.accessory(page::status(page::Status::Ok, "Confirmed"))
+    } else {
+        seed_row.control(
+            button::secondary_action(
+                CREATE_BACKUP_SEED_ID,
+                None,
+                "Write it down",
+                create_journey_focus,
+            )
+            .width(Length::Shrink)
             .on_press_maybe(
                 (!saving).then_some(ViewMessage::CreationBackup(BackupWalletMessage::NextStep)),
-            )
-            .width(Length::Fixed(340.0)),
-    );
-
-    if kit_available {
-        options = options.push(
-            button::secondary(None, "Save a Recovery Kit to Connect")
-                .on_press_maybe((!saving).then_some(ViewMessage::CreationKitRequested))
-                .width(Length::Fixed(340.0)),
-        );
-    }
-
-    let mut content = Column::new()
-        .width(Length::Fill)
-        .align_x(Alignment::Center)
-        .spacing(20)
-        .push(text("Back up this Cube").size(24).bold())
-        .push(
-            Container::new(
-                p1_regular(
-                    "Your recovery phrase is twelve words that rebuild this Cube on any \
-                     computer. Write them down and keep them somewhere safe — or save a \
-                     Recovery Kit, which stores the same seed with COINCUBE Connect, \
-                     encrypted with a recovery password only you know.",
-                )
-                .style(theme::text::secondary)
-                .align_x(iced::alignment::Horizontal::Center),
-            )
-            .max_width(560),
+            ),
         )
-        .push(
-            Container::new(
-                p1_regular(creation_gate::not_a_backup_copy(is_passkey))
-                    .style(theme::text::secondary)
-                    .align_x(iced::alignment::Horizontal::Center),
-            )
-            .max_width(560),
-        );
+    };
 
-    if !kit_available {
-        content = content.push(
-            Container::new(
-                p2_regular(
-                    "Sign in to COINCUBE Connect to save a Recovery Kit instead. \
-                     Your written phrase works either way.",
+    let kit_row = page::row("Recovery Kit");
+    let kit_row = if hub.kit_saved {
+        kit_row
+            .description("Encrypted copy kept with your Connect account.")
+            .accessory(page::status(page::Status::Ok, "Backed up"))
+    } else if kit_available {
+        kit_row
+            .description("Master seed, encrypted with a recovery password only you know.")
+            .control(
+                button::secondary_action(
+                    CREATE_BACKUP_KIT_ID,
+                    None,
+                    "Create Recovery Kit",
+                    create_journey_focus,
                 )
-                .style(theme::text::secondary)
-                .align_x(iced::alignment::Horizontal::Center),
+                .width(Length::Shrink)
+                .on_press_maybe((!saving).then_some(ViewMessage::CreationKitRequested)),
             )
-            .max_width(560),
+    } else {
+        kit_row
+            .description(
+                "Kept with your Connect account. Signing in also syncs this Cube to your \
+                 other devices and the Keychain app.",
+            )
+            .accessory(page::status(page::Status::Unknown, "Sign in required"))
+            .control(
+                // Opens the Connect sign-in sheet over this one; its Close
+                // returns focus here and the row offers the Kit.
+                button::secondary_action(
+                    LEGACY_CONNECT_SIGN_IN_ID,
+                    None,
+                    "Sign in",
+                    create_journey_focus,
+                )
+                .width(Length::Shrink)
+                .on_press_maybe((!saving).then_some(ViewMessage::GoToSection(
+                    HomeSection::Connect(app::menu::ConnectSubMenu::Overview),
+                ))),
+            )
+    };
+
+    Column::new()
+        .width(Length::Fill)
+        .max_width(640)
+        .spacing(20)
+        .push(h4_bold("Back up this Cube"))
+        .push(
+            p1_regular(if is_passkey {
+                "Set up one or both. Either one restores this Cube on another computer, \
+                 even without your passkey."
+            } else {
+                "Set up one or both. Either one restores this Cube on another computer, \
+                 even without your PIN."
+            })
+            .style(theme::text::secondary),
+        )
+        .push(page::rows([seed_row.into(), kit_row.into()]))
+        .push(
+            p2_regular(creation_gate::not_a_backup_copy(is_passkey)).style(theme::text::secondary),
+        )
+        .into()
+}
+
+/// The backup hub's footer: Cancel on the left; "I'll do this later" until a
+/// backup exists, then Continue, on the right.
+fn creation_choice_footer(saving: bool, hub: CreationBackupHub) -> Element<'static, ViewMessage> {
+    let mut row = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .push(
+            button::secondary_action(
+                CREATE_BACKUP_CANCEL_ID,
+                None,
+                "Cancel",
+                create_journey_focus,
+            )
+            .width(Length::Shrink)
+            .on_press_maybe((!saving).then_some(ViewMessage::CancelCreationBackup)),
+        )
+        .push(Space::new().width(Length::Fill));
+    if !hub.any() {
+        row = row.push(
+            button::secondary_action(
+                CREATE_BACKUP_LATER_ID,
+                None,
+                "I'll do this later",
+                create_journey_focus,
+            )
+            .width(Length::Shrink)
+            .on_press_maybe((!saving).then_some(ViewMessage::CreationBackupBypassRequested)),
         );
     }
-
-    Container::new(
-        content
-            .push(Space::new().height(Length::Fixed(10.0)))
-            .push(options)
-            .push(
-                button::transparent(None, "I'll do this later").on_press_maybe(
-                    (!saving).then_some(ViewMessage::CreationBackupBypassRequested),
-                ),
-            )
-            .push(button::transparent(None, "Cancel").on_press(ViewMessage::CancelCreationBackup)),
+    row.push(
+        button::primary_action(
+            CREATE_BACKUP_CONTINUE_ID,
+            None,
+            if saving { "Creating…" } else { "Continue" },
+            create_journey_focus,
+        )
+        .width(Length::Shrink)
+        .on_press_maybe((hub.any() && !saving).then_some(ViewMessage::CreationBackupContinue)),
     )
-    .width(Length::Fill)
     .into()
 }
 
@@ -7577,6 +7609,9 @@ pub enum ViewMessage {
     CreationBackupBypassConfirmed,
     /// Leave the backup step without creating anything.
     CancelCreationBackup,
+    /// Continue from the backup hub once the seed phrase, a Recovery Kit or
+    /// both are done: write the Cube with that evidence.
+    CreationBackupContinue,
 
     // ── Passkey creation: the Recovery Kit branch ────────────────────────
     /// "Create Recovery Kit" from [`CreationBackupStep::Choice`] — opens the
@@ -11397,7 +11432,6 @@ mod tests {
                 spark_available: true,
                 creating_cube: false,
                 passkey_mode: false,
-                signed_in: true,
                 importing_bitcoin: false,
                 can_import_bitcoin: true,
                 submit_in_form: true,
@@ -11412,7 +11446,6 @@ mod tests {
                 spark_available: false,
                 creating_cube: true,
                 passkey_mode: true,
-                signed_in: false,
                 importing_bitcoin: true,
                 can_import_bitcoin: true,
                 submit_in_form: true,
@@ -12216,8 +12249,8 @@ mod tests {
             .to_vec()
     }
 
-    /// Walk intro → phrase → verification and answer the challenge correctly.
-    /// Returns the task `VerifyPhrase` produced.
+    /// Walk intro → phrase → verification, answer the challenge correctly,
+    /// then Continue from the backup hub. Returns the task Continue produced.
     fn walk_backup_to_verified(home: &mut Home) -> Task<Message> {
         // Every creation now opens on the choice screen; "write down my
         // recovery phrase" is what leads into the wizard.
@@ -12250,7 +12283,14 @@ mod tests {
                 input: words[index - 1].clone(),
             }));
         }
-        home.update(backup(BackupWalletMessage::VerifyPhrase))
+        let verified = drain(home.update(backup(BackupWalletMessage::VerifyPhrase)));
+        assert!(
+            verified.is_empty(),
+            "a confirmed phrase returns to the backup hub; it must not write the Cube itself"
+        );
+        assert_eq!(step(home), CreationBackupStep::Choice);
+        assert!(home.creation_seed_confirmed);
+        home.update(Message::View(ViewMessage::CreationBackupContinue))
     }
 
     /// Read back what actually landed in `settings.json`.
@@ -12946,17 +12986,27 @@ mod tests {
                 ] {
                     for kit_available in [false, true] {
                         for saving in [false, true] {
-                            let _ = creation_backup_view(
-                                &step,
-                                Some(&words),
-                                saving,
-                                is_passkey,
-                                pw,
-                                confirm,
-                                ack,
-                                err,
-                                kit_available,
-                            );
+                            for (seed_confirmed, kit_saved) in
+                                [(false, false), (true, false), (false, true), (true, true)]
+                            {
+                                let hub = CreationBackupHub {
+                                    seed_confirmed,
+                                    kit_saved,
+                                };
+                                let _ = creation_backup_view(
+                                    &step,
+                                    Some(&words),
+                                    saving,
+                                    is_passkey,
+                                    pw,
+                                    confirm,
+                                    ack,
+                                    err,
+                                    kit_available,
+                                    hub,
+                                );
+                                let _ = creation_choice_footer(saving, hub);
+                            }
                         }
                         // The seed being gone mid-render must not panic.
                         let _ = creation_backup_view(
@@ -12969,6 +13019,7 @@ mod tests {
                             ack,
                             err,
                             kit_available,
+                            CreationBackupHub::default(),
                         );
                     }
                 }
@@ -13331,11 +13382,17 @@ mod tests {
         );
         type_kit_password(&mut home, "correct horse battery staple");
 
-        let out = drain(
+        let uploaded = drain(
             home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
                 kit_evidence(77),
             )))),
         );
+        assert!(
+            uploaded.is_empty(),
+            "a saved Kit returns to the backup hub; Continue writes the Cube"
+        );
+        assert_eq!(step(&home), CreationBackupStep::Choice);
+        let out = drain(home.update(Message::View(ViewMessage::CreationBackupContinue)));
         let [Message::CubeCreated(result)] = out.as_slice() else {
             panic!("expected one CubeCreated, got {:?}", out);
         };
@@ -13421,6 +13478,109 @@ mod tests {
         let _ = home.update(Message::View(ViewMessage::CreationKit(
             RecoveryKitMessage::AcknowledgeToggled(true),
         )));
+    }
+
+    /// The backup hub collects either or both: a confirmed phrase and a Kit
+    /// return to it, Continue does nothing until one exists, and the Cube it
+    /// writes records both.
+    #[test]
+    fn backup_hub_records_the_seed_phrase_and_recovery_kit_together() {
+        let dir = tmp_datadir("hub-both");
+        let mut home = signed_in_home_with_datadir(&dir);
+        passkey_create_form(&mut home, "Both");
+        let _ = drain(webview_registration(&mut home, "cred", 9));
+        assert_eq!(step(&home), CreationBackupStep::Choice);
+        assert!(
+            drain(home.update(Message::View(ViewMessage::CreationBackupContinue))).is_empty(),
+            "Continue must not write a Cube with no backup"
+        );
+        assert!(cubes_on_disk(&dir).is_empty());
+
+        // Seed phrase, back to the hub.
+        let _ = home.update(backup(BackupWalletMessage::NextStep));
+        let _ = home.update(backup(BackupWalletMessage::ToggleBackupIntroCheck));
+        let _ = home.update(backup(BackupWalletMessage::NextStep));
+        let words = shown_words(&home);
+        let _ = home.update(backup(BackupWalletMessage::NextStep));
+        let State::CreationBackup(CreationBackupStep::Verification { word_indices, .. }) =
+            home.state.clone()
+        else {
+            panic!("expected the verification screen, got {:?}", home.state);
+        };
+        for &index in &word_indices {
+            let _ = home.update(backup(BackupWalletMessage::WordInput {
+                index: index as u8,
+                input: words[index - 1].clone(),
+            }));
+        }
+        assert!(drain(home.update(backup(BackupWalletMessage::VerifyPhrase))).is_empty());
+        assert_eq!(step(&home), CreationBackupStep::Choice);
+        assert!(
+            cubes_on_disk(&dir).is_empty(),
+            "nothing is written before Continue"
+        );
+        let _ = home.update(backup(BackupWalletMessage::NextStep));
+        assert_eq!(
+            step(&home),
+            CreationBackupStep::Choice,
+            "a confirmed phrase is not walked again"
+        );
+
+        // Recovery Kit, back to the hub.
+        let _ = drain(home.update(Message::View(ViewMessage::CreationKitRequested)));
+        assert_eq!(step(&home), CreationBackupStep::KitPassword);
+        type_kit_password(&mut home, "correct horse battery staple");
+        assert!(drain(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+                kit_evidence(5),
+            ))))
+        )
+        .is_empty());
+        assert_eq!(step(&home), CreationBackupStep::Choice);
+        let _ = drain(home.update(Message::View(ViewMessage::CreationKitRequested)));
+        assert_eq!(
+            step(&home),
+            CreationBackupStep::Choice,
+            "a second Kit is not offered for the same creation"
+        );
+
+        let out = drain(home.update(Message::View(ViewMessage::CreationBackupContinue)));
+        let [Message::CubeCreated(Ok(cube))] = out.as_slice() else {
+            panic!("expected exactly one successful CubeCreated, got {:?}", out);
+        };
+        assert!(cube.backed_up, "the confirmed phrase must be recorded");
+        assert_eq!(
+            cube.creation_recovery_kit.as_ref().map(|k| k.cube_id),
+            Some(5),
+            "and so must the Kit"
+        );
+        assert_eq!(
+            creation_gate::evaluate_for_cube(cube, None),
+            creation_gate::CreationGate::Satisfied
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sign in from the hub's Recovery Kit row opens Connect over the step;
+    /// coming back finds the same unwritten Cube and its seed.
+    #[test]
+    fn signing_in_from_the_backup_hub_keeps_the_unwritten_cube() {
+        let dir = tmp_datadir("hub-sign-in");
+        let mut home = home_with_datadir(&dir);
+        passkey_create_form(&mut home, "Later");
+        let _ = drain(webview_registration(&mut home, "cred", 4));
+        assert_eq!(step(&home), CreationBackupStep::Choice);
+        assert!(!home.can_create_recovery_kit());
+
+        let _ = home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::Connect(app::menu::ConnectSubMenu::Overview),
+        )));
+        let _ = home.update(Message::View(ViewMessage::GoToSection(HomeSection::Cubes)));
+        assert_eq!(step(&home), CreationBackupStep::Choice);
+        assert!(home.creation_backup_words.is_some());
+        assert!(home.pending_passkey_cube.is_some());
+        assert!(cubes_on_disk(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The choice screen is the entry point either way; what changes with the
@@ -13534,11 +13694,17 @@ mod tests {
 
         // The upload's result, fed in directly — the network half is the
         // Connect client's, not this state machine's.
-        let out = drain(
+        let uploaded = drain(
             home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
                 kit_evidence(42),
             )))),
         );
+        assert!(
+            uploaded.is_empty(),
+            "a saved Kit returns to the backup hub; Continue writes the Cube"
+        );
+        assert_eq!(step(&home), CreationBackupStep::Choice);
+        let out = drain(home.update(Message::View(ViewMessage::CreationBackupContinue)));
         let [Message::CubeCreated(Ok(cube))] = out.as_slice() else {
             panic!("expected exactly one successful CubeCreated, got {:?}", out);
         };
@@ -13677,11 +13843,17 @@ mod tests {
         type_kit_password(&mut home, "correct horse battery staple");
         assert!(!home.creation_kit_password.is_empty());
 
-        let out = drain(
+        let uploaded = drain(
             home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
                 kit_evidence(1),
             )))),
         );
+        assert!(
+            uploaded.is_empty(),
+            "a saved Kit returns to the backup hub; Continue writes the Cube"
+        );
+        assert_eq!(step(&home), CreationBackupStep::Choice);
+        let out = drain(home.update(Message::View(ViewMessage::CreationBackupContinue)));
         let [Message::CubeCreated(result)] = out.as_slice() else {
             panic!("expected one CubeCreated, got {:?}", out);
         };
