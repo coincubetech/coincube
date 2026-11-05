@@ -399,6 +399,20 @@ fn recovery_section<'a>(
         }
     }
 
+    dashboard(
+        menu,
+        cache,
+        recovery_overview(cache, recovery_kit, recovery_alerts),
+    )
+}
+
+/// The overview body is separate from the shell so synthetic captures exercise
+/// the production rows without mounting a second scrolling dashboard.
+fn recovery_overview<'a>(
+    cache: &'a cache::Cache,
+    recovery_kit: Option<&'a RecoveryKit>,
+    recovery_alerts: Option<&'a RecoveryAlerts>,
+) -> Element<'a, Message> {
     let backed_up = cache.current_cube_backed_up;
     let seed_start: Message = SettingsMessage::BackupMasterSeed(BackupWalletMessage::Start).into();
     let seed_row = page::row("Seed phrase")
@@ -459,7 +473,7 @@ fn recovery_section<'a>(
         path,
     ));
 
-    dashboard(menu, cache, col)
+    col.into()
 }
 
 pub const SEED_REVEAL_ID: &str = "tenshu.settings.backup.seed";
@@ -1739,29 +1753,18 @@ mod tests {
     #[test]
     fn backup_page_has_one_seed_action_in_each_confirmation_state() {
         use crate::app::state::preferences::BalancePrivacy;
-        use crate::app::state::settings::general::BackupSeedState;
         use crate::app::view::{nav::shell::capture_tests, shared::landing::capture};
-        let menu = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery));
-        let pin = crate::pin_input::PinInput::new();
         for (appearance, palette) in capture_tests::themes() {
             for confirmed in [false, true] {
                 let mut cache = capture_tests::cache(appearance == "light", BalancePrivacy::Shown);
                 cache.current_cube_backed_up = confirmed;
-                let inspection = capture::inspect_full_window(
+                let inspection = capture::inspect(
                     if confirmed {
                         "seed-overview-confirmed"
                     } else {
                         "seed-overview-unconfirmed"
                     },
-                    recovery_section(
-                        &menu,
-                        &cache,
-                        &BackupSeedState::None,
-                        &pin,
-                        None,
-                        None,
-                        None,
-                    ),
+                    recovery_overview(&cache, None, None),
                     (1024, 768),
                     appearance,
                     palette,
