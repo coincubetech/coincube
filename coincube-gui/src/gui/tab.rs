@@ -8892,6 +8892,93 @@ mod opening_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// The opening waits on Spark inside the App, then must still run its
+    /// finale: the Ready beat, the rush and the edge-colour wash, with the
+    /// App shown only under the wash.
+    #[test]
+    fn the_finale_washes_once_spark_settles() {
+        use crate::app::view::{HomeMessage, Message as ViewMessage};
+        use home::launcher_opening::{Opening, Stage};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let root = datadir();
+        let spark = Arc::new(crate::app::wallets::SparkBackend::new(Arc::new(
+            crate::app::breez_spark::SparkClient::disconnected_for_test(),
+        )));
+        let (app, _load) = crate::app::App::new_without_wallet(
+            Arc::new(crate::app::breez_liquid::BreezClient::disconnected(
+                Network::Bitcoin,
+            )),
+            Some(spark),
+            crate::app::Config::new(false),
+            crate::dir::CoincubeDirectory::new(root.clone()),
+            Network::Bitcoin,
+            CubeSettings::new("Everyday".into(), ChainId::Bitcoin),
+        )
+        .unwrap();
+        let mut tab = Tab::new(1, State::App(app));
+        // Opened from the floor well before: the tumble is long over.
+        let t0 = Instant::now() - Duration::from_secs(10);
+        tab.opening = Some(super::CubeOpening {
+            scene: Opening::new(Some(floor()), false, Stage::AlmostThere, t0),
+            quote: coincube_ui::component::quote_display::Quote {
+                id: "test".into(),
+                text: "A quote.".into(),
+                author: "Someone".into(),
+                source: "Somewhere".into(),
+                category: String::new(),
+                length: String::new(),
+                contexts: Vec::new(),
+            },
+            loads: Vec::new(),
+            without_spark: false,
+        });
+        tab.sync_opening(Instant::now());
+        let stage = |tab: &Tab| tab.opening.as_ref().map(|o| o.scene.stage());
+        assert_eq!(stage(&tab), Some(Stage::Spark), "the App waits on Spark");
+
+        // `Synced` lands while the App's first fetch is in flight, so that
+        // fetch's answer is stale and only the next one settles Spark.
+        let home = |m| Message::Run(crate::app::Message::View(ViewMessage::Home(m)));
+        let balance = || HomeMessage::SparkBalanceUpdated {
+            btc: coincube_core::miniscript::bitcoin::Amount::from_sat(1_000),
+            usdb_balance: None,
+        };
+        drop(tab.update(home(HomeMessage::SparkSyncedObserved)));
+        drop(tab.update(home(balance())));
+        drop(tab.update(home(balance())));
+        let ready = Instant::now();
+        assert_eq!(stage(&tab), Some(Stage::Ready), "a synced balance is Ready");
+
+        let scene = |tab: &Tab, at| {
+            tab.opening
+                .as_ref()
+                .map(|o| (o.scene.wash(at), o.scene.shows_app(at)))
+        };
+        // The Ready beat holds at full light, App hidden, no wash yet.
+        tab.sync_opening(ready + Duration::from_millis(300));
+        assert_eq!(
+            scene(&tab, ready + Duration::from_millis(300)),
+            Some((0.0, false))
+        );
+        // The rush and wash peak while the face still covers the App.
+        let peak = ready + Duration::from_millis(1400);
+        tab.sync_opening(peak);
+        let (wash, app) = scene(&tab, peak).expect("the finale keeps the opening");
+        assert!(wash > 0.9, "the wash peaks, got {}", wash);
+        assert!(!app);
+        // The App takes over under the wash, which still covers it.
+        let under = ready + Duration::from_millis(1550);
+        tab.sync_opening(under);
+        let (wash, app) = scene(&tab, under).expect("the wash is still fading");
+        assert!(app, "the App shows under the wash");
+        assert!(wash > 0.5, "the wash still covers the App, got {}", wash);
+        // Once the wash has faded, the opening is dropped.
+        tab.sync_opening(ready + Duration::from_secs(3));
+        assert!(tab.opening.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn an_unlock_without_the_launcher_still_honours_reduced_motion() {
         // Auto-lock and a freshly created Cube reach the PIN screen without
