@@ -343,6 +343,36 @@ pub fn kage_cube_sealed() -> iced::widget::image::Handle {
     KAGE_CUBE_SEALED_HANDLE.clone()
 }
 
+// Small sumi-e object studies for Recovery Kit flows. Decode once per app.
+static RECOVERY_KIT_PROTECTED: LazyLock<iced::widget::image::Handle> = LazyLock::new(|| {
+    iced::widget::image::Handle::from_bytes(
+        include_bytes!("../static/images/recovery/kit-protected.png").as_slice(),
+    )
+});
+static RECOVERY_KIT_WITHDRAWN: LazyLock<iced::widget::image::Handle> = LazyLock::new(|| {
+    iced::widget::image::Handle::from_bytes(
+        include_bytes!("../static/images/recovery/kit-withdrawn.png").as_slice(),
+    )
+});
+
+static PIN_UNLOCK_LOCK: LazyLock<iced::widget::image::Handle> = LazyLock::new(|| {
+    iced::widget::image::Handle::from_bytes(
+        include_bytes!("../static/images/recovery/pin-lock.png").as_slice(),
+    )
+});
+
+pub fn pin_unlock_lock() -> iced::widget::image::Handle {
+    PIN_UNLOCK_LOCK.clone()
+}
+
+pub fn recovery_kit_protected() -> iced::widget::image::Handle {
+    RECOVERY_KIT_PROTECTED.clone()
+}
+
+pub fn recovery_kit_withdrawn() -> iced::widget::image::Handle {
+    RECOVERY_KIT_WITHDRAWN.clone()
+}
+
 #[cfg(test)]
 mod asset_logo_tests {
     use super::*;

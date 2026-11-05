@@ -1,7 +1,6 @@
 use iced::widget::{mouse_area, Column, Container, Row, Space};
 use iced::{Alignment, Length};
 
-use coincube_ui::color;
 use coincube_ui::component::tenshu::{
     segment, segmented, select, setting_row, toggle, SegmentSize, Tone,
 };
@@ -399,34 +398,22 @@ fn recovery_section<'a>(
         }
     }
 
+    dashboard(
+        menu,
+        cache,
+        recovery_overview(cache, recovery_kit, recovery_alerts),
+    )
+}
+
+/// The overview body is separate from the shell so synthetic captures exercise
+/// the production rows without mounting a second scrolling dashboard.
+fn recovery_overview<'a>(
+    cache: &'a cache::Cache,
+    recovery_kit: Option<&'a RecoveryKit>,
+    recovery_alerts: Option<&'a RecoveryAlerts>,
+) -> Element<'a, Message> {
     let backed_up = cache.current_cube_backed_up;
     let seed_start: Message = SettingsMessage::BackupMasterSeed(BackupWalletMessage::Start).into();
-    let lead = if backed_up {
-        page::lead(
-            page::Status::Ok,
-            "Seed phrase confirmed",
-            "Your seed phrase is confirmed",
-            "The three-word check was saved for this Cube.",
-            page::button(
-                SEED_LEAD_ID,
-                "Reveal seed phrase…",
-                Some(seed_start.clone()),
-            ),
-        )
-    } else {
-        page::lead(
-            page::Status::Warn,
-            "Backup not confirmed",
-            "Confirm your seed phrase",
-            "Losing this computer could mean losing the Cube.",
-            page::primary(
-                SEED_LEAD_ID,
-                "Confirm seed phrase",
-                Some(seed_start.clone()),
-            ),
-        )
-    };
-
     let seed_row = page::row("Seed phrase")
         .accessory(if backed_up {
             page::status(page::Status::Ok, "Confirmed")
@@ -434,18 +421,18 @@ fn recovery_section<'a>(
             page::status(page::Status::Warn, "Not confirmed")
         })
         .description("12 words, written down offline.")
-        .control(page::button(
-            SEED_REVEAL_ID,
-            "Reveal seed phrase…",
-            Some(seed_start),
-        ));
+        .control(if backed_up {
+            page::button(SEED_REVEAL_ID, "Reveal seed phrase…", Some(seed_start))
+        } else {
+            page::primary(SEED_REVEAL_ID, "Confirm seed phrase", Some(seed_start))
+        });
 
     let mut methods = vec![seed_row.into()];
     if let Some(rk) = recovery_kit {
         methods.push(recovery_kit_row(cache, rk));
     }
 
-    let mut col = Column::new().width(Length::Fill).push(lead);
+    let mut col = Column::new().width(Length::Fill);
     if let Some(notice) = cache.unswept_recovery_notice() {
         col = col.push(page::note(Tone::Muted, page::muted(notice), None));
     }
@@ -485,10 +472,9 @@ fn recovery_section<'a>(
         path,
     ));
 
-    dashboard(menu, cache, col)
+    col.into()
 }
 
-pub const SEED_LEAD_ID: &str = "tenshu.settings.backup.lead";
 pub const SEED_REVEAL_ID: &str = "tenshu.settings.backup.seed";
 pub const KIT_PRIMARY_ID: &str = "tenshu.settings.backup.kit";
 pub const KIT_REMOVE_ID: &str = "tenshu.settings.backup.kit-remove";
@@ -921,27 +907,6 @@ fn escrow_copy(tier: Option<EscrowTier>, spark: bool) -> &'static str {
              seed."
         }
     }
-}
-
-/// Small rounded "pill" badge naming a Recovery-Kit backup method in use
-/// (e.g. "Password", "Keychain"). Subtle translucent-orange fill + orange
-/// border, but the label uses the **theme's primary text colour** (not orange)
-/// so it stays high-contrast in both dark and light mode — orange-on-orange was
-/// unreadable, especially on the light warm-paper background.
-pub(crate) fn backup_pill<'a>(label: &'static str) -> Element<'a, Message> {
-    iced::widget::container(text(label).size(12).bold())
-        .padding([3, 10])
-        .style(|t: &theme::Theme| iced::widget::container::Style {
-            text_color: Some(t.colors.text.primary),
-            background: Some(iced::Background::Color(color::TRANSPARENT_ORANGE)),
-            border: iced::Border {
-                radius: 10.0.into(),
-                width: 1.0,
-                color: color::ORANGE,
-            },
-            ..Default::default()
-        })
-        .into()
 }
 
 /// Which halves a single backup method holds. A method is "enabled" (in use)
@@ -1763,6 +1728,48 @@ fn drift_warning_line(d: &DescriptorDrift) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backup_page_has_one_seed_action_in_each_confirmation_state() {
+        use crate::app::state::preferences::BalancePrivacy;
+        use crate::app::view::{nav::shell::capture_tests, shared::landing::capture};
+        for (appearance, palette) in capture_tests::themes() {
+            for confirmed in [false, true] {
+                let mut cache = capture_tests::cache(appearance == "light", BalancePrivacy::Shown);
+                cache.current_cube_backed_up = confirmed;
+                let inspection = capture::inspect(
+                    if confirmed {
+                        "seed-overview-confirmed"
+                    } else {
+                        "seed-overview-unconfirmed"
+                    },
+                    recovery_overview(&cache, None, None),
+                    (1024, 768),
+                    appearance,
+                    palette,
+                );
+                let action = if confirmed {
+                    "Reveal seed phrase…"
+                } else {
+                    "Confirm seed phrase"
+                };
+                assert_eq!(
+                    inspection
+                        .text
+                        .iter()
+                        .filter(|(value, _)| value == action)
+                        .count(),
+                    1
+                );
+                assert!(inspection.contains(if confirmed {
+                    "Confirmed"
+                } else {
+                    "Not confirmed"
+                }));
+                assert!(!inspection.contains("Your seed phrase is confirmed"));
+            }
+        }
+    }
+
     use super::*;
 
     #[derive(Default)]

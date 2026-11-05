@@ -1,371 +1,175 @@
-//! Views for the master-seed backup wizard.
-//!
-//! Rendered as a full-page takeover of the General Settings view when
-//! `BackupSeedState != None` (see `general.rs::general_section`).
-//!
+//! Master-seed backup views, shared with Cube creation through a message mapper.
+//! Settings retains its page header while the focused flow replaces the rows.
 //! Flow: PinEntry → Intro → RecoveryPhrase → Verification → Completed.
-//!
-//! # Two callers, two message types
-//!
-//! `intro_view`, `recovery_phrase_view`, `verification_view` and
-//! `completed_view` are generic over the message type and take a mapper, so the
-//! Cube-creation backup step in `home.rs` can reuse them with its own
-//! `ViewMessage` instead of duplicating the markup. The mapper is a plain `fn`
-//! pointer rather than a closure: it is `Copy` and `'static`, so it threads
-//! through nested builders without lifetime noise.
-//!
-//! `pin_entry_view` is deliberately **not** generic — creation has no re-auth
-//! step. The PIN was just typed and the signer is already in hand, so there is
-//! nothing to decrypt and nothing to gate.
 
 use coincube_ui::{
-    color,
-    component::{button as ui_button, text::*},
-    icon, theme,
+    component::tenshu::{self, ActionKind, Tone},
+    theme,
     widget::{CheckBox, Container, Element, TextInput},
 };
-use iced::widget::{container, Column, Row, Space};
+use iced::widget::{Column, Row, Space};
 use iced::{Alignment, Length};
 
+use super::page;
 use crate::app::state::settings::general::BackupSeedState;
 use crate::app::view::message::{BackupWalletMessage, Message, SettingsMessage};
 use crate::pin_input::PinInput;
 
-/// Shorthand: wrap a `BackupWalletMessage` in the full `Message` path.
 fn wrap(msg: BackupWalletMessage) -> Message {
     Message::Settings(SettingsMessage::BackupMasterSeed(msg))
 }
 
-/// Header for backup wizard screens: a single "< Back" button
-/// that rolls back one step in the flow.
-fn header<'a, M: Clone + 'a>(_title: &'a str, on: fn(BackupWalletMessage) -> M) -> Element<'a, M> {
-    Row::new()
-        .spacing(10)
-        .align_y(Alignment::Center)
+/// Match Settings' type and rhythm, keeping the task readable on wide windows.
+fn flow<'a, M: 'a>(title: &'a str, detail: &'a str) -> Column<'a, M, theme::Theme, iced::Renderer> {
+    Column::new()
+        .width(Length::Fill)
+        .max_width(640)
+        .spacing(24)
+        .push(Space::new().height(Length::Fixed(8.0)))
         .push(
-            ui_button::secondary(None, "< Back")
-                .on_press(on(BackupWalletMessage::PreviousStep))
-                .padding([8, 16])
-                .width(Length::Fixed(150.0)),
+            Column::new()
+                .spacing(6)
+                .push(tenshu::heading(title))
+                .push(tenshu::body(detail).style(theme::tenshu::text::muted)),
+        )
+}
+
+fn actions<'a, M: Clone + 'a>(
+    back: &'a str,
+    next: &'a str,
+    enabled: bool,
+    next_message: BackupWalletMessage,
+    on: fn(BackupWalletMessage) -> M,
+) -> Element<'a, M> {
+    Column::new()
+        .spacing(16)
+        .push(page::rule())
+        .push(
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(page::plain_button(
+                    back,
+                    ActionKind::Secondary,
+                    Some(on(BackupWalletMessage::PreviousStep)),
+                ))
+                .push(Space::new().width(Length::Fill))
+                .push(page::plain_button(
+                    next,
+                    ActionKind::Primary,
+                    enabled.then(|| on(next_message)),
+                )),
         )
         .into()
 }
 
-/// PIN re-entry screen. Shown at the start of the backup flow to gate
-/// access to the mnemonic. Also doubles as the decryption password.
-pub fn pin_entry_view<'a>(pin: &'a PinInput, error: Option<&'a str>) -> Element<'a, Message> {
-    let mut col = Column::new()
-        .spacing(20)
-        .width(Length::Fill)
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(icon::lock_icon().size(100).color(color::ORANGE))
-                .push(Space::new().width(Length::Fill)),
-        )
-        .push(Space::new().height(Length::Fixed(16.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    Container::new(
-                        text(
-                            "Enter your Cube PIN to unlock and display \
-                             your 12-word recovery phrase.",
-                        )
-                        .size(18)
-                        .align_x(iced::alignment::Horizontal::Center),
-                    )
-                    .width(Length::Fixed(600.0))
-                    .align_x(iced::alignment::Horizontal::Center),
-                )
-                .push(Space::new().width(Length::Fill)),
-        )
-        .push(Space::new().height(Length::Fixed(24.0)));
-
-    // PIN input widget, routed through BackupMasterSeed(PinInput(..)).
-    col = col.push(
-        Row::new()
-            .width(Length::Fill)
-            .align_y(Alignment::Center)
-            .push(Space::new().width(Length::Fill))
-            .push(pin.view().map(|m| wrap(BackupWalletMessage::PinInput(m))))
-            .push(Space::new().width(Length::Fill)),
-    );
-
-    col = col.push(Space::new().height(Length::Fixed(16.0)));
-
-    if let Some(err) = error {
-        col = col.push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(text(err).size(16).color(color::RED))
-                .push(Space::new().width(Length::Fill)),
-        );
-        col = col.push(Space::new().height(Length::Fixed(8.0)));
-    }
-
-    col = col.push(
-        Row::new()
-            .spacing(20)
-            .width(Length::Fill)
-            .align_y(Alignment::Center)
-            .push(Space::new().width(Length::Fill))
-            .push(
-                ui_button::secondary(None, "Cancel")
-                    .on_press(wrap(BackupWalletMessage::PreviousStep))
-                    .padding([8, 16])
-                    .width(Length::Fixed(150.0)),
-            )
-            .push({
-                let btn = ui_button::primary(None, "Unlock")
-                    .padding([8, 16])
-                    .width(Length::Fixed(200.0));
-                if pin.is_complete() {
-                    btn.on_press(wrap(BackupWalletMessage::VerifyPin))
-                } else {
-                    btn
-                }
-            })
-            .push(Space::new().width(Length::Fill)),
-    );
-
-    col.into()
+fn error_note<'a, M: 'a>(message: &'a str) -> Element<'a, M> {
+    page::note(
+        Tone::Bad,
+        tenshu::body(message).style(|t| theme::tenshu::text::tone(t, Tone::Bad)),
+        None,
+    )
 }
 
-/// Intro screen with security warning + "I understand" checkbox.
-///
-/// `note` is caller-specific copy shown above the checkbox, so the actions
-/// stay the last thing on the screen.
+/// Reuse the Launcher's compact PIN fields, including masking and digit focus.
+pub fn pin_entry_view<'a>(pin: &'a PinInput, error: Option<&'a str>) -> Element<'a, Message> {
+    let mut content = page::illustrated_flow(
+        "Unlock your seed phrase",
+        "Enter your Cube PIN to unlock and display your 12-word recovery phrase.",
+        coincube_ui::image::pin_unlock_lock(),
+    )
+    .push(
+        Column::new()
+            .spacing(8)
+            .push(tenshu::label("Cube PIN"))
+            .push(
+                pin.face_view()
+                    .map(|m| wrap(BackupWalletMessage::PinInput(m))),
+            ),
+    );
+    if let Some(error) = error {
+        content = content.push(error_note(error));
+    }
+    content
+        .push(actions(
+            "Cancel",
+            "Unlock",
+            pin.is_complete(),
+            BackupWalletMessage::VerifyPin,
+            wrap,
+        ))
+        .into()
+}
+
+/// Keep the acknowledgement explicit and preserve caller-specific notices.
 pub fn intro_view<M: Clone + 'static>(
     checked: bool,
     note: Option<Element<'static, M>>,
     on: fn(BackupWalletMessage) -> M,
 ) -> Element<'static, M> {
-    // One heading, plain copy and a single warning line; the checkbox reads as
-    // a sentence. Matches the seed phrase row's name in Settings › Backup
-    // methods.
-    let copy = Column::new()
-        .spacing(12)
-        .max_width(600)
-        .push(h4_bold("Write down your seed phrase"))
-        .push(
-            p1_regular(
-                "You'll see 12 words. Write them on paper, numbered, in the order shown. \
-                 They restore this Cube on any computer.",
-            )
-            .style(theme::text::secondary),
+    flow(
+        "Back up your seed phrase",
+        "You'll see 12 words. Write them on paper, numbered, in the order shown. They restore this Cube on any computer.",
+    )
+    .push(
+        tenshu::label(
+            "Anyone who sees these words can take your bitcoin. Don't photograph them, type them or share them with anyone, COINCUBE included.",
         )
-        .push(
-            Row::new()
-                .spacing(10)
-                .align_y(Alignment::Start)
-                .push(icon::warning_icon().style(theme::text::warning))
-                .push(
-                    p1_regular(
-                        "Anyone who sees these words can take your bitcoin. Don't \
-                         photograph them, type them or share them with anyone, COINCUBE \
-                         included.",
-                    )
-                    .style(theme::text::secondary),
-                ),
-        );
-    Column::new()
-        .spacing(20)
-        .width(Length::Fill)
-        .push(
-            Container::new(copy)
-                .width(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Center),
-        )
-        .push(note.map(|note| {
-            Container::new(note)
-                .width(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-        }))
-        .push(
-            Container::new(
-                Container::new(
-                    CheckBox::new(checked)
-                        .label(
-                            "I understand that if I lose these words, my funds can't be recovered.",
-                        )
-                        .on_toggle(move |_| on(BackupWalletMessage::ToggleBackupIntroCheck))
-                        .style(theme::checkbox::primary)
-                        .size(18),
-                )
-                .max_width(600)
-                .width(Length::Fill),
-            )
-            .width(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Center),
-        )
-        .push(Space::new().height(Length::Fixed(16.0)))
-        .push(
-            Row::new()
-                .spacing(20)
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    ui_button::secondary(None, "Cancel")
-                        .on_press(on(BackupWalletMessage::PreviousStep))
-                        .padding([8, 16])
-                        .width(Length::Fixed(150.0)),
-                )
-                .push({
-                    let btn = ui_button::primary(None, "Show seed phrase")
-                        .padding([8, 16])
-                        .width(Length::Fixed(300.0));
-                    if checked {
-                        btn.on_press(on(BackupWalletMessage::NextStep))
-                    } else {
-                        btn
-                    }
-                })
-                .push(Space::new().width(Length::Fill)),
-        )
-        .into()
+        .style(|t| theme::tenshu::text::tone(t, Tone::Warn)),
+    )
+    .push(note)
+    .push(
+        CheckBox::new(checked)
+            .label("I understand that if I lose these words, my funds can't be recovered.")
+            .on_toggle(move |_| on(BackupWalletMessage::ToggleBackupIntroCheck))
+            .style(theme::checkbox::primary)
+            .text_size(14)
+            .size(18)
+            .spacing(10)
+            .width(Length::Fill),
+    )
+    .push(actions("Cancel", "Show seed phrase", checked, BackupWalletMessage::NextStep, on))
+    .into()
 }
 
-/// Show the 12 mnemonic words in a 3×4 grid.
+/// Twelve numbered words, with flexible columns and theme-aware separators.
 pub fn recovery_phrase_view<'a, M: Clone + 'a>(
     mnemonic: &'a [String],
     on: fn(BackupWalletMessage) -> M,
 ) -> Element<'a, M> {
-    let mut grid = Column::new().spacing(30).align_x(Alignment::Center);
-
-    // 3 rows × 4 columns = 12 words
+    let mut grid = Column::new()
+        .spacing(0)
+        .width(Length::Fill)
+        .push(page::rule());
     for row in 0..3 {
-        let mut row_widget = Row::new().spacing(40).align_y(Alignment::Center);
+        let mut words = Row::new().spacing(16).width(Length::Fill);
         for col in 0..4 {
             let index = row * 4 + col;
             let word = mnemonic.get(index).map(|s| s.as_str()).unwrap_or("???");
-
-            let word_container = Container::new(
-                text(format!("{}. {}", index + 1, word))
-                    .size(16)
-                    .align_x(iced::alignment::Horizontal::Center),
-            )
-            .padding(12)
-            .width(Length::Fixed(150.0))
-            .align_x(iced::alignment::Horizontal::Center)
-            .style(|_theme| container::Style {
-                border: iced::Border {
-                    color: iced::Color::from_rgb8(0x80, 0x80, 0x80),
-                    width: 1.0,
-                    radius: 10.0.into(),
-                },
-                ..Default::default()
-            });
-
-            row_widget = row_widget.push(word_container);
+            words = words.push(
+                Container::new(
+                    Row::new()
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .push(Container::new(tenshu::caption(format!("{}", index + 1))).width(22))
+                        .push(tenshu::label(word)),
+                )
+                .width(Length::FillPortion(1))
+                .padding([14, 0]),
+            );
         }
-        grid = grid.push(row_widget);
+        grid = grid.push(words).push(page::rule());
     }
-
-    Column::new()
-        .spacing(20)
-        .width(Length::Fill)
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    Container::new(
-                        p1_regular("Write each word next to its number, then check the spelling. Keep the paper offline: anyone with these words can take your bitcoin.")
-                            .style(theme::text::secondary)
-                            .align_x(iced::alignment::Horizontal::Center)
-                    )
-                    .width(Length::Fixed(700.0))
-                    .align_x(iced::alignment::Horizontal::Center)
-                )
-                .push(Space::new().width(Length::Fill))
-        )
-        .push(Space::new().height(Length::Fixed(24.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(grid)
-                .push(Space::new().width(Length::Fill))
-        )
-        .push(Space::new().height(Length::Fixed(24.0)))
-        .push(
-            Row::new()
-                .spacing(20)
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    ui_button::secondary(None, "Back")
-                        .on_press(on(BackupWalletMessage::PreviousStep))
-                        .padding([8, 16])
-                        .width(Length::Fixed(150.0)),
-                )
-                .push(
-                    ui_button::primary(None, "I've written it down")
-                        .on_press(on(BackupWalletMessage::NextStep))
-                        .padding([8, 16])
-                        .width(Length::Fixed(300.0)),
-                )
-                .push(Space::new().width(Length::Fill))
-        )
-        .into()
+    flow(
+        "Write down your seed phrase",
+        "Write each word next to its number, then check the spelling. Keep the paper offline: anyone with these words can take your bitcoin.",
+    )
+    .push(grid)
+    .push(actions("Back", "I've written it down", true, BackupWalletMessage::NextStep, on))
+    .into()
 }
 
-/// Helper: a labelled word input field with a bottom border.
-fn word_input_field<'a, M: Clone + 'a, F, S>(
-    word_num: usize,
-    word_value: &'a str,
-    no_border_style: S,
-    on_input: F,
-) -> Element<'a, M>
-where
-    F: Fn(String) -> M + 'a,
-    S: Fn(
-            &coincube_ui::theme::Theme,
-            iced::widget::text_input::Status,
-        ) -> iced::widget::text_input::Style
-        + 'a,
-{
-    Column::new()
-        .push(
-            Row::new()
-                .spacing(12)
-                .align_y(Alignment::Center)
-                .push(text(format!("{}.", word_num)).size(18))
-                .push(
-                    TextInput::new("", word_value)
-                        .on_input(on_input)
-                        .padding(8)
-                        .width(Length::Fixed(300.0))
-                        .style(no_border_style),
-                ),
-        )
-        .push(
-            Container::new(Space::new().height(Length::Fixed(0.0)))
-                .width(Length::Fixed(340.0))
-                .height(Length::Fixed(1.0))
-                .style(|_theme| container::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgb8(
-                        0x80, 0x80, 0x80,
-                    ))),
-                    ..Default::default()
-                }),
-        )
-        .into()
-}
-
-/// Verification screen — ask the user for 3 random words from the mnemonic.
+/// Three labelled, bordered fields retain the app's visible input focus style.
 pub fn verification_view<'a, M: Clone + 'a>(
     word_indices: &'a [usize; 3],
     word_inputs: &'a [String; 3],
@@ -373,279 +177,84 @@ pub fn verification_view<'a, M: Clone + 'a>(
     saving: bool,
     on: fn(BackupWalletMessage) -> M,
 ) -> Element<'a, M> {
-    let all_filled = word_inputs.iter().all(|w| !w.trim().is_empty());
-
-    let mut content = Column::new().spacing(20).width(Length::Fill);
-
-    content = content.push(
-        Row::new()
-            .width(Length::Fill)
-            .align_y(Alignment::Center)
-            .push(Space::new().width(Length::Fill))
-            .push(
-                text("Type the word for each number from your paper.")
-                    .size(20)
-                    .align_x(iced::alignment::Horizontal::Center)
-                    .width(Length::Fixed(700.0)),
-            )
-            .push(Space::new().width(Length::Fill)),
+    let mut content = flow(
+        "Confirm your seed phrase",
+        "Type the word for each number from your paper.",
     );
-
-    content = content.push(Space::new().height(Length::Fixed(24.0)));
-
-    if let Some(err) = error {
-        content = content.push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    Container::new(text(err).size(16).color(color::RED))
-                        .padding(12)
-                        .style(|_theme| container::Style {
-                            background: Some(iced::Background::Color(iced::Color::from_rgb8(
-                                0x4c, 0x01, 0x01,
-                            ))),
-                            border: iced::Border {
-                                radius: 8.0.into(),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
-                )
-                .push(Space::new().width(Length::Fill)),
-        );
-        content = content.push(Space::new().height(Length::Fixed(16.0)));
-    }
-
-    // Custom text input style with no border
-    let no_border_style = |theme: &coincube_ui::theme::Theme,
-                           status: iced::widget::text_input::Status| {
-        let default_style = theme::text_input::primary(theme, status);
-        iced::widget::text_input::Style {
-            border: iced::Border {
-                width: 0.0,
-                ..default_style.border
-            },
-            ..default_style
-        }
-    };
-
-    let mut input_fields = Column::new().spacing(40).align_x(Alignment::Center);
-
+    let mut fields = Column::new().spacing(16).width(Length::Fill).max_width(360);
     for (i, &word_idx) in word_indices.iter().enumerate() {
-        input_fields = input_fields.push(word_input_field(
-            word_idx,
-            &word_inputs[i],
-            no_border_style,
-            move |input| {
-                on(BackupWalletMessage::WordInput {
-                    index: word_idx as u8,
-                    input,
-                })
-            },
-        ));
+        fields = fields.push(
+            Column::new()
+                .spacing(6)
+                .push(tenshu::label(format!("Word {}", word_idx)))
+                .push(
+                    TextInput::new("", &word_inputs[i])
+                        .on_input(move |input| {
+                            on(BackupWalletMessage::WordInput {
+                                index: word_idx as u8,
+                                input,
+                            })
+                        })
+                        .size(14)
+                        .padding([10, 12])
+                        .width(Length::Fill)
+                        .style(|t, status| theme::tenshu::control::field(t, status, 8.0, false)),
+                ),
+        );
     }
-
-    content = content.push(
-        Row::new()
-            .width(Length::Fill)
-            .align_y(Alignment::Center)
-            .push(Space::new().width(Length::Fill))
-            .push(input_fields)
-            .push(Space::new().width(Length::Fill)),
-    );
-
-    content = content.push(Space::new().height(Length::Fixed(24.0)));
-
-    content = content.push(
-        Row::new()
-            .spacing(20)
-            .width(Length::Fill)
-            .align_y(Alignment::Center)
-            .push(Space::new().width(Length::Fill))
-            .push(
-                ui_button::secondary(None, "Back")
-                    .on_press(on(BackupWalletMessage::PreviousStep))
-                    .padding([8, 16])
-                    .width(Length::Fixed(150.0)),
-            )
-            .push({
-                let label = if saving { "Saving…" } else { "Verify" };
-                let btn = ui_button::primary(None, label)
-                    .padding([8, 16])
-                    .width(Length::Fixed(300.0));
-                if all_filled && !saving {
-                    btn.on_press(on(BackupWalletMessage::VerifyPhrase))
-                } else {
-                    btn
-                }
-            })
-            .push(Space::new().width(Length::Fill)),
-    );
-
-    content.into()
+    content = content.push(fields);
+    if let Some(error) = error {
+        content = content.push(error_note(error));
+    }
+    content
+        .push(actions(
+            "Back",
+            if saving { "Saving…" } else { "Verify" },
+            word_inputs.iter().all(|w| !w.trim().is_empty()) && !saving,
+            BackupWalletMessage::VerifyPhrase,
+            on,
+        ))
+        .into()
 }
 
-/// Completed screen — backup is recorded, show a confirmation.
 pub fn completed_view<M: Clone + 'static>(on: fn(BackupWalletMessage) -> M) -> Element<'static, M> {
-    let primary_color = color::ORANGE;
-
-    Column::new()
-        .spacing(20)
-        .width(Length::Fill)
-        .push(header("Backup Complete", on))
-        .push(Space::new().height(Length::Fixed(20.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(icon::check_circle_icon().size(140).color(primary_color))
-                .push(Space::new().width(Length::Fill))
-        )
-        .push(Space::new().height(Length::Fixed(16.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    text("Your recovery phrase has been securely backed up. Keep it safe. It's the only way to restore your wallet.")
-                        .size(20)
-                        .align_x(iced::alignment::Horizontal::Center)
-                        .width(Length::Fixed(700.0))
-                )
-                .push(Space::new().width(Length::Fill))
-        )
-        .push(Space::new().height(Length::Fixed(24.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    ui_button::primary(None, "Back to Settings")
-                        .on_press(on(BackupWalletMessage::Complete))
-                        .padding([8, 16])
-                        .width(Length::Fixed(300.0))
-                )
-                .push(Space::new().width(Length::Fill))
-        )
-        .into()
+    flow(
+        "Seed phrase confirmed",
+        "The three-word check was saved for this Cube. Keep your recovery phrase safe.",
+    )
+    .push(page::status(page::Status::Ok, "Confirmed"))
+    .push(page::rule())
+    .push(page::plain_button(
+        "Back to Settings",
+        ActionKind::Primary,
+        Some(on(BackupWalletMessage::Complete)),
+    ))
+    .into()
 }
 
-/// Shown while the system passkey prompt is up for a passkey-derived Cube.
-///
-/// This replaces `passkey_pending_view`, which told the user that
-/// re-authentication was "coming soon" and to "keep access to the device or
-/// security key that holds your passkey". Both halves of that were wrong to
-/// leave standing: re-authentication works, and a platform passkey is bound to
-/// the Apple ID rather than to the device.
 pub fn passkey_reauth_view() -> Element<'static, Message> {
-    Column::new()
-        .spacing(20)
-        .width(Length::Fill)
-        .push(header("Backup via Passkey", wrap))
-        .push(Space::new().height(Length::Fixed(20.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(icon::lock_icon().size(100).color(color::ORANGE))
-                .push(Space::new().width(Length::Fill)),
-        )
-        .push(Space::new().height(Length::Fixed(16.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    Container::new(
-                        text(
-                            "Confirm with Touch ID to show this Cube's recovery phrase. \
-                             We ask again because putting your master seed on screen is \
-                             not the same as opening your wallet.",
-                        )
-                        .size(18)
-                        .align_x(iced::alignment::Horizontal::Center),
-                    )
-                    .width(Length::Fixed(600.0))
-                    .align_x(iced::alignment::Horizontal::Center),
-                )
-                .push(Space::new().width(Length::Fill)),
-        )
-        .push(Space::new().height(Length::Fixed(24.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    ui_button::secondary(None, "Cancel")
-                        .on_press(wrap(BackupWalletMessage::PreviousStep))
-                        .padding([8, 16])
-                        .width(Length::Fixed(300.0)),
-                )
-                .push(Space::new().width(Length::Fill)),
-        )
-        .into()
+    flow(
+        "Unlock your seed phrase",
+        "Confirm with Touch ID to show this Cube's recovery phrase. We ask again because putting your master seed on screen is not the same as opening your wallet.",
+    )
+    .push(page::status(page::Status::Busy, "Waiting for Touch ID…"))
+    .push(page::rule())
+    .push(page::button("tenshu.backup.passkey.cancel", "Cancel", Some(wrap(BackupWalletMessage::PreviousStep))))
+    .into()
 }
 
-/// Terminal error for the passkey path. The message is I12-compliant copy from
-/// `PasskeyError::user_message` — it never says the Cube is lost.
 pub fn backup_error_view(message: &str) -> Element<'_, Message> {
-    Column::new()
-        .spacing(20)
-        .width(Length::Fill)
-        .push(header("Backup via Passkey", wrap))
-        .push(Space::new().height(Length::Fixed(20.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(icon::lock_icon().size(100).color(color::ORANGE))
-                .push(Space::new().width(Length::Fill)),
-        )
-        .push(Space::new().height(Length::Fixed(16.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    Container::new(
-                        text(message)
-                            .size(18)
-                            .align_x(iced::alignment::Horizontal::Center),
-                    )
-                    .width(Length::Fixed(600.0))
-                    .align_x(iced::alignment::Horizontal::Center),
-                )
-                .push(Space::new().width(Length::Fill)),
-        )
-        .push(Space::new().height(Length::Fixed(24.0)))
-        .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    ui_button::primary(None, "Back to Settings")
-                        .on_press(wrap(BackupWalletMessage::PreviousStep))
-                        .padding([8, 16])
-                        .width(Length::Fixed(300.0)),
-                )
-                .push(Space::new().width(Length::Fill)),
-        )
+    flow("Couldn't unlock your seed phrase", "")
+        .push(error_note(message))
+        .push(page::rule())
+        .push(page::primary(
+            "tenshu.backup.error.back",
+            "Back to Settings",
+            Some(wrap(BackupWalletMessage::PreviousStep)),
+        ))
         .into()
 }
 
-/// Fallback — shouldn't be visible in the normal flow but useful for
-/// debugging state transitions.
 pub fn dispatch<'a>(
     state: &'a BackupSeedState,
     pin: &'a PinInput,
@@ -655,13 +264,7 @@ pub fn dispatch<'a>(
         BackupSeedState::None => None,
         BackupSeedState::PinEntry { error } => Some(pin_entry_view(pin, error.as_deref())),
         BackupSeedState::Intro(checked) => Some(intro_view(*checked, None, wrap)),
-        BackupSeedState::RecoveryPhrase => {
-            // Without a loaded mnemonic we can't show anything useful —
-            // bail back to the normal settings page. This shouldn't happen
-            // under normal flow because the mnemonic is loaded in VerifyPin.
-            let mnemonic = mnemonic?;
-            Some(recovery_phrase_view(mnemonic, wrap))
-        }
+        BackupSeedState::RecoveryPhrase => Some(recovery_phrase_view(mnemonic?, wrap)),
         BackupSeedState::Verification {
             word_indices,
             word_inputs,
@@ -677,5 +280,108 @@ pub fn dispatch<'a>(
         BackupSeedState::Completed => Some(completed_view(wrap)),
         BackupSeedState::PasskeyReauth => Some(passkey_reauth_view()),
         BackupSeedState::Error(message) => Some(backup_error_view(message)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+
+    /// Render every state using synthetic placeholders, including the minimum
+    /// desktop window and both palettes. The shared probe rejects text overflow.
+    #[test]
+    fn seed_flow_fits_desktop_sizes_and_themes() {
+        let pin = PinInput::new();
+        // Deliberately not a mnemonic: no wallet material belongs in captures.
+        let words: Vec<String> = (1..=12).map(|i| format!("sample-{i:02}")).collect();
+        let states = [
+            ("pin", BackupSeedState::PinEntry { error: None }),
+            (
+                "pin-error",
+                BackupSeedState::PinEntry {
+                    error: Some("Incorrect PIN. Please try again.".into()),
+                },
+            ),
+            ("intro", BackupSeedState::Intro(false)),
+            ("intro-checked", BackupSeedState::Intro(true)),
+            ("words", BackupSeedState::RecoveryPhrase),
+            (
+                "verification",
+                BackupSeedState::Verification {
+                    word_indices: [2, 6, 11],
+                    word_inputs: Default::default(),
+                    error: None,
+                    saving: false,
+                },
+            ),
+            (
+                "verification-error",
+                BackupSeedState::Verification {
+                    word_indices: [2, 6, 11],
+                    word_inputs: Default::default(),
+                    error: Some(
+                        "Those words don't match. Check your written copy and try again.".into(),
+                    ),
+                    saving: false,
+                },
+            ),
+            (
+                "saving",
+                BackupSeedState::Verification {
+                    word_indices: [2, 6, 11],
+                    word_inputs: ["sample-02".into(), "sample-06".into(), "sample-11".into()],
+                    error: None,
+                    saving: true,
+                },
+            ),
+            ("complete", BackupSeedState::Completed),
+            ("passkey", BackupSeedState::PasskeyReauth),
+            (
+                "error",
+                BackupSeedState::Error(
+                    "Authentication was cancelled. You can try again from Backup & protection."
+                        .into(),
+                ),
+            ),
+        ];
+        for (appearance, palette) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for size in [(1024, 768), (1440, 900)] {
+                for (name, state) in &states {
+                    let inspection = capture::inspect(
+                        &format!("seed-flow-{name}"),
+                        dispatch(state, &pin, Some(&words)).unwrap(),
+                        size,
+                        appearance,
+                        palette,
+                    );
+                    assert!(
+                        !inspection.text.is_empty(),
+                        "{} must show its instructions",
+                        name
+                    );
+                    assert!(
+                        inspection
+                            .text
+                            .iter()
+                            .all(|(_, bounds)| bounds.y + bounds.height <= (size.1 - 100) as f32),
+                        "{} must fit above the fold at {:?}",
+                        name,
+                        size
+                    );
+                    if name == &"words" {
+                        for word in &words {
+                            assert!(
+                                inspection.contains(word),
+                                "every numbered word must be visible"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
