@@ -26,7 +26,7 @@ use crate::{
     hw::HardwareWallets,
     installer::{
         context::Context,
-        message::{Message, OwnerKeychainRestoreMsg},
+        message::{Message, OwnerKeychainRestoreMsg, PhoneRestoreError},
         step::{
             recovery_kit_restore::{stage_restore, RestoreScope, StagedRestore},
             Step,
@@ -39,7 +39,10 @@ use crate::{
             client::resolve_connect_grpc_url,
             grpc::{create_channel, interceptor::AuthInterceptor, session::GrpcSessionClient},
         },
-        inheritance::{heir::decrypt_envelopes_raw, ArtifactKind},
+        inheritance::{
+            heir::{decrypt_envelopes_raw, HeirDecryptError},
+            ArtifactKind,
+        },
         recovery::{
             fetch_owner_recovery_envelope, parse_wallet_descriptor_blob,
             OwnerKeychainRecoveryError, RecoveredWalletBlob, SeedBlob, BLOB_VERSION,
@@ -59,6 +62,21 @@ enum Phase {
     },
     /// Terminal, display-safe copy (the duress 423 never explains why — I3).
     Error { message: String },
+    /// The phone turned the request down; a new request may be sent.
+    Declined,
+    /// The request was not approved before it expired; a new one may be
+    /// sent.
+    Expired,
+}
+
+/// The Keychain's typed answers get their own screens; everything else is
+/// display-safe copy.
+fn phone_error(e: HeirDecryptError) -> PhoneRestoreError {
+    match e {
+        HeirDecryptError::Rejected => PhoneRestoreError::Declined,
+        HeirDecryptError::Expired => PhoneRestoreError::Expired,
+        other => PhoneRestoreError::Failed(other.to_string()),
+    }
 }
 
 fn parse_owner_artifacts(
@@ -123,27 +141,28 @@ impl OwnerKeychainRestoreStep {
     fn decrypt_task(client: CoincubeClient, cube_id: u64) -> Task<Message> {
         Task::perform(
             async move {
+                let failed = PhoneRestoreError::Failed;
                 let wires = fetch_owner_recovery_envelope(&client, cube_id)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| failed(e.to_string()))?;
                 if wires.is_empty() {
-                    return Err(OwnerKeychainRecoveryError::NoEnvelope.to_string());
+                    return Err(failed(OwnerKeychainRecoveryError::NoEnvelope.to_string()));
                 }
                 let token = client
                     .token()
-                    .ok_or_else(|| "Sign in to your account to recover this Cube.".to_string())?
+                    .ok_or_else(|| failed("Sign in to your account to recover this Cube.".into()))?
                     .to_string();
                 let grpc_url = resolve_connect_grpc_url().await.ok_or_else(|| {
-                    "Recovery is unavailable right now. Try again later.".to_string()
+                    failed("Recovery is unavailable right now. Try again later.".into())
                 })?;
                 let channel = create_channel(&grpc_url)
                     .await
-                    .map_err(|e| format!("Couldn't reach Connect: {}", e))?;
+                    .map_err(|e| failed(format!("Couldn't reach Connect: {}", e)))?;
                 let mut grpc = GrpcSessionClient::new(channel, AuthInterceptor::new(&token));
                 let raw = decrypt_envelopes_raw(&mut grpc, cube_id, &wires)
                     .await
-                    .map_err(|e| e.to_string())?;
-                parse_owner_artifacts(raw)
+                    .map_err(phone_error)?;
+                parse_owner_artifacts(raw).map_err(failed)
             },
             |res| Message::OwnerKeychainRestore(OwnerKeychainRestoreMsg::DecryptResult(res)),
         )
@@ -176,17 +195,25 @@ impl Step for OwnerKeychainRestoreStep {
         match &self.client {
             Some(client) => Self::decrypt_task(client.clone(), self.cube_id),
             None => Task::done(Message::OwnerKeychainRestore(
-                OwnerKeychainRestoreMsg::DecryptResult(Err(
+                OwnerKeychainRestoreMsg::DecryptResult(Err(PhoneRestoreError::Failed(
                     "Sign in to your account to recover this Cube.".to_string(),
-                )),
+                ))),
             )),
         }
     }
 
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
-        let Message::OwnerKeychainRestore(OwnerKeychainRestoreMsg::DecryptResult(res)) = message
-        else {
-            return Task::none();
+        let res = match message {
+            Message::OwnerKeychainRestore(OwnerKeychainRestoreMsg::DecryptResult(res)) => res,
+            Message::OwnerKeychainRestore(OwnerKeychainRestoreMsg::SendNewRequest) => {
+                // Only a declined or expired request can be sent again.
+                if !matches!(self.phase, Phase::Declined | Phase::Expired) {
+                    return Task::none();
+                }
+                self.phase = Phase::Decrypting;
+                return self.load();
+            }
+            _ => return Task::none(),
         };
         match res {
             Ok((seed, descriptor)) => {
@@ -207,7 +234,15 @@ impl Step for OwnerKeychainRestoreStep {
                 // Auto-advance — the decrypt succeeded; no extra click needed.
                 Task::done(Message::Next)
             }
-            Err(message) => {
+            Err(PhoneRestoreError::Declined) => {
+                self.phase = Phase::Declined;
+                Task::none()
+            }
+            Err(PhoneRestoreError::Expired) => {
+                self.phase = Phase::Expired;
+                Task::none()
+            }
+            Err(PhoneRestoreError::Failed(message)) => {
                 self.phase = Phase::Error { message };
                 Task::none()
             }
@@ -317,6 +352,16 @@ impl Step for OwnerKeychainRestoreStep {
                         .to_string(),
                 ),
             ),
+            Phase::Declined => view::phone_request_stopped(
+                "Declined on your phone",
+                "The phone turned this request down. If that wasn't you, nothing was shared. \
+                 Send a new request and approve it on the phone.",
+            ),
+            Phase::Expired => view::phone_request_stopped(
+                "Request expired",
+                "It wasn't approved in time. Make sure Keychain is open and online on your \
+                 phone, then send a new one.",
+            ),
             Phase::Error { message } => view::install_titled(
                 "Approve on your phone",
                 progress,
@@ -407,6 +452,68 @@ mod tests {
             None,
             None,
         )
+    }
+
+    /// The Keychain's decline and expiry each get their own screen with
+    /// "Send a new request", which starts the decrypt again. Other failures
+    /// stay terminal copy.
+    #[tokio::test]
+    async fn a_declined_or_expired_phone_request_can_be_sent_again() {
+        use crate::home::restore_frame::rendered_labels;
+        assert_eq!(
+            phone_error(HeirDecryptError::Rejected),
+            PhoneRestoreError::Declined
+        );
+        assert_eq!(
+            phone_error(HeirDecryptError::Expired),
+            PhoneRestoreError::Expired
+        );
+        assert!(matches!(
+            phone_error(HeirDecryptError::MissingMaterial),
+            PhoneRestoreError::Failed(_)
+        ));
+
+        let directory = crate::dir::CoincubeDirectory::new(std::env::temp_dir());
+        let mut hws = HardwareWallets::new(
+            directory,
+            coincube_core::miniscript::bitcoin::Network::Bitcoin,
+        );
+        for (error, title) in [
+            (PhoneRestoreError::Declined, "Declined on your phone"),
+            (PhoneRestoreError::Expired, "Request expired"),
+        ] {
+            let mut step = OwnerKeychainRestoreStep::new(RestoreScope::Full, 7);
+            drop(step.update(
+                &mut hws,
+                Message::OwnerKeychainRestore(OwnerKeychainRestoreMsg::DecryptResult(Err(error))),
+            ));
+            let shown = rendered_labels(step.view(&hws, (0, 0), None)).await;
+            assert!(shown.iter().any(|l| l == title), "{:?}", shown);
+            assert!(
+                shown.iter().any(|l| l == "Send a new request"),
+                "{:?}",
+                shown
+            );
+            drop(step.update(
+                &mut hws,
+                Message::OwnerKeychainRestore(OwnerKeychainRestoreMsg::SendNewRequest),
+            ));
+            assert!(matches!(step.phase, Phase::Decrypting));
+        }
+
+        // A terminal failure cannot be "sent again".
+        let mut step = OwnerKeychainRestoreStep::new(RestoreScope::Full, 7);
+        drop(step.update(
+            &mut hws,
+            Message::OwnerKeychainRestore(OwnerKeychainRestoreMsg::DecryptResult(Err(
+                PhoneRestoreError::Failed("Recovery is unavailable right now.".into()),
+            ))),
+        ));
+        drop(step.update(
+            &mut hws,
+            Message::OwnerKeychainRestore(OwnerKeychainRestoreMsg::SendNewRequest),
+        ));
+        assert!(matches!(step.phase, Phase::Error { .. }));
     }
 
     #[test]

@@ -1913,6 +1913,24 @@ pub fn start_internal_bitcoind<'a>(
     )
 }
 
+/// A phone recovery the phone declined or let expire: what happened and
+/// "Send a new request".
+pub fn phone_request_stopped<'a>(title: &'static str, line: &'static str) -> Element<'a, Message> {
+    Column::new()
+        .spacing(12)
+        .width(Length::Fill)
+        .push(text::h4_bold(title))
+        .push(text::p1_regular(line).style(theme::text::secondary))
+        .push(
+            coincube_ui::component::button::primary(None, "Send a new request")
+                .width(Length::Shrink)
+                .on_press(Message::OwnerKeychainRestore(
+                    crate::installer::message::OwnerKeychainRestoreMsg::SendNewRequest,
+                )),
+        )
+        .into()
+}
+
 /// A Recovery Kit or phone restore's Done: Kage holding the sealed Cube,
 /// "[Cube] is restored" and one line. Open Cube is the frame's footer.
 pub fn restored<'a>(cube_name: &str, warning: Option<&'a String>) -> Element<'a, Message> {

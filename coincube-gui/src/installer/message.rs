@@ -397,9 +397,24 @@ pub enum OwnerKeychainRestoreMsg {
                 Option<crate::services::recovery::SeedBlob>,
                 Option<crate::services::recovery::RecoveredWalletBlob>,
             ),
-            String,
+            PhoneRestoreError,
         >,
     ),
+    /// "Send a new request" after the phone declined or let it expire.
+    SendNewRequest,
+}
+
+/// Why a phone recovery stopped. The Keychain's answer is typed (the
+/// relay's `DECRYPT_REQUEST_STATUS_REJECTED` / `_EXPIRED`), so a decline
+/// and a timeout each get their own screen and a new request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhoneRestoreError {
+    /// The phone turned the request down.
+    Declined,
+    /// Nobody approved it before its TTL.
+    Expired,
+    /// Anything else, as display-safe copy.
+    Failed(String),
 }
 
 impl std::fmt::Debug for OwnerKeychainRestoreMsg {
@@ -407,6 +422,7 @@ impl std::fmt::Debug for OwnerKeychainRestoreMsg {
         match self {
             Self::DecryptResult(Ok(_)) => write!(f, "DecryptResult(Ok(<redacted>))"),
             Self::DecryptResult(Err(e)) => f.debug_tuple("DecryptResult").field(e).finish(),
+            Self::SendNewRequest => write!(f, "SendNewRequest"),
         }
     }
 }
