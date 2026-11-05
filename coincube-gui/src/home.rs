@@ -2088,7 +2088,10 @@ impl Home {
                 if matches!(
                     self.state,
                     State::CreationBackup(CreationBackupStep::KitUploading)
-                ) {
+                ) || self.creation_backup_hub().any()
+                {
+                    // A finished backup is written by Continue; the bypass
+                    // would record "no backup" over it.
                     return Task::none();
                 }
                 if matches!(self.state, State::CreationBackup(_)) {
@@ -2113,7 +2116,8 @@ impl Home {
                 if !matches!(
                     self.state,
                     State::CreationBackup(CreationBackupStep::Bypass { acknowledged: true })
-                ) {
+                ) || self.creation_backup_hub().any()
+                {
                     return Task::none();
                 }
                 let bypass = creation_gate::CreationBackupBypass {
@@ -2219,16 +2223,26 @@ impl Home {
                         self.create_cube_pin = pin_input::PinInput::new();
                         self.create_cube_pin_confirm = pin_input::PinInput::new();
                         // The creation-time backup step's copy of the seed has
-                        // done its job — scrub it. `reload()` below replaces
-                        // `State::CreationBackup` with the Cube list, which
-                        // also makes the list parked for a cancel stale.
+                        // done its job — scrub it. The step itself is replaced
+                        // just below, and `reload()` refreshes that list.
                         self.scrub_creation_seed();
                         self.scrub_creation_kit();
+                        self.reset_creation_backup_progress();
                         // The passkey registration has been consumed by the
                         // write; holding it would let a second finalize insert
                         // a duplicate.
                         self.pending_passkey_cube = None;
-                        self.creation_backup_cubes = Vec::new();
+                        // Off the backup hub now, not when the reload lands:
+                        // in between, its Continue and "I'll do this later"
+                        // would act on a Cube that is already written.
+                        let parked = std::mem::take(&mut self.creation_backup_cubes);
+                        if matches!(self.state, State::CreationBackup(_)) {
+                            self.state = State::Cubes {
+                                cubes: parked,
+                                create_cube: false,
+                                source: self.network,
+                            };
+                        }
                         // Explicitly clear recovery words to prevent mnemonic from lingering in memory
                         for word in &mut self.recovery_words {
                             word.clear();
@@ -2976,6 +2990,16 @@ impl Home {
                     self.catalog.pending_select = None;
                     self.create_network_selection_pending = false;
                     self.error = Some(e.to_string());
+                    Task::none()
+                }
+                Ok(mut state) if matches!(self.state, State::CreationBackup(_)) => {
+                    // The backup step owns the screen and an unwritten Cube's
+                    // seed. A reload that lands now (the catch-up sync after
+                    // signing in from the hub, say) must not replace it; it
+                    // only refreshes the list a Cancel returns to.
+                    if let State::Cubes { cubes, .. } = &mut state {
+                        self.creation_backup_cubes = std::mem::take(cubes);
+                    }
                     Task::none()
                 }
                 Ok(mut state) => {
@@ -4344,8 +4368,7 @@ impl Home {
             _ => Vec::new(),
         };
         self.creation_backup_words = Some(zeroize::Zeroizing::new(words));
-        self.creation_seed_confirmed = false;
-        self.creation_kit_evidence = None;
+        self.reset_creation_backup_progress();
         self.state = State::CreationBackup(CreationBackupStep::Choice);
     }
 
@@ -4438,8 +4461,10 @@ impl Home {
             State::Cubes { cubes, .. } => std::mem::take(cubes),
             _ => Vec::new(),
         };
-        // The same entry point a PIN Cube gets. Which exits the choice screen
-        // offers depends on the session, not on the unlock method.
+        // The same entry point a PIN Cube gets, starting from nothing done.
+        // Which methods the hub offers depends on the session, not on the
+        // unlock method.
+        self.reset_creation_backup_progress();
         self.state = State::CreationBackup(CreationBackupStep::Choice);
         Task::none()
     }
@@ -4522,7 +4547,7 @@ impl Home {
         let Some(client) = self.connect_account.authenticated_client() else {
             self.creation_kit_error = Some(
                 "You're signed out of Connect, so there's nowhere to save a Recovery Kit. \
-                 Sign in and try again, or choose \"I'll do this later\"."
+                 Sign in and try again, or go back and write down the seed phrase."
                     .to_string(),
             );
             return Task::none();
@@ -4675,6 +4700,14 @@ impl Home {
         self.passkey_registration_succeeded(credential_id, prf_output)
     }
 
+    /// Forget the backup hub's progress. Called on every way into the step
+    /// (PIN and passkey) and every way out (abandon, write, failure), so one
+    /// creation's confirmed phrase or Kit can never be carried into the next.
+    fn reset_creation_backup_progress(&mut self) {
+        self.creation_seed_confirmed = false;
+        self.creation_kit_evidence = None;
+    }
+
     /// What the backup hub has collected for the Cube being created.
     fn creation_backup_hub(&self) -> CreationBackupHub {
         CreationBackupHub {
@@ -4804,10 +4837,17 @@ impl Home {
         // and left `total_cube_count` — the check that enforces the per-network
         // Cube limit — reading zero until the next reload.
         let cubes = std::mem::take(&mut self.creation_backup_cubes);
+        // A Kit saved during this creation is on Connect under
+        // `pending_cube_id`, sealing *this* seed. A retry generates a new
+        // seed, so it must not reuse that UUID: the server record would then
+        // hold a Kit for a seed the new Cube doesn't have. The abandoned
+        // record stays on Connect as a Cube that holds no funds.
+        if self.creation_kit_evidence.is_some() {
+            self.pending_cube_id = None;
+        }
         self.scrub_creation_seed();
         self.scrub_creation_kit();
-        self.creation_seed_confirmed = false;
-        self.creation_kit_evidence = None;
+        self.reset_creation_backup_progress();
         // A registered-but-unsaved passkey credential goes with it. The
         // credential itself stays in the platform authenticator — harmless,
         // since nothing references it — but this process must not still be
@@ -5052,6 +5092,17 @@ impl Home {
         // Explicit creation takes precedence over the catalog. The Create
         // sheet's signed-out notice carries the sign-in ID; the empty
         // Launcher uses the catalog IDs below.
+        if matches!(
+            self.state,
+            State::CreationBackup(CreationBackupStep::Choice)
+        ) && self.showing_create_journey()
+        {
+            return Id::new(if self.can_create_recovery_kit() {
+                CREATE_BACKUP_KIT_ID
+            } else {
+                CREATE_BACKUP_SIGN_IN_ID
+            });
+        }
         if self.showing_create_journey() {
             return Id::new(if self.connect_account.is_authenticated() {
                 LEGACY_CONNECT_ENTRY_ID
@@ -5079,6 +5130,7 @@ impl Home {
             || *saved == launcher_catalog::sign_in_id()
             || *saved == Id::new(LEGACY_CONNECT_ENTRY_ID)
             || *saved == Id::new(LEGACY_CONNECT_SIGN_IN_ID)
+            || *saved == Id::new(CREATE_BACKUP_SIGN_IN_ID)
         {
             // Both Launcher modes replace their action with status-only copy
             // during a pending session check, so there is no control to focus.
@@ -6932,15 +6984,17 @@ fn derive_phone_recovery(owner_self: Option<&OwnerSelfRecoverySummary>) -> (bool
 
 /// The creation-time backup step.
 ///
-/// The three wizard screens are the Settings ones, reused verbatim through
-/// `app::view::settings::backup`'s message-generic views with
-/// [`ViewMessage::CreationBackup`] as the mapper. What is added around them is
-/// creation-specific and belongs here:
+/// The three seed phrase screens are the Settings ones, reused verbatim
+/// through `app::view::settings::backup`'s message-generic views with
+/// [`ViewMessage::CreationBackup`] as the mapper; the Kit password screen is
+/// the Settings Kit flow's. What is creation-specific belongs here:
 ///
-/// - [`creation_gate::NOT_A_BACKUP_COPY`], because the mistake this step
+/// - The hub ([`creation_choice_view`]), which carries
+///   [`creation_gate::not_a_backup_copy`], because the mistake this step
 ///   exists to prevent is a user believing the datadir folder is their backup.
-/// - The "I'll do this later" escape and its acknowledgement screen. Settings
-///   has no equivalent — there, declining just closes a panel.
+/// - The "I'll do this later" escape, offered from the hub until a backup
+///   exists, and its acknowledgement screen. Settings has no equivalent:
+///   there, declining just closes a panel.
 #[allow(clippy::too_many_arguments)]
 fn creation_backup_view<'a>(
     step: &'a CreationBackupStep,
@@ -7005,8 +7059,8 @@ fn creation_backup_view<'a>(
                     Container::new(
                         p1_regular(
                             "Encrypting this Cube's master seed with your recovery password \
-                             and saving it to COINCUBE Connect. Your Cube is created once \
-                             this finishes.",
+                             and saving it to COINCUBE Connect. You'll come back to Backup \
+                             when it's done.",
                         )
                         .style(theme::text::secondary)
                         .align_x(iced::alignment::Horizontal::Center),
@@ -7033,6 +7087,7 @@ impl CreationBackupHub {
 }
 
 const CREATE_BACKUP_SEED_ID: &str = "tenshu.create:backup-seed";
+const CREATE_BACKUP_SIGN_IN_ID: &str = "tenshu.create:backup-sign-in";
 const CREATE_BACKUP_KIT_ID: &str = "tenshu.create:backup-kit";
 const CREATE_BACKUP_CANCEL_ID: &str = "tenshu.create:backup-cancel";
 const CREATE_BACKUP_LATER_ID: &str = "tenshu.create:backup-later";
@@ -7098,10 +7153,11 @@ fn creation_choice_view(
             )
             .accessory(page::status(page::Status::Unknown, "Sign in required"))
             .control(
-                // Opens the Connect sign-in sheet over this one; its Close
-                // returns focus here and the row offers the Kit.
+                // Opens the Connect sign-in sheet over this one. Its Close
+                // returns focus to this row: to Sign in, or to Create Recovery
+                // Kit once signed in (`connect_sheet_origin_id`).
                 button::secondary_action(
-                    LEGACY_CONNECT_SIGN_IN_ID,
+                    CREATE_BACKUP_SIGN_IN_ID,
                     None,
                     "Sign in",
                     create_journey_focus,
@@ -13558,6 +13614,152 @@ mod tests {
             creation_gate::evaluate_for_cube(cube, None),
             creation_gate::CreationGate::Satisfied
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Walk the seed phrase from the hub and answer it correctly; ends back on
+    /// the hub with the phrase confirmed.
+    fn confirm_seed_from_hub(home: &mut Home) {
+        let _ = home.update(backup(BackupWalletMessage::NextStep));
+        let _ = home.update(backup(BackupWalletMessage::ToggleBackupIntroCheck));
+        let _ = home.update(backup(BackupWalletMessage::NextStep));
+        let words = shown_words(home);
+        let _ = home.update(backup(BackupWalletMessage::NextStep));
+        let State::CreationBackup(CreationBackupStep::Verification { word_indices, .. }) =
+            home.state.clone()
+        else {
+            panic!("expected the verification screen, got {:?}", home.state);
+        };
+        for &index in &word_indices {
+            let _ = home.update(backup(BackupWalletMessage::WordInput {
+                index: index as u8,
+                input: words[index - 1].clone(),
+            }));
+        }
+        let _ = drain(home.update(backup(BackupWalletMessage::VerifyPhrase)));
+        assert_eq!(step(home), CreationBackupStep::Choice);
+        assert!(home.creation_seed_confirmed);
+    }
+
+    /// A written Cube leaves the hub at once, and its confirmed phrase and Kit
+    /// are not carried into the next creation in the same session.
+    #[test]
+    fn backup_hub_progress_does_not_outlive_its_cube() {
+        let dir = tmp_datadir("hub-twice");
+        let mut home = signed_in_home_with_datadir(&dir);
+        passkey_create_form(&mut home, "First");
+        let _ = drain(webview_registration(&mut home, "cred-1", 11));
+        confirm_seed_from_hub(&mut home);
+        let _ = drain(home.update(Message::View(ViewMessage::CreationKitRequested)));
+        type_kit_password(&mut home, "correct horse battery staple");
+        let _ = drain(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+                kit_evidence(21),
+            )))),
+        );
+        let out = drain(home.update(Message::View(ViewMessage::CreationBackupContinue)));
+        let [Message::CubeCreated(result)] = out.as_slice() else {
+            panic!("expected one CubeCreated, got {:?}", out);
+        };
+        let _ = drain(home.update(Message::CubeCreated(result.clone())));
+        assert!(
+            !matches!(home.state, State::CreationBackup(_)),
+            "a written Cube must not leave its hub (and its Continue) on screen"
+        );
+        assert_eq!(home.creation_backup_hub(), CreationBackupHub::default());
+        assert!(drain(home.update(Message::View(ViewMessage::CreationBackupContinue))).is_empty());
+
+        passkey_create_form(&mut home, "Second");
+        let _ = drain(webview_registration(&mut home, "cred-2", 12));
+        assert_eq!(step(&home), CreationBackupStep::Choice);
+        assert_eq!(
+            home.creation_backup_hub(),
+            CreationBackupHub::default(),
+            "the second Cube must start with nothing backed up"
+        );
+        assert!(
+            drain(home.update(Message::View(ViewMessage::CreationBackupContinue))).is_empty(),
+            "Continue must not write the second Cube with the first one's backups"
+        );
+        assert_eq!(cubes_on_disk(&dir).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reload landing while the hub is open (the catch-up sync after Sign
+    /// in, say) refreshes the list Cancel returns to and leaves the step alone.
+    #[test]
+    fn a_reload_during_the_backup_step_keeps_the_unwritten_cube() {
+        let dir = tmp_datadir("hub-reload");
+        let mut home = signed_in_home_with_datadir(&dir);
+        passkey_create_form(&mut home, "Pending");
+        let _ = drain(webview_registration(&mut home, "cred", 6));
+        confirm_seed_from_hub(&mut home);
+
+        let network = home.network;
+        drop(home.update(Message::Checked {
+            for_chain: network,
+            res: Ok(State::Cubes {
+                cubes: vec![CubeSettings::new("Synced".into(), network)],
+                create_cube: false,
+                source: network,
+            }),
+        }));
+        assert_eq!(step(&home), CreationBackupStep::Choice);
+        assert!(home.creation_seed_confirmed);
+        assert!(home.creation_backup_words.is_some());
+        assert!(home.pending_passkey_cube.is_some());
+
+        let _ = home.update(Message::View(ViewMessage::CancelCreationBackup));
+        let State::Cubes { cubes, .. } = &home.state else {
+            panic!("expected the Cube list after Cancel, got {:?}", home.state);
+        };
+        assert_eq!(cubes.len(), 1, "Cancel returns to the refreshed list");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cancel after a Kit was saved: the retry must not reuse the UUID that
+    /// Connect now holds a Kit for, sealing the abandoned seed.
+    #[test]
+    fn cancelling_after_a_saved_kit_gives_the_retry_a_new_uuid() {
+        let dir = tmp_datadir("hub-cancel-kit");
+        let mut home = signed_in_home_with_datadir(&dir);
+        passkey_create_form(&mut home, "Abandoned");
+        let _ = drain(webview_registration(&mut home, "cred", 8));
+        let kit_uuid = home.pending_cube_id;
+        assert!(kit_uuid.is_some());
+        let _ = drain(home.update(Message::View(ViewMessage::CreationKitRequested)));
+        type_kit_password(&mut home, "correct horse battery staple");
+        let _ = drain(
+            home.update(Message::View(ViewMessage::CreationKitUploaded(Ok(
+                kit_evidence(31),
+            )))),
+        );
+        let _ = home.update(Message::View(ViewMessage::CancelCreationBackup));
+        assert_eq!(home.pending_cube_id, None);
+        assert_eq!(home.creation_backup_hub(), CreationBackupHub::default());
+
+        // Without a Kit, a retry keeps its UUID as before.
+        passkey_create_form(&mut home, "Plain");
+        let _ = drain(webview_registration(&mut home, "cred-2", 9));
+        let plain_uuid = home.pending_cube_id;
+        let _ = home.update(Message::View(ViewMessage::CancelCreationBackup));
+        assert_eq!(home.pending_cube_id, plain_uuid);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Once a backup exists the bypass is refused: it would record "no backup"
+    /// over a finished one.
+    #[test]
+    fn the_bypass_is_refused_once_a_backup_exists() {
+        let dir = tmp_datadir("hub-bypass");
+        let mut home = signed_in_home_with_datadir(&dir);
+        passkey_create_form(&mut home, "Kept");
+        let _ = drain(webview_registration(&mut home, "cred", 10));
+        confirm_seed_from_hub(&mut home);
+        let _ = home.update(Message::View(ViewMessage::CreationBackupBypassRequested));
+        assert_eq!(step(&home), CreationBackupStep::Choice);
+        let _ = home.update(Message::View(ViewMessage::CreationBackupBypassConfirmed));
+        assert!(cubes_on_disk(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
