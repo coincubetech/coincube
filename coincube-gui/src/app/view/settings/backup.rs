@@ -148,41 +148,41 @@ pub fn intro_view<M: Clone + 'static>(
     note: Option<Element<'static, M>>,
     on: fn(BackupWalletMessage) -> M,
 ) -> Element<'static, M> {
-    let primary_color = color::ORANGE;
+    // One heading, plain copy and a single warning line; the checkbox reads as
+    // a sentence. Matches the seed phrase row's name in Settings › Backup
+    // methods.
+    let copy = Column::new()
+        .spacing(12)
+        .max_width(600)
+        .push(h4_bold("Write down your seed phrase"))
+        .push(
+            p1_regular(
+                "You'll see 12 words. Write them on paper, numbered, in the order shown. \
+                 They restore this Cube on any computer.",
+            )
+            .style(theme::text::secondary),
+        )
+        .push(
+            Row::new()
+                .spacing(10)
+                .align_y(Alignment::Start)
+                .push(icon::warning_icon().style(theme::text::warning))
+                .push(
+                    p1_regular(
+                        "Anyone who sees these words can take your bitcoin. Don't \
+                         photograph them, type them or share them with anyone, COINCUBE \
+                         included.",
+                    )
+                    .style(theme::text::secondary),
+                ),
+        );
     Column::new()
         .spacing(20)
         .width(Length::Fill)
         .push(
-            Row::new()
+            Container::new(copy)
                 .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(icon::file_earmark_icon().size(96).color(primary_color))
-                .push(Space::new().width(Length::Fill))
-        )
-        .push(
-            Container::new(
-                Column::new()
-                    .align_x(Alignment::Center)
-                    .max_width(600)
-                    .push(
-                        text("You will be shown 12 words. Write them down numbered in the same order shown and keep them in a safe place.")
-                            .size(20)
-                            .align_x(iced::alignment::Horizontal::Center)
-                    )
-                    .push(
-                        text("Do not share these words with anyone.")
-                            .size(20).bold().color(primary_color)
-                            .align_x(iced::alignment::Horizontal::Center)
-                    )
-                    .push(
-                        text("Without them, you will not be able to restore your wallet if you lose your computer.")
-                            .size(20)
-                            .align_x(iced::alignment::Horizontal::Center)
-                    )
-            )
-            .width(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Center)
+                .align_x(iced::alignment::Horizontal::Center),
         )
         .push(note.map(|note| {
             Container::new(note)
@@ -190,18 +190,21 @@ pub fn intro_view<M: Clone + 'static>(
                 .align_x(iced::alignment::Horizontal::Center)
         }))
         .push(
-            Row::new()
-                .width(Length::Fill)
-                .align_y(Alignment::Center)
-                .push(Space::new().width(Length::Fill))
-                .push(
+            Container::new(
+                Container::new(
                     CheckBox::new(checked)
-                        .label("I UNDERSTAND THAT IF I LOSE THESE WORDS, MY FUNDS CANNOT BE RECOVERED")
+                        .label(
+                            "I understand that if I lose these words, my funds can't be recovered.",
+                        )
                         .on_toggle(move |_| on(BackupWalletMessage::ToggleBackupIntroCheck))
                         .style(theme::checkbox::primary)
-                        .size(20)
+                        .size(18),
                 )
-                .push(Space::new().width(Length::Fill))
+                .max_width(600)
+                .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center),
         )
         .push(Space::new().height(Length::Fixed(16.0)))
         .push(
@@ -217,7 +220,7 @@ pub fn intro_view<M: Clone + 'static>(
                         .width(Length::Fixed(150.0)),
                 )
                 .push({
-                    let btn = ui_button::primary(None, "Show My Recovery Phrase")
+                    let btn = ui_button::primary(None, "Show seed phrase")
                         .padding([8, 16])
                         .width(Length::Fixed(300.0));
                     if checked {
@@ -226,7 +229,7 @@ pub fn intro_view<M: Clone + 'static>(
                         btn
                     }
                 })
-                .push(Space::new().width(Length::Fill))
+                .push(Space::new().width(Length::Fill)),
         )
         .into()
 }
@@ -277,8 +280,8 @@ pub fn recovery_phrase_view<'a, M: Clone + 'a>(
                 .push(Space::new().width(Length::Fill))
                 .push(
                     Container::new(
-                        text("Write these words down in order and keep them offline. Anyone with these words can access your wallet.")
-                            .size(20)
+                        p1_regular("Write each word next to its number, then check the spelling. Keep the paper offline: anyone with these words can take your bitcoin.")
+                            .style(theme::text::secondary)
                             .align_x(iced::alignment::Horizontal::Center)
                     )
                     .width(Length::Fixed(700.0))
@@ -309,7 +312,7 @@ pub fn recovery_phrase_view<'a, M: Clone + 'a>(
                         .width(Length::Fixed(150.0)),
                 )
                 .push(
-                    ui_button::primary(None, "I've Written It Down")
+                    ui_button::primary(None, "I've written it down")
                         .on_press(on(BackupWalletMessage::NextStep))
                         .padding([8, 16])
                         .width(Length::Fixed(300.0)),
@@ -380,12 +383,12 @@ pub fn verification_view<'a, M: Clone + 'a>(
             .align_y(Alignment::Center)
             .push(Space::new().width(Length::Fill))
             .push(
-                text("To make sure you saved your recovery phrase correctly, please enter the correct words.")
+                text("Type the word for each number from your paper.")
                     .size(20)
                     .align_x(iced::alignment::Horizontal::Center)
-                    .width(Length::Fixed(700.0))
+                    .width(Length::Fixed(700.0)),
             )
-            .push(Space::new().width(Length::Fill))
+            .push(Space::new().width(Length::Fill)),
     );
 
     content = content.push(Space::new().height(Length::Fixed(24.0)));
