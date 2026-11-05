@@ -18,12 +18,19 @@
 use coincube_ui::{
     component::{
         tenshu,
-        tenshu::{text_field, ActionButton, ActionKind, Tone},
+        tenshu::{text_field, ActionKind, Tone},
     },
-    icon::clipboard_icon,
-    widget::{Column, Container, Element, Row},
+    font, icon,
+    theme::{
+        self,
+        tenshu::button::{self, ActionShape},
+    },
+    widget::{action::Action, Column, Container, Element, Row},
 };
-use iced::{widget::Space, Alignment, Length};
+use iced::{
+    widget::{rich_text, span, Space},
+    Alignment, Length,
+};
 
 use crate::app::view::settings::page;
 use crate::app::{state::connect::ConnectCubePanel, view::ConnectCubeMessage};
@@ -55,15 +62,84 @@ pub fn release_warning(old_address: &str) -> String {
     )
 }
 
+/// The artboard's 36px rectangular form actions, retaining the shared
+/// Action keyboard/focus contract and semantic button colours.
 fn action<'a>(
     id: &'static str,
     label: &'a str,
     kind: ActionKind,
     on_press: Option<ConnectCubeMessage>,
-) -> ActionButton<'a, ConnectCubeMessage> {
-    ActionButton::new(id, label, kind, ConnectCubeMessage::FocusAction)
-        .compact()
-        .on_press_maybe(on_press)
+) -> Action<'a, ConnectCubeMessage> {
+    let label = iced::widget::text(label)
+        .size(14)
+        .shaping(iced::advanced::text::Shaping::Advanced)
+        .font(if kind == ActionKind::Primary {
+            font::SEMIBOLD
+        } else {
+            font::MEDIUM
+        });
+    let mut content = Row::new().spacing(6).align_y(Alignment::Center);
+    if id == COPY_ID {
+        content = content.push(icon::copy_icon().size(16));
+    }
+    Action::new(
+        id,
+        Container::new(content.push(label)).center_y(Length::Fill),
+        ConnectCubeMessage::FocusAction,
+    )
+    .height(36)
+    .padding([0, 14])
+    .focus_radius(8.0)
+    .style(move |theme, status| {
+        let mut appearance = button::action(theme, status, kind, ActionShape::Compact);
+        if kind == ActionKind::Primary && status == iced::widget::button::Status::Disabled {
+            appearance.background = None;
+            appearance.border.color = theme.colors.shell.line;
+            appearance.text_color = theme.colors.shell.muted;
+        } else if kind == ActionKind::Secondary && status == iced::widget::button::Status::Active {
+            appearance.background = None;
+        }
+        appearance
+    })
+    .on_press_maybe(on_press)
+}
+
+fn release_callout<'a>(address: &str) -> Element<'a, ConnectCubeMessage> {
+    let lead = format!("{address} stops working when you save.");
+    let warning = release_warning(address);
+    let detail = warning[lead.len()..].to_owned();
+    Container::new(
+        Row::new()
+            .spacing(12)
+            .align_y(Alignment::Start)
+            .push(
+                Container::new(
+                    icon::warning_icon()
+                        .size(16)
+                        .style(|t: &theme::Theme| theme::tenshu::text::tone(t, Tone::Warn)),
+                )
+                .padding(iced::Padding::default().top(2)),
+            )
+            .push(
+                rich_text([span::<(), _>(lead).font(font::BOLD), span(detail)])
+                    .font(font::REGULAR)
+                    .size(14)
+                    .line_height(iced::widget::text::LineHeight::Relative(1.45))
+                    .style(theme::tenshu::text::ink),
+            ),
+    )
+    .padding([14, 16])
+    .width(Length::Fill)
+    .style(|t: &theme::Theme| iced::widget::container::Style {
+        background: Some(iced::Background::Color(t.colors.shell.panel)),
+        border: iced::Border {
+            color: t.colors.shell.line,
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 /// The availability line under the username field: checking, taken or
@@ -104,7 +180,7 @@ fn username_field<'a>(
         &state.ln_username_input,
         ConnectCubeMessage::FocusAction,
     )
-    .suffix(LN_ADDRESS_DOMAIN)
+    .segmented_suffix(LN_ADDRESS_DOMAIN, 112.0)
     .placeholder("satoshi")
     .error_maybe(state.ln_username_error.as_deref())
     .on_input_maybe((!busy).then_some(ConnectCubeMessage::LnUsernameChanged));
@@ -134,30 +210,53 @@ pub fn settings_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCube
     };
     let current_username = lightning_username(&address);
 
+    let editing = state.ln_editing;
     let row = Row::new()
         .spacing(8)
         .align_y(Alignment::Center)
         .push(
-            tenshu::heading(address.clone())
-                .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
-                .width(Length::Fill),
-        )
-        .push(
-            action(
-                COPY_ID,
-                "Copy",
-                ActionKind::Primary,
-                Some(ConnectCubeMessage::CopyToClipboard(address.clone())),
-            )
-            .icon(clipboard_icon()),
+            Column::new()
+                .spacing(2)
+                .width(Length::Fill)
+                .push(
+                    tenshu::title(address.clone())
+                        .line_height(iced::widget::text::LineHeight::Relative(1.3))
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                )
+                .push(page::muted(
+                    "Anyone can send you bitcoin with this address.",
+                )),
         )
         .push(action(
-            CHANGE_ID,
-            "Change",
-            ActionKind::Secondary,
-            (!state.ln_editing && !state.ln_changing)
-                .then_some(ConnectCubeMessage::BeginEditLightningAddress),
-        ));
+            COPY_ID,
+            "Copy",
+            if editing {
+                ActionKind::Secondary
+            } else {
+                ActionKind::Primary
+            },
+            Some(ConnectCubeMessage::CopyToClipboard(address.clone())),
+        ))
+        .push(
+            action(
+                CHANGE_ID,
+                "Change",
+                ActionKind::Secondary,
+                (!state.ln_editing && !state.ln_changing)
+                    .then_some(ConnectCubeMessage::BeginEditLightningAddress),
+            )
+            .style(move |theme, status| {
+                let mut appearance =
+                    button::action(theme, status, ActionKind::Secondary, ActionShape::Compact);
+                if editing {
+                    appearance.background =
+                        Some(iced::Background::Color(theme.colors.shell.selected));
+                    appearance.border.color = theme.colors.shell.accent_ink;
+                    appearance.text_color = theme.colors.shell.ink;
+                }
+                appearance
+            }),
+        );
 
     let mut content = Column::new()
         .width(Length::Fill)
@@ -165,12 +264,7 @@ pub fn settings_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCube
         .push(page::heading("Your Lightning address"))
         .push(Space::new().height(Length::Fixed(12.0)))
         .push(page::rule())
-        .push(
-            Container::new(Column::new().spacing(4).push(row).push(page::muted(
-                "Anyone can send you bitcoin with this address.",
-            )))
-            .padding([16, 0]),
-        );
+        .push(Container::new(row).padding([12, 0]));
 
     if let Some(err) = state.ln_reconcile_needs_reregister.as_deref() {
         // API↔SDK divergence — the DB confirms the address but the Spark SDK
@@ -209,30 +303,35 @@ pub fn settings_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCube
             state.ln_changing,
         );
         let save = can_save.then_some(ConnectCubeMessage::SaveLightningAddress);
-        let form = Row::new()
-            .spacing(32)
-            .align_y(Alignment::Start)
-            .push(
-                Container::new(username_field(
-                    state,
-                    "New username",
-                    current_username.as_deref(),
-                    state.ln_changing,
-                    save.clone(),
-                ))
-                .width(Length::FillPortion(1)),
-            )
-            .push(
-                // Top-aligned with the input, below the field's label.
-                Column::new()
-                    .width(Length::FillPortion(1))
-                    .push(Space::new().height(Length::Fixed(14.0)))
-                    .push(page::note(
-                        Tone::Warn,
-                        page::muted(release_warning(&address)),
-                        None,
-                    )),
+        let submit = save.clone();
+        let form = iced::widget::responsive(move |size| {
+            let field = username_field(
+                state,
+                "New username",
+                current_username.as_deref(),
+                state.ln_changing,
+                submit.clone(),
             );
+            if size.width < 760.0 {
+                Column::new()
+                    .spacing(20)
+                    .push(field)
+                    .push(release_callout(&address))
+                    .into()
+            } else {
+                let field_width = ((size.width - 40.0) * 13.0 / 24.0).min(520.0);
+                Row::new()
+                    .spacing(40)
+                    .align_y(Alignment::Start)
+                    .push(Container::new(field).width(field_width))
+                    .push(
+                        Container::new(release_callout(&address))
+                            .padding(iced::Padding::default().top(29))
+                            .width((size.width - field_width - 40.0).min(440.0)),
+                    )
+                    .into()
+            }
+        });
         let buttons = Row::new()
             .spacing(8)
             .push(action(
@@ -252,14 +351,15 @@ pub fn settings_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCube
                 (!state.ln_changing).then_some(ConnectCubeMessage::CancelEditLightningAddress),
             ));
         let mut edit = Column::new()
-            .spacing(16)
+            .spacing(24)
             .width(Length::Fill)
             .push(form)
             .push(buttons);
         if let Some(err) = state.ln_claim_error.as_deref() {
             edit = edit.push(page::status(page::Status::Bad, err));
         }
-        content = content.push(Container::new(edit).padding([16, 0]));
+        content =
+            content.push(Container::new(edit).padding(iced::Padding::default().top(4).bottom(28)));
     }
     content.push(page::rule()).into()
 }
@@ -429,7 +529,6 @@ mod tests {
             "@coincube.io",
             "robert-allen@coincube.io is available",
             USERNAME_RULES,
-            "robert@coincube.io stops working when you save.",
             "Save new address",
             "Cancel",
         ] {
@@ -453,6 +552,41 @@ mod tests {
         let same = inspect(&state);
         assert!(same.contains("This is your current username"));
         assert!(!same.has_focus(iced::advanced::widget::Id::new(SAVE_ID)));
+    }
+
+    /// Render the production edit view in both themes and at wide/minimum
+    /// desktop widths. R06A_CAPTURE_DIR optionally writes the review frames.
+    #[test]
+    fn change_form_fits_desktop_widths_and_themes() {
+        let mut state = panel(Some("alex@coincube.io"));
+        state.ln_editing = true;
+        state.ln_username_input = "alex-new".into();
+        state.ln_username_available = Some(true);
+        for (appearance, theme) in [
+            ("dark", coincube_ui::theme::Theme::dark()),
+            ("light", coincube_ui::theme::Theme::light()),
+        ] {
+            for (outer, width) in [((1440, 900), 1120), ((1024, 768), 720)] {
+                let probe = capture::inspect_wide_content(
+                    "spark-ln-address-edit",
+                    settings_view(&state),
+                    outer,
+                    appearance,
+                    theme,
+                    width,
+                );
+                assert!(probe.contains("@coincube.io"));
+                assert!(probe.contains("alex-new@coincube.io is available"));
+                for id in [COPY_ID, USERNAME_ID, SAVE_ID, CANCEL_ID] {
+                    assert!(
+                        probe.has_focus(iced::advanced::widget::Id::new(id)),
+                        "{}",
+                        id
+                    );
+                }
+                assert!(!probe.has_focus(iced::advanced::widget::Id::new(CHANGE_ID)));
+            }
+        }
     }
 
     #[test]
