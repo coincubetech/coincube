@@ -285,6 +285,9 @@ pub enum SparkSettingsMessage {
     AutoConvertOffRequested,
     /// Keep auto-convert: close the question.
     AutoConvertOffCancelled,
+    /// Show or hide the Spark wallet service's technical details on
+    /// Connections.
+    ToggleTechnicalDetails,
     /// The user typed in the Spark nickname field on Balances & conversion.
     NicknameEdited(String),
     /// Return in the nickname field, or leaving the tab with a typed name.
