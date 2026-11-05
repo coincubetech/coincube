@@ -8,10 +8,7 @@ use super::{marketplace, NavContext, SubItem};
 use crate::{
     app::{
         features,
-        menu::{
-            CubeSettingsOption, CubeSubMenu, LiquidSubMenu, Menu, SettingsOption, SparkSubMenu,
-            VaultSubMenu,
-        },
+        menu::{CubeSettingsOption, CubeSubMenu, LiquidSubMenu, Menu, SparkSubMenu, VaultSubMenu},
         settings::preferences::PreferenceChange,
         state::preferences::{BalancePrivacy, BalancePrivacyChrome},
         view::{settings::page, shared::glyph, Message},
@@ -32,8 +29,8 @@ use iced::{
     Alignment, Length,
 };
 
-/// Where a rejected device is re-registered (Cube Settings → Connections).
-pub const DEVICE_REJECTED_ROUTE: Menu =
+/// Connect live updates and device registration (Cube Settings → Connections).
+pub const CONNECT_CONNECTIONS_ROUTE: Menu =
     Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections));
 
 /// Whether `menu` is a Settings route, whichever scope it is in. The
@@ -56,7 +53,7 @@ pub const CUBE_SWITCHER_ID: &str = "tenshu.cube.switcher";
 pub const CUBE_LOCK_ID: &str = "tenshu.cube.lock.ask";
 pub const CUBE_LOCK_CANCEL_ID: &str = "tenshu.cube.lock.cancel";
 pub const SETTINGS_ID: &str = "tenshu.shell.settings";
-/// The Cube connection chip. One id in every state, so a status change while
+/// The Connect live-update chip. One id in every state, so a status change while
 /// it has focus keeps focus on it.
 pub const CONNECTION_ID: &str = "tenshu.connect.status";
 pub const MIDDLE_SCROLL_ID: &str = "tenshu.shell.middle-scroll";
@@ -238,20 +235,6 @@ pub fn balance_privacy_eye<'a, M: Clone + 'static>(
         ))
 }
 
-/// Where the connection chip leads. A rejected device goes to About, where
-/// its one fix is. Otherwise the chip opens Node settings, which only the
-/// Vault scope has (an imported Bitcoin wallet takes that scope too); a Cube
-/// without one gets Settings' first tab.
-pub fn connection_route(status: &ConnectionStatus, has_vault_scope: bool) -> Menu {
-    if matches!(status, ConnectionStatus::DeviceRejected) {
-        DEVICE_REJECTED_ROUTE
-    } else if has_vault_scope {
-        Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Node)))
-    } else {
-        Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General))
-    }
-}
-
 pub fn top_bar_with_privacy<'a>(
     ctx: &NavContext<'a>,
     privacy: Option<BalancePrivacyChrome>,
@@ -286,31 +269,26 @@ pub fn top_bar_with_privacy<'a>(
 
     let (connection, kind) = match ctx.connect_stream_status {
         ConnectionStatus::Connected => ("Connected", page::Status::Ok),
-        ConnectionStatus::Connecting => ("Checking…", page::Status::Busy),
-        ConnectionStatus::Error(_) => ("Reconnect required", page::Status::Warn),
+        ConnectionStatus::Connecting => ("Connecting…", page::Status::Busy),
+        ConnectionStatus::Error(_) => ("Reconnecting…", page::Status::Warn),
         ConnectionStatus::DeviceRejected => ("Device not recognized", page::Status::Bad),
         ConnectionStatus::Inactive => ("Not checked", page::Status::Unknown),
     };
-    let route = connection_route(
-        ctx.connect_stream_status,
-        ctx.has_vault || ctx.has_imported_bitcoin,
-    );
     let connection_chip = chip(
         CONNECTION_ID,
-        status(connection, kind),
-        Message::Menu(route),
+        status(format!("Connect: {connection}"), kind),
+        Message::Menu(CONNECT_CONNECTIONS_ROUTE),
     );
     let connection = iced::widget::tooltip(
         connection_chip,
         container(muted(
-            match ctx.connect_stream_status {
-                ConnectionStatus::DeviceRejected => {
-                    format!("{} Click to re-register.", crate::app::DEVICE_REJECTED_HINT)
-                }
-                _ => format!("Cube connection: {connection}"),
-            },
+            format!(
+                "Connect live updates\n{}\nOpen Connections.",
+                ctx.connect_stream_status.tooltip()
+            ),
             12,
         ))
+        .max_width(380)
         .padding([6, 10])
         .style(theme::container::shell_menu),
         iced::widget::tooltip::Position::Bottom,

@@ -5440,8 +5440,8 @@ impl App {
 
         // Connect realtime gRPC stream. Active once `Message::ConnectStreamReady`
         // has populated `connect_stream_config`. The subscription identity is
-        // keyed on `(device_id, grpc_url, last_seen_seq)` so reconnecting after
-        // any of those change produces a fresh stream instead of stale wiring.
+        // keyed on `(device_id, grpc_url)`; the stream tracks its event cursor
+        // without restarting the subscription for each received event.
         if let Some(cfg) = self.connect_stream_config.as_ref() {
             subscriptions.push(
                 iced::Subscription::run_with(
@@ -5775,6 +5775,14 @@ impl App {
             }
             M::Disconnected(reason) => {
                 log::warn!("[CONNECT GRPC] Stream disconnected: {}", reason);
+                // The stream reports a failure before announcing its retry.
+                // Keep that failure visible until a connection succeeds.
+                if matches!(
+                    self.cache.connect_stream_status,
+                    ConnectionStatus::Error(_) | ConnectionStatus::DeviceRejected
+                ) {
+                    return Task::none();
+                }
                 self.cache.connect_stream_status = ConnectionStatus::Connecting;
                 stream_health_dispatch(ConnectionStatus::Connecting)
             }
@@ -12449,9 +12457,12 @@ pub(crate) mod tests {
         app.cache.connect_email = Some("rejected@example.invalid".into());
         app.connect_email = Some("rejected@example.invalid".into());
         drop(app.update(Message::View(view::Message::Menu(
-            view::nav::shell::DEVICE_REJECTED_ROUTE,
+            view::nav::shell::CONNECT_CONNECTIONS_ROUTE,
         ))));
-        assert_eq!(app.panels.current, view::nav::shell::DEVICE_REJECTED_ROUTE);
+        assert_eq!(
+            app.panels.current,
+            view::nav::shell::CONNECT_CONNECTIONS_ROUTE
+        );
         assert!(
             app.update(Message::View(view::Message::Settings(
                 view::SettingsMessage::ReregisterConnectDevice,
@@ -12531,6 +12542,40 @@ pub(crate) mod tests {
         ))));
         assert_eq!(app.cache.connect_device_id, None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn connect_retry_keeps_failure_visible_until_connected() {
+        use crate::services::connect::grpc::ConnectStreamMessage as M;
+
+        let _guard = crate::app::session::test_guard();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let root = std::env::temp_dir().join(format!("connect-retry-{}", uuid::Uuid::new_v4()));
+        let mut app = local_app(&root);
+        app.cache.fiat_chain = crate::chain::ChainId::Bitcoin;
+        for failure in [
+            M::Error("opening handshake timed out".into()),
+            M::DeviceRejected("device revoked".into()),
+        ] {
+            drop(app.update(Message::ConnectStream(failure)));
+            let status = app.cache.connect_stream_status.clone();
+            drop(app.update(Message::ConnectStream(M::Disconnected("retrying".into()))));
+            assert_eq!(app.cache.connect_stream_status, status);
+            drop(app.update(Message::ConnectStream(M::Connected)));
+            assert_eq!(app.cache.connect_stream_status, ConnectionStatus::Connected);
+        }
+        drop(app.update(Message::ConnectStream(M::Disconnected(
+            "stream ended".into(),
+        ))));
+        assert_eq!(
+            app.cache.connect_stream_status,
+            ConnectionStatus::Connecting
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
