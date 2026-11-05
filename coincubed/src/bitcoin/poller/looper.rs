@@ -424,7 +424,8 @@ fn new_tip(bit: &impl BitcoinInterface, current_tip: &BlockChainTip) -> TipUpdat
 /// Whether a refused reorg's depth was measured or merely bounded.
 #[derive(Debug, Clone, Copy)]
 enum RefusedDepth {
-    /// We reached the fork point, so this is the true depth.
+    /// The true depth: either we walked to the fork point, or (when the backend handed us
+    /// the ancestor) it is how deep the refused rollback reaches; see [`rollback_depth`].
     Exact(i32),
     /// The ancestor walk stopped at its limit, so the fork is at least this deep.
     AtLeast(i32),
@@ -497,6 +498,44 @@ fn report_divergence(
     reorg_alert.store_divergence();
 }
 
+/// How far below our tip rolling back to `ancestor` reaches into recorded history: the
+/// depth of the deepest coin or spend confirmation it would undo, or zero if it undoes
+/// none.
+///
+/// This, rather than the gap down to `ancestor`, is what the depth guard measures when the
+/// backend hands us the ancestor (Electrum, Esplora). Their ancestor is the nearest block
+/// their sparse local chain still shares with the backend, not the fork point, and after a
+/// restart that chain holds only genesis and our tip. So the gap shows how little of the
+/// chain we kept, not how much the backend undid. Measured that way, a stale tip on a
+/// wallet left idle for a week read as a reorg of a thousand blocks, or of the whole chain
+/// for a wallet with no confirmed coins. It was refused, and every later poll then saw a
+/// divergence it could not resolve, so the wallet stopped syncing for good.
+///
+/// `rollback_tip` only clears confirmations above the ancestor, so this is exactly what the
+/// rollback would destroy. A backend that drops our confirmed history deeper than
+/// [`MAX_REORG_DEPTH`] is still refused.
+fn rollback_depth(
+    db_conn: &mut Box<dyn DatabaseConnection>,
+    current_tip: &BlockChainTip,
+    ancestor: &BlockChainTip,
+) -> i32 {
+    db_conn
+        .coins(&[], &[])
+        .values()
+        .flat_map(|coin| [coin.block_info, coin.spend_block])
+        .flatten()
+        .map(|block| block.height)
+        .filter(|height| *height > ancestor.height)
+        .min()
+        .map_or(0, |deepest| {
+            current_tip
+                .height
+                .saturating_sub(deepest)
+                .saturating_add(1)
+                .max(0)
+        })
+}
+
 fn updates(
     db_conn: &mut Box<dyn DatabaseConnection>,
     bit: &mut impl BitcoinInterface,
@@ -549,11 +588,10 @@ fn updates(
                 && reorg_common_ancestor.hash != current_tip.hash
             {
                 // Same depth guard as the `new_tip` path above: backends that hand us the
-                // common ancestor directly (Electrum) can misreport just as badly as those we
-                // walk back ourselves, and the rollback is equally destructive either way.
-                let depth = current_tip
-                    .height
-                    .saturating_sub(reorg_common_ancestor.height);
+                // common ancestor directly (Electrum, Esplora) can misreport just as badly as
+                // those we walk back ourselves. But their ancestor is not the fork point, so
+                // the guard measures what the rollback would undo; see `rollback_depth`.
+                let depth = rollback_depth(db_conn, &current_tip, &reorg_common_ancestor);
                 if depth > MAX_REORG_DEPTH {
                     refuse_deep_reorg(reorg_alert, &current_tip, RefusedDepth::Exact(depth));
                     return Err("Poll did not produce a coherent chain update".into());
@@ -753,7 +791,7 @@ mod tests {
     use super::*;
     use crate::{
         bitcoin::ChainAlert,
-        database::{Coin, DatabaseInterface},
+        database::{BlockInfo, Coin, DatabaseInterface},
         testutils::{DummyBitcoind, DummyDatabase},
     };
     use std::str::FromStr;
@@ -1219,6 +1257,124 @@ mod tests {
             vec![outpoint],
             "the coin survives convergence"
         );
+    }
+
+    /// An Electrum/Esplora-like backend whose next sync reports `ancestor` as the common
+    /// ancestor of a reorg, the way those backends hand it over.
+    fn backend_reporting_ancestor(ancestor: BlockChainTip) -> DummyBitcoind {
+        let mut bit = DummyBitcoind::new();
+        bit.walks_ancestors = false;
+        bit.sync_reorg_ancestor = Some(ancestor);
+        bit
+    }
+
+    fn confirmed_coin(seed: u8, height: i32, spend_height: Option<i32>) -> Coin {
+        let block = |height| BlockInfo { height, time: 0 };
+        Coin {
+            outpoint: bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([seed; 32]), 0),
+            is_immature: false,
+            amount: bitcoin::Amount::from_sat(100_000),
+            derivation_index: bip32::ChildNumber::from_normal_idx(0).unwrap(),
+            is_change: false,
+            block_info: Some(block(height)),
+            spend_txid: spend_height.map(|_| bitcoin::Txid::from_byte_array([seed ^ 0xff; 32])),
+            spend_block: spend_height.map(block),
+            is_from_self: false,
+        }
+    }
+
+    /// Poll once against `bit` with `coins` stored and our tip at `our_tip`.
+    fn poll_reported_reorg(
+        our_tip: BlockChainTip,
+        coins: Vec<Coin>,
+        mut bit: DummyBitcoind,
+    ) -> (DummyDatabase, ReorgAlertCache) {
+        let mut db = DummyDatabase::new();
+        db.connection().update_tip(&our_tip);
+        db.insert_coins(coins);
+        let alert = ReorgAlertCache::default();
+        let _ = updates(
+            &mut db.connection(),
+            &mut bit,
+            &test_descs(),
+            &secp256k1::Secp256k1::verification_only(),
+            &alert,
+        );
+        (db, alert)
+    }
+
+    /// From the field: a testnet4 Vault last synced onto a block that was then orphaned.
+    /// After a restart its Esplora backend's nearest shared block was where its last coin
+    /// confirmed, 1,058 blocks down. That gap was refused as a 1,058-block reorg, and the
+    /// wallet stopped syncing for good: it missed a confirmed spend of its only coin and
+    /// later offered that coin for a send. Nothing above the ancestor is confirmed, so the
+    /// rollback undoes nothing and must be applied.
+    #[test]
+    fn stale_tip_far_above_the_reported_ancestor_rolls_back() {
+        let our_tip = tip(156_754, 0xaa);
+        let ancestor = tip(155_696, 0xcc);
+        let coin = confirmed_coin(1, 155_696, None);
+
+        let (db, alert) =
+            poll_reported_reorg(our_tip, vec![coin], backend_reporting_ancestor(ancestor));
+
+        assert_eq!(db.rollbacks(), vec![ancestor]);
+        assert_eq!(db.coin_outpoints(), vec![coin.outpoint]);
+        assert_eq!(alert.load(), ChainAlert::None);
+    }
+
+    /// From the field: a wallet with no confirmed coins keeps only genesis below its tip,
+    /// so a stale tip was reported as a reorg of the whole chain.
+    #[test]
+    fn stale_tip_of_a_wallet_without_confirmed_coins_rolls_back_to_genesis() {
+        let our_tip = tip(158_742, 0xaa);
+        let genesis = tip(0, 0xcc);
+
+        let (db, alert) = poll_reported_reorg(our_tip, vec![], backend_reporting_ancestor(genesis));
+
+        assert_eq!(db.rollbacks(), vec![genesis]);
+        assert_eq!(alert.load(), ChainAlert::None);
+    }
+
+    /// The guard still holds where it matters: a rollback that would undo a confirmation
+    /// deeper than the limit is refused, and is measured by that confirmation, not by the
+    /// gap to the ancestor. A spend counts as much as a deposit.
+    #[test]
+    fn reported_reorg_undoing_a_deep_confirmation_is_refused() {
+        let our_tip = tip(20_000, 0xaa);
+        let ancestor = tip(17_000, 0xcc);
+        // Deposit below the ancestor (untouched), spend 1,001 blocks deep (undone).
+        let deep_spend = confirmed_coin(1, 16_000, Some(19_000));
+        // Undone too, but shallower: the deepest confirmation sets the depth.
+        let shallow = confirmed_coin(2, 19_900, None);
+
+        let (db, alert) = poll_reported_reorg(
+            our_tip,
+            vec![deep_spend, shallow],
+            backend_reporting_ancestor(ancestor),
+        );
+
+        assert!(db.rollbacks().is_empty(), "the rollback must be refused");
+        let mut outpoints = db.coin_outpoints();
+        outpoints.sort();
+        let mut expected = vec![deep_spend.outpoint, shallow.outpoint];
+        expected.sort();
+        assert_eq!(outpoints, expected, "no coin may be removed");
+        assert_eq!(alert.load(), ChainAlert::RefusedReorg(1_001));
+    }
+
+    /// A reported rollback that undoes confirmations within the limit is applied.
+    #[test]
+    fn reported_reorg_undoing_a_shallow_confirmation_rolls_back() {
+        let our_tip = tip(20_000, 0xaa);
+        let ancestor = tip(17_000, 0xcc);
+        let coin = confirmed_coin(1, 20_000 - MAX_REORG_DEPTH + 1, None);
+
+        let (db, alert) =
+            poll_reported_reorg(our_tip, vec![coin], backend_reporting_ancestor(ancestor));
+
+        assert_eq!(db.rollbacks(), vec![ancestor]);
+        assert_eq!(alert.load(), ChainAlert::None);
     }
 
     #[test]
