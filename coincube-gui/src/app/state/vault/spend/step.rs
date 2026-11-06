@@ -46,7 +46,10 @@ use crate::{
         wallet::{SyncStatus, Wallet},
     },
     daemon::{
-        model::{coin_is_owned, remaining_sequence, Coin, CreateSpendResult, SpendTx},
+        model::{
+            coin_is_owned, next_recovery_sequence, remaining_sequence, Coin, CreateSpendResult,
+            SpendTx,
+        },
         Daemon,
     },
     services::feeestimation::fee_estimation::FeeEstimator,
@@ -1947,6 +1950,11 @@ impl Step for SelectRecoveryPath {
                 })
                 .collect(),
             self.selected_path,
+            self.recovery_paths
+                .iter()
+                .filter_map(|path| path.remaining_sequence)
+                .filter(|sequence| *sequence > 1)
+                .min(),
         )
     }
 
@@ -1996,6 +2004,7 @@ pub struct RecoveryPath {
     origins: Vec<(Fingerprint, HashSet<DerivationPath>)>,
     total_amount: Amount,
     number_of_coins: usize,
+    remaining_sequence: Option<u32>,
 }
 
 fn recovery_paths(wallet: &Wallet, coins: &[Coin], tip_height: i32) -> Vec<RecoveryPath> {
@@ -2023,6 +2032,11 @@ fn recovery_paths(wallet: &Wallet, coins: &[Coin], tip_height: i32) -> Vec<Recov
 
             let (threshold, origins) = path.thresh_origins();
             RecoveryPath {
+                remaining_sequence: next_recovery_sequence(
+                    coins,
+                    tip_height.max(0) as u32,
+                    sequence,
+                ),
                 total_amount,
                 number_of_coins,
                 sequence,
@@ -2402,10 +2416,87 @@ mod tests {
         assert_eq!(paths[0].number_of_coins, 1);
         assert_eq!(paths[0].total_amount, Amount::from_sat(10_000));
         assert_eq!(paths[0].threshold, 1);
+        assert_eq!(paths[0].remaining_sequence, Some(0));
         assert_eq!(
             paths[0].origins[0].0,
             Fingerprint::from_str("8a64f2a9").unwrap()
         );
+    }
+
+    #[test]
+    fn recovery_availability_and_countdown_follow_confirmations_and_spends() {
+        let wallet = wallet();
+        let mut spent = coin(1, 10_000, Some(80));
+        spent.spend_info = Some(coincubed::commands::LCSpendInfo {
+            txid: outpoint(99).txid,
+            height: None,
+        });
+        let mut coins = vec![spent, coin(2, 20_000, None), coin(3, 30_000, Some(95))];
+        let paths = recovery_paths(&wallet, &coins, 100);
+        assert_eq!(paths[0].number_of_coins, 0);
+        assert_eq!(paths[0].remaining_sequence, Some(5));
+        // The same timing used by Overview agrees with the spend selector:
+        // a transaction can enter the next block when one block remains.
+        let paths = recovery_paths(&wallet, &coins, 104);
+        assert_eq!(paths[0].number_of_coins, 1);
+        assert_eq!(paths[0].remaining_sequence, Some(1));
+        coins.pop();
+        assert_eq!(next_recovery_sequence(&coins, 104, 10), None);
+        assert_eq!(next_recovery_sequence(&[], 104, 10), None);
+    }
+
+    #[test]
+    fn recovery_countdown_is_visible_and_updates_until_path_opens() {
+        use crate::app::view::shared::landing::capture;
+        use coincube_ui::theme;
+
+        let descriptor = DESC
+            .split('#')
+            .next()
+            .unwrap()
+            .replace("older(10)", "older(52560)");
+        let wallet = Arc::new(Wallet::new(
+            CoincubeDescriptor::from_str(&descriptor).unwrap(),
+        ));
+        let coins = [coin(1, 10_000, Some(83_906))];
+        let mut selector = SelectRecoveryPath::new(wallet, &coins, 100_000);
+        let menu = Menu::Vault(crate::app::menu::VaultSubMenu::Recovery);
+        let cache = Cache::default();
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                let mounted = capture::inspect_filled(
+                    "recovery-locked-countdown",
+                    selector.view(&menu, &cache),
+                    outer,
+                    appearance,
+                    theme,
+                    outer,
+                );
+                assert!(mounted.contains("No recovery path is currently available."));
+                assert!(mounted.contains("Recovery path available in ≈ 254 days."));
+                assert!(!mounted.contains("can recover"));
+                assert!(!mounted.contains("Next"));
+            }
+        }
+        selector.load_from_coins_and_tip_height(&coins, 100_144);
+        assert_eq!(selector.recovery_paths[0].remaining_sequence, Some(36_322));
+        selector.load_from_coins_and_tip_height(&coins, 136_465);
+        assert_eq!(selector.recovery_paths[0].number_of_coins, 1);
+        let mounted = capture::inspect_filled(
+            "recovery-open",
+            selector.view(&menu, &cache),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+            (1024, 768),
+        );
+        assert!(mounted.contains("1 recovery path is available:"));
+        assert!(mounted.contains("can recover"));
+        assert!(!mounted.contains("available in ≈"));
+        assert!(mounted.contains("Next"));
     }
 
     #[test]

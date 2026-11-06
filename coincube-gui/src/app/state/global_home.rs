@@ -846,6 +846,19 @@ impl GlobalHome {
             liquid_balance_error: self.liquid_balance_error,
             usdt_balance_loaded: self.usdt_balance_loaded,
             vault_loaded: !vault_pending,
+            recovery_available: !vault_pending
+                && self
+                    .wallet
+                    .as_ref()
+                    .and_then(|wallet| wallet.recovery_timelock())
+                    .and_then(|timelock| {
+                        crate::daemon::model::next_recovery_sequence(
+                            cache.coins(),
+                            cache.blockheight().max(0) as u32,
+                            timelock,
+                        )
+                    })
+                    .is_some_and(|sequence| sequence <= 1),
             vault_stale: cache
                 .vault_alert
                 .as_ref()

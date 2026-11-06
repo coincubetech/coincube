@@ -482,7 +482,7 @@ mod tests {
             [
                 (
                     "vault recovery",
-                    labels(recovery(&vault_menu, cache, Vec::new(), None)),
+                    labels(recovery(&vault_menu, cache, Vec::new(), None, None)),
                 ),
                 (
                     "settings recovery",
