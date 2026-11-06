@@ -432,6 +432,14 @@ pub enum Message {
     /// One message from the live Connect realtime stream subscription.
     /// Routed to the active vault PSBT modal in PR B; PR A logs only.
     ConnectStream(crate::services::connect::grpc::ConnectStreamMessage),
+    /// The wait between automatic renewal attempts is over (C1).
+    ConnectRenewalRetry,
+    /// Flips the pulsing Connect light between its bright and dim phase.
+    ConnectLightTick,
+    /// Connect, not the user, ended the session: shown as Signed out by
+    /// Connect until the user signs in or presses Not now. Sent just before
+    /// the account panel's `LogOut`.
+    ConnectSignedOutBy(crate::app::SignedOutBy),
     /// Routed to the open `KeychainSignModal` on the active PSBT, when
     /// any. Wraps the modal's internal lifecycle messages so they can
     /// be dispatched through Iced's top-level update loop.

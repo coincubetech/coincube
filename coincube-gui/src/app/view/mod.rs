@@ -599,6 +599,7 @@ fn dashboard_shell_with_info<'a>(
 
     let shell_state = nav::shell::ShellState {
         switcher_open: cache.cube_switcher_open,
+        connect_open: cache.connect_panel_open,
         lock_confirmation: cache.cube_lock_confirmation,
         backup_attention: show_backup_warning,
     };

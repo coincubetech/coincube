@@ -11,6 +11,7 @@ use super::connect_v1::{
     DevicePlatform, Ping, Pong, StreamEnvelope,
 };
 use super::interceptor::AuthInterceptor;
+use super::trouble::{self, Refusal, Trouble};
 use super::ConnectStreamMessage;
 
 #[cfg(test)]
@@ -47,12 +48,20 @@ pub fn connect_stream(
             let mut attempt: u64 = 0;
 
             loop {
-                let mut rejected = false;
+                let mut refused = None;
                 let grpc_channel =
                     tokio::time::timeout(CONNECT_TIMEOUT, super::create_channel(&config.grpc_url))
                         .await
-                        .map_err(|_| "Connect transport connection timed out".to_owned())
-                        .and_then(|result| result.map_err(|e| e.to_string()));
+                        .map_err(|_| {
+                            log::warn!("[CONNECT GRPC] Transport connection timed out");
+                            Trouble::Unreachable
+                        })
+                        .and_then(|result| {
+                            result.map_err(|e| {
+                                log::warn!("[CONNECT GRPC] Transport error: {}", e);
+                                trouble::trouble(&e)
+                            })
+                        });
                 match grpc_channel {
                     Ok(grpc_channel) => {
                         let access_token = config.tokens.read().await.access_token.clone();
@@ -234,16 +243,14 @@ pub fn connect_stream(
                                                 );
                                                 return;
                                             }
-                                            if is_device_rejection(&e) {
-                                                // Revoked mid-stream.
-                                                reject_device(&mut channel, &e).await;
-                                                rejected = true;
+                                            if let Some(refusal) = trouble::refusal(&e) {
+                                                // Refused mid-stream.
+                                                refuse_device(&mut channel, &e, refusal).await;
+                                                refused = Some(refusal);
                                                 break;
                                             }
                                             log::error!("[CONNECT GRPC] Stream error: {}", e);
-                                            let _ = channel
-                                                .send(ConnectStreamMessage::Error(e.to_string()))
-                                                .await;
+                                            report_failure(&mut channel, &e).await;
                                             break;
                                         }
                                     }
@@ -258,62 +265,52 @@ pub fn connect_stream(
                                     );
                                     return;
                                 }
-                                if is_device_rejection(&e) {
-                                    reject_device(&mut channel, &e).await;
-                                    rejected = true;
+                                if let Some(refusal) = trouble::refusal(&e) {
+                                    refuse_device(&mut channel, &e, refusal).await;
+                                    refused = Some(refusal);
                                 } else {
-                                    // Distinguish auth failures so the App
-                                    // can prompt re-login rather than
-                                    // tight-looping reconnects against the
-                                    // same expired bearer. The shared
-                                    // `Arc<RwLock<AccessTokenResponse>>`
-                                    // gets refreshed automatically by the
-                                    // REST `BackendClient` on its next
-                                    // call — but if that path doesn't fire
-                                    // soon enough, the stream stays stuck
-                                    // in this branch.
-                                    let msg = if e.code() == tonic::Code::Unauthenticated {
-                                        format!(
-                                            "Connect session expired. Sign in again to resume \
-                                         real-time updates ({}).",
-                                            e.message(),
-                                        )
-                                    } else {
-                                        e.to_string()
-                                    };
-                                    if let Err(send_err) =
-                                        channel.send(ConnectStreamMessage::Error(msg)).await
-                                    {
-                                        log::warn!(
-                                            "[CONNECT GRPC] Failed to forward connect Error: {}",
-                                            send_err
-                                        );
-                                    }
+                                    log::warn!("[CONNECT GRPC] Connect attempt failed: {}", e);
+                                    report_failure(&mut channel, &e).await;
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        if let Err(send_err) = channel
-                            .send(ConnectStreamMessage::Error(e.to_string()))
-                            .await
+                    Err(trouble) => {
+                        if let Err(send_err) =
+                            channel.send(ConnectStreamMessage::Trouble(trouble)).await
                         {
                             log::warn!(
-                                "[CONNECT GRPC] Failed to forward channel Error: {}",
+                                "[CONNECT GRPC] Failed to forward channel trouble: {}",
                                 send_err
                             );
                         }
                     }
                 }
 
-                if rejected {
-                    // No `Disconnected`: the status stays on the rejection.
-                    // Re-check the same id slowly rather than stopping: the
-                    // API maps any device-lookup error (a DB blip included)
-                    // to PERMISSION_DENIED, and such a blip must still heal
+                // No `Disconnected` after a refusal: the status stays on it
+                // instead of flipping back to "reconnecting".
+                match refused {
+                    // Removed from the account: never retried. The App signs
+                    // out, which drops this subscription.
+                    Some(Refusal::DeviceRevoked) => {
+                        std::future::pending::<()>().await;
+                    }
+                    // The App renews the registration, which normally
+                    // restarts this subscription under the new id. Re-check
+                    // in case the renewal kept the same id.
+                    Some(Refusal::DeviceUnknown) => {
+                        tokio::time::sleep(UNKNOWN_RECHECK).await;
+                        continue;
+                    }
+                    // A server without reasons maps a failed device lookup
+                    // (a DB blip included) to the same denial, so re-check
+                    // the same id slowly; such a blip must still heal
                     // without minting a new device id.
-                    tokio::time::sleep(REJECTED_RECHECK).await;
-                    continue;
+                    Some(Refusal::Unexplained) => {
+                        tokio::time::sleep(REJECTED_RECHECK).await;
+                        continue;
+                    }
+                    None => {}
                 }
 
                 // Disconnected — reconnect with exponential backoff + jitter.
@@ -392,39 +389,43 @@ fn outbound_stream(
     ))
 }
 
-/// How often a rejected device id is re-checked. Long enough not to load the
-/// API with ids that are really gone, short enough that a server-side blip
-/// misread as "not found" heals on its own.
+/// How often an unexplained refusal (a server without reasons) is
+/// re-checked. Long enough not to load the API with ids that are really gone,
+/// short enough that a server-side blip misread as "not found" heals on its
+/// own.
 const REJECTED_RECHECK: Duration = Duration::from_secs(5 * 60);
 
-/// True when the server refused the device itself rather than the
-/// connection. The API answers `PERMISSION_DENIED` for a device id that is
-/// missing, owned by another account, or revoked (`realtime_server.go`).
-/// It also maps a failed device lookup to the same code, so this is a strong
-/// signal rather than proof; the loop keeps re-checking slowly.
-fn is_device_rejection(status: &tonic::Status) -> bool {
-    status.code() == tonic::Code::PermissionDenied
+/// How long an unknown device id waits before the same id is tried again,
+/// in case the App's renewal returned it unchanged.
+const UNKNOWN_RECHECK: Duration = Duration::from_secs(60);
+
+/// Report a refusal. The caller sends no `Disconnected` after it.
+async fn refuse_device(
+    channel: &mut iced::futures::channel::mpsc::Sender<ConnectStreamMessage>,
+    status: &tonic::Status,
+    refusal: Refusal,
+) {
+    log::warn!("[CONNECT GRPC] Device refused ({:?}): {}", refusal, status);
+    if let Err(e) = channel.send(ConnectStreamMessage::Refused(refusal)).await {
+        log::warn!("[CONNECT GRPC] Failed to forward the refusal: {}", e);
+    }
 }
 
-/// Report a device rejection. The caller sends no `Disconnected` after it,
-/// so the status stays on the rejection instead of flipping back to
-/// "reconnecting", and waits `REJECTED_RECHECK` before trying again.
-async fn reject_device(
+/// Report a failure that isn't a refusal. An expired sign-in stays an
+/// `Error` so the App can tell it apart; the REST client refreshes the
+/// shared token and the next attempt uses it. Anything else is trouble:
+/// offline or Connect unreachable.
+async fn report_failure(
     channel: &mut iced::futures::channel::mpsc::Sender<ConnectStreamMessage>,
     status: &tonic::Status,
 ) {
-    log::warn!(
-        "[CONNECT GRPC] Device rejected ({}); re-checking in {:?} unless it is re-registered",
-        status,
-        REJECTED_RECHECK
-    );
-    if let Err(e) = channel
-        .send(ConnectStreamMessage::DeviceRejected(
-            status.message().to_string(),
-        ))
-        .await
-    {
-        log::warn!("[CONNECT GRPC] Failed to forward DeviceRejected: {}", e);
+    let message = if status.code() == tonic::Code::Unauthenticated {
+        ConnectStreamMessage::Error(format!("Connect session expired ({})", status.message()))
+    } else {
+        ConnectStreamMessage::Trouble(trouble::status_trouble(status))
+    };
+    if let Err(e) = channel.send(message).await {
+        log::warn!("[CONNECT GRPC] Failed to forward the failure: {}", e);
     }
 }
 
@@ -477,26 +478,6 @@ mod tests {
             Some(Body::Ping(_))
         ));
         assert_eq!(start.elapsed(), HEARTBEAT_INTERVAL);
-    }
-
-    #[test]
-    fn only_permission_denied_is_a_device_rejection() {
-        assert!(is_device_rejection(&tonic::Status::permission_denied(
-            "device not found or not owned by user"
-        )));
-        assert!(is_device_rejection(&tonic::Status::permission_denied(
-            "device revoked"
-        )));
-        // Transient or session-level failures keep the reconnect loop.
-        for status in [
-            tonic::Status::unavailable("upstream down"),
-            tonic::Status::unauthenticated("token expired"),
-            tonic::Status::aborted("connection superseded"),
-            tonic::Status::internal("failed to register connection"),
-            tonic::Status::invalid_argument("invalid device_id"),
-        ] {
-            assert!(!is_device_rejection(&status), "{:?}", status.code());
-        }
     }
 
     #[test]

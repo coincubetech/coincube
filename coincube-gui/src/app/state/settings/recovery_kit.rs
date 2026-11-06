@@ -1448,6 +1448,10 @@ fn submit_password(
         set_pw_error(rk, "This Cube isn't registered with Connect yet.");
         return Task::none();
     };
+    if let Some(held) = upload_hold(cache) {
+        set_pw_error(rk, held);
+        return Task::none();
+    }
 
     // Build descriptor blob when we have a live wallet.
     let descriptor_blob = wallet
@@ -1502,6 +1506,25 @@ fn kit_toast(title: &str, guidance: &str, detail: &str) -> String {
         detail,
     )
     .toast()
+}
+
+/// Why an upload to Connect waits (C6): Recovery Kit and Cube backups go to
+/// Connect only while this computer's live updates are On, the same promise
+/// the Connect panel makes.
+fn upload_hold(cache: &Cache) -> Option<&'static str> {
+    use crate::app::ConnectionStatus as S;
+    match cache.connect_stream_status {
+        S::Inactive | S::Connected => None,
+        S::Offline => Some("No internet connection. Back up once you’re back online."),
+        S::Connecting => Some("Connect is still starting. Back up in a moment."),
+        S::Reconnecting | S::Renewing => {
+            Some("Tenshu can’t reach Connect right now. Back up once it’s back.")
+        }
+        S::RenewFailed => Some(
+            "Couldn’t reconnect this computer to Connect. Press Try again in the Connect \
+             control, then back up.",
+        ),
+    }
 }
 
 fn set_pw_error(rk: &mut RecoveryKit, msg: &str) {
@@ -1716,6 +1739,9 @@ fn start_phone_seal(
     let Some(cube_id) = server_cube_id else {
         return fail_phone_preflight(rk, mnemonic, "This Cube isn't registered with Connect yet.");
     };
+    if let Some(held) = upload_hold(cache) {
+        return fail_phone_preflight(rk, mnemonic, held);
+    }
     let Some((cube_meta, cube_uuid, network)) = gather_cube_meta(cache, local_cube_id) else {
         return fail_phone_preflight(rk, mnemonic, "Failed to read settings file.");
     };

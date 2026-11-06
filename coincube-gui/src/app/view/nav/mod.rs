@@ -28,7 +28,7 @@ use coincube_ui::{
     widget::{Button, Column, ColumnExt, Element, Row},
 };
 use iced::{
-    widget::{column, container, row, scrollable, text::Wrapping, Space},
+    widget::{column, container, row, scrollable, text::Wrapping},
     Alignment, Length,
 };
 
@@ -166,17 +166,10 @@ fn identity_block<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
         .push(avatar_button);
 
     if !ctx.cube_name.is_empty() {
-        // Cube name + (optional) Connect status dot. We render the dot
-        // inline with the name rather than on its own row so the
-        // header height doesn't grow for users on local-daemon cubes.
         let name = text::p2_bold(ctx.cube_name)
             .style(theme::text::primary)
             .align_x(Alignment::Center);
-        col = col.push(
-            row![name, connect_status_dot(ctx.connect_stream_status),]
-                .spacing(4)
-                .align_y(Alignment::Center),
-        );
+        col = col.push(name);
     }
 
     if let Some(addr) = ctx.lightning_address {
@@ -220,51 +213,6 @@ fn theme_toggle_row<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
         .into()
 }
 
-/// Small 8px colored dot showing the Connect realtime-stream health.
-/// `Inactive` collapses to an empty `Space` so users without Connect
-/// (local-daemon installs, fresh launches before `ConnectStreamReady`)
-/// don't see a confusing red dot in their sidebar.
-fn connect_status_dot<'a>(status: &'a crate::app::ConnectionStatus) -> Element<'a, Message> {
-    use iced::widget::{container, tooltip as iced_tooltip};
-    if !status.is_visible() {
-        return Space::new().width(Length::Fixed(0.0)).into();
-    }
-    let dot_color = match status {
-        crate::app::ConnectionStatus::Connected => color::GREEN,
-        crate::app::ConnectionStatus::Connecting => color::ORANGE,
-        crate::app::ConnectionStatus::Error(_) | crate::app::ConnectionStatus::DeviceRejected => {
-            color::RED
-        }
-        // Unreachable due to the early-return above, but keep the
-        // match exhaustive so adding a new variant produces a compile
-        // error instead of a silent default.
-        crate::app::ConnectionStatus::Inactive => color::GREY_3,
-    };
-    let dot = container(
-        Space::new()
-            .width(Length::Fixed(0.0))
-            .height(Length::Fixed(0.0)),
-    )
-    .width(Length::Fixed(8.0))
-    .height(Length::Fixed(8.0))
-    .style(
-        move |_t: &coincube_ui::theme::Theme| iced::widget::container::Style {
-            background: Some(iced::Background::Color(dot_color)),
-            border: iced::Border {
-                radius: 4.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-    );
-    iced_tooltip(
-        dot,
-        coincube_ui::component::text::caption(status.tooltip()),
-        iced_tooltip::Position::Bottom,
-    )
-    .into()
-}
-
 /// Ambient data both rails need while rendering.
 pub struct NavContext<'a> {
     pub has_vault: bool,
@@ -302,11 +250,37 @@ pub struct NavContext<'a> {
     /// under the cube name in [`identity_block`]. `Inactive` renders
     /// no dot (e.g. local-daemon installs without Connect).
     pub connect_stream_status: &'a crate::app::ConnectionStatus,
+    /// The Connect control's chrome: its panel, signed-out notice, light
+    /// phase and the Vault line.
+    pub connect: ConnectChrome<'a>,
     /// Account-scoped Bitcoin Blake2b grant, mirrored from `/connect/features`
     /// into [`crate::app::cache::Cache::btcb2_server_enabled`].
     pub btcb2_server_enabled: bool,
     /// Whether a Bitcoin Blake2b Cube already reuses this Cube's descriptor.
     pub btcb2_already_claimed: bool,
+}
+
+/// What the Connect control and the sidebar's Vault item need beyond the
+/// account and stream status.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConnectChrome<'a> {
+    pub panel_open: bool,
+    pub signed_out_by: Option<crate::app::SignedOutBy>,
+    /// The pulsing light is in its dim phase.
+    pub light_dim: bool,
+    /// The Vault's alert while its recent polls fail.
+    pub vault_alert: Option<&'a crate::app::VaultAlert>,
+}
+
+impl<'a> ConnectChrome<'a> {
+    pub fn from_cache(cache: &'a crate::app::cache::Cache) -> Self {
+        Self {
+            panel_open: cache.connect_panel_open,
+            signed_out_by: cache.connect_signed_out_by,
+            light_dim: cache.connect_light_dim && !cache.reduce_motion,
+            vault_alert: cache.vault_alert.as_ref(),
+        }
+    }
 }
 
 impl<'a> NavContext<'a> {
@@ -332,6 +306,7 @@ impl<'a> NavContext<'a> {
             connect_authenticated: cache.sidebar_connect_signed_in,
             connect_email: cache.connect_email.as_deref(),
             connect_stream_status: &cache.connect_stream_status,
+            connect: ConnectChrome::from_cache(cache),
         }
     }
 

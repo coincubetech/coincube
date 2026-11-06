@@ -92,6 +92,28 @@ pub fn group<'a, M: 'a>(
         .into()
 }
 
+/// A group whose heading carries one action on its right (`.gtop .meta`):
+/// a link that belongs to the whole group, so its rows keep only their
+/// status on the right.
+pub fn group_with_action<'a, M: 'a>(
+    title: impl Into<Cow<'a, str>>,
+    action: impl Into<Element<'a, M>>,
+    content: impl Into<Element<'a, M>>,
+) -> Element<'a, M> {
+    Column::new()
+        .width(Length::Fill)
+        .push(Space::new().height(Length::Fixed(GROUP_GAP)))
+        .push(
+            Row::new()
+                .align_y(Alignment::Center)
+                .push(heading(title).width(Length::Fill))
+                .push(action),
+        )
+        .push(Space::new().height(Length::Fixed(12.0)))
+        .push(content)
+        .into()
+}
+
 /// Ruled rows (`.rows`): a rule above the first row; every row draws the rule
 /// below itself.
 pub fn rows<'a, M: 'a>(items: impl IntoIterator<Item = Element<'a, M>>) -> Element<'a, M> {

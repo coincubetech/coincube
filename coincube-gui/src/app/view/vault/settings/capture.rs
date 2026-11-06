@@ -363,6 +363,7 @@ fn fixture_nav_context(cache: &Cache) -> crate::app::view::nav::NavContext<'_> {
         connect_authenticated: cache.sidebar_connect_signed_in,
         connect_email: cache.connect_email.as_deref(),
         connect_stream_status: &cache.connect_stream_status,
+        connect: Default::default(),
     }
 }
 

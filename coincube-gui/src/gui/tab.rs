@@ -953,6 +953,8 @@ pub struct Tab {
     /// Persisted theme mode — carried across state transitions so new App
     /// caches inherit the correct mode immediately.
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
+    /// The effective reduce-motion preference, carried into new App caches.
+    pub reduce_motion: bool,
     pub balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
     unlock_motion: Option<Instant>,
     /// Safe, owned Launcher geometry retained only through this unlock.
@@ -1036,6 +1038,7 @@ impl Tab {
             id,
             state,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+            reduce_motion: false,
             balance_privacy: None,
             unlock_motion: None,
             unlock_floor: None,
@@ -1082,6 +1085,15 @@ impl Tab {
         }
     }
 
+    /// The effective reduce-motion preference for an open Cube's chrome (the
+    /// Connect light's pulse).
+    pub fn set_reduce_motion(&mut self, reduce: bool) {
+        self.reduce_motion = reduce;
+        if let State::App(app) = &mut self.state {
+            app.cache_mut().reduce_motion = reduce;
+        }
+    }
+
     /// Feed the current native motion observation to a retained Launcher.
     pub fn set_system_reduces_motion(&mut self, observed: Option<bool>) {
         self.system_reduces_motion = observed;
@@ -1108,6 +1120,7 @@ impl Tab {
         match &mut self.state {
             State::App(app) => {
                 app.cache_mut().theme_mode = mode;
+                app.cache_mut().reduce_motion = self.reduce_motion;
                 app.cache_mut().balance_privacy = self.balance_privacy;
             }
             State::Home(home) => {
@@ -5974,6 +5987,7 @@ pub fn create_app_with_remote_backend(
             connect_transport_key: None,
             cube_encryption_key: None,
             cube_switcher_open: false,
+            connect_panel_open: false,
             cube_lock_confirmation: false,
             network,
             fiat_chain: cube_settings.network,
@@ -6044,6 +6058,8 @@ pub fn create_app_with_remote_backend(
             spark_notice: None,
             has_p2p: false, // Set later by App::new based on mnemonic availability
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+            reduce_motion: false,
+            connect_light_dim: false,
             balance_privacy: None,
             btc_usd_price: None,
             show_direction_badges: true,
@@ -6067,6 +6083,9 @@ pub fn create_app_with_remote_backend(
             connect_grpc_url: None,
             connect_tokens: Some(remote_backend.inner_client().auth.clone()),
             connect_stream_status: crate::app::ConnectionStatus::default(),
+            connect_signed_out_by: None,
+            vault_alert: None,
+            vault_via_connect: false,
             connect_device_id: None,
             connect_email: Some(remote_backend.user_email().to_string()),
         },

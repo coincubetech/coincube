@@ -310,6 +310,7 @@ pub fn vault_overview_view<'a>(
     display_mode: DisplayMode,
     mask_amounts: bool,
     psbts_waiting: usize,
+    alert: Option<&crate::app::VaultAlert>,
 ) -> Element<'a, Message> {
     // Show external-unconfirmed coins as part of the headline balance
     // (matching the Cube → Overview Vault card). The per-transaction
@@ -320,7 +321,12 @@ pub fn vault_overview_view<'a>(
     // headline.
     let total_balance = *balance + *unconfirmed_balance;
     let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(total_balance));
-    let sync = balance_sync_state(sync_status, total_balance, awaiting_rescan_date);
+    let mut sync = balance_sync_state(sync_status, total_balance, awaiting_rescan_date);
+    // The Vault's alert names why it stopped and when its figures are from,
+    // in the same words as the Connect panel and Vault › Connections.
+    if let (Some(alert), SyncState::Stale { message }) = (alert, &mut sync) {
+        *message = format!("{} · {}. {}", alert.word(), alert.title(), alert.detail());
+    }
     let history_unknown = matches!(sync, SyncState::Unknown { .. });
     let primary = Figure::new(total_balance.to_formatted_string_with_unit(bitcoin_unit))
         .unit(bitcoin_unit.label());
@@ -834,6 +840,7 @@ mod capture_tests {
                                 DisplayMode::BitcoinNative,
                                 false,
                                 1,
+                                None,
                             )
                         },
                         || None,
@@ -867,6 +874,7 @@ mod capture_tests {
                 DisplayMode::BitcoinNative,
                 true,
                 0,
+                None,
             ),
             (1024, 768),
             "dark",
@@ -911,6 +919,7 @@ mod capture_tests {
                             DisplayMode::BitcoinNative,
                             false,
                             0,
+                            None,
                         )
                     };
                 }
@@ -988,6 +997,7 @@ mod capture_tests {
                 DisplayMode::BitcoinNative,
                 false,
                 2,
+                None,
             )
         };
         let mounted = capture::inspect(

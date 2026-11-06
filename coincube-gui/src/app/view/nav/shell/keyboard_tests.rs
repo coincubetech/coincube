@@ -29,6 +29,7 @@ fn fixture_context() -> NavContext<'static> {
         connect_authenticated: false,
         connect_email: None,
         connect_stream_status: &STATUS,
+        connect: Default::default(),
         btcb2_server_enabled: false,
         btcb2_already_claimed: false,
     }
@@ -241,24 +242,17 @@ fn top_bar_right_group_is_eye_then_chips_then_app_preferences() {
         &renderer,
         &layout::Limits::new(Size::ZERO, Size::new(1024.0, TOP_BAR_HEIGHT)),
     );
-    let order = [
-        BALANCE_PRIVACY_ID,
-        "tenshu.connect.sign-in",
-        CONNECTION_ID,
-        APP_PREFERENCES_ID,
-    ]
-    .map(Id::new);
+    let order = [BALANCE_PRIVACY_ID, CONNECTION_ID, APP_PREFERENCES_ID].map(Id::new);
     let bounds = focus_snapshot(&mut element, &mut tree, &node, &renderer).bounds;
     let at = |target: &Id| bounds.iter().find(|(id, _)| id == target).unwrap().1;
     let x = |target: &Id| at(target).x;
     // The eye and App preferences are the shared 32px icon controls.
-    for icon in [&order[0], &order[3]] {
+    for icon in [&order[0], &order[2]] {
         assert_eq!((at(icon).width, at(icon).height), (32.0, 32.0));
     }
-    // The chips are the design's 32px `.chip`: 30px inside its 1px border.
-    for chip in [&order[1], &order[2]] {
-        assert_eq!(at(chip).height, 30.0, "{chip:?}");
-    }
+    // The Connect control is the design's 32px `.chip`: 30px inside its
+    // 1px border.
+    assert_eq!(at(&order[1]).height, 30.0);
     assert!(
         order.windows(2).all(|pair| x(&pair[0]) < x(&pair[1])),
         "right group order: {:?}",
@@ -415,7 +409,6 @@ fn shell_actions_follow_visual_order_and_dispatch_keyboard_once() {
     );
     for expected in [
         LAUNCHER_RETURN_ID,
-        "tenshu.connect.sign-in",
         CONNECTION_ID,
         APP_PREFERENCES_ID,
         CUBE_SWITCHER_ID,
@@ -487,7 +480,7 @@ fn shell_actions_follow_visual_order_and_dispatch_keyboard_once() {
         ),
         Some(Id::new(APP_PREFERENCES_ID))
     );
-    for expected in [CONNECTION_ID, "tenshu.connect.sign-in"] {
+    for expected in [CONNECTION_ID] {
         operate(
             &mut element,
             &mut tree,
@@ -522,7 +515,7 @@ fn shell_actions_follow_visual_order_and_dispatch_keyboard_once() {
 }
 
 #[test]
-fn signed_in_connect_chip_opens_account_sheet_intent() {
+fn signed_in_connect_control_opens_its_panel() {
     load_fonts();
     let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
         coincube_ui::font::REGULAR,
@@ -558,7 +551,7 @@ fn signed_in_connect_chip_opens_account_sheet_intent() {
             &renderer,
             focusable::find_focused(),
         ),
-        Some(Id::new("tenshu.connect.account"))
+        Some(Id::new(CONNECTION_ID))
     );
     assert!(matches!(
         send(
@@ -571,13 +564,12 @@ fn signed_in_connect_chip_opens_account_sheet_intent() {
             size,
         )
         .as_slice(),
-        [Message::OpenConnectSignIn]
+        [Message::ToggleConnectPanel]
     ));
 }
 
-/// The connection chip is the third control (after the brand and the account
-/// chip) in every state, under one id. Every state opens Cube Settings →
-/// Connections, which owns live updates and device registration.
+/// The Connect control is the second control (after the brand) in every
+/// state, under one id, and opens its panel while signed in.
 #[test]
 fn connection_chip_routes_to_cube_connections_in_every_state() {
     load_fonts();
@@ -587,14 +579,14 @@ fn connection_chip_routes_to_cube_connections_in_every_state() {
         Some("tiny-skia"),
     ))
     .unwrap();
-    static REJECTED: ConnectionStatus = ConnectionStatus::DeviceRejected;
+    static FAILED: ConnectionStatus = ConnectionStatus::RenewFailed;
     static CONNECTING: ConnectionStatus = ConnectionStatus::Connecting;
     static CONNECTED: ConnectionStatus = ConnectionStatus::Connected;
-    static ERROR: ConnectionStatus = ConnectionStatus::Error(String::new());
+    static OFFLINE: ConnectionStatus = ConnectionStatus::Offline;
     static INACTIVE: ConnectionStatus = ConnectionStatus::Inactive;
     let size = Size::new(1024.0, 768.0);
-    // Focus after brand and account chip: the third shell control.
-    let third_focus = |status: &'static ConnectionStatus, has_vault, has_imported_bitcoin| {
+    // Focus after the brand: the Connect control is the second shell control.
+    let second_focus = |status: &'static ConnectionStatus, has_vault, has_imported_bitcoin| {
         let mut ctx = fixture_context();
         ctx.connect_authenticated = true;
         ctx.connect_email = Some("shell@example.invalid");
@@ -608,7 +600,7 @@ fn connection_chip_routes_to_cube_connections_in_every_state() {
             &renderer,
             &layout::Limits::new(Size::ZERO, size),
         );
-        for _ in 0..3 {
+        for _ in 0..2 {
             operate(
                 &mut element,
                 &mut tree,
@@ -636,13 +628,12 @@ fn connection_chip_routes_to_cube_connections_in_every_state() {
         (focused, sent)
     };
 
-    let connections = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Connections));
-    for status in [&REJECTED, &CONNECTING, &CONNECTED, &ERROR, &INACTIVE] {
+    for status in [&FAILED, &CONNECTING, &CONNECTED, &OFFLINE, &INACTIVE] {
         for (has_vault, has_imported_bitcoin) in [(true, false), (false, true), (false, false)] {
-            let (focused, sent) = third_focus(status, has_vault, has_imported_bitcoin);
+            let (focused, sent) = second_focus(status, has_vault, has_imported_bitcoin);
             assert_eq!(focused, Some(Id::new(CONNECTION_ID)));
             assert!(
-                matches!(sent.as_slice(), [Message::Menu(menu)] if menu == &connections),
+                matches!(sent.as_slice(), [Message::ToggleConnectPanel]),
                 "{:?} vault={} imported={}: {:?}",
                 status,
                 has_vault,
@@ -658,11 +649,13 @@ fn connection_chip_routes_to_cube_connections_in_every_state() {
 #[test]
 fn connection_chip_fits_the_shell_in_every_state() {
     use crate::app::view::shared::landing::capture;
-    static STATES: [ConnectionStatus; 5] = [
+    static STATES: [ConnectionStatus; 7] = [
         ConnectionStatus::Connected,
         ConnectionStatus::Connecting,
-        ConnectionStatus::Error(String::new()),
-        ConnectionStatus::DeviceRejected,
+        ConnectionStatus::Reconnecting,
+        ConnectionStatus::Renewing,
+        ConnectionStatus::Offline,
+        ConnectionStatus::RenewFailed,
         ConnectionStatus::Inactive,
     ];
     for (appearance, palette) in [
@@ -688,7 +681,7 @@ fn connection_chip_fits_the_shell_in_every_state() {
                     appearance,
                     palette,
                 );
-                assert!(inspection.contains("Connect:"));
+                assert!(inspection.contains("Connect"));
                 let bounds = |id: &'static str| {
                     inspection
                         .focus
@@ -697,10 +690,8 @@ fn connection_chip_fits_the_shell_in_every_state() {
                         .unwrap()
                         .1
                 };
-                let account = bounds("tenshu.connect.account");
                 let connection = bounds(CONNECTION_ID);
                 let preferences = bounds(APP_PREFERENCES_ID);
-                assert!(account.x + account.width <= connection.x);
                 assert!(connection.x + connection.width <= preferences.x);
                 assert!(connection.height <= TOP_BAR_HEIGHT);
             }
@@ -757,9 +748,17 @@ fn connection_chip_keeps_focus_across_a_status_change() {
 fn shell_escape_prefers_review_then_switcher() {
     let all = ShellState {
         switcher_open: true,
+        connect_open: false,
         lock_confirmation: true,
         backup_attention: false,
     };
+    assert!(matches!(
+        escape_intent(ShellState {
+            connect_open: true,
+            ..all
+        }),
+        Some(Message::CloseConnectPanel)
+    ));
     assert!(matches!(escape_intent(all), Some(Message::CancelCubeLock)));
     assert!(matches!(
         escape_intent(ShellState {
@@ -1552,4 +1551,155 @@ fn bounds_of(bounds: &[(Id, Rectangle)], id: &'static str) -> Rectangle {
         .iter()
         .find_map(|(other, b)| (*other == Id::new(id)).then_some(*b))
         .unwrap_or_else(|| panic!("{} has no focus target", id))
+}
+
+/// The Connect panel in every state the design table names, with its exact
+/// labels. With `R06A_CAPTURE_DIR` set the captures are saved for review.
+#[test]
+fn connect_panel_says_what_the_state_table_says() {
+    use crate::app::view::shared::landing::capture;
+    use crate::app::{SignedOutBy, VaultAlert, VaultStall};
+    static CONNECTED: ConnectionStatus = ConnectionStatus::Connected;
+    static OFFLINE: ConnectionStatus = ConnectionStatus::Offline;
+    static RECONNECTING: ConnectionStatus = ConnectionStatus::Reconnecting;
+    static RENEWING: ConnectionStatus = ConnectionStatus::Renewing;
+    static FAILED: ConnectionStatus = ConnectionStatus::RenewFailed;
+    static INACTIVE: ConnectionStatus = ConnectionStatus::Inactive;
+    let offline_vault = VaultAlert {
+        stall: VaultStall::Offline,
+        via_connect: true,
+        needs_sign_in: false,
+        last_synced: Some("14:02".into()),
+        block: 974_600,
+    };
+    let signed_out_vault = VaultAlert {
+        stall: VaultStall::NotUpdating,
+        via_connect: true,
+        needs_sign_in: true,
+        last_synced: Some("09:14".into()),
+        block: 974_571,
+    };
+    struct Case<'a> {
+        name: &'static str,
+        signed_in: bool,
+        status: &'static ConnectionStatus,
+        signed_out_by: Option<SignedOutBy>,
+        vault: Option<&'a VaultAlert>,
+        says: &'static [&'static str],
+        never: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            name: "healthy",
+            signed_in: true,
+            status: &CONNECTED,
+            signed_out_by: None,
+            vault: None,
+            says: &[
+                "Signed in to COINCUBE | Connect",
+                "Live updates on this computer",
+                "On",
+                "Connect account",
+                "Connections settings",
+            ],
+            never: &["Vault", "Try again"],
+        },
+        Case {
+            name: "offline",
+            signed_in: true,
+            status: &OFFLINE,
+            signed_out_by: None,
+            vault: Some(&offline_vault),
+            says: &[
+                "Offline",
+                "No internet connection.",
+                "Family savings",
+                "The balance shown is from 14:02.",
+            ],
+            never: &["Try again"],
+        },
+        Case {
+            name: "unreachable",
+            signed_in: true,
+            status: &RECONNECTING,
+            signed_out_by: None,
+            vault: None,
+            says: &["Reconnecting…", "Tenshu can’t reach Connect right now"],
+            never: &["Try again", "registration"],
+        },
+        Case {
+            name: "renewing",
+            signed_in: true,
+            status: &RENEWING,
+            signed_out_by: None,
+            vault: None,
+            says: &["Reconnecting…", "Nothing to do."],
+            never: &["Try again", "Device ID"],
+        },
+        Case {
+            name: "failed",
+            signed_in: true,
+            status: &FAILED,
+            signed_out_by: None,
+            vault: None,
+            says: &[
+                "Offline",
+                "Couldn’t reconnect this computer",
+                "Try again",
+                "Connections settings",
+            ],
+            never: &["Paused", "Re-register"],
+        },
+        Case {
+            name: "signed-out-by-connect",
+            signed_in: false,
+            status: &INACTIVE,
+            signed_out_by: Some(SignedOutBy::ComputerRemoved),
+            vault: Some(&signed_out_vault),
+            says: &[
+                "Signed out of COINCUBE | Connect",
+                "This computer was removed from your Connect account",
+                "Sign in",
+                "Not now",
+                "Not updating",
+                "which needs you signed in",
+            ],
+            never: &["unlocked", "Connections settings"],
+        },
+    ];
+    for case in &cases {
+        for (appearance, palette) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            let mut ctx = fixture_context();
+            ctx.connect_authenticated = case.signed_in;
+            ctx.connect_email = case.signed_in.then_some("alex@example.test");
+            ctx.connect_stream_status = case.status;
+            ctx.connect.signed_out_by = case.signed_out_by;
+            ctx.connect.vault_alert = case.vault;
+            let bar = capture::inspect_filled(
+                &format!("connect-control-{}", case.name),
+                top_bar_with_privacy(&ctx, None),
+                (1024, 65),
+                appearance,
+                palette,
+                (1024, 65),
+            );
+            assert!(bar.contains("Connect"), "{}", case.name);
+            let panel = capture::inspect_full_window(
+                &format!("connect-panel-{}", case.name),
+                container(connect_panel(&ctx)).padding(16).into(),
+                (392, 460),
+                appearance,
+                palette,
+            );
+            for label in case.says {
+                assert!(panel.contains(label), "{}: {}", case.name, label);
+            }
+            for label in case.never {
+                assert!(!panel.contains(label), "{}: {}", case.name, label);
+            }
+        }
+    }
 }

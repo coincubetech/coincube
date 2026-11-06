@@ -12,7 +12,7 @@ use crate::{
         settings::preferences::PreferenceChange,
         state::preferences::{BalancePrivacy, BalancePrivacyChrome},
         view::{settings::page, shared::glyph, Message},
-        ConnectionStatus,
+        ConnectLight, ConnectionStatus,
     },
     chain::{ChainId, ChainIdExt},
 };
@@ -53,9 +53,14 @@ pub const CUBE_SWITCHER_ID: &str = "tenshu.cube.switcher";
 pub const CUBE_LOCK_ID: &str = "tenshu.cube.lock.ask";
 pub const CUBE_LOCK_CANCEL_ID: &str = "tenshu.cube.lock.cancel";
 pub const SETTINGS_ID: &str = "tenshu.shell.settings";
-/// The Connect live-update chip. One id in every state, so a status change while
-/// it has focus keeps focus on it.
+/// The Connect control. One id in every state, so a status change while it
+/// has focus keeps focus on it.
 pub const CONNECTION_ID: &str = "tenshu.connect.status";
+pub const CONNECT_PANEL_ACCOUNT_ID: &str = "tenshu.connect.panel.account";
+pub const CONNECT_PANEL_SETTINGS_ID: &str = "tenshu.connect.panel.settings";
+pub const CONNECT_PANEL_SIGN_IN_ID: &str = "tenshu.connect.panel.sign-in";
+pub const CONNECT_PANEL_NOT_NOW_ID: &str = "tenshu.connect.panel.not-now";
+pub const CONNECT_PANEL_TRY_AGAIN_ID: &str = "tenshu.connect.panel.try-again";
 pub const MIDDLE_SCROLL_ID: &str = "tenshu.shell.middle-scroll";
 pub const BALANCE_PRIVACY_ID: &str = "tenshu.balance-privacy.toggle";
 pub const APP_PREFERENCES_ID: &str = "tenshu.shell.app-preferences";
@@ -63,7 +68,9 @@ pub const APP_PREFERENCES_ID: &str = "tenshu.shell.app-preferences";
 /// Innermost shell dismissal. The GUI owns Escape dispatch; this helper only
 /// identifies the existing harmless intent for the currently open disclosure.
 pub fn escape_intent(state: ShellState) -> Option<Message> {
-    if state.lock_confirmation {
+    if state.connect_open {
+        Some(Message::CloseConnectPanel)
+    } else if state.lock_confirmation {
         Some(Message::CancelCubeLock)
     } else if state.switcher_open {
         Some(Message::ToggleCubeSwitcher)
@@ -75,6 +82,8 @@ pub fn escape_intent(state: ShellState) -> Option<Message> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ShellState {
     pub switcher_open: bool,
+    /// The Connect control's panel is open.
+    pub connect_open: bool,
     pub lock_confirmation: bool,
     pub backup_attention: bool,
 }
@@ -150,42 +159,6 @@ fn chip_button(
     style
 }
 
-/// A chip's content: the Settings status glyph, then 13px text, both in the
-/// status tone (`.chip .s-ok`, `.s-busy`, ...).
-fn status<'a>(label: impl Into<String>, kind: page::Status) -> Element<'a, Message> {
-    let (glyph, tone) = page::status_glyph(kind);
-    let style = move |t: &theme::Theme| theme::tenshu::text::tone(t, tone);
-    row![
-        glyph.size(16).style(style),
-        text(label.into()).size(13).style(style)
-    ]
-    .spacing(6)
-    .align_y(Alignment::Center)
-    .into()
-}
-
-/// A top-bar chip: a 32px, 8px-radius pressable status (`.chip`).
-fn chip<'a>(
-    id: &'static str,
-    content: Element<'a, Message>,
-    on_press: Message,
-) -> Element<'a, Message> {
-    container(
-        Action::new(
-            id,
-            // Inside the 1px border; a button keeps content at its top.
-            container(content).center_y(Length::Fixed(CHIP_HEIGHT - 2.0)),
-            Message::FocusAction,
-        )
-        .padding([0, 11])
-        .style(chip_button)
-        .focus_radius(CHIP_RADIUS)
-        .on_press(on_press),
-    )
-    .style(chip_style)
-    .into()
-}
-
 /// `.chip`: the shell's chip surface with the design's 8px corners.
 fn chip_style(t: &theme::Theme) -> iced::widget::container::Style {
     let mut style = theme::container::shell_chip(t);
@@ -239,61 +212,7 @@ pub fn top_bar_with_privacy<'a>(
     ctx: &NavContext<'a>,
     privacy: Option<BalancePrivacyChrome>,
 ) -> Element<'a, Message> {
-    let account = if ctx.connect_authenticated {
-        chip(
-            "tenshu.connect.account",
-            status("Signed in", page::Status::Ok),
-            Message::OpenConnectSignIn,
-        )
-    } else {
-        chip(
-            "tenshu.connect.sign-in",
-            status("Signed out", page::Status::Unknown),
-            Message::OpenConnectSignIn,
-        )
-    };
-    let account_name = if ctx.connect_authenticated {
-        ctx.connect_email
-            .map(|email| format!("Account: Signed in as {email}"))
-            .unwrap_or_else(|| "Account: Signed in".to_owned())
-    } else {
-        "Account: Signed out · Sign in".to_owned()
-    };
-    let account = iced::widget::tooltip(
-        account,
-        container(muted(account_name, 12))
-            .padding([6, 10])
-            .style(theme::container::shell_menu),
-        iced::widget::tooltip::Position::Bottom,
-    );
-
-    let (connection, kind) = match ctx.connect_stream_status {
-        ConnectionStatus::Connected => ("Connected", page::Status::Ok),
-        ConnectionStatus::Connecting => ("Connecting…", page::Status::Busy),
-        ConnectionStatus::Error(_) => ("Reconnecting…", page::Status::Warn),
-        ConnectionStatus::DeviceRejected => ("Device not recognized", page::Status::Bad),
-        ConnectionStatus::Inactive => ("Not checked", page::Status::Unknown),
-    };
-    let connection_chip = chip(
-        CONNECTION_ID,
-        status(format!("Connect: {connection}"), kind),
-        Message::Menu(CONNECT_CONNECTIONS_ROUTE),
-    );
-    let connection = iced::widget::tooltip(
-        connection_chip,
-        container(muted(
-            format!(
-                "Connect live updates\n{}\nOpen Connections.",
-                ctx.connect_stream_status.tooltip()
-            ),
-            12,
-        ))
-        .max_width(380)
-        .padding([6, 10])
-        .style(theme::container::shell_menu),
-        iced::widget::tooltip::Position::Bottom,
-    );
-
+    let connect = connect_control(ctx);
     let top: Element<'a, Message> = bar::top_bar(
         bar::brand_action(
             LAUNCHER_RETURN_ID,
@@ -314,11 +233,420 @@ pub fn top_bar_with_privacy<'a>(
             Message::ChangeDevicePreference,
         )
     }))
-    .chip(account)
-    .chip(connection)
+    .chip(connect)
     .into();
     // `.top { border-bottom: 1px }`, under the bar as on the Launcher.
-    column![top, rule::horizontal(1)].into()
+    let mut bar = column![top, rule::horizontal(1)];
+    // The panel hangs from the control's trailing edge, clear of App
+    // preferences, and covers the page rather than pushing it down.
+    if ctx.connect.panel_open {
+        bar = bar.push(
+            Floating::new(
+                container(connect_panel(ctx)).padding(iced::Padding::default().right(64.0)),
+            )
+            .align_x(iced::alignment::Horizontal::Right)
+            .gap(6.0)
+            .on_dismiss(Message::CloseConnectPanel),
+        );
+    }
+    bar.into()
+}
+
+/// The Connect control's light colours (`--alert`, `--amber`): stronger than
+/// the text tones, so a 9px dot reads on the rail.
+fn light_color(t: &theme::Theme, light: ConnectLight) -> iced::Color {
+    let dark = t.mode == coincube_ui::theme::palette::ThemeMode::Dark;
+    match light {
+        ConnectLight::On | ConnectLight::Connecting => t.colors.shell.good,
+        ConnectLight::Reconnecting => {
+            if dark {
+                iced::color!(0xf3b465)
+            } else {
+                iced::color!(0xc27400)
+            }
+        }
+        ConnectLight::NeedsYou => {
+            if dark {
+                iced::color!(0xf0604d)
+            } else {
+                iced::color!(0xb3261e)
+            }
+        }
+        ConnectLight::Offline => t.colors.shell.muted,
+    }
+}
+
+/// The status light on the account glyph: a 9px dot ringed in the rail
+/// colour, or a grey ring when offline. `dim` is the pulse's low phase.
+fn status_light<'a>(light: ConnectLight, dim: bool) -> Element<'a, Message> {
+    let pulses = matches!(light, ConnectLight::Connecting | ConnectLight::Reconnecting);
+    let alpha = if pulses && dim { 0.3 } else { 1.0 };
+    container(Space::new())
+        .width(Length::Fixed(9.0))
+        .height(Length::Fixed(9.0))
+        .style(move |t: &theme::Theme| {
+            let colour = light_color(t, light);
+            let (background, border) = if light == ConnectLight::Offline {
+                (
+                    t.colors.shell.rail,
+                    iced::Border {
+                        color: colour,
+                        width: 1.5,
+                        radius: 4.5.into(),
+                    },
+                )
+            } else {
+                (
+                    iced::Color { a: alpha, ..colour },
+                    iced::Border {
+                        color: t.colors.shell.rail,
+                        width: 1.5,
+                        radius: 4.5.into(),
+                    },
+                )
+            };
+            iced::widget::container::Style {
+                background: Some(background.into()),
+                border,
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
+/// The light Connect shows: none while signed out by the user, red while
+/// signed out by Connect, otherwise the live-updates light.
+fn connect_light(ctx: &NavContext<'_>) -> Option<ConnectLight> {
+    if !ctx.connect_authenticated {
+        return ctx.connect.signed_out_by.map(|_| ConnectLight::NeedsYou);
+    }
+    ctx.connect_stream_status.light()
+}
+
+/// The control's accessible name: the account, plus what its light means.
+fn connect_label(ctx: &NavContext<'_>) -> String {
+    if !ctx.connect_authenticated {
+        return match ctx.connect.signed_out_by {
+            Some(crate::app::SignedOutBy::ComputerRemoved) => "Connect: Sign in, needs attention: \
+                 this computer was removed from your Connect account"
+                .to_owned(),
+            Some(crate::app::SignedOutBy::SessionEnded) => {
+                "Connect: Sign in, needs attention: your Connect session ended".to_owned()
+            }
+            None => "Connect: Sign in".to_owned(),
+        };
+    }
+    let account = match ctx.connect_email {
+        Some(email) => format!("Connect account, {email}"),
+        None => "Connect account".to_owned(),
+    };
+    let meaning = match ctx.connect_stream_status {
+        ConnectionStatus::Inactive => return account,
+        ConnectionStatus::Connected => "live updates on",
+        ConnectionStatus::Connecting => "connecting",
+        ConnectionStatus::Reconnecting | ConnectionStatus::Renewing => "reconnecting",
+        ConnectionStatus::Offline => "offline: no internet connection",
+        ConnectionStatus::RenewFailed => "needs attention: couldn’t reconnect this computer",
+    };
+    format!("{account}, {meaning}")
+}
+
+/// The Connect control (`Connect · {email}`, `Connect · Offline` or
+/// `Connect · Sign in`): one control for the account and this computer's
+/// live updates, with a status light on the account glyph.
+fn connect_control<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
+    let signed_in = ctx.connect_authenticated;
+    let light = connect_light(ctx);
+    let has_panel = signed_in || ctx.connect.signed_out_by.is_some();
+    let offline = signed_in && *ctx.connect_stream_status == ConnectionStatus::Offline;
+
+    let mut avatar = iced::widget::Stack::new()
+        .width(Length::Fixed(20.0))
+        .height(Length::Fixed(20.0))
+        .push(
+            container(glyph::glyph(glyph::USER, 16.0, glyph::muted))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        );
+    if let Some(light) = light {
+        avatar = avatar.push(
+            container(status_light(light, ctx.connect.light_dim))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right)
+                .align_y(iced::alignment::Vertical::Top),
+        );
+    }
+    let (detail, detail_style): (String, fn(&theme::Theme) -> iced::widget::text::Style) =
+        if !signed_in {
+            ("Sign in".to_owned(), |t| iced::widget::text::Style {
+                color: Some(t.colors.shell.accent_ink),
+            })
+        } else if offline {
+            ("Offline".to_owned(), |t| iced::widget::text::Style {
+                color: Some(t.colors.shell.muted),
+            })
+        } else {
+            (ctx.connect_email.unwrap_or("Signed in").to_owned(), |t| {
+                iced::widget::text::Style {
+                    color: Some(t.colors.shell.muted),
+                }
+            })
+        };
+    let mut content = row![
+        avatar,
+        text("Connect").size(13).font(font::SEMIBOLD),
+        muted("·", 13),
+        text(detail)
+            .size(13)
+            .font(if signed_in {
+                font::REGULAR
+            } else {
+                font::SEMIBOLD
+            })
+            .wrapping(text::Wrapping::None)
+            .style(detail_style),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    if has_panel {
+        content = content.push(glyph::glyph(glyph::CHEVRON_DOWN, 16.0, glyph::muted));
+    }
+    let on_press = if has_panel {
+        Message::ToggleConnectPanel
+    } else {
+        Message::OpenConnectSignIn
+    };
+    let open = ctx.connect.panel_open;
+    let control = container(
+        Action::new(
+            CONNECTION_ID,
+            container(content).center_y(Length::Fixed(CHIP_HEIGHT - 2.0)),
+            Message::FocusAction,
+        )
+        .padding([0, 10])
+        .style(chip_button)
+        .focus_radius(CHIP_RADIUS)
+        .on_press(on_press),
+    )
+    .max_width(300)
+    .style(move |t: &theme::Theme| {
+        let mut style = chip_style(t);
+        if open {
+            style.background = Some(t.colors.shell.selected.into());
+            style.border.color = t.colors.shell.selected;
+        }
+        style
+    });
+    bar::accessible(control, connect_label(ctx))
+}
+
+/// Which panel control takes focus when the panel opens: the notice's first
+/// action when there is one, otherwise Connect account.
+pub fn connect_panel_first_focus(cache: &crate::app::cache::Cache) -> Id {
+    if !cache.connect_authenticated && cache.connect_signed_out_by.is_some() {
+        Id::from(CONNECT_PANEL_SIGN_IN_ID)
+    } else if cache.connect_stream_status == ConnectionStatus::RenewFailed {
+        Id::from(CONNECT_PANEL_TRY_AGAIN_ID)
+    } else {
+        Id::from(CONNECT_PANEL_ACCOUNT_ID)
+    }
+}
+
+/// A footer link in the panel (`.mi`): a label and a chevron.
+fn panel_link<'a>(
+    id: &'static str,
+    label: &'static str,
+    on_press: Message,
+) -> Element<'a, Message> {
+    Action::new(
+        id,
+        row![
+            text(label).size(13).width(Length::Fill),
+            glyph::glyph(glyph::CHEVRON_RIGHT, 16.0, glyph::muted),
+        ]
+        .align_y(Alignment::Center),
+        Message::FocusAction,
+    )
+    .width(Length::Fill)
+    .padding([9, 10])
+    .style(chip_button)
+    .focus_radius(CHIP_RADIUS)
+    .on_press(on_press)
+    .into()
+}
+
+fn rule_line<'a>() -> Element<'a, Message> {
+    rule::horizontal(1).into()
+}
+
+/// The Connect panel: the account, live updates on this computer, a notice
+/// only when the user has something to do, and a Vault line only when a
+/// Vault that uses Connect has stopped updating.
+fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
+    let signed_in = ctx.connect_authenticated;
+    let account = ctx
+        .connect_email
+        .filter(|_| signed_in)
+        .unwrap_or("Connect account");
+    let head = row![
+        container(glyph::glyph(glyph::USER, 18.0, glyph::accent))
+            .center_x(Length::Fixed(36.0))
+            .center_y(Length::Fixed(36.0))
+            .style(|t: &theme::Theme| iced::widget::container::Style {
+                background: Some(t.colors.shell.background.into()),
+                border: iced::Border {
+                    radius: 18.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        column![
+            text(account)
+                .size(14)
+                .font(font::SEMIBOLD)
+                .wrapping(text::Wrapping::WordOrGlyph),
+            muted(
+                if signed_in {
+                    "Signed in to COINCUBE | Connect"
+                } else {
+                    "Signed out of COINCUBE | Connect"
+                },
+                12,
+            ),
+        ]
+        .spacing(2),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center);
+
+    let mut body = Column::new().spacing(6);
+    let mut foot: Vec<Element<'a, Message>> = Vec::new();
+    match ctx.connect.signed_out_by.filter(|_| !signed_in) {
+        Some(reason) => {
+            body = body
+                .push(text(reason.title()).size(14).font(font::SEMIBOLD))
+                .push(muted(reason.detail(), 13))
+                .push(Space::new().height(Length::Fixed(8.0)))
+                .push(
+                    row![
+                        page::primary(
+                            CONNECT_PANEL_SIGN_IN_ID,
+                            "Sign in",
+                            Some(Message::OpenConnectSignIn)
+                        ),
+                        page::button(
+                            CONNECT_PANEL_NOT_NOW_ID,
+                            "Not now",
+                            Some(Message::DismissConnectSignOut)
+                        ),
+                    ]
+                    .spacing(8),
+                );
+        }
+        None => {
+            let status = *ctx.connect_stream_status;
+            let kind = match status {
+                ConnectionStatus::Connected => page::Status::Ok,
+                ConnectionStatus::Inactive | ConnectionStatus::Connecting => page::Status::Busy,
+                ConnectionStatus::Reconnecting | ConnectionStatus::Renewing => page::Status::Warn,
+                ConnectionStatus::Offline | ConnectionStatus::RenewFailed => page::Status::Off,
+            };
+            body = body.push(
+                row![
+                    text("Live updates on this computer")
+                        .size(13)
+                        .font(font::MEDIUM)
+                        .width(Length::Fill),
+                    page::status(kind, status.word()),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center),
+            );
+            if let Some(line) = status.line() {
+                body = body.push(muted(line, 13));
+            }
+            if status == ConnectionStatus::RenewFailed {
+                body = body
+                    .push(Space::new().height(Length::Fixed(6.0)))
+                    .push(rule_line())
+                    .push(Space::new().height(Length::Fixed(6.0)))
+                    .push(
+                        text(crate::app::RENEW_FAILED_TITLE)
+                            .size(14)
+                            .font(font::SEMIBOLD),
+                    )
+                    .push(muted(crate::app::renew_failed_detail(), 13))
+                    .push(Space::new().height(Length::Fixed(8.0)))
+                    .push(page::primary(
+                        CONNECT_PANEL_TRY_AGAIN_ID,
+                        "Try again",
+                        Some(Message::Settings(
+                            crate::app::view::SettingsMessage::ReregisterConnectDevice,
+                        )),
+                    ));
+            } else {
+                foot.push(panel_link(
+                    CONNECT_PANEL_ACCOUNT_ID,
+                    "Connect account",
+                    Message::OpenConnectSwitchAccount,
+                ));
+            }
+            foot.push(panel_link(
+                CONNECT_PANEL_SETTINGS_ID,
+                "Connections settings",
+                Message::Menu(CONNECT_CONNECTIONS_ROUTE),
+            ));
+        }
+    }
+    if let Some(alert) = ctx.connect.vault_alert.filter(|a| a.via_connect) {
+        body = body
+            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(rule_line())
+            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(
+                row![
+                    row![
+                        glyph::glyph(glyph::SHIELD, 16.0, glyph::muted),
+                        text(wallet_label("Vault", ctx.vault_alias))
+                            .size(13)
+                            .font(font::MEDIUM),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill),
+                    vault_status(alert),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center),
+            )
+            .push(muted(alert.panel_line(), 13));
+    }
+
+    let mut panel = column![
+        container(head).padding([14, 16]),
+        rule_line(),
+        container(body).padding([14, 16]),
+    ];
+    if !foot.is_empty() {
+        panel = panel
+            .push(rule_line())
+            .push(container(Column::with_children(foot).spacing(2)).padding(6));
+    }
+    container(panel)
+        .width(Length::Fixed(360.0))
+        .style(theme::container::shell_menu)
+        .into()
+}
+
+/// The Vault's status word while it isn't updating: Offline grey,
+/// Reconnecting… and Not updating amber.
+pub fn vault_status<'a>(alert: &crate::app::VaultAlert) -> Element<'a, Message> {
+    let kind = match alert.stall {
+        crate::app::VaultStall::Offline => page::Status::Off,
+        _ => page::Status::Warn,
+    };
+    page::status(kind, alert.word())
 }
 
 /// A rail icon: the canvas's stroke glyph, or a font icon where the canvas
@@ -357,6 +685,18 @@ fn nav_row<'a>(
     )
 }
 
+/// A top-level row with the Vault's alert dot after its label.
+fn nav_row_alert<'a>(
+    key: String,
+    label: String,
+    icon: Option<NavIcon>,
+    active: bool,
+    message: Option<Message>,
+    alert: bool,
+) -> Element<'a, Message> {
+    nav_row_inner(key, label, icon, active, message, false, None, alert)
+}
+
 /// A row whose focus ID comes from `key`, not its label, so a label that
 /// carries a user-chosen name keeps one ID whatever the name.
 fn nav_row_with_key<'a>(
@@ -367,6 +707,29 @@ fn nav_row_with_key<'a>(
     message: Option<Message>,
     nested: bool,
     disabled_reason: Option<String>,
+) -> Element<'a, Message> {
+    nav_row_inner(
+        key,
+        label,
+        icon,
+        active,
+        message,
+        nested,
+        disabled_reason,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn nav_row_inner<'a>(
+    key: String,
+    label: String,
+    icon: Option<NavIcon>,
+    active: bool,
+    message: Option<Message>,
+    nested: bool,
+    disabled_reason: Option<String>,
+    alert: bool,
 ) -> Element<'a, Message> {
     let mut body: Row<Message> = Row::new().spacing(10).align_y(Alignment::Center);
     if nested {
@@ -398,6 +761,22 @@ fn nav_row_with_key<'a>(
             .width(Length::Fill)
             .wrapping(text::Wrapping::WordOrGlyph),
     );
+    // `.ni .nd`: the Vault's alert dot, in the warning colour.
+    if alert {
+        body = body.push(
+            container(Space::new())
+                .width(Length::Fixed(8.0))
+                .height(Length::Fixed(8.0))
+                .style(|t: &theme::Theme| iced::widget::container::Style {
+                    background: Some(t.colors.shell.warn.into()),
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+        );
+    }
     let id = if nested {
         format!("tenshu.shell.sub.{key}.{message:?}")
     } else {
@@ -738,15 +1117,26 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
         ));
     }
     if ctx.has_vault || ctx.has_imported_bitcoin {
-        middle = middle.push(nav_row_with_key(
+        let label = wallet_label("Vault", ctx.vault_alias);
+        let vault = nav_row_alert(
             "Vault".to_owned(),
-            wallet_label("Vault", ctx.vault_alias),
+            label.clone(),
             Some(NavIcon::Glyph(glyph::SHIELD)),
             matches!(menu, Menu::Vault(_)) && !settings_active,
             Some(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
-            false,
-            None,
-        ));
+            ctx.connect.vault_alert.is_some(),
+        );
+        // The dot is never the only signal: the name says it too.
+        middle = middle.push(match ctx.connect.vault_alert {
+            Some(alert) => bar::accessible(
+                vault,
+                format!(
+                    "{label} ({})",
+                    alert.word().trim_end_matches('…').to_lowercase()
+                ),
+            ),
+            None => vault,
+        });
     } else {
         middle = middle.push(nav_row(
             "Set up Vault",

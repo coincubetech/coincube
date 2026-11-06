@@ -28,6 +28,16 @@ icon!(
     r#"<path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/>"#
 );
 icon!(BOLT, r#"<path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/>"#);
+icon!(
+    USER,
+    r#"<circle cx="9" cy="6.25" r="3"/><path d="M3.25 15.5c.85-2.85 3.1-4.25 5.75-4.25s4.9 1.4 5.75 4.25"/>"#
+);
+icon!(CHEVRON_DOWN, r#"<path d="m5 7 4 4 4-4"/>"#);
+icon!(CHEVRON_RIGHT, r#"<path d="m7 5 4 4-4 4"/>"#);
+icon!(
+    BUSY,
+    r#"<path d="M15 9a6 6 0 1 1-1.76-4.24"/><path d="M15 3v3.5h-3.5"/>"#
+);
 /// Spark's asterisk from `coincube-ui/static/logos/spark_badge.svg`. A filled
 /// brand mark, not a stroke icon, fitted to about 15px of the 18px cell.
 pub const SPARK: &str = concat!(
@@ -56,7 +66,6 @@ icon!(
     WARNING,
     r#"<path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/>"#
 );
-icon!(CHEVRON_DOWN, r#"<path d="m5 7 4 4 4-4"/>"#);
 icon!(CHEVRON_UP, r#"<path d="m5 11 4-4 4 4"/>"#);
 icon!(RECEIVED, r#"<path d="M13 5 5 13M5 7.5V13h5.5"/>"#);
 icon!(SENT, r#"<path d="M5 13 13 5M7.5 5H13v5.5"/>"#);
