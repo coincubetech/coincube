@@ -362,6 +362,16 @@ fn tip<'a, M: 'a>(label: Cow<'a, str>) -> Element<'a, M> {
     .into()
 }
 
+/// Gives a control `label` as its accessible name (see [`AccessibleLabel`]),
+/// for a control whose visible text doesn't say everything, such as one
+/// whose state is shown by a light.
+pub fn accessible<'a, M: 'a>(
+    content: impl Into<Element<'a, M>>,
+    label: impl Into<Cow<'a, str>>,
+) -> Element<'a, M> {
+    AccessibleLabel::new(content, label.into()).into()
+}
+
 /// The accessible label of an icon-only control: exposed to widget
 /// operations as text, as an `aria-label` is, and never drawn.
 ///

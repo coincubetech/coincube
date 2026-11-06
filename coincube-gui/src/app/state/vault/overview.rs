@@ -225,6 +225,7 @@ impl VaultOverview {
             cache.display_mode,
             cache.balance_amounts_masked(),
             self.psbts_waiting,
+            cache.vault_alert.as_ref(),
         )
     }
 }

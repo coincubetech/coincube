@@ -522,6 +522,12 @@ impl Pane {
         }
     }
 
+    pub fn set_reduce_motion(&mut self, reduce: bool) {
+        for tab in &mut self.tabs {
+            tab.set_reduce_motion(reduce);
+        }
+    }
+
     pub fn set_balance_privacy(
         &mut self,
         chrome: Option<crate::app::state::preferences::BalancePrivacyChrome>,

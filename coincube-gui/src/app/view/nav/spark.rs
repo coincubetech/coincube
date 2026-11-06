@@ -57,6 +57,7 @@ mod tests {
             connect_authenticated: false,
             connect_email: None,
             connect_stream_status: status,
+            connect: Default::default(),
             btcb2_server_enabled: false,
             btcb2_already_claimed: false,
         }

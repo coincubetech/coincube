@@ -644,7 +644,7 @@ mod tests {
             "Spark wallet service",
             "Running. Payments and balances are up to date.",
             "Technical details",
-            "Connect account and this device",
+            "Connect live updates",
             "Cube connections",
         ] {
             assert!(closed.contains(label), "{}", label);

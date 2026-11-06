@@ -3,6 +3,7 @@ pub mod device;
 pub mod interceptor;
 pub mod session;
 pub mod stream;
+pub mod trouble;
 
 use tonic::codegen::http::uri::InvalidUri;
 use tonic::transport::{Channel, ClientTlsConfig};
@@ -19,13 +20,16 @@ pub enum ConnectStreamMessage {
     Connected,
     SessionEvent(connect_v1::SessionEvent),
     Disconnected(String),
+    /// An error Connect reported inside a running stream, or an expired
+    /// sign-in. The stream keeps running or reconnects.
     Error(String),
-    /// The server refused this device (`PERMISSION_DENIED`: the cached
-    /// device id is missing, owned by another account, or revoked). The
-    /// stream stops its fast reconnect loop and re-checks the same id every
-    /// few minutes. Recovery is the user re-registering the device; we never
-    /// re-register silently, which would undo a revoke.
-    DeviceRejected(String),
+    /// Live updates stopped for a reason that isn't about this device: no
+    /// network, or Connect not answering. The stream retries with backoff.
+    Trouble(trouble::Trouble),
+    /// Connect refused this computer's device id. The stream stops its fast
+    /// reconnect loop; what happens next depends on the refusal (see
+    /// [`trouble::Refusal`]).
+    Refused(trouble::Refusal),
     /// Duress was activated elsewhere (Keychain Settings, email-link, Approach
     /// C, another desktop's PIN). Phase 7b: the receiving desktop locks into the
     /// cryptic screen but does **NOT** wipe — remote activation can be
@@ -60,7 +64,14 @@ impl std::fmt::Display for CreateChannelError {
     }
 }
 
-impl std::error::Error for CreateChannelError {}
+impl std::error::Error for CreateChannelError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidUri(e) => Some(e),
+            Self::Transport(e) => Some(e),
+        }
+    }
+}
 
 impl From<InvalidUri> for CreateChannelError {
     fn from(e: InvalidUri) -> Self {

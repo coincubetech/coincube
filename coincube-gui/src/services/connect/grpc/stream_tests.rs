@@ -135,8 +135,12 @@ async fn unresponsive_server_reports_handshake_timeout() {
     let first = tokio::time::timeout(CONNECT_TIMEOUT + Duration::from_secs(3), events.next()).await;
     server.abort();
     assert!(
-        matches!(first, Ok(Some(ConnectStreamMessage::Error(ref error)))
-        if error.contains("opening handshake timed out")),
+        matches!(
+            first,
+            Ok(Some(ConnectStreamMessage::Trouble(
+                super::trouble::Trouble::Unreachable
+            )))
+        ),
         "{:?}",
         first
     );

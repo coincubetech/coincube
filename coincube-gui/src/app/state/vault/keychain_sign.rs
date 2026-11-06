@@ -547,22 +547,25 @@ impl KeychainSignModal {
         if !has_pending_nonterminal {
             return None;
         }
-        match &self.stream_health {
-            crate::app::ConnectionStatus::Connecting => Some(
-                "Connection lost — reconnecting. Your signing requests are still active \
-                 server-side; updates will catch up once the connection comes back."
-                    .to_string(),
-            ),
-            crate::app::ConnectionStatus::DeviceRejected => Some(format!(
-                "{} Your signing requests are still active server-side.",
-                crate::app::DEVICE_REJECTED_HINT,
+        const SENT: &str = "Requests already sent stay on Connect;";
+        match self.stream_health {
+            crate::app::ConnectionStatus::Connecting
+            | crate::app::ConnectionStatus::Reconnecting
+            | crate::app::ConnectionStatus::Renewing => Some(format!(
+                "Reconnecting to Connect. {SENT} signatures reach Tenshu once live updates \
+                 are back."
             )),
-            crate::app::ConnectionStatus::Error(e) => Some(format!(
-                "Connection error ({}). Your signing requests are still active server-side; \
-                 reconnect to see updates.",
-                e,
+            crate::app::ConnectionStatus::Offline => Some(format!(
+                "No internet connection. {SENT} signatures reach Tenshu once you’re back online."
             )),
-            _ => None,
+            crate::app::ConnectionStatus::RenewFailed => Some(format!(
+                "{}. {SENT} signatures reach Tenshu once it reconnects. Try again from the \
+                 Connect control in the top bar.",
+                crate::app::RENEW_FAILED_TITLE,
+            )),
+            crate::app::ConnectionStatus::Inactive | crate::app::ConnectionStatus::Connected => {
+                None
+            }
         }
     }
 
@@ -2106,31 +2109,8 @@ impl Modal for KeychainSignModal {
         // pending and the realtime stream is unhealthy. We don't
         // pre-cancel anything on disconnect because sessions live
         // server-side; reconnecting catches up via `last_seen_seq`.
-        let has_pending_nonterminal = self.pending.iter().any(|p| !p.status.is_terminal());
-        if has_pending_nonterminal {
-            match &self.stream_health {
-                crate::app::ConnectionStatus::Connecting => {
-                    col = col.push(p1_regular(
-                        "Connection lost — reconnecting. Your signing requests are \
-                         still active server-side; updates will catch up once the \
-                         connection comes back.",
-                    ));
-                }
-                crate::app::ConnectionStatus::DeviceRejected => {
-                    col = col.push(p1_regular(format!(
-                        "{} Your signing requests are still active server-side.",
-                        crate::app::DEVICE_REJECTED_HINT,
-                    )));
-                }
-                crate::app::ConnectionStatus::Error(e) => {
-                    col = col.push(p1_regular(format!(
-                        "Connection error ({}). Your signing requests are still \
-                         active server-side; reconnect to see updates.",
-                        e,
-                    )));
-                }
-                _ => {}
-            }
+        if let Some(banner) = self.stream_health_banner() {
+            col = col.push(p1_regular(banner));
         }
 
         if let Some(err) = &self.error {
@@ -3459,15 +3439,20 @@ pub(crate) mod tests {
         modal.pending.push(pending(PendingSessionStatus::Pending));
         assert!(modal.stream_health_banner().is_none());
 
-        modal.stream_health = crate::app::ConnectionStatus::Connecting;
+        modal.stream_health = crate::app::ConnectionStatus::Reconnecting;
         assert!(modal
             .stream_health_banner()
-            .is_some_and(|b| b.contains("reconnecting")));
+            .is_some_and(|b| b.starts_with("Reconnecting to Connect")));
 
-        modal.stream_health = crate::app::ConnectionStatus::Error("socket closed".to_string());
+        modal.stream_health = crate::app::ConnectionStatus::Offline;
         assert!(modal
             .stream_health_banner()
-            .is_some_and(|b| b.contains("socket closed")));
+            .is_some_and(|b| b.contains("back online")));
+
+        modal.stream_health = crate::app::ConnectionStatus::RenewFailed;
+        assert!(modal
+            .stream_health_banner()
+            .is_some_and(|b| b.contains("Try again")));
 
         modal.pending[0].status = PendingSessionStatus::Completed;
         assert!(modal.stream_health_banner().is_none());

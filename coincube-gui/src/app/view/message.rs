@@ -162,6 +162,13 @@ pub enum Message {
     /// from the Launcher, through the Launcher's own delete confirmation.
     DeleteUnfinishedCube,
     ToggleCubeSwitcher,
+    /// The Connect control in the top bar: opens or closes its panel.
+    ToggleConnectPanel,
+    /// A press outside the Connect panel, or Escape.
+    CloseConnectPanel,
+    /// "Not now" on Signed out by Connect: clears the red light and leaves
+    /// the control in the ordinary signed-out state.
+    DismissConnectSignOut,
     AskCubeLock,
     CancelCubeLock,
     /// A shared Action's pointer-down request. The App applies whole-tree
@@ -499,20 +506,18 @@ pub enum SettingsMessage {
     ExportWallet,
     ImportWallet,
     AboutSection,
-    /// Install Cube › Settings › Connections (Connect account, this device,
-    /// Re-register).
+    /// Install Cube › Settings › Connections (Connect account and this
+    /// computer's live updates).
     ConnectionsSection,
-    /// Triggered by the "Re-register" button under Troubleshooting on
-    /// Cube › Settings › Connections. Clears the cached
-    /// `device_id` and re-runs `ensure_device_registered`, getting a
-    /// fresh `SignerDevice` row server-side. Useful when a device id
-    /// is suspect (compromise, machine swap) or the row went stale on
-    /// the API and signing started 404'ing.
+    /// "Try again" after automatic renewal failed: the App registers this
+    /// computer again with its stored key (`renewal_task`).
     ReregisterConnectDevice,
-    /// Settled result of the re-registration RPC: the new registration on
-    /// success, or a user-facing error string. Routed to the Connections
-    /// settings state so it can show the result line.
+    /// Settled result of a renewal, automatic or Try again: the registration
+    /// on success, or an error for the log. Handled by the App.
     ConnectDeviceReregistered(Result<ReregisteredDevice, String>),
+    /// Shows or hides Details for support (the device ID) under Couldn't
+    /// reconnect on Cube › Settings › Connections.
+    ToggleConnectSupportDetails,
     RegisterWallet,
     FingerprintAliasEdited(Fingerprint, String),
     WalletAliasEdited(String),

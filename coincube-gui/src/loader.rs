@@ -1055,6 +1055,7 @@ pub async fn load_application(
         connect_transport_key: None,
         cube_encryption_key: None,
         cube_switcher_open: false,
+        connect_panel_open: false,
         cube_lock_confirmation: false,
         datadir_path: config.datadir_path,
         network: config.info.network,
@@ -1117,6 +1118,8 @@ pub async fn load_application(
         spark_notice: None,
         has_p2p: false, // Set later by App::new based on mnemonic availability
         theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+        reduce_motion: false,
+        connect_light_dim: false,
         balance_privacy: None,
         btc_usd_price: None,
         show_direction_badges: true,
@@ -1140,6 +1143,9 @@ pub async fn load_application(
         connect_grpc_url: None,
         connect_tokens: None,
         connect_stream_status: crate::app::ConnectionStatus::default(),
+        connect_signed_out_by: None,
+        vault_alert: None,
+        vault_via_connect: false,
         connect_device_id: None,
         connect_email: None,
     };

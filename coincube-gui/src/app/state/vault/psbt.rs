@@ -1744,7 +1744,7 @@ fn build_keychain_if_ready(
         psbt.clone(),
         cache.connect_transport_key.clone(),
     )
-    .with_stream_health(cache.connect_stream_status.clone());
+    .with_stream_health(cache.connect_stream_status);
     let launch = modal.launch();
     (Some(modal), launch)
 }

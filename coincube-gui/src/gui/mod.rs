@@ -1532,6 +1532,7 @@ impl GUI {
         self.theme_mode = resolved.theme_mode;
         for (_, pane) in self.panes.iter_mut() {
             pane.set_theme_mode(self.theme_mode);
+            pane.set_reduce_motion(resolved.reduce_motion);
         }
     }
 
@@ -1639,17 +1640,15 @@ impl GUI {
             // The Launcher renders one of two Connect controls in each mode.
             // Authentication may have replaced the control while the sheet was open.
             tab::State::Home(home) => home.connect_sheet_return_id(saved),
-            tab::State::App(app)
-                if *saved == iced::advanced::widget::Id::new("tenshu.connect.sign-in")
-                    || *saved == iced::advanced::widget::Id::new("tenshu.connect.account") =>
+            // An open Cube has one Connect control in every state, so a
+            // sign-in or sign-out while the sheet was open keeps its id.
+            tab::State::App(_)
+                if *saved
+                    == iced::advanced::widget::Id::new(
+                        crate::app::view::nav::shell::CONNECTION_ID,
+                    ) =>
             {
-                Some(iced::advanced::widget::Id::new(
-                    if app.cache().sidebar_connect_signed_in {
-                        "tenshu.connect.account"
-                    } else {
-                        "tenshu.connect.sign-in"
-                    },
-                ))
+                Some(saved.clone())
             }
             _ => Some(saved.clone()),
         }
@@ -3141,15 +3140,8 @@ impl GUI {
                             !account.is_authenticated() && !account.is_checking_session()
                         })
                 });
-                let signed_in = self.overlay_origin(None).is_some_and(|origin| {
-                    self.connect_panel(&origin)
-                        .is_some_and(|account| account.is_authenticated())
-                });
-                let source_id = if signed_in {
-                    "tenshu.connect.account"
-                } else {
-                    "tenshu.connect.sign-in"
-                };
+                // The Connect control opened it, directly or from its panel.
+                let source_id = crate::app::view::nav::shell::CONNECTION_ID;
                 let open = self.open_connect_sheet_from(
                     pane_id,
                     tab_id,

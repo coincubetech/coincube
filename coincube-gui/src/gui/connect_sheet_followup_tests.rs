@@ -779,12 +779,10 @@ fn cube_auth_changes_return_focus_to_mounted_control() {
                 }
                 app.cache_mut().connect_authenticated = !signed_in_at_open;
                 app.cache_mut().sidebar_connect_signed_in = !signed_in_at_open;
-                let expected = iced::advanced::widget::Id::new(if signed_in_at_open {
-                    "tenshu.connect.sign-in"
-                } else {
-                    "tenshu.connect.account"
-                });
-                assert_ne!(origin.focus, Some(expected.clone()));
+                // One Connect control in every state: focus returns to it.
+                let expected =
+                    iced::advanced::widget::Id::new(crate::app::view::nav::shell::CONNECTION_ID);
+                assert_eq!(origin.focus, Some(expected.clone()));
                 assert_eq!(gui.connect_return_focus(&origin), Some(expected.clone()));
                 let task = if escape {
                     gui.update(Message::KeyPressed(Key::Escape))

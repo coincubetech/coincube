@@ -846,6 +846,13 @@ impl GlobalHome {
             liquid_balance_error: self.liquid_balance_error,
             usdt_balance_loaded: self.usdt_balance_loaded,
             vault_loaded: !vault_pending,
+            vault_stale: cache
+                .vault_alert
+                .as_ref()
+                .map(|alert| match &alert.last_synced {
+                    Some(at) => format!("Last known Vault balance · not updating since {at}"),
+                    None => "Last known Vault balance · not updating".to_owned(),
+                }),
             display_mode: cache.display_mode,
             has_vault: cache.has_vault,
             has_imported_bitcoin: cache.has_imported_bitcoin,

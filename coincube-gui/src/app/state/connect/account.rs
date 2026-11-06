@@ -1689,7 +1689,13 @@ impl ConnectAccountPanel {
                     }
                     Err((error, auth_error)) => {
                         if auth_error {
-                            return self.update_message(ConnectAccountMessage::LogOut);
+                            let logout = self.update_message(ConnectAccountMessage::LogOut);
+                            return iced::Task::batch([
+                                iced::Task::done(Message::ConnectSignedOutBy(
+                                    crate::app::SignedOutBy::SessionEnded,
+                                )),
+                                logout,
+                            ]);
                         }
                         self.error = Some(PanelError::retryable(error, RetryAction::Session));
                     }
@@ -1732,10 +1738,16 @@ impl ConnectAccountPanel {
                     return iced::Task::none();
                 }
                 // A current refresh was refused: the session is gone. Dispatched
-                // as the message it always was, so the GUI broadcasts it.
-                return iced::Task::done(Message::View(view::Message::ConnectAccount(
-                    ConnectAccountMessage::LogOut,
-                )));
+                // as the message it always was, so the GUI broadcasts it, after
+                // the notice that Connect ended it.
+                return iced::Task::batch([
+                    iced::Task::done(Message::ConnectSignedOutBy(
+                        crate::app::SignedOutBy::SessionEnded,
+                    )),
+                    iced::Task::done(Message::View(view::Message::ConnectAccount(
+                        ConnectAccountMessage::LogOut,
+                    ))),
+                ]);
             }
 
             ConnectAccountMessage::RefreshFailed(err) => {

@@ -1035,6 +1035,8 @@ pub struct App {
     /// fires `Message::ConnectStreamReady`, or permanently `None` if the
     /// service config returned no `grpc_url`.
     connect_stream_config: Option<crate::services::connect::grpc::stream::ConnectStreamConfig>,
+    /// Automatic renewal of this computer's Connect registration.
+    connect_renewal: Renewal,
     /// Cache state before this App panel sent its one pending OTP verification.
     in_app_otp_cache_snapshot: Option<crate::services::connect::client::cache::ConnectCache>,
     /// Network cache observed before a keyring restore starts its refresh RPC.
@@ -1058,68 +1060,281 @@ struct RestoreAuthSnapshot {
     )>,
 }
 
-/// Health of the Connect realtime stream as observed from the desktop.
+/// Health of this computer's Connect live updates, as the header control,
+/// its panel and Cube › Settings › Connections show it.
 ///
-/// Transitions are driven by `ConnectStreamMessage` events arriving on
-/// the gRPC subscription. The `Inactive` variant is distinct from
-/// `Disconnected` because we want to render *nothing* (rather than a
-/// red dot) when the user has no Connect identity yet — a fresh-install
-/// desktop on a local-daemon cube isn't "broken", it's just not using
-/// Connect.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Transitions are driven by `ConnectStreamMessage` events arriving on the
+/// gRPC subscription and by the App's automatic renewal. `Inactive` is
+/// distinct from the others because a Cube that doesn't use Connect isn't
+/// "broken": nothing is shown for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionStatus {
     /// No stream has been bootstrapped yet (no `Message::ConnectStreamReady`).
-    /// Render an empty slot, not a status dot.
     #[default]
     Inactive,
-    /// Stream subscription is mounted but no `Connected` has arrived
-    /// yet, or a `Disconnected` has fired and the next reconnect is
-    /// pending. Render amber.
+    /// The stream is starting and hasn't connected since sign-in or launch.
     Connecting,
-    /// `ConnectStreamMessage::Connected` was the last terminal event.
-    /// Render green.
+    /// Live updates are on.
     Connected,
-    /// `ConnectStreamMessage::Error` carried a non-recoverable signal,
-    /// or the stream surfaced a transport failure. The string is the
-    /// most recent error suitable for a tooltip. Render red.
-    Error(String),
-    /// `ConnectStreamMessage::DeviceRejected`: Connect refused this
-    /// device's id. Unlike `Error` there is no fast retry (only a slow
-    /// same-id re-check); the user re-registers the device to recover.
-    /// Render red.
-    DeviceRejected,
+    /// No usable network. Tenshu reconnects on its own.
+    Offline,
+    /// The network works but Connect doesn't answer, or the stream dropped.
+    /// Tenshu keeps trying.
+    Reconnecting,
+    /// Connect stopped recognizing this computer's id and Tenshu is renewing
+    /// the registration on its own.
+    Renewing,
+    /// Renewal failed twice, or a server without reasons refused the id. The
+    /// user presses Try again.
+    RenewFailed,
 }
 
-/// What to do when Connect no longer recognizes this device. Shared by
-/// every surface that shows `ConnectionStatus::DeviceRejected`.
-pub const DEVICE_REJECTED_HINT: &str = "COINCUBE | Connect doesn't recognize this device. \
-     Re-register it to resume live updates.";
+/// What everything Tenshu sends to Connect waits for while live updates
+/// aren't on.
+pub const CONNECT_WAITS_FOR: &str = "Keychain signing, Recovery Kits and Cube backups to Connect";
+
+/// The status light on the Connect control's account glyph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectLight {
+    /// Steady green: signed in, live updates on.
+    On,
+    /// Pulsing green: connecting for the first time.
+    Connecting,
+    /// Pulsing amber: something is wrong and Tenshu is fixing it.
+    Reconnecting,
+    /// Grey ring: no internet connection.
+    Offline,
+    /// Red: the user has something to do.
+    NeedsYou,
+}
 
 impl ConnectionStatus {
-    /// True for any state that the nav should surface (i.e. anything
-    /// non-`Inactive`). Keeps the empty-slot rendering at the call site
-    /// clean.
+    /// True for any state the header should surface.
     pub fn is_visible(&self) -> bool {
         !matches!(self, Self::Inactive)
     }
 
-    /// Short user-facing tooltip text describing the current state.
-    /// Kept here so the nav view doesn't have to spell out the variants.
-    pub fn tooltip(&self) -> String {
+    /// The word after "Live updates on this computer".
+    pub fn word(&self) -> &'static str {
         match self {
-            Self::Inactive => "Connect inactive".to_string(),
-            Self::Connecting => "Connecting to COINCUBE | Connect…".to_string(),
-            Self::Connected => "Connected".to_string(),
-            // Fixed copy, not the raw stream error. The detail is already
-            // logged where this variant is built; interpolating it here put
-            // transport internals into a tooltip that anyone could hover.
-            Self::Error(_) => {
-                "Can't reach COINCUBE | Connect — retrying. Live updates are paused.".to_string()
+            Self::Inactive | Self::Connecting => "Connecting…",
+            Self::Connected => "On",
+            Self::Offline | Self::RenewFailed => "Offline",
+            Self::Reconnecting | Self::Renewing => "Reconnecting…",
+        }
+    }
+
+    /// The one line under the status word. `RenewFailed` says its piece in a
+    /// notice instead ([`RENEW_FAILED_TITLE`]).
+    pub fn line(&self) -> Option<String> {
+        match self {
+            Self::Inactive | Self::Connecting => {
+                Some("Starting live updates from Connect.".to_owned())
             }
-            Self::DeviceRejected => DEVICE_REJECTED_HINT.to_string(),
+            Self::Connected => {
+                Some("Keychain signing requests and signatures arrive as they happen.".to_owned())
+            }
+            Self::Offline => Some(format!(
+                "No internet connection. Tenshu reconnects when you’re back online. \
+                 {CONNECT_WAITS_FOR} wait until then."
+            )),
+            Self::Reconnecting => Some(format!(
+                "Tenshu can’t reach Connect right now and keeps trying. \
+                 {CONNECT_WAITS_FOR} wait until it’s back."
+            )),
+            Self::Renewing => {
+                Some("Renewing this computer’s link to Connect. Nothing to do.".to_owned())
+            }
+            Self::RenewFailed => None,
+        }
+    }
+
+    /// The light on the account glyph, `None` while there is no stream.
+    pub fn light(&self) -> Option<ConnectLight> {
+        match self {
+            Self::Inactive => None,
+            Self::Connecting => Some(ConnectLight::Connecting),
+            Self::Connected => Some(ConnectLight::On),
+            Self::Offline => Some(ConnectLight::Offline),
+            Self::Reconnecting | Self::Renewing => Some(ConnectLight::Reconnecting),
+            Self::RenewFailed => Some(ConnectLight::NeedsYou),
+        }
+    }
+
+    /// Whether uploads to Connect (Recovery Kits, Cube backups) may run.
+    pub fn allows_uploads(&self) -> bool {
+        matches!(self, Self::Connected)
+    }
+}
+
+/// The notice shown when automatic renewal didn't work.
+pub const RENEW_FAILED_TITLE: &str = "Couldn’t reconnect this computer";
+
+pub fn renew_failed_detail() -> String {
+    format!(
+        "Connect stopped recognizing this computer, and renewing its link automatically \
+         didn’t work. {CONNECT_WAITS_FOR} wait until it does."
+    )
+}
+
+/// Why Connect, not the user, signed this computer out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignedOutBy {
+    /// The computer was removed from the Connect account.
+    ComputerRemoved,
+    /// The session ended and couldn't be refreshed.
+    SessionEnded,
+}
+
+impl SignedOutBy {
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::ComputerRemoved => "This computer was removed from your Connect account",
+            Self::SessionEnded => "Your Connect session on this computer ended",
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        format!("Sign in to use {CONNECT_WAITS_FOR} again.")
+    }
+}
+
+/// Why a Vault that stopped updating isn't, in the Vault's own words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VaultStall {
+    /// No internet connection (the Vault reads through Connect).
+    Offline,
+    /// Connect can't be reached right now.
+    Reconnecting,
+    /// Signed out of Connect, or any other failure.
+    NotUpdating,
+}
+
+/// A Vault whose recent polls failed (C8). Set by the Vault's own sync
+/// result, whatever the provider; the Connect state only picks the words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaultAlert {
+    pub stall: VaultStall,
+    /// The Vault reads its blockchain data through COINCUBE | Connect.
+    pub via_connect: bool,
+    /// Signed out of Connect while the Vault depends on it: the notice
+    /// offers Sign in.
+    pub needs_sign_in: bool,
+    /// Local time ("HH:MM") of the last successful sync, when known.
+    pub last_synced: Option<String>,
+    /// The block the Vault last synced to.
+    pub block: i32,
+}
+
+impl VaultAlert {
+    /// The Vault's status word in place of Synced.
+    pub fn word(&self) -> &'static str {
+        match self.stall {
+            VaultStall::Offline => "Offline",
+            VaultStall::Reconnecting => "Reconnecting…",
+            VaultStall::NotUpdating => "Not updating",
+        }
+    }
+
+    /// The notice's title on the Vault page.
+    pub fn title(&self) -> &'static str {
+        match self.stall {
+            VaultStall::Offline => "No internet connection",
+            VaultStall::Reconnecting => "Can’t reach COINCUBE | Connect",
+            VaultStall::NotUpdating if self.needs_sign_in => {
+                "Sign in to Connect to update this Vault"
+            }
+            VaultStall::NotUpdating => "This Vault isn’t updating",
+        }
+    }
+
+    fn figures_age(&self) -> String {
+        match &self.last_synced {
+            Some(at) => format!("Balance and activity are from {at}."),
+            None => "Balance and activity may be out of date.".to_owned(),
+        }
+    }
+
+    /// The notice's line on the Vault page.
+    pub fn detail(&self) -> String {
+        let from = self.figures_age();
+        match self.stall {
+            VaultStall::Offline => format!("{from} They update when you’re back online."),
+            VaultStall::Reconnecting => {
+                format!("{from} Tenshu keeps trying and updates them when Connect is back.")
+            }
+            VaultStall::NotUpdating if self.needs_sign_in => format!(
+                "{from} This Vault gets blockchain data through Connect, which needs you signed in."
+            ),
+            VaultStall::NotUpdating => format!("{from} Tenshu keeps trying."),
+        }
+    }
+
+    /// The line under "Vault · Not updating" in the Connect panel.
+    pub fn panel_line(&self) -> String {
+        let shown = match &self.last_synced {
+            Some(at) => format!(" The balance shown is from {at}."),
+            None => String::new(),
+        };
+        if self.needs_sign_in {
+            format!("It gets blockchain data through COINCUBE | Connect, which needs you signed in.{shown}")
+        } else {
+            format!("It gets blockchain data through COINCUBE | Connect.{shown}")
         }
     }
 }
+
+/// The Vault's alert, if its recent polls failed.
+pub fn vault_alert(
+    sync: &SyncStatus,
+    via_connect: bool,
+    connect: ConnectionStatus,
+    signed_in: bool,
+    last_poll: Option<u32>,
+    block: i32,
+) -> Option<VaultAlert> {
+    if !matches!(sync, SyncStatus::SyncFailing { .. }) {
+        return None;
+    }
+    let needs_sign_in = via_connect && !signed_in;
+    let stall = if !via_connect || needs_sign_in {
+        VaultStall::NotUpdating
+    } else {
+        match connect {
+            ConnectionStatus::Offline => VaultStall::Offline,
+            ConnectionStatus::Connecting
+            | ConnectionStatus::Reconnecting
+            | ConnectionStatus::Renewing => VaultStall::Reconnecting,
+            _ => VaultStall::NotUpdating,
+        }
+    };
+    let last_synced = last_poll
+        .and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
+        .map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string());
+    Some(VaultAlert {
+        stall,
+        via_connect,
+        needs_sign_in,
+        last_synced,
+        block,
+    })
+}
+
+/// Automatic renewal of this computer's Connect registration (C1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Renewal {
+    /// Attempts made in the current cycle.
+    pub attempts: u8,
+    /// A `RegisterDevice` request is in flight.
+    pub in_flight: bool,
+}
+
+/// Automatic attempts before showing Couldn't reconnect.
+pub const RENEWAL_ATTEMPTS: u8 = 2;
+/// The wait between automatic attempts.
+pub const RENEWAL_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+/// Half a pulse of the Connect light: bright, then dim.
+const CONNECT_LIGHT_PULSE: std::time::Duration = std::time::Duration::from_millis(800);
 
 /// Returns true when a `DaemonError` indicates the daemon process is no longer
 /// reachable (transport / stopped), as opposed to a transient RPC application
@@ -3043,6 +3258,7 @@ impl App {
     pub fn shell_escape_intent(&self) -> Option<view::Message> {
         view::nav::shell::escape_intent(view::nav::shell::ShellState {
             switcher_open: self.cache.cube_switcher_open,
+            connect_open: self.cache.connect_panel_open,
             lock_confirmation: self.cache.cube_lock_confirmation,
             backup_attention: false,
         })
@@ -3626,6 +3842,7 @@ impl App {
             connect_auth: connect_auth_arc,
             connect_email,
             connect_stream_config: None,
+            connect_renewal: Renewal::default(),
             in_app_otp_cache_snapshot: None,
             in_app_restore_cache_snapshot: None,
             in_app_refresh_commit: None,
@@ -3905,6 +4122,7 @@ impl App {
                 connect_auth: None,
                 connect_email: None,
                 connect_stream_config: None,
+                connect_renewal: Renewal::default(),
                 in_app_otp_cache_snapshot: None,
                 in_app_restore_cache_snapshot: None,
                 in_app_refresh_commit: None,
@@ -4699,6 +4917,7 @@ impl App {
     pub(crate) fn dismiss_shell_disclosures(&mut self) {
         self.cache.cube_switcher_open = false;
         self.cache.cube_lock_confirmation = false;
+        self.cache.connect_panel_open = false;
     }
 
     #[cfg(test)]
@@ -5442,6 +5661,16 @@ impl App {
         // has populated `connect_stream_config`. The subscription identity is
         // keyed on `(device_id, grpc_url)`; the stream tracks its event cursor
         // without restarting the subscription for each received event.
+        // The Connect light pulses while connecting, reconnecting or
+        // renewing, unless the user reduces motion.
+        if !self.cache.reduce_motion
+            && matches!(
+                self.cache.connect_stream_status.light(),
+                Some(ConnectLight::Connecting | ConnectLight::Reconnecting)
+            )
+        {
+            subscriptions.push(time::every(CONNECT_LIGHT_PULSE).map(|_| Message::ConnectLightTick));
+        }
         if let Some(cfg) = self.connect_stream_config.as_ref() {
             subscriptions.push(
                 iced::Subscription::run_with(
@@ -5770,32 +5999,73 @@ impl App {
         match event {
             M::Connected => {
                 log::info!("[CONNECT GRPC] Stream connected");
-                self.cache.connect_stream_status = ConnectionStatus::Connected;
-                stream_health_dispatch(ConnectionStatus::Connected)
+                self.connect_renewal = Renewal::default();
+                self.set_connect_status(ConnectionStatus::Connected)
             }
             M::Disconnected(reason) => {
                 log::warn!("[CONNECT GRPC] Stream disconnected: {}", reason);
-                // The stream reports a failure before announcing its retry.
-                // Keep that failure visible until a connection succeeds.
+                // The stream reports a failure before announcing its retry;
+                // keep that failure until a connection succeeds. A drop from
+                // a live stream reads as Reconnecting…, the first attempt
+                // as Connecting….
+                match self.cache.connect_stream_status {
+                    ConnectionStatus::Connected => {
+                        self.set_connect_status(ConnectionStatus::Reconnecting)
+                    }
+                    ConnectionStatus::Inactive => {
+                        self.set_connect_status(ConnectionStatus::Connecting)
+                    }
+                    _ => Task::none(),
+                }
+            }
+            M::Trouble(trouble) => {
+                use crate::services::connect::grpc::trouble::Trouble;
+                // A renewal in progress or one that needs the user outranks
+                // the stream's own trouble.
                 if matches!(
                     self.cache.connect_stream_status,
-                    ConnectionStatus::Error(_) | ConnectionStatus::DeviceRejected
+                    ConnectionStatus::Renewing | ConnectionStatus::RenewFailed
                 ) {
                     return Task::none();
                 }
-                self.cache.connect_stream_status = ConnectionStatus::Connecting;
-                stream_health_dispatch(ConnectionStatus::Connecting)
+                self.set_connect_status(match trouble {
+                    Trouble::Offline => ConnectionStatus::Offline,
+                    Trouble::Unreachable => ConnectionStatus::Reconnecting,
+                })
             }
-            M::DeviceRejected(reason) => {
-                log::warn!("[CONNECT GRPC] Device rejected: {}", reason);
-                self.cache.connect_stream_status = ConnectionStatus::DeviceRejected;
-                stream_health_dispatch(ConnectionStatus::DeviceRejected)
+            M::Refused(refusal) => {
+                use crate::services::connect::grpc::trouble::Refusal;
+                match refusal {
+                    // Connect has no record of this id: renew it (C1).
+                    Refusal::DeviceUnknown => self.renew_connect_device(false),
+                    // Removed from the account: never renewed (C3). Signing
+                    // out drops the stream.
+                    Refusal::DeviceRevoked => {
+                        log::warn!("[CONNECT] This computer was removed from the Connect account");
+                        Task::batch([
+                            Task::done(Message::ConnectSignedOutBy(SignedOutBy::ComputerRemoved)),
+                            Task::done(Message::View(view::Message::ConnectAccount(
+                                view::ConnectAccountMessage::LogOut,
+                            ))),
+                        ])
+                    }
+                    // A server without reasons: renewing could undo a
+                    // removal, so the user decides (Try again).
+                    Refusal::Unexplained => self.set_connect_status(ConnectionStatus::RenewFailed),
+                }
             }
             M::Error(err) => {
+                // An in-stream error or an expired sign-in. The REST client
+                // refreshes the shared token (or signs out if Connect
+                // refuses), and the stream retries with it.
                 log::warn!("[CONNECT GRPC] Stream error: {}", err);
-                let status = ConnectionStatus::Error(err);
-                self.cache.connect_stream_status = status.clone();
-                stream_health_dispatch(status)
+                if matches!(
+                    self.cache.connect_stream_status,
+                    ConnectionStatus::Renewing | ConnectionStatus::RenewFailed
+                ) {
+                    return Task::none();
+                }
+                self.set_connect_status(ConnectionStatus::Reconnecting)
             }
             M::SessionEvent(session_event) => {
                 log::info!(
@@ -5949,32 +6219,174 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        // Observe, don't consume: the Connections settings state still needs the
-        // result to render its banner, so it keeps its normal route.
-        let health = match &message {
-            Message::View(view::Message::Settings(
-                view::SettingsMessage::ConnectDeviceReregistered(Ok(registered)),
-            )) => self.adopt_reregistered_device(registered),
-            _ => None,
+        let task = self.update_connect_chrome(message);
+        self.refresh_vault_alert();
+        task
+    }
+
+    /// Recomputes the Vault's alert from its sync result (C8).
+    fn refresh_vault_alert(&mut self) {
+        let alert = if self.cache.has_vault {
+            let backend = self.daemon_backend();
+            let via_connect =
+                backend == DaemonBackend::EmbeddedCoincubed(Some(crate::node::NodeType::Esplora));
+            self.cache.vault_via_connect = via_connect;
+            let sync = sync_status(
+                backend,
+                self.cache.blockheight(),
+                self.cache.sync_progress(),
+                self.cache.last_poll_timestamp(),
+                self.cache.last_poll_at_startup,
+                self.cache.history_sync(),
+            );
+            vault_alert(
+                &sync,
+                via_connect,
+                self.cache.connect_stream_status,
+                self.cache.connect_authenticated,
+                self.cache.last_poll_timestamp(),
+                self.cache.blockheight(),
+            )
+        } else {
+            None
         };
-        let task = self.route(message);
-        match health {
-            Some(health) => Task::batch([health, task]),
-            None => task,
+        if self.cache.vault_alert != alert {
+            self.cache.vault_alert = alert;
         }
     }
 
-    /// A successful Settings → Connections re-register hands back the new device
-    /// id. Swap it into the stream config: the subscription is keyed on
-    /// `device_id`, so a stream stopped by `DeviceRejected` (or one still
-    /// using the stale id) is replaced by one that says hello with the new id.
+    /// The Connect control, its panel and renewal; everything else routes on.
+    fn update_connect_chrome(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::ReregisterConnectDevice,
+            )) => self.renew_connect_device(true),
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::ConnectDeviceReregistered(result),
+            )) => self.settle_connect_renewal(result),
+            Message::ConnectLightTick => {
+                self.cache.connect_light_dim = !self.cache.connect_light_dim;
+                Task::none()
+            }
+            Message::ConnectRenewalRetry => {
+                if self.cache.connect_stream_status == ConnectionStatus::Renewing {
+                    self.renew_connect_device(false)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::ConnectSignedOutBy(reason) => {
+                self.cache.connect_signed_out_by = Some(reason);
+                self.cache.connect_panel_open = false;
+                Task::none()
+            }
+            Message::View(view::Message::ToggleConnectPanel) => {
+                self.cache.connect_panel_open = !self.cache.connect_panel_open;
+                self.cache.cube_switcher_open = false;
+                self.cache.cube_lock_confirmation = false;
+                if self.cache.connect_panel_open {
+                    iced::widget::operation::focus(view::nav::shell::connect_panel_first_focus(
+                        &self.cache,
+                    ))
+                } else {
+                    iced::widget::operation::focus(view::nav::shell::CONNECTION_ID)
+                }
+            }
+            Message::View(view::Message::CloseConnectPanel) => {
+                if !self.cache.connect_panel_open {
+                    return Task::none();
+                }
+                self.cache.connect_panel_open = false;
+                iced::widget::operation::focus(view::nav::shell::CONNECTION_ID)
+            }
+            Message::View(view::Message::DismissConnectSignOut) => {
+                self.cache.connect_signed_out_by = None;
+                self.cache.connect_panel_open = false;
+                iced::widget::operation::focus(view::nav::shell::CONNECTION_ID)
+            }
+            message => self.route(message),
+        }
+    }
+
+    /// Sets the live-updates status and tells an open Keychain signing modal.
+    fn set_connect_status(&mut self, status: ConnectionStatus) -> Task<Message> {
+        if self.cache.connect_stream_status == status {
+            return Task::none();
+        }
+        self.cache.connect_stream_status = status;
+        stream_health_dispatch(status)
+    }
+
+    /// Registers this computer again (C1). Automatic attempts stop after
+    /// [`RENEWAL_ATTEMPTS`]; Try again (`manual`) always makes one more.
+    fn renew_connect_device(&mut self, manual: bool) -> Task<Message> {
+        if self.connect_renewal.in_flight {
+            return Task::none();
+        }
+        if manual {
+            self.connect_renewal.attempts = RENEWAL_ATTEMPTS - 1;
+        } else if self.connect_renewal.attempts >= RENEWAL_ATTEMPTS {
+            return self.set_connect_status(ConnectionStatus::RenewFailed);
+        }
+        let Some(task) = crate::app::state::settings::connections::renewal_task(&self.cache) else {
+            log::warn!("[CONNECT] Can't renew this computer's registration: Connect isn't set up");
+            return self.set_connect_status(ConnectionStatus::RenewFailed);
+        };
+        self.connect_renewal.attempts += 1;
+        self.connect_renewal.in_flight = true;
+        log::info!(
+            "[CONNECT] Renewing this computer's registration (attempt {}{})",
+            self.connect_renewal.attempts,
+            if manual { ", Try again" } else { "" }
+        );
+        Task::batch([self.set_connect_status(ConnectionStatus::Renewing), task])
+    }
+
+    /// A renewal settled. Success swaps the id into the stream; a failure
+    /// retries after [`RENEWAL_RETRY`] until the attempts run out.
+    fn settle_connect_renewal(
+        &mut self,
+        result: Result<view::ReregisteredDevice, String>,
+    ) -> Task<Message> {
+        self.connect_renewal.in_flight = false;
+        match result {
+            Ok(registered) => {
+                // Logged for support instead of shown (C6).
+                log::info!(
+                    "[CONNECT] Renewed this computer's registration: {} -> {}",
+                    registered.replaces,
+                    registered.device_id
+                );
+                self.adopt_reregistered_device(&registered)
+                    .unwrap_or_else(Task::none)
+            }
+            Err(e) => {
+                log::warn!(
+                    "[CONNECT] Renewing this computer's registration failed: {}",
+                    e
+                );
+                if self.connect_renewal.attempts >= RENEWAL_ATTEMPTS {
+                    self.set_connect_status(ConnectionStatus::RenewFailed)
+                } else {
+                    Task::perform(tokio::time::sleep(RENEWAL_RETRY), |_| {
+                        Message::ConnectRenewalRetry
+                    })
+                }
+            }
+        }
+    }
+
+    /// A successful renewal hands back the device id. Swap it into the stream
+    /// config: the subscription is keyed on `device_id`, so a stream stopped
+    /// by a refusal (or one still using the stale id) is replaced by one that
+    /// says hello with the new id.
     /// The swap only applies to the stream the request was started from: a
     /// result landing after sign-out (which clears the stream config), for
     /// another account, or after a newer sign-in already moved the stream to
     /// a different id is ignored, so it can't bring the device card back or
     /// replace a newer registration.
     /// An unchanged id leaves the status alone: the subscription key doesn't
-    /// change, so nothing restarts and "Connecting" would never settle.
+    /// change, and the running stream re-checks the same id on its own.
     fn adopt_reregistered_device(
         &mut self,
         registered: &view::ReregisteredDevice,
@@ -5988,8 +6400,9 @@ impl App {
         }
         cfg.device_id = registered.device_id.clone();
         self.cache.connect_device_id = Some(registered.device_id.clone());
-        self.cache.connect_stream_status = ConnectionStatus::Connecting;
-        Some(stream_health_dispatch(ConnectionStatus::Connecting))
+        // The new subscription reports Connected or a refusal; until then
+        // the light keeps pulsing amber.
+        Some(self.set_connect_status(ConnectionStatus::Renewing))
     }
 
     fn route(&mut self, message: Message) -> Task<Message> {
@@ -8817,6 +9230,7 @@ impl App {
                 return Task::none();
             }
             Message::View(view::Message::ToggleCubeSwitcher) => {
+                self.cache.connect_panel_open = false;
                 self.cache.cube_switcher_open = !self.cache.cube_switcher_open;
                 self.cache.cube_lock_confirmation = false;
                 return iced::widget::operation::focus(view::nav::shell::CUBE_SWITCHER_ID);
@@ -8853,6 +9267,7 @@ impl App {
                     .unwrap_or_else(Task::none);
                 self.cache.cube_switcher_open = false;
                 self.cache.cube_lock_confirmation = false;
+                self.cache.connect_panel_open = false;
                 let nickname_task = self.save_pending_spark_nickname(&menu);
                 return Task::batch([close_task, nickname_task, self.set_current_panel(menu)]);
             }
@@ -9364,7 +9779,12 @@ impl App {
                 // yet rebuild the stream (would need the token Arc +
                 // email re-plumbed from the account panel); the stream
                 // currently only re-establishes on app restart.
+                if !was_authenticated && self.cache.connect_authenticated {
+                    self.cache.connect_signed_out_by = None;
+                }
                 if was_authenticated && !self.cache.connect_authenticated {
+                    self.connect_renewal = Renewal::default();
+                    self.cache.connect_panel_open = false;
                     self.connect_stream_config = None;
                     self.connect_email = None;
                     self.cache.connect_grpc_url = None;
@@ -12395,11 +12815,14 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// A device Connect refuses must read as rejected (not "Checking…"), and
-    /// a successful re-register must swap the new id into the stream config
-    /// so the keyed subscription restarts instead of staying stopped.
+    /// The App's view of Connect refusals and renewal (C1, C3, C6): an
+    /// unexplained refusal waits for Try again, an unknown device is renewed
+    /// automatically (twice at most), and a renewal's result swaps the new id
+    /// into the stream config so the keyed subscription restarts.
     #[test]
-    fn device_rejection_holds_until_reregister_restarts_the_stream() {
+    fn refusals_and_renewal_drive_the_connect_status() {
+        use crate::services::connect::grpc::trouble::Refusal;
+        use crate::services::connect::grpc::ConnectStreamMessage as M;
         // Every result below was requested while the stream ran on id "1".
         let reregistered = |email: &str, device_id: &str| view::ReregisteredDevice {
             email: email.into(),
@@ -12413,7 +12836,7 @@ pub(crate) mod tests {
             .unwrap();
         let _enter = rt.enter();
         let root =
-            std::env::temp_dir().join(format!("connect-device-rejected-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("connect-device-refused-{}", uuid::Uuid::new_v4()));
         let mut app = local_app(&root);
         // `local_app` is a Blake2b fork Cube, whose dispatch guard drops every
         // Connect stream message. The stream only runs on Bitcoin-family Cubes.
@@ -12437,50 +12860,62 @@ pub(crate) mod tests {
         app.cache.connect_device_id = Some("1".into());
         app.cache.connect_stream_status = ConnectionStatus::Connecting;
 
-        drop(app.update(Message::ConnectStream(
-            crate::services::connect::grpc::ConnectStreamMessage::DeviceRejected(
-                "device not found or not owned by user".into(),
-            ),
-        )));
+        // A server without reasons: never renewed on its own.
+        drop(app.update(Message::ConnectStream(M::Refused(Refusal::Unexplained))));
         assert_eq!(
             app.cache.connect_stream_status,
-            ConnectionStatus::DeviceRejected
+            ConnectionStatus::RenewFailed
         );
+        assert_eq!(app.connect_renewal, Renewal::default());
 
-        // The rejected chip's route opens the Connections state, which owns the
-        // Re-register action: pressing it there starts the registration RPC.
+        // Try again starts a renewal.
         app.cache.connect_grpc_url = Some("https://grpc.example.invalid".into());
         app.cache.connect_tokens = app
             .connect_stream_config
             .as_ref()
             .map(|cfg| cfg.tokens.clone());
-        app.cache.connect_email = Some("rejected@example.invalid".into());
-        app.connect_email = Some("rejected@example.invalid".into());
-        drop(app.update(Message::View(view::Message::Menu(
-            view::nav::shell::CONNECT_CONNECTIONS_ROUTE,
-        ))));
-        assert_eq!(
-            app.panels.current,
-            view::nav::shell::CONNECT_CONNECTIONS_ROUTE
-        );
+        app.cache.connect_email = Some("refused@example.invalid".into());
+        app.connect_email = Some("refused@example.invalid".into());
         assert!(
             app.update(Message::View(view::Message::Settings(
                 view::SettingsMessage::ReregisterConnectDevice,
             )))
             .units()
                 > 0,
-            "Re-register must start the RPC from the chip's destination"
+            "Try again must start the registration"
         );
+        assert_eq!(app.cache.connect_stream_status, ConnectionStatus::Renewing);
+        assert!(app.connect_renewal.in_flight);
 
-        // A failed re-register changes nothing.
+        // Try again's one attempt failed: Couldn't reconnect again.
         drop(app.update(Message::View(view::Message::Settings(
             view::SettingsMessage::ConnectDeviceReregistered(Err("offline".into())),
         ))));
         assert_eq!(
             app.cache.connect_stream_status,
-            ConnectionStatus::DeviceRejected
+            ConnectionStatus::RenewFailed
         );
         assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "1");
+
+        // An unknown device is renewed automatically; a failure retries
+        // once after the wait, then gives up.
+        app.connect_renewal = Renewal::default();
+        drop(app.update(Message::ConnectStream(M::Refused(Refusal::DeviceUnknown))));
+        assert_eq!(app.cache.connect_stream_status, ConnectionStatus::Renewing);
+        assert_eq!(app.connect_renewal.attempts, 1);
+        drop(app.update(Message::View(view::Message::Settings(
+            view::SettingsMessage::ConnectDeviceReregistered(Err("offline".into())),
+        ))));
+        assert_eq!(app.cache.connect_stream_status, ConnectionStatus::Renewing);
+        drop(app.update(Message::ConnectRenewalRetry));
+        assert_eq!(app.connect_renewal.attempts, 2);
+        drop(app.update(Message::View(view::Message::Settings(
+            view::SettingsMessage::ConnectDeviceReregistered(Err("offline".into())),
+        ))));
+        assert_eq!(
+            app.cache.connect_stream_status,
+            ConnectionStatus::RenewFailed
+        );
 
         // A result for another account (switched mid-flight) is ignored.
         drop(app.update(Message::View(view::Message::Settings(
@@ -12490,53 +12925,37 @@ pub(crate) mod tests {
             ))),
         ))));
         assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "1");
-        assert_eq!(
-            app.cache.connect_stream_status,
-            ConnectionStatus::DeviceRejected
-        );
 
-        // The same id again restarts nothing, so the rejection stays visible.
+        // A new id restarts the stream under it; Connected ends the cycle.
         drop(app.update(Message::View(view::Message::Settings(
             view::SettingsMessage::ConnectDeviceReregistered(Ok(reregistered(
-                "rejected@example.invalid",
-                "1",
-            ))),
-        ))));
-        assert_eq!(
-            app.cache.connect_stream_status,
-            ConnectionStatus::DeviceRejected
-        );
-
-        drop(app.update(Message::View(view::Message::Settings(
-            view::SettingsMessage::ConnectDeviceReregistered(Ok(reregistered(
-                "rejected@example.invalid",
+                "refused@example.invalid",
                 "42",
             ))),
         ))));
         assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "42");
         assert_eq!(app.cache.connect_device_id.as_deref(), Some("42"));
-        assert_eq!(
-            app.cache.connect_stream_status,
-            ConnectionStatus::Connecting
-        );
+        assert_eq!(app.cache.connect_stream_status, ConnectionStatus::Renewing);
+        drop(app.update(Message::ConnectStream(M::Connected)));
+        assert_eq!(app.cache.connect_stream_status, ConnectionStatus::Connected);
+        assert_eq!(app.connect_renewal, Renewal::default());
 
         // A late result from the earlier request (still replacing "1") must
         // not overwrite the registration the stream has moved on to.
         drop(app.update(Message::View(view::Message::Settings(
             view::SettingsMessage::ConnectDeviceReregistered(Ok(reregistered(
-                "rejected@example.invalid",
+                "refused@example.invalid",
                 "44",
             ))),
         ))));
         assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "42");
-        assert_eq!(app.cache.connect_device_id.as_deref(), Some("42"));
 
         // A result landing after sign-out must not resurrect the device id.
         app.connect_stream_config = None;
         app.cache.connect_device_id = None;
         drop(app.update(Message::View(view::Message::Settings(
             view::SettingsMessage::ConnectDeviceReregistered(Ok(reregistered(
-                "rejected@example.invalid",
+                "refused@example.invalid",
                 "43",
             ))),
         ))));
@@ -12544,8 +12963,40 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A removed computer is never renewed: Connect signed it out (C3).
+    #[test]
+    fn a_revoked_device_is_signed_out_not_renewed() {
+        use crate::services::connect::grpc::trouble::Refusal;
+        use crate::services::connect::grpc::ConnectStreamMessage as M;
+        let _guard = crate::app::session::test_guard();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = rt.enter();
+        let root = std::env::temp_dir().join(format!("connect-revoked-{}", uuid::Uuid::new_v4()));
+        let mut app = local_app(&root);
+        app.cache.fiat_chain = crate::chain::ChainId::Bitcoin;
+        app.cache.connect_stream_status = ConnectionStatus::Connected;
+        assert!(
+            app.update(Message::ConnectStream(M::Refused(Refusal::DeviceRevoked)))
+                .units()
+                > 0
+        );
+        assert_eq!(app.connect_renewal, Renewal::default());
+        drop(app.update(Message::ConnectSignedOutBy(SignedOutBy::ComputerRemoved)));
+        assert_eq!(
+            app.cache.connect_signed_out_by,
+            Some(SignedOutBy::ComputerRemoved)
+        );
+        drop(app.update(Message::View(view::Message::DismissConnectSignOut)));
+        assert_eq!(app.cache.connect_signed_out_by, None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn connect_retry_keeps_failure_visible_until_connected() {
+        use crate::services::connect::grpc::trouble::Trouble;
         use crate::services::connect::grpc::ConnectStreamMessage as M;
 
         let _guard = crate::app::session::test_guard();
@@ -12557,23 +13008,31 @@ pub(crate) mod tests {
         let root = std::env::temp_dir().join(format!("connect-retry-{}", uuid::Uuid::new_v4()));
         let mut app = local_app(&root);
         app.cache.fiat_chain = crate::chain::ChainId::Bitcoin;
-        for failure in [
-            M::Error("opening handshake timed out".into()),
-            M::DeviceRejected("device revoked".into()),
+        for (failure, expected) in [
+            (
+                M::Trouble(Trouble::Unreachable),
+                ConnectionStatus::Reconnecting,
+            ),
+            (M::Trouble(Trouble::Offline), ConnectionStatus::Offline),
+            (
+                M::Error("Connect session expired".into()),
+                ConnectionStatus::Reconnecting,
+            ),
         ] {
             drop(app.update(Message::ConnectStream(failure)));
-            let status = app.cache.connect_stream_status.clone();
+            assert_eq!(app.cache.connect_stream_status, expected);
             drop(app.update(Message::ConnectStream(M::Disconnected("retrying".into()))));
-            assert_eq!(app.cache.connect_stream_status, status);
+            assert_eq!(app.cache.connect_stream_status, expected);
             drop(app.update(Message::ConnectStream(M::Connected)));
             assert_eq!(app.cache.connect_stream_status, ConnectionStatus::Connected);
         }
+        // A live stream that drops reads as Reconnecting…, not Connecting….
         drop(app.update(Message::ConnectStream(M::Disconnected(
             "stream ended".into(),
         ))));
         assert_eq!(
             app.cache.connect_stream_status,
-            ConnectionStatus::Connecting
+            ConnectionStatus::Reconnecting
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -13773,30 +14232,88 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn connection_status_visibility_and_tooltips_are_stable() {
-        assert!(!ConnectionStatus::Inactive.is_visible());
-        assert_eq!(ConnectionStatus::Inactive.tooltip(), "Connect inactive");
+    fn connection_status_words_and_lights_follow_the_design() {
+        use ConnectionStatus as S;
+        assert!(!S::Inactive.is_visible());
+        assert_eq!(S::Inactive.light(), None);
+        let expected = [
+            (S::Connecting, "Connecting…", ConnectLight::Connecting),
+            (S::Connected, "On", ConnectLight::On),
+            (S::Offline, "Offline", ConnectLight::Offline),
+            (S::Reconnecting, "Reconnecting…", ConnectLight::Reconnecting),
+            (S::Renewing, "Reconnecting…", ConnectLight::Reconnecting),
+            (S::RenewFailed, "Offline", ConnectLight::NeedsYou),
+        ];
+        for (status, word, light) in expected {
+            assert!(status.is_visible());
+            assert_eq!(status.word(), word, "{:?}", status);
+            assert_eq!(status.light(), Some(light), "{:?}", status);
+        }
+        // Only the user's own trouble is red; uploads wait unless On.
+        assert!(S::Connected.allows_uploads());
+        for status in [
+            S::Connecting,
+            S::Offline,
+            S::Reconnecting,
+            S::Renewing,
+            S::RenewFailed,
+        ] {
+            assert!(!status.allows_uploads(), "{:?}", status);
+        }
+        // No line says "registration", "stream" or "device".
+        for status in [
+            S::Connecting,
+            S::Connected,
+            S::Offline,
+            S::Reconnecting,
+            S::Renewing,
+        ] {
+            let line = status.line().unwrap();
+            for jargon in ["registration", "stream", "device", "gRPC"] {
+                assert!(!line.contains(jargon), "{:?}: {}", status, line);
+            }
+        }
+        assert_eq!(S::RenewFailed.line(), None);
+    }
 
-        assert!(ConnectionStatus::Connecting.is_visible());
-        assert!(ConnectionStatus::Connecting
-            .tooltip()
-            .starts_with("Connecting to COINCUBE | Connect"));
-
-        assert!(ConnectionStatus::Connected.is_visible());
-        assert_eq!(ConnectionStatus::Connected.tooltip(), "Connected");
-
-        let err = ConnectionStatus::Error("socket closed".to_string());
-        assert!(err.is_visible());
-        // The tooltip must describe the situation without echoing the
-        // transport error back at the user.
-        assert!(err.tooltip().starts_with("Can't reach COINCUBE | Connect"));
-        assert!(!err.tooltip().contains("socket closed"));
-
-        // A rejected device is not "retrying": the copy must name the fix.
-        let rejected = ConnectionStatus::DeviceRejected;
-        assert!(rejected.is_visible());
-        assert!(!rejected.tooltip().contains("retrying"));
-        assert!(rejected.tooltip().contains("Re-register"));
+    #[test]
+    fn the_vault_alert_follows_its_own_sync_result() {
+        let failing = SyncStatus::SyncFailing {
+            message: "Esplora client error".into(),
+            since: 0,
+            retry_progress: None,
+        };
+        // Synced: no alert, whatever Connect says.
+        assert_eq!(
+            vault_alert(
+                &SyncStatus::Synced,
+                true,
+                ConnectionStatus::Offline,
+                true,
+                None,
+                1
+            ),
+            None
+        );
+        let alert = |connect, signed_in| {
+            vault_alert(&failing, true, connect, signed_in, None, 974_600).unwrap()
+        };
+        assert_eq!(alert(ConnectionStatus::Offline, true).word(), "Offline");
+        assert_eq!(
+            alert(ConnectionStatus::Reconnecting, true).word(),
+            "Reconnecting…"
+        );
+        let signed_out = alert(ConnectionStatus::Inactive, false);
+        assert_eq!(signed_out.word(), "Not updating");
+        assert!(signed_out.needs_sign_in);
+        assert_eq!(
+            signed_out.title(),
+            "Sign in to Connect to update this Vault"
+        );
+        // A Vault on its own node says Not updating, never Connect's words.
+        let local = vault_alert(&failing, false, ConnectionStatus::Offline, true, None, 1).unwrap();
+        assert_eq!(local.word(), "Not updating");
+        assert!(!local.via_connect);
     }
 
     #[test]

@@ -212,44 +212,101 @@ pub fn import_export<'a>(
     dashboard(menu, cache, content)
 }
 
-/// Vault → Settings → Connections: the node backend's health with Node
-/// settings one click away, and one row for the Cube's Connect session that
-/// opens Cube › Connections.
+/// Vault → Settings → Connections: where the Vault reads its blockchain data
+/// and whether that is working, named by its provider. The Connect account
+/// itself lives in the header control; Keychain signing shows how live
+/// updates affect this Vault and links to Cube › Connections.
 pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
-    use crate::app::view::settings::page;
-    let progress = cache.sync_progress();
+    use crate::app::view::settings::{connections::live_updates_status, page};
+    use crate::app::ConnectionStatus;
     let block = coincube_ui::component::amount::group_digits(&cache.blockheight().to_string(), ",");
-    let node = if progress >= 1.0 {
-        page::row("Node backend and sync")
-            .accessory(page::status(page::Status::Ok, "Synced"))
-            .description(format!("Synced to block {block}."))
+    let (provider, provider_line) = if cache.vault_via_connect {
+        (
+            "COINCUBE | Connect",
+            "This Vault reads its balance and history through Connect.",
+        )
     } else {
-        page::row("Node backend and sync")
-            .accessory(page::status(
+        (
+            "Your own node or server",
+            "This Vault reads its balance and history from a node you chose.",
+        )
+    };
+    let data = page::row("Data provider")
+        .line(iced::widget::text(provider).size(14))
+        .description(provider_line)
+        .control(page::button(
+            "tenshu.settings.vault-connections.node",
+            "Node settings",
+            Some(Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
+                crate::app::menu::SettingsOption::Node,
+            ))))),
+        ));
+    let progress = cache.sync_progress();
+    let sync = match cache.vault_alert.as_ref() {
+        Some(alert) => {
+            let at = alert
+                .last_synced
+                .as_deref()
+                .map(|at| format!(" Last synced at {at}, block {block}."))
+                .unwrap_or_default();
+            page::row("Sync")
+                .control(crate::app::view::nav::shell::vault_status(alert))
+                .description(format!("{}.{at} Tenshu keeps trying.", alert.title()))
+        }
+        None if progress >= 1.0 => page::row("Sync")
+            .control(page::status(page::Status::Ok, "Synced"))
+            .description(format!("Synced to block {block}.")),
+        None => page::row("Sync")
+            .control(page::status(
                 page::Status::Busy,
                 format!("Syncing {:.1}%", crate::utils::syncing_percent(progress)),
             ))
-            .description(format!("At block {block}. Balances may be out of date."))
-    }
-    .control(page::button(
-        "tenshu.settings.vault-connections.node",
-        "Node settings",
-        Some(Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
-            crate::app::menu::SettingsOption::Node,
-        ))))),
-    ));
-    // The App wraps this in the dashboard (`connect_settings_content`).
-    page::group(
-        "Health",
+            .description(format!("At block {block}. Balances may be out of date.")),
+    };
+    let mut content = Column::new().width(Length::Fill).push(page::group(
+        "Blockchain data",
         None,
-        page::rows([
-            node.into(),
-            crate::app::view::settings::connections::cube_connections_row(
-                cache,
-                "tenshu.settings.vault-connections.cube",
+        page::rows([data.into(), sync.into()]),
+    ));
+
+    // Keychain signing reaches this Vault only through Connect's live updates.
+    if cache.connect_authenticated {
+        let status = cache.connect_stream_status;
+        let (kind, word) = live_updates_status(status);
+        const SENT: &str = "Requests already sent stay on Connect;";
+        let line = match status {
+            ConnectionStatus::Connected => {
+                "Signing requests and signatures from Keychain arrive as they happen.".to_owned()
+            }
+            ConnectionStatus::Inactive | ConnectionStatus::Connecting => {
+                "Starting live updates from Connect.".to_owned()
+            }
+            ConnectionStatus::Reconnecting | ConnectionStatus::Renewing => {
+                format!("Can’t reach Connect. {SENT} signatures reach Tenshu once it’s back.")
+            }
+            ConnectionStatus::Offline => format!(
+                "No internet connection. {SENT} signatures reach Tenshu once you’re back online."
             ),
-        ]),
-    )
+            ConnectionStatus::RenewFailed => format!(
+                "{}. {SENT} try again from Cube connections.",
+                crate::app::RENEW_FAILED_TITLE
+            ),
+        };
+        content = content.push(page::group_with_action(
+            "Keychain signing",
+            page::link(
+                "tenshu.settings.vault-connections.cube",
+                "Cube connections",
+                Message::Menu(crate::app::view::settings::connections::CUBE_CONNECTIONS_ROUTE),
+            ),
+            page::rows([page::row("Signing updates")
+                .control(page::status(kind, word))
+                .description(line)
+                .into()]),
+        ));
+    }
+    // The App wraps this in the dashboard (`connect_settings_content`).
+    content.into()
 }
 
 pub fn plaintext_export_review<'a>() -> Element<'a, Message> {
@@ -3352,15 +3409,23 @@ mod tests {
             coincube_ui::theme::Theme::dark(),
         );
         for label in [
-            "Node backend and sync",
+            "Blockchain data",
+            "Data provider",
+            "Sync",
             "Synced to block 974,600.",
             "Node settings",
-            "Connect account and this device",
+            "Keychain signing",
+            "Signing updates",
             "Cube connections",
         ] {
             assert!(probe.contains(label), "{}", label);
         }
-        for gone in ["Cube service session", "Open Node", "Manage in Connect"] {
+        for gone in [
+            "Cube service session",
+            "Open Node",
+            "Manage in Connect",
+            "Connect account and this device",
+        ] {
             assert!(!probe.contains(gone), "{}", gone);
         }
         let sent = capture::activate(

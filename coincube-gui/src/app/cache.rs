@@ -326,12 +326,20 @@ pub struct Cache {
         std::collections::HashMap<coincube_core::miniscript::bitcoin::OutPoint, std::time::Instant>,
     /// Current theme mode (dark/light) — used for theme-aware widget rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
+    /// The effective reduce-motion preference: the Connect light holds steady
+    /// instead of pulsing.
+    pub reduce_motion: bool,
+    /// The pulsing Connect light's dim phase, flipped by a slow tick only
+    /// while it pulses.
+    pub connect_light_dim: bool,
     /// Presentation input for the shared top-bar balance eye. `None` until the
     /// GUI preferences owner publishes a resolved or unresolved privacy state.
     pub balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
     /// Transient shell disclosures. These belong to this open Cube and are
     /// deliberately not persisted with wallet or device settings.
     pub cube_switcher_open: bool,
+    /// The Connect control's panel is open.
+    pub connect_panel_open: bool,
     pub cube_lock_confirmation: bool,
     /// BTC price in USD, always fetched regardless of the user's selected fiat
     /// currency. Used for converting USDt (which is pegged to USD) into sats.
@@ -426,6 +434,14 @@ pub struct Cache {
     /// `Inactive` for local-daemon installs and any session before the
     /// first `Message::ConnectStreamReady` has fired.
     pub connect_stream_status: crate::app::ConnectionStatus,
+    /// Set when Connect, not the user, signed this computer out. Cleared by
+    /// the next sign-in or by Not now.
+    pub connect_signed_out_by: Option<crate::app::SignedOutBy>,
+    /// The Vault's alert while its recent polls fail (C8), recomputed by the
+    /// App after every update.
+    pub vault_alert: Option<crate::app::VaultAlert>,
+    /// The Vault reads its blockchain data through COINCUBE | Connect.
+    pub vault_via_connect: bool,
     /// `SignerDevice.id` returned by the API's `RegisterDevice` RPC.
     /// Surfaced on the Settings → About page so the user can confirm
     /// this desktop is registered, and to drive the "Re-register"
@@ -496,8 +512,11 @@ impl std::default::Default for Cache {
             split_unconfirmed: std::collections::HashSet::new(),
             separated: std::collections::HashMap::new(),
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+            reduce_motion: false,
+            connect_light_dim: false,
             balance_privacy: None,
             cube_switcher_open: false,
+            connect_panel_open: false,
             cube_lock_confirmation: false,
             btc_usd_price: None,
             show_direction_badges: true,
@@ -513,6 +532,9 @@ impl std::default::Default for Cache {
             connect_grpc_url: None,
             connect_tokens: None,
             connect_stream_status: crate::app::ConnectionStatus::default(),
+            connect_signed_out_by: None,
+            vault_alert: None,
+            vault_via_connect: false,
             connect_device_id: None,
             connect_email: None,
         }

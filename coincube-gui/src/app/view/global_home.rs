@@ -147,6 +147,8 @@ fn wallet_card<'a>(
     // not-yet-authoritative value.
     loaded: bool,
     vault_alias: Option<&str>,
+    // The Vault's stale-balance line while it isn't updating.
+    stale: Option<String>,
 ) -> Element<'a, Message> {
     let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(*balance));
 
@@ -473,10 +475,19 @@ fn wallet_card<'a>(
             )
             .style(theme::button::transparent)
             .on_press(overview_action.clone());
+            // Like Spark's "Last known Spark balance · refresh failed".
+            let stale = stale.map(|line| {
+                Row::new()
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .push(warning_icon().size(14).style(theme::text::warning))
+                    .push(text(line).size(P2_SIZE).style(theme::text::warning))
+            });
             let content = Column::new()
                 .spacing(12)
                 .push(title_action)
                 .push(header)
+                .push_maybe(stale)
                 .push(btc_row);
 
             // P-Overview keeps the recovery affordance on the Vault card.
@@ -2384,6 +2395,9 @@ pub struct GlobalViewConfig<'a> {
     /// placeholder and suppresses pending indicators until the
     /// underlying balance is authoritative.
     pub vault_loaded: bool,
+    /// "Last known Vault balance · not updating since {time}" while the
+    /// Vault's recent polls fail.
+    pub vault_stale: Option<String>,
     /// Global fiat-native vs. bitcoin-native display preference. Mirrored
     /// from `cache.display_mode`.
     pub display_mode: crate::app::settings::display::DisplayMode,
@@ -2505,6 +2519,7 @@ pub fn global_home_view<'a>(
         liquid_balance_error,
         usdt_balance_loaded,
         vault_loaded,
+        vault_stale,
         display_mode,
         has_vault,
         has_imported_bitcoin,
@@ -3173,6 +3188,7 @@ pub fn global_home_view<'a>(
                 vault_loaded
             },
             vault_alias,
+            vault_stale.clone(),
         )
     };
 
@@ -3514,6 +3530,7 @@ mod tests {
                 liquid_balance_error: false,
                 usdt_balance_loaded: true,
                 vault_loaded: true,
+                vault_stale: None,
                 display_mode: DisplayMode::FiatNative,
                 has_vault: true,
                 has_imported_bitcoin: false,
