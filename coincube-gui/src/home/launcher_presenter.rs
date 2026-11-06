@@ -821,7 +821,7 @@ fn face_secondary_style(theme: &theme::Theme, status: iced_button::Status) -> ic
 }
 
 /// `.av.ghost`: a dashed ring holding the cloud.
-fn ghost_avatar<'a, M: 'a>(size: f32) -> Element<'a, M> {
+pub(super) fn ghost_avatar<'a, M: 'a>(size: f32) -> Element<'a, M> {
     let ring = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\"><circle cx=\"16\" cy=\"16\" r=\"15.5\" fill=\"none\" stroke=\"#fff\" stroke-dasharray=\"3 2\"/><g transform=\"translate(8 8) scale(.6667)\"><path d=\"{}\" fill=\"none\" stroke=\"#fff\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></g></svg>",
         launcher_scene::CLOUD
