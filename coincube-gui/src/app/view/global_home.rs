@@ -490,9 +490,7 @@ fn wallet_card<'a>(
                 .push_maybe(stale)
                 .push(btc_row);
 
-            // P-Overview keeps the recovery affordance on the Vault card.
-            // The prototype opens the Vault landing page, where the actual
-            // recovery state is explained; it does not jump into an operation.
+            // Open the available recovery paths directly in Tools.
             if show_recovery_path {
                 content.push(
                     Column::new()
@@ -517,7 +515,7 @@ fn wallet_card<'a>(
                                 style.text_color = t.colors.shell.accent_ink;
                                 style
                             })
-                            .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
+                            .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Recovery))),
                         ),
                 )
             } else {
@@ -2395,6 +2393,8 @@ pub struct GlobalViewConfig<'a> {
     /// placeholder and suppresses pending indicators until the
     /// underlying balance is authoritative.
     pub vault_loaded: bool,
+    /// Confirmed, unspent coins can be spent through a recovery path.
+    pub recovery_available: bool,
     /// "Last known Vault balance · not updating since {time}" while the
     /// Vault's recent polls fail.
     pub vault_stale: Option<String>,
@@ -2519,6 +2519,7 @@ pub fn global_home_view<'a>(
         liquid_balance_error,
         usdt_balance_loaded,
         vault_loaded,
+        recovery_available,
         vault_stale,
         display_mode,
         has_vault,
@@ -3175,7 +3176,7 @@ pub fn global_home_view<'a>(
             fiat_converter,
             wallet_balance_masked,
             has_vault || (has_imported_bitcoin && imported_installed),
-            has_vault,
+            has_vault && recovery_available,
             has_imported_bitcoin && !imported_installed,
             bitcoin_unit,
             pending_vault_incoming,
@@ -3530,6 +3531,7 @@ mod tests {
                 liquid_balance_error: false,
                 usdt_balance_loaded: true,
                 vault_loaded: true,
+                recovery_available: true,
                 vault_stale: None,
                 display_mode: DisplayMode::FiatNative,
                 has_vault: true,
@@ -3917,7 +3919,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_vault_recovery_footer_routes_to_landing_and_respects_privacy() {
+    fn overview_vault_recovery_footer_routes_to_tools_and_respects_availability_and_privacy() {
         use crate::app::view::shared::landing::capture;
 
         let fixture = ViewFixture::new();
@@ -3936,6 +3938,18 @@ mod tests {
                 );
                 assert!(normal.contains("Recovery path"));
                 assert!(normal.has_focus(target.clone()));
+
+                let mut locked = fixture.config(0, None, None);
+                locked.recovery_available = false;
+                let locked = capture::inspect(
+                    "overview-vault-recovery-locked",
+                    overview(locked),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(!locked.contains("Recovery path"));
+                assert!(!locked.has_focus(target.clone()));
 
                 let mut masked = fixture.config(0, None, None);
                 masked.balance_masked = true;
@@ -3993,7 +4007,7 @@ mod tests {
             assert_eq!(routes.len(), 1, "pointer={pointer}: {messages:?}");
             assert!(matches!(
                 routes[0],
-                Message::Menu(Menu::Vault(VaultSubMenu::Overview))
+                Message::Menu(Menu::Vault(VaultSubMenu::Recovery))
             ));
         }
     }

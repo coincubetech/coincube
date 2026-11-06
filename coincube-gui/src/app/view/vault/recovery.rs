@@ -31,6 +31,7 @@ pub fn recovery<'a>(
     cache: &'a Cache,
     recovery_paths: Vec<Element<'a, Message>>,
     selected_path: Option<usize>,
+    next_recovery_sequence: Option<u32>,
 ) -> Element<'a, Message> {
     let no_recovery_paths = recovery_paths.is_empty();
     const INFO_TEXT: &str = "Use a recovery path to send funds to another wallet after its time lock has elapsed. A backup does not unlock a time lock.";
@@ -61,8 +62,22 @@ pub fn recovery<'a>(
                             })
                             .width(Length::Fill),
                         )
+                        .push(next_recovery_sequence.map(|sequence| {
+                            let days = super::coins::blocks_to_days_ceil(sequence);
+                            text(format!(
+                                "{} in ≈ {} day{}.",
+                                if no_recovery_paths {
+                                    "Recovery path available"
+                                } else {
+                                    "Next recovery path available"
+                                },
+                                days,
+                                if days == 1 { "" } else { "s" },
+                            ))
+                        }))
                         .push((!no_recovery_paths).then_some(Space::new().height(20)))
-                        .push(Column::with_children(recovery_paths).spacing(20)),
+                        .push(Column::with_children(recovery_paths).spacing(20))
+                        .spacing(10),
                 )
                 .style(theme::card::simple)
                 .padding(20),
