@@ -251,7 +251,15 @@ pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
                 .unwrap_or_default();
             page::row("Sync")
                 .control(crate::app::view::nav::shell::vault_status(alert))
-                .description(format!("{}.{at} Tenshu keeps trying.", alert.title()))
+                .description(format!(
+                    "{}.{at} {}",
+                    alert.title(),
+                    if alert.stall == crate::app::VaultStall::NeedsReconnect {
+                        "Press Try again in the Connect control."
+                    } else {
+                        "Tenshu keeps trying."
+                    }
+                ))
         }
         None if progress >= 1.0 => page::row("Sync")
             .control(page::status(page::Status::Ok, "Synced"))

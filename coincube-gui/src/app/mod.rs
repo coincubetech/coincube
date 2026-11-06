@@ -1037,6 +1037,9 @@ pub struct App {
     connect_stream_config: Option<crate::services::connect::grpc::stream::ConnectStreamConfig>,
     /// Automatic renewal of this computer's Connect registration.
     connect_renewal: Renewal,
+    /// Part of the stream subscription's identity: bumped to restart it
+    /// without an id change.
+    connect_stream_restart: u64,
     /// Cache state before this App panel sent its one pending OTP verification.
     in_app_otp_cache_snapshot: Option<crate::services::connect::client::cache::ConnectCache>,
     /// Network cache observed before a keyring restore starts its refresh RPC.
@@ -1208,6 +1211,9 @@ pub enum VaultStall {
     Reconnecting,
     /// Signed out of Connect, or any other failure.
     NotUpdating,
+    /// Connect stopped recognizing this computer and automatic renewal
+    /// failed: retries have stopped until the user presses Try again.
+    NeedsReconnect,
 }
 
 /// A Vault whose recent polls failed (C8). Set by the Vault's own sync
@@ -1232,7 +1238,7 @@ impl VaultAlert {
         match self.stall {
             VaultStall::Offline => "Offline",
             VaultStall::Reconnecting => "Reconnecting…",
-            VaultStall::NotUpdating => "Not updating",
+            VaultStall::NotUpdating | VaultStall::NeedsReconnect => "Not updating",
         }
     }
 
@@ -1245,6 +1251,7 @@ impl VaultAlert {
                 "Sign in to Connect to update this Vault"
             }
             VaultStall::NotUpdating => "This Vault isn’t updating",
+            VaultStall::NeedsReconnect => crate::app::RENEW_FAILED_TITLE,
         }
     }
 
@@ -1267,6 +1274,9 @@ impl VaultAlert {
                 "{from} This Vault gets blockchain data through Connect, which needs you signed in."
             ),
             VaultStall::NotUpdating => format!("{from} Tenshu keeps trying."),
+            VaultStall::NeedsReconnect => {
+                format!("{from} Press Try again in the Connect control to update this Vault.")
+            }
         }
     }
 
@@ -1305,6 +1315,7 @@ pub fn vault_alert(
             ConnectionStatus::Connecting
             | ConnectionStatus::Reconnecting
             | ConnectionStatus::Renewing => VaultStall::Reconnecting,
+            ConnectionStatus::RenewFailed => VaultStall::NeedsReconnect,
             _ => VaultStall::NotUpdating,
         }
     };
@@ -2746,6 +2757,10 @@ async fn check_bitcoind_net_stats(
 /// for the next reconnect's ClientHello.
 struct ConnectStreamSubKey {
     cfg: crate::services::connect::grpc::stream::ConnectStreamConfig,
+    /// Bumped to restart a stream whose id didn't change, such as after a
+    /// renewal that returned the same id while the stream sleeps on a
+    /// refusal re-check.
+    restart: u64,
 }
 
 impl std::hash::Hash for ConnectStreamSubKey {
@@ -2753,6 +2768,7 @@ impl std::hash::Hash for ConnectStreamSubKey {
         "connect-stream".hash(state);
         self.cfg.device_id.hash(state);
         self.cfg.grpc_url.hash(state);
+        self.restart.hash(state);
     }
 }
 
@@ -3843,6 +3859,7 @@ impl App {
             connect_email,
             connect_stream_config: None,
             connect_renewal: Renewal::default(),
+            connect_stream_restart: 0,
             in_app_otp_cache_snapshot: None,
             in_app_restore_cache_snapshot: None,
             in_app_refresh_commit: None,
@@ -4123,6 +4140,7 @@ impl App {
                 connect_email: None,
                 connect_stream_config: None,
                 connect_renewal: Renewal::default(),
+                connect_stream_restart: 0,
                 in_app_otp_cache_snapshot: None,
                 in_app_restore_cache_snapshot: None,
                 in_app_refresh_commit: None,
@@ -5674,7 +5692,10 @@ impl App {
         if let Some(cfg) = self.connect_stream_config.as_ref() {
             subscriptions.push(
                 iced::Subscription::run_with(
-                    ConnectStreamSubKey { cfg: cfg.clone() },
+                    ConnectStreamSubKey {
+                        cfg: cfg.clone(),
+                        restart: self.connect_stream_restart,
+                    },
                     make_connect_stream,
                 )
                 .map(Message::ConnectStream),
@@ -6385,8 +6406,9 @@ impl App {
     /// another account, or after a newer sign-in already moved the stream to
     /// a different id is ignored, so it can't bring the device card back or
     /// replace a newer registration.
-    /// An unchanged id leaves the status alone: the subscription key doesn't
-    /// change, and the running stream re-checks the same id on its own.
+    /// An unchanged id restarts the stream too (through the subscription's
+    /// restart count): the running one may be sleeping on a refusal
+    /// re-check for minutes after Connect accepted the registration.
     fn adopt_reregistered_device(
         &mut self,
         registered: &view::ReregisteredDevice,
@@ -6395,11 +6417,15 @@ impl App {
             return None;
         }
         let cfg = self.connect_stream_config.as_mut()?;
-        if cfg.device_id != registered.replaces || cfg.device_id == registered.device_id {
+        if cfg.device_id != registered.replaces {
             return None;
         }
-        cfg.device_id = registered.device_id.clone();
-        self.cache.connect_device_id = Some(registered.device_id.clone());
+        if cfg.device_id == registered.device_id {
+            self.connect_stream_restart = self.connect_stream_restart.wrapping_add(1);
+        } else {
+            cfg.device_id = registered.device_id.clone();
+            self.cache.connect_device_id = Some(registered.device_id.clone());
+        }
         // The new subscription reports Connected or a refusal; until then
         // the light keeps pulsing amber.
         Some(self.set_connect_status(ConnectionStatus::Renewing))
@@ -12926,6 +12952,18 @@ pub(crate) mod tests {
         ))));
         assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "1");
 
+        // The same id restarts the sleeping stream through its restart count.
+        let restart = app.connect_stream_restart;
+        drop(app.update(Message::View(view::Message::Settings(
+            view::SettingsMessage::ConnectDeviceReregistered(Ok(reregistered(
+                "refused@example.invalid",
+                "1",
+            ))),
+        ))));
+        assert_eq!(app.connect_stream_restart, restart + 1);
+        assert_eq!(app.connect_stream_config.as_ref().unwrap().device_id, "1");
+        assert_eq!(app.cache.connect_stream_status, ConnectionStatus::Renewing);
+
         // A new id restarts the stream under it; Connected ends the cycle.
         drop(app.update(Message::View(view::Message::Settings(
             view::SettingsMessage::ConnectDeviceReregistered(Ok(reregistered(
@@ -14310,6 +14348,12 @@ pub(crate) mod tests {
             signed_out.title(),
             "Sign in to Connect to update this Vault"
         );
+        // After automatic renewal failed nothing retries: point at Try again.
+        let failed = alert(ConnectionStatus::RenewFailed, true);
+        assert_eq!(failed.stall, VaultStall::NeedsReconnect);
+        assert_eq!(failed.word(), "Not updating");
+        assert!(failed.detail().contains("Try again"));
+        assert!(!failed.detail().contains("keeps trying"));
         // A Vault on its own node says Not updating, never Connect's words.
         let local = vault_alert(&failing, false, ConnectionStatus::Offline, true, None, 1).unwrap();
         assert_eq!(local.word(), "Not updating");
