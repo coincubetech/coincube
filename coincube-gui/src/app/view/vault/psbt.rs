@@ -2256,7 +2256,7 @@ fn border_wallet_recon_phrase_view(
         .spacing(12)
         .push(header)
         .push(p1_regular(prompt))
-        .push(p1_regular("Reconstruction needs the recovery phrase, your exact 11-cell pattern in order, and the checksum word you recorded when enrolling this key.")
+        .push(p1_regular("Reconstruction needs the recovery phrase and your exact 11-cell pattern in order. The checksum word is recalculated from your pattern.")
             .style(theme::text::secondary))
         .push(word_rows);
 
