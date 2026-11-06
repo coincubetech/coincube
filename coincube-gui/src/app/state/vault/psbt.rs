@@ -1876,9 +1876,9 @@ impl BorderWalletReconstructionState {
     /// ([`SignModal::border_wallet_grid_phrase`]) and is where the correctness
     /// lives — this function only writes what it is given.
     ///
-    /// This prefill signs nothing on its own: the pattern and its checksum word
-    /// are the secret half of a Border Wallet key and still have to be supplied
-    /// on the next step. The words stay editable.
+    /// This prefill signs nothing on its own: the pattern is the secret half of
+    /// a Border Wallet key and still has to be supplied on the next step. The
+    /// words stay editable.
     fn prefill_phrase(&mut self, phrase: &GridRecoveryPhrase) {
         for (field, word) in self
             .phrase_words
@@ -3715,8 +3715,8 @@ mod tests {
         assert!(state.phrase_valid);
         assert!(state.phrase_prefilled);
 
-        // The grid seed is not the key. The pattern and its checksum word are
-        // still the user's to supply, so `Next` only opens the grid.
+        // The grid seed is not the key. The pattern is still the user's to
+        // supply, so `Next` only opens the grid.
         assert!(state.update(BorderWalletReconMessage::Next).is_none());
         assert_eq!(state.step, ReconStep::Grid);
         assert!(state.grid.is_some());

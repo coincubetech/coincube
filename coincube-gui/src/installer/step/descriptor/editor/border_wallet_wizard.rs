@@ -592,13 +592,13 @@ impl BorderWalletWizard {
                 "2. Select 11 cells from the word grid (your Pattern)",
             ))
             .push(p1_regular(
-                "3. Memorize the checksum word (the final derived word)",
+                "3. Review the automatically calculated checksum word",
             ))
             .push(p1_regular("4. Review and confirm the derived key"))
             .push(p1_regular(
-                "Important: To reconstruct this key you need all three components: \
-                 the recovery phrase, the exact pattern, and the checksum word. \
-                 Write them down and store them securely.",
+                "To reconstruct this key, you need your recovery phrase and exact pattern. \
+                 Keep your recovery phrase safe and make sure you can reproduce your \
+                 pattern in the same order. The checksum word is calculated automatically.",
             ));
 
         // Intro is the first step of the wizard, so "Back" returns the user
@@ -857,10 +857,8 @@ impl BorderWalletWizard {
             .spacing(12)
             .push(p1_bold(format!("Checksum word: \"{}\"", checksum_word)))
             .push(p1_regular(
-                "This is the only word you need to memorize. The checksum word is \
-                 the 12th word of the derived mnemonic, calculated automatically from \
-                 your pattern. Together with the recovery phrase and your pattern, it \
-                 forms the three components needed to reconstruct this key.",
+                "This word is generated automatically. You can keep it as an optional \
+                 reference to help check your pattern.",
             ))
             .push(enrollment_display);
 
@@ -887,8 +885,6 @@ impl BorderWalletWizard {
             .map(|e| format!("{}", e.fingerprint))
             .unwrap_or_default();
 
-        let checksum_word = self.checksum_word.as_deref().unwrap_or("???");
-
         let body = Column::new()
             .spacing(8)
             .push(p1_bold("Important \u{2014} Read carefully"))
@@ -898,19 +894,16 @@ impl BorderWalletWizard {
                  be stored in the wallet descriptor.",
             ))
             .push(p1_regular(
-                "To reconstruct this key in the future, you need all three components:",
+                "To reconstruct this key in the future, you need:",
             ))
             .push(p1_regular(
                 "1. The recovery phrase (12 words that seed the grid)",
             ))
             .push(p1_regular("2. Your exact pattern (the 11 cells in order)"))
-            .push(p1_bold(format!(
-                "3. The checksum word: \"{}\"",
-                checksum_word
-            )))
             .push(p1_regular(
-                "Write down and securely store all three. Without any one of them, \
-                 the key cannot be recovered.",
+                "Keep your recovery phrase safe and make sure you can reproduce your \
+                 pattern in the same order. Both are required to recover your key. \
+                 The checksum word is recalculated automatically; you don't need to memorize it.",
             ))
             .push(p1_bold(format!("Key fingerprint: {}", fingerprint)));
 
