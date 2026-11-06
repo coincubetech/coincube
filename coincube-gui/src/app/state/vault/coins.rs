@@ -52,6 +52,7 @@ pub struct CoinsPanel {
     coins: Coins,
     selected: Vec<usize>,
     labels_edited: LabelsEdited,
+    label_saving: Option<OutPoint>,
     warning: Option<Error>,
     /// timelock value to pass for the heir to consume a coin.
     timelock: Option<u16>,
@@ -114,6 +115,7 @@ impl CoinsPanel {
     ) -> Self {
         let mut panel = Self {
             labels_edited: LabelsEdited::default(),
+            label_saving: None,
             coins: Coins::default(),
             selected: Vec::new(),
             warning: None,
@@ -240,6 +242,27 @@ impl CoinsPanel {
 
     fn update_split(&mut self, cache: &Cache, message: CoinControlMessage) -> Task<Message> {
         match message {
+            CoinControlMessage::EditLabel(outpoint) => {
+                if self.label_saving.is_some()
+                    || !self.coins.list.iter().any(|coin| coin.outpoint == outpoint)
+                {
+                    return Task::none();
+                }
+                self.labels_edited = LabelsEdited::default();
+                let value = self
+                    .coins
+                    .labels
+                    .get(&outpoint.to_string())
+                    .cloned()
+                    .unwrap_or_default();
+                return Task::done(Message::View(view::Message::Label(
+                    vec![outpoint.to_string()],
+                    view::LabelMessage::Edited(value),
+                )))
+                .chain(iced::widget::operation::focus(
+                    view::vault::coins::COIN_LABEL_INPUT_ID,
+                ));
+            }
             CoinControlMessage::Choose(outpoint) => {
                 if self.split.is_none() && !self.chosen.remove(&outpoint) {
                     self.chosen.insert(outpoint);
@@ -406,6 +429,7 @@ impl State for CoinsPanel {
                 )
             }),
             selection_bar: self.split.is_none(),
+            label_saving: self.label_saving,
         };
         let content = view::dashboard(
             menu,
@@ -520,12 +544,67 @@ impl State for CoinsPanel {
                 }
             },
             Message::View(view::Message::Label(_, _)) | Message::LabelsUpdated(_) => {
+                let mut restore_focus = None;
+                let saved = match &message {
+                    Message::View(view::Message::Label(items, intent)) => {
+                        if self.label_saving.is_some() {
+                            return Task::none();
+                        }
+                        match intent {
+                            view::LabelMessage::Confirm => {
+                                let Some(item) = items.first().filter(|item| {
+                                    self.labels_edited
+                                        .cache()
+                                        .get(*item)
+                                        .is_some_and(|value| value.valid)
+                                }) else {
+                                    return Task::none();
+                                };
+                                self.label_saving = item.parse().ok();
+                            }
+                            view::LabelMessage::Cancel => restore_focus = items.first().cloned(),
+                            _ => {}
+                        }
+                        false
+                    }
+                    Message::LabelsUpdated(result) => {
+                        let pending = self.label_saving.take();
+                        if let (Some(outpoint), Ok(labels)) = (pending, result) {
+                            if labels.contains_key(&outpoint.to_string()) {
+                                restore_focus = Some(outpoint.to_string());
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
                 match self.labels_edited.update(
                     daemon,
                     message,
                     std::iter::once(&mut self.coins).map(|a| a as &mut dyn LabelsLoader),
                 ) {
-                    Ok(cmd) => return cmd,
+                    Ok(cmd) => {
+                        let focus = restore_focus
+                            .map(|outpoint| {
+                                iced::widget::operation::focus(view::vault::coins::coin_action_id(
+                                    &outpoint, "label",
+                                ))
+                            })
+                            .unwrap_or_else(Task::none);
+                        let notice = if saved {
+                            Task::done(Message::View(view::Message::ShowToast(
+                                log::Level::Info,
+                                "Coin label saved".to_string(),
+                            )))
+                        } else {
+                            Task::none()
+                        };
+                        return Task::batch([cmd, focus, notice]);
+                    }
                     Err(e) => {
                         let err_msg = crate::user_error::report(&e);
                         self.warning = Some(e);
@@ -597,6 +676,153 @@ mod tests {
     use crate::daemon::model::Coin;
     use coincube_core::miniscript::bitcoin;
     use std::str::FromStr;
+
+    #[tokio::test]
+    async fn coin_label_saves_retry_preserve_scope_and_reject_invalid_or_duplicate_writes() {
+        use crate::daemon::{client::Coincubed, DaemonError};
+        use crate::utils::mock::Daemon as MockDaemon;
+        use iced::futures::StreamExt;
+        use serde_json::json;
+        async fn outputs(task: Task<Message>) -> Vec<Message> {
+            let mut messages = Vec::new();
+            if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                while let Some(action) = stream.next().await {
+                    if let iced_runtime::Action::Output(message) = action {
+                        messages.push(message);
+                    }
+                }
+            }
+            messages
+        }
+        let coin = Coin {
+            outpoint: OutPoint::from_str(&format!("{:064x}:0", 1)).unwrap(),
+            amount: bitcoin::Amount::from_sat(100_000),
+            block_height: Some(100),
+            spend_info: None,
+            is_immature: false,
+            address: bitcoin::Address::from_str("bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg")
+                .unwrap()
+                .assume_checked(),
+            derivation_index: 0.into(),
+            is_change: false,
+            is_from_self: false,
+        };
+        let outpoint = coin.outpoint.to_string();
+        let expected = json!({"method":"updatelabels","params":[{(outpoint.clone()):"Reserve"}]});
+        let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(Coincubed::new(
+            MockDaemon::new(vec![
+                (Some(expected.clone()), Err(DaemonError::NoAnswer)),
+                (Some(expected), Ok(json!({}))),
+                (
+                    Some(json!({"method":"updatelabels","params":[{(outpoint.clone()):null}]})),
+                    Ok(json!({})),
+                ),
+            ])
+            .run(),
+        ));
+        let cache = Cache::default();
+        let mut panel = CoinsPanel::new(
+            std::slice::from_ref(&coin),
+            Some(1008),
+            crate::chain::ChainId::Bitcoin,
+        );
+        panel
+            .coins
+            .labels
+            .insert(coin.outpoint.txid.to_string(), "Payroll".into());
+        panel
+            .coins
+            .labels
+            .insert(coin.address.to_string(), "Deposit address".into());
+        let open = panel.update(
+            Some(daemon.clone()),
+            &cache,
+            Message::View(view::Message::CoinControl(CoinControlMessage::EditLabel(
+                coin.outpoint,
+            ))),
+        );
+        for message in outputs(open).await {
+            let _ = panel.update(Some(daemon.clone()), &cache, message);
+        }
+        assert!(panel.selected.is_empty(), "editing must not expand details");
+        assert_eq!(panel.labels_edited.cache()[&outpoint].value, "");
+        let edit = |value| {
+            Message::View(view::Message::Label(
+                vec![outpoint.clone()],
+                view::LabelMessage::Edited(value),
+            ))
+        };
+        let confirm = || {
+            Message::View(view::Message::Label(
+                vec![outpoint.clone()],
+                view::LabelMessage::Confirm,
+            ))
+        };
+        let _ = panel.update(Some(daemon.clone()), &cache, edit("x".repeat(101)));
+        assert!(!panel.labels_edited.cache()[&outpoint].valid);
+        let task = panel.update(Some(daemon.clone()), &cache, confirm());
+        assert!(
+            iced_runtime::task::into_stream(task).is_none(),
+            "invalid draft must not call daemon"
+        );
+        for succeeds in [false, true] {
+            let _ = panel.update(Some(daemon.clone()), &cache, edit("Reserve".into()));
+            let save = panel.update(Some(daemon.clone()), &cache, confirm());
+            assert_eq!(panel.label_saving, Some(coin.outpoint));
+            assert!(
+                iced_runtime::task::into_stream(panel.update(
+                    Some(daemon.clone()),
+                    &cache,
+                    confirm()
+                ))
+                .is_none(),
+                "pending save must not submit twice"
+            );
+            for message in outputs(save).await {
+                let notice = panel.update(Some(daemon.clone()), &cache, message);
+                let messages = outputs(notice).await;
+                assert_eq!(messages.iter().any(|message| matches!(message, Message::View(view::Message::ShowToast(_, text)) if text == "Coin label saved")), succeeds);
+            }
+            assert_eq!(panel.label_saving, None);
+            if succeeds {
+                assert!(!panel.labels_edited.cache().contains_key(&outpoint));
+                assert_eq!(panel.coins.labels[&outpoint], "Reserve");
+            } else {
+                assert_eq!(panel.labels_edited.cache()[&outpoint].value, "Reserve");
+                assert!(!panel.coins.labels.contains_key(&outpoint));
+            }
+            assert_eq!(
+                panel.coins.labels[&coin.outpoint.txid.to_string()],
+                "Payroll"
+            );
+            assert_eq!(
+                panel.coins.labels[&coin.address.to_string()],
+                "Deposit address"
+            );
+        }
+        // Saving an empty label removes only the coin's override.
+        let _ = panel.update(Some(daemon.clone()), &cache, edit("".into()));
+        let save = panel.update(Some(daemon.clone()), &cache, confirm());
+        for message in outputs(save).await {
+            let _ = panel.update(Some(daemon.clone()), &cache, message);
+        }
+        assert!(!panel.coins.labels.contains_key(&outpoint));
+        assert_eq!(
+            panel.coins.labels[&coin.outpoint.txid.to_string()],
+            "Payroll"
+        );
+        let _ = panel.update(Some(daemon.clone()), &cache, edit("Unsaved draft".into()));
+        let _ = panel.update(
+            Some(daemon),
+            &cache,
+            Message::View(view::Message::Label(
+                vec![outpoint.clone()],
+                view::LabelMessage::Cancel,
+            )),
+        );
+        assert!(panel.labels_edited.cache().is_empty());
+        assert!(!panel.coins.labels.contains_key(&outpoint));
+    }
 
     #[test]
     fn test_coins_panel_update_coins() {
