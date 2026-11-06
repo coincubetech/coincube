@@ -119,6 +119,8 @@ pub trait Close {
 /// Coin control intents: choosing coins to send, and the Split coins overlay.
 #[derive(Debug, Clone)]
 pub enum CoinControlMessage {
+    /// Open the label editor for this coin, independently of its details.
+    EditLabel(coincube_core::miniscript::bitcoin::OutPoint),
     Choose(coincube_core::miniscript::bitcoin::OutPoint),
     ClearChosen,
     SendSelected,

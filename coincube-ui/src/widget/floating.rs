@@ -31,6 +31,8 @@ pub struct Floating<'a, Message> {
     align_x: Option<Horizontal>,
     gap: f32,
     on_dismiss: Option<Message>,
+    fit_to_window: bool,
+    dismiss_on_escape: bool,
 }
 
 impl<'a, Message> Floating<'a, Message> {
@@ -40,6 +42,8 @@ impl<'a, Message> Floating<'a, Message> {
             align_x: None,
             gap: 0.0,
             on_dismiss: None,
+            fit_to_window: false,
+            dismiss_on_escape: false,
         }
     }
 
@@ -62,6 +66,22 @@ impl<'a, Message> Floating<'a, Message> {
     pub fn on_dismiss(self, on_dismiss: Message) -> Self {
         Self {
             on_dismiss: Some(on_dismiss),
+            ..self
+        }
+    }
+
+    /// Keep an anchored editor inside the window, including after scrolling.
+    pub fn fit_to_window(self) -> Self {
+        Self {
+            fit_to_window: true,
+            ..self
+        }
+    }
+
+    /// Dismiss on the first Escape, even while an editor has input focus.
+    pub fn dismiss_on_escape(self) -> Self {
+        Self {
+            dismiss_on_escape: true,
             ..self
         }
     }
@@ -167,6 +187,8 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for Floating<'_, Message> 
             position: bounds.position() + translation,
             width: bounds.width,
             on_dismiss: self.on_dismiss.as_ref(),
+            fit_to_window: self.fit_to_window,
+            dismiss_on_escape: self.dismiss_on_escape,
         })))
     }
 }
@@ -177,14 +199,29 @@ struct Overlay<'a, 'b, Message> {
     position: Point,
     width: f32,
     on_dismiss: Option<&'b Message>,
+    fit_to_window: bool,
+    dismiss_on_escape: bool,
 }
 
 impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, '_, Message> {
-    fn layout(&mut self, renderer: &Renderer, _bounds: Size) -> layout::Node {
-        self.content
-            .as_widget_mut()
-            .layout(self.tree, renderer, &content_limits(self.width))
-            .move_to(self.position)
+    fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
+        let content =
+            self.content
+                .as_widget_mut()
+                .layout(self.tree, renderer, &content_limits(self.width));
+        let position = if self.fit_to_window {
+            Point::new(
+                self.position
+                    .x
+                    .clamp(8.0, (bounds.width - content.size().width - 8.0).max(8.0)),
+                self.position
+                    .y
+                    .clamp(8.0, (bounds.height - content.size().height - 8.0).max(8.0)),
+            )
+        } else {
+            self.position
+        };
+        content.move_to(position)
     }
 
     fn update(
@@ -197,6 +234,20 @@ impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, 
         shell: &mut Shell<'_, Message>,
     ) {
         if let Some(message) = self.on_dismiss {
+            if self.dismiss_on_escape
+                && matches!(
+                    event,
+                    Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: keyboard::Key::Named(key::Named::Escape),
+                        repeat: false,
+                        ..
+                    })
+                )
+            {
+                shell.publish(message.clone());
+                shell.capture_event();
+                return;
+            }
             if let Event::Mouse(mouse::Event::ButtonPressed(_)) = event {
                 if !cursor.is_over(layout.bounds()) {
                     shell.publish(message.clone());

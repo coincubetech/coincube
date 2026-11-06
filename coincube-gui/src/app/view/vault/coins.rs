@@ -1,16 +1,24 @@
 use std::collections::HashMap;
 
 use iced::{
-    widget::{checkbox, Space},
+    widget::{checkbox, scrollable, Space},
     Alignment, Length,
 };
 
 use coincube_ui::component::amount::BitcoinDisplayUnit;
 use coincube_ui::{
-    component::{amount::*, badge, button, form, text::*},
+    component::{
+        amount::*,
+        badge, button, form,
+        tenshu::{
+            action::ActionButton,
+            field::{text_field, FieldSize},
+        },
+        text::*,
+    },
     icon::{self, coins_icon},
     theme,
-    widget::{Button, Column, Container, Element, Row, RowExt},
+    widget::{action::Action, floating::Floating, Column, Container, Element, Row, RowExt},
 };
 
 use crate::{
@@ -20,7 +28,7 @@ use crate::{
         view::{
             message::{CoinControlMessage, Message},
             placeholder,
-            vault::{label, split_coins},
+            vault::split_coins,
         },
     },
     chain::ChainId,
@@ -33,7 +41,7 @@ use crate::{
 pub fn chain_badge<'a, T: 'a>(status: ChainStatus, here: ChainId) -> Container<'a, T> {
     Container::new(iced::widget::tooltip::Tooltip::new(
         Container::new(p2_regular(status.label(here)))
-            .padding(10)
+            .padding([5, 8])
             .center_x(Length::Shrink)
             .style(theme::pill::simple),
         Container::new(p1_regular(status.explanation(here)))
@@ -68,10 +76,126 @@ fn recovery_timing_known(coin: &Coin, tip: u32) -> bool {
 }
 
 const AMOUNT_COLUMN_WIDTH: f32 = 160.0;
-const CONFIRMATIONS_COLUMN_WIDTH: f32 = 130.0;
+const CONFIRMATIONS_COLUMN_WIDTH: f32 = 100.0;
 const DETAILS_COLUMN_WIDTH: f32 = 85.0;
 const CHECK_COLUMN_WIDTH: f32 = 24.0;
-const CHAINS_COLUMN_WIDTH: f32 = 210.0;
+const CHAINS_COLUMN_WIDTH: f32 = 110.0;
+const STATUS_COLUMN_WIDTH: f32 = 216.0;
+const TABLE_MIN_WIDTH: f32 = 1024.0;
+pub const COIN_LABEL_INPUT_ID: &str = "vault.coin-label.input";
+
+pub fn coin_action_id(outpoint: &str, action: &str) -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::from(format!("vault.coin.{outpoint}.{action}"))
+}
+
+fn coin_copy<'a>(
+    outpoint: &str,
+    value: String,
+    kind: &'static str,
+    location: &str,
+) -> Element<'a, Message> {
+    iced::widget::tooltip(
+        Action::new(
+            coin_action_id(outpoint, &format!("copy-{kind}-{location}")),
+            icon::clipboard_icon().size(16),
+            Message::FocusAction,
+        )
+        .padding(6)
+        .style(theme::button::transparent_border)
+        .on_press(Message::CopyWithToast(
+            value,
+            format!("{kind} copied to clipboard"),
+        )),
+        Container::new(p2_regular(format!("Copy {}", kind.to_lowercase())))
+            .padding(8)
+            .style(theme::card::simple),
+        iced::widget::tooltip::Position::Top,
+    )
+    .into()
+}
+
+fn coin_label_popover<'a>(
+    outpoint: &str,
+    value: &'a form::Value<String>,
+    has_label: bool,
+    saving: bool,
+) -> Element<'a, Message> {
+    use theme::tenshu::button::ActionKind;
+    let items = vec![outpoint.to_owned()];
+    let confirm = Message::Label(items.clone(), crate::app::view::LabelMessage::Confirm);
+    let cancel = Message::Label(items.clone(), crate::app::view::LabelMessage::Cancel);
+    let input_items = items.clone();
+    let mut field = text_field(
+        COIN_LABEL_INPUT_ID,
+        "Label",
+        &value.value,
+        Message::FocusAction,
+    )
+    .placeholder("e.g. Savings")
+    .size(FieldSize::Compact)
+    .error_maybe((!value.valid).then_some("This label is too long. Try a shorter label."));
+    if !saving {
+        field = field.on_input(move |value| {
+            Message::Label(
+                input_items.clone(),
+                crate::app::view::LabelMessage::Edited(value),
+            )
+        });
+        if value.valid {
+            field = field.on_submit(confirm.clone());
+        }
+    }
+    let panel = Container::new(
+        Column::new()
+            .spacing(16)
+            .push(
+                Column::new()
+                    .spacing(3)
+                    .push(p1_bold(if has_label {
+                        "Edit coin label"
+                    } else {
+                        "Add coin label"
+                    }))
+                    .push(p2_regular("For this coin only").style(theme::text::secondary)),
+            )
+            .push(field)
+            .push(
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        ActionButton::new(
+                            coin_action_id(outpoint, "label-cancel"),
+                            "Cancel",
+                            ActionKind::Secondary,
+                            Message::FocusAction,
+                        )
+                        .compact()
+                        .on_press_maybe((!saving).then_some(cancel.clone())),
+                    )
+                    .push(
+                        ActionButton::new(
+                            coin_action_id(outpoint, "label-save"),
+                            if saving { "Saving…" } else { "Save label" },
+                            ActionKind::Primary,
+                            Message::FocusAction,
+                        )
+                        .compact()
+                        .on_press_maybe((value.valid && !saving).then_some(confirm)),
+                    ),
+            ),
+    )
+    .padding(20)
+    .width(320)
+    .style(theme::tenshu::surface::panel);
+    let floating = Floating::new(panel).gap(8.0).fit_to_window();
+    if saving {
+        floating.into()
+    } else {
+        floating.on_dismiss(cancel).dismiss_on_escape().into()
+    }
+}
 
 fn coin_label(coin: &Coin, labels: &HashMap<String, String>) -> String {
     let outpoint = coin.outpoint.to_string();
@@ -125,6 +249,10 @@ fn coin_table_header<'a>(blake2b: bool) -> Container<'a, Message> {
                     .width(Length::Fixed(CHAINS_COLUMN_WIDTH))
             }))
             .push(
+                Container::new(p2_regular("Status").bold().style(theme::text::secondary))
+                    .width(Length::Fixed(STATUS_COLUMN_WIDTH)),
+            )
+            .push(
                 Container::new(p2_regular("Label").bold().style(theme::text::secondary))
                     .width(Length::FillPortion(1)),
             )
@@ -143,10 +271,10 @@ fn coin_table_header<'a>(blake2b: bool) -> Container<'a, Message> {
 
 #[allow(clippy::too_many_arguments)]
 pub fn coins_view<'a>(
-    cache: &Cache,
+    cache: &'a Cache,
     coins: &'a [Coin],
     timelock: Option<u16>,
-    selected: &[usize],
+    selected: &'a [usize],
     labels: &'a HashMap<String, String>,
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
@@ -158,6 +286,10 @@ pub fn coins_view<'a>(
         .filter(|coin| control.chosen.contains(&coin.outpoint))
         .map(|coin| coin.amount)
         .sum();
+    let chosen_count = control.chosen.len();
+    let selection_bar = control.selection_bar;
+    let label_saving = control.label_saving;
+    let chosen = control.chosen;
     Column::new()
         .push(Container::new(h3("Coin control").bold()).width(Length::Fill))
         .push(
@@ -166,10 +298,17 @@ pub fn coins_view<'a>(
             } else {
                 "Inspect coin balances, labels, confirmations and recovery timing."
             })
+            .width(Length::Fill)
             .style(theme::text::secondary),
         )
         .push(control.both_chains.map(|(count, total, can_split)| {
-            split_coins::both_chains_banner(cache.chain(), count, total, can_split)
+            split_coins::both_chains_banner(
+                cache.chain(),
+                count,
+                total,
+                can_split,
+                cache.balance_amounts_masked(),
+            )
         }))
         .push(coins.is_empty().then(|| {
             placeholder(
@@ -179,38 +318,51 @@ pub fn coins_view<'a>(
             )
         }))
         .push((!coins.is_empty()).then(|| {
-            Container::new(
-                Column::new()
-                    .push(coin_table_header(blake2b))
-                    .push(coins.iter().enumerate().fold(
-                        Column::new().spacing(0),
-                        |col, (i, coin)| {
-                            col.push(iced::widget::rule::horizontal(1))
-                                .push(coin_list_view(
-                                    coin,
-                                    timelock,
-                                    cache.blockheight().max(0) as u32,
-                                    i,
-                                    selected.contains(&i),
-                                    control.chosen.contains(&coin.outpoint),
-                                    labels,
-                                    labels_editing,
-                                    bitcoin_unit,
-                                    cache.balance_amounts_masked(),
-                                    blake2b.then(|| {
-                                        (cache.chain_status(&coin.outpoint), cache.chain())
-                                    }),
-                                ))
-                        },
-                    )),
-            )
-            .style(theme::card::simple)
-            .width(Length::Fill)
+            iced::widget::responsive(move |size| {
+                let table =
+                    Container::new(Column::new().push(coin_table_header(blake2b)).push(
+                        coins.iter().enumerate().fold(
+                            Column::new().spacing(0),
+                            |col, (i, coin)| {
+                                col.push(iced::widget::rule::horizontal(1))
+                                    .push(coin_list_view(
+                                        coin,
+                                        timelock,
+                                        cache.blockheight().max(0) as u32,
+                                        i,
+                                        selected.contains(&i),
+                                        chosen.contains(&coin.outpoint),
+                                        labels,
+                                        labels_editing,
+                                        bitcoin_unit,
+                                        cache.balance_amounts_masked(),
+                                        blake2b.then(|| {
+                                            (cache.chain_status(&coin.outpoint), cache.chain())
+                                        }),
+                                        label_saving == Some(coin.outpoint),
+                                    ))
+                            },
+                        ),
+                    ))
+                    .style(theme::card::simple)
+                    .width(size.width.max(if blake2b {
+                        TABLE_MIN_WIDTH
+                    } else {
+                        TABLE_MIN_WIDTH - CHAINS_COLUMN_WIDTH - 12.0
+                    }));
+                scrollable(table)
+                    .direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::new(),
+                    ))
+                    .width(Length::Fill)
+                    .height(Length::Shrink)
+                    .into()
+            })
+            .height(Length::Shrink)
         }))
-        .push(
-            (control.selection_bar && !coins.is_empty())
-                .then(|| split_coins::selection_bar(control.chosen.len(), chosen_total)),
-        )
+        .push((selection_bar && !coins.is_empty()).then(|| {
+            split_coins::selection_bar(chosen_count, chosen_total, cache.balance_amounts_masked())
+        }))
         .align_x(Alignment::Center)
         .spacing(35)
         .into()
@@ -226,6 +378,8 @@ pub struct CoinControl {
     pub both_chains: Option<(usize, coincube_core::miniscript::bitcoin::Amount, bool)>,
     /// Whether to show the selection bar (not while the overlay is open).
     pub selection_bar: bool,
+    /// The label write in flight; its editor stays visible but cannot resubmit.
+    pub label_saving: Option<coincube_core::miniscript::bitcoin::OutPoint>,
 }
 
 #[allow(clippy::collapsible_else_if)]
@@ -242,6 +396,7 @@ fn coin_list_view<'a>(
     bitcoin_unit: BitcoinDisplayUnit,
     mask_amounts: bool,
     chain: Option<(ChainStatus, ChainId)>,
+    label_saving: bool,
 ) -> Container<'a, Message> {
     let outpoint = coin.outpoint.to_string();
     let address = coin.address.to_string();
@@ -275,110 +430,130 @@ fn coin_list_view<'a>(
     } else {
         None
     };
+    let label = coin_label(coin, labels);
+    let has_label = labels.get(&outpoint).is_some_and(|label| !label.is_empty());
+    let label_trigger = Action::new(
+        coin_action_id(&outpoint, "label"),
+        Row::new()
+            .spacing(5)
+            .align_y(Alignment::Center)
+            .push(
+                p2_regular(if label == "—" && !has_label {
+                    "Add label".to_owned()
+                } else {
+                    label
+                })
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            )
+            .push(
+                if has_label {
+                    icon::pencil_icon()
+                } else {
+                    icon::plus_icon()
+                }
+                .size(14),
+            ),
+        Message::FocusAction,
+    )
+    .padding([4, 0])
+    .style(theme::button::transparent_border)
+    .on_press_maybe((!label_saving).then_some(Message::CoinControl(
+        CoinControlMessage::EditLabel(coin.outpoint),
+    )));
+    // No enclosing row button: copy, labels, checkboxes and details each own
+    // their activation, so a copy or edit never expands the coin by accident.
+    let row = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .push(
+            Container::new(checkbox(chosen).on_toggle(move |_| {
+                Message::CoinControl(CoinControlMessage::Choose(coin.outpoint))
+            }))
+            .width(Length::Fixed(CHECK_COLUMN_WIDTH)),
+        )
+        .push(Container::new(amount).width(Length::Fixed(AMOUNT_COLUMN_WIDTH)))
+        .push(
+            Container::new(
+                p2_regular(confirmation_status(coin.block_height, blockheight))
+                    .style(theme::text::secondary),
+            )
+            .width(Length::Fixed(CONFIRMATIONS_COLUMN_WIDTH)),
+        )
+        .push_maybe(chain.map(|(status, here)| {
+            Container::new(chain_badge(status, here)).width(Length::Fixed(CHAINS_COLUMN_WIDTH))
+        }))
+        .push(
+            Container::new(
+                status
+                    .map(Element::from)
+                    .unwrap_or_else(|| p2_regular("—").into()),
+            )
+            .width(Length::Fixed(STATUS_COLUMN_WIDTH)),
+        )
+        .push(Container::new(label_trigger).width(Length::FillPortion(1)))
+        .push(
+            Container::new(
+                Row::new()
+                    .spacing(3)
+                    .align_y(Alignment::Center)
+                    .push(p2_regular(short_address(&address)).style(theme::text::secondary))
+                    .push(coin_copy(&outpoint, address.clone(), "Address", "row")),
+            )
+            .width(Length::FillPortion(1)),
+        )
+        .push(
+            Container::new(
+                Action::new(
+                    coin_action_id(&outpoint, "details"),
+                    p2_regular(if collapsed {
+                        "Hide details"
+                    } else {
+                        "Details ▾"
+                    })
+                    .width(Length::Fill)
+                    .style(theme::text::secondary),
+                    Message::FocusAction,
+                )
+                .padding([4, 0])
+                .style(theme::button::transparent_border)
+                .on_press(Message::Select(index)),
+            )
+            .width(Length::Fixed(DETAILS_COLUMN_WIDTH)),
+        );
+    let editor = labels_editing.get(&outpoint).map(|value| {
+        // The trailing region is wider than the Label cell, allowing the
+        // anchored editor to overlap subsequent columns without moving them.
+        let prefix = CHECK_COLUMN_WIDTH
+            + AMOUNT_COLUMN_WIDTH
+            + CONFIRMATIONS_COLUMN_WIDTH
+            + STATUS_COLUMN_WIDTH
+            + 4.0 * 12.0
+            + if chain.is_some() {
+                CHAINS_COLUMN_WIDTH + 12.0
+            } else {
+                0.0
+            };
+        Row::new()
+            .push(Space::new().width(prefix))
+            .push(coin_label_popover(
+                &outpoint,
+                value,
+                has_label,
+                label_saving,
+            ))
+    });
     Container::new(
         Column::new()
             .push(
-                Button::new(
-                    Column::new()
-                        .spacing(10)
-                        .push(
-                            Row::new()
-                                .spacing(12)
-                                .align_y(Alignment::Center)
-                                .push(
-                                    Container::new(checkbox(chosen).on_toggle(move |_| {
-                                        Message::CoinControl(CoinControlMessage::Choose(
-                                            coin.outpoint,
-                                        ))
-                                    }))
-                                    .width(Length::Fixed(CHECK_COLUMN_WIDTH)),
-                                )
-                                .push(
-                                    Container::new(amount)
-                                        .width(Length::Fixed(AMOUNT_COLUMN_WIDTH)),
-                                )
-                                .push(
-                                    Container::new(
-                                        p2_regular(confirmation_status(
-                                            coin.block_height,
-                                            blockheight,
-                                        ))
-                                        .style(theme::text::secondary),
-                                    )
-                                    .width(Length::Fixed(CONFIRMATIONS_COLUMN_WIDTH)),
-                                )
-                                .push_maybe(chain.map(|(status, here)| {
-                                    Container::new(chain_badge(status, here))
-                                        .width(Length::Fixed(CHAINS_COLUMN_WIDTH))
-                                }))
-                                .push(
-                                    Container::new(
-                                        p1_regular(coin_label(coin, labels))
-                                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-                                    )
-                                    .width(Length::FillPortion(1)),
-                                )
-                                .push(
-                                    Container::new(
-                                        p2_regular(short_address(&address))
-                                            .style(theme::text::secondary)
-                                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-                                    )
-                                    .width(Length::FillPortion(1)),
-                                )
-                                .push(
-                                    Container::new(
-                                        p2_regular(if collapsed {
-                                            "Hide details"
-                                        } else {
-                                            "Details ▾"
-                                        })
-                                        .style(theme::text::secondary),
-                                    )
-                                    .width(Length::Fixed(DETAILS_COLUMN_WIDTH)),
-                                ),
-                        )
-                        .push(
-                            Row::new()
-                                .spacing(8)
-                                .align_y(Alignment::Center)
-                                .push(
-                                    Container::new(
-                                        Row::new()
-                                            .spacing(8)
-                                            .align_y(Alignment::Center)
-                                            .push(
-                                                p2_regular("Status:").style(theme::text::secondary),
-                                            )
-                                            .push_maybe(status),
-                                    )
-                                    .width(Length::FillPortion(1)),
-                                )
-                                .push(Container::new(Row::new()).width(Length::FillPortion(1))),
-                        ),
-                )
-                .style(theme::button::transparent_border)
-                .padding(14)
-                .width(Length::Fill)
-                .on_press(Message::Select(index)),
+                Container::new(Column::new().push(row).push(editor))
+                    .padding(14)
+                    .width(Length::Fill),
             )
             .push(if collapsed {
                 Some(
                     Column::new()
                         .padding(10)
                         .spacing(5)
-                        .push(
-                            Container::new(if let Some(label) = labels_editing.get(&outpoint) {
-                                label::label_editing(vec![outpoint.clone()], label, P1_SIZE)
-                            } else {
-                                label::label_editable(
-                                    vec![outpoint.clone()],
-                                    labels.get(&outpoint),
-                                    P1_SIZE,
-                                )
-                            })
-                            .width(Length::Fill),
-                        )
                         .push(if coin.spend_info.is_none() {
                             if let (Some(_), Some(timelock)) = (coin.block_height, timelock) {
                                 if !recovery_timing_known(coin, blockheight) {
@@ -435,13 +610,12 @@ fn coin_list_view<'a>(
                                                     p2_regular(address.clone())
                                                         .style(theme::text::secondary),
                                                 )
-                                                .push(
-                                                    Button::new(icon::clipboard_icon())
-                                                        .on_press(Message::Clipboard(
-                                                            address.clone(),
-                                                        ))
-                                                        .style(theme::button::transparent_border),
-                                                ),
+                                                .push(coin_copy(
+                                                    &outpoint,
+                                                    address.clone(),
+                                                    "Address",
+                                                    "details",
+                                                )),
                                         )
                                         .spacing(5),
                                 )
@@ -463,6 +637,29 @@ fn coin_list_view<'a>(
                                 .push(
                                     Row::new()
                                         .align_y(Alignment::Center)
+                                        .spacing(5)
+                                        .push(
+                                            p2_regular("Transaction ID:")
+                                                .bold()
+                                                .style(theme::text::secondary),
+                                        )
+                                        .push(
+                                            p2_regular(txid.clone())
+                                                .style(theme::text::secondary)
+                                                .wrapping(
+                                                    iced::widget::text::Wrapping::WordOrGlyph,
+                                                ),
+                                        )
+                                        .push(coin_copy(
+                                            &outpoint,
+                                            txid.clone(),
+                                            "Transaction ID",
+                                            "details",
+                                        )),
+                                )
+                                .push(
+                                    Row::new()
+                                        .align_y(Alignment::Center)
                                         .push(
                                             p2_regular("Outpoint:")
                                                 .bold()
@@ -475,13 +672,12 @@ fn coin_list_view<'a>(
                                                     p2_regular(format!("{}", coin.outpoint))
                                                         .style(theme::text::secondary),
                                                 )
-                                                .push(
-                                                    Button::new(icon::clipboard_icon())
-                                                        .on_press(Message::Clipboard(
-                                                            coin.outpoint.to_string(),
-                                                        ))
-                                                        .style(theme::button::transparent_border),
-                                                ),
+                                                .push(coin_copy(
+                                                    &outpoint,
+                                                    outpoint.clone(),
+                                                    "Outpoint",
+                                                    "details",
+                                                )),
                                         )
                                         .spacing(5),
                                 )
@@ -537,9 +733,9 @@ fn coin_list_view<'a>(
                                         && timelock.is_some_and(|timelock| {
                                             remaining_sequence(coin, blockheight, timelock) == 0
                                         }) {
-                                        button::primary(icon, label)
+                                        button::primary_compact(icon, label)
                                     } else {
-                                        button::secondary(icon, label)
+                                        button::secondary_compact(icon, label)
                                     };
                                     refresh_btn.on_press(Message::Menu(Menu::Vault(
                                         crate::app::menu::VaultSubMenu::Coins(Some(vec![
@@ -713,7 +909,7 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            let mounted = capture::inspect(
+            let mounted = capture::inspect_full_window(
                 "vault-coins-privacy",
                 coins_view(
                     &cache,
@@ -734,7 +930,7 @@ mod tests {
             assert!(!mounted.contains("replay status and recovery timing"));
             assert!(mounted.contains("Confirmations"));
             assert!(mounted.contains("Address"));
-            assert!(mounted.contains("Status:"));
+            assert!(mounted.contains("Status"));
             assert!(
                 !mounted.contains("Chains"),
                 "no chain surface with Blake2b off"
@@ -779,7 +975,7 @@ mod tests {
             ((1440, 900), "dark", theme::Theme::dark()),
             ((1440, 900), "light", theme::Theme::light()),
         ] {
-            let mounted = capture::inspect(
+            let mounted = capture::inspect_full_window(
                 "vault-coin-table",
                 coins_view(
                     &cache,
@@ -823,7 +1019,7 @@ mod tests {
                 ("light", theme::Theme::light()),
             ] {
                 let scenario = format!("vault-coin-unmasked-{}", unit);
-                let mounted = capture::inspect(
+                let mounted = capture::inspect_full_window(
                     &scenario,
                     coins_view(
                         &cache,
@@ -853,7 +1049,7 @@ mod tests {
         let coins = [confirmed_coin(100)];
         let cache = Cache::default();
         let labels = HashMap::new();
-        let empty = capture::inspect(
+        let empty = capture::inspect_full_window(
             "vault-coin-empty",
             coins_view(
                 &cache,
@@ -878,7 +1074,7 @@ mod tests {
             coins[0].outpoint.to_string(),
             "Long reserve label for a time-locked deposit held for a shared treasury".into(),
         );
-        let long_label = capture::inspect(
+        let long_label = capture::inspect_full_window(
             "vault-coin-long-label",
             coins_view(
                 &cache,
@@ -902,7 +1098,7 @@ mod tests {
             coins[0].outpoint.to_string(),
             "TreasuryReserveDepositWithoutSpacesForCompactWidths".into(),
         );
-        let unbroken_label = capture::inspect(
+        let unbroken_label = capture::inspect_full_window(
             "vault-coin-unbroken-label",
             coins_view(
                 &cache,
@@ -945,7 +1141,7 @@ mod tests {
         ] {
             let mut cache = Cache::default();
             cache.record_entanglement(coins[0].outpoint.txid, answer, std::time::Instant::now());
-            let mounted = capture::inspect(
+            let mounted = capture::inspect_full_window(
                 scenario,
                 coins_view(
                     &cache,
@@ -974,7 +1170,7 @@ mod tests {
         let coins = [confirmed_coin(100)];
         let labels = HashMap::new();
         let unknown = Cache::default();
-        let unknown_view = capture::inspect(
+        let unknown_view = capture::inspect_full_window(
             "vault-coin-unknown-recovery-tip",
             coins_view(
                 &unknown,
@@ -999,7 +1195,7 @@ mod tests {
 
         let mut known = Cache::default();
         known.daemon_cache.blockheight = 101;
-        let known_view = capture::inspect(
+        let known_view = capture::inspect_full_window(
             "vault-coin-known-recovery-tip",
             coins_view(
                 &known,
@@ -1023,7 +1219,7 @@ mod tests {
 
     #[test]
     fn chain_badge_never_calls_a_missing_transaction_verified() {
-        let mounted = capture::inspect(
+        let mounted = capture::inspect_full_window(
             "vault-chain-status",
             chain_badge::<Message>(ChainStatus::NotSeen, ChainId::Bitcoin).into(),
             (400, 100),
@@ -1032,7 +1228,7 @@ mod tests {
         );
         assert!(mounted.contains("Not seen on Blake2b · checking"));
         assert!(!mounted.contains("verified"));
-        let both = capture::inspect(
+        let both = capture::inspect_full_window(
             "vault-chain-status-both",
             chain_badge::<Message>(ChainStatus::BothChains, ChainId::BitcoinBlake2b).into(),
             (400, 100),
@@ -1051,7 +1247,7 @@ mod tests {
             Entanglement::Entangled,
             std::time::Instant::now(),
         );
-        let mounted = capture::inspect(
+        let mounted = capture::inspect_full_window(
             "vault-coins-split-surfaces",
             coins_view(
                 &cache,
@@ -1066,6 +1262,7 @@ mod tests {
                     chosen: vec![coins[0].outpoint].into_iter().collect(),
                     both_chains: Some((1, coins[0].amount, true)),
                     selection_bar: true,
+                    label_saving: None,
                 },
             ),
             (1280, 800),
@@ -1076,7 +1273,8 @@ mod tests {
         assert!(mounted.contains("Both chains"));
         assert!(mounted.contains("Split coins"));
         assert!(mounted.contains("also exists on Bitcoin Blake2b"));
-        assert!(mounted.contains("1 selected · 98,765,432 sats"));
+        assert!(mounted.contains("1 selected · •••••• sats"));
+        assert!(!mounted.contains("98,765,432"));
         assert!(mounted.contains("Send selected"));
     }
 
@@ -1087,6 +1285,389 @@ mod tests {
         assert_eq!(recovery_status_copy(143), "Recovery in 143 blocks");
         assert_eq!(recovery_status_copy(144), "Recovery in ≈ 1 day");
         assert_eq!(recovery_status_copy(1008), "Recovery in ≈ 7 days");
+    }
+
+    #[test]
+    fn row_copy_and_label_actions_work_without_expanding_details() {
+        let coins = [confirmed_coin(100)];
+        let cache = Cache::default();
+        let outpoint = coins[0].outpoint.to_string();
+        for pointer in [false, true] {
+            for (action, expanded, expected, notice) in [
+                (
+                    "copy-Address-row",
+                    false,
+                    coins[0].address.to_string(),
+                    "Address copied to clipboard",
+                ),
+                (
+                    "copy-Address-details",
+                    true,
+                    coins[0].address.to_string(),
+                    "Address copied to clipboard",
+                ),
+                (
+                    "copy-Transaction ID-details",
+                    true,
+                    coins[0].outpoint.txid.to_string(),
+                    "Transaction ID copied to clipboard",
+                ),
+                (
+                    "copy-Outpoint-details",
+                    true,
+                    outpoint.clone(),
+                    "Outpoint copied to clipboard",
+                ),
+            ] {
+                let selected = if expanded { vec![0] } else { vec![] };
+                let messages = capture::activate(
+                    coins_view(
+                        &cache,
+                        &coins,
+                        None,
+                        &selected,
+                        &HashMap::new(),
+                        &HashMap::new(),
+                        BitcoinDisplayUnit::Sats,
+                        true,
+                        CoinControl::default(),
+                    ),
+                    coin_action_id(&outpoint, action),
+                    (1920, 1080),
+                    pointer,
+                );
+                assert!(messages.iter().any(|message| matches!(message, Message::CopyWithToast(value, text) if value == &expected && text == notice)), "{:?}", messages);
+                assert!(
+                    !messages
+                        .iter()
+                        .any(|message| matches!(message, Message::Select(_))),
+                    "copy must not expand the row"
+                );
+            }
+            let messages = capture::activate(
+                coins_view(
+                    &cache,
+                    &coins,
+                    None,
+                    &[],
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    BitcoinDisplayUnit::Sats,
+                    false,
+                    CoinControl::default(),
+                ),
+                coin_action_id(&outpoint, "label"),
+                (1920, 1080),
+                pointer,
+            );
+            assert!(messages.iter().any(|message| matches!(message, Message::CoinControl(CoinControlMessage::EditLabel(value)) if *value == coins[0].outpoint)));
+            assert!(!messages
+                .iter()
+                .any(|message| matches!(message, Message::Select(_))));
+        }
+    }
+
+    #[test]
+    fn amount_privacy_masks_both_chain_banner_and_selection_total() {
+        let coins = [confirmed_coin(100)];
+        // Unresolved privacy must conceal amounts, just like explicitly hidden.
+        for privacy in [
+            None,
+            Some(BalancePrivacy::Hidden),
+            Some(BalancePrivacy::Shown),
+        ] {
+            let cache = Cache {
+                balance_privacy: privacy.map(|privacy| BalancePrivacyChrome {
+                    privacy,
+                    busy: false,
+                    interactive: false,
+                }),
+                ..Default::default()
+            };
+            let mounted = capture::inspect_full_window(
+                "vault-coin-all-amounts-privacy",
+                coins_view(
+                    &cache,
+                    &coins,
+                    None,
+                    &[],
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    BitcoinDisplayUnit::Sats,
+                    true,
+                    CoinControl {
+                        chosen: std::iter::once(coins[0].outpoint).collect(),
+                        both_chains: Some((1, coins[0].amount, true)),
+                        selection_bar: true,
+                        ..Default::default()
+                    },
+                ),
+                (1280, 900),
+                "dark",
+                theme::Theme::dark(),
+            );
+            let shown = privacy == Some(BalancePrivacy::Shown);
+            assert_eq!(mounted.contains("98,765,432"), shown);
+            assert_eq!(mounted.contains("•••••• sats also exists"), !shown);
+            assert_eq!(mounted.contains("1 selected · •••••• sats"), !shown);
+            assert!(mounted.contains("Bitcoin Blake2b"));
+        }
+    }
+
+    #[test]
+    fn label_popover_keeps_rows_still_fits_window_and_handles_keyboard_and_dismissal() {
+        use iced::advanced::{
+            layout, overlay,
+            renderer::Headless,
+            widget::{operation, operation::focusable, Id, Operation, Tree},
+            Layout, Shell,
+        };
+        use iced::{keyboard, mouse, Event, Point, Rectangle, Size, Vector};
+        #[derive(Default)]
+        struct Probe {
+            text: Vec<(String, Rectangle)>,
+            horizontal_scroll: bool,
+        }
+        impl Operation for Probe {
+            fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn Operation)) {
+                visit(self);
+            }
+            fn text(&mut self, _: Option<&Id>, bounds: Rectangle, value: &str) {
+                self.text.push((value.to_owned(), bounds));
+            }
+            fn scrollable(
+                &mut self,
+                _: Option<&Id>,
+                bounds: Rectangle,
+                content: Rectangle,
+                _: Vector,
+                _: &mut dyn operation::Scrollable,
+            ) {
+                self.horizontal_scroll |= content.width > bounds.width + 1.0;
+            }
+        }
+        fn panel_bounds(node: &layout::Node, width: f32) -> Option<Rectangle> {
+            if node.bounds().width < width {
+                Some(node.bounds())
+            } else {
+                node.children()
+                    .iter()
+                    .filter_map(|child| panel_bounds(child, width))
+                    .max_by(|a, b| a.height.total_cmp(&b.height))
+            }
+        }
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let mut second = confirmed_coin(101);
+        second.outpoint.vout = 1;
+        let coins = [confirmed_coin(100), second];
+        let cache = Cache::default();
+        let labels = HashMap::new();
+        let outpoint = coins[0].outpoint.to_string();
+        let editing = HashMap::from([(outpoint.clone(), form::Value::<String>::default())]);
+        let closed_editing = HashMap::new();
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            // 652px is the real content allocation in a minimum desktop window.
+            for (width, height) in [(652, 668), (1280, 900)] {
+                let size = Size::new(width as f32, height as f32);
+                let viewport = Rectangle::with_size(size);
+                let limits = layout::Limits::new(Size::ZERO, size);
+                let mut renderer =
+                    iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+                        coincube_ui::font::REGULAR,
+                        iced::Pixels(14.0),
+                        Some("tiny-skia"),
+                    ))
+                    .unwrap();
+                let page = |open| -> Element<'_, Message> {
+                    scrollable(coins_view(
+                        &cache,
+                        &coins,
+                        Some(1008),
+                        &[0],
+                        &labels,
+                        if open { &editing } else { &closed_editing },
+                        BitcoinDisplayUnit::Sats,
+                        true,
+                        CoinControl::default(),
+                    ))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+                };
+                let mut closed = page(false);
+                let mut closed_tree = Tree::new(closed.as_widget());
+                let closed_node =
+                    closed
+                        .as_widget_mut()
+                        .layout(&mut closed_tree, &renderer, &limits);
+                let mut before = Probe::default();
+                closed.as_widget_mut().operate(
+                    &mut closed_tree,
+                    Layout::new(&closed_node),
+                    &renderer,
+                    &mut before,
+                );
+                let mut element = page(true);
+                let mut tree = Tree::new(element.as_widget());
+                let node = element
+                    .as_widget_mut()
+                    .layout(&mut tree, &renderer, &limits);
+                assert!(node.size().width <= size.width);
+                let mut after = Probe::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &renderer,
+                    &mut after,
+                );
+                assert_eq!(after.horizontal_scroll, width < TABLE_MIN_WIDTH as u32);
+                for entry in &before.text {
+                    assert!(
+                        after.text.contains(entry),
+                        "label editor moved table content: {:?}",
+                        entry
+                    );
+                }
+                let header = after
+                    .text
+                    .iter()
+                    .find(|(text, _)| text == "Status")
+                    .unwrap()
+                    .1;
+                let status = after
+                    .text
+                    .iter()
+                    .find(|(text, _)| text == "Recovery timing unavailable")
+                    .unwrap()
+                    .1;
+                assert!(
+                    status.x >= header.x && status.x < header.x + STATUS_COLUMN_WIDTH,
+                    "status belongs in its column"
+                );
+                let mut focus: Box<dyn Operation<()>> =
+                    Box::new(focusable::focus(Id::from(COIN_LABEL_INPUT_ID)));
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &renderer,
+                    &mut operation::black_box(focus.as_mut()),
+                );
+                let mut popover = element
+                    .as_widget_mut()
+                    .overlay(
+                        &mut tree,
+                        Layout::new(&node),
+                        &renderer,
+                        &viewport,
+                        Vector::ZERO,
+                    )
+                    .map(overlay::Nested::new)
+                    .unwrap();
+                let popup_node = popover.layout(&renderer, size);
+                let panel = panel_bounds(&popup_node, size.width).unwrap();
+                assert!(panel.width >= 300.0 && panel.width <= 320.0);
+                assert!(panel.x >= 0.0 && panel.x + panel.width <= size.width);
+                assert!(panel.y >= 0.0 && panel.y + panel.height <= size.height);
+                for key in [keyboard::key::Named::Enter, keyboard::key::Named::Escape] {
+                    let mut messages = Vec::new();
+                    let event = Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: keyboard::Key::Named(key),
+                        modified_key: keyboard::Key::Named(key),
+                        physical_key: keyboard::key::Physical::Unidentified(
+                            keyboard::key::NativeCode::Unidentified,
+                        ),
+                        location: keyboard::Location::Standard,
+                        modifiers: keyboard::Modifiers::default(),
+                        text: None,
+                        repeat: false,
+                    });
+                    popover.update(
+                        &event,
+                        Layout::new(&popup_node),
+                        mouse::Cursor::Available(panel.center()),
+                        &renderer,
+                        &mut iced::advanced::clipboard::Null,
+                        &mut Shell::new(&mut messages),
+                    );
+                    assert!(messages.iter().any(|message| matches!(message, Message::Label(items, intent) if items == std::slice::from_ref(&outpoint) && matches!((key, intent), (keyboard::key::Named::Enter, crate::app::view::LabelMessage::Confirm) | (keyboard::key::Named::Escape, crate::app::view::LabelMessage::Cancel)))));
+                }
+                let mut messages = Vec::new();
+                let mut shell = Shell::new(&mut messages);
+                popover.update(
+                    &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    Layout::new(&popup_node),
+                    mouse::Cursor::Available(Point::new(2.0, 2.0)),
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut shell,
+                );
+                assert!(shell.is_event_captured());
+                assert!(matches!(
+                    messages.as_slice(),
+                    [Message::Label(_, crate::app::view::LabelMessage::Cancel)]
+                ));
+                drop(popover);
+                if let Ok(directory) = std::env::var("R06A_CAPTURE_DIR") {
+                    std::fs::create_dir_all(&directory).unwrap();
+                    iced::advanced::Renderer::reset(&mut renderer, viewport);
+                    let style = iced::advanced::renderer::Style {
+                        text_color: theme.colors.text.primary,
+                    };
+                    element.as_widget().draw(
+                        &tree,
+                        &mut renderer,
+                        &theme,
+                        &style,
+                        Layout::new(&node),
+                        mouse::Cursor::Unavailable,
+                        &viewport,
+                    );
+                    if let Some(mut popup) = element
+                        .as_widget_mut()
+                        .overlay(
+                            &mut tree,
+                            Layout::new(&node),
+                            &renderer,
+                            &viewport,
+                            Vector::ZERO,
+                        )
+                        .map(overlay::Nested::new)
+                    {
+                        let popup_node = popup.layout(&renderer, size);
+                        popup.draw(
+                            &mut renderer,
+                            &theme,
+                            &style,
+                            Layout::new(&popup_node),
+                            mouse::Cursor::Unavailable,
+                        );
+                    }
+                    let pixels = renderer.screenshot(
+                        Size::new(width, height),
+                        1.0,
+                        theme.colors.general.background,
+                    );
+                    image::save_buffer(
+                        std::path::Path::new(&directory).join(format!(
+                            "coin-label-popover-{appearance}-{width}x{height}-synthetic.png"
+                        )),
+                        &pixels,
+                        width,
+                        height,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
+            }
+        }
     }
 
     #[test]
