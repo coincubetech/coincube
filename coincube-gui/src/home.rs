@@ -6007,8 +6007,11 @@ impl Home {
         if projection.at_limit() {
             content = content.push(
                 p2_regular(format!(
-                    "{} of {} Cubes on the {} plan. Upgrade, or delete a Cube, to bring one in.",
-                    projection.total_count, projection.cube_limit, projection.tier
+                    "{}: {} of {} Cubes on the {} plan. Upgrade, or delete a Cube on this network, to bring one in.",
+                    launcher_chrome::network_name(self.network),
+                    projection.total_count,
+                    projection.cube_limit,
+                    projection.tier
                 ))
                 .style(theme::text::warning),
             );
