@@ -292,13 +292,16 @@ pub fn auto_convert_line<'a>(
     let (title, body) = match line {
         AutoConvertLine::On => (
             "Auto-convert is on",
-            "Bitcoin you receive converts to USDB.",
+            "Incoming bitcoin payments convert to USDB. Bitcoin from manual swaps stays bitcoin.",
         ),
         AutoConvertLine::Held => (
             "Auto-convert is waiting",
             "A swap out of USDB is settling. Bitcoin received meanwhile stays bitcoin.",
         ),
-        AutoConvertLine::Off => ("Auto-convert is off", "Bitcoin you receive stays bitcoin."),
+        AutoConvertLine::Off => (
+            "Auto-convert is off",
+            "Incoming bitcoin payments stay bitcoin. Your USDB stays USDB.",
+        ),
     };
     Column::new()
         .spacing(4)
@@ -867,7 +870,7 @@ mod tests {
         }));
         let probe = inspect("spark-swap-auto-convert-off", swap_body(&cache, &swap));
         assert!(probe.contains("Auto-convert is off"));
-        assert!(probe.contains("Bitcoin you receive stays bitcoin."));
+        assert!(probe.contains("Incoming bitcoin payments stay bitcoin. Your USDB stays USDB."));
         drop(swap.on_message(SparkSwapMessage::AutoConvertLoaded {
             read: 0,
             line: Some(crate::app::state::spark::swap::AutoConvertLine::Held),
@@ -882,7 +885,8 @@ mod tests {
         }));
         let probe = inspect("spark-swap-auto-convert-on", swap_body(&cache, &swap));
         assert!(probe.contains("Auto-convert is on"));
-        assert!(probe.contains("Bitcoin you receive converts to USDB."));
+        assert!(probe.contains("Incoming bitcoin payments convert to USDB."));
+        assert!(probe.contains("Bitcoin from manual swaps stays bitcoin."));
         let messages = crate::app::view::shared::landing::capture::activate(
             swap_body(&cache, &swap),
             Id::new(WALLET_SETTINGS_ID),
