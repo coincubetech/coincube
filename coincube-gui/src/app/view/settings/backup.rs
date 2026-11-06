@@ -120,7 +120,7 @@ pub fn intro_view<M: Clone + 'static>(
     .push(note)
     .push(
         CheckBox::new(checked)
-            .label("I understand that if I lose these words, my funds can't be recovered.")
+            .label("I understand that if I lose these words and don't have a Recovery Kit, my funds can't be recovered.")
             .on_toggle(move |_| on(BackupWalletMessage::ToggleBackupIntroCheck))
             .style(theme::checkbox::primary)
             .text_size(14)
