@@ -77,11 +77,12 @@ pub fn both_chains_banner<'a>(
     count: usize,
     total: Amount,
     can_split: bool,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let text = format!(
         "{} · {} also {} on {}. Until split, a transaction on one chain can be copied to the other.",
         coins_count(count),
-        sats(total),
+        if mask_amounts { "•••••• sats".to_string() } else { sats(total) },
         if count == 1 { "exists" } else { "exist" },
         chain_name(twin(here)),
     );
@@ -96,10 +97,10 @@ pub fn both_chains_banner<'a>(
             )
             .push(Container::new(p2_regular(text)).width(Length::Fill))
             .push(if can_split {
-                button::primary(None, "Split coins")
+                button::primary_compact(None, "Split coins")
                     .on_press(Message::CoinControl(CoinControlMessage::OpenSplit))
             } else {
-                button::primary(None, "Split coins")
+                button::primary_compact(None, "Split coins")
             }),
     )
     .padding(16)
@@ -109,27 +110,35 @@ pub fn both_chains_banner<'a>(
 }
 
 /// The bar under the coin table while coins are chosen.
-pub fn selection_bar<'a>(count: usize, total: Amount) -> Element<'a, Message> {
+pub fn selection_bar<'a>(count: usize, total: Amount, mask_amounts: bool) -> Element<'a, Message> {
     let summary = if count == 0 {
         "No coins selected".to_string()
     } else {
-        format!("{} selected · {}", count, sats(total))
+        format!(
+            "{} selected · {}",
+            count,
+            if mask_amounts {
+                "•••••• sats".to_string()
+            } else {
+                sats(total)
+            }
+        )
     };
     Row::new()
         .spacing(16)
         .align_y(Alignment::Center)
         .push(Container::new(p1_regular(summary)).width(Length::Fill))
         .push(if count > 0 {
-            button::secondary(None, "Clear")
+            button::secondary_compact(None, "Clear")
                 .on_press(Message::CoinControl(CoinControlMessage::ClearChosen))
         } else {
-            button::secondary(None, "Clear")
+            button::secondary_compact(None, "Clear")
         })
         .push(if count > 0 {
-            button::primary(None, "Send selected")
+            button::primary_compact(None, "Send selected")
                 .on_press(Message::CoinControl(CoinControlMessage::SendSelected))
         } else {
-            button::primary(None, "Send selected")
+            button::primary_compact(None, "Send selected")
         })
         .into()
 }
