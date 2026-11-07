@@ -389,6 +389,103 @@ mod tests {
         assert_eq!(splitting[0].action, None);
     }
 
+    /// A signature split past its confirmations is "split but unconfirmed":
+    /// the hub must keep Coins on both chains open. A spent copy of that
+    /// flag, a coin verified on this chain, and a coin still on both chains
+    /// must not be counted as that same gap.
+    #[test]
+    fn a_signature_split_stays_unverified_on_the_hub() {
+        use crate::{daemon::model::Coin, services::entangled::Entanglement};
+        use coincube_core::{
+            descriptors::CoincubeDescriptor,
+            miniscript::bitcoin::{bip32::ChildNumber, Address, OutPoint, Txid},
+        };
+        use coincubed::commands::LCSpendInfo;
+        use std::{
+            str::FromStr,
+            time::{Duration, Instant},
+        };
+
+        const DESC: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
+        let wallet = Arc::new(Wallet::new(
+            CoincubeDescriptor::from_str(DESC).expect("fixture descriptor"),
+        ));
+        let outpoint = |n: u32| OutPoint::new(Txid::from_str(&format!("{n:064x}")).unwrap(), 0);
+        let address = Address::from_str("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+            .unwrap()
+            .assume_checked();
+        let coin = |n: u32, sats: u64, spent: bool| Coin {
+            amount: Amount::from_sat(sats),
+            outpoint: outpoint(n),
+            address: address.clone(),
+            block_height: Some(100),
+            derivation_index: ChildNumber::from(n),
+            spend_info: spent.then(|| LCSpendInfo {
+                txid: outpoint(99).txid,
+                height: Some(110),
+            }),
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        };
+        let signature_split = outpoint(1);
+        let verified = outpoint(2);
+        let spent_split = outpoint(3);
+        let both = outpoint(4);
+
+        let mut cache = Cache::default();
+        cache.daemon_cache.coins = vec![
+            coin(1, 10_000, false),
+            coin(2, 20_000, false),
+            coin(3, 30_000, true),
+            coin(4, 40_000, false),
+        ];
+        cache.split_unconfirmed.insert(signature_split);
+        cache.split_unconfirmed.insert(spent_split);
+        cache
+            .separated
+            .insert(verified, Instant::now() + Duration::from_secs(600));
+        assert!(cache.record_entanglement(both.txid, Entanglement::Entangled, Instant::now()));
+        assert_eq!(
+            cache.chain_status(&signature_split),
+            ChainStatus::SplitUnconfirmed
+        );
+        assert_eq!(cache.chain_status(&verified), ChainStatus::OnlyHere);
+        assert_eq!(cache.chain_status(&both), ChainStatus::BothChains);
+
+        let panel = SplitHubPanel::new(wallet);
+        let facts = panel.facts(&cache);
+        assert_eq!(
+            facts.unverified, 1,
+            "only the unspent signature split lacks positive evidence"
+        );
+        assert_eq!(facts.both_chains, 1);
+        assert_eq!(facts.both_total, Amount::from_sat(40_000));
+
+        cache
+            .daemon_cache
+            .coins
+            .retain(|coin| coin.outpoint == signature_split || coin.outpoint == verified);
+        let facts = panel.facts(&cache);
+        assert_eq!(facts.unverified, 1);
+        assert_eq!(facts.both_chains, 0);
+        let coins_items = items(facts);
+        assert_eq!(coins_items[0].state, ItemState::ToDo);
+        assert!(coins_items[0].detail.starts_with("1 coin not verified yet"));
+        assert_eq!(coins_items[0].action, None);
+
+        cache
+            .daemon_cache
+            .coins
+            .retain(|coin| coin.outpoint == verified);
+        cache.split_unconfirmed.clear();
+        let facts = panel.facts(&cache);
+        assert_eq!(facts.unverified, 0);
+        let done = items(facts);
+        assert_eq!(done[0].state, ItemState::Done);
+        assert!(done[0].detail.starts_with("None."));
+    }
+
     #[test]
     fn hub_mounts_its_checklist() {
         use crate::app::view::shared::landing::capture;
