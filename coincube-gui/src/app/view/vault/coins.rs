@@ -166,6 +166,7 @@ pub fn coins_view<'a>(
             } else {
                 "Inspect coin balances, labels, confirmations and recovery timing."
             })
+            .width(Length::Fill)
             .style(theme::text::secondary),
         )
         .push(control.both_chains.map(|(count, total, can_split)| {
