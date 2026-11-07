@@ -287,6 +287,9 @@ fn launcher_capture_ghosts() {
             );
         };
         shot(&home, "1-mixed-row");
+        home.catalog.key.mode = super::launcher_catalog::KeyMode::Pinned;
+        shot(&home, "1-key");
+        home.catalog.key.mode = super::launcher_catalog::KeyMode::Closed;
         for uuid in ["ghost-kit", "ghost-nokit"] {
             home.catalog.selected = Some(CubeCatalogKey {
                 chain: ChainId::Bitcoin,

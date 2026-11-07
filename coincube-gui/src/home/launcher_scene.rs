@@ -888,7 +888,10 @@ fn xml_text(value: &str) -> String {
 }
 
 const SHIELD: &str = "M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z";
-const IMPORTED: &str = "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M10 7.5v9m0-9h3c2.4 0 2.4 4 0 4h-3m0 0h3.6c2.6 0 2.6 4.5 0 4.5H10M11.5 6v1.5m0 9V18";
+/// An imported wallet: a billfold, since a coin would read as the network
+/// (Robert, 2026-11-07).
+const IMPORTED: &str =
+    "M4 7.5h15a1 1 0 0 1 1 1V19a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1zM4 7.5 15 4.2v3.3M16 14h1.5";
 const LOCKED: &str = "M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3";
 /// Spark's asterisk, the same path as `coincube-ui`'s `spark_badge.svg`. It
 /// is a filled mark in a 67.3 x 64 box, so [`spark`] fits it to the 24-unit

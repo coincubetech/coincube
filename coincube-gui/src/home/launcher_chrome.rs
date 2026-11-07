@@ -29,8 +29,12 @@ use crate::{
 /// `.top` and `.bottom`: 64px bars with a 24px gutter, as the shared top bar.
 pub(super) const BAR_HEIGHT: f32 = top_bar::HEIGHT;
 const GUTTER: f32 = top_bar::GUTTER;
-/// `.keycard`: 264px wide, 8px above the bar.
-const KEY_CARD_WIDTH: f32 = 264.0;
+/// `.keycard`: 300px wide with one column, 440px with the Connect column,
+/// 8px above the bar.
+const KEY_CARD_WIDTH: f32 = 300.0;
+const KEY_CARD_WIDE: f32 = 440.0;
+/// The Key's face column: "Right" over "lock or kit".
+const KEY_FACE_WIDTH: f32 = 72.0;
 /// `.keybtn { height: 32px }`.
 const KEY_BUTTON_HEIGHT: f32 = 32.0;
 const ACTIVITY_MENU_WIDTH: f32 = 300.0;
@@ -46,7 +50,12 @@ const PLUS: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 2
 const IMPORT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"/></svg>"##;
 const KEY: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2M14 9l2 2"/></svg>"##;
 const SHIELD: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"/></svg>"##;
-const IMPORTED: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M10 7.5v9m0-9h3c2.4 0 2.4 4 0 4h-3m0 0h3.6c2.6 0 2.6 4.5 0 4.5H10M11.5 6v1.5m0 9V18"/></svg>"##;
+/// An imported wallet: a billfold, since a coin would read as the network
+/// (Robert, 2026-11-07).
+const WALLET: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7.5h15a1 1 0 0 1 1 1V19a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1zM4 7.5 15 4.2v3.3M16 14h1.5"/></svg>"##;
+const CLOUD: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z"/></svg>"##;
+const KIT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M8.8 13.6l2.2 2.2 4.2-4.3"/></svg>"##;
+const NOKIT: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.5h16V19H4zM9 8.5V6.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M3 4l18 18"/></svg>"##;
 /// Spark's asterisk from `coincube-ui`'s `spark_badge.svg`, filled and fitted
 /// to the 24-unit grid like the face mark.
 const SPARK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path transform="translate(3 3.4) scale(0.2675)" fill="#fff" fill-rule="evenodd" d="M39.7159 25.248L40.8727 0.570312H26.4219L27.5787 25.2483L4.46555 16.5221L0 30.2656L23.8282 36.7915L8.38717 56.0763L20.0781 64.5703L33.6483 43.9245L47.2179 64.5695L58.9089 56.0755L43.4679 36.7909L67.2937 30.2657L62.8281 16.5221L39.7159 25.248Z"/></svg>"##;
@@ -64,6 +73,8 @@ pub(super) enum Ink {
     Accent,
     /// `--warn`: a backup that needs attention.
     Warn,
+    /// `--good`: a Recovery Kit that restores the Cube here.
+    Good,
     /// `--on-accent`, text and icons on the primary fill.
     OnAccent,
     /// Lays out like the bar's brand without drawing it, to align a menu.
@@ -91,6 +102,7 @@ fn ink(theme: &theme::Theme, tone: Ink) -> Color {
         Ink::Muted => shell.muted,
         Ink::Accent => shell.accent_ink,
         Ink::Warn => shell.warn,
+        Ink::Good => shell.good,
         Ink::OnAccent => iced::color!(0x201407),
         Ink::Clear => Color::TRANSPARENT,
         // Solid blends toward the dock's rail: Iced's SVG tint ignores alpha,
@@ -1243,13 +1255,21 @@ fn key_button<'a>(open: bool) -> Element<'a, ViewMessage> {
         .into()
 }
 
-fn coin<'a>(chain: ChainId, light: bool) -> Element<'a, ViewMessage> {
-    svg(svg::Handle::from_memory(
-        launcher_coin::widget_source(chain, 16.0, 1.5, light).into_bytes(),
-    ))
-    .width(Length::Fixed(16.0))
-    .height(Length::Fixed(16.0))
-    .into()
+fn coin<'a>(chain: ChainId, light: bool, greyed: bool) -> Element<'a, ViewMessage> {
+    let source = if greyed {
+        // As a ghost's top face: `filter: grayscale(1); opacity: .55`.
+        let ink = if light { "#30302d" } else { "#ecebe6" };
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" color=\"{ink}\"><filter id=\"g\"><feColorMatrix type=\"saturate\" values=\"0\"/></filter><g filter=\"url(#g)\" opacity=\".55\">{}</g></svg>",
+            launcher_coin::fragment(chain, 0.0, 0.0, 16.0, 1.5, 16.0 * 0.018)
+        )
+    } else {
+        launcher_coin::widget_source(chain, 16.0, 1.5, light)
+    };
+    svg(svg::Handle::from_memory(source.into_bytes()))
+        .width(Length::Fixed(16.0))
+        .height(Length::Fixed(16.0))
+        .into()
 }
 
 /// `.sw`: a 12px face swatch in a network family's edge colour.
@@ -1273,80 +1293,346 @@ fn swatch<'a>(chain: ChainId, light: bool) -> Element<'a, ViewMessage> {
         .into()
 }
 
-fn legend_row<'a>(
+fn rgba([r, g, b, a]: [u8; 4]) -> String {
+    format!("rgba({r},{g},{b},{:.3})", a as f32 / 255.0)
+}
+
+/// The Key's column heads: a 20px Cube, solid for one on this device,
+/// see-through with its far edges dashed for one only in Connect.
+fn mini_cube<'a>(ghost: bool, light: bool) -> Element<'a, ViewMessage> {
+    let (edge, fill, back) = if ghost {
+        (
+            rgba(launcher_scene::ghost_edge(ChainId::Bitcoin, light)),
+            rgba(launcher_scene::ghost_fill(
+                launcher_scene::Ghost::Restorable,
+                light,
+            )),
+            "<path d=\"M12 3v9M4 16.5l8-4.5 8 4.5\" stroke-dasharray=\"1.5 1.5\" opacity=\".7\"/>",
+        )
+    } else {
+        let [r, g, b] = launcher_scene::Palette::new(light).top;
+        (
+            rgba(launcher_scene::edge(ChainId::Bitcoin, light)),
+            format!("rgb({r},{g},{b})"),
+            "",
+        )
+    };
+    let source = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"{edge}\" stroke-width=\"1.5\" stroke-linejoin=\"round\"><path d=\"M12 3l8 4.5v9L12 21l-8-4.5v-9z\" fill=\"{fill}\"/><path d=\"M4 7.5l8 4.5 8-4.5M12 12v9\"/>{back}</svg>"
+    );
+    svg(svg::Handle::from_memory(source.into_bytes()))
+        .width(Length::Fixed(20.0))
+        .height(Length::Fixed(20.0))
+        .into()
+}
+
+/// One line of a Key cell: its marks, then what they mean.
+fn mark<'a>(
     marks: Vec<Element<'a, ViewMessage>>,
     label: &'static str,
+    tone: Ink,
 ) -> Element<'a, ViewMessage> {
     let mut row = Row::new().spacing(6).align_y(Alignment::Center);
     for mark in marks {
         row = row.push(mark);
     }
-    row.push(words(label, 13.0, font::REGULAR, Ink::Body))
+    if label.is_empty() {
+        row.into()
+    } else {
+        row.push(Container::new(words(label, 13.0, font::REGULAR, tone)).width(Length::Fill))
+            .into()
+    }
+}
+
+fn rule_line<'a>() -> Element<'a, ViewMessage> {
+    Container::new(Space::new())
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(|theme: &theme::Theme| container::Style {
+            background: Some(iced::Background::Color(theme.colors.shell.line)),
+            ..Default::default()
+        })
         .into()
 }
 
-/// `.keycard`: how to read a Cube, using the marks this app actually draws.
-pub(super) fn key_card<'a>(home: &Home) -> Element<'a, ViewMessage> {
+/// A Key row: the face and what it carries, then one cell per column,
+/// under a rule unless it opens the card.
+fn face_row<'a>(
+    ruled: bool,
+    face: &'static str,
+    carries: &'static str,
+    cells: Vec<Column<'a, ViewMessage>>,
+) -> Element<'a, ViewMessage> {
+    let mut row = Row::new().spacing(14).push(
+        Column::new()
+            .width(Length::Fixed(KEY_FACE_WIDTH))
+            .push(words(face, 13.0, font::MEDIUM, Ink::Body))
+            .push(words(carries, 13.0, font::REGULAR, Ink::Muted)),
+    );
+    for cell in cells {
+        row = row.push(cell.spacing(6).width(Length::FillPortion(1)));
+    }
+    let row = Container::new(row).padding([9.0, 0.0]);
+    if ruled {
+        Column::new().push(rule_line()).push(row).into()
+    } else {
+        // The card's first row: nothing above it to rule off.
+        row.padding(Padding {
+            bottom: 9.0,
+            ..Padding::ZERO
+        })
+        .into()
+    }
+}
+
+/// The networks the Key explains: Blake2b and the test networks only when
+/// the user has them shown (Developer Mode, the Blake2b release).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyNetworks {
+    blake2b: bool,
+    test: bool,
+}
+
+impl KeyNetworks {
+    fn of(displayed: &[ChainId]) -> Self {
+        Self {
+            blake2b: displayed
+                .iter()
+                .any(|c| c.is_blake2b() && !launcher_coin::is_test_network(*c)),
+            test: displayed.iter().any(|c| launcher_coin::is_test_network(*c)),
+        }
+    }
+
+    fn coins(self) -> Vec<ChainId> {
+        let mut coins = vec![ChainId::Bitcoin];
+        if self.blake2b {
+            coins.push(ChainId::BitcoinBlake2b);
+        }
+        coins
+    }
+}
+
+/// `.keycard`: how to read a Cube, one row per face. A second column shows
+/// the marks a Cube only in Connect draws instead, when the floor stands
+/// any (G-Key, Robert 2026-11-07).
+pub(super) fn key_card<'a>(home: &Home, ghosts: bool) -> Element<'a, ViewMessage> {
     let light = matches!(
         home.theme_mode,
         coincube_ui::theme::palette::ThemeMode::Light
     );
-    let b2b = home.displayed_networks.iter().any(|c| c.is_blake2b());
-    let mut edges = vec![swatch(ChainId::Bitcoin, light)];
-    if b2b {
-        edges.push(swatch(ChainId::BitcoinBlake2b, light));
+    let networks = KeyNetworks::of(&home.displayed_networks);
+    let coins = |greyed| {
+        networks
+            .coins()
+            .into_iter()
+            .map(|chain| coin(chain, light, greyed))
+            .collect::<Vec<_>>()
+    };
+    let cells = |local: Column<'a, ViewMessage>, connect: Column<'a, ViewMessage>| {
+        if ghosts {
+            vec![local, connect]
+        } else {
+            vec![local]
+        }
+    };
+
+    let head = |label: &'static str, ghost: bool| {
+        Row::new()
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .width(Length::FillPortion(1))
+            .push(mini_cube(ghost, light))
+            .push(words(label, 11.0, font::REGULAR, Ink::Muted))
+    };
+    let heads = Row::new()
+        .spacing(14)
+        .padding(Padding {
+            bottom: 8.0,
+            ..Padding::ZERO
+        })
+        .push(
+            Container::new(words("Face", 11.0, font::REGULAR, Ink::Muted))
+                .width(Length::Fixed(KEY_FACE_WIDTH)),
+        )
+        .push(head("On this device", false))
+        .push(head("Only in Connect", true));
+
+    let top = face_row(
+        ghosts,
+        "Top",
+        "network",
+        cells(
+            Column::new().push(mark(coins(false), "Network coin", Ink::Body)),
+            Column::new().push(mark(coins(true), "Same coin, greyed", Ink::Body)),
+        ),
+    );
+    let left = face_row(
+        true,
+        "Left",
+        "wallets",
+        cells(
+            Column::new()
+                .push(mark(
+                    vec![
+                        glyph(SHIELD, 16.0, Ink::Body),
+                        glyph(WALLET, 16.0, Ink::Body),
+                        glyph(SPARK, 16.0, Ink::Body),
+                    ],
+                    "",
+                    Ink::Body,
+                ))
+                .push(words(
+                    "Vault, imported wallet, Spark",
+                    13.0,
+                    font::REGULAR,
+                    Ink::Muted,
+                )),
+            Column::new()
+                .push(mark(
+                    vec![
+                        glyph(SHIELD, 16.0, Ink::Muted),
+                        glyph(SPARK, 16.0, Ink::Muted),
+                        glyph(CLOUD, 16.0, Ink::Body),
+                    ],
+                    "",
+                    Ink::Body,
+                ))
+                .push(words(
+                    "Wallets Connect knows of, greyed, then a cloud",
+                    13.0,
+                    font::REGULAR,
+                    Ink::Muted,
+                )),
+        ),
+    );
+    let right = face_row(
+        true,
+        "Right",
+        if ghosts { "lock or kit" } else { "lock" },
+        cells(
+            Column::new()
+                .push(mark(
+                    vec![
+                        glyph(LOCK, 16.0, Ink::Body),
+                        glyph(PASSKEY, 16.0, Ink::Body),
+                    ],
+                    "PIN or passkey",
+                    Ink::Body,
+                ))
+                .push(mark(
+                    vec![glyph(ATTENTION, 16.0, Ink::Warn)],
+                    "Backup not confirmed",
+                    Ink::Body,
+                ))
+                .push(mark(
+                    vec![glyph(QUESTION, 16.0, Ink::Muted)],
+                    "Backup status unknown",
+                    Ink::Body,
+                )),
+            Column::new()
+                .push(mark(
+                    vec![glyph(KIT, 16.0, Ink::Good)],
+                    "Recovery Kit: can restore here",
+                    Ink::Body,
+                ))
+                .push(mark(
+                    vec![
+                        glyph(NOKIT, 16.0, Ink::Muted),
+                        glyph(ATTENTION, 16.0, Ink::Warn),
+                    ],
+                    "No Recovery Kit",
+                    Ink::Body,
+                )),
+        ),
+    );
+
+    let mut edges = Row::new()
+        .spacing(14)
+        .align_y(Alignment::Center)
+        .push(words("Edge", 13.0, font::REGULAR, Ink::Muted));
+    let mut families = vec![(ChainId::Bitcoin, "Bitcoin")];
+    if networks.blake2b {
+        families.push((ChainId::BitcoinBlake2b, "Blake2b"));
     }
-    edges.push(swatch(ChainId::Testnet4, light));
-    let mut coins = vec![coin(ChainId::Bitcoin, light)];
-    if b2b {
-        coins.push(coin(ChainId::BitcoinBlake2b, light));
+    if networks.test {
+        families.push((ChainId::Testnet4, "Test networks"));
     }
-    Container::new(
-        Column::new()
-            .spacing(10)
-            .push(legend_row(coins, "Top: network"))
-            .push(legend_row(
-                vec![
-                    glyph(SHIELD, 16.0, Ink::Body),
-                    glyph(IMPORTED, 16.0, Ink::Body),
-                    glyph(SPARK, 16.0, Ink::Body),
-                ],
-                "Left: wallets",
+    for (chain, name) in families {
+        edges = edges.push(
+            Row::new()
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .push(swatch(chain, light))
+                .push(words(name, 13.0, font::REGULAR, Ink::Body)),
+        );
+    }
+
+    let mut card = Column::new();
+    if ghosts {
+        card = card.push(heads);
+    }
+    card = card.push(top).push(left).push(right);
+    if ghosts {
+        card = card.push(face_row(
+            true,
+            "Body",
+            "fill",
+            vec![
+                Column::new().push(mark(vec![], "Solid", Ink::Body)),
+                Column::new()
+                    .push(mark(vec![], "See-through", Ink::Body))
+                    .push(words(
+                        "Faint fill only when it has a Recovery Kit",
+                        13.0,
+                        font::REGULAR,
+                        Ink::Muted,
+                    )),
+            ],
+        ));
+    }
+    card = card
+        .push(rule_line())
+        .push(Container::new(edges).padding(Padding {
+            top: 10.0,
+            ..Padding::ZERO
+        }));
+    if ghosts {
+        card = card.push(
+            Container::new(words(
+                "Select a Cube that's only in Connect to restore it or delete it from Connect.",
+                12.0,
+                font::REGULAR,
+                Ink::Muted,
             ))
-            .push(legend_row(
-                vec![
-                    glyph(LOCK, 16.0, Ink::Body),
-                    glyph(PASSKEY, 16.0, Ink::Body),
-                ],
-                "Right: PIN or passkey lock",
-            ))
-            .push(legend_row(
-                vec![glyph(ATTENTION, 16.0, Ink::Warn)],
-                "Backup not confirmed",
-            ))
-            .push(legend_row(
-                vec![glyph(QUESTION, 16.0, Ink::Muted)],
-                "Backup status unknown",
-            ))
-            .push(legend_row(edges, "Edge: network family")),
-    )
-    .width(Length::Fixed(KEY_CARD_WIDTH))
-    .padding(Padding {
-        top: 12.0,
-        right: 14.0,
-        bottom: 12.0,
-        left: 14.0,
-    })
-    .style(|theme: &theme::Theme| container::Style {
-        background: Some(iced::Background::Color(theme.colors.shell.panel)),
-        border: Border {
-            color: theme.colors.shell.line,
-            width: 1.0,
-            radius: 8.0.into(),
-        },
-        ..Default::default()
-    })
-    .into()
+            .padding(Padding {
+                top: 10.0,
+                ..Padding::ZERO
+            }),
+        );
+    }
+
+    Container::new(card)
+        .width(Length::Fixed(if ghosts {
+            KEY_CARD_WIDE
+        } else {
+            KEY_CARD_WIDTH
+        }))
+        .padding(Padding {
+            top: 14.0,
+            right: 16.0,
+            bottom: 14.0,
+            left: 16.0,
+        })
+        .style(|theme: &theme::Theme| container::Style {
+            background: Some(iced::Background::Color(theme.colors.shell.panel)),
+            border: Border {
+                color: theme.colors.shell.line,
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
 }
 
 /// An undrawn copy of the bar's brand (`top_bar::brand_mark`), to place a
@@ -1504,7 +1790,11 @@ pub(super) fn network_layer<'a>(
 }
 
 /// The Key card's layer: bottom-right, 8px above the dock.
-pub(super) fn key_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>> {
+pub(super) fn key_layer<'a>(
+    home: &Home,
+    projection: &Projection<'_>,
+) -> Option<Element<'a, ViewMessage>> {
+    let ghosts = projection.floor_eligible(home.catalog.mode) && !projection.ghosts.is_empty();
     // A hover peek waits while a dock menu is open: one popover at a time.
     let menu = home.catalog.plan_menu || home.catalog.activity.menu;
     (home.catalog.key_open() && !menu).then(|| {
@@ -1513,7 +1803,7 @@ pub(super) fn key_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>> {
         // pointer's way up from the button to the card.
         let button_top = (BAR_HEIGHT + KEY_BUTTON_HEIGHT) / 2.0;
         Container::new(
-            mouse_area(Container::new(key_card(home)).padding(Padding {
+            mouse_area(Container::new(key_card(home, ghosts)).padding(Padding {
                 bottom: 8.0,
                 ..Padding::ZERO
             }))
@@ -1791,7 +2081,47 @@ pub(crate) fn quiet_dock<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M> {
 
 #[cfg(test)]
 mod tests {
-    use super::count_text;
+    use super::{count_text, KeyNetworks};
+    use crate::chain::ChainId;
+
+    #[test]
+    fn the_key_explains_only_the_networks_the_user_has_shown() {
+        let only = |displayed: &[ChainId]| KeyNetworks::of(displayed);
+        assert_eq!(
+            only(&[ChainId::Bitcoin]),
+            KeyNetworks {
+                blake2b: false,
+                test: false
+            }
+        );
+        assert_eq!(
+            only(&[ChainId::Bitcoin, ChainId::BitcoinBlake2b]),
+            KeyNetworks {
+                blake2b: true,
+                test: false
+            }
+        );
+        // Developer Mode without the Blake2b release: test networks only.
+        assert_eq!(
+            only(&[ChainId::Bitcoin, ChainId::Testnet4, ChainId::Signet]),
+            KeyNetworks {
+                blake2b: false,
+                test: true
+            }
+        );
+        // Blake2b testnet alone is a test network, not the Blake2b family.
+        assert_eq!(
+            only(&[ChainId::Bitcoin, ChainId::BitcoinBlake2bTestnet4]),
+            KeyNetworks {
+                blake2b: false,
+                test: true
+            }
+        );
+        assert_eq!(
+            only(&[ChainId::Bitcoin, ChainId::BitcoinBlake2b]).coins(),
+            vec![ChainId::Bitcoin, ChainId::BitcoinBlake2b]
+        );
+    }
 
     #[test]
     fn the_count_names_this_devices_cubes_and_the_ghosts_apart() {
