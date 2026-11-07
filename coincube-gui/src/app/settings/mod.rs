@@ -1829,7 +1829,7 @@ impl std::fmt::Display for SettingsError {
 pub mod global {
     use super::preferences::{
         DevicePreferences, LauncherStyle, MotionPreference, NetworkActivitySource,
-        PreferenceChange, ThemePreference, Zoom,
+        PreferenceChange, ThemePreference, WorldviewMode, Zoom,
     };
     use crate::dir::CoincubeDirectory;
     use async_hwi::bitbox::{ConfigError, NoiseConfig, NoiseConfigData};
@@ -1900,6 +1900,8 @@ pub mod global {
         #[serde(default, deserialize_with = "deserialize_present_theme_preference")]
         pub theme_preference: Option<ThemePreference>,
         #[serde(default)]
+        pub worldview: WorldviewMode,
+        #[serde(default)]
         pub launcher_style: LauncherStyle,
         /// Not, by itself, authority to show amounts: see
         /// `balance_privacy_initialized` and
@@ -1963,6 +1965,7 @@ pub mod global {
                 account_tier: AccountTier::default(),
                 theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
                 theme_preference: Some(ThemePreference::System),
+                worldview: WorldviewMode::default(),
                 launcher_style: LauncherStyle::default(),
                 hide_balances: false,
                 // A missing file can coexist with legacy Cubes: never resolved by default.
@@ -1984,6 +1987,7 @@ pub mod global {
         fn preferences(&self) -> DevicePreferences {
             DevicePreferences {
                 theme: self.theme_preference.unwrap_or(self.theme_mode.into()),
+                worldview: self.worldview,
                 launcher_style: self.launcher_style,
                 hide_balances: self.hide_balances,
                 motion: self.motion_preference,
@@ -2002,6 +2006,7 @@ pub mod global {
                     // Legacy readers need a deterministic concrete value.
                     self.theme_mode = choice.resolve(None);
                 }
+                PreferenceChange::Worldview(mode) => self.worldview = mode,
                 PreferenceChange::LauncherStyle(style) => self.launcher_style = style,
                 PreferenceChange::HideBalances(hidden) => {
                     self.hide_balances = hidden;
@@ -4014,6 +4019,45 @@ pub mod global {
                 .collect();
             names.sort();
             assert_eq!(names, ["global_settings.json", "global_settings.lock"]);
+        }
+
+        #[test]
+        fn worldview_defaults_and_round_trips_independently_of_other_preferences() {
+            let root = TempRoot::new("worldview");
+            let path = root.global();
+            assert_eq!(
+                GlobalSettings::load_preferences(&path).unwrap().worldview,
+                WorldviewMode::Samurai
+            );
+            assert!(!path.exists());
+            for input in [
+                r#"{"theme_mode":"light","language":"es","bitcoin_blake2b_beta":true}"#,
+                r#"{"theme_mode":"light","language":"es","bitcoin_blake2b_beta":true,"worldview":"future_mode"}"#,
+            ] {
+                std::fs::write(&path, input).unwrap();
+                let before = GlobalSettings::load_preferences(&path).unwrap();
+                assert_eq!(before.worldview, WorldviewMode::Samurai);
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), input);
+
+                for (mode, key) in [
+                    (WorldviewMode::Suitcoiner, "suitcoiner"),
+                    (WorldviewMode::Luke, "luke"),
+                    (WorldviewMode::Samurai, "samurai"),
+                ] {
+                    let expected = DevicePreferences {
+                        worldview: mode,
+                        ..before
+                    };
+                    let receipt =
+                        GlobalSettings::save_preference(&path, PreferenceChange::Worldview(mode))
+                            .unwrap();
+                    assert_eq!(receipt.preferences(), expected);
+                    assert_eq!(receipt.balances_hidden(), None);
+                    assert_eq!(GlobalSettings::load_preferences(&path).unwrap(), expected);
+                    assert_eq!(raw(&path)["worldview"], key);
+                    assert_eq!(raw(&path)["language"], "es");
+                }
+            }
         }
 
         #[test]

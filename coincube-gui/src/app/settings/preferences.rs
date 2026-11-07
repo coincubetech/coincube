@@ -33,6 +33,17 @@ impl From<ThemeMode> for ThemePreference {
     }
 }
 
+/// Installation-wide presentation choice, independent of the color scheme.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorldviewMode {
+    Suitcoiner,
+    Luke,
+    #[default]
+    #[serde(other)]
+    Samurai,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LauncherStyle {
@@ -171,6 +182,7 @@ impl From<Zoom> for u16 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DevicePreferences {
     pub theme: ThemePreference,
+    pub worldview: WorldviewMode,
     pub launcher_style: LauncherStyle,
     pub hide_balances: bool,
     pub motion: MotionPreference,
@@ -186,6 +198,7 @@ impl Default for DevicePreferences {
     fn default() -> Self {
         Self {
             theme: ThemePreference::System,
+            worldview: WorldviewMode::default(),
             launcher_style: LauncherStyle::Cubes,
             hide_balances: false,
             motion: MotionPreference::FollowSystem,
@@ -233,6 +246,7 @@ impl DevicePreferences {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferenceChange {
     Theme(ThemePreference),
+    Worldview(WorldviewMode),
     LauncherStyle(LauncherStyle),
     HideBalances(bool),
     Motion(MotionPreference),

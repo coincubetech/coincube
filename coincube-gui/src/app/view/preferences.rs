@@ -23,11 +23,55 @@ use iced::{advanced::widget::Id, widget::container, Alignment, Length};
 use crate::app::{
     settings::preferences::{
         DevicePreferences, EffectivePreferences, LauncherStyle, MotionPreference,
-        NetworkActivitySource, PreferenceChange, ThemePreference, Zoom,
+        NetworkActivitySource, PreferenceChange, ThemePreference, WorldviewMode, Zoom,
     },
     state::preferences::{BalancePrivacy, PreferencesPageState, Section},
 };
 use coincube_ui::theme::palette::ThemeMode;
+
+// Keep feature copy together for the future locale catalog. The IDs are also
+// used for keyboard focus and stay stable across locales.
+fn worldview_row<'a>(selected: WorldviewMode, enabled: bool) -> Element<'a, Message> {
+    let tagline = match selected {
+        WorldviewMode::Samurai => "The Way of the Bitcoin",
+        WorldviewMode::Suitcoiner => "The Market Has Spoken",
+        WorldviewMode::Luke => "No Spam Shall Pass",
+    };
+
+    setting_row(
+        "Bitcoin Worldview",
+        segmented(
+            [
+                segment(
+                    "tenshu.preferences.worldview.samurai",
+                    WorldviewMode::Samurai,
+                    "Samurai",
+                ),
+                segment(
+                    "tenshu.preferences.worldview.suitcoiner",
+                    WorldviewMode::Suitcoiner,
+                    "Suitcoiner",
+                ),
+                segment(
+                    "tenshu.preferences.worldview.luke",
+                    WorldviewMode::Luke,
+                    "Luke",
+                ),
+            ],
+            Some(selected),
+            Message::FocusAction,
+        )
+        .size(SegmentSize::Compact)
+        .on_select_maybe(
+            enabled.then_some(|mode| Message::Change(PreferenceChange::Worldview(mode))),
+        ),
+    )
+    .tag(SCOPE)
+    .trailing_tag()
+    .description("Choose a presentation style for Tenshu on this device.")
+    .note(tagline, Tone::Muted)
+    .into()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -359,6 +403,7 @@ fn section_content<'a>(
                 .note(current, Tone::Muted)
                 .into(),
             );
+            rows.push(worldview_row(saved.worldview, enabled));
             let max_zoom = model.max_zoom.unwrap_or(Zoom::LARGEST);
             let (zoom_selected, zoom_note) = zoom_choice(saved.zoom, max_zoom);
             rows.push(
@@ -1408,6 +1453,45 @@ mod tests {
             );
         }
         (focused, messages)
+    }
+
+    #[test]
+    fn appearance_worldview_segments_emit_typed_keyboard_intents() {
+        for (id, mode) in [
+            (
+                "tenshu.preferences.worldview.samurai",
+                WorldviewMode::Samurai,
+            ),
+            (
+                "tenshu.preferences.worldview.suitcoiner",
+                WorldviewMode::Suitcoiner,
+            ),
+            ("tenshu.preferences.worldview.luke", WorldviewMode::Luke),
+        ] {
+            let model = ViewModel {
+                saved: Some(DevicePreferences::default()),
+                ..Default::default()
+            };
+            let (focused, messages) =
+                activate(model, Section::Appearance, id, keyboard::key::Named::Enter);
+            assert!(focused, "{}", id);
+            assert_eq!(
+                messages,
+                vec![Message::Change(PreferenceChange::Worldview(mode))]
+            );
+
+            let (focused, messages) = activate(
+                ViewModel {
+                    saving: true,
+                    ..model
+                },
+                Section::Appearance,
+                id,
+                keyboard::key::Named::Space,
+            );
+            assert!(!focused, "{} was focusable while saving", id);
+            assert!(messages.is_empty());
+        }
     }
 
     #[test]
