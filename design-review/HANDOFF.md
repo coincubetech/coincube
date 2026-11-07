@@ -1,5 +1,7 @@
 # Tenshu redesign · implementation hand-off
 
+[Bitcoin Worldview Modes specification](../docs/design/bitcoin-worldview-modes.md)
+
 This folder is the complete hand-off for implementing the Tenshu redesign in this
 repository. It was produced in a Claude Design review with Robert on 2026-10-22/23.
 Read this file first, then the review doc, then the inventory.
