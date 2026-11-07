@@ -1,0 +1,23 @@
+{
+  "cubes": [
+    {
+      "id": "1a4fe87f-92bf-4094-8856-5df4f638542d",
+      "name": "Family",
+      "network": "bitcoin",
+      "backed_up": false,
+      "mfa_done": false,
+      "created_at": 1775675584,
+      "security_pin_hash": "$argon2id$v=19$m=19456,t=2,p=1$oaWo0fU/4VS9EuS7k9sjcA$MUz6Vi2zx3Fqqp22RND8b6LSvYLHXCqFxvOyuNEOL/8",
+      "liquid_wallet_signer_fingerprint": "6a97c8c8",
+      "unit_setting": {
+        "display_unit": "BTC"
+      },
+      "fiat_price": {
+        "source": "COINCUBE",
+        "currency": "USD",
+        "is_enabled": true
+      }
+    }
+  ],
+  "wallets": []
+}

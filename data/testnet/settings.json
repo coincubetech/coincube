@@ -1,0 +1,23 @@
+{
+  "cubes": [
+    {
+      "id": "debcb8f2-3d8f-49eb-a4bf-3af5c567fa35",
+      "name": "Eezi Cube",
+      "network": "testnet",
+      "backed_up": false,
+      "mfa_done": false,
+      "created_at": 1775674776,
+      "security_pin_hash": "$argon2id$v=19$m=19456,t=2,p=1$iyqIrdmW6uQWKNSMbgSC6A$uMIAYIkG8ly7HunF0yuXVKWd4gSiOZFIkLR+STmY7Y8",
+      "liquid_wallet_signer_fingerprint": "3e3b1eaa",
+      "unit_setting": {
+        "display_unit": "BTC"
+      },
+      "fiat_price": {
+        "source": "COINCUBE",
+        "currency": "USD",
+        "is_enabled": true
+      }
+    }
+  ],
+  "wallets": []
+}

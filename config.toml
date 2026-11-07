@@ -1,0 +1,14 @@
+# Coincube Daemon Configuration (Local Development)
+data_dir = "./data"
+log_level = "debug"
+
+# You will need a valid descriptor to run. 
+# This is a sample one from the documentation for testing.
+main_descriptor = "wsh(or_d(pk([0dd8c6f0/48'/1'/0'/2']tpubDFMbZ7U5k5hEfsttnZTKMmwrGMHnqUGxhShsvBjHimXBpmAp5KmxpyGsLx2toCaQgYq5TipBLhTUtA2pRSB9b14m5KwSohTDoCHkk1EnqtZ/<0;1>/*),and_v(v:pkh([d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<0;1>/*),older(65535))))#7nvn6ssc"
+
+[bitcoin_config]
+network = "testnet"
+poll_interval_secs = 30
+
+[electrum_config]
+addr = "tcp://electrum.blockstream.info:60001"
