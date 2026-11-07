@@ -218,9 +218,9 @@ fn stable_balance_group<'a>(
     let auto = page::row("Auto-convert received bitcoin")
         .accessory(page::status(kind, word))
         .description(
-            "Bitcoin that arrives in Spark from now on is converted to USDB, so the wallet holds \
-             its dollar value. Bitcoin you already have stays bitcoin. Each conversion can fill \
-             slightly differently from the rate at the time.",
+            "When on, new bitcoin payments received in Spark convert to USDB. Bitcoin you already \
+             have and bitcoin from manual swaps stay bitcoin. Turning this off keeps your USDB \
+             as USDB. Each conversion can fill slightly differently from the rate at the time.",
         )
         .control(
             toggle(
@@ -495,7 +495,9 @@ mod tests {
         for label in [
             "US dollar balance (USDB)",
             "Auto-convert received bitcoin",
-            "Bitcoin you already have stays bitcoin.",
+            "When on, new bitcoin payments received in Spark convert to USDB.",
+            "have and bitcoin from manual swaps stay bitcoin.",
+            "Turning this off keeps your USDB as USDB.",
             "Pay from USDB when bitcoin runs short",
             "Always on",
             "Conversion",
