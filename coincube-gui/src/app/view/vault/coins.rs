@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use iced::{
-    widget::{checkbox, scrollable, Space},
+    widget::{checkbox, Space},
     Alignment, Length,
 };
 
@@ -18,7 +18,10 @@ use coincube_ui::{
     },
     icon::{self, coins_icon},
     theme,
-    widget::{action::Action, floating::Floating, Column, Container, Element, Row, RowExt},
+    widget::{
+        action::Action, floating::Floating, horizontal_scroll, Column, Container, Element, Row,
+        RowExt,
+    },
 };
 
 use crate::{
@@ -350,13 +353,7 @@ pub fn coins_view<'a>(
                     } else {
                         TABLE_MIN_WIDTH - CHAINS_COLUMN_WIDTH - 12.0
                     }));
-                scrollable(table)
-                    .direction(scrollable::Direction::Horizontal(
-                        scrollable::Scrollbar::new(),
-                    ))
-                    .width(Length::Fill)
-                    .height(Length::Shrink)
-                    .into()
+                horizontal_scroll(table)
             })
             .height(Length::Shrink)
         }))
@@ -862,6 +859,7 @@ mod tests {
     use crate::app::view::shared::landing::capture;
     use crate::services::entangled::Entanglement;
     use coincube_core::miniscript::bitcoin::{bip32::ChildNumber, Address, Amount, OutPoint, Txid};
+    use iced::widget::scrollable;
     use std::str::FromStr;
 
     fn confirmed_coin(height: i32) -> Coin {
@@ -877,6 +875,79 @@ mod tests {
             is_immature: false,
             is_change: false,
             is_from_self: false,
+        }
+    }
+
+    #[test]
+    fn vertical_wheel_over_the_table_scrolls_the_page_after_horizontal_scrolling() {
+        use crate::app::{menu::VaultSubMenu, view::page_head_tests};
+        use iced::advanced::{widget::Tree, Layout, Shell};
+        use iced::{mouse, Event, Rectangle, Size};
+
+        let renderer = page_head_tests::renderer();
+        let cache = Cache::default();
+        let menu = Menu::Vault(VaultSubMenu::Coins(None));
+        let coins: Vec<_> = (0..24)
+            .map(|vout| {
+                let mut coin = confirmed_coin(100);
+                coin.outpoint.vout = vout;
+                coin
+            })
+            .collect();
+        let labels = HashMap::new();
+        let editing = HashMap::new();
+
+        for vertical in [
+            mouse::ScrollDelta::Lines { x: 0.0, y: -2.0 },
+            mouse::ScrollDelta::Pixels { x: -2.0, y: -80.0 },
+        ] {
+            let mut page = crate::app::view::dashboard(
+                &menu,
+                &cache,
+                coins_view(
+                    &cache,
+                    &coins,
+                    None,
+                    &[],
+                    &labels,
+                    &editing,
+                    BitcoinDisplayUnit::Sats,
+                    true,
+                    CoinControl::default(),
+                ),
+            );
+            let mut tree = Tree::new(page.as_widget());
+            let (node, probe) = page_head_tests::frame(&mut tree, &renderer, &mut page);
+            let cursor = mouse::Cursor::Available(probe.text("Amount").center());
+            let mut wheel = |delta| {
+                let mut messages = Vec::new();
+                let mut shell = Shell::new(&mut messages);
+                page.as_widget_mut().update(
+                    &mut tree,
+                    &Event::Mouse(mouse::Event::WheelScrolled { delta }),
+                    Layout::new(&node),
+                    cursor,
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut shell,
+                    &Rectangle::with_size(Size::new(1024.0, 768.0)),
+                );
+                (shell.is_event_captured(), messages)
+            };
+            let (captured, messages) = wheel(mouse::ScrollDelta::Pixels { x: -80.0, y: 0.0 });
+            assert!(captured, "the narrow table accepts horizontal scrolling");
+            assert!(
+                messages.is_empty(),
+                "the page stays put during horizontal scrolling"
+            );
+            let (_, messages) = wheel(vertical);
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| matches!(message, Message::Scroll(y) if *y > 0.0)),
+                "the page scrolls vertically over the table after {vertical:?}",
+                vertical = vertical,
+            );
         }
     }
 

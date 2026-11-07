@@ -3,9 +3,12 @@ mod cursor;
 mod editor;
 pub mod equal_height;
 pub mod floating;
+mod horizontal_scroll;
 mod menu;
 pub mod modal;
 pub mod text_input;
+
+pub use horizontal_scroll::horizontal_scroll;
 
 use crate::theme::Theme;
 
