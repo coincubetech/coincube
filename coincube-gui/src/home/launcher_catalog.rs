@@ -2177,7 +2177,7 @@ fn launcher_screen(home: &Home, with_dock: bool) -> Element<'_, ViewMessage> {
             .width(Length::Fill)
             .height(Length::Fill)
             .push(screen)
-            .push(super::launcher_chrome::key_layer(home))
+            .push(super::launcher_chrome::key_layer(home, &projection))
             .push(super::launcher_chrome::activity_layer(home))
             .push(super::launcher_chrome::plan_layer(home, &projection))
             .push(super::launcher_chrome::network_layer(home, &projection)),
@@ -2522,13 +2522,13 @@ mod tests {
         let mut home = home_with(&[("a", "Alpha")]);
         let closed = home_tree("key-card", &home, WIDE, "dark", theme::Theme::dark());
         assert!(closed.has(&key_id()));
-        assert!(!closed.contains("Top: network"));
+        assert!(!closed.contains("Network coin"));
 
         catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
         assert_eq!(home.catalog.key.mode, KeyMode::Peek);
         assert!(
             home_tree("key-card", &home, WIDE, "dark", theme::Theme::dark())
-                .contains("Top: network")
+                .contains("Network coin")
         );
         catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, false));
         assert!(!home.catalog.key_open(), "a peek closes on hover-out");
@@ -6663,7 +6663,7 @@ mod tests {
         assert!(!home.catalog.plan_menu);
         // A hover peek waits while a menu is up.
         catalog(&mut home, CatalogMessage::KeyHover(KeyPart::Button, true));
-        assert!(super::super::launcher_chrome::key_layer(&home).is_none());
+        assert!(super::super::launcher_chrome::key_layer(&home, &project(&home)).is_none());
     }
 
     /// The plan menu marks the network Create and Import act on, now that
