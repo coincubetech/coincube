@@ -901,6 +901,7 @@ fn refund_can_submit(
 
 #[allow(clippy::too_many_arguments)]
 pub fn refundable_detail_view<'a>(
+    chain: crate::chain::ChainId,
     refundable: &'a DomainRefundableSwap,
     fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
@@ -1051,6 +1052,10 @@ pub fn refundable_detail_view<'a>(
             Column::new()
                 .spacing(15)
                 .push(Container::new(h4_bold("Refund Details")).width(Length::Fill))
+                .push(p2_regular(format!(
+                    "Destination network · {}",
+                    crate::chain::canonical_network_name(chain)
+                )))
                 .push(p1_regular(format!(
                     "Refund amount: {}",
                     btc_amount.to_formatted_string_with_unit(bitcoin_unit)
@@ -1413,6 +1418,7 @@ mod tests {
         macro_rules! detail {
             ($fee:expr, $refunding:expr, $in_flight:expr, $mask_amounts:expr) => {
                 refundable_detail_view(
+                    crate::chain::ChainId::Bitcoin,
                     &refund,
                     None,
                     BitcoinDisplayUnit::Sats,

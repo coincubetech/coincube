@@ -321,6 +321,7 @@ impl State for LiquidTransactions {
                 menu,
                 cache,
                 view::liquid::refundable_detail_view(
+                    cache.chain(),
                     refundable,
                     fiat_converter,
                     cache.bitcoin_unit,

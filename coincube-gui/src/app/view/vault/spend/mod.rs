@@ -72,6 +72,9 @@ pub fn spend_view<'a>(
         ),
         Column::new()
             .spacing(20)
+            .push(p1_regular(crate::chain::canonical_network_name(
+                cache.chain(),
+            )))
             .push_maybe(mcp_review.then(|| mcp_prepared_review(tx, network)))
             .push(psbt::spend_header(tx, labels_editing, bitcoin_unit))
             .push_maybe(if spend_warnings.is_empty() || saved {

@@ -85,6 +85,7 @@ pub struct SparkSendView<'a> {
     /// Bitcoin network the cube runs on — gates the stablecoin picker options
     /// (cross-chain is mainnet-only).
     pub network: Network,
+    pub chain: crate::chain::ChainId,
     /// The cross-chain destination + routes for the current send, when there is
     /// one. Lives on the panel rather than in the phase because it must survive
     /// a failed send — a retry re-prepares from it.
@@ -401,6 +402,7 @@ fn recipient_status_row(
 
 fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
     let phase = view.phase;
+    let bitcoin_network = crate::chain::canonical_network_name(view.chain);
     let cross_chain_ctx = view.cross_chain_ctx;
     let slippage_input = view.slippage_input;
     let advanced_open = &view.advanced_open;
@@ -579,6 +581,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                 let mut col = Column::new()
                     .spacing(14)
                     .push(h4_bold("Preview"))
+                    .push(kv_row("Source Bitcoin network", bitcoin_network.to_owned()))
                     .push(kv_row(
                         "They receive",
                         format!(
@@ -679,6 +682,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                 Column::new()
                     .spacing(14)
                     .push(h4_bold("Preview"))
+                    .push(kv_row("Bitcoin network", bitcoin_network.to_owned()))
                     .push(kv_row("Method", ok.method.clone()))
                     .push(kv_row("Paid from", pay_from_label(paid_from).to_owned()))
                     // The conversion funding the send, with its own fee and
@@ -1786,6 +1790,7 @@ mod tests {
                 mask_amounts: self.mask_amounts,
                 receive_target: self.target,
                 network: self.network,
+                chain: self.network.into(),
                 cross_chain_ctx: None,
                 slippage_input: "",
                 advanced_open: false,

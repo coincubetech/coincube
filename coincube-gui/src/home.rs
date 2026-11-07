@@ -5259,13 +5259,21 @@ impl Home {
         }
     }
 
+    #[cfg(test)]
     pub fn view(&self) -> Element<Message> {
+        self.view_with_worldview(Default::default())
+    }
+
+    pub(crate) fn view_with_worldview(
+        &self,
+        worldview: crate::app::settings::preferences::WorldviewMode,
+    ) -> Element<Message> {
         // The Launcher and Create journey own their chrome and body scrolling.
         // Other Home sections keep the legacy frame.
         let layout: Element<Message> = if self.showing_create_journey() {
             self.create_journey_view()
         } else if launcher_catalog::catalog_visible(self) {
-            launcher_catalog::launcher_view(self).map(Message::View)
+            launcher_catalog::launcher_view_with_worldview(self, worldview).map(Message::View)
         } else {
             self.legacy_frame()
         };

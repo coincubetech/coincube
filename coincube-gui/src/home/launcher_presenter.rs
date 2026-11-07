@@ -278,12 +278,17 @@ fn network_coin(
     .height(Length::Fixed(size))
 }
 
-fn network_label<'a>(chain: ChainId, size: f32, light: bool) -> Element<'a, ViewMessage> {
+fn network_label<'a>(
+    chain: ChainId,
+    label: &'static str,
+    size: f32,
+    light: bool,
+) -> Element<'a, ViewMessage> {
     Row::new()
         .spacing(6)
         .align_y(Alignment::Center)
         .push(network_coin(chain, size, light))
-        .push(tenshu::caption(chain.label()))
+        .push(tenshu::caption(label).wrapping(Wrapping::WordOrGlyph))
         .into()
 }
 
@@ -291,7 +296,9 @@ fn local_facts<'a>(
     row: &launcher_catalog::LocalRow<'_>,
     table: bool,
     light: bool,
+    worldview: crate::app::settings::preferences::WorldviewMode,
 ) -> Element<'a, ViewMessage> {
+    let network = crate::chain::worldview_chain_label(row.key.chain, worldview);
     let (backup_text, backup_tone) = backup(row.cube);
     let name =
         Column::new()
@@ -313,7 +320,7 @@ fn local_facts<'a>(
             .push(Container::new(icon::cube_icon()).width(Length::Fixed(AVATAR_WIDTH)))
             .push(name)
             .push(
-                Container::new(network_label(row.key.chain, 16.0, light))
+                Container::new(network_label(row.key.chain, network, 16.0, light))
                     .width(Length::Fixed(NETWORK_WIDTH)),
             )
             .push(
@@ -339,7 +346,7 @@ fn local_facts<'a>(
                     .push(icon::cube_icon())
                     .push(name),
             )
-            .push(network_label(row.key.chain, 16.0, light))
+            .push(network_label(row.key.chain, network, 16.0, light))
             .push(
                 tenshu::caption(format!(
                     "Wallets: {} · Backup: {}",
@@ -356,10 +363,11 @@ fn local_row<'a>(
     selected: bool,
     table: bool,
     light: bool,
+    worldview: crate::app::settings::preferences::WorldviewMode,
 ) -> Element<'a, ViewMessage> {
     let select = Action::new(
         launcher_catalog::select_id(&row.key),
-        local_facts(row, table, light),
+        local_facts(row, table, light, worldview),
         focus,
     )
     .width(Length::Fill)
@@ -432,7 +440,12 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
         )
         .push(detail_line(
             "Network",
-            network_label(row.key.chain, 18.0, light),
+            network_label(
+                row.key.chain,
+                crate::chain::canonical_network_name(row.key.chain),
+                18.0,
+                light,
+            ),
         ))
         .push(detail_line(
             "Lock",
@@ -1123,6 +1136,7 @@ fn list_layout<'a>(
     scene: &LauncherScene,
     width: f32,
     light: bool,
+    worldview: crate::app::settings::preferences::WorldviewMode,
 ) -> Element<'a, ViewMessage> {
     let list_width =
         if scene.selected.is_some() && width >= LIST_MIN_WIDTH + DETAILS_WIDTH + PANEL_GAP {
@@ -1175,6 +1189,7 @@ fn list_layout<'a>(
                 scene.selected.as_ref() == Some(&row.key),
                 table,
                 light,
+                worldview,
             ));
         }
     }
@@ -1212,9 +1227,16 @@ fn list_layout<'a>(
     }
 }
 
-/// The v113 List body. Home's existing chrome, single scroll owner and quota
-/// dock surround this pure body in the production Home route.
+#[cfg(test)]
 pub(super) fn list_body(home: &Home) -> Element<'_, ViewMessage> {
+    list_body_with_worldview(home, Default::default())
+}
+
+/// The Launcher List body, with aliases confined to passive row captions.
+pub(super) fn list_body_with_worldview(
+    home: &Home,
+    worldview: crate::app::settings::preferences::WorldviewMode,
+) -> Element<'_, ViewMessage> {
     let projection = launcher_catalog::project(home);
     let scene = project_catalog(&projection);
     let light = matches!(
@@ -1224,8 +1246,10 @@ pub(super) fn list_body(home: &Home) -> Element<'_, ViewMessage> {
     Column::new()
         .spacing(8)
         .push(
-            responsive(move |size: Size| list_layout(&projection, &scene, size.width, light))
-                .height(Length::Shrink),
+            responsive(move |size: Size| {
+                list_layout(&projection, &scene, size.width, light, worldview)
+            })
+            .height(Length::Shrink),
         )
         .into()
 }
@@ -1953,11 +1977,20 @@ pub(super) fn floor_body(home: &Home) -> Element<'_, ViewMessage> {
     floor_body_in(home, f32::INFINITY)
 }
 
-/// The floor in a body `available` pixels tall, so the stage meets the dock.
+#[cfg(test)]
 pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMessage> {
+    floor_body_with_worldview(home, available, Default::default())
+}
+
+/// The floor in a body `available` pixels tall, so the stage meets the dock.
+pub(super) fn floor_body_with_worldview(
+    home: &Home,
+    available: f32,
+    worldview: crate::app::settings::preferences::WorldviewMode,
+) -> Element<'_, ViewMessage> {
     let projection = launcher_catalog::project(home);
     if !projection.floor_eligible(home.catalog.mode) {
-        return list_body(home);
+        return list_body_with_worldview(home, worldview);
     }
     if projection.shows_create_placeholder(home.catalog.mode) {
         return responsive(move |size: Size| empty_floor(home, size.width, available))
@@ -1993,7 +2026,7 @@ pub(super) fn floor_body_in(home: &Home, available: f32) -> Element<'_, ViewMess
     let scene = project_catalog(&projection);
     let floor = responsive(move |size: Size| {
         if size.width < 840.0 {
-            list_layout(&projection, &scene, size.width, light)
+            list_layout(&projection, &scene, size.width, light, worldview)
         } else {
             floor_layout(
                 &projection,
@@ -4323,6 +4356,29 @@ mod tests {
     }
 
     #[test]
+    fn worldview_alias_in_list_keeps_the_exact_network_in_cube_details() {
+        let home = home_with_cubes();
+        let mounted = capture::inspect(
+            "launcher-list-luke-worldview",
+            list_body_with_worldview(
+                &home,
+                crate::app::settings::preferences::WorldviewMode::Luke,
+            ),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Spamcoin (BTC)"));
+        assert!(mounted.contains("Bitcoin SHA-256 · Mainnet"));
+        assert!(
+            mounted.has_focus(launcher_catalog::open_id(&CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: "second".into(),
+            }))
+        );
+    }
+
+    #[test]
     fn stale_rows_remain_visible_but_not_keyboard_actionable() {
         let mut home = home_with_cubes();
         if let super::super::State::Cubes { source, .. } = &mut home.state {
@@ -4385,7 +4441,13 @@ mod tests {
         };
         let mounted = capture::inspect(
             "v113-launcher-wide-table",
-            list_layout(&projection, &project_catalog(&projection), 1400.0, true),
+            list_layout(
+                &projection,
+                &project_catalog(&projection),
+                1400.0,
+                true,
+                Default::default(),
+            ),
             (2000, 900),
             "light",
             theme::Theme::light(),

@@ -4045,7 +4045,13 @@ impl GUI {
             .find(|(id, _)| Some(**id) == self.focus)
             .or_else(|| self.panes.iter().next())
             .expect("GUI always owns its primary pane");
-        let background = pane.view().map(move |message| Message::Pane(id, message));
+        let worldview = self.preferences.accepted().map_or_else(
+            crate::app::settings::preferences::WorldviewMode::default,
+            |accepted| accepted.preferences.worldview,
+        );
+        let background = pane
+            .view(worldview)
+            .map(move |message| Message::Pane(id, message));
         if let Some(sheet) = &self.preferences_sheet {
             if self.overlay_origin_is_current(&sheet.origin) {
                 let foreground = preferences_view::view(&sheet.page, self.preferences_view_model())

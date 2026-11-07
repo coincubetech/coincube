@@ -234,6 +234,9 @@ pub fn psbt_view<'a>(
                         _ => None,
                     }),
             )
+            .push(p1_regular(crate::chain::canonical_network_name(
+                cache.chain(),
+            )))
             .push(spend_header_masked(
                 tx,
                 labels_editing,
@@ -449,6 +452,7 @@ pub fn broadcast_action<'a>(
     is_self_transfer: bool,
 ) -> Element<'a, Message> {
     broadcast_action_with_identity_review(
+        crate::chain::ChainId::Bitcoin,
         conflicting_txids,
         saved,
         broadcasting,
@@ -477,6 +481,7 @@ fn broadcast_outcome(is_self_transfer: bool, replaces_pending: bool) -> &'static
 
 #[allow(clippy::too_many_arguments)]
 pub fn broadcast_action_with_identity_review<'a>(
+    chain: crate::chain::ChainId,
     conflicting_txids: &HashSet<Txid>,
     saved: bool,
     broadcasting: bool,
@@ -501,6 +506,7 @@ pub fn broadcast_action_with_identity_review<'a>(
             Column::new()
                 .spacing(10)
                 .push(Container::new(h4_bold("Broadcast the transaction")).width(Length::Fill))
+                .push(p1_regular(crate::chain::canonical_network_name(chain)))
                 .push(error.map(|err| card::error("Broadcast failed", err)))
                 .push(if conflicting_txids.is_empty() {
                     None
@@ -2146,17 +2152,21 @@ fn signing_path_card(path: SigningPath, action_scope: u64) -> Element<'static, M
 /// listing its keys with per-key signability, mirroring the vault-creation
 /// "Set keys" layout.
 pub fn sign_action<'a>(
+    chain: crate::chain::ChainId,
     action_scope: u64,
     paths: Vec<SigningPath>,
     keychain_notices: Vec<String>,
     error: Option<String>,
 ) -> Element<'a, Message> {
     let mut col = Column::new().spacing(15).width(Length::Fill).push(
-        Row::new().push(Space::new().width(Length::Fill)).push(
-            secondary_action(action_id(action_scope, "picker.close"), "Close")
-                .on_press(Message::Spend(SpendTxMessage::Cancel))
-                .width(Length::Fixed(100.0)),
-        ),
+        Row::new()
+            .align_y(Alignment::Center)
+            .push(p1_regular(crate::chain::canonical_network_name(chain)).width(Length::Fill))
+            .push(
+                secondary_action(action_id(action_scope, "picker.close"), "Close")
+                    .on_press(Message::Spend(SpendTxMessage::Cancel))
+                    .width(Length::Fixed(100.0)),
+            ),
     );
     if let Some(error) = error {
         col = col.push(card::warning(error));
@@ -2660,6 +2670,7 @@ mod tests {
         let mounted = capture::inspect_full_window(
             "psbt-picker-keyboard",
             sign_action(
+                crate::chain::ChainId::Bitcoin,
                 91,
                 vec![make_path(SigningKeyState::Available(
                     SigningKeyAction::Master,
@@ -2681,6 +2692,7 @@ mod tests {
             assert!(matches!(
                 capture::activate_with_key(
                     sign_action(
+                        crate::chain::ChainId::Bitcoin,
                         91,
                         vec![make_path(SigningKeyState::Available(
                             SigningKeyAction::Master
@@ -2700,6 +2712,7 @@ mod tests {
         let busy = capture::inspect_full_window(
             "psbt-picker-busy",
             sign_action(
+                crate::chain::ChainId::Bitcoin,
                 91,
                 vec![make_path(SigningKeyState::InProgress("Signing…".into()))],
                 vec![],
@@ -2732,7 +2745,13 @@ mod tests {
         let toggle = action_id(91, "picker.path.42.toggle");
         let collapsed = capture::inspect_full_window(
             "psbt-picker-inactive-path",
-            sign_action(91, vec![inactive()], vec![], None),
+            sign_action(
+                crate::chain::ChainId::Bitcoin,
+                91,
+                vec![inactive()],
+                vec![],
+                None,
+            ),
             (1024, 768),
             "dark",
             theme::Theme::dark(),
@@ -2742,7 +2761,13 @@ mod tests {
         for key in [Named::Enter, Named::Space] {
             assert!(matches!(
                 capture::activate_with_key(
-                    sign_action(91, vec![inactive()], vec![], None),
+                    sign_action(
+                        crate::chain::ChainId::Bitcoin,
+                        91,
+                        vec![inactive()],
+                        vec![],
+                        None
+                    ),
                     toggle.clone(),
                     (1024, 768),
                     false,
@@ -2989,7 +3014,7 @@ mod tests {
         .unwrap();
         let mut element: Element<'_, Message> = coincube_ui::widget::modal::Modal::new(
             overview(false),
-            sign_action(95, vec![], vec![], None),
+            sign_action(crate::chain::ChainId::Bitcoin, 95, vec![], vec![], None),
         )
         .into();
         let mut tree = Tree::new(element.as_widget());
@@ -3019,6 +3044,54 @@ mod tests {
             .operate(Layout::new(&overlay_node), &renderer, &mut probe);
         assert!(probe.0.contains(&action_id(95, "picker.close")));
         assert!(!probe.0.contains(&action_id(94, "overview.sign")));
+    }
+
+    #[test]
+    fn worldview_signer_and_broadcast_confirmations_show_the_exact_chain() {
+        use crate::chain::ChainId;
+
+        let quote = quote();
+        let image = image_handle();
+        for (chain, expected, other) in [
+            (
+                ChainId::Bitcoin,
+                "Bitcoin SHA-256 · Mainnet",
+                "Bitcoin BLAKE2b · Mainnet",
+            ),
+            (
+                ChainId::BitcoinBlake2b,
+                "Bitcoin BLAKE2b · Mainnet",
+                "Bitcoin SHA-256 · Mainnet",
+            ),
+        ] {
+            for dialog in [
+                sign_action(chain, 1, vec![], vec![], None),
+                broadcast_action_with_identity_review(
+                    chain,
+                    &HashSet::new(),
+                    false,
+                    false,
+                    None,
+                    "40,000 sats",
+                    &quote,
+                    &image,
+                    false,
+                    None,
+                ),
+            ] {
+                let mounted = capture::inspect(
+                    "psbt-canonical-network",
+                    dialog,
+                    (1024, 768),
+                    "dark",
+                    theme::Theme::dark(),
+                );
+                assert!(mounted.contains(expected), "missing {}", expected);
+                for wrong in [other, "Spamcoin", "LukeCoin", "Bitcoin (XBT)"] {
+                    assert!(!mounted.contains(wrong), "unexpected {}", wrong);
+                }
+            }
+        }
     }
 
     #[test]
@@ -3288,6 +3361,7 @@ mod tests {
         };
 
         let _ = sign_action(
+            crate::chain::ChainId::Bitcoin,
             1,
             vec![active, inactive_collapsed, inactive_expanded],
             vec!["Connect is not ready yet.".to_string()],

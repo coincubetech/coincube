@@ -21,7 +21,7 @@ use iced::{
 use crate::app::breez_liquid::assets::{format_usdt_display, AssetKind};
 use crate::app::menu::Menu;
 use crate::app::state::liquid::send::{
-    LiquidSendFlowState, Modal, PreparedIntent, ReceiveNetwork, SendAsset,
+    LiquidSendFlowState, Modal, PreparedIntent, PreparedPayment, ReceiveNetwork, SendAsset,
 };
 use crate::app::view::{
     self, vault::fiat::FiatAmount, FiatAmountConverter, LiquidSendMessage, Message,
@@ -246,6 +246,7 @@ pub fn liquid_send_with_flow<'a>(config: LiquidSendFlowConfig<'a>) -> Element<'a
             // the live input fields, so what the user approves is what executes.
             let content = final_check_page(
                 intent,
+                config.cache.chain(),
                 config.fiat_converter.as_ref(),
                 config.is_sending,
                 config.bitcoin_unit,
@@ -1542,6 +1543,7 @@ pub fn fiat_input_model<'a>(
 /// the intent — the same value `ConfirmSend` executes — removes the possibility.
 pub fn final_check_page<'a>(
     intent: &'a PreparedIntent,
+    chain: crate::chain::ChainId,
     fiat_converter: Option<&FiatAmountConverter>,
     is_sending: bool,
     bitcoin_unit: BitcoinDisplayUnit,
@@ -1565,12 +1567,25 @@ pub fn final_check_page<'a>(
         .padding([0, 40])
         .align_y(Alignment::Center);
 
+    let network = crate::chain::canonical_network_name(chain);
+    let destination = match intent.payment() {
+        PreparedPayment::Onchain { .. } => network.to_owned(),
+        PreparedPayment::Regular { response, .. } => match &response.destination {
+            breez_sdk_liquid::prelude::SendDestination::LiquidAddress { .. } => "Liquid".to_owned(),
+            breez_sdk_liquid::prelude::SendDestination::Bolt11 { .. }
+            | breez_sdk_liquid::prelude::SendDestination::Bolt12 { .. } => {
+                format!("Lightning on {network}")
+            }
+        },
+    };
     let mut content = Column::new()
         .spacing(25)
         .padding(40)
         .width(Length::Fill)
         .max_width(600)
-        .align_x(Alignment::Center);
+        .align_x(Alignment::Center)
+        .push(p2_regular("Source network · Liquid"))
+        .push(p2_regular(format!("Destination network · {destination}")));
 
     if let Some(desc) = description {
         content = content.push(

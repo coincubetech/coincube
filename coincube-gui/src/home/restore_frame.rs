@@ -196,7 +196,7 @@ fn chip_row<'a, M: 'a>(chain: ChainId, light: bool) -> Row<'a, M> {
         .spacing(8)
         .align_y(Alignment::Center)
         .push(coin(chain, light, 16.0))
-        .push(p2_regular(chain.label()))
+        .push(p2_regular(crate::chain::canonical_network_name(chain)))
         .push_maybe(network_tag(chain))
 }
 

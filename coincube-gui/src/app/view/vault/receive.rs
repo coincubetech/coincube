@@ -794,6 +794,7 @@ pub fn receive<'a>(
 }
 
 pub fn verify_address_modal<'a>(
+    chain: crate::chain::ChainId,
     hws: &'a [HardwareWallet],
     chosen_hws: &HashSet<Fingerprint>,
     address: &Address,
@@ -848,6 +849,7 @@ pub fn verify_address_modal<'a>(
                 Column::new()
                     .spacing(8)
                     .push(p2_bold("Address"))
+                    .push(p2_regular(crate::chain::canonical_network_name(chain)))
                     .push(address_field(
                         address_control_id(Scope::VerifyModal, Control::Copy, &addr),
                         addr.clone(),
@@ -1646,7 +1648,13 @@ mod tests {
             for outer in [COMPACT, WIDE] {
                 let none = capture::inspect(
                     "vault-receive-verify-no-device",
-                    verify_address_modal(&[], &chosen, &address, &index),
+                    verify_address_modal(
+                        crate::chain::ChainId::Bitcoin,
+                        &[],
+                        &chosen,
+                        &address,
+                        &index,
+                    ),
                     outer,
                     appearance,
                     theme,
@@ -1663,7 +1671,13 @@ mod tests {
 
                 let device = capture::inspect(
                     "vault-receive-verify-unavailable-device",
-                    verify_address_modal(&unsupported, &chosen, &address, &index),
+                    verify_address_modal(
+                        crate::chain::ChainId::Bitcoin,
+                        &unsupported,
+                        &chosen,
+                        &address,
+                        &index,
+                    ),
                     outer,
                     appearance,
                     theme,
@@ -1675,7 +1689,7 @@ mod tests {
         for pointer in [false, true] {
             assert!(matches!(
                 activate_once(
-                    verify_address_modal(&[], &chosen, &address, &index),
+                    verify_address_modal(crate::chain::ChainId::Bitcoin, &[], &chosen, &address, &index),
                     copy.clone(),
                     pointer
                 ),
@@ -1683,7 +1697,13 @@ mod tests {
             ));
             assert!(matches!(
                 activate_once(
-                    verify_address_modal(&[], &chosen, &address, &index),
+                    verify_address_modal(
+                        crate::chain::ChainId::Bitcoin,
+                        &[],
+                        &chosen,
+                        &address,
+                        &index
+                    ),
                     verify_close_id(),
                     pointer
                 ),

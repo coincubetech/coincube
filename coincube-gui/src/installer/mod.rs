@@ -4169,7 +4169,7 @@ mod restore_frame_tests {
         let shown = rendered_labels(kit.view()).await;
         for label in [
             "Import or restore",
-            "Bitcoin",
+            "Bitcoin SHA-256 · Mainnet",
             "Recovery Kit",
             "Recover with phone",
             "Restore from Cube Recovery Kit",

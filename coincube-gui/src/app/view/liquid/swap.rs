@@ -622,6 +622,8 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
     let summary = Column::new()
         .width(Length::Fill)
         .push(rule())
+        .push(line("Network", "Liquid".to_owned()))
+        .push(rule())
         .push(line(
             "You pay",
             fmt_amount(config.from_asset, q.from_total_base(), config.bitcoin_unit),

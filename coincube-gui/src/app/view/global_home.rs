@@ -1926,6 +1926,11 @@ fn review_page<'a>(
         ),
         dl_row("Receiving wallet", text(receiving), false),
         dl_row("Route", text(route_text(direction)), false),
+        dl_row(
+            "Bitcoin network",
+            text(crate::chain::canonical_network_name(ctx.chain)),
+            false,
+        ),
     ];
     if let Some(parsed) = parsed {
         rows.push(dl_row("Amount", text(with_fiat(parsed)), false));
@@ -5127,6 +5132,7 @@ mod tests {
         for label in [
             "Review and confirm",
             "Nothing moves until you confirm.",
+            "Bitcoin SHA-256 · Mainnet",
             "Sending from",
             "Spark · Everyday",
             "Receiving wallet",

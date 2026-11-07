@@ -272,6 +272,7 @@ fn tx_list_view(
 /// `descendant_txids` contains the IDs of any transactions from this wallet that are
 /// direct descendants of the transaction to be replaced.
 pub fn create_rbf_modal<'a>(
+    chain: crate::chain::ChainId,
     is_cancel: bool,
     descendant_txids: &HashSet<Txid>,
     feerate: &form::Value<String>,
@@ -301,7 +302,8 @@ pub fn create_rbf_modal<'a>(
     let mut body = Column::new()
         .spacing(16)
         .width(Length::Fill)
-        .push(h4_bold("Transaction replacement"));
+        .push(h4_bold("Transaction replacement"))
+        .push(p2_regular(crate::chain::canonical_network_name(chain)));
 
     if created {
         body = body
@@ -678,7 +680,14 @@ mod rbf_view_tests {
             let descendants: HashSet<_> = "abcdef".chars().take(count).map(txid).collect();
             capture::inspect_full_window(
                 "vault-rbf-descendant-height",
-                create_rbf_modal(false, &descendants, &rate("12", true), None, false),
+                create_rbf_modal(
+                    crate::chain::ChainId::Bitcoin,
+                    false,
+                    &descendants,
+                    &rate("12", true),
+                    None,
+                    false,
+                ),
                 (1024, 768),
                 "light",
                 theme::Theme::light(),
@@ -702,7 +711,14 @@ mod rbf_view_tests {
         let last = txid('e');
         assert!(inspect(5).has_focus(Id::from(format!("vault-rbf-copy-{last}"))));
         assert!(capture::activate(
-            create_rbf_modal(false, &five, &rate("12", true), None, false),
+            create_rbf_modal(
+                crate::chain::ChainId::Bitcoin,
+                false,
+                &five,
+                &rate("12", true),
+                None,
+                false
+            ),
             Id::from(format!("vault-rbf-copy-{last}")),
             (1024, 768),
             false,
@@ -728,7 +744,14 @@ mod rbf_view_tests {
                                processing| {
                     capture::inspect_full_window(
                         scenario,
-                        create_rbf_modal(cancel, ids, rate, created, processing),
+                        create_rbf_modal(
+                            crate::chain::ChainId::Bitcoin,
+                            cancel,
+                            ids,
+                            rate,
+                            created,
+                            processing,
+                        ),
                         outer,
                         appearance,
                         theme,
@@ -819,7 +842,14 @@ mod rbf_view_tests {
         let valid = rate("12", true);
         let activate = |cancel, rate: &form::Value<String>, created, target: &str| {
             capture::activate(
-                create_rbf_modal(cancel, &none, rate, created, false),
+                create_rbf_modal(
+                    crate::chain::ChainId::Bitcoin,
+                    cancel,
+                    &none,
+                    rate,
+                    created,
+                    false,
+                ),
                 Id::from(target.to_owned()),
                 (1440, 900),
                 false,
@@ -836,7 +866,14 @@ mod rbf_view_tests {
             .any(|m| matches!(m, Message::CreateRbf(CreateRbfMessage::Cancel))));
         let descendants = HashSet::from([txid('a')]);
         assert!(capture::activate(
-            create_rbf_modal(false, &descendants, &valid, None, false),
+            create_rbf_modal(
+                crate::chain::ChainId::Bitcoin,
+                false,
+                &descendants,
+                &valid,
+                None,
+                false
+            ),
             Id::from(format!("vault-rbf-copy-{}", txid('a'))),
             (1440, 900),
             false,

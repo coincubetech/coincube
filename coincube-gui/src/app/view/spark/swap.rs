@@ -234,8 +234,8 @@ pub fn swap_body<'a>(cache: &'a Cache, swap: &'a SparkSwap) -> Element<'a, Messa
         SwapPhase::Details { .. } | SwapPhase::Quoting => {
             details_card(swap, price, decimals, cache.balance_amounts_masked())
         }
-        SwapPhase::Review(ok) => review_card(ok, price, decimals, false),
-        SwapPhase::Swapping(ok) => review_card(ok, price, decimals, true),
+        SwapPhase::Review(ok) => review_card(ok, cache.chain(), price, decimals, false),
+        SwapPhase::Swapping(ok) => review_card(ok, cache.chain(), price, decimals, true),
         SwapPhase::Swapped(ok) => {
             let (body, heading) = swapped_copy(&ok.status);
             result_card(body, heading, true)
@@ -496,6 +496,7 @@ fn details_card<'a>(
 
 fn review_card<'a>(
     ok: &'a PrepareSwapOk,
+    chain: crate::chain::ChainId,
     price: Option<f64>,
     decimals: u32,
     swapping: bool,
@@ -557,7 +558,12 @@ fn review_card<'a>(
             (!swapping).then(|| swap_message(SparkSwapMessage::Confirm)),
         ));
     Column::new()
-        .push(section(h4_bold("Review")))
+        .push(section(
+            Column::new()
+                .spacing(6)
+                .push(h4_bold("Review"))
+                .push(p2_regular(crate::chain::canonical_network_name(chain))),
+        ))
         .push(iced::widget::rule::horizontal(1))
         .push(section(figures))
         .push(iced::widget::rule::horizontal(1))

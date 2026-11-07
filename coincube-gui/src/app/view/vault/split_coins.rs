@@ -161,6 +161,11 @@ pub fn send_warning<'a>(here: ChainId, count: usize, ack: bool) -> Element<'a, M
     let mut column = Column::new()
         .spacing(16)
         .push(h4_bold(question))
+        .push(p1_regular(crate::chain::canonical_network_name(here)))
+        .push(p1_regular(format!(
+            "Also on {}",
+            crate::chain::canonical_network_name(twin(here))
+        )))
         .push(p1_regular(body).style(theme::text::secondary));
     if !here.is_blake2b() {
         column = column.push(
@@ -338,6 +343,7 @@ pub fn split_overlay<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
     let mut body = Column::new()
         .spacing(20)
         .push(h4_bold(format!("Split coins on {}", chain_name(here))))
+        .push(p1_regular(crate::chain::canonical_network_name(here)))
         .push(p1_regular(intro).style(theme::text::secondary));
 
     if here.is_blake2b() {

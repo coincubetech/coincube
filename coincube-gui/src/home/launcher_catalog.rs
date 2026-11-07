@@ -2118,17 +2118,29 @@ fn body_style(theme: &theme::Theme) -> container::Style {
 
 /// The visible Launcher: compact top bar, one scrolling floor or List body,
 /// and the pinned dock. Both bodies consume the same catalog projection.
+#[cfg(test)]
 pub(super) fn launcher_view(home: &Home) -> Element<'_, ViewMessage> {
-    launcher_screen(home, true)
+    launcher_view_with_worldview(home, Default::default())
+}
+
+pub(super) fn launcher_view_with_worldview(
+    home: &Home,
+    worldview: crate::app::settings::preferences::WorldviewMode,
+) -> Element<'_, ViewMessage> {
+    launcher_screen(home, true, worldview)
 }
 
 /// The Launcher under a wizard sheet: the same top bar and body, without
 /// the dock, which the sheet would half cover. It is drawn inert.
 pub(super) fn launcher_backdrop(home: &Home) -> Element<'_, ViewMessage> {
-    launcher_screen(home, false)
+    launcher_screen(home, false, Default::default())
 }
 
-fn launcher_screen(home: &Home, with_dock: bool) -> Element<'_, ViewMessage> {
+fn launcher_screen(
+    home: &Home,
+    with_dock: bool,
+    worldview: crate::app::settings::preferences::WorldviewMode,
+) -> Element<'_, ViewMessage> {
     let projection = project(home);
     // `.quiet`: the bars mute while a Cube's face is up, as in every
     // non-browse phase of the prototype.
@@ -2144,9 +2156,9 @@ fn launcher_screen(home: &Home, with_dock: bool) -> Element<'_, ViewMessage> {
             .width(Length::Fill)
             .push(error.clone().map(|error| card::simple(p1_regular(error))))
             .push(if floor_visible {
-                super::launcher_presenter::floor_body_in(home, size.height)
+                super::launcher_presenter::floor_body_with_worldview(home, size.height, worldview)
             } else {
-                super::launcher_presenter::list_body(home)
+                super::launcher_presenter::list_body_with_worldview(home, worldview)
             });
         let body_content = if floor_visible {
             body_content
@@ -3076,7 +3088,7 @@ mod tests {
             let network_in_row = tree
                 .text
                 .iter()
-                .any(|(value, bounds)| value == "Bitcoin" && in_row(bounds));
+                .any(|(value, bounds)| value == "Bitcoin (BTC)" && in_row(bounds));
             assert!(
                 network_in_row,
                 "network label outside the row at {:?}",
