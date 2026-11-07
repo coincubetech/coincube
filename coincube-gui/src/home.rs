@@ -5936,13 +5936,14 @@ impl Home {
             })
             .into()
         };
+        // Counts only Connect Cubes missing from this device, so say so:
+        // a bare "N Cubes" reads as the whole account.
         let connected = |phone: bool| -> Element<'static, ViewMessage> {
             let count = self.restorable_here(phone);
             pill(
                 format!(
-                    "Connected · {count} {} on {}",
+                    "Connected · {count} {} not on this device",
                     if count == 1 { "Cube" } else { "Cubes" },
-                    self.network.label()
                 ),
                 true,
             )
@@ -10003,7 +10004,9 @@ mod tests {
         assert_eq!(home.connect_restore_reason(), None);
         let shown = restore_frame::rendered_labels(home.create_journey_frame()).await;
         assert!(
-            shown.iter().any(|l| l == "Connected · 0 Cubes on Signet"),
+            shown
+                .iter()
+                .any(|l| l == "Connected · 0 Cubes not on this device"),
             "{:?}",
             shown
         );
