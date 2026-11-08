@@ -8100,11 +8100,6 @@ struct DeleteCubeModal {
     delete_connect_backup: bool,
     /// Whether the user is authenticated and the cube is synced (backup exists).
     can_delete_backup: bool,
-    /// A Bitcoin Blake2b Cube's Connect copy goes with it: that Launcher
-    /// neither lists nor restores Connect-only Cubes, so a copy left behind
-    /// could not be restored or removed and would hold a Cube slot.
-    connect_copy_required: bool,
-    is_authenticated: bool,
     // `None` means we were not able to determine whether wallet uses internal bitcoind.
     internal_bitcoind: Option<bool>,
     /// Data root. The PIN is verified by decrypting this Cube's seed file, so
@@ -8485,9 +8480,6 @@ impl DeleteCubeModal {
         is_authenticated: bool,
     ) -> Self {
         let can_delete_backup = is_authenticated && cube.remote_synced;
-        // `remote_synced` is not "never registered" (a rename clears it), and
-        // the Connect delete is a no-op for a Cube Connect doesn't hold.
-        let connect_copy_required = cube.network.is_blake2b();
         Self {
             cube,
             wallet_settings,
@@ -8496,10 +8488,8 @@ impl DeleteCubeModal {
             warning: None,
             deleted: false,
             delete_liana_connect: false,
-            delete_connect_backup: connect_copy_required && is_authenticated,
+            delete_connect_backup: false,
             can_delete_backup,
-            connect_copy_required,
-            is_authenticated,
             internal_bitcoind,
             pin_input: pin_input::PinInput::new(),
             pin_error: None,
@@ -8632,7 +8622,7 @@ impl DeleteCubeModal {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::Confirm(cube_id))) => {
-                if cube_id != self.cube.id || !self.connect_copy_settled() {
+                if cube_id != self.cube.id {
                     return Task::none();
                 }
 
@@ -8721,7 +8711,7 @@ impl DeleteCubeModal {
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::DeleteConnectBackup(
                 delete,
             ))) => {
-                self.delete_connect_backup = delete || self.connect_copy_required;
+                self.delete_connect_backup = delete;
             }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::PinInput(msg))) => {
                 self.pin_error = None;
@@ -8734,18 +8724,9 @@ impl DeleteCubeModal {
         Task::none()
     }
 
-    /// A Cube whose Connect copy must go with it is only deleted alongside
-    /// that copy.
-    fn connect_copy_settled(&self) -> bool {
-        !self.connect_copy_required || self.delete_connect_backup
-    }
-
     fn view(&self) -> Element<Message> {
         let pin_ready = !self.cube.has_pin(&self.datadir_root) || self.pin_input.is_complete();
-        let can_delete = pin_ready
-            && self.warning.is_none()
-            && !self.waiting_for_stop
-            && self.connect_copy_settled();
+        let can_delete = pin_ready && self.warning.is_none() && !self.waiting_for_stop;
         let display_name = catalog_display_name(&self.cube.name);
         let mut confirm_button = button::secondary_action(
             DELETE_LOCAL_CONFIRM_ID,
@@ -8807,24 +8788,7 @@ impl DeleteCubeModal {
             .push(Row::new().push(text(help_text_3)));
 
         // Option to also delete the Connect API backup (only when relevant)
-        if self.connect_copy_required {
-            col =
-                col.push(Space::new().height(Length::Fixed(5.0)))
-                    .push(if self.is_authenticated {
-                        p1_regular(
-                            "Its Connect backup is deleted too: Bitcoin Blake2b Cubes \
-                     can't be restored from Connect yet. This frees a Cube slot.",
-                        )
-                        .style(theme::text::warning)
-                    } else {
-                        p1_regular(
-                            "Sign in to Connect to delete this Cube. Its Connect backup \
-                     is deleted with it, as Bitcoin Blake2b Cubes can't be \
-                     restored from Connect yet.",
-                        )
-                        .style(theme::text::warning)
-                    });
-        } else if self.can_delete_backup {
+        if self.can_delete_backup {
             col = col.push(Space::new().height(Length::Fixed(5.0))).push(
                 CheckBox::new(self.delete_connect_backup)
                     .label("Also delete Connect backup (frees a Cube slot)")
@@ -12389,50 +12353,6 @@ mod tests {
         assert!(!modal.stop_refused);
         assert!(!wallet_dir.exists());
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_blake2b_delete_takes_its_connect_copy_with_it() {
-        let datadir = test_datadir();
-        let network_dir = datadir.network_directory(ChainId::BitcoinBlake2b);
-        let fork =
-            CubeSettings::new_with_raw_id("fork".into(), "Fork".into(), ChainId::BitcoinBlake2b);
-
-        // Signed in: the Connect copy is deleted too, whatever the sync flag
-        // says, and it can't be opted out of.
-        let mut signed_in = DeleteCubeModal::new(
-            fork.clone(),
-            network_dir.clone(),
-            datadir.path().to_path_buf(),
-            None,
-            Some(true),
-            true,
-        );
-        assert!(!fork.remote_synced);
-        assert!(signed_in.delete_connect_backup);
-        let _ = signed_in.update(Message::View(ViewMessage::DeleteCube(
-            DeleteCubeMessage::DeleteConnectBackup(false),
-        )));
-        assert!(signed_in.delete_connect_backup);
-        assert!(signed_in.connect_copy_settled());
-        let _ = signed_in.view();
-
-        // Signed out: nothing could remove the Connect copy, so no delete.
-        let mut signed_out = DeleteCubeModal::new(
-            fork.clone(),
-            network_dir,
-            datadir.path().to_path_buf(),
-            None,
-            Some(true),
-            false,
-        );
-        assert!(!signed_out.connect_copy_settled());
-        let _ = signed_out.view();
-        let _ = signed_out.update(Message::View(ViewMessage::DeleteCube(
-            DeleteCubeMessage::Confirm(fork.id.clone()),
-        )));
-        assert!(!signed_out.deleted);
-        assert!(signed_out.warning.is_none());
     }
 
     #[test]
