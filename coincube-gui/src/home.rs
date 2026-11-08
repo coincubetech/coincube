@@ -36,7 +36,7 @@ use crate::{
         settings::{
             self,
             global::{AccountTier, GlobalSettings},
-            AuthConfig, BitcoinImport, CubeSettings, WalletSettings,
+            BitcoinImport, CubeSettings, WalletSettings,
         },
         state::{
             connect::{
@@ -50,10 +50,6 @@ use crate::{
     delete::{delete_wallet, DeleteError},
     dir::{CoincubeDirectory, NetworkDirectory},
     installer::UserFlow,
-    services::connect::{
-        client::{auth::AuthClient, backend::api::UserRole, get_service_config},
-        login::{connect_with_credentials, BackendState},
-    },
 };
 use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
 
@@ -8085,7 +8081,6 @@ struct DeleteCubeModal {
     delete_connect_backup: bool,
     /// Whether the user is authenticated and the cube is synced (backup exists).
     can_delete_backup: bool,
-    user_role: Option<UserRole>,
     // `None` means we were not able to determine whether wallet uses internal bitcoind.
     internal_bitcoind: Option<bool>,
     /// Data root. The PIN is verified by decrypting this Cube's seed file, so
@@ -8466,9 +8461,9 @@ impl DeleteCubeModal {
         is_authenticated: bool,
     ) -> Self {
         let can_delete_backup = is_authenticated && cube.remote_synced;
-        let mut modal = Self {
-            cube: cube.clone(),
-            wallet_settings: wallet_settings.clone(),
+        Self {
+            cube,
+            wallet_settings,
             network_directory,
             datadir_root,
             warning: None,
@@ -8477,29 +8472,11 @@ impl DeleteCubeModal {
             delete_connect_backup: false,
             can_delete_backup,
             internal_bitcoind,
-            user_role: None,
             pin_input: pin_input::PinInput::new(),
             pin_error: None,
             waiting_for_stop: false,
             stop_refused: false,
-        };
-        if let Some(wallet) = &wallet_settings {
-            if let Some(auth) = &wallet.remote_backend_auth {
-                match Handle::current().block_on(check_membership(
-                    cube.network,
-                    &modal.network_directory,
-                    auth,
-                )) {
-                    Err(e) => {
-                        modal.warning = Some(e);
-                    }
-                    Ok(user_role) => {
-                        modal.user_role = user_role;
-                    }
-                }
-            }
         }
-        modal
     }
 
     /// Directories whose daemon a delete must wait for: the Vault's, or an
@@ -8888,45 +8865,6 @@ impl DeleteCubeModal {
                 .style(delete_modal_card),
         )
         .map(Message::View)
-    }
-}
-
-pub async fn check_membership<C: Into<crate::chain::ChainId>>(
-    chain: C,
-    network_dir: &NetworkDirectory,
-    auth: &AuthConfig,
-) -> Result<Option<UserRole>, DeleteError> {
-    // The legacy remote backend is a Bitcoin-family service; a chain this
-    // build cannot run never reaches here (the delete modal only lists Cubes
-    // the launcher can open), so the projection is lossless.
-    let network = chain.into().bitcoin_network();
-    let service_config = get_service_config(network)
-        .await
-        .map_err(|e| DeleteError::Connect(e.to_string()))?;
-
-    if let BackendState::WalletExists(client, _, _) = connect_with_credentials(
-        AuthClient::new(
-            service_config.auth_api_url,
-            service_config.auth_api_public_key,
-            auth.email.to_string(),
-        ),
-        auth.wallet_id.clone(),
-        service_config.backend_api_url,
-        None,
-        network,
-        network_dir,
-    )
-    .await
-    .map_err(|e| DeleteError::Connect(e.to_string()))?
-    {
-        Ok(Some(
-            client
-                .user_wallet_membership()
-                .await
-                .map_err(|e| DeleteError::Connect(e.to_string()))?,
-        ))
-    } else {
-        Ok(None)
     }
 }
 
