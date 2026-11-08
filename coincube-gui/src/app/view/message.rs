@@ -1782,6 +1782,15 @@ pub enum ConnectAccountMessage {
     RefreshRejected {
         epoch: u64,
     },
+    /// A refresh that never reached Connect: no network, or Connect didn't
+    /// answer. The stored session is kept and re-checked (`RecheckSession`)
+    /// instead of falling back to the sign-in form.
+    RefreshUnreachable {
+        trouble: crate::services::connect::grpc::trouble::Trouble,
+        epoch: u64,
+    },
+    /// The wait before re-checking an unverified session is over.
+    RecheckSession,
     LogOut,
     /// Open or dismiss the account's inline sign-out review.
     ReviewSignOut(bool),

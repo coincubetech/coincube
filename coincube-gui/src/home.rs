@@ -524,6 +524,10 @@ pub struct Home {
     /// App preferences is open over this Launcher; its top-bar entry shows
     /// the current state (`.tbtn.on`). Set by the GUI that owns the sheet.
     pub(crate) app_preferences_open: bool,
+    /// The effective reduce-motion preference: the Connect light holds steady.
+    pub(crate) reduce_motion: bool,
+    /// The pulsing Connect light's dim phase.
+    pub(crate) connect_light_dim: bool,
     /// Last native accessibility observation used by Follow system motion.
     system_reduces_motion: Option<bool>,
     /// A Liquid wallet exists on this device (the sunset gate's local half),
@@ -705,6 +709,8 @@ impl Home {
                 active_section: HomeSection::Cubes,
                 theme_mode: GlobalSettings::load_theme_mode(&GlobalSettings::path(&datadir_path)),
                 app_preferences_open: false,
+                reduce_motion: false,
+                connect_light_dim: false,
                 system_reduces_motion,
                 liquid_on_disk: false,
                 // Recomputed whenever the Create Cube form opens — see
@@ -1173,9 +1179,33 @@ impl Home {
     }
 
     pub fn subscription(&self, foreground: bool) -> Subscription<Message> {
+        // The Connect light pulses while the session is checked or Connect
+        // can't be reached, unless motion is reduced.
+        let pulse = if foreground
+            && !self.reduce_motion
+            && matches!(
+                launcher_chrome::launcher_connect_state(self).1,
+                Some(crate::app::ConnectLight::Connecting | crate::app::ConnectLight::Reconnecting)
+            ) {
+            iced::time::every(std::time::Duration::from_millis(800))
+                .map(|_| Message::ConnectLightTick)
+        } else {
+            Subscription::none()
+        };
+        // A stored session that couldn't be checked is checked again (L1).
+        let recheck = match self.connect_account.unverified.as_ref() {
+            Some(unverified) if foreground => unverified.recheck().map(|_| {
+                Message::View(ViewMessage::ConnectAccount(
+                    app::view::ConnectAccountMessage::RecheckSession,
+                ))
+            }),
+            _ => Subscription::none(),
+        };
         let base = Subscription::batch([
             self.launcher_subscription(foreground),
             self.activity_subscription(foreground),
+            pulse,
+            recheck,
         ]);
         // Escape closes the network menu first, then the activity source
         // menu, then the plan menu, then shuts the Key card.
@@ -1422,6 +1452,20 @@ impl Home {
         );
         let task = match message {
             Message::View(ViewMessage::Catalog(message)) => self.update_catalog(message),
+            Message::ConnectLightTick => {
+                self.connect_light_dim = !self.connect_light_dim;
+                Task::none()
+            }
+            // Connect, not the user, ended the session; the GUI mirrors it to
+            // every tab (L3).
+            Message::ConnectSignedOutBy(reason) => {
+                self.connect_account.signed_out_by = Some(reason);
+                Task::none()
+            }
+            Message::View(ViewMessage::DismissConnectSignOut) => {
+                self.connect_account.signed_out_by = None;
+                Task::none()
+            }
             message => self.update_lifecycle(message),
         };
         self.reconcile_catalog();
@@ -5229,12 +5273,9 @@ impl Home {
                 LEGACY_CONNECT_SIGN_IN_ID
             });
         }
+        // The Launcher's control keeps one id in every state (L6).
         if launcher_catalog::catalog_visible(self) {
-            return if self.connect_account.is_authenticated() {
-                launcher_catalog::connect_id()
-            } else {
-                launcher_catalog::sign_in_id()
-            };
+            return launcher_catalog::connect_id();
         }
         if !self.connect_account.is_authenticated() {
             return Id::new(LEGACY_CONNECT_SIGN_IN_ID);
@@ -5251,9 +5292,12 @@ impl Home {
             || *saved == Id::new(LEGACY_CONNECT_SIGN_IN_ID)
             || *saved == Id::new(CREATE_BACKUP_SIGN_IN_ID)
         {
-            // Both Launcher modes replace their action with status-only copy
-            // during a pending session check, so there is no control to focus.
-            (!self.connect_account.is_checking_session()).then(|| self.connect_sheet_origin_id())
+            // Both Launcher modes make the control inert while the session is
+            // first checked, so there is no control to focus then. A stored
+            // session waiting to be re-checked keeps it pressable.
+            (!self.connect_account.is_checking_session()
+                || self.connect_account.unverified.is_some())
+            .then(|| self.connect_sheet_origin_id())
         } else {
             Some(saved.clone())
         }
@@ -7676,6 +7720,7 @@ fn map_connect_task(task: Task<app::message::Message>) -> Task<Message> {
         app::message::Message::CompleteDuressEnrollment(payload) => {
             Message::PersistDuressEnrollment(payload)
         }
+        app::message::Message::ConnectSignedOutBy(reason) => Message::ConnectSignedOutBy(reason),
         // The duress-disable confirmation toast (Issue 2). Home has no toast
         // surface; the Duress panel already reflects the disabled state in its
         // own fields, so swallow it quietly rather than warn.
@@ -7693,6 +7738,11 @@ fn map_connect_task(task: Task<app::message::Message>) -> Task<Message> {
 pub enum Message {
     /// Bubble successful preference writes to the GUI for every open tab.
     GlobalSettingsChanged,
+    /// Flips the pulsing Connect light between its bright and dim phase.
+    ConnectLightTick,
+    /// Connect, not the user, ended the session (from this Launcher's account
+    /// panel or relayed by the GUI from another tab).
+    ConnectSignedOutBy(crate::app::SignedOutBy),
     GlobalFeatureLoaded(u64, bool),
     RecoveryServiceResolved {
         target: RecoveryServiceTarget,
@@ -7821,6 +7871,9 @@ pub enum Message {
 
 #[derive(Debug, Clone)]
 pub enum ViewMessage {
+    /// "Not now" on the Connect sheet's signed-out notice: clears the red
+    /// light everywhere (the GUI relays it to every tab).
+    DismissConnectSignOut,
     /// A message from the creation-time backup step. The payload is the
     /// Settings backup wizard's own message type: `State::CreationBackup`
     /// renders that wizard's views, and this variant is the `fn` mapper they
@@ -10080,6 +10133,83 @@ mod tests {
         let mut cube = CubeSettings::new("Imported".to_string(), Network::Bitcoin);
         cube.bitcoin_import = home.pending_bitcoin_import.clone();
         assert_eq!(vault_subtitle(&cube), "Vault import pending");
+    }
+
+    /// The Launcher's control describes the account (it has no live updates):
+    /// the light and words follow the session, never "Sign in" for a session
+    /// that is only waiting for the network.
+    #[test]
+    fn the_launcher_connect_control_describes_the_account() {
+        use crate::app::state::connect::account::UnverifiedSession;
+        use crate::app::view::shared::connect_control::ConnectDetail;
+        use crate::app::{ConnectLight, SignedOutBy};
+        use crate::services::connect::grpc::trouble::Trouble;
+        let state = |home: &Home| {
+            let (detail, light, label) = launcher_chrome::launcher_connect_state(home);
+            (format!("{detail:?}"), light, label)
+        };
+        let signed_in = signed_in_home();
+        let (detail, light, label) = state(&signed_in);
+        assert_eq!(
+            detail,
+            format!("{:?}", ConnectDetail::Account("founder@example.com"))
+        );
+        assert_eq!(light, Some(ConnectLight::On));
+        assert_eq!(label, "Connect account, founder@example.com, signed in");
+
+        let idle = || ConnectFlowStep::Login {
+            email: String::new(),
+            loading: false,
+        };
+        let waiting = |trouble| {
+            let mut home = home();
+            home.connect_account.step = idle();
+            home.connect_account.unverified = Some(UnverifiedSession {
+                email: "alex@example.test".into(),
+                trouble,
+                attempts: 1,
+            });
+            home
+        };
+        let (detail, light, label) = state(&waiting(Trouble::Offline));
+        assert_eq!(detail, format!("{:?}", ConnectDetail::Offline));
+        assert_eq!(light, Some(ConnectLight::Offline));
+        assert!(label.ends_with("offline: no internet connection"));
+        let (detail, light, _) = state(&waiting(Trouble::Unreachable));
+        assert_eq!(
+            detail,
+            format!("{:?}", ConnectDetail::Account("alex@example.test"))
+        );
+        assert_eq!(light, Some(ConnectLight::Reconnecting));
+
+        let mut ended = home();
+        ended.connect_account.step = idle();
+        ended.connect_account.signed_out_by = Some(SignedOutBy::SessionEnded);
+        let (detail, light, label) = state(&ended);
+        assert_eq!(detail, format!("{:?}", ConnectDetail::SignIn));
+        assert_eq!(light, Some(ConnectLight::NeedsYou));
+        assert!(label.contains("needs attention"));
+
+        let mut plain = home();
+        plain.connect_account.step = idle();
+        let (detail, light, label) = state(&plain);
+        assert_eq!(detail, format!("{:?}", ConnectDetail::SignIn));
+        assert_eq!(light, None);
+        assert_eq!(label, "Connect: Sign in");
+    }
+
+    /// Not now and the relayed notice reach the Launcher's account (L3).
+    #[test]
+    fn the_signed_out_notice_comes_and_goes() {
+        use crate::app::SignedOutBy;
+        let mut home = home();
+        drop(home.update(Message::ConnectSignedOutBy(SignedOutBy::ComputerRemoved)));
+        assert_eq!(
+            home.connect_account.signed_out_by,
+            Some(SignedOutBy::ComputerRemoved)
+        );
+        drop(home.update(Message::View(ViewMessage::DismissConnectSignOut)));
+        assert_eq!(home.connect_account.signed_out_by, None);
     }
 
     fn signed_in_home() -> Home {

@@ -143,28 +143,9 @@ fn muted<'a>(label: impl Into<String>, size: u32) -> Text<'a> {
         })
 }
 
-/// `theme::container::shell_chip`'s pill radius.
-/// `.chip { border-radius: 8px }`.
-const CHIP_RADIUS: f32 = 8.0;
-/// `.chip { height: 32px }`.
-const CHIP_HEIGHT: f32 = 32.0;
-
-/// A chip's press target: the shell's hover fill, kept inside the pill.
-fn chip_button(
-    theme: &theme::Theme,
-    status: iced::widget::button::Status,
-) -> iced::widget::button::Style {
-    let mut style = theme::button::shell_nav(theme, status);
-    style.border.radius = CHIP_RADIUS.into();
-    style
-}
-
-/// `.chip`: the shell's chip surface with the design's 8px corners.
-fn chip_style(t: &theme::Theme) -> iced::widget::container::Style {
-    let mut style = theme::container::shell_chip(t);
-    style.border.radius = CHIP_RADIUS.into();
-    style
-}
+use crate::app::view::shared::connect_control::{
+    self as shared_connect, chip_button, ConnectDetail, CHIP_RADIUS,
+};
 
 /// Legacy entry point for callers without the GUI privacy owner. Cube routes
 /// mount `top_bar_with_privacy` from the shared dashboard shell.
@@ -252,68 +233,6 @@ pub fn top_bar_with_privacy<'a>(
     bar.into()
 }
 
-/// The Connect control's light colours (`--alert`, `--amber`): stronger than
-/// the text tones, so a 9px dot reads on the rail.
-fn light_color(t: &theme::Theme, light: ConnectLight) -> iced::Color {
-    let dark = t.mode == coincube_ui::theme::palette::ThemeMode::Dark;
-    match light {
-        ConnectLight::On | ConnectLight::Connecting => t.colors.shell.good,
-        ConnectLight::Reconnecting => {
-            if dark {
-                iced::color!(0xf3b465)
-            } else {
-                iced::color!(0xc27400)
-            }
-        }
-        ConnectLight::NeedsYou => {
-            if dark {
-                iced::color!(0xf0604d)
-            } else {
-                iced::color!(0xb3261e)
-            }
-        }
-        ConnectLight::Offline => t.colors.shell.muted,
-    }
-}
-
-/// The status light on the account glyph: a 9px dot ringed in the rail
-/// colour, or a grey ring when offline. `dim` is the pulse's low phase.
-fn status_light<'a>(light: ConnectLight, dim: bool) -> Element<'a, Message> {
-    let pulses = matches!(light, ConnectLight::Connecting | ConnectLight::Reconnecting);
-    let alpha = if pulses && dim { 0.3 } else { 1.0 };
-    container(Space::new())
-        .width(Length::Fixed(9.0))
-        .height(Length::Fixed(9.0))
-        .style(move |t: &theme::Theme| {
-            let colour = light_color(t, light);
-            let (background, border) = if light == ConnectLight::Offline {
-                (
-                    t.colors.shell.rail,
-                    iced::Border {
-                        color: colour,
-                        width: 1.5,
-                        radius: 4.5.into(),
-                    },
-                )
-            } else {
-                (
-                    iced::Color { a: alpha, ..colour },
-                    iced::Border {
-                        color: t.colors.shell.rail,
-                        width: 1.5,
-                        radius: 4.5.into(),
-                    },
-                )
-            };
-            iced::widget::container::Style {
-                background: Some(background.into()),
-                border,
-                ..Default::default()
-            }
-        })
-        .into()
-}
-
 /// The light Connect shows: none while signed out by the user, red while
 /// signed out by Connect, otherwise the live-updates light.
 fn connect_light(ctx: &NavContext<'_>) -> Option<ConnectLight> {
@@ -356,89 +275,31 @@ fn connect_label(ctx: &NavContext<'_>) -> String {
 /// live updates, with a status light on the account glyph.
 fn connect_control<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
     let signed_in = ctx.connect_authenticated;
-    let light = connect_light(ctx);
     let has_panel = signed_in || ctx.connect.signed_out_by.is_some();
-    let offline = signed_in && *ctx.connect_stream_status == ConnectionStatus::Offline;
-
-    let mut avatar = iced::widget::Stack::new()
-        .width(Length::Fixed(20.0))
-        .height(Length::Fixed(20.0))
-        .push(
-            container(glyph::glyph(glyph::USER, 16.0, glyph::muted))
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        );
-    if let Some(light) = light {
-        avatar = avatar.push(
-            container(status_light(light, ctx.connect.light_dim))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Right)
-                .align_y(iced::alignment::Vertical::Top),
-        );
-    }
-    let (detail, detail_style): (String, fn(&theme::Theme) -> iced::widget::text::Style) =
-        if !signed_in {
-            ("Sign in".to_owned(), |t| iced::widget::text::Style {
-                color: Some(t.colors.shell.accent_ink),
-            })
-        } else if offline {
-            ("Offline".to_owned(), |t| iced::widget::text::Style {
-                color: Some(t.colors.shell.muted),
-            })
-        } else {
-            (ctx.connect_email.unwrap_or("Signed in").to_owned(), |t| {
-                iced::widget::text::Style {
-                    color: Some(t.colors.shell.muted),
-                }
-            })
-        };
-    let mut content = row![
-        avatar,
-        text("Connect").size(13).font(font::SEMIBOLD),
-        muted("·", 13),
-        text(detail)
-            .size(13)
-            .font(if signed_in {
-                font::REGULAR
-            } else {
-                font::SEMIBOLD
-            })
-            .wrapping(text::Wrapping::None)
-            .style(detail_style),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-    if has_panel {
-        content = content.push(glyph::glyph(glyph::CHEVRON_DOWN, 16.0, glyph::muted));
-    }
-    let on_press = if has_panel {
-        Message::ToggleConnectPanel
+    let detail = if !signed_in {
+        ConnectDetail::SignIn
+    } else if *ctx.connect_stream_status == ConnectionStatus::Offline {
+        ConnectDetail::Offline
     } else {
-        Message::OpenConnectSignIn
+        ConnectDetail::Account(ctx.connect_email.unwrap_or("Signed in"))
     };
-    let open = ctx.connect.panel_open;
-    let control = container(
-        Action::new(
-            CONNECTION_ID,
-            container(content).center_y(Length::Fixed(CHIP_HEIGHT - 2.0)),
-            Message::FocusAction,
-        )
-        .padding([0, 10])
-        .style(chip_button)
-        .focus_radius(CHIP_RADIUS)
-        .on_press(on_press),
+    shared_connect::connect_control(
+        shared_connect::ConnectControl {
+            id: Id::new(CONNECTION_ID),
+            detail,
+            light: connect_light(ctx),
+            light_dim: ctx.connect.light_dim,
+            chevron: has_panel,
+            open: ctx.connect.panel_open,
+            label: connect_label(ctx),
+        },
+        Some(if has_panel {
+            Message::ToggleConnectPanel
+        } else {
+            Message::OpenConnectSignIn
+        }),
+        Message::FocusAction,
     )
-    .max_width(300)
-    .style(move |t: &theme::Theme| {
-        let mut style = chip_style(t);
-        if open {
-            style.background = Some(t.colors.shell.selected.into());
-            style.border.color = t.colors.shell.selected;
-        }
-        style
-    });
-    bar::accessible(control, connect_label(ctx))
 }
 
 /// Which panel control takes focus when the panel opens: the notice's first

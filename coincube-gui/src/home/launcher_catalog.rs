@@ -697,7 +697,7 @@ impl Home {
                 FloorEntry::Ghost(cube) => LauncherScenePeer {
                     key: ghost_key(cube),
                     name: catalog_display_name(&cube.name),
-                    status: ghost_status(cube),
+                    status: ghost_status(cube, projection.connect_trouble),
                     marks: ghost_marks(cube),
                 },
             })
@@ -1323,6 +1323,9 @@ pub(super) struct Projection<'a> {
     /// The selected ghost on the floor: its index in `remotes`.
     pub(super) selected_ghost: Option<usize>,
     pub(super) query: String,
+    /// Why the stored Connect session couldn't be checked, while it waits:
+    /// ghosts then say they can't be restored yet (L5).
+    pub(super) connect_trouble: Option<crate::services::connect::grpc::trouble::Trouble>,
     pub(super) network: ChainId,
     pub(super) total_count: usize,
     pub(super) cube_limit: usize,
@@ -1426,8 +1429,18 @@ pub(super) fn ghost_marks(cube: &RemoteCube) -> super::launcher_scene::CubeMarks
         .with_vault(cube.has_vault == Some(true))
 }
 
-/// The state line under a ghost on the floor.
-pub(super) fn ghost_status(cube: &RemoteCube) -> &'static str {
+/// The state line under a ghost on the floor. While the session waits to be
+/// checked, nothing can be restored: it says why instead.
+pub(super) fn ghost_status(
+    cube: &RemoteCube,
+    trouble: Option<crate::services::connect::grpc::trouble::Trouble>,
+) -> &'static str {
+    use crate::services::connect::grpc::trouble::Trouble;
+    match trouble {
+        Some(Trouble::Offline) => return "In Connect · Offline",
+        Some(Trouble::Unreachable) => return "In Connect · Reconnecting…",
+        None => {}
+    }
     match ghost_kind(cube) {
         super::launcher_scene::Ghost::Restorable => "In Connect · Restore",
         super::launcher_scene::Ghost::Unrestorable => "In Connect · No Recovery Kit",
@@ -1664,6 +1677,7 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
             .position(|row| row.index == record && row.actionable)
     });
     Projection {
+        connect_trouble: home.connect_account.unverified.as_ref().map(|u| u.trouble),
         local_total,
         filtered_total,
         hidden,
@@ -2852,10 +2866,17 @@ mod tests {
             }
             hasher.finish()
         }
+        // A settled sign-in, so the Connect light has no pulse to tick.
+        let settled = || crate::app::state::connect::ConnectFlowStep::Login {
+            email: String::new(),
+            loading: false,
+        };
         let mut first = rows(9);
         first.catalog.mode = LauncherMode::Cubes;
+        first.connect_account.step = settled();
         let mut second = rows(9);
         second.catalog.mode = LauncherMode::Cubes;
+        second.connect_account.step = settled();
         let mut pane = pane::Pane::new_with_tab(tab::State::Home(first));
         pane.tabs.push(tab::Tab::new(2, tab::State::Home(second)));
 
@@ -3456,10 +3477,23 @@ mod tests {
             kinds,
             [Ghost::Restorable, Ghost::Unrestorable, Ghost::Unrestorable]
         );
-        assert_eq!(ghost_status(&home.remote_cubes[0]), "In Connect · Restore");
         assert_eq!(
-            ghost_status(&home.remote_cubes[2]),
+            ghost_status(&home.remote_cubes[0], None),
+            "In Connect · Restore"
+        );
+        assert_eq!(
+            ghost_status(&home.remote_cubes[2], None),
             "In Connect · No Recovery Kit"
+        );
+        // While the stored session waits to be checked, nothing restores (L5).
+        use crate::services::connect::grpc::trouble::Trouble;
+        assert_eq!(
+            ghost_status(&home.remote_cubes[0], Some(Trouble::Offline)),
+            "In Connect · Offline"
+        );
+        assert_eq!(
+            ghost_status(&home.remote_cubes[2], Some(Trouble::Unreachable)),
+            "In Connect · Reconnecting…"
         );
 
         // A ghost turns to its face on the floor, and stays out of every
@@ -5643,9 +5677,10 @@ mod tests {
                 email: String::new(),
                 loading: false,
             };
+            // One id in every state (L6).
             assert!(overview(&activate_chrome(
                 &signed_out,
-                sign_in_id(),
+                connect_id(),
                 pointer
             )));
 

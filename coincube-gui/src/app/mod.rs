@@ -4932,6 +4932,12 @@ impl App {
         &self.cube_settings
     }
 
+    /// The signed-out-by-Connect notice, as the GUI relays it to every tab.
+    pub fn set_connect_signed_out_by(&mut self, reason: Option<SignedOutBy>) {
+        self.cache.connect_signed_out_by = reason;
+        self.panels.connect.account.signed_out_by = reason;
+    }
+
     pub(crate) fn dismiss_shell_disclosures(&mut self) {
         self.cache.cube_switcher_open = false;
         self.cache.cube_lock_confirmation = false;
@@ -5679,6 +5685,14 @@ impl App {
         // has populated `connect_stream_config`. The subscription identity is
         // keyed on `(device_id, grpc_url)`; the stream tracks its event cursor
         // without restarting the subscription for each received event.
+        // A stored Connect session that couldn't be checked is checked again.
+        if let Some(unverified) = self.panels.connect.account.unverified.as_ref() {
+            subscriptions.push(unverified.recheck().map(|_| {
+                Message::View(view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::RecheckSession,
+                ))
+            }));
+        }
         // The Connect light pulses while connecting, reconnecting or
         // renewing, unless the user reduces motion.
         if !self.cache.reduce_motion
@@ -16647,9 +16661,9 @@ pub(crate) mod shell_tests {
             .unwrap();
     }
 
-    /// A transient refresh failure in the open Cube leaves a truthful,
-    /// retryable error instead of a silent "Sign in" prompt or a loop, and
-    /// the Cube's own retry signs it in once the backend recovers.
+    /// A transient refresh failure in the open Cube keeps the stored session,
+    /// waiting to be checked again, instead of a silent "Sign in" prompt or a
+    /// loop, and the Cube's own retry signs it in once the backend recovers.
     #[test]
     fn open_cube_shows_retryable_error_when_its_refresh_fails() {
         std::thread::Builder::new()
@@ -16689,8 +16703,8 @@ pub(crate) mod shell_tests {
                     assert!(!cube.panels.connect.account.is_authenticated());
                     assert!(!cube.panels.connect.account.is_checking_session());
                     assert!(
-                        cube.panels.connect.account.error.is_some(),
-                        "a failed check is shown as an error, not as signed out"
+                        cube.panels.connect.account.unverified.is_some(),
+                        "a failed check keeps the session waiting, not signed out"
                     );
                     // The backend recovers; the panel's "Try again" re-runs Init.
                     let healthy = signin_server(200).await;
