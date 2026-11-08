@@ -12441,6 +12441,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Opening Delete used to log in to the legacy Liana Connect backend to
+    /// read a membership role nothing consulted. A backend that did not answer
+    /// left a warning, and that warning disabled Delete, so the Cube could not
+    /// be removed. No runtime is entered: that check blocked on one.
+    #[test]
+    fn a_legacy_remote_backend_does_not_block_deleting_the_cube() {
+        let started = std::time::Instant::now();
+        let root =
+            std::env::temp_dir().join(format!("delete-legacy-backend-{}", uuid::Uuid::new_v4()));
+        let datadir = CoincubeDirectory::new(root.clone());
+        let wallet = WalletSettings {
+            name: "Coincube-kt6ht0kt".to_string(),
+            alias: None,
+            descriptor_checksum: "kt6ht0kt".to_string(),
+            pinned_at: Some(1_720_000_000),
+            keys: Vec::new(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: Some(crate::app::settings::AuthConfig::new(
+                "alex@example.test".into(),
+                "legacy-wallet".into(),
+            )),
+            start_internal_bitcoind: Some(false),
+            pending_rescan: None,
+            keychain_keys_recorded: false,
+        };
+        let cube = cube("local-a", "Local A", Network::Bitcoin);
+        let modal = DeleteCubeModal::new(
+            cube,
+            datadir.network_directory(Network::Bitcoin),
+            root.clone(),
+            Some(wallet),
+            Some(false),
+            false,
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "opening Delete must not wait on the legacy backend"
+        );
+        assert!(
+            modal.warning.is_none(),
+            "an unreachable legacy backend must not disable Delete"
+        );
+        assert!(
+            modal
+                .wallet_settings
+                .as_ref()
+                .and_then(|wallet| wallet.remote_backend_auth.as_ref())
+                .is_some(),
+            "the legacy backend is still recorded; Delete no longer asks it"
+        );
+        // The confirm button is enabled exactly when the PIN is ready, there
+        // is no warning, and no daemon stop is in progress.
+        assert!(!modal.cube.has_pin(&root));
+        assert!(!modal.waiting_for_stop);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn modal_views_and_non_destructive_modal_updates_build() {
         let cube = cube("local-a", "Local A", Network::Bitcoin);
