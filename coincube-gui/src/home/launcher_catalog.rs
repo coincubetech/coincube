@@ -1137,10 +1137,21 @@ pub(super) struct RemoteRestore {
 pub(super) fn remote_restore(cube: &RemoteCube) -> RemoteRestore {
     let (password_recoverable, phone_recoverable) = remote_recovery(cube);
     // No restore route exists for Bitcoin Blake2b yet, whatever Connect holds:
-    // its ghosts can be deleted from Connect, never restored.
-    if ghost_chain(cube).is_some_and(ChainId::is_blake2b) {
+    // its ghosts can be deleted from Connect, never restored. The status
+    // still names what Connect holds, so a kept backup doesn't read as gone.
+    if restore_unsupported(cube) {
+        let status = match (password_recoverable, phone_recoverable) {
+            (true, _) => "Recovery Kit in Connect \u{b7} Restore isn\u{2019}t available on Bitcoin Blake2b yet",
+            (false, true) => "Phone recovery in Connect \u{b7} Restore isn\u{2019}t available on Bitcoin Blake2b yet",
+            (false, false) if cube.has_recovery_kit => {
+                "Recovery Kit has no Master Seed \u{b7} Restore isn\u{2019}t available on Bitcoin Blake2b yet"
+            }
+            (false, false) => {
+                "No Recovery Kit in Connect \u{b7} Restore isn\u{2019}t available on Bitcoin Blake2b yet"
+            }
+        };
         return RemoteRestore {
-            status: "Registered in Connect (Bitcoin Blake2b Cubes can\u{2019}t be restored yet)",
+            status,
             action: None,
         };
     }
@@ -1172,6 +1183,12 @@ pub(super) fn remote_restore(cube: &RemoteCube) -> RemoteRestore {
         (false, false) => None,
     };
     RemoteRestore { status, action }
+}
+
+/// This build has no restore or import route for `cube`'s chain (Bitcoin
+/// Blake2b), whatever Connect holds for it.
+pub(super) fn restore_unsupported(cube: &RemoteCube) -> bool {
+    ghost_chain(cube).is_some_and(ChainId::is_blake2b)
 }
 
 /// The ways Connect holds to restore `cube` (password, phone), whether or not
@@ -1455,6 +1472,9 @@ pub(super) fn ghost_status(
         Some(Trouble::Offline) => return "In Connect · Offline",
         Some(Trouble::Unreachable) => return "In Connect · Reconnecting…",
         None => {}
+    }
+    if restore_unsupported(cube) {
+        return "In Connect \u{b7} Can\u{2019}t restore on Blake2b yet";
     }
     match ghost_kind(cube) {
         super::launcher_scene::Ghost::Restorable => "In Connect · Restore",
@@ -3922,7 +3942,10 @@ mod tests {
         // Nothing restores it, whatever Connect holds.
         let restore = remote_restore(&kept);
         assert!(restore.action.is_none());
-        assert!(restore.status.contains("can\u{2019}t be restored"));
+        assert!(restore.status.starts_with("Recovery Kit in Connect"));
+        assert!(restore
+            .status
+            .ends_with("Restore isn\u{2019}t available on Bitcoin Blake2b yet"));
         assert!(matches!(
             ghost_kind(&kept),
             super::super::launcher_scene::Ghost::Unrestorable
