@@ -1621,8 +1621,9 @@ impl Home {
         self.refresh_displayed_networks();
         if self.network.is_blake2b() {
             // Explicitly supported launcher actions only: the Create Cube
-            // journey (name, PIN or passkey, backup) and opening a Cube. Its
-            // Vault is created from inside the Cube. No import, seed
+            // journey (name, PIN or passkey, backup), opening, renaming and
+            // deleting a Cube. Its Vault is created from inside the Cube. No
+            // import, seed
             // recovery, Recovery Kit restore, phone restore or duress
             // completion route.
             let allowed = match &message {
@@ -1669,6 +1670,22 @@ impl Home {
                         )
                         | ViewMessage::OpenUrl(_)
                         | ViewMessage::DismissAdvisoryNotice
+                        | ViewMessage::RenameCube(_)
+                        | ViewMessage::RenameCubeNameEdited(_)
+                        | ViewMessage::RenameCubeConfirm
+                        | ViewMessage::RenameCubeCancel
+                        // Local delete only: a remote-only Cube's modal can
+                        // start a restore instead.
+                        | ViewMessage::DeleteCube(
+                            DeleteCubeMessage::ShowModal(_)
+                                | DeleteCubeMessage::CloseModal
+                                | DeleteCubeMessage::Confirm(_)
+                                | DeleteCubeMessage::DeleteLianaConnect(_)
+                                | DeleteCubeMessage::DeleteConnectBackup(_)
+                                | DeleteCubeMessage::Deleted
+                                | DeleteCubeMessage::DaemonStopped(_)
+                                | DeleteCubeMessage::PinInput(_)
+                        )
                 ),
                 Message::Checked { .. }
                 | Message::CubeLimitsLoaded(_)
@@ -1679,6 +1696,8 @@ impl Home {
                 | Message::CubeRemoteRegistered { .. }
                 | Message::CubeRemoteUpdated { .. }
                 | Message::CubeCreated(_)
+                | Message::CubeBackupDeleted(_)
+                | Message::CubeRenamed(_)
                 | Message::PasskeyWindowId(_)
                 | Message::PasskeyWebviewUpdate(_)
                 | Message::PasskeyCeremonyResult(_)
@@ -11208,6 +11227,54 @@ mod tests {
 
         let _ = home.update(Message::View(ViewMessage::RenameCubeCancel));
         assert!(home.rename_cube_modal.is_none());
+    }
+
+    #[test]
+    fn a_blake2b_cube_renames_on_its_own_launcher() {
+        let datadir = fresh_datadir();
+        let directory = datadir.network_directory(ChainId::BitcoinBlake2b);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let fork =
+            CubeSettings::new_with_raw_id("fork".into(), "Fork".into(), ChainId::BitcoinBlake2b);
+        let settings_path = directory.path().join(settings::SETTINGS_FILE_NAME);
+        std::fs::write(
+            &settings_path,
+            serde_json::to_vec(&settings::Settings {
+                cubes: vec![fork.clone()],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
+        enable_btcb2(&mut home);
+        home.network = ChainId::BitcoinBlake2b;
+        home.state = State::Cubes {
+            cubes: vec![fork.clone()],
+            create_cube: false,
+            source: ChainId::BitcoinBlake2b,
+        };
+        let key = CubeCatalogKey {
+            chain: ChainId::BitcoinBlake2b,
+            cube_id: fork.id.clone(),
+        };
+
+        drop(home.update(Message::View(ViewMessage::RenameCatalog(key.clone()))));
+        assert_eq!(home.rename_cube_modal, Some((key, "Fork".to_string())));
+        drop(home.update(Message::View(ViewMessage::RenameCubeNameEdited(
+            "Fork renamed".into(),
+        ))));
+        let output = drain(home.update(Message::View(ViewMessage::RenameCubeConfirm)));
+        assert!(matches!(output.as_slice(), [Message::CubeRenamed(Ok(()))]));
+        assert!(home.error().is_none());
+        let saved: settings::Settings =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(saved.cubes[0].name, "Fork renamed");
+
+        // The local write's result closes the dialog on this chain too.
+        drop(home.update(Message::CubeRenamed(Ok(()))));
+        assert!(home.rename_cube_modal.is_none());
+        assert!(home.error().is_none());
     }
 
     #[test]

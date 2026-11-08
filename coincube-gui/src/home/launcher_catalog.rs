@@ -2065,15 +2065,12 @@ fn details_panel<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
                         Some(ViewMessage::RenameCatalog(row.key.clone())),
                         link_style,
                     ))
-                    // Bitcoin Blake2b Cubes keep their existing delete exclusion.
-                    .push((!row.cube.network.is_blake2b()).then(|| {
-                        label_action(
-                            delete_id(&row.key),
-                            "Delete…",
-                            Some(ViewMessage::DeleteCatalog(row.key.clone())),
-                            link_style,
-                        )
-                    })),
+                    .push(label_action(
+                        delete_id(&row.key),
+                        "Delete…",
+                        Some(ViewMessage::DeleteCatalog(row.key.clone())),
+                        link_style,
+                    )),
             ),
     )
     .padding([24, 28])
@@ -3849,7 +3846,7 @@ mod tests {
     }
 
     #[test]
-    fn blake2b_cubes_keep_their_delete_exclusion() {
+    fn blake2b_cubes_offer_delete() {
         let mut home = home_with(&[("a", "Fork Vault")]);
         // The List is only visible on an available network.
         home.connect_account.bitcoin_blake2b_opt_in = true;
@@ -3873,7 +3870,12 @@ mod tests {
             theme::Theme::dark(),
         );
         assert!(inspection.has_focus(rename_id(&fork)));
-        assert!(!inspection.has_focus(delete_id(&fork)));
+        assert!(inspection.has_focus(delete_id(&fork)));
+
+        // The Blake2b Launcher's action allowlist lets the delete through.
+        drop(home.update(Message::View(ViewMessage::DeleteCatalog(fork))));
+        assert!(home.error.is_none());
+        assert!(home.delete_cube_modal.is_some());
     }
 
     #[test]
