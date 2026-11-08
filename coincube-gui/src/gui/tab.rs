@@ -4992,18 +4992,18 @@ impl Tab {
             State::Installer(v) => v.view().map(Message::Install),
             State::App(v) if v.cube_settings().network.is_blake2b() => {
                 let generation = self.fork_session_generation;
-                v.view().map(move |message| {
+                v.view_with_worldview(worldview).map(move |message| {
                     Message::ForkAsync(generation, Box::new(Message::Run(message)))
                 })
             }
             State::App(v) => {
                 let generation = self.app_generation;
-                v.view().map(move |message| {
+                v.view_with_worldview(worldview).map(move |message| {
                     Message::AppAsync(generation, Box::new(Message::Run(message)))
                 })
             }
             State::Home(v) => v.view_with_worldview(worldview).map(Message::Launch),
-            State::Loader(v) => v.view().map(Message::Load),
+            State::Loader(v) => v.view_with_worldview(worldview).map(Message::Load),
             State::Login(v) => v.view().map(Message::Login),
             State::PinEntry(v) => {
                 let progress = self

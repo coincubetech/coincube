@@ -33,6 +33,7 @@ pub mod split_hardware;
 pub mod user_error;
 pub mod utils;
 pub mod wallet_source_form;
+mod worldview_art;
 
 use coincubed::ApiVersion;
 
