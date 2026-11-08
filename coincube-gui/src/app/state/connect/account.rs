@@ -9258,7 +9258,72 @@ mod unverified_session_tests {
         assert_eq!(refresh_trouble(&status(502)), Some(Trouble::Unreachable));
         // A real answer from Connect is not a reachability problem.
         assert_eq!(refresh_trouble(&status(400)), None);
+        assert_eq!(refresh_trouble(&status(401)), None);
         assert_eq!(refresh_trouble(&CoincubeError::Api("bad".into())), None);
+    }
+
+    /// Connection refused is the offline/unreachable case the status checks
+    /// above do not cover. A body Connect actually sent is a real failure:
+    /// keeping the session for it would retry forever instead of showing
+    /// the error.
+    #[tokio::test]
+    async fn transport_failures_keep_the_session_and_a_delivered_body_does_not() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let refused: CoincubeError = reqwest::Client::new()
+            .get(format!("http://{addr}/api/v1/auth/token/refresh"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .expect_err("nothing is listening")
+            .into();
+        assert!(
+            matches!(&refused, CoincubeError::Network(e) if e.is_connect() || e.is_timeout()),
+            "a closed local port is a transport failure, got {:?}",
+            refused
+        );
+        assert!(
+            refresh_trouble(&refused).is_some(),
+            "a transport failure must keep the stored session, got {:?}",
+            refused
+        );
+
+        let answered = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let answered_addr = answered.local_addr().unwrap();
+        let body = b"not-json";
+        std::thread::spawn(move || {
+            let (mut sock, _) = answered.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = std::io::Read::read(&mut sock, &mut buf);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            use std::io::Write;
+            let _ = sock.write_all(header.as_bytes());
+            let _ = sock.write_all(body);
+        });
+        let delivered: CoincubeError = reqwest::Client::new()
+            .get(format!("http://{answered_addr}/api/v1/auth/token/refresh"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .expect("the local server answers")
+            .json::<serde_json::Value>()
+            .await
+            .expect_err("the body is not JSON")
+            .into();
+        assert!(
+            matches!(&delivered, CoincubeError::Network(e) if e.is_decode()),
+            "expected a decode error, got {:?}",
+            delivered
+        );
+        assert_eq!(
+            refresh_trouble(&delivered),
+            None,
+            "a body Connect delivered is not a reachability wait"
+        );
     }
 
     #[test]
@@ -9321,5 +9386,185 @@ mod unverified_session_tests {
         panel.install_shared_client(CoincubeClient::new());
         assert_eq!(panel.unverified, None);
         assert!(matches!(panel.step, ConnectFlowStep::CheckingSession));
+    }
+
+    /// Drops whatever session the thread-local test store is holding, including
+    /// when the test panics.
+    struct ClearSession;
+    impl Drop for ClearSession {
+        fn drop(&mut self) {
+            delete_connect_secret(CONNECT_KEYRING_USER);
+        }
+    }
+
+    fn store_session(email: &str) {
+        let session = StoredSession {
+            login: LoginResponse {
+                requires_2fa: false,
+                token: "synthetic-access".into(),
+                refresh_token: "synthetic-refresh".into(),
+                user: User {
+                    id: 7,
+                    email: email.into(),
+                    email_verified: Some(true),
+                },
+            },
+        };
+        write_connect_secret(CONNECT_KEYRING_USER, &serde_json::to_vec(&session).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_reachability_failure_keeps_the_stored_session_and_counts_attempts() {
+        delete_connect_secret(CONNECT_KEYRING_USER);
+        let _clear = ClearSession;
+        store_session("alex@example.test");
+        let stored = read_connect_secret(CONNECT_KEYRING_USER);
+        let mut panel = ConnectAccountPanel::new();
+        panel.step = ConnectFlowStep::CheckingSession;
+        let epoch = panel.auth_epoch();
+
+        let first = panel.update_message(ConnectAccountMessage::RefreshUnreachable {
+            trouble: Trouble::Offline,
+            epoch,
+        });
+        assert_eq!(first.units(), 0);
+        assert_eq!(
+            panel.unverified,
+            Some(UnverifiedSession {
+                email: "alex@example.test".into(),
+                trouble: Trouble::Offline,
+                attempts: 1,
+            })
+        );
+        assert!(panel.error.is_none());
+        assert!(matches!(
+            panel.step,
+            ConnectFlowStep::Login { loading: false, .. }
+        ));
+
+        let second = panel.update_message(ConnectAccountMessage::RefreshUnreachable {
+            trouble: Trouble::Unreachable,
+            epoch,
+        });
+        assert_eq!(second.units(), 0);
+        assert_eq!(
+            panel.unverified,
+            Some(UnverifiedSession {
+                email: "alex@example.test".into(),
+                trouble: Trouble::Unreachable,
+                attempts: 2,
+            })
+        );
+        assert_eq!(
+            read_connect_secret(CONNECT_KEYRING_USER),
+            stored,
+            "the stored session stays put while Connect cannot be checked"
+        );
+    }
+
+    #[test]
+    fn a_reachability_failure_without_a_stored_session_does_not_wait() {
+        delete_connect_secret(CONNECT_KEYRING_USER);
+        let _clear = ClearSession;
+        let mut panel = ConnectAccountPanel::new();
+        panel.step = ConnectFlowStep::CheckingSession;
+        let task = panel.update_message(ConnectAccountMessage::RefreshUnreachable {
+            trouble: Trouble::Offline,
+            epoch: panel.auth_epoch(),
+        });
+        assert_eq!(task.units(), 0);
+        assert!(panel.unverified.is_none());
+        assert!(matches!(
+            panel.step,
+            ConnectFlowStep::Login {
+                loading: false,
+                ref email,
+            } if email.is_empty()
+        ));
+    }
+
+    #[test]
+    fn a_recheck_while_waiting_starts_another_session_check() {
+        delete_connect_secret(CONNECT_KEYRING_USER);
+        let _clear = ClearSession;
+        store_session("alex@example.test");
+        let mut panel = ConnectAccountPanel::new();
+        panel.unverified = Some(unverified(2));
+        panel.step = ConnectFlowStep::Login {
+            email: String::new(),
+            loading: false,
+        };
+        let task = panel.update_message(ConnectAccountMessage::RecheckSession);
+        assert!(
+            task.units() > 0,
+            "a mounted wait must check the stored session again"
+        );
+        assert!(matches!(
+            panel.step,
+            ConnectFlowStep::Login { loading: true, .. }
+        ));
+        // The wait is still the same one until that check settles.
+        assert_eq!(
+            panel.unverified.as_ref().map(|session| session.attempts),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn a_stale_refresh_cannot_sign_out_or_start_a_wait() {
+        let mut panel = ConnectAccountPanel::new();
+        let stale = panel.auth_epoch();
+        panel.invalidate_auth();
+        panel.step = ConnectFlowStep::Dashboard;
+        panel.unverified = Some(unverified(4));
+
+        let rejected =
+            panel.update_message(ConnectAccountMessage::RefreshRejected { epoch: stale });
+        assert_eq!(rejected.units(), 0);
+        let unreachable = panel.update_message(ConnectAccountMessage::RefreshUnreachable {
+            trouble: Trouble::Offline,
+            epoch: stale,
+        });
+        assert_eq!(unreachable.units(), 0);
+        assert!(matches!(panel.step, ConnectFlowStep::Dashboard));
+        assert_eq!(
+            panel.unverified.as_ref().map(|session| session.attempts),
+            Some(4)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_refresh_signs_the_account_out() {
+        use iced::futures::StreamExt;
+
+        let mut panel = ConnectAccountPanel::new();
+        panel.step = ConnectFlowStep::CheckingSession;
+        panel.unverified = Some(unverified(2));
+        let task = panel.update_message(ConnectAccountMessage::RefreshRejected {
+            epoch: panel.auth_epoch(),
+        });
+        let mut stream = iced_runtime::task::into_stream(task).expect("sign-out task");
+        let mut saw_signed_out = false;
+        let mut saw_logout = false;
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message) = action {
+                match message {
+                    Message::ConnectSignedOutBy(crate::app::SignedOutBy::SessionEnded) => {
+                        saw_signed_out = true;
+                    }
+                    Message::View(view::Message::ConnectAccount(ConnectAccountMessage::LogOut)) => {
+                        saw_logout = true;
+                    }
+                    other => panic!("unexpected refresh rejection output: {:?}", other),
+                }
+            }
+        }
+        assert!(
+            saw_signed_out,
+            "a refused refresh tells every tab the session ended"
+        );
+        assert!(saw_logout, "a refused refresh logs the account out");
+        drop(panel.update_message(ConnectAccountMessage::LogOut));
+        assert_eq!(panel.unverified, None);
     }
 }
