@@ -304,7 +304,7 @@ pub fn settings_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCube
         );
         let save = can_save.then_some(ConnectCubeMessage::SaveLightningAddress);
         let submit = save.clone();
-        let form = iced::widget::responsive(move |size| {
+        let form = crate::app::view::responsive(move |size| {
             let field = username_field(
                 state,
                 "New username",

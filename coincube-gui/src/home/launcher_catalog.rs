@@ -12,14 +12,13 @@
 //! They are never persisted and never change the authoritative lists, quotas
 //! or recoverability.
 
+use crate::app::view::responsive;
 use iced::{
     advanced::widget::Id,
     event,
     keyboard::{self, key},
     mouse,
-    widget::{
-        button as iced_button, container, responsive, rule, scrollable, text::Wrapping, Space,
-    },
+    widget::{button as iced_button, container, rule, scrollable, text::Wrapping, Space},
     Alignment, Length, Size, Task,
 };
 use std::time::{Duration, Instant};

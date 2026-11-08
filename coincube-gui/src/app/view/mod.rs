@@ -478,6 +478,15 @@ fn dashboard_layout<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
+/// Iced invokes responsive builders during layout, after the root view has
+/// returned. Carry the window's language into that deferred view build.
+pub(crate) fn responsive<'a, M: 'a>(
+    build: impl Fn(iced::Size) -> Element<'a, M> + 'a,
+) -> iced::widget::Responsive<'a, M, theme::Theme, iced::Renderer> {
+    let language = coincube_ui::locale::language();
+    iced::widget::responsive(move |size| coincube_ui::locale::render_in(language, || build(size)))
+}
+
 const WALLET_PAGE_SCROLL_ID: &str = "tenshu.wallet.page.scroll";
 
 /// A reading page with Activity's detail pane (`.det`) for a selected row:
@@ -492,7 +501,7 @@ pub fn dashboard_with_detail<'a>(
     content: impl Fn() -> Element<'a, Message> + 'a,
     detail: impl Fn() -> Option<Element<'a, Message>> + 'a,
 ) -> Element<'a, Message> {
-    let body = iced::widget::responsive(move |size: iced::Size| {
+    let body = responsive(move |size: iced::Size| {
         let page_body = Column::new()
             .push(head_slot(Some(head())))
             .push(
@@ -1422,6 +1431,29 @@ mod page_head_tests {
                 menu
             );
         }
+    }
+
+    #[test]
+    fn spanish_dashboard_detail_survives_deferred_layout() {
+        use coincube_ui::locale::{language, render_in, Language, Text};
+        let renderer = renderer();
+        let cache = Cache::default();
+        let menu = Menu::Vault(VaultSubMenu::Overview);
+        let mut element = render_in(Language::Spanish, || {
+            super::dashboard_with_detail(
+                &menu,
+                &cache,
+                || vault_page_head(&cache, "Vault"),
+                || iced::widget::text(Text::Review.get()).into(),
+                || Some(iced::widget::text(Text::TransactionReplacement.get()).into()),
+            )
+        });
+        assert_eq!(language(), Language::English);
+        let mut tree = Tree::new(element.as_widget());
+        let (_, probe) = frame(&mut tree, &renderer, &mut element);
+        probe.text("Revisión");
+        probe.text("Reemplazo de transacción");
+        assert_eq!(language(), Language::English);
     }
 
     #[test]

@@ -3007,7 +3007,11 @@ pub mod global {
             }
             let token =
                 std::str::from_utf8(&self.bytes[start..self.at]).map_err(|e| e.to_string())?;
-            if known_value(self.known, &self.path).is_some() || number_survives(token) {
+            // A field that accepts malformed input may normalize a number to
+            // a nonnumeric typed value. The raw token still needs protection.
+            if known_value(self.known, &self.path).is_some_and(serde_json::Value::is_number)
+                || number_survives(token)
+            {
                 Ok(())
             } else {
                 Err("Global settings hold a number this build cannot keep exactly".to_string())
@@ -4091,6 +4095,23 @@ pub mod global {
                 assert_eq!(GlobalSettings::load_preferences(&path).unwrap(), expected);
                 assert_eq!(raw(&path)["language"], code);
             }
+        }
+
+        #[test]
+        fn lossy_malformed_language_does_not_rewrite_settings() {
+            let root = TempRoot::new("lossy-language");
+            let path = root.global();
+            let input = r#"{"language":9007199254740993.0,"worldview":"luke"}"#;
+            std::fs::write(&path, input).unwrap();
+            assert_eq!(
+                GlobalSettings::load_preferences(&path).unwrap().language,
+                Language::English
+            );
+            assert!(
+                GlobalSettings::save_preference(&path, PreferenceChange::DeveloperMode(true))
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), input);
         }
 
         #[test]

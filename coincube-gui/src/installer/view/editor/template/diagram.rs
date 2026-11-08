@@ -2,8 +2,9 @@
 //! The wide composition keeps policy keys beside labelled spend windows; the
 //! compact composition stacks them so the timing labels remain readable.
 
+use crate::app::view::responsive;
 use iced::{
-    widget::{container, responsive, Space},
+    widget::{container, Space},
     Alignment, Background, Border, Color, Length, Size,
 };
 

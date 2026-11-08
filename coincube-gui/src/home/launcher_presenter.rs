@@ -1,10 +1,11 @@
 //! v113 Launcher List and Opening presentation. The catalog, unlock and
 //! loader remain the authorities for rows, actions and startup state.
 
+use crate::app::view::responsive;
 use coincube_ui::locale::Text as CopyText;
 use iced::{
     advanced::widget::Id,
-    widget::{button as iced_button, container, responsive, rule, text::Wrapping, Space, Stack},
+    widget::{button as iced_button, container, rule, text::Wrapping, Space, Stack},
     Alignment, Length, Size,
 };
 
@@ -2486,7 +2487,7 @@ fn opening_content<'a, M: 'a>(
         .spacing(8)
         .align_y(Alignment::Center)
         .push(opening_words(
-            "Opening",
+            CopyText::Opening.get(),
             14.0,
             font::REGULAR,
             Tone::Muted,
@@ -2550,13 +2551,13 @@ fn opening_content<'a, M: 'a>(
     if face.stalled {
         let (note, label, action) = if face.stage == super::launcher_opening::Stage::Spark {
             (
-                "Spark is taking longer than usual.",
-                "Continue without Spark",
+                CopyText::SparkOpeningSlow.get(),
+                CopyText::ContinueWithoutSpark.get(),
                 face.without_spark,
             )
         } else {
             (
-                "Taking longer than usual.",
+                CopyText::OpeningSlow.get(),
                 CopyText::Cancel.get(),
                 face.cancel,
             )
@@ -2802,6 +2803,51 @@ mod tests {
     use iced::Rectangle;
     use launcher_catalog::LauncherMode;
     use std::path::PathBuf;
+
+    #[test]
+    fn spanish_cube_opening_survives_deferred_layout() {
+        use crate::home::launcher_opening::{Opening, Stage};
+        use coincube_ui::locale::{language, render_in, Language};
+
+        let cube = crate::app::settings::CubeSettings::new_with_raw_id(
+            "spanish-opening".into(),
+            "Everyday".into(),
+            ChainId::Bitcoin,
+        );
+        let floor = floor_context(&cube);
+        let quote = coincube_ui::component::quote_display::random_quote("loading");
+        let spanish_quote = render_in(Language::Spanish, || quote.localized_text().to_owned());
+        let now = std::time::Instant::now();
+        let opening = Opening::new(Some(floor.clone()), true, Stage::Connecting, now);
+        let view = render_in(Language::Spanish, || {
+            opening_on_floor(
+                &floor,
+                OpeningFace {
+                    cube: &cube,
+                    quote: &quote,
+                    stage: Stage::Connecting,
+                    stalled: false,
+                    cancel: || (),
+                    without_spark: || (),
+                },
+                coincube_ui::theme::palette::ThemeMode::Dark,
+                &opening,
+                now,
+            )
+        });
+        assert_eq!(language(), Language::English);
+        let result = capture::inspect_filled(
+            "spanish-cube-opening",
+            view,
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+            (1024, 768),
+        );
+        assert!(result.contains("Conectando con el servicio de la cartera"));
+        assert!(result.contains(&spanish_quote));
+        assert_eq!(language(), Language::English);
+    }
 
     fn floor_context(
         cube: &crate::app::settings::CubeSettings,

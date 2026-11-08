@@ -671,7 +671,7 @@ impl P2PPanel {
 
     /// Responsive production Book presenter, shared with the synthetic layout test.
     fn book_view<'a>(&'a self) -> Element<'a, view::Message> {
-        iced::widget::responsive(move |size: iced::Size| {
+        crate::app::view::responsive(move |size: iced::Size| {
             let filtered_orders = self.filtered_orders();
             // BUY BTC is the taker's intent: it matches maker sell orders.
             let buy_count = self

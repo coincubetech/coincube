@@ -231,4 +231,8 @@ catalog! {
     ZoomLimit => ("This screen fits up to {percent}%.", "Esta pantalla admite un zoom de hasta {percent}%."),
     ZoomMacShortcuts => ("Cmd + and Cmd − change it from any screen; Cmd 0 returns to 100%.", "Usa Cmd + y Cmd − para cambiar el zoom. Cmd 0 vuelve al 100%."),
     ZoomOtherShortcuts => ("Ctrl + and Ctrl − change it from any screen; Ctrl 0 returns to 100%.", "Usa Ctrl + y Ctrl − para cambiar el zoom. Ctrl 0 vuelve al 100%."),
+    Opening => ("Opening", "Abriendo"),
+    SparkOpeningSlow => ("Spark is taking longer than usual.", "Spark está tardando más de lo habitual."),
+    ContinueWithoutSpark => ("Continue without Spark", "Continuar sin Spark"),
+    OpeningSlow => ("Taking longer than usual.", "Está tardando más de lo habitual."),
 }

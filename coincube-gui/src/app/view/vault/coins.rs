@@ -321,7 +321,7 @@ pub fn coins_view<'a>(
             )
         }))
         .push((!coins.is_empty()).then(|| {
-            iced::widget::responsive(move |size| {
+            crate::app::view::responsive(move |size| {
                 let table =
                     Container::new(Column::new().push(coin_table_header(blake2b)).push(
                         coins.iter().enumerate().fold(

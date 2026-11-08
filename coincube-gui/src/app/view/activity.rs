@@ -1145,8 +1145,10 @@ fn completed_psbt_disclosure<'a>(
 }
 
 pub fn render<'a>(activity: &'a Activity, cache: &'a Cache) -> Element<'a, Message> {
-    iced::widget::responsive(move |size: iced::Size| render_at_width(activity, cache, size.width))
-        .into()
+    crate::app::view::responsive(move |size: iced::Size| {
+        render_at_width(activity, cache, size.width)
+    })
+    .into()
 }
 
 /// The Cube's coin before its name (`.idl > img`).
