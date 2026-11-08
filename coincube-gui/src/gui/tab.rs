@@ -3175,8 +3175,12 @@ impl Tab {
                             command.map(Message::Launch)
                         }
                     } else {
-                        // No cube settings stored, go to home
-                        let (home, command) = Home::new(i.destination_path(), Some(network));
+                        // No cube settings stored, go to home, on the Import
+                        // or restore path a restore's path list left for.
+                        let (mut home, command) = Home::new(i.destination_path(), Some(network));
+                        if let Some(destination) = i.take_restore_exit() {
+                            home.open_restore_destination(destination);
+                        }
                         self.state = State::Home(home);
                         command.map(Message::Launch)
                     }

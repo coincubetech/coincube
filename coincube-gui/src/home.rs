@@ -474,6 +474,9 @@ pub struct Home {
     /// Recover with phone's Cube step lists every network's Cubes, not
     /// only the current network's.
     restore_all_networks: bool,
+    /// The Import or restore path to open once the Cube list is checked:
+    /// the installer's restore left for it from its path list.
+    pending_restore_destination: Option<crate::installer::RestoreDestination>,
     /// Opens a newly created Cube through the ordinary unlock path after the
     /// settings reload makes its row available, so the Cube's own screens
     /// (Create Vault, or an import's descriptor steps) come next.
@@ -682,6 +685,7 @@ impl Home {
                 restore_hub: false,
                 restore_phone: false,
                 restore_all_networks: false,
+                pending_restore_destination: None,
                 open_created_cube: None,
                 delete_after_check: None,
                 open_after_registration: None,
@@ -1148,6 +1152,12 @@ impl Home {
 
     pub fn stop(&mut self) {}
 
+    /// Opens Import or restore on `destination` once the Cube list is
+    /// checked: the installer's restore left for it from its path list.
+    pub fn open_restore_destination(&mut self, destination: crate::installer::RestoreDestination) {
+        self.pending_restore_destination = Some(destination);
+    }
+
     /// Set a top-level error message shown on the home screen.
     /// Used by outer state machines (e.g. `gui::tab`) to surface issues
     /// they detect while handling home-originated messages.
@@ -1420,11 +1430,26 @@ impl Home {
             &message,
             Message::View(ViewMessage::ConnectAccount(_) | ViewMessage::ConnectSheetAccount(_))
         );
+        let checked = matches!(&message, Message::Checked { .. });
         let task = match message {
             Message::View(ViewMessage::Catalog(message)) => self.update_catalog(message),
             message => self.update_lifecycle(message),
         };
         self.reconcile_catalog();
+        // The path a restore left for opens through its own message, with
+        // that path's guards, once the list it opens over is checked.
+        if checked && matches!(self.state, State::Cubes { .. } | State::NoCube { .. }) {
+            if let Some(destination) = self.pending_restore_destination.take() {
+                use crate::installer::RestoreDestination;
+                let open = match destination {
+                    RestoreDestination::Overview => ViewMessage::ShowRestoreHub,
+                    RestoreDestination::ImportBitcoin => ViewMessage::ShowImportBitcoin,
+                    RestoreDestination::Kit => ViewMessage::RestoreFromAnyRecoveryKit,
+                    RestoreDestination::Phone => ViewMessage::ShowRestorePhone,
+                };
+                return Task::batch([task, Task::done(Message::View(open))]);
+            }
+        }
         // Once the first probe has finished, read the networks such a change
         // lists, whatever screen Home is on: a creation backup or recovery
         // returns to the list without another check. A Bitcoin-only start
@@ -9089,6 +9114,48 @@ mod tests {
 
     fn home() -> Home {
         Home::new(test_datadir(), Some(Network::Bitcoin)).0
+    }
+
+    /// A restore that left from the installer's path list opens that path
+    /// over the checked list, through the path's own message, and only once.
+    #[test]
+    fn a_restore_left_from_its_path_list_opens_that_path() {
+        use crate::installer::RestoreDestination;
+        for (destination, opens) in [
+            (RestoreDestination::Overview, "ShowRestoreHub"),
+            (RestoreDestination::ImportBitcoin, "ShowImportBitcoin"),
+            (RestoreDestination::Kit, "RestoreFromAnyRecoveryKit"),
+            (RestoreDestination::Phone, "ShowRestorePhone"),
+        ] {
+            let mut home = home();
+            home.open_restore_destination(destination);
+            let checked = || Message::Checked {
+                for_chain: ChainId::Bitcoin,
+                res: Ok(State::NoCube { create_cube: false }),
+            };
+            let next = drain(home.update(checked()));
+            let opened: Vec<_> = next
+                .iter()
+                .filter_map(|message| match message {
+                    Message::View(view) => Some(format!("{view:?}")),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(opened, [opens], "{:?}", destination);
+            assert!(drain(home.update(checked()))
+                .iter()
+                .all(|message| !matches!(message, Message::View(_))));
+        }
+
+        let mut home = home();
+        home.open_restore_destination(RestoreDestination::Overview);
+        for message in drain(home.update(Message::Checked {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::NoCube { create_cube: false }),
+        })) {
+            drop(home.update(message));
+        }
+        assert!(home.restore_hub && home.showing_create_form());
     }
 
     #[test]

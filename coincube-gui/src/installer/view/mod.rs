@@ -2842,10 +2842,13 @@ fn titled_layout<'a>(
     actions: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     if let Some(path_title) = FRAMED.with(|framed| framed.get()) {
-        let mut back = button::secondary(Some(icon::previous_icon()), "Back").width(Length::Shrink);
-        if let Some(message) = previous_message {
-            back = back.on_press(message);
-        }
+        // A step with nowhere to go back to has no Back: the frame's Close
+        // and path list leave it.
+        let back = previous_message.map(|message| {
+            button::secondary(Some(icon::previous_icon()), "Back")
+                .width(Length::Shrink)
+                .on_press(message)
+        });
         // The frame already heads the page with the path's title. The step's
         // title sits on its content, and Back shares the footer row with the
         // step's actions.
@@ -3326,7 +3329,9 @@ pub fn recovery_kit_restore<'a>(
         }),
         title,
         content,
-        Some(Message::Previous),
+        // A full restore opens its Import or restore path, whose path list
+        // and Close leave it; a descriptor-only restore steps back.
+        (!matches!(scope, crate::installer::step::RestoreScope::Full)).then_some(Message::Previous),
     )
 }
 

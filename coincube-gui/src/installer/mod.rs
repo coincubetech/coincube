@@ -279,6 +279,16 @@ pub enum RestorePath {
     Phone,
 }
 
+/// A row of Import or restore's path list, pressed in the installer: the
+/// Launcher owns every path, so the installer hands the press back to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreDestination {
+    Overview,
+    ImportBitcoin,
+    Kit,
+    Phone,
+}
+
 /// Where a restore step sits on its path's stepper. Steps with none are
 /// Connect, node and finalize, which the design sums up as Finish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -437,6 +447,8 @@ pub struct Installer {
     steps: Vec<Box<dyn Step>>,
     /// A Cube restore drawn in Import or restore (P-Restore), and its chain.
     restore: Option<(RestorePath, crate::chain::ChainId)>,
+    /// The path list row that left the restore, for the Launcher to open.
+    restore_exit: Option<RestoreDestination>,
     /// Create Vault from inside an open Cube, drawn under its own heading
     /// and stepper. Bitcoin Blake2b keeps the installer's layout.
     create_vault: bool,
@@ -507,6 +519,11 @@ impl Installer {
             step.revert(&mut self.context)
         }
         Task::none()
+    }
+
+    /// The path list row that left a restore, taken once by the Launcher.
+    pub fn take_restore_exit(&mut self) -> Option<RestoreDestination> {
+        self.restore_exit.take()
     }
 
     /// Public identifier of the generated Cube master signer.
@@ -839,6 +856,7 @@ impl Installer {
             && (!chain.is_blake2b() || context.in_cube_fork_vault);
         let mut installer = Installer {
             restore,
+            restore_exit: None,
             create_vault,
             navigation_error: None,
             claim_target_saved: false,
@@ -1294,6 +1312,10 @@ impl Installer {
             }
             Message::Next => self.next(),
             Message::Previous => self.previous(),
+            Message::LeaveRestore(destination) => {
+                self.restore_exit = Some(destination);
+                Task::done(Message::BackToApp(self.network))
+            }
             Message::Install => {
                 #[cfg(feature = "mcp-proposals")]
                 if self.context.mcp_proposal.is_some() {
@@ -1601,6 +1623,7 @@ impl Installer {
     ) -> Element<'a, Message> {
         use crate::home::restore_frame;
         use coincube_ui::component::text::*;
+        use coincube_ui::widget::ColumnExt;
         use iced::Length;
 
         let stage = self
@@ -1627,17 +1650,39 @@ impl Installer {
                 )
             },
         );
+        // Before anything is written, as for Close, the path list leaves
+        // for the Launcher's path; after, it only shows where the user is.
+        let leave = |destination: RestoreDestination, open: bool| {
+            (stage.is_some() && open).then_some(Message::LeaveRestore(destination))
+        };
         let nav = restore_frame::nav()
-            .push(restore_frame::nav_label("Overview", false))
-            .push(restore_frame::nav_label("Import Bitcoin wallet", false))
-            .push(restore_frame::nav_label(
+            .push(restore_frame::nav_action(
+                "Overview",
+                false,
+                leave(RestoreDestination::Overview, true),
+            ))
+            .push(restore_frame::nav_action(
+                "Import Bitcoin wallet",
+                false,
+                leave(
+                    RestoreDestination::ImportBitcoin,
+                    chain == crate::chain::ChainId::Bitcoin,
+                ),
+            ))
+            .push(restore_frame::nav_action(
                 "Recovery Kit",
                 path == RestorePath::Kit,
+                leave(RestoreDestination::Kit, path != RestorePath::Kit),
             ))
-            .push(restore_frame::nav_label(
-                "Recover with phone",
-                path == RestorePath::Phone,
-            ));
+            .push_maybe(
+                crate::feature_flags::OWNER_KEYCHAIN_RECOVERY_ENABLED.then(|| {
+                    restore_frame::nav_action(
+                        "Recover with phone",
+                        path == RestorePath::Phone,
+                        leave(RestoreDestination::Phone, path != RestorePath::Phone),
+                    )
+                }),
+            );
         let body = iced::widget::scrollable(
             Column::new()
                 .spacing(20)
@@ -4194,6 +4239,29 @@ mod restore_frame_tests {
         let shown = rendered_labels(create.view()).await;
         assert!(!has(&shown, "Import or restore"), "{:?}", shown);
         assert!(shown.iter().any(|text| text.contains(" | ")), "{:?}", shown);
+    }
+
+    /// The Kit's first step has no Back: like every Import or restore path,
+    /// its path list and Close leave it. A path list press goes back to the
+    /// Launcher, which takes the path to open once.
+    #[tokio::test]
+    async fn a_recovery_kit_restore_leaves_from_its_path_list() {
+        use iced_runtime::futures::futures::StreamExt;
+
+        let mut kit = installer(UserFlow::RestoreFromRecoveryKit { cube_uuid: None });
+        let shown = rendered_labels(kit.view()).await;
+        assert!(!has(&shown, "Back"), "{:?}", shown);
+
+        let task = kit.update(Message::LeaveRestore(RestoreDestination::Phone));
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        assert!(matches!(
+            stream.next().await,
+            Some(iced_runtime::Action::Output(Message::BackToApp(
+                bitcoin::Network::Bitcoin
+            )))
+        ));
+        assert_eq!(kit.take_restore_exit(), Some(RestoreDestination::Phone));
+        assert_eq!(kit.take_restore_exit(), None);
     }
 
     /// Opt-in frames: `LAUNCHER_CAPTURE_DIR=<dir> cargo test -p coincube-gui

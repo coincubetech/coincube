@@ -53,6 +53,9 @@ pub enum Message {
     Skip,
     Previous,
     BackToApp(Network),
+    /// A press on Import or restore's path list: back to the Launcher, on
+    /// that path.
+    LeaveRestore(super::RestoreDestination),
     /// A Recovery Kit or phone restore's Done: open the restored Cube.
     OpenRestoredCube,
     Install,
