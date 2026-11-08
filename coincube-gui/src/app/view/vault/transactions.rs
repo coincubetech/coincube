@@ -1,3 +1,4 @@
+use coincube_ui::locale::Text as CopyText;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 
@@ -197,7 +198,7 @@ fn tx_list_view(
     let status = if tx.time.is_none() {
         "Unconfirmed"
     } else {
-        "Confirmed"
+        CopyText::Confirmed.get()
     };
     let sign = match direction {
         TransactionDirection::Incoming => "+",
@@ -302,7 +303,7 @@ pub fn create_rbf_modal<'a>(
     let mut body = Column::new()
         .spacing(16)
         .width(Length::Fill)
-        .push(h4_bold("Transaction replacement"))
+        .push(h4_bold(CopyText::TransactionReplacement.get()))
         .push(p2_regular(crate::chain::canonical_network_name(chain)));
 
     if created {
@@ -327,7 +328,7 @@ pub fn create_rbf_modal<'a>(
                         button::secondary_action(
                             Id::new("vault-rbf-close"),
                             None,
-                            "Close",
+                            CopyText::Close.get(),
                             Message::FocusAction,
                         )
                         .on_press(Message::CreateRbf(CreateRbfMessage::Cancel)),
@@ -436,7 +437,7 @@ pub fn create_rbf_modal<'a>(
                     button::secondary_action(
                         Id::new("vault-rbf-back"),
                         None,
-                        "Back",
+                        CopyText::Back.get(),
                         Message::FocusAction,
                     )
                     .on_press_maybe(
@@ -465,14 +466,15 @@ pub fn transaction_detail_view<'a>(
         &tx.outgoing_amount
     };
     let status = if tx.time.is_some() {
-        "Confirmed"
+        CopyText::Confirmed.get()
     } else {
         "Unconfirmed · awaiting a Bitcoin confirmation"
     };
-    let back_btn: Element<'_, Message> = button::secondary(Some(icon::previous_icon()), "Back")
-        .width(Length::Fixed(150.0))
-        .on_press(Message::Close)
-        .into();
+    let back_btn: Element<'_, Message> =
+        button::secondary(Some(icon::previous_icon()), CopyText::Back.get())
+            .width(Length::Fixed(150.0))
+            .on_press(Message::Close)
+            .into();
 
     let title = if tx.is_send_to_self() {
         "Self-transfer"

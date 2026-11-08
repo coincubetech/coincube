@@ -64,8 +64,12 @@ combinations must work. Spanish is the first additional locale to validate.
   currencies according to the app's locale policy when available, without
   changing their values, rounding rules, units or amount parsing in this feature.
 
-The initial preference slice uses English copy. Spanish UI enablement belongs to
-the app's localization rollout.
+The desktop language selector is a device preference under **App preferences →
+Appearance**. It defaults to English and uses the accepted settings receipt
+independently of worldview. The first Spanish catalog covers Worldview-related
+screens, device preferences, the shared technical network labels, and the
+bundled quotes. The remaining shared desktop copy and external error messages
+are part of the wider localization rollout.
 
 ## Chain identity and financial safety
 

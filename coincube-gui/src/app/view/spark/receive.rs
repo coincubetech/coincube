@@ -1,5 +1,6 @@
 //! View renderer for [`crate::app::state::spark::receive::SparkReceive`].
 
+use coincube_ui::locale::Text as CopyText;
 use std::collections::HashMap;
 
 use coincube_core::miniscript::bitcoin::Network;
@@ -93,9 +94,9 @@ impl<'a> SparkReceiveView<'a> {
         // ── Full-screen celebration for received payments ─────────────
         if let SparkReceivePhase::Received { count, .. } = self.phase {
             let verb_phrase = if *count > 1 {
-                "have arrived."
+                CopyText::HaveArrived.get()
             } else {
-                "has arrived."
+                CopyText::HasArrived.get()
             };
             return coincube_ui::component::received_celebration_page(
                 self.received_celebration_context,
@@ -651,7 +652,7 @@ fn deposit_row<'a>(
             .align_y(Alignment::Center)
             .push(p2_regular(format!("Error: {}", short_error(err))))
             .push(
-                button::secondary(None, "Retry")
+                button::secondary(None, CopyText::Retry.get())
                     .on_press(Message::SparkReceive(
                         crate::app::view::SparkReceiveMessage::ClaimDepositRequested {
                             txid: deposit.txid.clone(),

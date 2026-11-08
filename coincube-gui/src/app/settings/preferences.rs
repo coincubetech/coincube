@@ -33,6 +33,7 @@ impl From<ThemeMode> for ThemePreference {
     }
 }
 
+pub use coincube_ui::locale::Language;
 pub use coincube_ui::theme::WorldviewMode;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +175,7 @@ impl From<Zoom> for u16 {
 pub struct DevicePreferences {
     pub theme: ThemePreference,
     pub worldview: WorldviewMode,
+    pub language: Language,
     pub launcher_style: LauncherStyle,
     pub hide_balances: bool,
     pub motion: MotionPreference,
@@ -190,6 +192,7 @@ impl Default for DevicePreferences {
         Self {
             theme: ThemePreference::System,
             worldview: WorldviewMode::default(),
+            language: Language::default(),
             launcher_style: LauncherStyle::Cubes,
             hide_balances: false,
             motion: MotionPreference::FollowSystem,
@@ -238,6 +241,7 @@ impl DevicePreferences {
 pub enum PreferenceChange {
     Theme(ThemePreference),
     Worldview(WorldviewMode),
+    Language(Language),
     LauncherStyle(LauncherStyle),
     HideBalances(bool),
     Motion(MotionPreference),

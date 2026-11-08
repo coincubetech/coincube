@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use coincube_ui::locale::Text as CopyText;
 use iced::advanced::widget::Id;
 use iced::{
     alignment::Horizontal,
@@ -473,9 +474,9 @@ pub fn broadcast_action<'a>(
 /// the cancellation confirms, though: the original can still be mined first.
 fn broadcast_outcome(is_self_transfer: bool, replaces_pending: bool) -> &'static str {
     match (is_self_transfer, replaces_pending) {
-        (true, true) => "will return to your wallet once the cancellation confirms.",
-        (true, false) => "has been transferred.",
-        (false, _) => "has been sent successfully.",
+        (true, true) => CopyText::CancellationOutcome.get(),
+        (true, false) => CopyText::HasBeenTransferred.get(),
+        (false, _) => CopyText::HasBeenSentSuccessfully.get(),
     }
 }
 
@@ -505,9 +506,12 @@ pub fn broadcast_action_with_identity_review<'a>(
         card::simple(
             Column::new()
                 .spacing(10)
-                .push(Container::new(h4_bold("Broadcast the transaction")).width(Length::Fill))
+                .push(
+                    Container::new(h4_bold(CopyText::BroadcastTheTransaction.get()))
+                        .width(Length::Fill),
+                )
                 .push(p1_regular(crate::chain::canonical_network_name(chain)))
-                .push(error.map(|err| card::error("Broadcast failed", err)))
+                .push(error.map(|err| card::error(CopyText::BroadcastFailed.get(), err)))
                 .push(if conflicting_txids.is_empty() {
                     None
                 } else {
@@ -649,7 +653,7 @@ pub fn delete_action<'a>(deleted: bool) -> Element<'a, Message> {
                     Row::new()
                         .push(Column::new().width(Length::Fill))
                         .push(
-                            button::transparent(None, "Cancel")
+                            button::transparent(None, CopyText::Cancel.get())
                                 .on_press(Message::Spend(SpendTxMessage::Cancel)),
                         )
                         .push(
@@ -700,7 +704,7 @@ pub fn keychain_unavailable_action<'a>(action_scope: u64, signed_in: bool) -> El
                         button::secondary_action(
                             action_id(action_scope, "keychain-unavailable.cancel"),
                             None,
-                            "Cancel",
+                            CopyText::Cancel.get(),
                             Message::FocusAction,
                         )
                         .style(theme::button::container)
@@ -935,7 +939,7 @@ pub fn spend_overview_with_cancel<'a>(
             Some(
                 Row::new()
                     .push(Space::new().width(Length::Fill))
-                    .push_maybe(cancel.map(|message| secondary_action(action_id(action_scope, "overview.cancel"), "Cancel")
+                    .push_maybe(cancel.map(|message| secondary_action(action_id(action_scope, "overview.cancel"), CopyText::Cancel.get())
                         .on_press(message).width(Length::Fixed(150.0))))
                     .push(if tx.status != SpendStatus::Pending {
                         None
@@ -993,7 +997,11 @@ pub fn signatures<'a>(
                             .spacing(10)
                             .push(p1_bold("Status"))
                             .push(icon::square_check_icon().style(theme::text::success))
-                            .push(text("Ready").bold().style(theme::text::success))
+                            .push(
+                                text(CopyText::Ready.get())
+                                    .bold()
+                                    .style(theme::text::success),
+                            )
                             .push(text("  signed by"))
                             .push(
                                 sigs.signed_pubkeys
@@ -1929,7 +1937,7 @@ fn signing_key_row(
         SigningKeyState::Retry(idx) => button::secondary_action(
             row_id("retry"),
             Some(icon::reload_icon()),
-            "Retry",
+            CopyText::Retry.get(),
             Message::FocusAction,
         )
         .on_press(Message::Spend(SpendTxMessage::RetryKeychainSigner(*idx)))
@@ -2163,9 +2171,12 @@ pub fn sign_action<'a>(
             .align_y(Alignment::Center)
             .push(p1_regular(crate::chain::canonical_network_name(chain)).width(Length::Fill))
             .push(
-                secondary_action(action_id(action_scope, "picker.close"), "Close")
-                    .on_press(Message::Spend(SpendTxMessage::Cancel))
-                    .width(Length::Fixed(100.0)),
+                secondary_action(
+                    action_id(action_scope, "picker.close"),
+                    CopyText::Close.get(),
+                )
+                .on_press(Message::Spend(SpendTxMessage::Cancel))
+                .width(Length::Fixed(100.0)),
             ),
     );
     if let Some(error) = error {
@@ -2234,7 +2245,7 @@ fn border_wallet_recon_phrase_view(
         .as_ref()
         .map(|e| p1_regular(e.as_str()).color(color::RED).into());
 
-    let cancel_btn = button::transparent(None, "Cancel").on_press(Message::Spend(
+    let cancel_btn = button::transparent(None, CopyText::Cancel.get()).on_press(Message::Spend(
         SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::Cancel),
     ));
 
@@ -2302,10 +2313,11 @@ fn border_wallet_recon_grid_view(recon: &BorderWalletReconstructionState) -> Ele
         }),
     );
 
-    let back_btn =
-        button::transparent(Some(icon::previous_icon()), "Back").on_press(Message::Spend(
-            SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::Previous),
-        ));
+    let back_btn = button::transparent(Some(icon::previous_icon()), CopyText::Back.get()).on_press(
+        Message::Spend(SpendTxMessage::BorderWalletRecon(
+            BorderWalletReconMessage::Previous,
+        )),
+    );
 
     let status = p1_bold(format!(
         "Selected: {} / {} cells",

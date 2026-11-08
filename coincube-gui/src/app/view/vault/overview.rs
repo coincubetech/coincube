@@ -1,4 +1,5 @@
 use chrono::{DateTime, Local, Utc};
+use coincube_ui::locale::Text as CopyText;
 use std::{collections::HashMap, time::Duration, vec};
 
 use iced::{
@@ -262,7 +263,7 @@ fn protection_strip<'a>(
                 ProtectionItem::Psbts(copy) => (
                     copy,
                     "review-psbts",
-                    "Review",
+                    CopyText::Review.get(),
                     Menu::Vault(VaultSubMenu::PSBTs(None)),
                     None,
                 ),
@@ -588,7 +589,7 @@ pub fn received_celebration_page<'a>(
         amount_display,
         quote,
         image_handle,
-        "has arrived.",
+        CopyText::HasArrived.get(),
         Message::DismissReceivedCelebration,
     )
 }

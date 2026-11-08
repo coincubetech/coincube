@@ -2,6 +2,7 @@
 //! Settings retains its page header while the focused flow replaces the rows.
 //! Flow: PinEntry → Intro → RecoveryPhrase → Verification → Completed.
 
+use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     component::tenshu::{self, ActionKind, Tone},
     theme,
@@ -74,15 +75,15 @@ fn error_note<'a, M: 'a>(message: &'a str) -> Element<'a, M> {
 /// Reuse the Launcher's compact PIN fields, including masking and digit focus.
 pub fn pin_entry_view<'a>(pin: &'a PinInput, error: Option<&'a str>) -> Element<'a, Message> {
     let mut content = page::illustrated_flow(
-        "Unlock your seed phrase",
-        "Enter your Cube PIN to unlock and display your 12-word recovery phrase.",
+        CopyText::UnlockYourSeedPhrase.get(),
+        CopyText::EnterYourCubePinToUnlockAndDisplayYour.get(),
         coincube_ui::image::pin_unlock_lock(),
         coincube_ui::illustration::Slot::Pin,
     )
     .push(
         Column::new()
             .spacing(8)
-            .push(tenshu::label("Cube PIN"))
+            .push(tenshu::label(CopyText::CubePin.get()))
             .push(
                 pin.face_view()
                     .map(|m| wrap(BackupWalletMessage::PinInput(m))),
@@ -93,8 +94,8 @@ pub fn pin_entry_view<'a>(pin: &'a PinInput, error: Option<&'a str>) -> Element<
     }
     content
         .push(actions(
-            "Cancel",
-            "Unlock",
+            CopyText::Cancel.get(),
+            CopyText::Unlock.get(),
             pin.is_complete(),
             BackupWalletMessage::VerifyPin,
             wrap,
@@ -109,19 +110,17 @@ pub fn intro_view<M: Clone + 'static>(
     on: fn(BackupWalletMessage) -> M,
 ) -> Element<'static, M> {
     flow(
-        "Back up your seed phrase",
-        "You'll see 12 words. Write them on paper, numbered, in the order shown. They restore this Cube on any computer.",
+        CopyText::BackUpYourSeedPhrase.get(),
+        CopyText::YouLlSee12WordsWriteThemOnPaper.get(),
     )
     .push(
-        tenshu::label(
-            "Anyone who sees these words can take your bitcoin. Don't photograph them, type them or share them with anyone, COINCUBE included.",
-        )
-        .style(|t| theme::tenshu::text::tone(t, Tone::Warn)),
+        tenshu::label(CopyText::AnyoneWhoSeesTheseWordsCanTakeYourBitcoin.get())
+            .style(|t| theme::tenshu::text::tone(t, Tone::Warn)),
     )
     .push(note)
     .push(
         CheckBox::new(checked)
-            .label("I understand that if I lose these words and don't have a Recovery Kit, my funds can't be recovered.")
+            .label(CopyText::IUnderstandThatIfILoseTheseWordsAnd.get())
             .on_toggle(move |_| on(BackupWalletMessage::ToggleBackupIntroCheck))
             .style(theme::checkbox::primary)
             .text_size(14)
@@ -129,7 +128,13 @@ pub fn intro_view<M: Clone + 'static>(
             .spacing(10)
             .width(Length::Fill),
     )
-    .push(actions("Cancel", "Show seed phrase", checked, BackupWalletMessage::NextStep, on))
+    .push(actions(
+        CopyText::Cancel.get(),
+        CopyText::ShowSeedPhrase.get(),
+        checked,
+        BackupWalletMessage::NextStep,
+        on,
+    ))
     .into()
 }
 
@@ -162,11 +167,17 @@ pub fn recovery_phrase_view<'a, M: Clone + 'a>(
         grid = grid.push(words).push(page::rule());
     }
     flow(
-        "Write down your seed phrase",
-        "Write each word next to its number, then check the spelling. Keep the paper offline: anyone with these words can take your bitcoin.",
+        CopyText::WriteDownYourSeedPhrase.get(),
+        CopyText::WriteEachWordNextToItsNumberThenCheck.get(),
     )
     .push(grid)
-    .push(actions("Back", "I've written it down", true, BackupWalletMessage::NextStep, on))
+    .push(actions(
+        CopyText::Back.get(),
+        CopyText::IVeWrittenItDown.get(),
+        true,
+        BackupWalletMessage::NextStep,
+        on,
+    ))
     .into()
 }
 
@@ -179,15 +190,19 @@ pub fn verification_view<'a, M: Clone + 'a>(
     on: fn(BackupWalletMessage) -> M,
 ) -> Element<'a, M> {
     let mut content = flow(
-        "Confirm your seed phrase",
-        "Type the word for each number from your paper.",
+        CopyText::ConfirmYourSeedPhrase.get(),
+        CopyText::TypeTheWordForEachNumberFromYourPaper.get(),
     );
     let mut fields = Column::new().spacing(16).width(Length::Fill).max_width(360);
     for (i, &word_idx) in word_indices.iter().enumerate() {
         fields = fields.push(
             Column::new()
                 .spacing(6)
-                .push(tenshu::label(format!("Word {}", word_idx)))
+                .push(tenshu::label(CopyText::RecoveryWordNumber.get().replacen(
+                    "{number}",
+                    &word_idx.to_string(),
+                    1,
+                )))
                 .push(
                     TextInput::new("", &word_inputs[i])
                         .on_input(move |input| {
@@ -209,8 +224,12 @@ pub fn verification_view<'a, M: Clone + 'a>(
     }
     content
         .push(actions(
-            "Back",
-            if saving { "Saving…" } else { "Verify" },
+            CopyText::Back.get(),
+            if saving {
+                CopyText::Saving.get()
+            } else {
+                CopyText::Verify.get()
+            },
             word_inputs.iter().all(|w| !w.trim().is_empty()) && !saving,
             BackupWalletMessage::VerifyPhrase,
             on,
@@ -220,13 +239,13 @@ pub fn verification_view<'a, M: Clone + 'a>(
 
 pub fn completed_view<M: Clone + 'static>(on: fn(BackupWalletMessage) -> M) -> Element<'static, M> {
     flow(
-        "Seed phrase confirmed",
-        "The three-word check was saved for this Cube. Keep your recovery phrase safe.",
+        CopyText::SeedPhraseConfirmed.get(),
+        CopyText::TheThreeWordCheckWasSavedForThisCube.get(),
     )
-    .push(page::status(page::Status::Ok, "Confirmed"))
+    .push(page::status(page::Status::Ok, CopyText::Confirmed.get()))
     .push(page::rule())
     .push(page::plain_button(
-        "Back to Settings",
+        CopyText::BackToSettings.get(),
         ActionKind::Primary,
         Some(on(BackupWalletMessage::Complete)),
     ))
@@ -235,22 +254,29 @@ pub fn completed_view<M: Clone + 'static>(on: fn(BackupWalletMessage) -> M) -> E
 
 pub fn passkey_reauth_view() -> Element<'static, Message> {
     flow(
-        "Unlock your seed phrase",
-        "Confirm with Touch ID to show this Cube's recovery phrase. We ask again because putting your master seed on screen is not the same as opening your wallet.",
+        CopyText::UnlockYourSeedPhrase.get(),
+        CopyText::ConfirmWithTouchIdToShowThisCubeS.get(),
     )
-    .push(page::status(page::Status::Busy, "Waiting for Touch ID…"))
+    .push(page::status(
+        page::Status::Busy,
+        CopyText::WaitingForTouchId.get(),
+    ))
     .push(page::rule())
-    .push(page::button("tenshu.backup.passkey.cancel", "Cancel", Some(wrap(BackupWalletMessage::PreviousStep))))
+    .push(page::button(
+        "tenshu.backup.passkey.cancel",
+        CopyText::Cancel.get(),
+        Some(wrap(BackupWalletMessage::PreviousStep)),
+    ))
     .into()
 }
 
 pub fn backup_error_view(message: &str) -> Element<'_, Message> {
-    flow("Couldn't unlock your seed phrase", "")
+    flow(CopyText::CouldnTUnlockYourSeedPhrase.get(), "")
         .push(error_note(message))
         .push(page::rule())
         .push(page::primary(
             "tenshu.backup.error.back",
-            "Back to Settings",
+            CopyText::BackToSettings.get(),
             Some(wrap(BackupWalletMessage::PreviousStep)),
         ))
         .into()

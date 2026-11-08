@@ -18,6 +18,7 @@
 
 use coincube_core::miniscript::bitcoin::Amount;
 use coincube_spark_protocol::PaymentSummary;
+use coincube_ui::locale::Text as CopyText;
 use iced::widget::image;
 
 use crate::app::wallets::DomainPaymentStatus;
@@ -126,25 +127,23 @@ impl<'a> SparkTransactionsView<'a> {
                     )))
                     .push(Space::new().height(Length::Fixed(10.0)))
                     .push(
-                        text(
-                            "Your Spark wallet is ready. Once you send or receive\nfunds, they'll show up here.",
-                        )
-                        .size(16)
-                        .style(theme::text::secondary)
-                        .wrapping(iced::widget::text::Wrapping::Word)
-                        .align_x(iced::alignment::Horizontal::Center),
+                        text(CopyText::SparkHistoryEmpty.get())
+                            .size(16)
+                            .style(theme::text::secondary)
+                            .wrapping(iced::widget::text::Wrapping::Word)
+                            .align_x(iced::alignment::Horizontal::Center),
                     )
                     .push(
                         Row::new()
                             .spacing(15)
                             .push(
-                                button::primary(None, "Send sats")
+                                button::primary(None, CopyText::SendSats.get())
                                     .on_press(Message::Menu(Menu::Spark(SparkSubMenu::Send)))
                                     .padding(15)
                                     .width(Length::Fixed(150.0)),
                             )
                             .push(
-                                button::transparent_border(None, "Receive sats")
+                                button::transparent_border(None, CopyText::ReceiveSats.get())
                                     .on_press(Message::Menu(Menu::Spark(SparkSubMenu::Receive)))
                                     .padding(15)
                                     .width(Length::Fixed(150.0)),

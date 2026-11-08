@@ -1,6 +1,7 @@
 pub mod editor;
 
 use async_hwi::utils::extract_keys_and_template;
+use coincube_ui::locale::Text as CopyText;
 use iced::widget::{checkbox, radio, scrollable, tooltip, Button, Space, TextInput};
 use iced::{
     alignment,
@@ -950,7 +951,7 @@ pub fn define_bitcoind<'a>(
     let col_address = Column::new()
         .push(text("Address:").bold())
         .push(
-            form::Form::new_trimmed("Address", address, |msg| {
+            form::Form::new_trimmed(CopyText::Address.get(), address, |msg| {
                 Message::DefineNode(DefineNode::DefineBitcoind(
                     DefineBitcoind::ConfigFieldEdited(ConfigField::Address, msg),
                 ))
@@ -1921,12 +1922,14 @@ pub fn restored<'a>(cube_name: &str, warning: Option<&'a String>) -> Element<'a,
         .width(Length::Fill)
         .align_x(Alignment::Center)
         .push(crate::home::restore_frame::done_art(false))
-        .push(text::h3(format!("{cube_name} is restored")))
+        .push(text::h3(CopyText::CubeRestored.get().replacen(
+            "{cube_name}",
+            cube_name,
+            1,
+        )))
         .push(
-            text::p1_regular(
-                "Its wallets are back on this computer. Open it to pick up where you left off.",
-            )
-            .style(theme::text::secondary),
+            text::p1_regular(CopyText::ItsWalletsAreBackOnThisComputerOpenIt.get())
+                .style(theme::text::secondary),
         )
         .push(warning.map(|e| card::invalid(text::text(e))))
         .into()
@@ -2399,7 +2402,7 @@ pub fn recover_mnemonic<'a>(
                 Row::new()
                     .spacing(10)
                     .push(
-                        button::secondary(None, "Cancel")
+                        button::secondary(None, CopyText::Cancel.get())
                             .on_press(Message::ImportMnemonic(false))
                             .width(Length::Fixed(200.0)),
                     )
@@ -2883,7 +2886,7 @@ fn titled_layout<'a>(
         None => content.into(),
     };
     let mut prev_button =
-        button::secondary(Some(icon::previous_icon()), "Back").width(Length::Shrink);
+        button::secondary(Some(icon::previous_icon()), CopyText::Back.get()).width(Length::Shrink);
     if let Some(msg) = previous_message {
         prev_button = prev_button.on_press(msg);
     }
@@ -3212,7 +3215,7 @@ pub fn recovery_kit_restore<'a>(
                     selected.name
                 )))
                 .push(
-                    TextInput::new("Recovery password", password)
+                    TextInput::new(CopyText::RecoveryPassword.get(), password)
                         .id(format!(
                             "tenshu.installer.restore.{ui_instance}.password-input"
                         ))

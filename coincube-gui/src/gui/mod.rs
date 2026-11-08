@@ -4030,6 +4030,15 @@ impl GUI {
     }
 
     fn screen(&self) -> Element<Message> {
+        let language = self
+            .preferences
+            .accepted()
+            .map(|accepted| accepted.preferences.language)
+            .unwrap_or_default();
+        coincube_ui::locale::render_in(language, || self.localized_screen())
+    }
+
+    fn localized_screen(&self) -> Element<Message> {
         if privacy_render_needs_cover(
             &self.preferences,
             &GlobalSettings::path(&self.config.coincube_directory),

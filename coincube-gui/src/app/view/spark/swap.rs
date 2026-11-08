@@ -7,6 +7,7 @@
 use coincube_spark_protocol::{
     AssetAmount, ConversionQuote, PrepareSwapOk, SwapStatus, WalletAsset,
 };
+use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     component::tenshu::{steps, ActionButton, ActionKind},
     component::text::*,
@@ -561,7 +562,7 @@ fn review_card<'a>(
         .push(section(
             Column::new()
                 .spacing(6)
-                .push(h4_bold("Review"))
+                .push(h4_bold(CopyText::Review.get()))
                 .push(p2_regular(crate::chain::canonical_network_name(chain))),
         ))
         .push(iced::widget::rule::horizontal(1))

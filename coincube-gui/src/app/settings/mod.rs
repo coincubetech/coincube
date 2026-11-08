@@ -1828,7 +1828,7 @@ impl std::fmt::Display for SettingsError {
 #[allow(unstable_name_collisions)]
 pub mod global {
     use super::preferences::{
-        DevicePreferences, LauncherStyle, MotionPreference, NetworkActivitySource,
+        DevicePreferences, Language, LauncherStyle, MotionPreference, NetworkActivitySource,
         PreferenceChange, ThemePreference, WorldviewMode, Zoom,
     };
     use crate::dir::CoincubeDirectory;
@@ -1902,6 +1902,8 @@ pub mod global {
         #[serde(default)]
         pub worldview: WorldviewMode,
         #[serde(default)]
+        pub language: Language,
+        #[serde(default)]
         pub launcher_style: LauncherStyle,
         /// Not, by itself, authority to show amounts: see
         /// `balance_privacy_initialized` and
@@ -1966,6 +1968,7 @@ pub mod global {
                 theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
                 theme_preference: Some(ThemePreference::System),
                 worldview: WorldviewMode::default(),
+                language: Language::default(),
                 launcher_style: LauncherStyle::default(),
                 hide_balances: false,
                 // A missing file can coexist with legacy Cubes: never resolved by default.
@@ -1988,6 +1991,7 @@ pub mod global {
             DevicePreferences {
                 theme: self.theme_preference.unwrap_or(self.theme_mode.into()),
                 worldview: self.worldview,
+                language: self.language,
                 launcher_style: self.launcher_style,
                 hide_balances: self.hide_balances,
                 motion: self.motion_preference,
@@ -2007,6 +2011,7 @@ pub mod global {
                     self.theme_mode = choice.resolve(None);
                 }
                 PreferenceChange::Worldview(mode) => self.worldview = mode,
+                PreferenceChange::Language(language) => self.language = language,
                 PreferenceChange::LauncherStyle(style) => self.launcher_style = style,
                 PreferenceChange::HideBalances(hidden) => {
                     self.hide_balances = hidden;
@@ -4057,6 +4062,34 @@ pub mod global {
                     assert_eq!(raw(&path)["worldview"], key);
                     assert_eq!(raw(&path)["language"], "es");
                 }
+            }
+        }
+
+        #[test]
+        fn display_language_round_trips_without_changing_worldview() {
+            let root = TempRoot::new("display-language");
+            let path = root.global();
+            assert_eq!(
+                GlobalSettings::load_preferences(&path).unwrap().language,
+                Language::English
+            );
+
+            std::fs::write(
+                &path,
+                r#"{"language":{"future":true},"worldview":"luke","theme_mode":"light"}"#,
+            )
+            .unwrap();
+            let before = GlobalSettings::load_preferences(&path).unwrap();
+            assert_eq!(before.language, Language::English);
+            assert_eq!(before.worldview, WorldviewMode::Luke);
+            for (language, code) in [(Language::Spanish, "es"), (Language::English, "en")] {
+                let receipt =
+                    GlobalSettings::save_preference(&path, PreferenceChange::Language(language))
+                        .unwrap();
+                let expected = DevicePreferences { language, ..before };
+                assert_eq!(receipt.preferences(), expected);
+                assert_eq!(GlobalSettings::load_preferences(&path).unwrap(), expected);
+                assert_eq!(raw(&path)["language"], code);
             }
         }
 

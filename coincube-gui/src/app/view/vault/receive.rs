@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use coincube_ui::locale::Text as CopyText;
 use iced::{
     advanced::widget::Id,
     widget::{
@@ -833,7 +834,7 @@ pub fn verify_address_modal<'a>(
                     .push(h4_bold("Verify address on a device").width(Length::Fill))
                     .push(action(
                         verify_close_id(),
-                        "Close",
+                        CopyText::Close.get(),
                         Some(icon::cross_icon()),
                         Some(Message::Close),
                         landing_subtle_button_style,
@@ -848,7 +849,7 @@ pub fn verify_address_modal<'a>(
             .push(
                 Column::new()
                     .spacing(8)
-                    .push(p2_bold("Address"))
+                    .push(p2_bold(CopyText::Address.get()))
                     .push(p2_regular(crate::chain::canonical_network_name(chain)))
                     .push(address_field(
                         address_control_id(Scope::VerifyModal, Control::Copy, &addr),
@@ -887,7 +888,7 @@ pub fn qr_modal<'a>(qr: &'a qr_code::Data, _address: &'a String) -> Element<'a, 
                     .push(p1_bold("Scan to pay this address").width(Length::Fill))
                     .push(action(
                         qr_close_id(),
-                        "Close",
+                        CopyText::Close.get(),
                         Some(icon::cross_icon()),
                         Some(Message::Close),
                         landing_subtle_button_style,

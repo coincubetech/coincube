@@ -34,6 +34,7 @@
 //! names the build, and deliberately does not mention the Apple ID or iCloud
 //! Keychain — see that variant for why.
 
+use coincube_ui::locale::Text as CopyText;
 use iced::widget::{image, Space};
 use iced::{Alignment, Length, Task};
 
@@ -488,7 +489,7 @@ impl PasskeyUnlock {
                         &self.loading_image_handle,
                     )))
                     .push(crate::loading::loading_indicator(None))
-                    .push(text("Loading your Cube...").style(theme::text::secondary))
+                    .push(text(CopyText::LoadingYourCube.get()).style(theme::text::secondary))
                     .push(Space::new().height(Length::Fill)),
             )
             .width(Length::Fill)
@@ -565,7 +566,7 @@ impl PasskeyUnlock {
             }
             Phase::Opening => unreachable!("handled above"),
         }
-        let cancel = iced::widget::button(face::face_link_label("Cancel"))
+        let cancel = iced::widget::button(face::face_link_label(CopyText::Cancel.get()))
             .padding([2.0, 4.0])
             .style(face::face_link_style)
             .on_press(Message::Back);

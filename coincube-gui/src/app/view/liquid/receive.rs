@@ -1,6 +1,7 @@
 use coincube_core::miniscript::bitcoin::{Amount, Denomination};
 
 use crate::app::wallets::{DomainPaymentDetails, DomainPaymentStatus};
+use coincube_ui::locale::Text as CopyText;
 
 use coincube_ui::{
     color,
@@ -1382,7 +1383,7 @@ pub fn received_celebration_page<'a>(
         amount_display,
         quote,
         image_handle,
-        "has arrived.",
+        CopyText::HasArrived.get(),
         LiquidReceiveMessage::DismissCelebration,
     )
 }

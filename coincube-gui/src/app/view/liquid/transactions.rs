@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use coincube_core::miniscript::bitcoin::Amount;
+use coincube_ui::locale::Text as CopyText;
 use iced::widget::image;
 
 use crate::app::wallets::{
@@ -70,7 +71,7 @@ fn payment_detail_status(
             _ => theme::text::secondary,
         };
         let label = if status == BtcSwapReceiveStatus::Completed {
-            "Confirmed"
+            CopyText::Confirmed.get()
         } else {
             status.label()
         };
@@ -78,7 +79,7 @@ fn payment_detail_status(
     }
 
     match payment.status {
-        DomainPaymentStatus::Complete => ("Confirmed", theme::text::success),
+        DomainPaymentStatus::Complete => (CopyText::Confirmed.get(), theme::text::success),
         DomainPaymentStatus::Pending => ("Pending", theme::text::secondary),
         DomainPaymentStatus::Created => ("Created", theme::text::secondary),
         DomainPaymentStatus::Failed => ("Failed", theme::text::destructive),
@@ -232,8 +233,9 @@ pub fn liquid_transactions_view<'a>(
     // empty response just means we've paged past the end — keep the list
     // shell and pagination controls visible so the user can Prev back.
     if loading && payments.is_empty() && current_page == 0 && !show_refundables {
-        content =
-            content.push(p1_regular("Loading Liquid transactions…").style(theme::text::secondary));
+        content = content.push(
+            p1_regular(CopyText::LoadingLiquidTransactions.get()).style(theme::text::secondary),
+        );
     } else if payments.is_empty() && current_page == 0 && !show_refundables {
         // Empty state with Kage quote
         content = content.push(
@@ -242,37 +244,43 @@ pub fn liquid_transactions_view<'a>(
                 .width(Length::Fill)
                 .align_x(Alignment::Center)
                 .push(Space::new().height(Length::Fixed(40.0)))
-                .push(quote_display::display(
-                    &QuoteDisplayProps::new("empty-wallet", empty_state_quote, empty_state_image_handle),
-                ))
+                .push(quote_display::display(&QuoteDisplayProps::new(
+                    "empty-wallet",
+                    empty_state_quote,
+                    empty_state_image_handle,
+                )))
                 .push(Space::new().height(Length::Fixed(10.0)))
                 .push(
                     text(match asset_filter {
-                        AssetFilter::All => "Your Liquid wallet is ready. Once you send or receive\nfunds, they'll show up here.",
-                        AssetFilter::LbtcOnly => "No L-BTC transactions on this page.",
-                        AssetFilter::UsdtOnly => "No USDt transactions on this page.",
+                        AssetFilter::All => CopyText::LiquidHistoryEmpty.get(),
+                        AssetFilter::LbtcOnly => CopyText::NoLBtcTransactionsOnThisPage.get(),
+                        AssetFilter::UsdtOnly => CopyText::NoUsdtTransactionsOnThisPage.get(),
                     })
-                        .size(16)
-                        .style(theme::text::secondary)
-                        .wrapping(iced::widget::text::Wrapping::Word)
-                        .align_x(iced::alignment::Horizontal::Center),
+                    .size(16)
+                    .style(theme::text::secondary)
+                    .wrapping(iced::widget::text::Wrapping::Word)
+                    .align_x(iced::alignment::Horizontal::Center),
                 )
-                .push_maybe(matches!(asset_filter, AssetFilter::All).then(||
+                .push_maybe(matches!(asset_filter, AssetFilter::All).then(|| {
                     Row::new()
                         .spacing(15)
                         .push(
-                            button::primary(None, "Send sats")
-                                .on_press(Message::Menu(Menu::Liquid(crate::app::menu::LiquidSubMenu::Send)))
+                            button::primary(None, CopyText::SendSats.get())
+                                .on_press(Message::Menu(Menu::Liquid(
+                                    crate::app::menu::LiquidSubMenu::Send,
+                                )))
                                 .padding(15)
                                 .width(Length::Fixed(150.0)),
                         )
                         .push(
-                            button::transparent_border(None, "Receive sats")
-                                .on_press(Message::Menu(Menu::Liquid(crate::app::menu::LiquidSubMenu::Receive)))
+                            button::transparent_border(None, CopyText::ReceiveSats.get())
+                                .on_press(Message::Menu(Menu::Liquid(
+                                    crate::app::menu::LiquidSubMenu::Receive,
+                                )))
                                 .padding(15)
                                 .width(Length::Fixed(150.0)),
-                        ),
-                )),
+                        )
+                })),
         );
     } else if !payments.is_empty() || current_page > 0 {
         // The dashboard already wraps the whole panel in a page-level
@@ -431,7 +439,9 @@ fn payment_list_status(
     if matches!(payment.details, DomainPaymentDetails::OnChainBitcoin { .. }) {
         let status = classify_payment(payment, refundable_swap_addresses);
         return match status {
-            BtcSwapReceiveStatus::Completed => Some(("Confirmed", theme::text::success)),
+            BtcSwapReceiveStatus::Completed => {
+                Some((CopyText::Confirmed.get(), theme::text::success))
+            }
             BtcSwapReceiveStatus::Refunded => Some(("Refunded", theme::text::success)),
             BtcSwapReceiveStatus::Failed | BtcSwapReceiveStatus::Refundable => {
                 Some((status.label(), theme::text::error))
@@ -440,7 +450,7 @@ fn payment_list_status(
         };
     }
     match payment.status {
-        DomainPaymentStatus::Complete => Some(("Confirmed", theme::text::success)),
+        DomainPaymentStatus::Complete => Some((CopyText::Confirmed.get(), theme::text::success)),
         DomainPaymentStatus::Pending => Some(("Pending", theme::text::warning)),
         DomainPaymentStatus::Created => Some(("Created", theme::text::secondary)),
         DomainPaymentStatus::Failed => Some(("Failed", theme::text::error)),
@@ -1052,9 +1062,10 @@ pub fn refundable_detail_view<'a>(
             Column::new()
                 .spacing(15)
                 .push(Container::new(h4_bold("Refund Details")).width(Length::Fill))
-                .push(p2_regular(format!(
-                    "Destination network · {}",
-                    crate::chain::canonical_network_name(chain)
+                .push(p2_regular(CopyText::DestinationNetwork.get().replacen(
+                    "{network}",
+                    crate::chain::canonical_network_name(chain),
+                    1,
                 )))
                 .push(p1_regular(format!(
                     "Refund amount: {}",

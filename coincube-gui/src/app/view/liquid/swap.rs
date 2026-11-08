@@ -6,6 +6,7 @@
 //! [`crate::app::state::liquid::swap`] for the quote model.
 
 use coincube_core::miniscript::bitcoin::Amount;
+use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     color,
     component::{
@@ -588,7 +589,7 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
         content = content
             .push(text(status).size(P1_SIZE).style(theme::text::secondary))
             .push(
-                button::secondary(None, "Back")
+                button::secondary(None, CopyText::Back.get())
                     .on_press(LiquidSwapMessage::BackToInput)
                     .width(Length::Fixed(120.0)),
             );
@@ -622,7 +623,7 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
     let summary = Column::new()
         .width(Length::Fill)
         .push(rule())
-        .push(line("Network", "Liquid".to_owned()))
+        .push(line(CopyText::Network.get(), "Liquid".to_owned()))
         .push(rule())
         .push(line(
             "You pay",
@@ -677,7 +678,7 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
         b
     };
 
-    let back_btn = button::secondary(None, "Back")
+    let back_btn = button::secondary(None, CopyText::Back.get())
         .on_press(LiquidSwapMessage::BackToInput)
         .width(Length::Fixed(120.0));
 
@@ -752,7 +753,7 @@ pub fn liquid_swap_view<'a>(config: LiquidSwapConfig<'a>) -> Element<'a, LiquidS
             config.sent_amount_display,
             config.sent_quote,
             config.sent_image_handle,
-            "is on its way.",
+            CopyText::IsOnItsWay.get(),
             LiquidSwapMessage::Done,
         ),
     }

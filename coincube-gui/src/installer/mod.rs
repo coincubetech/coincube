@@ -157,6 +157,7 @@ pub(crate) fn connect_esplora_config<C: Into<crate::chain::ChainId>>(
 }
 
 use coincube_core::miniscript::bitcoin::{self, Network};
+use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     component::network_banner,
     widget::{Column, Element},
@@ -1652,14 +1653,25 @@ impl Installer {
             coincube_ui::widget::Row::new()
                 .push(iced::widget::Space::new().width(Length::Fill))
                 .push(
-                    coincube_ui::component::button::primary(None, "Open Cube")
+                    coincube_ui::component::button::primary(None, CopyText::OpenCube.get())
                         .width(Length::Shrink)
                         .on_press(Message::OpenRestoredCube),
                 )
                 .into()
         });
         let region = restore_frame::region(
-            Some(restore_frame::step_rail(path.steps(), active)),
+            Some(restore_frame::step_rail(
+                match (coincube_ui::locale::language(), path) {
+                    (coincube_ui::locale::Language::Spanish, RestorePath::Kit) => {
+                        &["Cube", "Contraseña", "PIN", "Listo"]
+                    }
+                    (coincube_ui::locale::Language::Spanish, RestorePath::Phone) => {
+                        &["Cube", "Aprobar", "PIN", "Listo"]
+                    }
+                    _ => path.steps(),
+                },
+                active,
+            )),
             body,
             footer,
         );

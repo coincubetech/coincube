@@ -19,6 +19,7 @@ pub mod toast;
 pub mod tooltip;
 pub mod transaction;
 
+use crate::locale::Text as CopyText;
 use bitcoin::Network;
 pub use tooltip::{tooltip, tooltip_custom};
 
@@ -58,7 +59,7 @@ pub fn received_celebration_page<'a, M: Clone + 'a>(
                 .illustration_slot(crate::illustration::Slot::Received)
                 .image_size(480),
         ))
-        .push(text::h3("Payment received!"))
+        .push(text::h3(CopyText::PaymentReceived.get()))
         .push(
             Row::new()
                 .spacing(5)
@@ -78,7 +79,7 @@ pub fn received_celebration_page<'a, M: Clone + 'a>(
         )
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(
-            button::primary(None, "Back")
+            button::primary(None, CopyText::Back.get())
                 .width(Length::Fixed(150.0))
                 .on_press(on_dismiss.clone()),
         )
@@ -126,7 +127,7 @@ pub fn sent_celebration_page<'a, M: Clone + 'a>(
                 .illustration_slot(crate::illustration::Slot::Sent)
                 .image_size(480),
         ))
-        .push(text::h3("Transaction complete!"))
+        .push(text::h3(CopyText::TransactionComplete.get()))
         .push(
             Row::new()
                 .spacing(5)
@@ -150,7 +151,7 @@ pub fn sent_celebration_page<'a, M: Clone + 'a>(
         )
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(
-            button::primary(None, "Back")
+            button::primary(None, CopyText::Back.get())
                 .width(Length::Fixed(150.0))
                 .on_press(on_dismiss.clone()),
         );

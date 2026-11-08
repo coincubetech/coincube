@@ -1,6 +1,7 @@
 //! v113 Launcher List and Opening presentation. The catalog, unlock and
 //! loader remain the authorities for rows, actions and startup state.
 
+use coincube_ui::locale::Text as CopyText;
 use iced::{
     advanced::widget::Id,
     widget::{button as iced_button, container, responsive, rule, text::Wrapping, Space, Stack},
@@ -238,7 +239,7 @@ pub(super) fn backup_mark(cube: &crate::app::settings::CubeSettings) -> BackupMa
 
 pub(super) fn backup(cube: &crate::app::settings::CubeSettings) -> (&'static str, tenshu::Tone) {
     match backup_mark(cube) {
-        BackupMark::Confirmed => ("Confirmed", tenshu::Tone::Good),
+        BackupMark::Confirmed => (CopyText::Confirmed.get(), tenshu::Tone::Good),
         BackupMark::NotConfirmed => ("Not confirmed", tenshu::Tone::Warn),
         BackupMark::Unknown => ("Status unknown", tenshu::Tone::Muted),
     }
@@ -430,7 +431,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
                 .push(
                     ActionButton::new(
                         launcher_catalog::close_details_id(),
-                        "Back",
+                        CopyText::Back.get(),
                         ActionKind::Quiet,
                         focus,
                     )
@@ -439,7 +440,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
                 ),
         )
         .push(detail_line(
-            "Network",
+            CopyText::Network.get(),
             network_label(
                 row.key.chain,
                 crate::chain::canonical_network_name(row.key.chain),
@@ -758,7 +759,7 @@ fn floor_details<'a>(
         ))
         .push(face_link(
             launcher_catalog::close_details_id(),
-            "Back",
+            CopyText::Back.get(),
             ViewMessage::Catalog(CatalogMessage::ClearSelection),
         ))
         .push((!row.cube.network.is_blake2b()).then(|| {
@@ -923,7 +924,7 @@ fn ghost_details<'a>(
         .push(primary)
         .push(face_link(
             launcher_catalog::close_details_id(),
-            "Back",
+            CopyText::Back.get(),
             ViewMessage::Catalog(CatalogMessage::ClearSelection),
         ));
     // Three actions overrun the 364px face, so Delete takes its own line,
@@ -1124,7 +1125,7 @@ fn table_header<'a>() -> Element<'a, ViewMessage> {
         .align_y(Alignment::Center)
         .push(Space::new().width(Length::Fixed(AVATAR_WIDTH)))
         .push(tenshu::caption("Cube").width(Length::Fill))
-        .push(tenshu::caption("Network").width(Length::Fixed(NETWORK_WIDTH)))
+        .push(tenshu::caption(CopyText::Network.get()).width(Length::Fixed(NETWORK_WIDTH)))
         .push(tenshu::caption("Wallets").width(Length::Fixed(WALLETS_WIDTH)))
         .push(tenshu::caption("Seed phrase").width(Length::Fixed(BACKUP_WIDTH)))
         .push(Space::new().width(Length::Fixed(ACTION_WIDTH)))
@@ -2513,7 +2514,7 @@ fn opening_content<'a, M: 'a>(
         .push(
             Container::new(
                 opening_words(
-                    face.quote.text.clone(),
+                    face.quote.localized_text().to_owned(),
                     22.0,
                     font::REGULAR,
                     Tone::Ink,
@@ -2554,7 +2555,11 @@ fn opening_content<'a, M: 'a>(
                 face.without_spark,
             )
         } else {
-            ("Taking longer than usual.", "Cancel", face.cancel)
+            (
+                "Taking longer than usual.",
+                CopyText::Cancel.get(),
+                face.cancel,
+            )
         };
         body = body.push(Space::new().height(Length::Fixed(18.0))).push(
             Row::new()
@@ -2738,7 +2743,12 @@ fn opening_rail<'a, M: 'a>(scene: &OpeningScene) -> Element<'a, M> {
     // split the row with it and strand the network mid-bar.
     .lead(
         Container::new(
-            tenshu::body(format!("Opening {}", scene.cube_name)).wrapping(Wrapping::WordOrGlyph),
+            tenshu::body(
+                CopyText::OpeningCube
+                    .get()
+                    .replacen("{cube_name}", &scene.cube_name, 1),
+            )
+            .wrapping(Wrapping::WordOrGlyph),
         )
         .max_width(OPENING_RAIL_NAME),
     )

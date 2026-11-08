@@ -1,4 +1,5 @@
 use breez_sdk_liquid::{bitcoin::Denomination, model::PreparePayOnchainResponse};
+use coincube_ui::locale::Text as CopyText;
 use std::time::Duration;
 
 use coincube_ui::component::text::Text;
@@ -1389,7 +1390,7 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
             ))
             .push(page_actions(
                 Some(back_button(
-                    "Back",
+                    CopyText::Back.get(),
                     Some(Message::Home(HomeMessage::PreviousStep)),
                 )),
                 dialog_button(
@@ -1413,7 +1414,7 @@ fn check_row<'a>(label: String, state: std::cmp::Ordering) -> Element<'a, Messag
                     color: Some(t.colors.shell.good),
                 })
                 .into(),
-            "Done",
+            CopyText::Done.get(),
         ),
         Equal => (
             clock_icon().size(16).style(theme::text::secondary).into(),
@@ -1464,7 +1465,7 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
             } else {
                 button::primary_loading(
                     None,
-                    "Unlock",
+                    CopyText::Unlock.get(),
                     busy,
                     (!ctx.other.pin.is_empty() && !busy)
                         .then_some(Message::Home(HomeMessage::UnlockOtherCube)),
@@ -1504,7 +1505,7 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                         .push(unlock)
                         .push(Space::new().width(Length::Fill))
                         .push(back_button(
-                            "Cancel",
+                            CopyText::Cancel.get(),
                             Some(Message::Home(HomeMessage::PreviousStep)),
                         )),
                 )
@@ -1738,7 +1739,7 @@ fn amount_page<'a>(
             )
             .push(page_actions(
                 Some(back_button(
-                    "Back",
+                    CopyText::Back.get(),
                     Some(Message::Home(HomeMessage::PreviousStep)),
                 )),
                 dialog_button(
@@ -1927,7 +1928,7 @@ fn review_page<'a>(
         dl_row("Receiving wallet", text(receiving), false),
         dl_row("Route", text(route_text(direction)), false),
         dl_row(
-            "Bitcoin network",
+            CopyText::BitcoinNetwork.get(),
             text(crate::chain::canonical_network_name(ctx.chain)),
             false,
         ),
@@ -2057,7 +2058,7 @@ fn review_page<'a>(
             }))
             .push(page_actions(
                 Some(back_button(
-                    "Back",
+                    CopyText::Back.get(),
                     (!is_sending).then_some(Message::Home(HomeMessage::PreviousStep)),
                 )),
                 primary.width(Length::Fixed(200.0)).into(),

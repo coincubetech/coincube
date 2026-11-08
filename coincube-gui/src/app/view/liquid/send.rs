@@ -1,5 +1,6 @@
 use breez_sdk_liquid::InputType;
 use coincube_core::miniscript::bitcoin::Amount;
+use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     color,
     component::{
@@ -260,7 +261,7 @@ pub fn liquid_send_with_flow<'a>(config: LiquidSendFlowConfig<'a>) -> Element<'a
                 config.sent_amount_display,
                 config.sent_quote,
                 config.sent_image_handle,
-                "has been sent successfully.",
+                CopyText::HasBeenSentSuccessfully.get(),
                 LiquidSendMessage::BackToHome,
             )
             .map(Message::LiquidSend);
@@ -319,7 +320,7 @@ fn send_page<'a>(
     let aside = Column::new()
         .spacing(12)
         .push(liquid_send_step("1", "Details", true))
-        .push(liquid_send_step("2", "Review", false))
+        .push(liquid_send_step("2", CopyText::Review.get(), false))
         .push(liquid_send_step("3", "Sent", false))
         .push(iced::widget::rule::horizontal(1))
         .push(p2_regular("Available in Liquid").style(theme::text::secondary))
@@ -1517,7 +1518,7 @@ pub fn fiat_input_model<'a>(
 
     content = content.push(iced::widget::Space::new().height(Length::Fixed(5.0)));
 
-    let done_button = button::primary(None, "Done").width(Length::Fill);
+    let done_button = button::primary(None, CopyText::Done.get()).width(Length::Fill);
     let done_button = if !fiat_input.valid || fiat_input.value.is_empty() {
         done_button
     } else {
@@ -1556,7 +1557,7 @@ pub fn final_check_page<'a>(
     let description = intent.description();
     let header = Row::new()
         .push(
-            button::secondary(Some(icon::previous_icon()), "Back")
+            button::secondary(Some(icon::previous_icon()), CopyText::Back.get())
                 .width(Length::Fixed(150.0))
                 .on_press(LiquidSendMessage::PopupMessage(
                     view::SendPopupMessage::Close,
@@ -1574,7 +1575,9 @@ pub fn final_check_page<'a>(
             breez_sdk_liquid::prelude::SendDestination::LiquidAddress { .. } => "Liquid".to_owned(),
             breez_sdk_liquid::prelude::SendDestination::Bolt11 { .. }
             | breez_sdk_liquid::prelude::SendDestination::Bolt12 { .. } => {
-                format!("Lightning on {network}")
+                CopyText::LightningNetwork
+                    .get()
+                    .replacen("{network}", network, 1)
             }
         },
     };
@@ -1584,8 +1587,12 @@ pub fn final_check_page<'a>(
         .width(Length::Fill)
         .max_width(600)
         .align_x(Alignment::Center)
-        .push(p2_regular("Source network · Liquid"))
-        .push(p2_regular(format!("Destination network · {destination}")));
+        .push(p2_regular(CopyText::SourceLiquidNetwork.get()))
+        .push(p2_regular(CopyText::DestinationNetwork.get().replacen(
+            "{network}",
+            &destination,
+            1,
+        )));
 
     if let Some(desc) = description {
         content = content.push(

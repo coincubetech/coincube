@@ -3,6 +3,7 @@
 //! v157, `P-Advanced`).
 
 use coincube_core::miniscript::bitcoin::{Amount, OutPoint};
+use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     component::{amount::*, button, text::*},
     theme,
@@ -162,9 +163,10 @@ pub fn send_warning<'a>(here: ChainId, count: usize, ack: bool) -> Element<'a, M
         .spacing(16)
         .push(h4_bold(question))
         .push(p1_regular(crate::chain::canonical_network_name(here)))
-        .push(p1_regular(format!(
-            "Also on {}",
-            crate::chain::canonical_network_name(twin(here))
+        .push(p1_regular(CopyText::ReplaySiblingNetwork.get().replacen(
+            "{network}",
+            crate::chain::canonical_network_name(twin(here)),
+            1,
         )))
         .push(p1_regular(body).style(theme::text::secondary));
     if !here.is_blake2b() {
@@ -181,7 +183,7 @@ pub fn send_warning<'a>(here: ChainId, count: usize, ack: bool) -> Element<'a, M
         .align_y(Alignment::Center)
         .push(Space::new().width(Length::Fill))
         .push(
-            button::secondary(None, "Cancel")
+            button::secondary(None, CopyText::Cancel.get())
                 .on_press(Message::CoinControl(CoinControlMessage::CloseWarning)),
         );
     if !here.is_blake2b() {
@@ -447,9 +449,9 @@ pub fn split_overlay<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
                 .width(Length::Fill),
         )
         .push(if overlay.working {
-            button::secondary(None, "Cancel")
+            button::secondary(None, CopyText::Cancel.get())
         } else {
-            button::secondary(None, "Cancel")
+            button::secondary(None, CopyText::Cancel.get())
                 .on_press(Message::CoinControl(CoinControlMessage::CancelSplit))
         })
         .push(if blocked.is_none() {

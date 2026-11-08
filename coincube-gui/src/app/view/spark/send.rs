@@ -6,6 +6,7 @@
 //! polish (fee tier picker, fiat estimate, address book, QR scanner)
 //! lands in a later phase once the bridge write path has soaked a bit.
 
+use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     color,
     component::{
@@ -133,7 +134,7 @@ impl<'a> SparkSendView<'a> {
                 self.sent_amount_display,
                 self.sent_quote,
                 self.sent_image_handle,
-                "has been sent successfully.",
+                CopyText::HasBeenSentSuccessfully.get(),
                 Message::SparkSend(crate::app::view::SparkSendMessage::Reset),
             );
         }
@@ -471,7 +472,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
             let mut col = Column::new()
                 .spacing(12)
                 .push(h4_bold("Confirm the network"))
-                .push(kv_row("Address", address.address.clone()));
+                .push(kv_row(CopyText::Address.get(), address.address.clone()));
 
             if let Some(route) = routes.get(*selected) {
                 col = col.push(p1_regular(cross_chain::chain_confirmation(address, route)));
@@ -551,7 +552,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                             .width(Length::Fixed(160.0)),
                     )
                     .push(
-                        button::transparent_border(None, "Cancel")
+                        button::transparent_border(None, CopyText::Cancel.get())
                             .on_press(Message::SparkSend(SparkSendMessage::Reset))
                             .width(Length::Fixed(120.0)),
                     ),
@@ -580,8 +581,11 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                 );
                 let mut col = Column::new()
                     .spacing(14)
-                    .push(h4_bold("Preview"))
-                    .push(kv_row("Source Bitcoin network", bitcoin_network.to_owned()))
+                    .push(h4_bold(CopyText::Preview.get()))
+                    .push(kv_row(
+                        CopyText::SourceBitcoinNetwork.get(),
+                        bitcoin_network.to_owned(),
+                    ))
                     .push(kv_row(
                         "They receive",
                         format!(
@@ -594,7 +598,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                         ),
                     ))
                     .push(kv_row(
-                        "Network",
+                        CopyText::Network.get(),
                         format!("{} — via {}", quote.route.chain, quote.route.provider),
                     ))
                     // The old single mixed-unit "Fee" line hid how much each part
@@ -650,7 +654,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
 
                 col = col.push(Space::new().height(Length::Fixed(8.0))).push(
                     Row::new().spacing(10).push(action).push(
-                        button::transparent_border(None, "Cancel")
+                        button::transparent_border(None, CopyText::Cancel.get())
                             .on_press(Message::SparkSend(SparkSendMessage::Reset))
                             .width(Length::Fixed(120.0)),
                     ),
@@ -681,8 +685,8 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
             Container::new(
                 Column::new()
                     .spacing(14)
-                    .push(h4_bold("Preview"))
-                    .push(kv_row("Bitcoin network", bitcoin_network.to_owned()))
+                    .push(h4_bold(CopyText::Preview.get()))
+                    .push(kv_row(CopyText::BitcoinNetwork.get(), bitcoin_network.to_owned()))
                     .push(kv_row("Method", ok.method.clone()))
                     .push(kv_row("Paid from", pay_from_label(paid_from).to_owned()))
                     // The conversion funding the send, with its own fee and
@@ -724,7 +728,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                             .spacing(10)
                             .push(confirm)
                             .push(
-                                button::transparent_border(None, "Cancel")
+                                button::transparent_border(None, CopyText::Cancel.get())
                                     .on_press(Message::SparkSend(SparkSendMessage::Reset))
                                     .width(Length::Fixed(120.0)),
                             ),
@@ -826,7 +830,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                         );
                     }
                     actions = actions.push(
-                        button::secondary(None, "Check again")
+                        button::secondary(None, CopyText::CheckAgain.get())
                             .on_press(Message::SparkSend(SparkSendMessage::ReconcileRequested))
                             .width(Length::Fixed(140.0)),
                     );
@@ -1152,7 +1156,7 @@ pub fn pay_from_picker_modal<'a>(
             Row::new().push(Space::new().width(Length::Fill)).push(
                 Action::new(
                     PAY_FROM_CLOSE_ID,
-                    text("Close").size(P2_SIZE).bold(),
+                    text(CopyText::Close.get()).size(P2_SIZE).bold(),
                     Message::FocusAction,
                 )
                 .style(theme::button::transparent_border)
@@ -1476,7 +1480,7 @@ pub fn send_target_picker_modal<'a>(
         Row::new().push(Space::new().width(Length::Fill)).push(
             Action::new(
                 TARGET_PICKER_CLOSE_ID,
-                text("Close").size(P2_SIZE).bold(),
+                text(CopyText::Close.get()).size(P2_SIZE).bold(),
                 Message::FocusAction,
             )
             .style(theme::button::transparent_border)
