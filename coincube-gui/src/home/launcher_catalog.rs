@@ -1135,9 +1135,15 @@ pub(super) struct RemoteRestore {
 }
 
 pub(super) fn remote_restore(cube: &RemoteCube) -> RemoteRestore {
-    let password_recoverable = cube.has_recovery_kit && cube.has_encrypted_seed;
-    let phone_recoverable =
-        cube.phone_recoverable && feature_flags::OWNER_KEYCHAIN_RECOVERY_ENABLED;
+    let (password_recoverable, phone_recoverable) = remote_recovery(cube);
+    // No restore route exists for Bitcoin Blake2b yet, whatever Connect holds:
+    // its ghosts can be deleted from Connect, never restored.
+    if ghost_chain(cube).is_some_and(ChainId::is_blake2b) {
+        return RemoteRestore {
+            status: "Registered in Connect (Bitcoin Blake2b Cubes can\u{2019}t be restored yet)",
+            action: None,
+        };
+    }
     let status = match (password_recoverable, phone_recoverable) {
         (true, true) => "Recovery Kit + Phone recovery available",
         (true, false) => "Recovery Kit available",
@@ -1166,6 +1172,15 @@ pub(super) fn remote_restore(cube: &RemoteCube) -> RemoteRestore {
         (false, false) => None,
     };
     RemoteRestore { status, action }
+}
+
+/// The ways Connect holds to restore `cube` (password, phone), whether or not
+/// this build can restore its chain. Deleting it from Connect takes these.
+pub(super) fn remote_recovery(cube: &RemoteCube) -> (bool, bool) {
+    (
+        cube.has_recovery_kit && cube.has_encrypted_seed,
+        cube.phone_recoverable && feature_flags::OWNER_KEYCHAIN_RECOVERY_ENABLED,
+    )
 }
 
 /// Length-prefixed so no Cube ID can collide with another purpose or chain.
@@ -1624,7 +1639,7 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
     let all_remotes: Vec<&RemoteCube> = home
         .remote_cubes
         .iter()
-        .filter(|rc| !network.is_blake2b() && rc.network == network_str && filter.matches(network))
+        .filter(|rc| rc.network == network_str && filter.matches(network))
         .collect();
     let remote_total = all_remotes.len();
     let remotes: Vec<&RemoteCube> = all_remotes
@@ -1632,11 +1647,11 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
         .filter(|rc| matches_query(&catalog_display_name(&rc.name), &query))
         .collect();
     // The floor's ghosts follow the filter across networks, as local Cubes
-    // do, in the networks' listed order. Bitcoin Blake2b has no ghosts.
+    // do, in the networks' listed order.
     let all_ghosts: Vec<&RemoteCube> = home
         .ordered_networks()
         .into_iter()
-        .filter(|chain| !chain.is_blake2b() && filter.matches(*chain))
+        .filter(|chain| filter.matches(*chain))
         .flat_map(|chain| {
             home.remote_cubes
                 .iter()
@@ -1650,7 +1665,7 @@ pub(super) fn project(home: &Home) -> Projection<'_> {
     let hidden_ghosts = home
         .ordered_networks()
         .into_iter()
-        .filter(|chain| !chain.is_blake2b() && !filter.matches(*chain))
+        .filter(|chain| !filter.matches(*chain))
         .flat_map(|chain| {
             home.remote_cubes
                 .iter()
@@ -3876,6 +3891,64 @@ mod tests {
         drop(home.update(Message::View(ViewMessage::DeleteCatalog(fork))));
         assert!(home.error.is_none());
         assert!(home.delete_cube_modal.is_some());
+    }
+
+    #[test]
+    fn blake2b_connect_only_cubes_are_listed_counted_and_deleted_not_restored() {
+        let mut home = home_with(&[("a", "Fork Vault")]);
+        home.connect_account.bitcoin_blake2b_opt_in = true;
+        home.global_blake2b_enabled = true;
+        home.network = ChainId::BitcoinBlake2b;
+        if let State::Cubes { source, cubes, .. } = &mut home.state {
+            *source = ChainId::BitcoinBlake2b;
+            cubes[0].network = ChainId::BitcoinBlake2b;
+        }
+        // Kept in Connect when it was deleted here, with every backup Connect
+        // can hold.
+        let mut kept = remote("kept", "Kept", true, true, true, true);
+        kept.network = settings::network_to_api_string(ChainId::BitcoinBlake2b);
+        assert_eq!(kept.network, ChainId::BitcoinBlake2b.api_str());
+        home.remote_cubes = vec![kept.clone()];
+        home.server_cube_limit = Some(10);
+
+        // Listed and on the floor, and it takes a slot.
+        let projection = project(&home);
+        assert_eq!(projection.remote_total, 1);
+        assert_eq!(projection.ghosts.len(), 1);
+        assert_eq!(projection.total_count, 2);
+        assert_eq!(home.cube_usage(ChainId::BitcoinBlake2b), (Some(1), 1));
+        assert_eq!(home.cube_usage(ChainId::Bitcoin).1, 0);
+
+        // Nothing restores it, whatever Connect holds.
+        let restore = remote_restore(&kept);
+        assert!(restore.action.is_none());
+        assert!(restore.status.contains("can\u{2019}t be restored"));
+        assert!(matches!(
+            ghost_kind(&kept),
+            super::super::launcher_scene::Ghost::Unrestorable
+        ));
+        let inspection = capture::inspect(
+            "catalog-blake2b-connect-only",
+            catalog_view(&home),
+            WIDE,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(inspection.has_focus(remote_delete_id("kept")));
+        assert!(!inspection.has_focus(restore_id("kept")));
+
+        // Delete from Connect gets past the Blake2b allowlist.
+        for pointer in [false, true] {
+            assert!(matches!(
+                activate_once(catalog_view(&home), remote_delete_id("kept"), pointer),
+                ViewMessage::DeleteCube(DeleteCubeMessage::ShowRemoteModal(uuid)) if uuid == "kept"
+            ));
+        }
+        drop(home.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::ShowRemoteModal("kept".to_string()),
+        ))));
+        assert!(home.error.is_none());
+        assert!(home.delete_remote_cube_modal.is_some());
     }
 
     #[test]
