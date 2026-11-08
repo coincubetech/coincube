@@ -22,7 +22,7 @@ use iced::{advanced::widget::Id, widget::container, Alignment, Length};
 
 use crate::app::{
     settings::preferences::{
-        DevicePreferences, EffectivePreferences, LauncherStyle, MotionPreference,
+        ArtworkStyle, DevicePreferences, EffectivePreferences, LauncherStyle, MotionPreference,
         NetworkActivitySource, PreferenceChange, ThemePreference, WorldviewMode, Zoom,
     },
     state::preferences::{BalancePrivacy, PreferencesPageState, Section},
@@ -71,6 +71,75 @@ fn worldview_row<'a>(selected: WorldviewMode, enabled: bool) -> Element<'a, Mess
     .description("Choose a presentation style for Tenshu on this device.")
     .note(tagline, Tone::Muted)
     .into()
+}
+
+fn artwork_row<'a>(saved: DevicePreferences, enabled: bool) -> Element<'a, Message> {
+    use coincube_ui::{component::quote_display, illustration, theme::tenshu::control};
+
+    let mode = saved.worldview;
+    let (mode_name, existing_name, scene_name) = match mode {
+        WorldviewMode::Samurai => ("Samurai", "Kage", "Mountain Watch"),
+        WorldviewMode::Suitcoiner => ("Suitcoiner", "Gilded Wall Street", "Gilded Exchange"),
+        WorldviewMode::Luke => ("Luke", "Purist’s Woodcut", "The Stone Crossing"),
+    };
+    let mut options = [
+        (
+            ArtworkStyle::Existing,
+            existing_name,
+            "Existing set",
+            "tenshu.preferences.artwork.existing",
+        ),
+        (
+            ArtworkStyle::Scene,
+            scene_name,
+            "New scene",
+            "tenshu.preferences.artwork.scene",
+        ),
+    ];
+    if ArtworkStyle::default_for(mode) == ArtworkStyle::Scene {
+        options.swap(0, 1);
+    }
+    let choices = IntoIterator::into_iter(options).fold(
+        Row::new().spacing(8),
+        |row, (style, name, label, id)| {
+            let selected = saved.artwork.get(mode) == style;
+            let image = illustration::artwork_thumbnail(mode, style)
+                .unwrap_or_else(|| quote_display::image_handle_for_context("empty-wallet"));
+            let thumbnail = iced::widget::image(image)
+                .width(Length::Fixed(88.0))
+                .height(Length::Fixed(88.0))
+                .content_fit(iced::ContentFit::Contain);
+            let caption = Row::new()
+                .spacing(4)
+                .align_y(Alignment::Center)
+                .push(selected.then(|| check_circle_icon().size(12)))
+                .push(tenshu_text::caption(name).font(font::MEDIUM));
+            let content = Column::new()
+                .spacing(4)
+                .align_x(Alignment::Center)
+                .width(Length::Fill)
+                .push(thumbnail)
+                .push(caption)
+                .push(tenshu_text::caption(label).style(theme::text::secondary));
+            row.push(
+                FocusableAction::new(id, content, Message::FocusAction)
+                    .width(Length::Fixed(139.0))
+                    .padding([7, 5])
+                    .style(move |theme, status| control::choice_chip(theme, status, selected))
+                    .on_press_maybe(
+                        enabled.then_some(Message::Change(PreferenceChange::Artwork(mode, style))),
+                    ),
+            )
+        },
+    );
+    setting_row("Artwork", choices)
+        .tag(SCOPE)
+        .trailing_tag()
+        .description(format!(
+            "Choose the artwork for {mode_name} on opening and empty activity."
+        ))
+        .note("Each worldview remembers its own choice.", Tone::Muted)
+        .into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,6 +473,7 @@ fn section_content<'a>(
                 .into(),
             );
             rows.push(worldview_row(saved.worldview, enabled));
+            rows.push(artwork_row(saved, enabled));
             let max_zoom = model.max_zoom.unwrap_or(Zoom::LARGEST);
             let (zoom_selected, zoom_note) = zoom_choice(saved.zoom, max_zoom);
             rows.push(
@@ -1453,6 +1523,75 @@ mod tests {
             );
         }
         (focused, messages)
+    }
+
+    #[test]
+    fn artwork_picker_uses_the_active_worldview_and_fits_appearance() {
+        use crate::app::view::shared::landing::capture;
+        use coincube_ui::theme::Theme;
+        let page = PreferencesPageState {
+            section: Section::Appearance,
+            ..Default::default()
+        };
+        for (worldview, existing, scene) in [
+            (WorldviewMode::Samurai, "Kage", "Mountain Watch"),
+            (
+                WorldviewMode::Suitcoiner,
+                "Gilded Wall Street",
+                "Gilded Exchange",
+            ),
+            (
+                WorldviewMode::Luke,
+                "Purist’s Woodcut",
+                "The Stone Crossing",
+            ),
+        ] {
+            let model = ViewModel {
+                saved: Some(DevicePreferences {
+                    worldview,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            for (id, style) in [
+                (
+                    "tenshu.preferences.artwork.existing",
+                    ArtworkStyle::Existing,
+                ),
+                ("tenshu.preferences.artwork.scene", ArtworkStyle::Scene),
+            ] {
+                let (focused, messages) =
+                    activate(model, Section::Appearance, id, keyboard::key::Named::Enter);
+                assert!(focused);
+                assert_eq!(
+                    messages,
+                    vec![Message::Change(PreferenceChange::Artwork(worldview, style))]
+                );
+                let (focused, messages) = activate(
+                    ViewModel {
+                        saving: true,
+                        ..model
+                    },
+                    Section::Appearance,
+                    id,
+                    keyboard::key::Named::Space,
+                );
+                assert!(!focused);
+                assert!(messages.is_empty());
+            }
+            for (appearance, theme) in [("light", Theme::light()), ("dark", Theme::dark())] {
+                let mounted = capture::inspect_filled(
+                    &format!("artwork-picker-{worldview:?}"),
+                    view(&page, model),
+                    (1024, 768),
+                    appearance,
+                    theme.with_worldview(worldview),
+                    (1024, 768),
+                );
+                assert!(mounted.contains(existing));
+                assert!(mounted.contains(scene));
+            }
+        }
     }
 
     #[test]
