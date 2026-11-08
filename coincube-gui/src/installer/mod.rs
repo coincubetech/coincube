@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 mod claim;
 pub(crate) mod connect_vault;
 mod context;
@@ -304,8 +305,8 @@ impl RestorePath {
 
     pub(crate) fn title(self) -> &'static str {
         match self {
-            Self::Kit => "Restore from Cube Recovery Kit",
-            Self::Phone => "Recover with phone",
+            Self::Kit => localized_copy("Restore from Cube Recovery Kit"),
+            Self::Phone => localized_copy("Recover with phone"),
         }
     }
 
@@ -323,10 +324,10 @@ impl RestorePath {
         let label = match stage {
             Some(RestoreStage::SignIn) => "Cube",
             Some(RestoreStage::Cube) => "Cube",
-            Some(RestoreStage::Password) => "Password",
-            Some(RestoreStage::Approve) => "Approve",
+            Some(RestoreStage::Password) => localized_copy("Password"),
+            Some(RestoreStage::Approve) => localized_copy("Approve"),
             Some(RestoreStage::Pin) => "PIN",
-            None => "Done",
+            None => localized_copy("Done"),
         };
         let steps = self.steps();
         steps
@@ -359,14 +360,14 @@ impl VaultStage {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Vault => "Vault",
-            Self::Policy => "Policy",
-            Self::Keys => "Keys",
-            Self::Backup => "Backup",
-            Self::Register => "Register",
+            Self::Policy => localized_copy("Policy"),
+            Self::Keys => localized_copy("Keys"),
+            Self::Backup => localized_copy("Backup"),
+            Self::Register => localized_copy("Register"),
             Self::Connect => "Connect",
             Self::Node => "Node",
-            Self::Name => "Name",
-            Self::Done => "Done",
+            Self::Name => localized_copy("Name"),
+            Self::Done => localized_copy("Done"),
         }
     }
 

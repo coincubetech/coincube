@@ -67,7 +67,8 @@ fn actions<'a, M: Clone + 'a>(
 fn error_note<'a, M: 'a>(message: &'a str) -> Element<'a, M> {
     page::note(
         Tone::Bad,
-        tenshu::body(message).style(|t| theme::tenshu::text::tone(t, Tone::Bad)),
+        tenshu::body(coincube_ui::locale::notice(message.to_owned()))
+            .style(|t| theme::tenshu::text::tone(t, Tone::Bad)),
         None,
     )
 }

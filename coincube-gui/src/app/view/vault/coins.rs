@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use std::collections::HashMap;
 
 use iced::{
@@ -109,9 +111,13 @@ fn coin_copy<'a>(
             value,
             format!("{kind} copied to clipboard"),
         )),
-        Container::new(p2_regular(format!("Copy {}", kind.to_lowercase())))
-            .padding(8)
-            .style(theme::card::simple),
+        Container::new(p2_regular(localized_format!(
+            "Copy {}",
+            "Copiar {}",
+            kind.to_lowercase()
+        )))
+        .padding(8)
+        .style(theme::card::simple),
         iced::widget::tooltip::Position::Top,
     )
     .into()
@@ -134,7 +140,7 @@ fn coin_label_popover<'a>(
         &value.value,
         Message::FocusAction,
     )
-    .placeholder("e.g. Savings")
+    .placeholder(localized_copy("e.g. Savings"))
     .size(FieldSize::Compact)
     .error_maybe((!value.valid).then_some("This label is too long. Try a shorter label."));
     if !saving {
@@ -155,11 +161,14 @@ fn coin_label_popover<'a>(
                 Column::new()
                     .spacing(3)
                     .push(p1_bold(if has_label {
-                        "Edit coin label"
+                        localized_copy("Edit coin label")
                     } else {
-                        "Add coin label"
+                        localized_copy("Add coin label")
                     }))
-                    .push(p2_regular("For this coin only").style(theme::text::secondary)),
+                    .push(
+                        p2_regular(localized_copy("For this coin only"))
+                            .style(theme::text::secondary),
+                    ),
             )
             .push(field)
             .push(
@@ -170,7 +179,7 @@ fn coin_label_popover<'a>(
                     .push(
                         ActionButton::new(
                             coin_action_id(outpoint, "label-cancel"),
-                            "Cancel",
+                            localized_copy("Cancel"),
                             ActionKind::Secondary,
                             Message::FocusAction,
                         )
@@ -236,36 +245,60 @@ fn coin_table_header<'a>(blake2b: bool) -> Container<'a, Message> {
             .align_y(Alignment::Center)
             .push(Space::new().width(Length::Fixed(CHECK_COLUMN_WIDTH)))
             .push(
-                Container::new(p2_regular("Amount").bold().style(theme::text::secondary))
-                    .width(Length::Fixed(AMOUNT_COLUMN_WIDTH)),
+                Container::new(
+                    p2_regular(localized_copy("Amount"))
+                        .bold()
+                        .style(theme::text::secondary),
+                )
+                .width(Length::Fixed(AMOUNT_COLUMN_WIDTH)),
             )
             .push(
                 Container::new(
-                    p2_regular("Confirmations")
+                    p2_regular(localized_copy("Confirmations"))
                         .bold()
                         .style(theme::text::secondary),
                 )
                 .width(Length::Fixed(CONFIRMATIONS_COLUMN_WIDTH)),
             )
             .push_maybe(blake2b.then(|| {
-                Container::new(p2_regular("Chains").bold().style(theme::text::secondary))
-                    .width(Length::Fixed(CHAINS_COLUMN_WIDTH))
+                Container::new(
+                    p2_regular(localized_copy("Chains"))
+                        .bold()
+                        .style(theme::text::secondary),
+                )
+                .width(Length::Fixed(CHAINS_COLUMN_WIDTH))
             }))
             .push(
-                Container::new(p2_regular("Status").bold().style(theme::text::secondary))
-                    .width(Length::Fixed(STATUS_COLUMN_WIDTH)),
+                Container::new(
+                    p2_regular(localized_copy("Status"))
+                        .bold()
+                        .style(theme::text::secondary),
+                )
+                .width(Length::Fixed(STATUS_COLUMN_WIDTH)),
             )
             .push(
-                Container::new(p2_regular("Label").bold().style(theme::text::secondary))
-                    .width(Length::FillPortion(1)),
+                Container::new(
+                    p2_regular(localized_copy("Label"))
+                        .bold()
+                        .style(theme::text::secondary),
+                )
+                .width(Length::FillPortion(1)),
             )
             .push(
-                Container::new(p2_regular("Address").bold().style(theme::text::secondary))
-                    .width(Length::FillPortion(1)),
+                Container::new(
+                    p2_regular(localized_copy("Address"))
+                        .bold()
+                        .style(theme::text::secondary),
+                )
+                .width(Length::FillPortion(1)),
             )
             .push(
-                Container::new(p2_regular("Details").bold().style(theme::text::secondary))
-                    .width(Length::Fixed(DETAILS_COLUMN_WIDTH)),
+                Container::new(
+                    p2_regular(localized_copy("Details"))
+                        .bold()
+                        .style(theme::text::secondary),
+                )
+                .width(Length::Fixed(DETAILS_COLUMN_WIDTH)),
             ),
     )
     .padding(14)
@@ -294,12 +327,12 @@ pub fn coins_view<'a>(
     let label_saving = control.label_saving;
     let chosen = control.chosen;
     Column::new()
-        .push(Container::new(h3("Coin control").bold()).width(Length::Fill))
+        .push(Container::new(h3(localized_copy("Coin control")).bold()).width(Length::Fill))
         .push(
             p1_regular(if blake2b {
-                "Inspect coin balances, labels, confirmations, replay status and recovery timing."
+                localized_copy("Inspect coin balances, labels, confirmations, replay status and recovery timing.")
             } else {
-                "Inspect coin balances, labels, confirmations and recovery timing."
+                localized_copy("Inspect coin balances, labels, confirmations and recovery timing.")
             })
             .width(Length::Fill)
             .style(theme::text::secondary),
@@ -316,8 +349,8 @@ pub fn coins_view<'a>(
         .push(coins.is_empty().then(|| {
             placeholder(
                 coins_icon().size(80),
-                "No coins yet",
-                "Coins will appear here after this Vault receives bitcoin.",
+                coincube_ui::locale::copy("No coins yet"),
+                coincube_ui::locale::copy("Coins will appear here after this Vault receives bitcoin."),
             )
         }))
         .push((!coins.is_empty()).then(|| {
@@ -415,14 +448,16 @@ fn coin_list_view<'a>(
             )
         } else {
             badge::badge_pill(
-                "Recovery timing unavailable",
-                "The chain tip is not available yet. Recovery timing will appear after sync.",
+                coincube_ui::locale::copy("Recovery timing unavailable"),
+                coincube_ui::locale::copy(
+                    "The chain tip is not available yet. Recovery timing will appear after sync.",
+                ),
             )
         })
     } else if !coin.is_immature {
         Some(badge::badge_pill(
-            "Spendable",
-            "This confirmed coin can use the primary spending path with its required signatures.",
+            coincube_ui::locale::copy("Spendable"),
+            coincube_ui::locale::copy("This confirmed coin can use the primary spending path with its required signatures."),
         ))
     } else {
         None
@@ -494,7 +529,12 @@ fn coin_list_view<'a>(
                     .spacing(3)
                     .align_y(Alignment::Center)
                     .push(p2_regular(short_address(&address)).style(theme::text::secondary))
-                    .push(coin_copy(&outpoint, address.clone(), "Address", "row")),
+                    .push(coin_copy(
+                        &outpoint,
+                        address.clone(),
+                        coincube_ui::locale::copy("Address"),
+                        "row",
+                    )),
             )
             .width(Length::FillPortion(1)),
         )
@@ -503,9 +543,9 @@ fn coin_list_view<'a>(
                 Action::new(
                     coin_action_id(&outpoint, "details"),
                     p2_regular(if collapsed {
-                        "Hide details"
+                        localized_copy("Hide details")
                     } else {
-                        "Details ▾"
+                        localized_copy("Details ▾")
                     })
                     .width(Length::Fill)
                     .style(theme::text::secondary),
@@ -555,17 +595,17 @@ fn coin_list_view<'a>(
                             if let (Some(_), Some(timelock)) = (coin.block_height, timelock) {
                                 if !recovery_timing_known(coin, blockheight) {
                                     Some(Container::new(
-                                        p1_regular("Recovery timing unavailable")
+                                        p1_regular(localized_copy("Recovery timing unavailable"))
                                             .style(theme::text::secondary),
                                     ))
                                 } else if remaining_sequence(coin, blockheight, timelock) == 0 {
                                     Some(Container::new(
-                                        p1_bold("One or more recovery paths are available")
+                                        p1_bold(localized_copy("One or more recovery paths are available"))
                                             .style(theme::text::error),
                                     ))
                                 } else {
-                                    Some(Container::new(p1_bold(format!(
-                                        "First recovery path will be available in {} blocks",
+                                    Some(Container::new(p1_bold(localized_format!(
+                                        "First recovery path will be available in {} blocks", "La primera ruta de recuperación estará disponible en bloques {}",
                                         remaining_sequence(coin, blockheight, timelock)
                                     ))))
                                 }
@@ -581,14 +621,14 @@ fn coin_list_view<'a>(
                                     Row::new()
                                         .align_y(Alignment::Center)
                                         .push(
-                                            p2_regular("Address label:")
+                                            p2_regular(localized_copy("Address label:"))
                                                 .bold()
                                                 .style(theme::text::secondary),
                                         )
                                         .push(if let Some(label) = labels.get(&address) {
                                             p2_regular(label).style(theme::text::secondary)
                                         } else {
-                                            p2_regular("No label").style(theme::text::secondary)
+                                            p2_regular(localized_copy("No label")).style(theme::text::secondary)
                                         })
                                         .spacing(5),
                                 )
@@ -596,7 +636,7 @@ fn coin_list_view<'a>(
                                     Row::new()
                                         .align_y(Alignment::Center)
                                         .push(
-                                            p2_regular("Address:")
+                                            p2_regular(localized_copy("Address:"))
                                                 .bold()
                                                 .style(theme::text::secondary),
                                         )
@@ -610,7 +650,7 @@ fn coin_list_view<'a>(
                                                 .push(coin_copy(
                                                     &outpoint,
                                                     address.clone(),
-                                                    "Address",
+                                                    coincube_ui::locale::copy("Address"),
                                                     "details",
                                                 )),
                                         )
@@ -620,14 +660,14 @@ fn coin_list_view<'a>(
                                     Row::new()
                                         .align_y(Alignment::Center)
                                         .push(
-                                            p2_regular("Deposit transaction label:")
+                                            p2_regular(localized_copy("Deposit transaction label:"))
                                                 .bold()
                                                 .style(theme::text::secondary),
                                         )
                                         .push(if let Some(label) = labels.get(&txid) {
                                             p2_regular(label).style(theme::text::secondary)
                                         } else {
-                                            p2_regular("No label").style(theme::text::secondary)
+                                            p2_regular(localized_copy("No label")).style(theme::text::secondary)
                                         })
                                         .spacing(5),
                                 )
@@ -636,7 +676,7 @@ fn coin_list_view<'a>(
                                         .align_y(Alignment::Center)
                                         .spacing(5)
                                         .push(
-                                            p2_regular("Transaction ID:")
+                                            p2_regular(localized_copy("Transaction ID:"))
                                                 .bold()
                                                 .style(theme::text::secondary),
                                         )
@@ -650,7 +690,7 @@ fn coin_list_view<'a>(
                                         .push(coin_copy(
                                             &outpoint,
                                             txid.clone(),
-                                            "Transaction ID",
+                                            coincube_ui::locale::copy("Transaction ID"),
                                             "details",
                                         )),
                                 )
@@ -658,7 +698,7 @@ fn coin_list_view<'a>(
                                     Row::new()
                                         .align_y(Alignment::Center)
                                         .push(
-                                            p2_regular("Outpoint:")
+                                            p2_regular(localized_copy("Outpoint:"))
                                                 .bold()
                                                 .style(theme::text::secondary),
                                         )
@@ -672,7 +712,7 @@ fn coin_list_view<'a>(
                                                 .push(coin_copy(
                                                     &outpoint,
                                                     outpoint.clone(),
-                                                    "Outpoint",
+                                                    coincube_ui::locale::copy("Outpoint"),
                                                     "details",
                                                 )),
                                         )
@@ -681,7 +721,7 @@ fn coin_list_view<'a>(
                                 .push(coin.block_height.map(|b| {
                                     Row::new()
                                         .push(
-                                            p2_regular("Block height:")
+                                            p2_regular(localized_copy("Block height:"))
                                                 .bold()
                                                 .style(theme::text::secondary),
                                         )
@@ -697,7 +737,7 @@ fn coin_list_view<'a>(
                                 .push(
                                     Row::new()
                                         .push(
-                                            p2_regular("Spend txid:")
+                                            p2_regular(localized_copy("Spend txid:"))
                                                 .bold()
                                                 .style(theme::text::secondary),
                                         )
@@ -707,7 +747,7 @@ fn coin_list_view<'a>(
                                 .push(if let Some(height) = info.height {
                                     Row::new()
                                         .push(
-                                            p2_regular("Spend block height:")
+                                            p2_regular(localized_copy("Spend block height:"))
                                                 .bold()
                                                 .style(theme::text::secondary),
                                         )
@@ -715,7 +755,7 @@ fn coin_list_view<'a>(
                                         .spacing(5)
                                 } else {
                                     Row::new().push(
-                                        p2_regular("Not in a block")
+                                        p2_regular(localized_copy("Not in a block"))
                                             .bold()
                                             .style(theme::text::secondary),
                                     )
@@ -756,7 +796,7 @@ pub fn coin_sequence_label<'a, T: 'a>(seq: u32, timelock: u32) -> Container<'a, 
             Row::new()
                 .spacing(5)
                 .push(icon::clock_icon().width(Length::Fixed(20.0)))
-                .push(p2_regular("Recovery open"))
+                .push(p2_regular(localized_copy("Recovery open")))
                 .align_y(Alignment::Center),
         )
         .padding(10)

@@ -1,3 +1,4 @@
+use crate::locale::copy as localized_copy;
 use crate::{
     color,
     component::text,
@@ -617,9 +618,9 @@ pub fn master_signer<'a, T: 'a, F: Display>(
             ]))
             .push(Space::new().width(Length::Fixed(20.0)))
             .push(if !can_sign {
-                Some(text::text(
+                Some(text::text(localized_copy(
                     "This master signer is not part of this spending path.",
-                ))
+                )))
             } else {
                 None
             })
@@ -649,9 +650,9 @@ pub fn border_wallet_signer<'a, T: 'a, F: Display>(
             ]))
             .push(Space::new().width(Length::Fixed(20.0)))
             .push(if !can_sign {
-                Some(text::text(
+                Some(text::text(localized_copy(
                     "This border wallet key is not part of this spending path.",
-                ))
+                )))
             } else {
                 None
             })
@@ -874,7 +875,7 @@ pub fn advisory_section<'a, T: 'a + Clone>(
                 .spacing(5)
                 .align_y(Vertical::Center)
                 .push(advisory_badge(badge_label, badge_tip))
-                .push(text::p2_regular("What this means"))
+                .push(text::p2_regular(localized_copy("What this means")))
                 .push(chevron),
         )
         .style(theme::button::transparent)

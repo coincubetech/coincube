@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 mod message;
 
 pub mod activity;
@@ -647,7 +648,10 @@ pub fn modal<'a, T: Into<Element<'a, Message>>, F: Into<Element<'a, Message>>>(
                         Column::new().width(Length::Fill)
                     })
                     .align_y(iced::Alignment::Center)
-                    .push(button::secondary(Some(cross_icon()), "Close").on_press(Message::Close)),
+                    .push(
+                        button::secondary(Some(cross_icon()), localized_copy("Close"))
+                            .on_press(Message::Close),
+                    ),
             )
             .padding(10)
             .style(theme::container::background),
@@ -714,7 +718,7 @@ pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
                     Column::new()
                         .push(text(reason).bold())
                         .push(
-                            text("Your other wallets are unaffected.")
+                            text(localized_copy("Your other wallets are unaffected."))
                                 .size(P2_SIZE)
                                 .style(theme::text::secondary),
                         )
@@ -722,7 +726,7 @@ pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
                             button::secondary_action(
                                 liquid_account_overview_id(),
                                 None,
-                                "Back to Overview",
+                                coincube_ui::locale::copy("Back to Overview"),
                                 Message::FocusAction,
                             )
                             .on_press(overview.clone()),
@@ -738,7 +742,7 @@ pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
                 button::secondary_action(
                     liquid_account_back_id(),
                     Some(coincube_ui::icon::arrow_back()),
-                    "Overview",
+                    coincube_ui::locale::copy("Overview"),
                     Message::FocusAction,
                 )
                 .style(theme::button::transparent)
@@ -762,7 +766,7 @@ pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
                 .style(theme::text::secondary),
         )
         .push(
-            text("Not available on this network")
+            text(localized_copy("Not available on this network"))
                 .style(theme::text::secondary)
                 .bold(),
         )
@@ -857,7 +861,7 @@ pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
         };
 
         let inner = iced::widget::row![
-            container(text::p1_bold(content).color(text_color))
+            container(text::p1_bold(coincube_ui::locale::notice(content)).color(text_color))
                 .width(600)
                 .height(WIDGET_HEIGHT)
                 .padding(15)

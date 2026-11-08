@@ -3,6 +3,7 @@
 //! notes (`.note`) and the saved line (`.saved`). Every Settings tab composes
 //! these, so the tabs share one rhythm.
 
+use coincube_ui::locale::copy as localized_copy;
 use std::borrow::Cow;
 
 use coincube_ui::component::tenshu::{self, ActionButton, ActionKind, Tone};
@@ -422,7 +423,7 @@ pub fn note<'a, M: 'a>(
 /// The right-aligned status under a form (`.saved`); keeps its 26px even when
 /// empty so rows below do not move.
 pub fn saved_line<'a, M: 'a>(saved: bool) -> Element<'a, M> {
-    Container::new(muted(if saved { "Saved" } else { "" }))
+    Container::new(muted(if saved { localized_copy("Saved") } else { "" }))
         .width(Length::Fill)
         .height(Length::Fixed(26.0))
         .padding(iced::Padding::default().top(8.0))

@@ -1,5 +1,7 @@
 use chrono::{DateTime, Local, Utc};
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::locale::Text as CopyText;
+use coincube_ui::localized_format;
 use std::{collections::HashMap, time::Duration, vec};
 
 use iced::{
@@ -57,7 +59,7 @@ fn rescan_date_prompt<'a>(cube_id: &str) -> Element<'a, Message> {
                     .push(Space::new().width(Length::Fill))
                     .push(landing_button(
                         landing_control_id(cube_id, "Vault", "rescan-pick-date"),
-                        "Pick a date",
+                        localized_copy("Pick a date"),
                         None,
                         Message::FocusAction,
                         Some(Message::Menu(Menu::Vault(menu::VaultSubMenu::Settings(
@@ -67,7 +69,7 @@ fn rescan_date_prompt<'a>(cube_id: &str) -> Element<'a, Message> {
                     ))
                     .push(landing_button(
                         landing_control_id(cube_id, "Vault", "rescan-dismiss"),
-                        "Dismiss",
+                        localized_copy("Dismiss"),
                         Some(cross_icon()),
                         Message::FocusAction,
                         Some(Message::HideRescanPrompt),
@@ -162,7 +164,7 @@ pub(crate) fn balance_sync_state(
 /// is getting somewhere does not read as failed throughout.
 fn retry_note(retry_progress: Option<f64>) -> String {
     retry_progress
-        .map(|p| format!(", retrying ({:.1}%)", 100.0 * p))
+        .map(|p| localized_format!(", retrying ({:.1}%)", ", reintentando ({:.1}%)", 100.0 * p))
         .unwrap_or_default()
 }
 
@@ -354,7 +356,7 @@ pub fn vault_overview_view<'a>(
         [
             landing_button(
                 landing_control_id(cube_id, "Vault", "send-btc"),
-                "Send",
+                localized_copy("Send"),
                 None,
                 Message::FocusAction,
                 Some(Message::Menu(Menu::Vault(VaultSubMenu::Send))),
@@ -364,7 +366,7 @@ pub fn vault_overview_view<'a>(
             .into(),
             landing_button(
                 landing_control_id(cube_id, "Vault", "receive-btc"),
-                "Receive",
+                localized_copy("Receive"),
                 None,
                 Message::FocusAction,
                 Some(Message::Menu(Menu::Vault(VaultSubMenu::Receive))),
@@ -382,7 +384,7 @@ pub fn vault_overview_view<'a>(
                     .push(
                         Column::new()
                             .spacing(8)
-                            .push(h4_bold("Total balance"))
+                            .push(h4_bold(localized_copy("Total balance")))
                             .push(wallet_header::<Message>(WalletHeaderProps {
                                 sats: total_balance,
                                 fiat: fiat_balance,
@@ -412,8 +414,9 @@ pub fn vault_overview_view<'a>(
                             .spacing(10)
                             .align_y(Alignment::Center)
                             .push(
-                                text(format!(
+                                text(localized_format!(
                                     "Your local node is syncing — {:.1}% complete",
+                                    "Tu nodo local se está sincronizando. Progreso: {:.1}%",
                                     crate::utils::syncing_percent(progress)
                                 ))
                                 .style(theme::text::secondary)
@@ -463,10 +466,10 @@ pub fn payment_view<'a>(
     let title =
         match tx.kind {
             TransactionKind::OutgoingSinglePayment(_)
-            | TransactionKind::OutgoingPaymentBatch(_) => "Outgoing payment",
+            | TransactionKind::OutgoingPaymentBatch(_) => localized_copy("Outgoing payment"),
             TransactionKind::IncomingSinglePayment(_)
-            | TransactionKind::IncomingPaymentBatch(_) => "Incoming payment",
-            _ => "Payment",
+            | TransactionKind::IncomingPaymentBatch(_) => localized_copy("Incoming payment"),
+            _ => localized_copy("Payment"),
         };
     dashboard_headed(
         menu,
@@ -496,7 +499,7 @@ pub fn payment_view<'a>(
                 amount_with_size(&tx.tx.output[output_index].value, H3_SIZE)
             }))
             .push(Space::new().height(H3_SIZE))
-            .push(Container::new(h3("Transaction")).width(Length::Fill))
+            .push(Container::new(h3(localized_copy("Transaction"))).width(Length::Fill))
             .push(if tx.is_batch() {
                 if let Some(label) = labels_editing.get(&txid) {
                     Some(label::label_editing(vec![txid.clone()], label, H3_SIZE))
@@ -513,7 +516,7 @@ pub fn payment_view<'a>(
             .push(tx.fee_amount.map(|fee_amount| {
                 Row::new()
                     .align_y(Alignment::Center)
-                    .push(h3("Miner fee: ").style(theme::text::secondary))
+                    .push(h3(localized_copy("Miner fee: ")).style(theme::text::secondary))
                     .push(if cache.balance_amounts_masked() {
                         Row::new().push(text("••••••").size(H3_SIZE))
                     } else {
@@ -542,7 +545,10 @@ pub fn payment_view<'a>(
                             .format("%b. %d, %Y - %T");
                         Row::new()
                             .width(Length::Fill)
-                            .push(Container::new(text("Date:").bold()).width(Length::Fill))
+                            .push(
+                                Container::new(text(localized_copy("Date:")).bold())
+                                    .width(Length::Fill),
+                            )
                             .push(Container::new(text(format!("{}", date))).width(Length::Shrink))
                     }))
                     .push(
@@ -569,9 +575,11 @@ pub fn payment_view<'a>(
                     .spacing(5),
             ))
             .push(
-                button::secondary(None, "See transaction details").on_press(Message::Menu(
-                    Menu::Vault(VaultSubMenu::Transactions(Some(tx.tx.compute_txid()))),
-                )),
+                button::secondary(None, localized_copy("See transaction details")).on_press(
+                    Message::Menu(Menu::Vault(VaultSubMenu::Transactions(Some(
+                        tx.tx.compute_txid(),
+                    )))),
+                ),
             )
             .spacing(20),
     )

@@ -16,6 +16,7 @@ use coincube_core::miniscript::bitcoin::{
     NetworkKind,
 };
 use coincube_core::wallet_descriptor::ImportedWalletDescriptor;
+use coincube_ui::locale::copy as localized_copy;
 use iced::advanced::{
     layout,
     renderer::Headless,
@@ -190,9 +191,9 @@ fn pair_state(scenario: &str) -> LocalSigningState {
 fn node_panel<'a>(fixture: &'a Fixture, offline: bool) -> Element<'a, Message> {
     let status = node_backend_status(
         if offline {
-            "Backend unavailable"
+            localized_copy("Backend unavailable")
         } else {
-            "Local node"
+            localized_copy("Local node")
         },
         if offline {
             icon::network_icon()

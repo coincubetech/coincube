@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::{
     widget::{pick_list, text_input, Space},
     Alignment, Length,
@@ -184,12 +186,15 @@ impl BuySellPanel {
             column = column.push(
                 Row::new()
                     .push(
-                        text::p2_regular(format!("Country  {}", country.name))
+                        text::p2_regular(localized_format!("Country  {}", "País {}", country.name))
                             .style(theme::text::secondary),
                     )
                     .push(
-                        text::p2_regular(format!("Provider  {provider}"))
-                            .style(theme::text::secondary),
+                        text::p2_regular(localized_format!(
+                            "Provider  {provider}",
+                            "Proveedor {provider}"
+                        ))
+                        .style(theme::text::secondary),
                     )
                     .spacing(24),
             );
@@ -256,7 +261,7 @@ impl BuySellPanel {
                     Row::new()
                         .spacing(5)
                         .align_y(Alignment::Center)
-                        .push(text::text("Signing In").size(16))
+                        .push(text::text(localized_copy("Signing In")).size(16))
                         .push(
                             Container::new(spinner::typing_text_carousel(
                                 "...",
@@ -274,7 +279,7 @@ impl BuySellPanel {
             .height(Length::Fixed(44.0))
             .style(theme::button::primary)
         } else {
-            button::primary(None, "Continue")
+            button::primary(None, localized_copy("Continue"))
                 .on_press_maybe(valid_email.then_some(BuySellMessage::SubmitLogin))
                 .width(Length::Fill)
         };
@@ -321,7 +326,7 @@ impl BuySellPanel {
                     Row::new()
                         .spacing(5)
                         .align_y(Alignment::Center)
-                        .push(text::text("Signing up").size(16))
+                        .push(text::text(localized_copy("Signing up")).size(16))
                         .push(
                             Container::new(spinner::typing_text_carousel(
                                 "...",
@@ -340,7 +345,7 @@ impl BuySellPanel {
             .style(theme::button::primary)
             .into()
         } else {
-            button::primary(None, "Continue")
+            button::primary(None, localized_copy("Continue"))
                 .on_press_maybe(
                     valid_email.then_some(ViewMessage::BuySell(BuySellMessage::SubmitRegistration)),
                 )
@@ -393,7 +398,7 @@ impl BuySellPanel {
 
         let top_bar = Row::new()
             .push(
-                button::secondary(Some(previous_icon()), "Back")
+                button::secondary(Some(previous_icon()), localized_copy("Back"))
                     .width(Length::Fixed(150.0))
                     .on_press_maybe((!*sending).then_some(BuySellMessage::ResetWidget)),
             )
@@ -412,7 +417,7 @@ impl BuySellPanel {
                     Row::new()
                         .spacing(5)
                         .align_y(Alignment::Center)
-                        .push(text::text("Verifying").size(16))
+                        .push(text::text(localized_copy("Verifying")).size(16))
                         .push(
                             Container::new(spinner::typing_text_carousel(
                                 "...",
@@ -431,7 +436,7 @@ impl BuySellPanel {
             .style(theme::button::primary)
             .into()
         } else {
-            button::primary(None, "Verify OTP")
+            button::primary(None, localized_copy("Verify OTP"))
                 .on_press_maybe((!otp.is_empty()).then_some(BuySellMessage::VerifyOtp))
                 .width(Length::FillPortion(1))
                 .into()
@@ -440,7 +445,7 @@ impl BuySellPanel {
         // Action buttons
         let resend_enabled = !*sending && *cooldown == 0;
         let resend_button: iced::Element<BuySellMessage, theme::Theme> = if *cooldown > 0 {
-            let label = format!("Resend in {}s", cooldown);
+            let label = localized_format!("Resend in {}s", "Reenviar en {} s", cooldown);
             iced::widget::button(
                 Container::new(
                     Row::new()
@@ -457,7 +462,7 @@ impl BuySellPanel {
             .height(Length::Fixed(44.0))
             .into()
         } else {
-            button::secondary(Some(email_icon()), "Resend OTP")
+            button::secondary(Some(email_icon()), localized_copy("Resend OTP"))
                 .on_press_maybe(resend_enabled.then_some(BuySellMessage::SendOtp))
                 .width(Length::FillPortion(1))
                 .into()
@@ -555,12 +560,16 @@ impl BuySellPanel {
 
         let col = match *manual {
             true => Column::new()
-                .push(text::h3("Location").style(theme::text::primary))
+                .push(text::h3(localized_copy("Location")).style(theme::text::primary))
                 .push(
-                    text::p2_regular("Choose your country to find an available provider.")
-                        .style(theme::text::secondary),
+                    text::p2_regular(localized_copy(
+                        "Choose your country to find an available provider.",
+                    ))
+                    .style(theme::text::secondary),
                 )
-                .push(text::p2_medium("Select Country:").style(theme::text::primary))
+                .push(
+                    text::p2_medium(localized_copy("Select Country:")).style(theme::text::primary),
+                )
                 .push(
                     pick_list(
                         crate::services::coincube::get_countries(),
@@ -574,16 +583,19 @@ impl BuySellPanel {
                         },
                     )
                     .padding(10)
-                    .placeholder("Select Country: "),
+                    .placeholder(localized_copy("Select Country: ")),
                 )
                 .align_x(Alignment::Start)
                 .spacing(16)
                 .width(Length::Fill),
             false => Column::new()
-                .push(text::h3("Location").style(theme::text::primary))
-                .push(text::p1_bold("Detecting your location...").style(theme::text::primary))
+                .push(text::h3(localized_copy("Location")).style(theme::text::primary))
                 .push(
-                    text::text("Please wait...")
+                    text::p1_bold(localized_copy("Detecting your location..."))
+                        .style(theme::text::primary),
+                )
+                .push(
+                    text::text(localized_copy("Please wait..."))
                         .size(14)
                         .style(theme::text::secondary),
                 )

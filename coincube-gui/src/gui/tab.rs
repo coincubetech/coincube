@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use iced::{Subscription, Task};
@@ -1150,10 +1151,10 @@ impl Tab {
         match &self.state {
             State::Installer(_) => "Installer",
             State::Loader(_) => "Loading...",
-            State::Home(_) => "Home",
-            State::Login(_) => "Login",
-            State::PinEntry(_) => "Enter PIN",
-            State::PasskeyUnlock(_) => "Unlock with passkey",
+            State::Home(_) => localized_copy("Home"),
+            State::Login(_) => localized_copy("Login"),
+            State::PinEntry(_) => localized_copy("Enter PIN"),
+            State::PasskeyUnlock(_) => localized_copy("Unlock with passkey"),
             State::App(a) => a.title(),
             State::DuressActive(_) => "COINCUBE",
         }

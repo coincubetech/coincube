@@ -7,6 +7,8 @@
 //! last response returned fewer rows than `PAGE_SIZE`. Both disable while
 //! a fetch is in flight so rapid double-clicks can't skip pages.
 
+use crate::locale::copy as localized_copy;
+use crate::localized_format;
 use iced::{alignment, Length};
 
 use crate::{
@@ -37,7 +39,7 @@ pub fn pagination_controls<'a, Message: Clone + 'a>(
     .on_press_maybe((prev_enabled && interactive).then_some(on_prev));
 
     let next_button = Button::new(
-        text("Next >")
+        text(localized_copy("Next >"))
             .size(P1_SIZE)
             .align_x(alignment::Horizontal::Center)
             .width(Length::Fill),
@@ -50,7 +52,7 @@ pub fn pagination_controls<'a, Message: Clone + 'a>(
     let label = if processing {
         "Loading…".to_string()
     } else {
-        format!("Page {}", current_page.saturating_add(1))
+        localized_format!("Page {}", "Página {}", current_page.saturating_add(1))
     };
 
     let row = Row::new()

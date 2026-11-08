@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 #[cfg(test)]
 mod capture;
 pub mod general;
@@ -57,7 +59,7 @@ pub fn list<'a>(
     _is_remote_backend: bool,
 ) -> Element<'a, Message> {
     // Defensive fallback for Settings(None) + no inner section state.
-    let header = Button::new(text("Settings").size(30).bold())
+    let header = Button::new(text(localized_copy("Settings")).size(30).bold())
         .style(theme::button::transparent)
         .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
             crate::app::menu::SettingsOption::Wallet,
@@ -70,9 +72,9 @@ pub fn list<'a>(
             .spacing(20)
             .width(Length::Fill)
             .push(header)
-            .push(p1_regular(
+            .push(p1_regular(localized_copy(
                 "Open Wallet & signers to review this wallet's settings.",
-            )),
+            ))),
     )
 }
 
@@ -123,11 +125,11 @@ pub fn import_export<'a>(
         .into()];
     if supports_inheritance {
         protection.push(
-            page::row("Encrypted descriptor")
-                .description("Needed with the keys to restore this Vault. Decrypts with one of your signing devices or xpubs.")
+            page::row(localized_copy("Encrypted descriptor"))
+                .description(localized_copy("Needed with the keys to restore this Vault. Decrypts with one of your signing devices or xpubs."))
                 .control(page::button(
                     "tenshu.settings.vault-data.encrypted",
-                    "Export encrypted…",
+                    localized_copy("Export encrypted…"),
                     settings(SettingsMessage::ExportEncryptedDescriptor),
                 ))
                 .into(),
@@ -135,7 +137,7 @@ pub fn import_export<'a>(
     }
 
     let mut content = Column::new().width(Length::Fill).push(page::group(
-        "Protection material",
+        localized_copy("Protection material"),
         Some("Anyone holding this can see every address and balance in the Vault.".into()),
         page::rows(protection),
     ));
@@ -143,16 +145,16 @@ pub fn import_export<'a>(
     let mut portability: Vec<Element<'a, Message>> = Vec::new();
     if supports_inheritance {
         portability.push(
-            page::row("Wallet file")
-                .description("Unencrypted. Moves wallet information to another device; imports are checked against this network first.")
+            page::row(localized_copy("Wallet file"))
+                .description(localized_copy("Unencrypted. Moves wallet information to another device; imports are checked against this network first."))
                 .control(page::button(
                     "tenshu.settings.vault-data.export-wallet",
-                    "Export…",
+                    localized_copy("Export…"),
                     settings(SettingsMessage::ExportWallet),
                 ))
                 .control(page::button(
                     "tenshu.settings.vault-data.import-wallet",
-                    "Import…",
+                    localized_copy("Import…"),
                     settings(SettingsMessage::ImportWallet),
                 ))
                 .into(),
@@ -179,10 +181,10 @@ pub fn import_export<'a>(
     if supports_inheritance {
         formats.push(
             page::row("Plaintext descriptor")
-                .description("For hardware registration or other wallets. Reveals the wallet policy and public keys.")
+                .description(localized_copy("For hardware registration or other wallets. Reveals the wallet policy and public keys."))
                 .control(page::button(
                     "tenshu.settings.vault-data.plaintext",
-                    "Export…",
+                    localized_copy("Export…"),
                     settings(SettingsMessage::ReviewPlaintextDescriptorExport),
                 ))
                 .into(),
@@ -196,7 +198,9 @@ pub fn import_export<'a>(
                     .spacing(12)
                     .align_y(Alignment::Center)
                     .push(Container::new(page::rule()).width(Length::Fill))
-                    .push(coincube_ui::component::tenshu::caption("Other formats"))
+                    .push(coincube_ui::component::tenshu::caption(localized_copy(
+                        "Other formats",
+                    )))
                     .push(Container::new(page::rule()).width(Length::Fill)),
             )
             .padding(iced::Padding::default().top(24.0).bottom(12.0)),
@@ -204,7 +208,7 @@ pub fn import_export<'a>(
     }
     records = records.push(page::rows(formats));
     content = content.push(page::group(
-        "Portability and records",
+        localized_copy("Portability and records"),
         Some("Plaintext files reveal the Vault's full history. They hold no private keys, and records do not replace recovery material.".into()),
         records,
     ));
@@ -231,12 +235,12 @@ pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
             "This Vault reads its balance and history from a node you chose.",
         )
     };
-    let data = page::row("Data provider")
+    let data = page::row(localized_copy("Data provider"))
         .line(iced::widget::text(provider).size(14))
         .description(provider_line)
         .control(page::button(
             "tenshu.settings.vault-connections.node",
-            "Node settings",
+            localized_copy("Node settings"),
             Some(Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
                 crate::app::menu::SettingsOption::Node,
             ))))),
@@ -247,7 +251,12 @@ pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
             let at = alert
                 .last_synced
                 .as_deref()
-                .map(|at| format!(" Last synced at {at}, block {block}."))
+                .map(|at| {
+                    localized_format!(
+                        " Last synced at {at}, block {block}.",
+                        "Última sincronización en {at}, bloque {block}."
+                    )
+                })
                 .unwrap_or_default();
             page::row("Sync")
                 .control(crate::app::view::nav::shell::vault_status(alert))
@@ -262,17 +271,27 @@ pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
                 ))
         }
         None if progress >= 1.0 => page::row("Sync")
-            .control(page::status(page::Status::Ok, "Synced"))
-            .description(format!("Synced to block {block}.")),
+            .control(page::status(page::Status::Ok, localized_copy("Synced")))
+            .description(localized_format!(
+                "Synced to block {block}.",
+                "Sincronizado para bloquear {block}."
+            )),
         None => page::row("Sync")
             .control(page::status(
                 page::Status::Busy,
-                format!("Syncing {:.1}%", crate::utils::syncing_percent(progress)),
+                localized_format!(
+                    "Syncing {:.1}%",
+                    "Sincronización {:.1}%",
+                    crate::utils::syncing_percent(progress)
+                ),
             ))
-            .description(format!("At block {block}. Balances may be out of date.")),
+            .description(localized_format!(
+                "At block {block}. Balances may be out of date.",
+                "En el bloque {block}. Los saldos pueden estar fuera de la fecha."
+            )),
     };
     let mut content = Column::new().width(Length::Fill).push(page::group(
-        "Blockchain data",
+        localized_copy("Blockchain data"),
         None,
         page::rows([data.into(), sync.into()]),
     ));
@@ -304,10 +323,10 @@ pub fn connections<'a>(cache: &'a Cache) -> Element<'a, Message> {
             "Keychain signing",
             page::link(
                 "tenshu.settings.vault-connections.cube",
-                "Cube connections",
+                localized_copy("Cube connections"),
                 Message::Menu(crate::app::view::settings::connections::CUBE_CONNECTIONS_ROUTE),
             ),
-            page::rows([page::row("Signing updates")
+            page::rows([page::row(localized_copy("Signing updates"))
                 .control(page::status(kind, word))
                 .description(line)
                 .into()]),
@@ -321,20 +340,20 @@ pub fn plaintext_export_review<'a>() -> Element<'a, Message> {
     card::modal(
         Column::new()
             .spacing(15)
-            .push(h4_bold("Export a plaintext descriptor?"))
+            .push(h4_bold(localized_copy("Export a plaintext descriptor?")))
             .push(text(
-                "This file is not encrypted. It reveals your wallet policy and public keys. Choose a private location in the file picker and share it only with an app you trust.",
+                localized_copy("This file is not encrypted. It reveals your wallet policy and public keys. Choose a private location in the file picker and share it only with an app you trust."),
             ))
             .push(
                 Row::new()
                     .spacing(10)
                     .push(
-                        button::secondary(None, "Cancel").on_press(Message::Settings(
+                        button::secondary(None, localized_copy("Cancel")).on_press(Message::Settings(
                             SettingsMessage::CancelPlaintextDescriptorExport,
                         )),
                     )
                     .push(
-                        button::primary(None, "Choose export location…").on_press(
+                        button::primary(None, localized_copy("Choose export location…")).on_press(
                             Message::Settings(SettingsMessage::ExportPlaintextDescriptor),
                         ),
                     ),
@@ -355,34 +374,40 @@ pub fn remote_backend_section<'a>(
     let content = card::simple(
         Column::new()
             .spacing(20)
-            .push(text("Grant access to wallet to another user"))
+            .push(text(localized_copy(
+                "Grant access to wallet to another user",
+            )))
             .push(
-                form::Form::new_trimmed("User email", email_form, |email| {
+                form::Form::new_trimmed(localized_copy("User email"), email_form, |email| {
                     Message::Settings(SettingsMessage::RemoteBackendSettings(
                         RemoteBackendSettingsMessage::EditInvitationEmail(email),
                     ))
                 })
-                .warning("Email is invalid")
+                .warning(localized_copy("Email is invalid"))
                 .size(P1_SIZE)
                 .padding(10),
             )
             .push(
                 Row::new()
                     .push(if success {
-                        Some(text("Invitation was sent").style(theme::text::success))
+                        Some(
+                            text(localized_copy("Invitation was sent")).style(theme::text::success),
+                        )
                     } else {
                         None
                     })
                     .push(Space::new().width(Length::Fill))
-                    .push(button::secondary(None, "Send invitation").on_press_maybe(
-                        if !processing && email_form.valid {
-                            Some(Message::Settings(SettingsMessage::RemoteBackendSettings(
-                                RemoteBackendSettingsMessage::SendInvitation,
-                            )))
-                        } else {
-                            None
-                        },
-                    )),
+                    .push(
+                        button::secondary(None, localized_copy("Send invitation")).on_press_maybe(
+                            if !processing && email_form.valid {
+                                Some(Message::Settings(SettingsMessage::RemoteBackendSettings(
+                                    RemoteBackendSettingsMessage::SendInvitation,
+                                )))
+                            } else {
+                                None
+                            },
+                        ),
+                    ),
             ),
     )
     .width(Length::Fill);
@@ -420,7 +445,7 @@ pub fn bitcoind_edit<'a>(
                             .push(badge::badge(icon::network_icon()))
                             .push(
                                 Column::new()
-                                    .push(text("Network:"))
+                                    .push(text(localized_copy("Network:")))
                                     .push(text(network.to_string()).bold()),
                             )
                             .spacing(10)
@@ -431,7 +456,7 @@ pub fn bitcoind_edit<'a>(
                             .push(badge::badge(icon::block_icon()))
                             .push(
                                 Column::new()
-                                    .push(text("Block Height:"))
+                                    .push(text(localized_copy("Block Height:")))
                                     .push(text(blockheight.to_string()).bold()),
                             )
                             .spacing(10)
@@ -447,7 +472,7 @@ pub fn bitcoind_edit<'a>(
                 .iter()
                 .fold(
                     Row::new()
-                        .push(text("RPC authentication:").small().bold())
+                        .push(text(localized_copy("RPC authentication:")).small().bold())
                         .spacing(10),
                     |row, auth_type| {
                         row.push(radio(
@@ -465,11 +490,11 @@ pub fn bitcoind_edit<'a>(
             RpcAuthType::CookieFile => Column::new()
                 .push(
                     form::Form::new_trimmed(
-                        "Cookie file path",
+                        localized_copy("Cookie file path"),
                         &rpc_auth_vals.cookie_path,
                         |value| SettingsEditMessage::FieldEdited("cookie_file_path", value),
                     )
-                    .warning("Please enter a valid filesystem path")
+                    .warning(localized_copy("Please enter a valid filesystem path"))
                     .size(P1_SIZE)
                     .padding(5),
                 )
@@ -478,18 +503,22 @@ pub fn bitcoind_edit<'a>(
                 .push(
                     Row::new()
                         .push(
-                            form::Form::new_trimmed("User", &rpc_auth_vals.user, |value| {
-                                SettingsEditMessage::FieldEdited("user", value)
-                            })
-                            .warning("Please enter a valid user")
+                            form::Form::new_trimmed(
+                                localized_copy("User"),
+                                &rpc_auth_vals.user,
+                                |value| SettingsEditMessage::FieldEdited("user", value),
+                            )
+                            .warning(localized_copy("Please enter a valid user"))
                             .size(P1_SIZE)
                             .padding(5),
                         )
                         .push(
-                            form::Form::new_trimmed("Password", &rpc_auth_vals.password, |value| {
-                                SettingsEditMessage::FieldEdited("password", value)
-                            })
-                            .warning("Please enter a valid password")
+                            form::Form::new_trimmed(
+                                localized_copy("Password"),
+                                &rpc_auth_vals.password,
+                                |value| SettingsEditMessage::FieldEdited("password", value),
+                            )
+                            .warning(localized_copy("Please enter a valid password"))
                             .size(P1_SIZE)
                             .padding(5),
                         )
@@ -504,15 +533,15 @@ pub fn bitcoind_edit<'a>(
                     form::Form::new_trimmed("Socket address:", addr, |value| {
                         SettingsEditMessage::FieldEdited("socket_address", value)
                     })
-                    .warning("Please enter a valid address")
+                    .warning(localized_copy("Please enter a valid address"))
                     .size(P1_SIZE)
                     .padding(5),
                 )
                 .spacing(5),
         );
 
-    let mut cancel_button = button::transparent(None, " Cancel ").padding(5);
-    let mut confirm_button = button::secondary(None, " Save ").padding(5);
+    let mut cancel_button = button::transparent(None, localized_copy(" Cancel ")).padding(5);
+    let mut confirm_button = button::secondary(None, localized_copy(" Save ")).padding(5);
     if !processing {
         cancel_button = cancel_button.on_press(SettingsEditMessage::Cancel);
         confirm_button = confirm_button.on_press(SettingsEditMessage::Confirm);
@@ -574,7 +603,7 @@ pub fn bitcoind<'a>(
                             .push(badge::badge(icon::network_icon()))
                             .push(
                                 Column::new()
-                                    .push(text("Network:"))
+                                    .push(text(localized_copy("Network:")))
                                     .push(text(network.to_string()).bold()),
                             )
                             .spacing(10)
@@ -585,7 +614,7 @@ pub fn bitcoind<'a>(
                             .push(badge::badge(icon::block_icon()))
                             .push(
                                 Column::new()
-                                    .push(text("Block Height:"))
+                                    .push(text(localized_copy("Block Height:")))
                                     .push(text(blockheight.to_string()).bold()),
                             )
                             .spacing(10)
@@ -661,7 +690,7 @@ pub fn bitcoind<'a>(
         .into(),
         // An external node's flavour isn't ours to switch, but the version below
         // still names it, so this stays a generic label rather than a guess.
-        None => text("Bitcoin node").bold().into(),
+        None => text(localized_copy("Bitcoin node")).bold().into(),
     };
     // What is actually running, straight from the node. Worth showing next to the
     // switcher precisely because the two can disagree — a datadir configured for
@@ -720,19 +749,20 @@ pub fn flavor_switch_confirm<'a>(target: NodeFlavor) -> Element<'a, NodeSettings
         Column::new()
             .spacing(20)
             .push(
-                text(format!(
+                text(localized_format!(
                     "Switch node software to {}?",
+                    "¿Cambiar el software de nodos a {}?",
                     target.display_name()
                 ))
                 .bold()
                 .size(20),
             )
             .push(
-                text(
+                text(localized_copy(
                     "This restarts your managed node for every Vault (and downloads the \
                      client if it isn't already installed, ~50 MB). Your Vaults keep \
                      working; the node reconnects on the same port once it's back.",
-                )
+                ))
                 .size(14)
                 .style(theme::text::secondary),
             )
@@ -745,12 +775,12 @@ pub fn flavor_switch_confirm<'a>(target: NodeFlavor) -> Element<'a, NodeSettings
                 Row::new()
                     .spacing(10)
                     .push(
-                        button::secondary(None, "Cancel")
+                        button::secondary(None, localized_copy("Cancel"))
                             .width(Length::FillPortion(1))
                             .on_press(NodeSettingsMessage::CancelFlavorSwitch),
                     )
                     .push(
-                        button::primary(None, "Switch")
+                        button::primary(None, localized_copy("Switch"))
                             .width(Length::FillPortion(1))
                             .on_press(NodeSettingsMessage::ConfirmFlavorSwitch),
                     ),
@@ -788,20 +818,22 @@ pub fn switch_discards_scan_confirm<'a>(
             .push(text(title).bold().size(20))
             .push(text(body).size(14).style(theme::text::secondary))
             .push(
-                text("If you wait, Tenshu can switch for you once the scan has finished.")
-                    .size(14)
-                    .style(theme::text::secondary),
+                text(localized_copy(
+                    "If you wait, Tenshu can switch for you once the scan has finished.",
+                ))
+                .size(14)
+                .style(theme::text::secondary),
             )
             .push(
                 Row::new()
                     .spacing(10)
                     .push(
-                        button::secondary(None, "Keep scanning")
+                        button::secondary(None, localized_copy("Keep scanning"))
                             .width(Length::FillPortion(1))
                             .on_press(NodeSettingsMessage::CancelSwitchDiscardingScan),
                     )
                     .push(
-                        button::primary(None, "Switch anyway")
+                        button::primary(None, localized_copy("Switch anyway"))
                             .width(Length::FillPortion(1))
                             .on_press(NodeSettingsMessage::ConfirmSwitchDiscardingScan),
                     ),
@@ -823,7 +855,10 @@ pub fn background_node_install<'a>(
         BackgroundNodeInstall::Downloading(percent) => {
             let mut col = Column::new().spacing(10).push(
                 p2_regular(match percent {
-                    Some(percent) => format!("Downloading the local node… {percent:.0}%"),
+                    Some(percent) => localized_format!(
+                        "Downloading the local node… {percent:.0}%",
+                        "Descargando el nodo local… {percent:.0}%"
+                    ),
                     None => "Downloading the local node…".to_string(),
                 })
                 .style(theme::text::secondary),
@@ -833,16 +868,22 @@ pub fn background_node_install<'a>(
             }
             col.into()
         }
-        BackgroundNodeInstall::Starting => {
-            p2_regular("Verifying, installing and starting the local node…")
-                .style(theme::text::secondary)
-                .into()
-        }
+        BackgroundNodeInstall::Starting => p2_regular(localized_copy(
+            "Verifying, installing and starting the local node…",
+        ))
+        .style(theme::text::secondary)
+        .into(),
         BackgroundNodeInstall::Failed(error) => Column::new()
             .spacing(10)
-            .push(p2_regular(format!("Setup paused: {error}")).style(theme::text::warning))
             .push(
-                button::secondary(None, "Retry")
+                p2_regular(localized_format!(
+                    "Setup paused: {error}",
+                    "Configuración pausada: {error}"
+                ))
+                .style(theme::text::warning),
+            )
+            .push(
+                button::secondary(None, localized_copy("Retry"))
                     .padding([8, 15])
                     .on_press(NodeSettingsMessage::RetryBackgroundNodeSetup),
             )
@@ -852,12 +893,12 @@ pub fn background_node_install<'a>(
         Container::new(
             Column::new()
                 .spacing(8)
-                .push(caption("Local node setup"))
+                .push(caption(localized_copy("Local node setup")))
                 .push(
-                    p2_regular(
+                    p2_regular(localized_copy(
                         "Your Vault uses COINCUBE | Connect until the local node is \
                          installed and synced.",
-                    )
+                    ))
                     .style(theme::text::secondary),
                 )
                 .push(body),
@@ -878,7 +919,7 @@ pub fn pruned_node_notice<'a, M: 'a>(
     Container::new(
         Column::new()
             .spacing(8)
-            .push(caption("Local wallet history unavailable"))
+            .push(caption(localized_copy("Local wallet history unavailable")))
             .push(p2_regular(why.to_string()).style(theme::text::warning)),
     )
     .padding(15)
@@ -933,7 +974,7 @@ pub fn electrum_edit<'a>(
                             .push(badge::badge(icon::network_icon()))
                             .push(
                                 Column::new()
-                                    .push(text("Network:"))
+                                    .push(text(localized_copy("Network:")))
                                     .push(text(network.to_string()).bold()),
                             )
                             .spacing(10)
@@ -944,7 +985,7 @@ pub fn electrum_edit<'a>(
                             .push(badge::badge(icon::block_icon()))
                             .push(
                                 Column::new()
-                                    .push(text("Block Height:"))
+                                    .push(text(localized_copy("Block Height:")))
                                     .push(text(blockheight.to_string()).bold()),
                             )
                             .spacing(10)
@@ -959,12 +1000,12 @@ pub fn electrum_edit<'a>(
     });
     col = col.push(
         Column::new()
-            .push(text("Address:").bold().small())
+            .push(text(localized_copy("Address:")).bold().small())
             .push(
                 form::Form::new_trimmed("127:0.0.1:50001", addr, |value| {
                     SettingsEditMessage::FieldEdited("address", value)
                 })
-                .warning("Please enter a valid address")
+                .warning(localized_copy("Please enter a valid address"))
                 .size(P1_SIZE)
                 .padding(5),
             )
@@ -973,8 +1014,8 @@ pub fn electrum_edit<'a>(
             .spacing(5),
     );
 
-    let mut cancel_button = button::transparent(None, " Cancel ").padding(5);
-    let mut confirm_button = button::secondary(None, " Save ").padding(5);
+    let mut cancel_button = button::transparent(None, localized_copy(" Cancel ")).padding(5);
+    let mut confirm_button = button::secondary(None, localized_copy(" Save ")).padding(5);
     if !processing {
         cancel_button = cancel_button.on_press(SettingsEditMessage::Cancel);
         confirm_button = confirm_button.on_press(SettingsEditMessage::Confirm);
@@ -1028,7 +1069,7 @@ pub fn electrum<'a>(
                             .push(badge::badge(icon::network_icon()))
                             .push(
                                 Column::new()
-                                    .push(text("Network:"))
+                                    .push(text(localized_copy("Network:")))
                                     .push(text(network.to_string()).bold()),
                             )
                             .spacing(10)
@@ -1039,7 +1080,7 @@ pub fn electrum<'a>(
                             .push(badge::badge(icon::block_icon()))
                             .push(
                                 Column::new()
-                                    .push(text("Block Height:"))
+                                    .push(text(localized_copy("Block Height:")))
                                     .push(text(blockheight.to_string()).bold()),
                             )
                             .spacing(10)
@@ -1111,14 +1152,22 @@ pub fn is_running_label<'a, T: 'a>(is_running: Option<bool>) -> Container<'a, T>
             Container::new(
                 Row::new()
                     .push(icon::dot_icon().size(5).style(theme::text::success))
-                    .push(text("Running").small().style(theme::text::success))
+                    .push(
+                        text(localized_copy("Running"))
+                            .small()
+                            .style(theme::text::success),
+                    )
                     .align_y(Alignment::Center),
             )
         } else {
             Container::new(
                 Row::new()
                     .push(icon::dot_icon().size(5).style(theme::text::error))
-                    .push(text("Not running").small().style(theme::text::error))
+                    .push(
+                        text(localized_copy("Not running"))
+                            .small()
+                            .style(theme::text::error),
+                    )
                     .align_y(Alignment::Center),
             )
         }
@@ -1170,7 +1219,11 @@ pub fn rescan<'a>(
         body = body
             .push(page::status(
                 page::Status::Busy,
-                format!("Rescanning… {:.2}%", p * 100.0),
+                localized_format!(
+                    "Rescanning… {:.2}%",
+                    "Volviendo a escanear… {:.2}%",
+                    p * 100.0
+                ),
             ))
             .push(ProgressBar::new(0.0..=1.0, p as f32).length(Length::Fill));
     } else {
@@ -1178,14 +1231,29 @@ pub fn rescan<'a>(
             Row::new()
                 .spacing(12)
                 .align_y(Alignment::End)
-                .push(field("Year", "2022", year, "rescan_year"))
-                .push(field("Month", "12", month, "rescan_month"))
-                .push(field("Day", "31", day, "rescan_day"))
+                .push(field(
+                    coincube_ui::locale::copy("Year"),
+                    "2022",
+                    year,
+                    "rescan_year",
+                ))
+                .push(field(
+                    coincube_ui::locale::copy("Month"),
+                    "12",
+                    month,
+                    "rescan_month",
+                ))
+                .push(field(
+                    coincube_ui::locale::copy("Day"),
+                    "31",
+                    day,
+                    "rescan_day",
+                ))
                 .push(page::plain_button(
                     if processing {
-                        "Starting rescan…"
+                        localized_copy("Starting rescan…")
                     } else {
-                        "Start rescan"
+                        localized_copy("Start rescan")
                     },
                     ActionKind::Secondary,
                     ready.then_some(SettingsEditMessage::Confirm),
@@ -1208,18 +1276,18 @@ pub fn rescan<'a>(
     if success {
         body = body.push(page::status(
             page::Status::Ok,
-            "Successfully rescanned the blockchain",
+            localized_copy("Successfully rescanned the blockchain"),
         ));
     }
     if recovery_running {
-        body = body.push(page::muted(
+        body = body.push(page::muted(localized_copy(
             "Available when wallet history recovery finishes or is cancelled.",
-        ));
+        )));
     }
     body = body.push(page::muted(
-        "Re-reads blocks your node still keeps to rebuild this Vault's history. It does not repair Connect sign-in or node connectivity.",
+        localized_copy("Re-reads blocks your node still keeps to rebuild this Vault's history. It does not repair Connect sign-in or node connectivity."),
     ));
-    page::group("Rescan from a date", None, body)
+    page::group(localized_copy("Rescan from a date"), None, body)
 }
 
 fn is_ok_and<T, E>(res: &Result<T, E>, f: impl FnOnce(&T) -> bool) -> bool {
@@ -1300,8 +1368,9 @@ fn policy_rows<'a>(
         let mut recovery_keys: Vec<Fingerprint> = recovery_keys.into_keys().collect();
         recovery_keys.sort();
         let label = recovery_path_label(i, several, *sequence, &recovery_keys, provider_keys);
-        let detail = format!(
+        let detail = localized_format!(
             "After {} blocks (~{}) without spending. {}",
+            "Después de bloques {} (~{}) sin gasto. {}",
             sequence,
             expire_message_units(*sequence as u32).join(","),
             quorum_sentence(threshold, &recovery_keys, keys_aliases, "spend")
@@ -1314,7 +1383,7 @@ fn policy_rows<'a>(
                 .control_maybe((i == 0).then(|| {
                     page::button(
                         VAULT_RECOVERY_TOOLS_ID,
-                        "Open recovery tools",
+                        localized_copy("Open recovery tools"),
                         Some(Message::Menu(Menu::Vault(VaultSubMenu::Recovery))),
                     )
                 }))
@@ -1440,14 +1509,18 @@ pub fn wallet_settings<'a>(
             coincube_ui::component::tenshu::Tone::Muted,
             Row::new()
                 .spacing(4)
-                .push(text("Imported wallet · no local keys.").size(13).bold())
-                .push(text("Signing needs the external signers below.").size(13))
+                .push(
+                    text(localized_copy("Imported wallet · no local keys."))
+                        .size(13)
+                        .bold(),
+                )
+                .push(text(localized_copy("Signing needs the external signers below.")).size(13))
                 .wrap(),
             None,
         ));
     }
     content = content.push(page::group(
-        "Identity and policy",
+        localized_copy("Identity and policy"),
         None,
         page::rows(identity),
     ));
@@ -1463,7 +1536,7 @@ pub fn wallet_settings<'a>(
             }
         }
         if provider_keys.contains_key(&fg) {
-            detail = format!("{} · Provider key", detail);
+            detail = localized_format!("{} · Provider key", "{} · clave del proveedor", detail);
         }
         let field = tenshu_ui::text_field(
             iced::advanced::widget::Id::from(format!("tenshu.settings.vault.signer.{}", fg)),
@@ -1489,7 +1562,7 @@ pub fn wallet_settings<'a>(
     });
     content = content
         .push(page::group(
-            "Signers",
+            localized_copy("Signers"),
             Some("Names save when you press Return.".into()),
             page::rows(signer_rows),
         ))
@@ -1498,12 +1571,12 @@ pub fn wallet_settings<'a>(
     // A Vault without a Keychain key has no Keychain tab to open.
     let pairable = vault.is_some() && !cache.vault_lacks_keychain_key;
     let pair_row = page::row("Keychain").description(if pairable {
-        "Pair a phone holding this Vault's Keychain key. Same Wi-Fi. No Connect account needed."
+        localized_copy("Pair a phone holding this Vault's Keychain key. Same Wi-Fi. No Connect account needed.")
     } else if vault.is_some() {
-        "Unavailable: this Vault has no Keychain key. One can only be added when a Vault is \
-         created."
+        localized_copy("Unavailable: this Vault has no Keychain key. One can only be added when a Vault is \
+         created.")
     } else {
-        "Unavailable: this wallet has no Keychain-eligible key in Tenshu."
+        localized_copy("Unavailable: this wallet has no Keychain-eligible key in Tenshu.")
     });
     let pair_row = if pairable {
         pair_row.control(page::button(
@@ -1514,16 +1587,22 @@ pub fn wallet_settings<'a>(
             ))))),
         ))
     } else {
-        pair_row.control(page::status(page::Status::Off, "Unavailable"))
+        pair_row.control(page::status(
+            page::Status::Off,
+            localized_copy("Unavailable"),
+        ))
     };
     content = content.push(page::group(
-        "Phone signing and members",
+        localized_copy("Phone signing and members"),
         None,
         page::rows([
             pair_row.into(),
-            page::row("Members")
-                .accessory(page::status(page::Status::Off, "Not enabled"))
-                .description("For eligible Connect Vaults only.")
+            page::row(localized_copy("Members"))
+                .accessory(page::status(
+                    page::Status::Off,
+                    localized_copy("Not enabled"),
+                ))
+                .description(localized_copy("For eligible Connect Vaults only."))
                 .into(),
         ]),
     ));
@@ -1537,16 +1616,18 @@ pub fn wallet_settings<'a>(
     ));
     if expert_open {
         let mut descriptor_row = page::row("Descriptor")
-            .description("Hidden. Copying exposes the wallet policy and public keys to other apps.")
+            .description(localized_copy(
+                "Hidden. Copying exposes the wallet policy and public keys to other apps.",
+            ))
             .control(page::button(
                 VAULT_COPY_ID,
-                "Copy…",
+                localized_copy("Copy…"),
                 Some(Message::Settings(SettingsMessage::ReviewDescriptorCopy)),
             ));
         if vault.is_some() {
             descriptor_row = descriptor_row.control(page::button(
                 VAULT_EXPORT_ID,
-                "Export encrypted…",
+                localized_copy("Export encrypted…"),
                 Some(Message::Settings(
                     SettingsMessage::ExportEncryptedDescriptor,
                 )),
@@ -1555,11 +1636,11 @@ pub fn wallet_settings<'a>(
         let mut advanced: Vec<Element<'a, Message>> = vec![descriptor_row.into()];
         if hardware_registration_allowed {
             advanced.push(
-                page::row("Hardware registration")
-                    .description("Register this wallet on a hardware device. Re-register after policy changes.")
+                page::row(localized_copy("Hardware registration"))
+                    .description(localized_copy("Register this wallet on a hardware device. Re-register after policy changes."))
                     .control(page::button(
                         VAULT_REGISTER_ID,
-                        "Register on device…",
+                        localized_copy("Register on device…"),
                         Some(Message::Settings(SettingsMessage::RegisterWallet)),
                     ))
                     .into(),
@@ -1567,10 +1648,10 @@ pub fn wallet_settings<'a>(
         }
         if vault.is_some() {
             advanced.push(
-                page::row("Recovery path, coin control and PSBTs")
+                page::row(localized_copy("Recovery path, coin control and PSBTs"))
                     .control(page::button(
                         VAULT_TOOLS_ID,
-                        "Open Vault tools",
+                        localized_copy("Open Vault tools"),
                         Some(Message::Menu(Menu::Vault(VaultSubMenu::Recovery))),
                     ))
                     .into(),
@@ -1586,19 +1667,19 @@ pub fn descriptor_copy_review<'a>() -> Element<'a, Message> {
     card::modal(
         Column::new()
             .spacing(15)
-            .push(h4_bold("Copy wallet descriptor?"))
+            .push(h4_bold(localized_copy("Copy wallet descriptor?")))
             .push(text(
-                "The descriptor reveals this wallet's policy and public keys. Other apps may read the clipboard. Copy only if you trust where you will paste it.",
+                localized_copy("The descriptor reveals this wallet's policy and public keys. Other apps may read the clipboard. Copy only if you trust where you will paste it."),
             ))
             .push(
                 Row::new()
                     .spacing(10)
                     .push(
-                        button::secondary(None, "Cancel")
+                        button::secondary(None, localized_copy("Cancel"))
                             .on_press(Message::Settings(SettingsMessage::CancelDescriptorCopy)),
                     )
                     .push(
-                        button::primary(None, "Copy descriptor")
+                        button::primary(None, localized_copy("Copy descriptor"))
                             .on_press(Message::Settings(SettingsMessage::ConfirmDescriptorCopy)),
                     ),
             ),
@@ -1694,13 +1775,13 @@ pub fn node_backend_status<'a>(
                 .spacing(2)
                 .push(page::status(
                     page::Status::Busy,
-                    "Applying your node change…",
+                    localized_copy("Applying your node change…"),
                 ))
-                .push(page::muted(
+                .push(page::muted(localized_copy(
                     "Tenshu is stopping the previous wallet backend and loading the new one. \
                      This can take a while if a wallet scan is still running. \
                      Local blockchain progress is shown separately below.",
-                )),
+                ))),
             None,
         ));
     }
@@ -1711,7 +1792,7 @@ pub fn node_backend_status<'a>(
     let mut node_actions: Vec<Element<'a, NodeSettingsMessage>> = Vec::new();
     if can_switch_to_connect {
         actions.push(page::plain_button(
-            "Switch to COINCUBE | Connect",
+            localized_copy("Switch to COINCUBE | Connect"),
             ActionKind::Secondary,
             (!processing).then_some(NodeSettingsMessage::SwitchToConnect),
         ));
@@ -1724,14 +1805,14 @@ pub fn node_backend_status<'a>(
         can_switch_to_bitcoind && pending_ibd != Some(true) && !recovery_in_progress;
     if show_switch_to_bitcoind_btn {
         node_actions.push(page::plain_button(
-            "Switch to local node",
+            localized_copy("Switch to local node"),
             ActionKind::Secondary,
             (!processing).then_some(NodeSettingsMessage::SwitchToBitcoind),
         ));
     }
     if can_setup_local_node {
         actions.push(page::plain_button(
-            "Set up local node",
+            localized_copy("Set up local node"),
             ActionKind::Secondary,
             (!processing).then_some(NodeSettingsMessage::SetupLocalNode),
         ));
@@ -1763,14 +1844,20 @@ pub fn node_backend_status<'a>(
         };
         let pending = can_switch_to_bitcoind;
         let desc = if catching_up {
-            Some(format!("{name} is catching up with known headers."))
+            Some(localized_format!(
+                "{name} is catching up with known headers.",
+                "{name} está al día con los encabezados conocidos."
+            ))
         } else if still_syncing {
             let next = if pending && auto_switch_to_pending {
                 "Tenshu will automatically switch to this node once syncing is complete. "
             } else {
                 ""
             };
-            Some(format!("{name} is syncing the blockchain. {next}{pace}"))
+            Some(localized_format!(
+                "{name} is syncing the blockchain. {next}{pace}",
+                "{name} está sincronizando la cadena de bloques. {next}{pace}"
+            ))
         } else if pending && recovery_in_progress {
             Some("Bring this Vault's history over below, then switch.".to_string())
         } else if pending {
@@ -1799,8 +1886,8 @@ pub fn node_backend_status<'a>(
         }
         if let Some((blocks, headers)) = local_heights {
             block = block.push(
-                text(format!(
-                    "Verified blocks: {blocks} / {headers} known headers · {} blocks remaining",
+                text(localized_format!(
+                    "Verified blocks: {blocks} / {headers} known headers · {} blocks remaining", "Bloques verificados: {blocks} de {headers} encabezados conocidos · faltan {} bloques",
                     headers.saturating_sub(blocks),
                 ))
                 .size(14),
@@ -1816,7 +1903,7 @@ pub fn node_backend_status<'a>(
     } else if can_switch_to_bitcoind || active_backend == "Local Node" {
         let mut block = Column::new().spacing(6).push(page::status(
             page::Status::Busy,
-            "Waiting for the local node to report sync progress…",
+            localized_copy("Waiting for the local node to report sync progress…"),
         ));
         // A starting node's log is most useful before it reports progress.
         if let Some(log) = pending_bitcoind_log.filter(|_| show_log) {
@@ -1841,7 +1928,7 @@ pub fn node_backend_status<'a>(
         if pending_bitcoind_log.is_some() {
             node_actions.push(page::plain_button(
                 if show_log {
-                    "Hide node log"
+                    localized_copy("Hide node log")
                 } else {
                     "Node log"
                 },
@@ -1850,13 +1937,15 @@ pub fn node_backend_status<'a>(
             ));
         }
         let label = match &flavor {
-            Some(flavor) => format!("Local node · {flavor}"),
+            Some(flavor) => localized_format!("Local node · {flavor}", "Nodo local · {flavor}"),
             None => "Local node".to_string(),
         };
         let mut node_row = page::row(label);
         if pending_progress.is_some() && !still_syncing {
-            node_row =
-                node_row.accessory(page::status(page::Status::Ok, "Blockchain sync complete"));
+            node_row = node_row.accessory(page::status(
+                page::Status::Ok,
+                localized_copy("Blockchain sync complete"),
+            ));
         }
         rows.push(
             node_actions
@@ -1887,14 +1976,14 @@ pub fn pending_node_setup_panel<'a>(
     col = col.push(
         Row::new()
             .push(
-                text("Set up local node")
+                text(localized_copy("Set up local node"))
                     .bold()
                     .size(18)
                     .width(Length::Fill),
             )
             .push(Space::new().width(Length::Fill))
             .push(
-                button::transparent(None, "Cancel")
+                button::transparent(None, localized_copy("Cancel"))
                     .on_press(NodeSettingsMessage::SetupLocalNodeCancel),
             )
             .align_y(Alignment::Center),
@@ -1903,7 +1992,7 @@ pub fn pending_node_setup_panel<'a>(
     col = col.push(
         Column::new()
             .spacing(8)
-            .push(caption("Bitcoin Core RPC address"))
+            .push(caption(localized_copy("Bitcoin Core RPC address")))
             .push(
                 TextInput::new("127.0.0.1:8332", &addr.value)
                     .on_input(NodeSettingsMessage::SetupLocalNodeAddrChanged)
@@ -1914,7 +2003,7 @@ pub fn pending_node_setup_panel<'a>(
             .push(if addr.valid {
                 text("").size(12)
             } else {
-                text("Invalid address (expected host:port)")
+                text(localized_copy("Invalid address (expected host:port)"))
                     .style(theme::text::warning)
                     .size(12)
             }),
@@ -1923,7 +2012,7 @@ pub fn pending_node_setup_panel<'a>(
     col = col.push(
         Column::new()
             .spacing(8)
-            .push(caption("Authentication"))
+            .push(caption(localized_copy("Authentication")))
             .push(
                 Row::new()
                     .spacing(15)
@@ -1947,7 +2036,7 @@ pub fn pending_node_setup_panel<'a>(
             col = col.push(
                 Column::new()
                     .spacing(8)
-                    .push(caption("Cookie file path"))
+                    .push(caption(localized_copy("Cookie file path")))
                     .push(
                         TextInput::new(
                             "/path/to/.bitcoin/.cookie",
@@ -1963,7 +2052,7 @@ pub fn pending_node_setup_panel<'a>(
                     .push(if rpc_auth_vals.cookie_path.valid {
                         text("").size(12)
                     } else {
-                        text("Cookie file path must not be empty")
+                        text(localized_copy("Cookie file path must not be empty"))
                             .style(theme::text::warning)
                             .size(12)
                     }),
@@ -1976,7 +2065,7 @@ pub fn pending_node_setup_panel<'a>(
                     .push(
                         Column::new()
                             .spacing(8)
-                            .push(caption("Username"))
+                            .push(caption(localized_copy("Username")))
                             .push(
                                 TextInput::new("rpcuser", &rpc_auth_vals.user.value)
                                     .on_input(|v| {
@@ -1989,7 +2078,7 @@ pub fn pending_node_setup_panel<'a>(
                             .push(if rpc_auth_vals.user.valid {
                                 text("").size(12)
                             } else {
-                                text("Username must not be empty")
+                                text(localized_copy("Username must not be empty"))
                                     .style(theme::text::warning)
                                     .size(12)
                             })
@@ -1998,7 +2087,7 @@ pub fn pending_node_setup_panel<'a>(
                     .push(
                         Column::new()
                             .spacing(8)
-                            .push(caption("Password"))
+                            .push(caption(localized_copy("Password")))
                             .push(
                                 TextInput::new("rpcpassword", &rpc_auth_vals.password.value)
                                     .on_input(|v| {
@@ -2014,7 +2103,7 @@ pub fn pending_node_setup_panel<'a>(
                             .push(if rpc_auth_vals.password.valid {
                                 text("").size(12)
                             } else {
-                                text("Password must not be empty")
+                                text(localized_copy("Password must not be empty"))
                                     .style(theme::text::warning)
                                     .size(12)
                             })
@@ -2048,22 +2137,24 @@ pub fn node_setup_mode_picker_panel<'a>() -> Element<'a, NodeSettingsMessage> {
     col = col.push(
         Row::new()
             .push(
-                text("Set up local node")
+                text(localized_copy("Set up local node"))
                     .bold()
                     .size(18)
                     .width(Length::Fill),
             )
             .push(
-                button::transparent(None, "Cancel")
+                button::transparent(None, localized_copy("Cancel"))
                     .on_press(NodeSettingsMessage::SetupLocalNodeCancel),
             )
             .align_y(Alignment::Center),
     );
 
     col = col.push(
-        text("How would you like to connect to Bitcoin Core?")
-            .style(theme::text::secondary)
-            .size(14),
+        text(localized_copy(
+            "How would you like to connect to Bitcoin Core?",
+        ))
+        .style(theme::text::secondary)
+        .size(14),
     );
 
     let external_card = card::simple(
@@ -2074,16 +2165,18 @@ pub fn node_setup_mode_picker_panel<'a>() -> Element<'a, NodeSettingsMessage> {
                     Row::new()
                         .spacing(10)
                         .push(badge::badge(icon::network_icon()))
-                        .push(text("My own node").bold())
+                        .push(text(localized_copy("My own node")).bold())
                         .align_y(Alignment::Center),
                 )
                 .push(
-                    text("Connect to a Bitcoin Core node you already have running.")
-                        .size(13)
-                        .style(theme::text::secondary),
+                    text(localized_copy(
+                        "Connect to a Bitcoin Core node you already have running.",
+                    ))
+                    .size(13)
+                    .style(theme::text::secondary),
                 )
                 .push(
-                    button::secondary(None, "Configure →")
+                    button::secondary(None, localized_copy("Configure →"))
                         .padding([8, 14])
                         .on_press(NodeSettingsMessage::SetupLocalNodeModeSelected(false)),
                 ),
@@ -2100,11 +2193,11 @@ pub fn node_setup_mode_picker_panel<'a>() -> Element<'a, NodeSettingsMessage> {
                     Row::new()
                         .spacing(10)
                         .push(badge::badge(icon::bitcoin_icon()))
-                        .push(text("Tenshu-managed node (recommended)").bold())
+                        .push(text(localized_copy("Tenshu-managed node (recommended)")).bold())
                         .align_y(Alignment::Center),
                 )
                 .push(
-                    text("Tenshu downloads and runs a pruned node (~15 GB) automatically. No configuration needed.")
+                    text(localized_copy("Tenshu downloads and runs a pruned node (~15 GB) automatically. No configuration needed."))
                         .size(13)
                         .style(theme::text::secondary),
                 )
@@ -2128,16 +2221,16 @@ pub fn node_setup_mode_picker_panel<'a>() -> Element<'a, NodeSettingsMessage> {
                 )
                 .push(
                     text(
-                        "Knots ships stricter relay defaults — it limits oversized \
-                         data-carrier (\"spam\") transactions. Standard sends are unaffected.",
+                        localized_copy("Knots ships stricter relay defaults — it limits oversized \
+                         data-carrier (\"spam\") transactions. Standard sends are unaffected."),
                     )
                     .size(12)
                     .style(theme::text::secondary),
                 )
                 .push(
                     text(
-                        "Your Vaults share one Bitcoin node, so this applies to every Vault — \
-                         switching restarts the node and moves them all to the chosen build.",
+                        localized_copy("Your Vaults share one Bitcoin node, so this applies to every Vault — \
+                         switching restarts the node and moves them all to the chosen build."),
                     )
                     .size(12)
                     .style(theme::text::secondary),
@@ -2167,14 +2260,14 @@ pub fn internal_node_setup_panel<'a>(
     col = col.push(
         Row::new()
             .push(
-                text("Setting up local node")
+                text(localized_copy("Setting up local node"))
                     .bold()
                     .size(18)
                     .width(Length::Fill),
             )
             .push({
                 let close_btn: Element<'_, NodeSettingsMessage> = if done || error.is_some() {
-                    button::transparent(None, "Close")
+                    button::transparent(None, localized_copy("Close"))
                         .on_press(NodeSettingsMessage::SetupLocalNodeCancel)
                         .into()
                 } else {
@@ -2189,18 +2282,22 @@ pub fn internal_node_setup_panel<'a>(
         col = col.push(
             Column::new()
                 .spacing(8)
-                .push(text("Setup failed").bold().style(theme::text::warning))
+                .push(
+                    text(localized_copy("Setup failed"))
+                        .bold()
+                        .style(theme::text::warning),
+                )
                 .push(text(err).size(13).style(theme::text::warning))
                 .push(
                     Row::new()
                         .spacing(10)
                         .push(
-                            button::secondary(None, "Retry")
+                            button::secondary(None, localized_copy("Retry"))
                                 .padding([8, 14])
                                 .on_press(NodeSettingsMessage::SetupLocalNodeModeSelected(true)),
                         )
                         .push(
-                            button::transparent(None, "Cancel")
+                            button::transparent(None, localized_copy("Cancel"))
                                 .on_press(NodeSettingsMessage::SetupLocalNodeCancel),
                         ),
                 ),
@@ -2209,11 +2306,19 @@ pub fn internal_node_setup_panel<'a>(
         col = col.push(
             Column::new()
                 .spacing(6)
-                .push(text(format!("{name} is running and syncing in the background.")).bold())
                 .push(
-                    text("Tenshu will automatically switch to this node once syncing is complete.")
-                        .size(13)
-                        .style(theme::text::secondary),
+                    text(localized_format!(
+                        "{name} is running and syncing in the background.",
+                        "{name} se está ejecutando y sincronizando en el fondo."
+                    ))
+                    .bold(),
+                )
+                .push(
+                    text(localized_copy(
+                        "Tenshu will automatically switch to this node once syncing is complete.",
+                    ))
+                    .size(13)
+                    .style(theme::text::secondary),
                 ),
         );
     } else if downloading {
@@ -2221,8 +2326,9 @@ pub fn internal_node_setup_panel<'a>(
             Column::new()
                 .spacing(10)
                 .push(
-                    text(format!(
+                    text(localized_format!(
                         "Downloading {name}… {:.0}%",
+                        "Descargar {name}... {:.0}%",
                         download_progress.min(99.9)
                     ))
                     .size(14),
@@ -2234,9 +2340,12 @@ pub fn internal_node_setup_panel<'a>(
         );
     } else if installing {
         col = col.push(
-            text(format!("Installing and starting {name}…"))
-                .size(14)
-                .style(theme::text::secondary),
+            text(localized_format!(
+                "Installing and starting {name}…",
+                "Instalar y comenzar {name}…"
+            ))
+            .size(14)
+            .style(theme::text::secondary),
         );
     }
 
@@ -2290,12 +2399,14 @@ pub fn inbound_tor_section<'a>(
         return page::group(
             "Inbound connections",
             Some(intro.into()),
-            page::rows([page::row("Accept inbound connections over Tor")
-                .control(page::status(
-                    page::Status::Off,
-                    "Not available on this platform",
-                ))
-                .into()]),
+            page::rows([
+                page::row(localized_copy("Accept inbound connections over Tor"))
+                    .control(page::status(
+                        page::Status::Off,
+                        localized_copy("Not available on this platform"),
+                    ))
+                    .into(),
+            ]),
         );
     }
 
@@ -2308,8 +2419,8 @@ pub fn inbound_tor_section<'a>(
             .into()];
     if enabled {
         rows.push(
-            page::row("Limit upload to ~1 GB/day")
-                .description("Uploads up to ~1 GB/day. Turn off the limit only if your internet connection isn't metered.")
+            page::row(localized_copy("Limit upload to ~1 GB/day"))
+                .description(localized_copy("Uploads up to ~1 GB/day. Turn off the limit only if your internet connection isn't metered."))
                 .control(
                     toggle(TOR_LIMIT_ID, limit_upload, Message::FocusAction).on_toggle(|on| {
                         node_message(NodeSettingsMessage::InboundTorLimitUploadToggled(on))
@@ -2318,13 +2429,15 @@ pub fn inbound_tor_section<'a>(
                 .into(),
         );
         rows.push(
-            page::row("Also route outbound connections through Tor")
-                .control(
-                    toggle(TOR_OUTBOUND_ID, outbound_via_tor, Message::FocusAction).on_toggle(
-                        |on| node_message(NodeSettingsMessage::InboundTorOutboundToggled(on)),
-                    ),
-                )
-                .into(),
+            page::row(localized_copy(
+                "Also route outbound connections through Tor",
+            ))
+            .control(
+                toggle(TOR_OUTBOUND_ID, outbound_via_tor, Message::FocusAction).on_toggle(|on| {
+                    node_message(NodeSettingsMessage::InboundTorOutboundToggled(on))
+                }),
+            )
+            .into(),
         );
     }
 
@@ -2332,7 +2445,7 @@ pub fn inbound_tor_section<'a>(
     // user can see their node is actually taking part in the network.
     if let Some(s) = stats {
         rows.push(
-            page::row("Connections")
+            page::row(localized_copy("Connections"))
                 .control(
                     text(format!(
                         "{} inbound · {} outbound",
@@ -2344,7 +2457,7 @@ pub fn inbound_tor_section<'a>(
         );
         if let Some(onion) = &s.onion_address {
             rows.push(
-                page::row("Onion address")
+                page::row(localized_copy("Onion address"))
                     .control(
                         Row::new()
                             .spacing(8)
@@ -2368,7 +2481,7 @@ pub fn inbound_tor_section<'a>(
                 "unlimited".to_string()
             };
             rows.push(
-                page::row("Shared today")
+                page::row(localized_copy("Shared today"))
                     .control(text(format!("{} of {}", human_bytes(s.upload_used), cap)).size(14))
                     .into(),
             );
@@ -2407,18 +2520,18 @@ pub fn inbound_tor_section<'a>(
                 .push(Container::new(page::status(kind, status)).width(Length::Fill))
                 .push(page::button(
                     NODE_RESTART_ID,
-                    "Restart node to apply",
+                    localized_copy("Restart node to apply"),
                     Some(node_message(NodeSettingsMessage::RestartNodeToApply)),
                 )),
         );
     // Set expectations: the node only serves while the app is open and the
     // machine is awake.
     if enabled {
-        content = content.push(page::caption(
+        content = content.push(page::caption(localized_copy(
             "Your node is reachable while Tenshu is open and your computer is awake. \
              Minimizing is fine; if the computer sleeps, connections reconnect \
              automatically on wake.",
-        ));
+        )));
     }
     page::group("Inbound connections", Some(intro.into()), content)
 }
@@ -2443,14 +2556,16 @@ pub fn custom_esplora_section<'a>(
     let field = form::Form::new_trimmed("https://esplora.example.com/api", url, |v| {
         NodeSettingsMessage::CustomEsploraEdited(v)
     })
-    .warning("Enter a full http:// or https:// URL")
+    .warning(localized_copy("Enter a full http:// or https:// URL"))
     .size(P1_SIZE)
     .padding(10);
 
     let apply: Element<'_, NodeSettingsMessage> = if probing {
-        button::secondary(None, "Checking…").padding([8, 14]).into()
+        button::secondary(None, localized_copy("Checking…"))
+            .padding([8, 14])
+            .into()
     } else {
-        button::secondary(None, "Check and use")
+        button::secondary(None, localized_copy("Check and use"))
             .padding([8, 14])
             .on_press(NodeSettingsMessage::CustomEsploraApply)
             .into()
@@ -2458,13 +2573,13 @@ pub fn custom_esplora_section<'a>(
 
     let mut col = Column::new()
         .spacing(15)
-        .push(text("Your own Esplora").bold().size(18))
+        .push(text(localized_copy("Your own Esplora")).bold().size(18))
         .push(
-            text(
+            text(localized_copy(
                 "By default, chain queries go through COINCUBE's proxy — which means we \
                  see which addresses your wallet asks about, though not who you are. \
                  Point this at your own Esplora server to remove us from that path.",
-            )
+            ))
             .size(12)
             .style(theme::text::secondary),
         )
@@ -2478,8 +2593,8 @@ pub fn custom_esplora_section<'a>(
 
     if let Some(status) = status {
         col = col.push(match status {
-            Ok(height) => text(format!(
-                "Reachable — reported block height {}. Switching your chain queries over.",
+            Ok(height) => text(localized_format!(
+                "Reachable — reported block height {}. Switching your chain queries over.", "Alcanzar — reportó la altura de bloque {}. Intercambiando sus consultas de cadena.",
                 height
             ))
             .size(12)
@@ -2489,11 +2604,11 @@ pub fn custom_esplora_section<'a>(
     }
 
     col = col.push(separation().width(Length::Fill)).push(
-        text(
+        text(localized_copy(
             "No fallback is kept: if your server is unreachable, syncing stops rather than \
              quietly sending your address lookups somewhere else. Switch back to \
              COINCUBE | Connect above to restore the default providers.",
-        )
+        ))
         .size(12)
         .style(theme::text::secondary),
     );
@@ -2712,21 +2827,24 @@ pub fn wallet_history_section<'a>(
         Some(height) => history_step(
             1,
             StepState::Done,
-            "Sync the blockchain",
-            Some(format!("Done · block {height}")),
+            coincube_ui::locale::copy("Sync the blockchain"),
+            Some(localized_format!(
+                "Done · block {height}",
+                "Hecho · bloque {height}"
+            )),
             None,
         ),
         None if switching || switched => history_step(
             1,
             StepState::Done,
-            "Sync the blockchain",
+            coincube_ui::locale::copy("Sync the blockchain"),
             Some("Done".into()),
             None,
         ),
         None => history_step(
             1,
             StepState::Current,
-            "Sync the blockchain",
+            coincube_ui::locale::copy("Sync the blockchain"),
             Some("Waiting for your node".into()),
             None,
         ),
@@ -2763,19 +2881,24 @@ pub fn wallet_history_section<'a>(
                     },
                 ))
                 .push(page::muted(if status.reconciled {
-                    "Every payment and spend Connect found checks out against your node."
+                    localized_copy(
+                        "Every payment and spend Connect found checks out against your node.",
+                    )
                 } else {
-                    "Your node can provide this Vault's history."
+                    localized_copy("Your node can provide this Vault's history.")
                 })),
             None,
         ));
         (StepState::Done, Some("Done".to_string()))
     } else if preparing {
         body = body
-            .push(page::status(page::Status::Busy, "Preparing…"))
-            .push(page::muted(
+            .push(page::status(
+                page::Status::Busy,
+                localized_copy("Preparing…"),
+            ))
+            .push(page::muted(localized_copy(
                 "Importing what Connect found and working out which blocks your node still needs.",
-            ));
+            )));
         (StepState::Current, None)
     } else if let Some(job) = job.filter(|_| running) {
         let current = match job.phase {
@@ -2823,20 +2946,20 @@ pub fn wallet_history_section<'a>(
         if !status.cancel_queued {
             actions = actions
                 .push(page::plain_button(
-                    "Pause",
+                    localized_copy("Pause"),
                     ActionKind::Secondary,
                     Some(NodeSettingsMessage::RecoveryPause),
                 ))
                 .push(page::plain_button(
-                    "Cancel",
+                    localized_copy("Cancel"),
                     ActionKind::Secondary,
                     Some(NodeSettingsMessage::RecoveryCancel),
                 ));
         }
         body = body.push(actions.push(page::muted(if status.cancel_queued {
-            "Cancelling after the current batch…"
+            localized_copy("Cancelling after the current batch…")
         } else {
-            "Both wait for the current batch. Progress is saved if Tenshu closes."
+            localized_copy("Both wait for the current batch. Progress is saved if Tenshu closes.")
         })));
         (StepState::Current, Some(format!("{percent:.0}%")))
     } else if let Some(job) = job.filter(|_| paused) {
@@ -2861,37 +2984,43 @@ pub fn wallet_history_section<'a>(
                 Row::new()
                     .spacing(8)
                     .push(page::plain_button(
-                        "Resume",
+                        localized_copy("Resume"),
                         ActionKind::Primary,
                         can_start.then_some(NodeSettingsMessage::RecoveryResume),
                     ))
                     .push(page::plain_button(
-                        "Cancel recovery",
+                        localized_copy("Cancel recovery"),
                         ActionKind::Secondary,
                         Some(NodeSettingsMessage::RecoveryCancel),
                     )),
             );
         }
-        (StepState::Stopped, Some(format!("Paused at {percent:.0}%")))
+        (
+            StepState::Stopped,
+            Some(localized_format!(
+                "Paused at {percent:.0}%",
+                "Pausa en {percent:.0}%"
+            )),
+        )
     } else {
         body = body
             .push(page::muted(
-                "Your node only keeps recent blocks, so it hasn't seen this Vault's older payments yet. Tenshu brings them over and checks every payment and spend against your node.",
+                localized_copy("Your node only keeps recent blocks, so it hasn't seen this Vault's older payments yet. Tenshu brings them over and checks every payment and spend against your node."),
             ))
             .push(
                 Row::new()
                     .spacing(12)
                     .push(history_source(
-                        "Start from Connect's history",
+                        coincube_ui::locale::copy("Start from Connect's history"),
                         Some("Recommended"),
-                        "Imports what Connect found and fetches only the blocks it can't prove. Usually the quickest.",
+                        coincube_ui::locale::copy("Imports what Connect found and fetches only the blocks it can't prove. Usually the quickest."),
                         !from_date,
                         false,
                     ))
                     .push(history_source(
-                        "Start from a date or block",
+                        coincube_ui::locale::copy("Start from a date or block"),
                         None,
-                        "Scans every block from that point, for payments Connect may have missed. Can take hours.",
+                        coincube_ui::locale::copy("Scans every block from that point, for payments Connect may have missed. Can take hours."),
                         from_date,
                         true,
                     )),
@@ -2906,7 +3035,7 @@ pub fn wallet_history_section<'a>(
                         .align_y(Alignment::Center)
                         .push(
                             Container::new(form::Form::new_trimmed(
-                                "Block height or YYYY-MM-DD",
+                                localized_copy("Block height or YYYY-MM-DD"),
                                 start,
                                 NodeSettingsMessage::RecoveryStartEdited,
                             ))
@@ -2921,16 +3050,16 @@ pub fn wallet_history_section<'a>(
                         )),
                 )
                 .push(page::muted(
-                    "Downloads and scans every block from there. Keep Tenshu open; progress is saved if interrupted.",
+                    localized_copy("Downloads and scans every block from there. Keep Tenshu open; progress is saved if interrupted."),
                 ))
                 .push(page::plain_button(
-                    "Recover from this date or block",
+                    localized_copy("Recover from this date or block"),
                     ActionKind::Primary,
                     can_start.then_some(NodeSettingsMessage::RecoveryStart),
                 ));
         } else {
             body = body.push(page::plain_button(
-                "Import history from Connect",
+                localized_copy("Import history from Connect"),
                 ActionKind::Primary,
                 can_start.then_some(NodeSettingsMessage::ImportConnectHistory),
             ));
@@ -2943,38 +3072,43 @@ pub fn wallet_history_section<'a>(
     let step2 = history_step(
         2,
         state2,
-        "Bring this Vault's history to your node",
+        coincube_ui::locale::copy("Bring this Vault's history to your node"),
         note2,
         Some(body.into()),
     );
 
     let step3_body: Element<'a, NodeSettingsMessage> = if switched {
-        page::status(page::Status::Ok, "This Vault now uses your local node")
+        page::status(
+            page::Status::Ok,
+            localized_copy("This Vault now uses your local node"),
+        )
     } else if switching {
         Column::new()
             .spacing(10)
             .push(page::status(
                 page::Status::Busy,
-                "Switching to your local node…",
+                localized_copy("Switching to your local node…"),
             ))
-            .push(page::muted(
+            .push(page::muted(localized_copy(
                 "Tenshu is stopping Connect and loading this Vault on your local node.",
-            ))
+            )))
             .into()
     } else if done {
         Column::new()
             .spacing(10)
-            .push(page::muted(
+            .push(page::muted(localized_copy(
                 "Switch this Vault to read its balance and history from your node.",
-            ))
+            )))
             .push(page::plain_button(
-                "Switch to local node",
+                localized_copy("Switch to local node"),
                 ActionKind::Primary,
                 (switch_step == LocalNodeSwitchStep::Ready)
                     .then_some(NodeSettingsMessage::SwitchToBitcoind),
             ))
             .push_maybe((switch_step == LocalNodeSwitchStep::Waiting).then(|| {
-                page::muted("Waiting for the node and wallet history checks before switching.")
+                page::muted(localized_copy(
+                    "Waiting for the node and wallet history checks before switching.",
+                ))
             }))
             .into()
     } else {
@@ -2982,11 +3116,11 @@ pub fn wallet_history_section<'a>(
             .spacing(10)
             .align_y(Alignment::Center)
             .push(page::plain_button(
-                "Switch to local node",
+                localized_copy("Switch to local node"),
                 ActionKind::Secondary,
                 None,
             ))
-            .push(page::muted("Available after step 2"))
+            .push(page::muted(localized_copy("Available after step 2")))
             .into()
     };
     let step3 = history_step(
@@ -2998,7 +3132,7 @@ pub fn wallet_history_section<'a>(
         } else {
             StepState::Todo
         },
-        "Switch to your local node",
+        coincube_ui::locale::copy("Switch to your local node"),
         if switched { Some("Done".into()) } else { None },
         Some(step3_body),
     );
@@ -3009,13 +3143,13 @@ pub fn wallet_history_section<'a>(
             Container::new(
                 Column::new()
                     .spacing(4)
-                    .push(page::heading(if switched { "Vault moved to your local node" } else { "Move this Vault to your local node" }))
+                    .push(page::heading(if switched { localized_copy("Vault moved to your local node") } else { localized_copy("Move this Vault to your local node") }))
                     .push(page::muted(if switched {
-                        "All steps complete. Tenshu reads this Vault from your node."
+                        localized_copy("All steps complete. Tenshu reads this Vault from your node.")
                     } else if switching {
-                        "Your blockchain and Vault history are ready. Finishing the switch…"
+                        localized_copy("Your blockchain and Vault history are ready. Finishing the switch…")
                     } else {
-                        "Bring this Vault's history over, then switch. Connect keeps working until you do."
+                        localized_copy("Bring this Vault's history over, then switch. Connect keeps working until you do.")
                     })),
             )
             .padding([20, 24]),
@@ -3035,14 +3169,14 @@ pub fn wallet_history_section<'a>(
                     .align_y(Alignment::Center)
                     .push(
                         Container::new(page::muted(if switched {
-                            "You can switch back to Connect from this page."
+                            localized_copy("You can switch back to Connect from this page.")
                         } else {
-                            "Not ready? Connect keeps working, and you can come back here any time."
+                            localized_copy("Not ready? Connect keeps working, and you can come back here any time.")
                         }))
                         .width(Length::Fill),
                     )
                     .push(page::plain_button(
-                        if switched { "Done" } else { "Not now" },
+                        if switched { localized_copy("Done") } else { localized_copy("Not now") },
                         ActionKind::Secondary,
                         Some(NodeSettingsMessage::RecoveryDismiss),
                     )),
@@ -3100,7 +3234,13 @@ pub fn rolling_retention_section<'a>(
         None => "Waiting for the node to report its pruning depth…".into(),
     };
     let policy_description = policy
-        .map(|policy| format!("Current target: {} days of blocks.", policy.days))
+        .map(|policy| {
+            localized_format!(
+                "Current target: {} days of blocks.",
+                "Objetivo actual: {} días de bloques.",
+                policy.days
+            )
+        })
         .unwrap_or_else(|| {
             if status
                 .policy
@@ -3116,27 +3256,27 @@ pub fn rolling_retention_section<'a>(
         .value
         .parse::<u32>()
         .is_ok_and(|days| (1..=3650).contains(&days));
-    let current_row = page::row("Current pruning depth").description(current);
-    let row = page::row("Retention window")
+    let current_row = page::row(localized_copy("Current pruning depth")).description(current);
+    let row = page::row(localized_copy("Retention window"))
         .description(policy_description)
         .line(
             Container::new(Column::new()
                 .spacing(6)
-                .push(page::muted("Days to retain"))
+                .push(page::muted(localized_copy("Days to retain")))
                 .push(
                     Row::new()
                         .spacing(12)
                         .align_y(Alignment::Center)
                         .push(
                             Container::new(form::Form::new_trimmed(
-                                "For example, 180 or 365",
+                                localized_copy("For example, 180 or 365"),
                                 days,
                                 NodeSettingsMessage::RetentionDaysEdited,
                             ))
                             .max_width(320),
                         )
                         .push(page::plain_button(
-                            "Apply",
+                            localized_copy("Apply"),
                             ActionKind::Secondary,
                             (!status.busy && valid).then_some(NodeSettingsMessage::RetentionApply),
                         )),
@@ -3144,11 +3284,11 @@ pub fn rolling_retention_section<'a>(
                 .max_width(400),
         )
         .description(
-            "Keeps a rolling window of blocks. Older blocks are downloaded if needed and can use hundreds of GB. To return to automatic pruning, apply a storage target in Node resources.",
+            localized_copy("Keeps a rolling window of blocks. Older blocks are downloaded if needed and can use hundreds of GB. To return to automatic pruning, apply a storage target in Node resources."),
         )
         .top();
     page::group(
-        "Block retention",
+        localized_copy("Block retention"),
         None,
         page::rows([current_row.into(), row.into()]),
     )
@@ -3192,7 +3332,7 @@ pub fn node_resources_section<'a>(
         Row::new()
             .spacing(6)
             .align_y(Alignment::Center)
-            .push(text("Custom (MB):").size(13))
+            .push(text(localized_copy("Custom (MB):")).size(13))
             .push(
                 Container::new(Element::<NodeSettingsMessage>::from(
                     form::Form::new_amount_sats(placeholder, value, on)
@@ -3274,17 +3414,17 @@ pub fn node_resources_section<'a>(
                 )
                 .wrap(),
         )
-        .push(coincube_ui::component::tenshu::caption(
+        .push(coincube_ui::component::tenshu::caption(localized_copy(
             "Leave blank for the default (300 MB).",
-        ))
+        )))
         .into();
 
     let notes = Column::new()
         .spacing(2)
         .width(Length::Fill)
         .push(
-            text(format!(
-                "Estimated total: about {} GB of disk, and up to {} MB of memory for the mempool.",
+            text(localized_format!(
+                "Estimated total: about {} GB of disk, and up to {} MB of memory for the mempool.", "Total estimado: alrededor de {} GB de espacio en disco y hasta {} MB de memoria para la mempool.",
                 estimated_total_disk_gb(prune_mb),
                 mem_mb,
             ))
@@ -3292,29 +3432,29 @@ pub fn node_resources_section<'a>(
         )
         .push(Space::new().height(Length::Fixed(6.0)))
         .push(page::muted(
-            "• Lowering the target prunes more block data now, and that can't be undone.",
+            localized_copy("• Lowering the target prunes more block data now, and that can't be undone."),
         ))
         .push(page::muted(
-            "• Raising it keeps more blocks from now on — blocks already pruned don't come back.",
+            localized_copy("• Raising it keeps more blocks from now on — blocks already pruned don't come back."),
         ))
         .push(page::muted(
-            "• Restoring an old wallet may require re-downloading blocks below the prune depth.",
+            localized_copy("• Restoring an old wallet may require re-downloading blocks below the prune depth."),
         ));
 
     let rows = page::rows([
         block(
-            "Node data to keep",
-            "How much block data your node keeps on disk. The chainstate (~14 GB) is always kept and can't be pruned, so total disk use is always higher than this number.",
+            coincube_ui::locale::copy("Node data to keep"),
+            coincube_ui::locale::copy("How much block data your node keeps on disk. The chainstate (~14 GB) is always kept and can't be pruned, so total disk use is always higher than this number."),
             prune_controls,
         ),
         page::rule(),
         block(
-            "Mempool memory cap",
-            "Memory reserved for unconfirmed transactions. During heavy congestion a small cap can delay when small incoming payments first appear, until they confirm.",
+            coincube_ui::locale::copy("Mempool memory cap"),
+            coincube_ui::locale::copy("Memory reserved for unconfirmed transactions. During heavy congestion a small cap can delay when small incoming payments first appear, until they confirm."),
             mem_controls,
         ),
         page::rule(),
-        page::row("Computer size")
+        page::row(localized_copy("Computer size"))
             .control(page::plain_segments([
                 (
                     "Small computer",
@@ -3338,7 +3478,7 @@ pub fn node_resources_section<'a>(
             .top()
             .into(),
     ]);
-    page::group("Node resources", None, rows)
+    page::group(localized_copy("Node resources"), None, rows)
 }
 
 pub fn register_wallet_modal<'a>(
@@ -3351,7 +3491,11 @@ pub fn register_wallet_modal<'a>(
         Column::new()
             .push(
                 Column::new()
-                    .push(text("Select device:").bold().width(Length::Fill))
+                    .push(
+                        text(localized_copy("Select device:"))
+                            .bold()
+                            .width(Length::Fill),
+                    )
                     .spacing(10)
                     .push(
                         hws.iter()

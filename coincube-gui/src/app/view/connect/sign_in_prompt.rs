@@ -7,6 +7,8 @@
 //! which bubbles up to the pane so the Home tab can take focus and
 //! land the user on the Connect login form.
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::{
     color,
     component::{button, text},
@@ -25,10 +27,11 @@ pub fn sign_in_prompt<'a>(feature_label: &'a str) -> Element<'a, Message> {
     let card = Container::new(
         Column::new()
             .spacing(12)
-            .push(text::p1_bold("Sign in to Connect").style(theme::text::primary))
+            .push(text::p1_bold(localized_copy("Sign in to Connect")).style(theme::text::primary))
             .push(
-                text::p2_regular(format!(
+                text::p2_regular(localized_format!(
                     "Sign in to your Connect account to {}.",
+                    "Inicie sesión en su cuenta Connect a {}.",
                     feature_label
                 ))
                 .color(color::GREY_3),
@@ -39,7 +42,7 @@ pub fn sign_in_prompt<'a>(feature_label: &'a str) -> Element<'a, Message> {
                     .align_y(Alignment::Center)
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        button::primary(None, "Sign In")
+                        button::primary(None, localized_copy("Sign In"))
                             .on_press(Message::OpenConnectSignIn)
                             .width(Length::Fixed(140.0)),
                     ),
@@ -62,10 +65,10 @@ pub fn claim_ln_address_prompt<'a>() -> Element<'a, Message> {
             .spacing(12)
             .push(text::p1_bold("Claim a Lightning Address first").style(theme::text::primary))
             .push(
-                text::p2_regular(
+                text::p2_regular(localized_copy(
                     "Your Avatar is bound to your Lightning Address. Claim one to set \
                      up an Avatar.",
-                )
+                ))
                 .color(color::GREY_3),
             )
             .push(Space::new().height(Length::Fixed(4.0)))
@@ -74,7 +77,7 @@ pub fn claim_ln_address_prompt<'a>() -> Element<'a, Message> {
                     .align_y(Alignment::Center)
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        button::primary(None, "Claim Lightning Address")
+                        button::primary(None, localized_copy("Claim Lightning Address"))
                             .on_press(Message::Menu(Menu::Spark(SparkSubMenu::Settings(Some(
                                 SparkSettingsOption::LightningAddress,
                             )))))

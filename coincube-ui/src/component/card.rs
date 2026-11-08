@@ -30,7 +30,7 @@ pub fn warning<'a, T: 'a>(message: String) -> Container<'a, T> {
             .spacing(20)
             .align_y(iced::Alignment::Center)
             .push(icon::warning_icon())
-            .push(text(message)),
+            .push(text(crate::locale::notice(message))),
     )
     .padding(15)
     .style(theme::card::warning)
@@ -45,7 +45,7 @@ pub fn error<'a, T: 'a>(message: &'static str, error: String) -> Container<'a, T
                 .align_y(iced::Alignment::Center)
                 .push(icon::warning_icon().color(color::RED))
                 .push(text(message).color(color::RED)),
-            Text::new(error),
+            Text::new(crate::locale::notice(error)),
             iced::widget::tooltip::Position::Bottom,
         )
         .style(theme::card::error),

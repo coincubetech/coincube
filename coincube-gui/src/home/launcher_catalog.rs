@@ -13,6 +13,8 @@
 //! or recoverability.
 
 use crate::app::view::responsive;
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::{
     advanced::widget::Id,
     event,
@@ -1138,13 +1140,13 @@ pub(super) fn remote_restore(cube: &RemoteCube) -> RemoteRestore {
     let phone_recoverable =
         cube.phone_recoverable && feature_flags::OWNER_KEYCHAIN_RECOVERY_ENABLED;
     let status = match (password_recoverable, phone_recoverable) {
-        (true, true) => "Recovery Kit + Phone recovery available",
-        (true, false) => "Recovery Kit available",
-        (false, true) => "Phone recovery available",
-        (false, false) if cube.has_recovery_kit => {
-            "Recovery Kit has no Master Seed — restore from the device where it was backed up"
-        }
-        (false, false) => "Registered in Connect (no Recovery Kit backed up)",
+        (true, true) => localized_copy("Recovery Kit + Phone recovery available"),
+        (true, false) => localized_copy("Recovery Kit available"),
+        (false, true) => localized_copy("Phone recovery available"),
+        (false, false) if cube.has_recovery_kit => localized_copy(
+            "Recovery Kit has no Master Seed — restore from the device where it was backed up",
+        ),
+        (false, false) => localized_copy("Registered in Connect (no Recovery Kit backed up)"),
     };
     let action = match (password_recoverable, phone_recoverable) {
         (true, true) => Some((
@@ -1818,9 +1820,13 @@ fn label_action<'a>(
     press: Option<ViewMessage>,
     style: fn(&theme::Theme, iced_button::Status) -> iced_button::Style,
 ) -> Action<'a, ViewMessage> {
-    Action::new(id, Container::new(p2_medium(label)).padding([6, 12]), focus)
-        .style(style)
-        .on_press_maybe(press)
+    Action::new(
+        id,
+        Container::new(p2_medium(localized_copy(label))).padding([6, 12]),
+        focus,
+    )
+    .style(style)
+    .on_press_maybe(press)
 }
 
 fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a, ViewMessage> {
@@ -1871,8 +1877,9 @@ fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a,
                     .push(name),
             )
             .push(
-                p2_regular(format!(
+                p2_regular(localized_format!(
                     "Network: {}  ·  Wallets: {}  ·  Backup: {}",
+                    "Red: {} · Carteras: {} · Copia de seguridad: {}",
                     row.key.chain.label(),
                     row.wallets,
                     backup,
@@ -1899,7 +1906,7 @@ fn local_row<'a>(row: &LocalRow<'_>, selected: bool, table: bool) -> Element<'a,
         .push(
             Container::new(label_action(
                 open_id(&row.key),
-                "Open",
+                localized_copy("Open"),
                 row.actionable
                     .then(|| ViewMessage::RunCatalog(row.key.clone())),
                 link_style,
@@ -1946,7 +1953,7 @@ fn remote_row<'a>(cube: &RemoteCube) -> Element<'a, ViewMessage> {
         }))
         .push(label_action(
             remote_delete_id(&cube.uuid),
-            "Delete…",
+            localized_copy("Delete…"),
             Some(ViewMessage::DeleteCube(DeleteCubeMessage::ShowRemoteModal(
                 cube.uuid.clone(),
             ))),
@@ -1983,24 +1990,27 @@ fn details_panel<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
                     )
                     .push(label_action(
                         close_details_id(),
-                        "Close",
+                        localized_copy("Close"),
                         Some(ViewMessage::Catalog(CatalogMessage::ClearSelection)),
                         link_style,
                     )),
             )
             .push(detail_line(
-                "Network",
+                localized_copy("Network"),
                 p2_regular(row.key.chain.label()).into(),
             ))
-            .push(detail_line("Stored", p2_regular("On this device").into()))
             .push(detail_line(
-                "Lock",
+                localized_copy("Stored"),
+                p2_regular(localized_copy("On this device")).into(),
+            ))
+            .push(detail_line(
+                localized_copy("Lock"),
                 p2_regular(super::launcher_presenter::lock_state(row.open))
                     .style(muted)
                     .into(),
             ))
             .push(detail_line(
-                "Seed phrase",
+                localized_copy("Seed phrase"),
                 p2_regular(backup).style(tone_style(backup_tone)).into(),
             ))
             .push(detail_line(
@@ -2010,14 +2020,14 @@ fn details_panel<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
                     .into(),
             ))
             .push(detail_line(
-                "Recovery Kit",
+                localized_copy("Recovery Kit"),
                 p2_regular(caption)
                     .style(tone_style(tone))
                     .wrapping(Wrapping::WordOrGlyph)
                     .into(),
             ))
             .push(detail_line(
-                "Wallets",
+                localized_copy("Wallets"),
                 p2_regular(row.wallets.clone())
                     .style(muted)
                     .wrapping(Wrapping::WordOrGlyph)
@@ -2026,21 +2036,23 @@ fn details_panel<'a>(row: &LocalRow<'_>) -> Element<'a, ViewMessage> {
             // Passkey metadata is a stored fact; PIN presence is not known
             // before unlock, so nothing is claimed for other Cubes.
             .push(
-                row.cube
-                    .is_passkey_cube()
-                    .then(|| detail_line("Unlocks with", p2_regular("Passkey").into())),
+                row.cube.is_passkey_cube().then(|| {
+                    detail_line(localized_copy("Unlocks with"), p2_regular("Passkey").into())
+                }),
             )
             .push(
-                p2_regular("Opening asks for its PIN or passkey on the next screen.")
-                    .style(muted)
-                    .wrapping(Wrapping::WordOrGlyph),
+                p2_regular(localized_copy(
+                    "Opening asks for its PIN or passkey on the next screen.",
+                ))
+                .style(muted)
+                .wrapping(Wrapping::WordOrGlyph),
             )
             .push(
                 Row::new()
                     .spacing(8)
                     .push(label_action(
                         details_open_id(&row.key),
-                        "Open",
+                        localized_copy("Open"),
                         Some(ViewMessage::RunCatalog(row.key.clone())),
                         theme::button::primary,
                     ))
@@ -2089,17 +2101,17 @@ fn table_heading<'a>() -> Element<'a, ViewMessage> {
         .push(Space::new().width(Length::Fixed(AVATAR_WIDTH)))
         .push(p2_regular("Cube").style(muted).width(Length::Fill))
         .push(
-            p2_regular("Network")
+            p2_regular(localized_copy("Network"))
                 .style(muted)
                 .width(Length::Fixed(NETWORK_WIDTH)),
         )
         .push(
-            p2_regular("Wallets")
+            p2_regular(localized_copy("Wallets"))
                 .style(muted)
                 .width(Length::Fixed(WALLETS_WIDTH)),
         )
         .push(
-            p2_regular("Seed phrase")
+            p2_regular(localized_copy("Seed phrase"))
                 .style(muted)
                 .width(Length::Fixed(BACKUP_WIDTH)),
         )
@@ -2224,7 +2236,7 @@ pub(super) fn layout<'a>(projection: &Projection<'_>, width: f32) -> Element<'a,
         .spacing(8)
         .align_y(Alignment::Center)
         .push(
-            TextInput::new("Search Cubes by name", &projection.query)
+            TextInput::new(localized_copy("Search Cubes by name"), &projection.query)
                 .id(search_input_id())
                 .on_input(|query| ViewMessage::Catalog(CatalogMessage::Query(query)))
                 .padding(10)
@@ -2233,7 +2245,7 @@ pub(super) fn layout<'a>(projection: &Projection<'_>, width: f32) -> Element<'a,
         .push((!projection.query.is_empty()).then(|| {
             label_action(
                 clear_query_id(),
-                "Clear",
+                localized_copy("Clear"),
                 Some(ViewMessage::Catalog(CatalogMessage::ClearQuery)),
                 link_style,
             )
@@ -2245,13 +2257,14 @@ pub(super) fn layout<'a>(projection: &Projection<'_>, width: f32) -> Element<'a,
             Column::new()
                 .spacing(8)
                 .padding([16, 12])
-                .push(p1_regular(format!(
+                .push(p1_regular(localized_format!(
                     "No Cubes match “{}”.",
+                    "No Cubes coinciden con “{}”.",
                     projection.query.trim()
                 )))
                 .push(label_action(
                     control_id("clear-query-empty"),
-                    "Clear search",
+                    localized_copy("Clear search"),
                     Some(ViewMessage::Catalog(CatalogMessage::ClearQuery)),
                     link_style,
                 )),

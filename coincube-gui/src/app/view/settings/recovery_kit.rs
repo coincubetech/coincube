@@ -1,6 +1,7 @@
 //! Recovery Kit views shared with Cube creation through a message mapper.
 //! Authentication, password policy and removal gates remain in the state machine.
 
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     component::tenshu::{self, ActionButton, ActionKind, Tone},
@@ -18,7 +19,7 @@ use crate::app::view::message::{
 };
 use crate::pin_input::PinInput;
 use crate::services::coincube::RecoveryKitStatus;
-use crate::services::recovery::{score_password, PasswordStrength, MIN_PASSWORD_LEN};
+use crate::services::recovery::{score_password, MIN_PASSWORD_LEN};
 
 fn wrap(msg: RecoveryKitMessage) -> Message {
     Message::Settings(SettingsMessage::RecoveryKit(msg))
@@ -50,7 +51,8 @@ fn flow<'a, M: 'a>(
 fn error_note<'a, M: 'a>(message: &'a str) -> Element<'a, M> {
     page::note(
         Tone::Bad,
-        tenshu::body(message).style(|t| theme::tenshu::text::tone(t, Tone::Bad)),
+        tenshu::body(coincube_ui::locale::notice(message.to_owned()))
+            .style(|t| theme::tenshu::text::tone(t, Tone::Bad)),
         None,
     )
 }
@@ -114,19 +116,6 @@ pub fn pin_entry_view<'a>(pin: &'a PinInput, error: Option<&'a str>) -> Element<
 
 /// Shared with Cube creation. Keep the exact length, strength, match and
 /// acknowledgement gates, and wrap secret input at the message boundary.
-fn strength_label(strength: PasswordStrength) -> &'static str {
-    if coincube_ui::locale::language() == coincube_ui::locale::Language::English {
-        return strength.label();
-    }
-    match strength {
-        PasswordStrength::VeryWeak => "Muy débil",
-        PasswordStrength::Weak => "Débil",
-        PasswordStrength::Fair => "Aceptable",
-        PasswordStrength::Strong => "Fuerte",
-        PasswordStrength::VeryStrong => "Muy fuerte",
-    }
-}
-
 pub fn password_entry_view<'a, M: Clone + 'a>(
     password: &'a Zeroizing<String>,
     confirm: &'a Zeroizing<String>,
@@ -162,11 +151,11 @@ pub fn password_entry_view<'a, M: Clone + 'a>(
         )
         .push(tenshu::caption(CopyText::PasswordStrength.get().replacen(
             "{strength}",
-            strength_label(strength),
+            localized_copy(strength.label()),
             1,
         )));
     if let Some(hint) = hint {
-        fields = fields.push(tenshu::caption(hint));
+        fields = fields.push(tenshu::caption(coincube_ui::locale::notice(hint)));
     }
     fields = fields
         .push(Space::new().height(8))
@@ -430,9 +419,9 @@ pub fn completed_view(
                 page::Status::Off
             },
             if has_seed || has_descriptor {
-                "Backed up"
+                localized_copy("Backed up")
             } else {
-                "Not backed up"
+                localized_copy("Not backed up")
             },
         ))
         .push(tenshu::caption(
@@ -453,7 +442,8 @@ pub fn error_view(message: &str) -> Element<'static, Message> {
     flow(CopyText::CouldnTCompleteRecoveryKitAction.get(), "", false)
         .push(page::note(
             Tone::Bad,
-            tenshu::body(message.to_owned()).style(|t| theme::tenshu::text::tone(t, Tone::Bad)),
+            tenshu::body(coincube_ui::locale::notice(message.to_owned()))
+                .style(|t| theme::tenshu::text::tone(t, Tone::Bad)),
             None,
         ))
         .push(page::rule())

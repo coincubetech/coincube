@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 pub mod custom;
 pub mod diagram;
 pub mod inheritance;
@@ -56,7 +57,7 @@ pub fn choose_descriptor_template(
             .align_x(Alignment::Center)
             .spacing(10)
             .push(
-                p2_regular("Choose how your Vault can be spent now and recovered after inactivity. Select a policy to see its keys and recovery timing.")
+                p2_regular(localized_copy("Choose how your Vault can be spent now and recovered after inactivity. Select a policy to see its keys and recovery timing."))
                     .style(theme::text::secondary)
                     .width(Length::Fill)
                     .align_x(alignment::Horizontal::Center),
@@ -141,9 +142,9 @@ pub(super) fn template_introduction(
                     .spacing(6)
                     .push(p2_regular(tip).style(theme::text::secondary))
                     .push(show_keychain_tip.then(|| {
-                        p2_regular(
+                        p2_regular(localized_copy(
                             "A family member or friend can contribute a Keychain key remotely.",
-                        )
+                        ))
                         .style(theme::text::secondary)
                     })),
             ),
@@ -151,7 +152,7 @@ pub(super) fn template_introduction(
         Some(Message::Previous),
         Action::new(
             format!("tenshu.installer.vault.intro.{}.next", ui_instance),
-            Container::new(p2_regular("Next")).center_x(Length::Shrink),
+            Container::new(p2_regular(localized_copy("Next"))).center_x(Length::Shrink),
             Message::FocusAction,
         )
         .style(theme::button::primary)

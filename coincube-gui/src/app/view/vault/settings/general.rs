@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use iced::widget::{pick_list, Column, Row, Space, Toggler};
 use iced::{Alignment, Length};
 
@@ -46,7 +47,7 @@ pub fn fiat_price<'a>(
                 Row::new()
                     .spacing(10)
                     .align_y(Alignment::Center)
-                    .push(text("Fiat price:").bold())
+                    .push(text(localized_copy("Fiat price:")).bold())
                     .push(Space::new().width(Length::Fill))
                     .push(
                         Toggler::new(new_price_setting.is_enabled)
@@ -59,7 +60,7 @@ pub fn fiat_price<'a>(
                     Row::new()
                         .spacing(20)
                         .align_y(Alignment::Center)
-                        .push(text("Exchange rate source:").bold())
+                        .push(text(localized_copy("Exchange rate source:")).bold())
                         .push(Space::new().width(Length::Fill))
                         .push(
                             pick_list(
@@ -85,7 +86,7 @@ pub fn fiat_price<'a>(
                     Row::new()
                         .spacing(20)
                         .align_y(Alignment::Center)
-                        .push(text("Currency:").bold())
+                        .push(text(localized_copy("Currency:")).bold())
                         .push(Space::new().width(Length::Fill))
                         .push(
                             pick_list(

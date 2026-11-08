@@ -10,6 +10,7 @@
 //! (pulsing balance + progress row during sync, "+X unconfirmed" row)
 //! so those don't regress when Vault Overview adopts the shared helper.
 
+use coincube_ui::locale::copy as localized_copy;
 use std::time::Duration;
 
 use coincube_core::miniscript::bitcoin::Amount;
@@ -307,7 +308,7 @@ pub fn wallet_header<'a, M: Clone + 'static>(props: WalletHeaderProps<M>) -> Col
         SyncState::Checking => Some(
             Row::<'a, M>::new()
                 .push(
-                    text("Checking for new transactions")
+                    text(localized_copy("Checking for new transactions"))
                         .size(P2_SIZE)
                         .style(theme::text::secondary),
                 )
@@ -447,7 +448,11 @@ fn warning_row<'a, M: 'a>(message: String) -> Element<'a, M> {
         .spacing(6)
         .align_y(Alignment::Center)
         .push(warning_icon().size(P2_SIZE).style(theme::text::warning))
-        .push(text(message).size(P2_SIZE).style(theme::text::warning))
+        .push(
+            text(coincube_ui::locale::notice(message))
+                .size(P2_SIZE)
+                .style(theme::text::warning),
+        )
         .wrap()
         .into()
 }
@@ -467,6 +472,10 @@ fn pending_row<'a, M: 'a>(
             P2_SIZE,
             bitcoin_unit,
         ))
-        .push(text("pending").size(P2_SIZE).style(theme::text::secondary))
+        .push(
+            text(localized_copy("pending"))
+                .size(P2_SIZE)
+                .style(theme::text::secondary),
+        )
         .into()
 }

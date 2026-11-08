@@ -3,6 +3,7 @@
 //! wallet's Source, Review, Scan and Done steps. Both draw the same header,
 //! path list and stepper, so the user sees one flow across the hand-off.
 
+use coincube_ui::locale::copy as localized_copy;
 use iced::{widget::Space, Alignment, Length};
 
 use iced::advanced::widget::Id;
@@ -219,7 +220,9 @@ fn close_content<'a, M: 'a>() -> Element<'a, M> {
                     .size(14)
                     .style(theme::tenshu::text::ink),
             )
-            .push(coincube_ui::component::tenshu::text::label("Close"))
+            .push(coincube_ui::component::tenshu::text::label(localized_copy(
+                "Close",
+            )))
             .spacing(6)
             .align_y(Alignment::Center),
     )

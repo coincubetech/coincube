@@ -15,6 +15,7 @@
 //! existing dispatch path through `ConnectPanel::update` keeps
 //! working.
 
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     component::{
         tenshu,
@@ -152,9 +153,12 @@ fn availability<'a>(
     if username.is_empty() || state.ln_username_error.is_some() {
         Space::new().into()
     } else if state.ln_checking {
-        page::status(page::Status::Busy, "Checking…")
+        page::status(page::Status::Busy, localized_copy("Checking…"))
     } else if !lightning_username_differs(current, username) {
-        page::status(page::Status::Off, "This is your current username")
+        page::status(
+            page::Status::Off,
+            localized_copy("This is your current username"),
+        )
     } else if state.ln_username_available == Some(true) {
         page::status(
             page::Status::Ok,
@@ -223,13 +227,13 @@ pub fn settings_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCube
                         .line_height(iced::widget::text::LineHeight::Relative(1.3))
                         .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                 )
-                .push(page::muted(
+                .push(page::muted(localized_copy(
                     "Anyone can send you bitcoin with this address.",
-                )),
+                ))),
         )
         .push(action(
             COPY_ID,
-            "Copy",
+            coincube_ui::locale::copy("Copy"),
             if editing {
                 ActionKind::Secondary
             } else {
@@ -240,7 +244,7 @@ pub fn settings_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCube
         .push(
             action(
                 CHANGE_ID,
-                "Change",
+                coincube_ui::locale::copy("Change"),
                 ActionKind::Secondary,
                 (!state.ln_editing && !state.ln_changing)
                     .then_some(ConnectCubeMessage::BeginEditLightningAddress),
@@ -261,7 +265,7 @@ pub fn settings_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCube
     let mut content = Column::new()
         .width(Length::Fill)
         .push(Space::new().height(Length::Fixed(page::GROUP_GAP)))
-        .push(page::heading("Your Lightning address"))
+        .push(page::heading(localized_copy("Your Lightning address")))
         .push(Space::new().height(Length::Fixed(12.0)))
         .push(page::rule())
         .push(Container::new(row).padding([12, 0]));
@@ -274,7 +278,9 @@ pub fn settings_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCube
             Tone::Bad,
             Column::new()
                 .spacing(4)
-                .push(tenshu::label("This address needs re-registration"))
+                .push(tenshu::label(localized_copy(
+                    "This address needs re-registration",
+                )))
                 .push(page::muted(err)),
             Some(
                 action(
@@ -346,7 +352,7 @@ pub fn settings_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCube
             ))
             .push(action(
                 CANCEL_ID,
-                "Cancel",
+                coincube_ui::locale::copy("Cancel"),
                 ActionKind::Secondary,
                 (!state.ln_changing).then_some(ConnectCubeMessage::CancelEditLightningAddress),
             ));
@@ -389,9 +395,9 @@ fn claim_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage
         .push(action(
             CLAIM_ID,
             if state.ln_claiming {
-                "Claiming…"
+                localized_copy("Claiming…")
             } else {
-                "Claim address"
+                localized_copy("Claim address")
             },
             ActionKind::Primary,
             claim,
@@ -401,7 +407,7 @@ fn claim_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage
         if state.registration_error.is_some() {
             body = body.push(action(
                 RETRY_ID,
-                "Retry connection",
+                coincube_ui::locale::copy("Retry connection"),
                 ActionKind::Secondary,
                 Some(ConnectCubeMessage::RetryRegistration),
             ));

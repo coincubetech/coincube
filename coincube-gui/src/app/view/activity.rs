@@ -4,6 +4,8 @@
 
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use coincube_spark_protocol::PaymentSummary;
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::{
     component::tenshu::{self, page_head, FieldSize, PageWidth},
     font, theme,
@@ -60,12 +62,12 @@ impl std::fmt::Display for WalletFilter {
         write!(
             f,
             "{}",
-            match self {
+            localized_copy(match self {
                 Self::All => "All wallets",
                 Self::Vault => "Vault",
                 Self::Spark => "Spark",
                 Self::Liquid => "Liquid",
-            }
+            })
         )
     }
 }
@@ -74,12 +76,12 @@ impl std::fmt::Display for DirectionFilter {
         write!(
             f,
             "{}",
-            match self {
+            localized_copy(match self {
                 Self::All => "All",
                 Self::Received => "Received",
                 Self::Sent => "Sent",
                 Self::Transfers => "Transfers",
-            }
+            })
         )
     }
 }
@@ -88,12 +90,12 @@ impl std::fmt::Display for StatusFilter {
         write!(
             f,
             "{}",
-            match self {
+            localized_copy(match self {
                 Self::All => "All",
                 Self::Pending => "Pending",
                 Self::Confirmed => "Confirmed",
                 Self::Failed => "Failed",
-            }
+            })
         )
     }
 }
@@ -318,9 +320,9 @@ impl Entry {
         let title = label.unwrap_or_else(|| {
             match direction {
                 DirectionFilter::Received if tx.time.is_none() => "Incoming Bitcoin",
-                DirectionFilter::Received => "Received Bitcoin",
-                DirectionFilter::Sent => "Sent Bitcoin",
-                _ => "Self-transfer",
+                DirectionFilter::Received => localized_copy("Received Bitcoin"),
+                DirectionFilter::Sent => localized_copy("Sent Bitcoin"),
+                _ => localized_copy("Self-transfer"),
             }
             .into()
         });
@@ -533,12 +535,14 @@ impl Entry {
                 // settling, or one that failed, says so, as the Swap
                 // screen's result does.
                 let title = match conversion.status {
-                    SwapStatus::RefundNeeded | SwapStatus::Refunded => "Swap refund",
-                    SwapStatus::Failed => "Conversion didn't go through",
-                    SwapStatus::Pending if to_usdb => "Converting to USDB",
-                    SwapStatus::Pending => "Converting to bitcoin",
-                    SwapStatus::Completed if to_usdb => "Converted to USDB",
-                    SwapStatus::Completed => "Converted to bitcoin",
+                    SwapStatus::RefundNeeded | SwapStatus::Refunded => {
+                        localized_copy("Swap refund")
+                    }
+                    SwapStatus::Failed => localized_copy("Conversion didn't go through"),
+                    SwapStatus::Pending if to_usdb => localized_copy("Converting to USDB"),
+                    SwapStatus::Pending => localized_copy("Converting to bitcoin"),
+                    SwapStatus::Completed if to_usdb => localized_copy("Converted to USDB"),
+                    SwapStatus::Completed => localized_copy("Converted to bitcoin"),
                 };
                 let status = match conversion.status {
                     SwapStatus::Completed => StatusFilter::Confirmed,
@@ -1012,8 +1016,12 @@ fn one_line<'a>(content: iced::widget::Text<'a, theme::Theme>) -> Element<'a, Me
 fn status_cell<'a>(entry: &Entry, size: f32, note: bool) -> Element<'a, Message> {
     let (mark, tone) = status_tone(entry);
     let label = match entry.status_note.filter(|_| note) {
-        Some(note) => format!("{} · {note}", entry.status_label),
-        None => entry.status_label.clone(),
+        Some(note) => format!(
+            "{} · {}",
+            localized_copy(&entry.status_label),
+            localized_copy(note)
+        ),
+        None => localized_copy(&entry.status_label).to_owned(),
     };
     row![
         glyph::glyph(mark, 16.0, tone),
@@ -1200,7 +1208,7 @@ fn wallet_filters(activity: &Activity) -> Vec<WalletFilter> {
 fn filters_bar<'a>(activity: &'a Activity, frame: Frame) -> Element<'a, Message> {
     let wallet = tenshu::select(
         "tenshu.activity.filter.wallet",
-        "Wallet",
+        coincube_ui::locale::copy("Wallet"),
         wallet_filters(activity)
             .into_iter()
             .map(|value| (value, value.to_string())),
@@ -1211,7 +1219,7 @@ fn filters_bar<'a>(activity: &'a Activity, frame: Frame) -> Element<'a, Message>
     .on_select(|value| Message::Activity(ActivityMessage::Wallet(value)));
     let direction = tenshu::select(
         "tenshu.activity.filter.direction",
-        "Direction",
+        coincube_ui::locale::copy("Direction"),
         [
             DirectionFilter::All,
             DirectionFilter::Received,
@@ -1226,7 +1234,7 @@ fn filters_bar<'a>(activity: &'a Activity, frame: Frame) -> Element<'a, Message>
     .on_select(|value| Message::Activity(ActivityMessage::Direction(value)));
     let status = tenshu::select(
         "tenshu.activity.filter.status",
-        "Status",
+        coincube_ui::locale::copy("Status"),
         [
             StatusFilter::All,
             StatusFilter::Pending,
@@ -1246,7 +1254,7 @@ fn filters_bar<'a>(activity: &'a Activity, frame: Frame) -> Element<'a, Message>
         Message::FocusAction,
     )
     .size(FieldSize::Compact)
-    .placeholder("YYYY-MM-DD to YYYY-MM-DD")
+    .placeholder(localized_copy("YYYY-MM-DD to YYYY-MM-DD"))
     .error_maybe(
         activity
             .filters
@@ -1263,7 +1271,7 @@ fn filters_bar<'a>(activity: &'a Activity, frame: Frame) -> Element<'a, Message>
             &activity.filters.search,
             Message::FocusAction,
         )
-        .placeholder("Label, txid, hash or swap ID")
+        .placeholder(localized_copy("Label, txid, hash or swap ID"))
         .on_input(|value| Message::Activity(ActivityMessage::Search(value))),
     )
     .width(Length::Fill)
@@ -1336,7 +1344,7 @@ fn header<'a>(
                 if count == 1 {
                     "1 filter active".to_owned()
                 } else {
-                    format!("{count} filters active")
+                    localized_format!("{count} filters active", "Filtros {count} activos")
                 },
                 13.0,
                 font::MEDIUM,
@@ -1351,9 +1359,15 @@ fn header<'a>(
     let more = activity.vault_has_more || activity.spark_has_more || activity.liquid_has_more;
     actions = actions.push(words(
         if more {
-            format!("Showing {shown} of {loaded} loaded")
+            localized_format!(
+                "Showing {shown} of {loaded} loaded",
+                "Mostrando {shown} de {loaded} cargado"
+            )
         } else {
-            format!("Showing {shown} of {loaded}")
+            localized_format!(
+                "Showing {shown} of {loaded}",
+                "Mostrando {shown} de {loaded}"
+            )
         },
         13.0,
         font::REGULAR,
@@ -1677,10 +1691,15 @@ pub fn recent_activity<'a>(
         ),
     };
     // `.sech`: the heading, and the way into Activity on its right.
-    let mut heading = Row::new()
-        .spacing(16)
-        .align_y(Alignment::Center)
-        .push(words("Recent activity", 16.0, font::SEMIBOLD, glyph::ink).width(Length::Fill));
+    let mut heading = Row::new().spacing(16).align_y(Alignment::Center).push(
+        words(
+            localized_copy("Recent activity"),
+            16.0,
+            font::SEMIBOLD,
+            glyph::ink,
+        )
+        .width(Length::Fill),
+    );
     if !entries.is_empty() {
         heading = heading.push(
             Action::new(
@@ -1696,7 +1715,7 @@ pub fn recent_activity<'a>(
     let mut content = Column::new().spacing(10).push(heading);
     if !entries.is_empty() {
         content = content.push(words(
-            "Select a transaction to view details",
+            localized_copy("Select a transaction to view details"),
             13.0,
             font::REGULAR,
             glyph::muted,
@@ -1742,11 +1761,11 @@ pub fn recent_activity<'a>(
         let note = if let Some(note) = unknown_history {
             note
         } else if loading {
-            "Loading payment history…"
+            localized_copy("Loading payment history…")
         } else if failed {
-            "No transactions to show"
+            localized_copy("No transactions to show")
         } else {
-            "No transactions yet"
+            localized_copy("No transactions yet")
         };
         rows = rows.push(column![
             container(words(note, 14.0, font::REGULAR, glyph::muted))
@@ -1946,9 +1965,14 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
     .on_press(Message::Activity(ActivityMessage::CloseDetail));
     let close = iced::widget::tooltip(
         close,
-        container(words("Close details", 12.0, font::REGULAR, glyph::muted))
-            .padding([6, 10])
-            .style(theme::container::shell_menu),
+        container(words(
+            localized_copy("Close details"),
+            12.0,
+            font::REGULAR,
+            glyph::muted,
+        ))
+        .padding([6, 10])
+        .style(theme::container::shell_menu),
         iced::widget::tooltip::Position::Bottom,
     );
     let mut heading = Row::new().spacing(10).align_y(Alignment::Start);
@@ -1997,7 +2021,7 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
         .push(figure)
         .push(Space::new().height(Length::Fixed(2.0)))
         .push(words(
-            "Historical fiat amount unavailable",
+            localized_copy("Historical fiat amount unavailable"),
             13.0,
             font::REGULAR,
             glyph::muted,
@@ -2010,7 +2034,12 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
         let path = tx.sigs.primary_path();
         detail = detail
             .push(Space::new().height(Length::Fixed(20.0)))
-            .push(words("PSBT and signers", 14.0, font::SEMIBOLD, glyph::ink))
+            .push(words(
+                localized_copy("PSBT and signers"),
+                14.0,
+                font::SEMIBOLD,
+                glyph::ink,
+            ))
             .push(Space::new().height(Length::Fixed(4.0)))
             .push(words(
                 entry.signer_status.clone().unwrap_or_default(),
@@ -2021,17 +2050,17 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
             .push(Space::new().height(Length::Fixed(8.0)))
             .push(rule::horizontal(1))
             .push(fact(
-                "Required",
+                localized_copy("Required"),
                 format!("{} signatures", path.threshold),
                 false,
             ))
             .push(fact(
-                "Collected",
+                localized_copy("Collected"),
                 format!("{} signatures", path.sigs_count),
                 false,
             ))
             .push(fact(
-                "Remaining",
+                localized_copy("Remaining"),
                 format!(
                     "{} signatures",
                     path.threshold.saturating_sub(path.sigs_count)
@@ -2042,7 +2071,9 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
             .push(
                 Action::new(
                     Id::from("tenshu.activity.detail.sign"),
-                    text("Continue signing").size(14).font(font::SEMIBOLD),
+                    text(localized_copy("Continue signing"))
+                        .size(14)
+                        .font(font::SEMIBOLD),
                     Message::FocusAction,
                 )
                 .style(theme::button::primary)
@@ -2064,12 +2095,16 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
         let local = time.with_timezone(&Local);
         detail = detail.push(iced::widget::tooltip(
             fact(
-                "Date",
+                localized_copy("Date"),
                 local.format("%a %-d %b %Y, %H:%M").to_string(),
                 false,
             ),
             container(words(
-                format!("UTC{} · device time zone", local.format("%:z")),
+                localized_format!(
+                    "UTC{} · device time zone",
+                    "UTC{} · Zona horaria del dispositivo",
+                    local.format("%:z")
+                ),
                 12.0,
                 font::REGULAR,
                 glyph::muted,
@@ -2080,17 +2115,21 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
         ));
     }
     if let Some(fee) = &entry.fee {
-        detail = detail.push(fact("Fee", fee_detail(fee, masked), false));
+        detail = detail.push(fact(localized_copy("Fee"), fee_detail(fee, masked), false));
     }
     if let ActivityTarget::Vault(tx) = &entry.target {
         if let Some(height) = tx.height {
             detail = detail.push(fact(
-                "Confirmations",
+                localized_copy("Confirmations"),
                 vault_confirmation_detail(height, cache.blockheight()),
                 false,
             ));
         } else {
-            detail = detail.push(fact("Confirmations", "0 · Pending".to_owned(), false));
+            detail = detail.push(fact(
+                localized_copy("Confirmations"),
+                "0 · Pending".to_owned(),
+                false,
+            ));
         }
     }
     if let Some((key, value)) = &entry.peer {
@@ -2117,11 +2156,11 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
         .spacing(6);
         type Tone = fn(&theme::Theme) -> iced::Color;
         let note: Option<(&str, Tone)> = if saving {
-            Some(("Saving…", glyph::muted))
+            Some((localized_copy("Saving…"), glyph::muted))
         } else if let Some(error) = activity.label_error_for(&entry.id) {
             Some((error, glyph::bad))
         } else if draft.is_some_and(|draft| draft != stored) {
-            Some(("Press Enter to save", glyph::muted))
+            Some((localized_copy("Press Enter to save"), glyph::muted))
         } else {
             None
         };
@@ -2142,7 +2181,7 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
             detail = detail.push(
                 Action::new(
                     DETAIL_EXPLORER_ID,
-                    text("View on blockchain explorer")
+                    text(localized_copy("View on blockchain explorer"))
                         .size(13)
                         .font(font::MEDIUM),
                     Message::FocusAction,
@@ -2299,7 +2338,7 @@ fn render_at_width<'a>(
     if cutoff.is_some() {
         list = list.push(
             container(words(
-                "Older days appear as each wallet's history loads.",
+                localized_copy("Older days appear as each wallet's history loads."),
                 13.0,
                 font::REGULAR,
                 glyph::muted,
@@ -2401,7 +2440,9 @@ fn render_at_width<'a>(
             empty = empty.push(
                 Action::new(
                     Id::from("tenshu.activity.empty.clear"),
-                    text("Clear filters").size(14).font(font::MEDIUM),
+                    text(localized_copy("Clear filters"))
+                        .size(14)
+                        .font(font::MEDIUM),
                     Message::FocusAction,
                 )
                 .style(theme::button::secondary)
@@ -2447,7 +2488,9 @@ fn render_at_width<'a>(
     if activity.vault_has_more || activity.spark_has_more || activity.liquid_has_more {
         let mut more = Action::new(
             Id::from("tenshu.activity.more"),
-            text("Load older activity").size(14).font(font::MEDIUM),
+            text(localized_copy("Load older activity"))
+                .size(14)
+                .font(font::MEDIUM),
             Message::FocusAction,
         )
         .style(theme::button::secondary)

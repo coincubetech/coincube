@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use iced::{
     event::{self, Event},
     keyboard,
@@ -4043,10 +4044,12 @@ impl GUI {
             &self.preferences,
             &GlobalSettings::path(&self.config.coincube_directory),
         ) {
-            return iced::widget::container(iced::widget::text("Updating balance privacy…"))
-                .width(iced::Length::Fill)
-                .height(iced::Length::Fill)
-                .into();
+            return iced::widget::container(iced::widget::text(localized_copy(
+                "Updating balance privacy…",
+            )))
+            .width(iced::Length::Fill)
+            .height(iced::Length::Fill)
+            .into();
         }
         let (&id, pane) = self
             .panes

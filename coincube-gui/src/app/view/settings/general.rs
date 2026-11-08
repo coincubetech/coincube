@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::widget::{mouse_area, Column, Container, Row, Space};
 use iced::{Alignment, Length};
 
@@ -133,8 +135,10 @@ pub(crate) fn display_content<'a>(
         .push(page::saved_line(saved));
 
     let name = name_input.unwrap_or(cache.cube_name.as_str());
-    let name_row = page::row("Cube name")
-        .description("Saved when you press Return or leave the field.")
+    let name_row = page::row(localized_copy("Cube name"))
+        .description(localized_copy(
+            "Saved when you press Return or leave the field.",
+        ))
         .control(
             Container::new(
                 coincube_ui::component::tenshu::text_field(
@@ -166,8 +170,12 @@ pub(crate) fn display_content<'a>(
 
     Column::new()
         .width(Length::Fill)
-        .push(page::group("Amounts & currency", None, amounts))
-        .push(page::group("Cube identity", None, identity))
+        .push(page::group(
+            localized_copy("Amounts & currency"),
+            None,
+            amounts,
+        ))
+        .push(page::group(localized_copy("Cube identity"), None, identity))
         .into()
 }
 
@@ -204,7 +212,9 @@ fn avatar_row<'a>(cache: &'a cache::Cache, flow_open: bool) -> Element<'a, Messa
         "Not set up yet.".to_owned()
     } else {
         match cache.avatar_regenerations_remaining {
-            Some(n) if n >= 0 => format!("Regenerations left: {}", n),
+            Some(n) if n >= 0 => {
+                localized_format!("Regenerations left: {}", "Regeneraciones restantes: {}", n)
+            }
             _ => "Generated from your Lightning Address.".to_owned(),
         }
     };
@@ -261,23 +271,23 @@ fn payment_checks_section<'a>(
                     Row::new()
                         .spacing(4)
                         .push(
-                            text("Turn off recipient checks?")
+                            text(localized_copy("Turn off recipient checks?"))
                                 .size(13)
                                 .font(coincube_ui::font::SEMIBOLD),
                         )
-                        .push(text("Sends will skip the identity check.").size(13))
+                        .push(text(localized_copy("Sends will skip the identity check.")).size(13))
                         .wrap(),
                     Some(
                         Row::new()
                             .spacing(8)
                             .push(page::primary(
                                 CHECKS_OFF_CONFIRM_ID,
-                                "Turn off",
+                                localized_copy("Turn off"),
                                 Some(SettingsMessage::ToggleRecipientIdentityChecks(false).into()),
                             ))
                             .push(page::button(
                                 CHECKS_OFF_CANCEL_ID,
-                                "Cancel",
+                                localized_copy("Cancel"),
                                 Some(SettingsMessage::CancelRecipientChecksOff.into()),
                             ))
                             .into(),
@@ -288,24 +298,24 @@ fn payment_checks_section<'a>(
         );
     }
     rows.push(
-        page::row("Strict mode")
-            .description(
+        page::row(localized_copy("Strict mode"))
+            .description(localized_copy(
                 "Strict mode does not share the plaintext destination or payment amount. \
                  Branta can still observe lookup timing and your network connection.",
-            )
+            ))
             .line(page::link(
                 BRANTA_PRIVACY_ID,
-                "Branta privacy information",
+                localized_copy("Branta privacy information"),
                 Message::OpenUrl("https://branta.pro/your-data".into()),
             ))
-            .control(page::status(page::Status::Ok, "Always on"))
+            .control(page::status(page::Status::Ok, localized_copy("Always on")))
             .top()
             .into(),
     );
     let content = Column::new()
         .width(Length::Fill)
         .push(page::group(
-            "Recipient checks",
+            localized_copy("Recipient checks"),
             Some("Before you send, Tenshu asks Branta whether the recipient is verified. This applies to every Cube on this device.".into()),
             page::rows(rows),
         ))
@@ -344,19 +354,19 @@ fn data_exports_section<'a>(menu: &'a Menu, cache: &'a cache::Cache) -> Element<
     };
 
     let rows = page::rows([
-        page::row("Recovery Kit")
-            .description("Managed in Backup & protection.")
+        page::row(localized_copy("Recovery Kit"))
+            .description(localized_copy("Managed in Backup & protection."))
             .control(page::button(
                 DATA_BACKUP_ID,
-                "Open Backup & protection",
+                localized_copy("Open Backup & protection"),
                 Some(Message::Menu(recovery_kit_route())),
             ))
             .into(),
-        page::row("Vault files and records")
+        page::row(localized_copy("Vault files and records"))
             .description(vault_detail)
             .control(page::button(
                 DATA_VAULT_ID,
-                "Open Vault data",
+                localized_copy("Open Vault data"),
                 vault_data_route(cache).map(Message::Menu),
             ))
             .into(),
@@ -414,17 +424,25 @@ fn recovery_overview<'a>(
 ) -> Element<'a, Message> {
     let backed_up = cache.current_cube_backed_up;
     let seed_start: Message = SettingsMessage::BackupMasterSeed(BackupWalletMessage::Start).into();
-    let seed_row = page::row("Seed phrase")
+    let seed_row = page::row(localized_copy("Seed phrase"))
         .accessory(if backed_up {
-            page::status(page::Status::Ok, "Confirmed")
+            page::status(page::Status::Ok, localized_copy("Confirmed"))
         } else {
-            page::status(page::Status::Warn, "Not confirmed")
+            page::status(page::Status::Warn, localized_copy("Not confirmed"))
         })
-        .description("12 words, written down offline.")
+        .description(localized_copy("12 words, written down offline."))
         .control(if backed_up {
-            page::button(SEED_REVEAL_ID, "Reveal seed phrase…", Some(seed_start))
+            page::button(
+                SEED_REVEAL_ID,
+                localized_copy("Reveal seed phrase…"),
+                Some(seed_start),
+            )
         } else {
-            page::primary(SEED_REVEAL_ID, "Confirm seed phrase", Some(seed_start))
+            page::primary(
+                SEED_REVEAL_ID,
+                localized_copy("Confirm seed phrase"),
+                Some(seed_start),
+            )
         });
 
     let mut methods = vec![seed_row.into()];
@@ -436,20 +454,29 @@ fn recovery_overview<'a>(
     if let Some(notice) = cache.unswept_recovery_notice() {
         col = col.push(page::note(Tone::Muted, page::muted(notice), None));
     }
-    col = col.push(page::group("Backup methods", None, page::rows(methods)));
+    col = col.push(page::group(
+        localized_copy("Backup methods"),
+        None,
+        page::rows(methods),
+    ));
 
     let path_row = if cache.has_vault {
-        page::row("Recovery path")
-            .description("Review the Vault's recovery spending path and timelocks in its tools.")
+        page::row(localized_copy("Recovery path"))
+            .description(localized_copy(
+                "Review the Vault's recovery spending path and timelocks in its tools.",
+            ))
             .control(page::button(
                 RECOVERY_TOOLS_ID,
-                "Open recovery tools",
+                localized_copy("Open recovery tools"),
                 Some(Message::Menu(Menu::Vault(VaultSubMenu::Recovery))),
             ))
     } else {
-        page::row("Recovery path")
-            .description("No Vault in this Cube.")
-            .control(page::status(page::Status::Off, "Not applicable"))
+        page::row(localized_copy("Recovery path"))
+            .description(localized_copy("No Vault in this Cube."))
+            .control(page::status(
+                page::Status::Off,
+                localized_copy("Not applicable"),
+            ))
     };
     let mut path_rows = vec![path_row.into()];
     let mut alerts_controls = None;
@@ -467,7 +494,7 @@ fn recovery_overview<'a>(
         path = path.push(page::disclosure_body([controls]));
     }
     col = col.push(page::group(
-        "Vault recovery path",
+        localized_copy("Vault recovery path"),
         Some("Spending, not backup. A backup never unlocks it.".into()),
         path,
     ));
@@ -484,21 +511,28 @@ pub const ALERTS_MANAGE_ID: &str = "tenshu.settings.backup.alerts";
 /// The Recovery Kit row (`#recovery-kit`): its status beside the label, what
 /// protects it and what it holds below, and the action for its state.
 fn recovery_kit_row<'a>(cache: &'a cache::Cache, rk: &'a RecoveryKit) -> Element<'a, Message> {
-    let row =
-        page::row("Recovery Kit").description("Encrypted copy kept with your Connect account.");
+    let row = page::row(localized_copy("Recovery Kit")).description(localized_copy(
+        "Encrypted copy kept with your Connect account.",
+    ));
     if !cache.connect_authenticated && !cache.restorable_connect_session {
         return row
-            .accessory(page::status(page::Status::Unknown, "Sign in required"))
+            .accessory(page::status(
+                page::Status::Unknown,
+                localized_copy("Sign in required"),
+            ))
             .control(page::button(
                 KIT_PRIMARY_ID,
-                "Sign in",
+                localized_copy("Sign in"),
                 Some(Message::OpenConnectSignIn),
             ))
             .into();
     }
     if let Some((label, action)) = unregistered_cube_action(cache) {
         return row
-            .accessory(page::status(page::Status::Unknown, "Reconnect required"))
+            .accessory(page::status(
+                page::Status::Unknown,
+                localized_copy("Reconnect required"),
+            ))
             .control(page::button(KIT_PRIMARY_ID, label, Some(action)))
             .into();
     }
@@ -535,31 +569,49 @@ fn recovery_alerts_row<'a>(ra: &'a RecoveryAlerts, has_vault: bool) -> Element<'
             Some(SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::ToggleManage).into()),
         )
     };
-    let row = page::row("Recovery alerts");
+    let row = page::row(localized_copy("Recovery alerts"));
     let row = if !has_vault || ra.no_vault {
-        row.accessory(page::status(page::Status::Off, "Not applicable"))
-            .description("Needs a Vault with a recovery path, registered with Connect.")
+        row.accessory(page::status(
+            page::Status::Off,
+            localized_copy("Not applicable"),
+        ))
+        .description(localized_copy(
+            "Needs a Vault with a recovery path, registered with Connect.",
+        ))
     } else if !ra.entitled {
-        row.accessory(page::status(page::Status::Off, "Not included"))
-            .description("Not in your plan. Verified by Connect.")
-            .control(page::button(
-                RECOVERY_ALERTS_VIEW_PLANS_ID,
-                "Compare plans",
-                Some(Message::OpenPlanBillingFrom(RECOVERY_ALERTS_VIEW_PLANS_ID)),
-            ))
+        row.accessory(page::status(
+            page::Status::Off,
+            localized_copy("Not included"),
+        ))
+        .description(localized_copy("Not in your plan. Verified by Connect."))
+        .control(page::button(
+            RECOVERY_ALERTS_VIEW_PLANS_ID,
+            localized_copy("Compare plans"),
+            Some(Message::OpenPlanBillingFrom(RECOVERY_ALERTS_VIEW_PLANS_ID)),
+        ))
     } else if ra.loading && ra.status.is_none() {
-        row.accessory(page::status(page::Status::Busy, "Checking…"))
-            .description("Still checking. No plan change implied.")
+        row.accessory(page::status(
+            page::Status::Busy,
+            localized_copy("Checking…"),
+        ))
+        .description(localized_copy("Still checking. No plan change implied."))
     } else if ra.status.is_none() {
-        row.accessory(page::status(page::Status::Unknown, "Eligibility unknown"))
-            .description("Sign in to Connect to check eligibility.")
+        row.accessory(page::status(
+            page::Status::Unknown,
+            localized_copy("Eligibility unknown"),
+        ))
+        .description(localized_copy("Sign in to Connect to check eligibility."))
     } else if ra.alerts_on() {
-        row.accessory(page::status(page::Status::Ok, "On"))
-            .description("Alerts your recovery contacts when the path opens.")
+        row.accessory(page::status(page::Status::Ok, localized_copy("On")))
+            .description(localized_copy(
+                "Alerts your recovery contacts when the path opens.",
+            ))
             .control(manage("Manage alerts"))
     } else {
-        row.accessory(page::status(page::Status::Off, "Off"))
-            .description("Your keyholders are not alerted when the path opens.")
+        row.accessory(page::status(page::Status::Off, localized_copy("Off")))
+            .description(localized_copy(
+                "Your keyholders are not alerted when the path opens.",
+            ))
             .control(manage("Manage alerts"))
     };
     row.into()
@@ -598,11 +650,11 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts, spark: bool) -> Element<'a, 
 
     // ── Control 1: the Recovery alerts toggle (monitoring on/off) ──────────
     body = body.push(
-        page::row("Recovery alerts")
-            .description(
+        page::row(localized_copy("Recovery alerts"))
+            .description(localized_copy(
                 "Let COINCUBE watch the chain and alert your keyholders when a recovery path \
                  for this Vault opens.",
-            )
+            ))
             .control(
                 toggle(ALERTS_TOGGLE_ID, alerts_on, Message::FocusAction).on_toggle_maybe(
                     (!busy).then_some(|on| {
@@ -614,10 +666,10 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts, spark: bool) -> Element<'a, 
     );
     // The C4 disclosure — stated plainly, no euphemisms.
     if alerts_on {
-        body = body.push(page::caption(
+        body = body.push(page::caption(localized_copy(
             "When on, COINCUBE learns only the block height at which this Vault's recovery \
              window opens and that this desktop checked in — never your addresses or balances.",
-        ));
+        )));
     }
 
     // Residual nudge (PR 3): with keyholders present but alerts off, they'd
@@ -625,10 +677,10 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts, spark: bool) -> Element<'a, 
     if !alerts_on && !ra.recipients.notified.is_empty() {
         body = body.push(page::note(
             Tone::Warn,
-            page::muted(
+            page::muted(localized_copy(
                 "Your keyholders will NOT be alerted when this Vault's recovery window opens. \
                  Turn on Recovery alerts to fix this.",
-            ),
+            )),
             None,
         ));
     }
@@ -653,7 +705,7 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts, spark: bool) -> Element<'a, 
                     .spacing(8)
                     .push(page::primary(
                         ALERTS_OFF_CONFIRM_ID,
-                        "Turn off",
+                        localized_copy("Turn off"),
                         (!busy).then_some(
                             SettingsMessage::RecoveryAlerts(
                                 RecoveryAlertsMessage::ConfirmAlertsOff,
@@ -663,7 +715,7 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts, spark: bool) -> Element<'a, 
                     ))
                     .push(page::button(
                         ALERTS_OFF_CANCEL_ID,
-                        "Cancel",
+                        localized_copy("Cancel"),
                         Some(
                             SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::CancelAlertsOff)
                                 .into(),
@@ -680,11 +732,11 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts, spark: bool) -> Element<'a, 
         if ra.recipients.notified.is_empty() {
             // Deliberately does *not* say "add keyholders": a Vault's
             // keyholders are its signers, fixed when the descriptor is sealed.
-            who = who.push(page::muted(
+            who = who.push(page::muted(localized_copy(
                 "No one would be alerted for this Vault. Alert recipients are this Vault's \
                  keyholders and beneficiaries; its keyholders are fixed when the Vault is \
                  built, so they can't be added to an existing Vault.",
-            ));
+            )));
         } else {
             for r in &ra.recipients.notified {
                 // Tag beneficiaries so a mixed list stays honest under a
@@ -704,17 +756,21 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts, spark: bool) -> Element<'a, 
             } else {
                 ("members", "have")
             };
-            who = who.push(page::muted(format!(
-                "{} {} of this Vault {} no email on file, so COINCUBE can't alert them.",
+            who = who.push(page::muted(localized_format!(
+                "{} {} of this Vault {} no email on file, so COINCUBE can't alert them.", "{} {} de este Vault {} no email en el archivo, por lo que COINCUBE no puede alertarlos.",
                 n, noun, verb,
             )));
         }
-        body = body.push(page::row("Keyholders who'd be notified").line(who).top());
+        body = body.push(
+            page::row(localized_copy("Keyholders who'd be notified"))
+                .line(who)
+                .top(),
+        );
     }
 
     // ── Control 2: the escrow selector (what keyholders can recover) ───────
     body = body.push(
-        page::row("What keyholders can recover")
+        page::row(localized_copy("What keyholders can recover"))
             .line(escrow_selector(ra, alerts_on, busy, spark))
             .top(),
     );
@@ -749,17 +805,17 @@ fn escrow_selector<'a>(
             Column::new()
                 .spacing(2)
                 .push(
-                    text(
+                    text(localized_copy(
                         "An encrypted recovery kit for your keyholders is part of the Estate plan.",
-                    )
+                    ))
                     .size(13),
                 )
-                .push(page::muted(
+                .push(page::muted(localized_copy(
                     "Recovery alerts above still work on your current plan.",
-                )),
+                ))),
             Some(page::button(
                 ESCROW_VIEW_PLANS_ID,
-                "View plans",
+                localized_copy("View plans"),
                 Some(Message::OpenPlanBillingFrom(ESCROW_VIEW_PLANS_ID)),
             )),
         );
@@ -779,16 +835,20 @@ fn escrow_selector<'a>(
     // the known current tier is a no-op in `SelectEscrow`.
     let selector = segmented(
         [
-            segment("tenshu.settings.escrow.off", EscrowTier::Off, "Nothing"),
+            segment(
+                "tenshu.settings.escrow.off",
+                EscrowTier::Off,
+                localized_copy("Nothing"),
+            ),
             segment(
                 "tenshu.settings.escrow.vault",
                 EscrowTier::VaultOnly,
-                "Vault only",
+                localized_copy("Vault only"),
             ),
             segment(
                 "tenshu.settings.escrow.full",
                 EscrowTier::FullCube,
-                "Full Cube",
+                localized_copy("Full Cube"),
             ),
         ],
         display_tier,
@@ -808,9 +868,9 @@ fn escrow_selector<'a>(
 
     // Auto-enable disclosure: picking a kit while alerts are off turns them on.
     if !alerts_on {
-        col = col.push(page::muted(
+        col = col.push(page::muted(localized_copy(
             "Choosing Vault only or Full Cube also turns Recovery alerts on.",
-        ));
+        )));
     }
 
     // Full-Cube re-confirms the PIN before exporting the seed into escrow.
@@ -818,9 +878,11 @@ fn escrow_selector<'a>(
         col = col
             .push(Space::new().height(Length::Fixed(8.0)))
             .push(
-                text("Enter your PIN to include this Cube's seed in the encrypted recovery kit.")
-                    .size(13)
-                    .font(coincube_ui::font::SEMIBOLD),
+                text(localized_copy(
+                    "Enter your PIN to include this Cube's seed in the encrypted recovery kit.",
+                ))
+                .size(13)
+                .font(coincube_ui::font::SEMIBOLD),
             )
             .push(
                 coincube_ui::component::tenshu::text_field(
@@ -849,7 +911,7 @@ fn escrow_selector<'a>(
                     .spacing(8)
                     .push(page::primary(
                         ESCROW_CONFIRM_ID,
-                        "Confirm",
+                        localized_copy("Confirm"),
                         (!busy).then_some(
                             SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::ConfirmFullCube)
                                 .into(),
@@ -857,7 +919,7 @@ fn escrow_selector<'a>(
                     ))
                     .push(page::button(
                         ESCROW_CANCEL_ID,
-                        "Cancel",
+                        localized_copy("Cancel"),
                         Some(
                             SettingsMessage::RecoveryAlerts(RecoveryAlertsMessage::CancelFullCube)
                                 .into(),
@@ -879,33 +941,33 @@ fn escrow_copy(tier: Option<EscrowTier>, spark: bool) -> &'static str {
         // Escrow is on, but an older API doesn't report which tier — state that
         // honestly rather than assert (and possibly mis-state) descriptor-only
         // vs seed escrow.
-        None => {
+        None => localized_copy(
             "A recovery kit is stored, but this device can't tell which kind (this server doesn't \
              report it). Reselect Vault only or Full Cube to confirm or change it, or Nothing to \
-             remove it."
-        }
-        Some(EscrowTier::Off) => {
+             remove it.",
+        ),
+        Some(EscrowTier::Off) => localized_copy(
             "Nothing — alerts only: your keyholders are told when the recovery window opens, but \
-             no encrypted recovery kit is stored, so they can't recover this Vault themselves."
-        }
-        Some(EscrowTier::VaultOnly) => {
+             no encrypted recovery kit is stored, so they can't recover this Vault themselves.",
+        ),
+        Some(EscrowTier::VaultOnly) => localized_copy(
             "Vault only: an encrypted copy of this Vault's descriptor is sealed to each \
              keyholder's own key — only they can open it, never COINCUBE. When the recovery \
              window opens, a keyholder recovers the watch-only Vault and sweeps the funds. The \
-             seed is never escrowed."
-        }
-        Some(EscrowTier::FullCube) if spark => {
+             seed is never escrowed.",
+        ),
+        Some(EscrowTier::FullCube) if spark => localized_copy(
             "Full Cube: seals this Cube's seed AND descriptor to each keyholder's own key. A \
              keyholder can restore the entire Cube — Spark and Vault. COINCUBE can never \
              read either; only the keyholder's key can. You'll re-confirm your PIN to include the \
-             seed."
-        }
-        Some(EscrowTier::FullCube) => {
+             seed.",
+        ),
+        Some(EscrowTier::FullCube) => localized_copy(
             "Full Cube: seals this Cube's seed AND descriptor to each keyholder's own key. A \
              keyholder can restore the entire Cube, including its Vault. COINCUBE can never \
              read either; only the keyholder's key can. You'll re-confirm your PIN to include the \
-             seed."
-        }
+             seed.",
+        ),
     }
 }
 
@@ -1149,9 +1211,11 @@ fn method_gap_sentence(m: &MethodBackup, has_vault: bool, label: &str) -> Option
         // No seed present — the seed is what's missing, in either shape.
         "Master Seed Phrase"
     };
-    Some(format!(
+    Some(localized_format!(
         "Your {} backup is missing the {}.",
-        label, missing_half
+        "Su respaldo de {} está perdiendo el {}.",
+        label,
+        missing_half
     ))
 }
 
@@ -1224,9 +1288,10 @@ fn recovery_kit_card_state(
 
     if pw_complete && kc_complete {
         // Every enabled method complete → backed up.
-        let title = "Recovery Kit backed up";
-        let subtitle = format!(
+        let title = localized_copy("Recovery Kit backed up");
+        let subtitle = localized_format!(
             "Last updated {}.",
+            "Última actualización de {}.",
             overview
                 .last_updated
                 .as_deref()
@@ -1362,8 +1427,9 @@ fn recovery_kit_card<'a>(
         if keychain_present {
             methods.push("Keychain");
         }
-        row = row.line(page::muted(format!(
+        row = row.line(page::muted(localized_format!(
             "Protected by: {}",
+            "Protegido por: {}",
             methods.join(" · ")
         )));
     }
@@ -1371,7 +1437,11 @@ fn recovery_kit_card<'a>(
     match backup_contents(&overview) {
         BackupContents::Nothing => {}
         BackupContents::Shared(halves) => {
-            row = row.line(page::muted(format!("Includes: {}", halves.join(" · "))));
+            row = row.line(page::muted(localized_format!(
+                "Includes: {}",
+                "Incluye: {}",
+                halves.join(" · ")
+            )));
         }
         BackupContents::PerMethod(per_method) => {
             for (method, halves) in per_method {
@@ -1394,7 +1464,7 @@ fn recovery_kit_card<'a>(
     if status.is_none() || stale {
         row = row.control(page::button(
             KIT_PRIMARY_ID,
-            "Refresh status",
+            localized_copy("Refresh status"),
             (!loading)
                 .then_some(SettingsMessage::RecoveryKit(RecoveryKitMessage::LoadStatus).into()),
         ));
@@ -1415,7 +1485,7 @@ fn recovery_kit_card<'a>(
     if has_kit && !stale && !loading {
         row = row.control(page::button(
             KIT_REMOVE_ID,
-            "Remove…",
+            localized_copy("Remove…"),
             Some(SettingsMessage::RecoveryKit(RecoveryKitMessage::Remove).into()),
         ));
     }
@@ -1443,12 +1513,12 @@ fn amounts_and_currency<'a>(
 
 fn direction_badges_toggle<'a>(show: bool) -> Element<'a, Message> {
     setting_row(
-        "Direction badges",
+        localized_copy("Direction badges"),
         toggle("settings-direction-badges", show, Message::FocusAction)
             .on_toggle(|value| SettingsMessage::ToggleDirectionBadges(value).into()),
     )
-    .tag("This device")
-    .description("In and Out badges in Activity.")
+    .tag(localized_copy("This device"))
+    .description(localized_copy("In and Out badges in Activity."))
     .into()
 }
 
@@ -1495,7 +1565,7 @@ fn labeled_select_row<'a>(
 
 fn display_mode_choice<'a>(current: DisplayMode, allowed: bool) -> Element<'a, Message> {
     setting_row(
-        "Primary amount",
+        localized_copy("Primary amount"),
         segmented(
             [
                 segment(
@@ -1523,14 +1593,14 @@ fn display_mode_choice<'a>(current: DisplayMode, allowed: bool) -> Element<'a, M
             }
         })),
     )
-    .description("Shown large.")
+    .description(localized_copy("Shown large."))
     .into()
 }
 
 pub fn bitcoin_display_unit<'a>(new_unit_setting: &'a UnitSetting) -> Element<'a, Message> {
     let current = new_unit_setting.display_unit;
     setting_row(
-        "Bitcoin unit",
+        localized_copy("Bitcoin unit"),
         segmented(
             [
                 segment("settings-unit-btc", BitcoinDisplayUnit::BTC, "BTC"),
@@ -1575,11 +1645,11 @@ pub fn fiat_price<'a>(
         .spacing(0)
         .width(Length::Fill)
         .push(setting_row(
-            "Fiat estimates",
+            localized_copy("Fiat estimates"),
             toggle("settings-fiat-estimates", enabled, Message::FocusAction)
                 .on_toggle(|value| FiatMessage::Enable(value).into()),
         )
-        .description("Approximate values beside Bitcoin amounts.")
+        .description(localized_copy("Approximate values beside Bitcoin amounts."))
         .note(
             "Fiat price data is provided by third-party services. Availability and accuracy are not guaranteed.",
             Tone::Muted,
@@ -1706,11 +1776,15 @@ fn method_descriptor_drift(present: bool, live: Option<&str>, cached: Option<&st
 /// with [`DescriptorDrift::any`]).
 fn drift_subtitle(d: &DescriptorDrift) -> &'static str {
     match (d.password, d.keychain) {
-        (true, true) => {
-            "Your Wallet Descriptor changed since your last backup — update both copies now."
+        (true, true) => localized_copy(
+            "Your Wallet Descriptor changed since your last backup — update both copies now.",
+        ),
+        (true, false) => {
+            localized_copy("Your password backup's Wallet Descriptor is out of date — update now.")
         }
-        (true, false) => "Your password backup's Wallet Descriptor is out of date — update now.",
-        (false, true) => "Your phone backup's Wallet Descriptor is out of date — update now.",
+        (false, true) => {
+            localized_copy("Your phone backup's Wallet Descriptor is out of date — update now.")
+        }
         (false, false) => "",
     }
 }

@@ -8,6 +8,7 @@
 //! content inset 28/40px with a 700px reading width. Every row carries the
 //! "This device" tag in its own trailing column.
 
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     component::tenshu::{
         segment, segmented, setting_row, text as tenshu_text, toggle, ActionButton, ActionKind,
@@ -321,7 +322,10 @@ fn section_content<'a>(
     let mut notice = |line: String, tone: Tone| notices.push((line, tone));
     if let Some(error) = model.load_error {
         notice(
-            format!("Device preferences could not be loaded: {error}"),
+            coincube_ui::localized_format!(
+                "Device preferences could not be loaded: {error}",
+                "No se pudieron cargar las preferencias del dispositivo: {error}"
+            ),
             Tone::Bad,
         );
     }
@@ -350,8 +354,10 @@ fn section_content<'a>(
     let idle = !model.saving && !model.loading;
     let Some(saved) = model.saved else {
         let status = if model.load_error.is_some() {
-            "Device preferences are unavailable. Retry the load before changing settings. \
-             Amounts stay hidden until you choose."
+            localized_copy(
+                "Device preferences are unavailable. Retry the load before changing settings. \
+             Amounts stay hidden until you choose.",
+            )
         } else {
             CopyText::LoadingDevicePreferencesAmountsRemainHidden.get()
         };
@@ -631,10 +637,10 @@ fn section_content<'a>(
                 )
                 .tag(CopyText::ThisDevice.get())
                 .trailing_tag()
-                .description(
+                .description(localized_copy(
                     "Reduced removes the Cube turn and other movement. Security checks never \
                      wait for animation.",
-                )
+                ))
                 .note(system_status, Tone::Muted)
                 .into(),
             );
@@ -675,10 +681,10 @@ fn section_content<'a>(
                 )
                 .tag(CopyText::ThisDevice.get())
                 .trailing_tag()
-                .description(
+                .description(localized_copy(
                     "Show the Bitcoin Blake2b network in the Launcher, when creating Cubes and in \
                      Vault tools.",
-                )
+                ))
                 .into(),
             );
         }
@@ -882,15 +888,15 @@ fn section_content<'a>(
                 )
                 .tag(CopyText::ThisDevice.get())
                 .trailing_tag()
-                .description("Public download counts for Tenshu releases")
+                .description(localized_copy("Public download counts for Tenshu releases"))
                 .into(),
             );
             rows.push(
                 setting_row(
-                    "Open-source licenses",
+                    localized_copy("Open-source licenses"),
                     link_action(
                         "tenshu.preferences.open-licenses",
-                        "View licenses",
+                        localized_copy("View licenses"),
                         about
                             .can_open_licenses
                             .then_some(Message::Action(Action::OpenLicenses)),
@@ -898,7 +904,9 @@ fn section_content<'a>(
                 )
                 .tag(CopyText::ThisDevice.get())
                 .trailing_tag()
-                .description("Licenses for the software Tenshu is built on")
+                .description(localized_copy(
+                    "Licenses for the software Tenshu is built on",
+                ))
                 .into(),
             );
         }
@@ -931,7 +939,7 @@ fn component_versions_row<'a>(expanded: bool) -> Element<'a, Message> {
                     .width(Length::Fixed(16.0))
                     .style(theme::tenshu::text::ink),
             )
-            .push(tenshu_text::label("Component versions"))
+            .push(tenshu_text::label(localized_copy("Component versions")))
             .spacing(6)
             .align_y(Alignment::Center),
         Message::FocusAction,
@@ -943,7 +951,7 @@ fn component_versions_row<'a>(expanded: bool) -> Element<'a, Message> {
         Column::new()
             .push(disclosure)
             .push(
-                tenshu_text::body("Wallet daemon and Spark bridge")
+                tenshu_text::body(localized_copy("Wallet daemon and Spark bridge"))
                     .size(13)
                     .style(theme::tenshu::text::muted),
             )
@@ -1179,9 +1187,11 @@ fn explicit_privacy_choice(enabled: bool) -> Element<'static, Message> {
         .spacing(6)
         .push(status_text(
             if enabled {
-                "Not set yet. Amounts stay hidden until you choose."
+                localized_copy("Not set yet. Amounts stay hidden until you choose.")
             } else {
-                "Not set yet. Amounts stay hidden while visibility changes are unavailable."
+                localized_copy(
+                    "Not set yet. Amounts stay hidden while visibility changes are unavailable.",
+                )
             },
             Tone::Muted,
         ))
@@ -1191,7 +1201,7 @@ fn explicit_privacy_choice(enabled: bool) -> Element<'static, Message> {
                 .push(
                     ActionButton::new(
                         "tenshu.preferences.balances.show",
-                        "Show balances",
+                        localized_copy("Show balances"),
                         ActionKind::Secondary,
                         Message::FocusAction,
                     )
@@ -1203,7 +1213,7 @@ fn explicit_privacy_choice(enabled: bool) -> Element<'static, Message> {
                 .push(
                     ActionButton::new(
                         "tenshu.preferences.balances.keep-hidden",
-                        "Keep hidden",
+                        localized_copy("Keep hidden"),
                         ActionKind::Secondary,
                         Message::FocusAction,
                     )
@@ -1223,7 +1233,7 @@ fn retry_hide_controls(enabled: bool) -> Element<'static, Message> {
     Column::new()
         .spacing(6)
         .push(status_text(
-            "Balances are hidden now. Hide has not been saved on this device.",
+            localized_copy("Balances are hidden now. Hide has not been saved on this device."),
             Tone::Muted,
         ))
         .push(
@@ -1244,7 +1254,7 @@ fn retry_hide_controls(enabled: bool) -> Element<'static, Message> {
                 .push(
                     ActionButton::new(
                         "tenshu.preferences.balances.show-explicitly",
-                        "Show balances",
+                        localized_copy("Show balances"),
                         ActionKind::Secondary,
                         Message::FocusAction,
                     )

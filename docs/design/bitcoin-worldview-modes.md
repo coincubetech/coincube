@@ -66,10 +66,13 @@ combinations must work. Spanish is the first additional locale to validate.
 
 The desktop language selector is a device preference under **App preferences →
 Appearance**. It defaults to English and uses the accepted settings receipt
-independently of worldview. The first Spanish catalog covers Worldview-related
-screens, device preferences, the shared technical network labels, and the
-bundled quotes. The remaining shared desktop copy and external error messages
-are part of the wider localization rollout.
+independently of worldview. The Spanish catalog includes Samurai's desktop
+navigation, setup, wallet screens, settings, bundled quotes, and app-authored
+error guidance. Translate messages at presentation time so the accepted locale
+also applies to deferred views and errors received earlier. Preserve canonical
+network names, addresses, amounts, and support codes. Diagnostics returned by
+external services, devices, or libraries may appear in their original language.
+Suitcoiner and Luke voice proposals remain separate drafts.
 
 ## Chain identity and financial safety
 

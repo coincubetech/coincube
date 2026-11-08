@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use std::collections::{HashMap, HashSet};
 
 use iced::{
@@ -39,7 +41,7 @@ pub fn recovery<'a>(
         menu,
         cache,
         Column::new()
-            .push(Container::new(h3("Recovery path").bold()).width(Length::Fill))
+            .push(Container::new(h3(localized_copy("Recovery path")).bold()).width(Length::Fill))
             .push(Container::new(text(INFO_TEXT)))
             .push(cache.unswept_recovery_notice().map(text))
             .push(Space::new().height(Length::Fixed(20.0)))
@@ -50,8 +52,9 @@ pub fn recovery<'a>(
                             text(if no_recovery_paths {
                                 "No recovery path is currently available.".to_string()
                             } else {
-                                format!(
+                                localized_format!(
                                     "{} recovery path{} available:",
+                                    "Rutas de recuperación disponibles: {} ruta{}",
                                     recovery_paths.len(),
                                     if recovery_paths.len() > 1 {
                                         "s are"
@@ -89,7 +92,7 @@ pub fn recovery<'a>(
                     Row::new()
                         .push(Space::new().width(Length::Fill))
                         .push(
-                            button::primary(None, "Next")
+                            button::primary(None, localized_copy("Next"))
                                 .on_press_maybe(selected_path.map(|_| Message::Next))
                                 .width(Length::Fixed(200.0)),
                         )
@@ -122,8 +125,9 @@ pub fn recovery_path_view<'a>(
                         .align_y(Alignment::Center)
                         .spacing(10)
                         .push(
-                            text(format!(
+                            text(localized_format!(
                                 "{} signature{} from",
+                                "{} firma{} de",
                                 threshold,
                                 if threshold > 1 { "s" } else { "" }
                             ))
@@ -154,9 +158,10 @@ pub fn recovery_path_view<'a>(
                 .push(
                     Row::new()
                         .spacing(5)
-                        .push(text("can recover"))
-                        .push(text(format!(
+                        .push(text(localized_copy("can recover")))
+                        .push(text(localized_format!(
                             "{} coin{} totalling",
+                            "{} moneda{} con un total de",
                             number_of_coins,
                             if number_of_coins > 1 { "s" } else { "" }
                         )))

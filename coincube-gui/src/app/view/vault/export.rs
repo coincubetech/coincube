@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     component::{
         button, card, hw,
@@ -50,9 +51,10 @@ pub fn export_modal<'a, Message: From<ImportExportMessage> + Clone + 'static>(
     advisory: Option<&'static crate::hw_advisory::Advisory>,
 ) -> Element<'a, Message> {
     let cancel = match state {
-        ImportExportState::Started | ImportExportState::Progress(_) => {
-            Some(button::secondary(None, "Cancel").on_press(ImportExportMessage::UserStop.into()))
-        }
+        ImportExportState::Started | ImportExportState::Progress(_) => Some(
+            button::secondary(None, localized_copy("Cancel"))
+                .on_press(ImportExportMessage::UserStop.into()),
+        ),
         _ => None,
     }
     .map(Container::new);
@@ -88,12 +90,12 @@ pub fn export_modal<'a, Message: From<ImportExportMessage> + Clone + 'static>(
         Some(Container::new(
             Row::new()
                 .push(
-                    button::secondary(None, "Overwrite")
+                    button::secondary(None, localized_copy("Overwrite"))
                         .on_press(ImportExportMessage::Overwrite.into()),
                 )
                 .push(Space::new().width(30))
                 .push(
-                    button::secondary(None, "Ignore").on_press(ImportExportMessage::Ignore.into()),
+                    button::secondary(None, localized_copy("Ignore")).on_press(ImportExportMessage::Ignore.into()),
                 ),
         )),
     );
@@ -102,12 +104,12 @@ pub fn export_modal<'a, Message: From<ImportExportMessage> + Clone + 'static>(
         Some(Container::new(
             Row::new()
                 .push(
-                    button::secondary(None, "Overwrite")
+                    button::secondary(None, localized_copy("Overwrite"))
                         .on_press(ImportExportMessage::Overwrite.into()),
                 )
                 .push(Space::new().width(30))
                 .push(
-                    button::secondary(None, "Ignore").on_press(ImportExportMessage::Ignore.into()),
+                    button::secondary(None, localized_copy("Ignore")).on_press(ImportExportMessage::Ignore.into()),
                 ),
         )),
     );
