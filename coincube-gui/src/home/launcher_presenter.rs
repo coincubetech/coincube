@@ -2510,6 +2510,8 @@ fn opening_content<'a, M: 'a>(
     let ready = face.stage == super::launcher_opening::Stage::Ready;
     let mut body = Column::new()
         .align_x(Alignment::Center)
+        .push(coincube_ui::illustration::opening_image(alpha))
+        .push(Space::new().height(Length::Fixed(16.0)))
         .push(
             Container::new(
                 opening_words(
@@ -4493,6 +4495,63 @@ mod tests {
         assert!(mounted.has_focus(launcher_catalog::select_id(&key)));
         assert!(mounted.has_focus(launcher_catalog::open_id(&key)));
         assert!(mounted.has_focus(launcher_catalog::details_open_id(&key)));
+    }
+
+    #[test]
+    fn artwork_picker_live_opening_keeps_status_and_stall_actions() {
+        use super::super::launcher_opening::{Opening, Stage};
+        use coincube_ui::theme::{ArtworkStyle, WorldviewMode};
+        use std::time::{Duration, Instant};
+
+        let cube = crate::app::settings::CubeSettings::new_with_raw_id(
+            "fixture".into(),
+            "Everyday".into(),
+            ChainId::Bitcoin,
+        );
+        let quote = Quote {
+            id: "fixture".into(),
+            text: "Verify the network before you send. An illustration can change with your worldview, while the network and the next action stay the same.".into(),
+            author: "Author".into(),
+            source: "Source".into(),
+            category: "loading".into(),
+            length: "long".into(),
+            contexts: Vec::new(),
+        };
+        let started = Instant::now();
+        let now = started + Duration::from_secs(20);
+        for floor in [None, Some(floor_context(&cube))] {
+            let opening = Opening::new(floor, false, Stage::Spark, started);
+            for artwork in [ArtworkStyle::Existing, ArtworkStyle::Scene] {
+                let face = OpeningFace {
+                    cube: &cube,
+                    quote: &quote,
+                    stage: opening.stage(),
+                    stalled: true,
+                    cancel: || (),
+                    without_spark: || (),
+                };
+                let theme = theme::Theme::dark()
+                    .with_worldview(WorldviewMode::Suitcoiner)
+                    .with_artwork(artwork);
+                let (layout, element) = match opening.floor() {
+                    Some(context) => (
+                        "floor",
+                        opening_on_floor(context, face, theme.mode, &opening, now),
+                    ),
+                    None => ("list", opening_full_screen(face, theme.mode, &opening, now)),
+                };
+                let mounted = capture::inspect_filled(
+                    &format!("artwork-live-opening-{layout}-{artwork:?}"),
+                    element,
+                    (1024, 768),
+                    "dark",
+                    theme,
+                    (1024, 768),
+                );
+                assert!(mounted.contains("Loading your Spark wallet"));
+                assert!(mounted.contains("Continue without Spark"));
+            }
+        }
     }
 
     #[test]

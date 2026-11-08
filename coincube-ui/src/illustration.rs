@@ -87,10 +87,29 @@ fn scene(mode: WorldviewMode) -> Option<&'static Handle> {
     }
 }
 
-/// Thumbnail for an Appearance option. The existing set is represented by
-/// its empty-history image, or by the caller's incumbent Samurai image.
+/// Thumbnail for an Appearance option. Use the existing set's empty-history
+/// image so the picker and activity preview share the same artwork.
 pub fn artwork_thumbnail(mode: WorldviewMode, style: ArtworkStyle) -> Option<Handle> {
-    selected(mode, style, Slot::EmptyHistory).map(|(handle, _)| handle.clone())
+    static KAGE: LazyLock<Option<Handle>> =
+        LazyLock::new(|| decode_png(include_bytes!("../static/images/kage/kage-seated.png")));
+    selected(mode, style, Slot::EmptyHistory)
+        .map(|(handle, _)| handle)
+        .or_else(|| KAGE.as_ref())
+        .cloned()
+}
+
+/// Artwork on the live Launcher opening face, fading with the other content.
+pub fn opening_image<'a, M: 'a>(opacity: f32) -> Option<Element<'a, M>> {
+    static CUBE: LazyLock<Option<Handle>> =
+        LazyLock::new(|| decode_png(include_bytes!("../static/images/cube/cube-active.png")));
+    Some(Element::new(Illustration {
+        slot: Some(Slot::Opening),
+        incumbent: CUBE.as_ref()?.clone(),
+        width: Length::Fixed(160.0),
+        height: Length::Fixed(160.0),
+        fit: ContentFit::ScaleDown,
+        opacity,
+    }))
 }
 
 fn selected(
@@ -123,6 +142,7 @@ pub fn image<'a, M: 'a>(
         width,
         height,
         fit,
+        opacity: 1.0,
     })
 }
 
@@ -132,6 +152,7 @@ struct Illustration {
     width: Length,
     height: Length,
     fit: ContentFit,
+    opacity: f32,
 }
 
 impl Illustration {
@@ -140,6 +161,7 @@ impl Illustration {
             .width(self.width)
             .height(self.height)
             .content_fit(self.fit)
+            .opacity(self.opacity)
     }
 }
 
@@ -266,6 +288,13 @@ mod tests {
 
     #[test]
     fn artwork_picker_uses_three_scenes_only_in_the_previewed_slots() {
+        let kage = artwork_thumbnail(WorldviewMode::Samurai, ArtworkStyle::Existing).unwrap();
+        assert_eq!(
+            kage.id(),
+            artwork_thumbnail(WorldviewMode::Samurai, ArtworkStyle::Existing)
+                .unwrap()
+                .id()
+        );
         let mut ids = std::collections::HashSet::new();
         for mode in [
             WorldviewMode::Samurai,

@@ -74,7 +74,7 @@ fn worldview_row<'a>(selected: WorldviewMode, enabled: bool) -> Element<'a, Mess
 }
 
 fn artwork_row<'a>(saved: DevicePreferences, enabled: bool) -> Element<'a, Message> {
-    use coincube_ui::{component::quote_display, illustration, theme::tenshu::control};
+    use coincube_ui::{illustration, theme::tenshu::control};
 
     let mode = saved.worldview;
     let (mode_name, existing_name, scene_name) = match mode {
@@ -103,12 +103,12 @@ fn artwork_row<'a>(saved: DevicePreferences, enabled: bool) -> Element<'a, Messa
         Row::new().spacing(8),
         |row, (style, name, label, id)| {
             let selected = saved.artwork.get(mode) == style;
-            let image = illustration::artwork_thumbnail(mode, style)
-                .unwrap_or_else(|| quote_display::image_handle_for_context("empty-wallet"));
-            let thumbnail = iced::widget::image(image)
-                .width(Length::Fixed(88.0))
-                .height(Length::Fixed(88.0))
-                .content_fit(iced::ContentFit::Contain);
+            let thumbnail = illustration::artwork_thumbnail(mode, style).map(|image| {
+                iced::widget::image(image)
+                    .width(Length::Fixed(88.0))
+                    .height(Length::Fixed(88.0))
+                    .content_fit(iced::ContentFit::Contain)
+            });
             let caption = Row::new()
                 .spacing(4)
                 .align_y(Alignment::Center)
