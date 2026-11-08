@@ -4379,6 +4379,42 @@ mod tests {
     }
 
     #[test]
+    fn worldview_create_backdrop_uses_alias_and_sheet_uses_exact_chain() {
+        use crate::app::settings::preferences::WorldviewMode;
+
+        let mut home = home_with_cubes();
+        let super::super::State::Cubes { create_cube, .. } = &mut home.state else {
+            panic!("expected the fixture to have local Cubes");
+        };
+        *create_cube = true;
+        home.catalog.mode = launcher_catalog::LauncherMode::List;
+        home.catalog.selected = None;
+        assert!(home.showing_create_journey());
+
+        // The inert wrapper deliberately hides background widgets from the
+        // inspector's operations. Inspect the backdrop before composition.
+        let backdrop = capture::inspect_filled(
+            "launcher-create-luke-backdrop",
+            launcher_catalog::launcher_backdrop(&home, WorldviewMode::Luke),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+            (1440, 900),
+        );
+        assert!(backdrop.contains("Spamcoin (BTC)"));
+        let sheet = capture::inspect_filled(
+            "launcher-create-luke-sheet",
+            home.view_with_worldview(WorldviewMode::Luke),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+            (1440, 900),
+        );
+        assert!(sheet.contains("Bitcoin SHA-256 · Mainnet"));
+        assert!(!sheet.contains("Spamcoin (BTC)"));
+    }
+
+    #[test]
     fn stale_rows_remain_visible_but_not_keyboard_actionable() {
         let mut home = home_with_cubes();
         if let super::super::State::Cubes { source, .. } = &mut home.state {

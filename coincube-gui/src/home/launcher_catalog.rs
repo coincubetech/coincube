@@ -2132,8 +2132,11 @@ pub(super) fn launcher_view_with_worldview(
 
 /// The Launcher under a wizard sheet: the same top bar and body, without
 /// the dock, which the sheet would half cover. It is drawn inert.
-pub(super) fn launcher_backdrop(home: &Home) -> Element<'_, ViewMessage> {
-    launcher_screen(home, false, Default::default())
+pub(super) fn launcher_backdrop(
+    home: &Home,
+    worldview: crate::app::settings::preferences::WorldviewMode,
+) -> Element<'_, ViewMessage> {
+    launcher_screen(home, false, worldview)
 }
 
 fn launcher_screen(

@@ -5271,7 +5271,7 @@ impl Home {
         // The Launcher and Create journey own their chrome and body scrolling.
         // Other Home sections keep the legacy frame.
         let layout: Element<Message> = if self.showing_create_journey() {
-            self.create_journey_view()
+            self.create_journey_view_with_worldview(worldview)
         } else if launcher_catalog::catalog_visible(self) {
             launcher_catalog::launcher_view_with_worldview(self, worldview).map(Message::View)
         } else {
@@ -5415,15 +5415,23 @@ impl Home {
         }
     }
 
+    #[cfg(test)]
+    fn create_journey_view(&self) -> Element<Message> {
+        self.create_journey_view_with_worldview(Default::default())
+    }
+
     /// Create-only presentation around the existing network, Cube and backup
     /// state machines. The controls below dispatch their original messages;
     /// the journey does not hold a second copy of any wallet material.
-    fn create_journey_view(&self) -> Element<Message> {
+    fn create_journey_view_with_worldview(
+        &self,
+        worldview: crate::app::settings::preferences::WorldviewMode,
+    ) -> Element<Message> {
         // Presented like Connect and App preferences: a sheet over the
         // inert, dimmed Launcher, its top bar left in view. The backdrop
         // drops the dock, which the sheet would otherwise half cover.
         crate::gui::compose_overlay(
-            launcher_catalog::launcher_backdrop(self).map(Message::View),
+            launcher_catalog::launcher_backdrop(self, worldview).map(Message::View),
             self.create_journey_frame().map(Message::View),
             true,
         )
