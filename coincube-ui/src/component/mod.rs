@@ -54,7 +54,9 @@ pub fn received_celebration_page<'a, M: Clone + 'a>(
         .align_x(iced::Alignment::Center)
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .push(qd::display(
-            &QuoteDisplayProps::new(context, quote, image_handle).image_size(480),
+            &QuoteDisplayProps::new(context, quote, image_handle)
+                .illustration_slot(crate::illustration::Slot::Received)
+                .image_size(480),
         ))
         .push(text::h3("Payment received!"))
         .push(
@@ -120,7 +122,9 @@ pub fn sent_celebration_page<'a, M: Clone + 'a>(
         .align_x(iced::Alignment::Center)
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .push(qd::display(
-            &QuoteDisplayProps::new(context, quote, image_handle).image_size(480),
+            &QuoteDisplayProps::new(context, quote, image_handle)
+                .illustration_slot(crate::illustration::Slot::Sent)
+                .image_size(480),
         ))
         .push(text::h3("Transaction complete!"))
         .push(

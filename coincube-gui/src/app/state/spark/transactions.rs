@@ -144,12 +144,13 @@ impl SparkTransactions {
             })
             .collect();
     }
+}
 
-    pub(crate) fn view_with_worldview<'a>(
+impl State for SparkTransactions {
+    fn view<'a>(
         &'a self,
         menu: &'a Menu,
         cache: &'a Cache,
-        worldview: crate::app::settings::preferences::WorldviewMode,
     ) -> Element<'a, crate::app::view::Message> {
         let fiat_converter: Option<FiatAmountConverter> =
             cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
@@ -196,11 +197,7 @@ impl SparkTransactions {
                 bitcoin_unit: cache.bitcoin_unit,
                 show_direction_badges: cache.show_direction_badges,
                 empty_state_quote: &self.empty_state_quote,
-                empty_state_image_handle: crate::worldview_art::illustration(
-                    worldview,
-                    crate::worldview_art::Slot::EmptyHistory,
-                    &self.empty_state_image_handle,
-                ),
+                empty_state_image_handle: &self.empty_state_image_handle,
                 current_page: self.current_page,
                 is_last_page: self.is_last_page,
                 processing: self.processing,
@@ -237,16 +234,6 @@ impl SparkTransactions {
                     .into()
             }
         }
-    }
-}
-
-impl State for SparkTransactions {
-    fn view<'a>(
-        &'a self,
-        menu: &'a Menu,
-        cache: &'a Cache,
-    ) -> Element<'a, crate::app::view::Message> {
-        self.view_with_worldview(menu, cache, Default::default())
     }
 
     fn reload(

@@ -94,13 +94,17 @@ wallet and chain data as input to presentation.
   empty and celebration contexts. `image.rs` supplies the castle mark, sealed
   Cube art for Restore and the recovery illustrations used by Backup and
   Recovery Kit. Preserve these files and their current Samurai bindings.
-- Map new bundled illustrations by semantic slot. Start with a small set of
-  welcome, empty, loading and post-success slots. Keep fallback order
-  mode illustration → Samurai illustration → omit the decorative slot.
-  Keep the current quote choice stable during a mode switch.
+- Bundle eight illustrations per alternate mode under
+  `coincube-ui/static/images/worldview`. The slots cover opening and syncing,
+  empty activity, send and receive celebrations, restore completion, Recovery
+  Kit protection and removal, and Backup and Recovery Kit PIN prompts.
+  Celebrations share their artwork across payment rails. Each slot keeps the
+  incumbent Samurai image and its layout as the fallback. Quote choice stays
+  stable during a mode switch.
 - Use restrained decorative accents in both color schemes. Preserve established
   warning, error, success, focus and chain-identification semantics. Keep asset
-  symbols, user avatars and the app mark outside the decorative registry.
+  symbols, user avatars, the interactive Launcher Cube and the app mark outside
+  the decorative registry.
 
 ## Delivery and validation
 

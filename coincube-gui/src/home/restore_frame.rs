@@ -463,9 +463,13 @@ pub(crate) fn done_art<'a, M: 'a>(light: bool) -> Element<'a, M> {
     const SCALE: f32 = WIDTH / 320.0;
     let radius = 122.0 * SCALE;
     let (cx, cy) = (165.0 * SCALE, 140.0 * SCALE);
-    let art = iced::widget::image(coincube_ui::image::kage_cube_sealed())
-        .width(Length::Fixed(WIDTH))
-        .height(Length::Fixed(HEIGHT));
+    let art = coincube_ui::illustration::image(
+        Some(coincube_ui::illustration::Slot::Restored),
+        coincube_ui::image::kage_cube_sealed(),
+        Length::Fixed(WIDTH),
+        Length::Fixed(HEIGHT),
+        iced::ContentFit::Contain,
+    );
     let mut stack = iced::widget::Stack::new()
         .width(Length::Fixed(WIDTH))
         .height(Length::Fixed(HEIGHT));
@@ -480,13 +484,20 @@ pub(crate) fn done_art<'a, M: 'a>(light: bool) -> Element<'a, M> {
                             Container::new(Space::new())
                                 .width(Length::Fixed(radius * 2.0))
                                 .height(Length::Fixed(radius * 2.0))
-                                .style(move |_: &theme::Theme| iced::widget::container::Style {
-                                    background: Some(iced::Background::Color(iced::Color::WHITE)),
-                                    border: iced::Border {
-                                        radius: radius.into(),
+                                .style(move |theme: &theme::Theme| {
+                                    if theme.worldview() != theme::WorldviewMode::Samurai {
+                                        return iced::widget::container::Style::default();
+                                    }
+                                    iced::widget::container::Style {
+                                        background: Some(iced::Background::Color(
+                                            iced::Color::WHITE,
+                                        )),
+                                        border: iced::Border {
+                                            radius: radius.into(),
+                                            ..Default::default()
+                                        },
                                         ..Default::default()
-                                    },
-                                    ..Default::default()
+                                    }
                                 }),
                         ),
                 ),

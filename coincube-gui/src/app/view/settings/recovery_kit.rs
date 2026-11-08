@@ -38,6 +38,11 @@ fn flow<'a, M: 'a>(
         } else {
             image::recovery_kit_protected()
         },
+        if removing {
+            coincube_ui::illustration::Slot::KitRemoval
+        } else {
+            coincube_ui::illustration::Slot::KitProtection
+        },
     )
 }
 
@@ -82,6 +87,7 @@ pub fn pin_entry_view<'a>(pin: &'a PinInput, error: Option<&'a str>) -> Element<
         "Confirm your Cube PIN",
         "Enter your Cube PIN to unlock your Master Seed Phrase. We'll encrypt it on-device before uploading.",
         image::pin_unlock_lock(),
+        coincube_ui::illustration::Slot::Pin,
     ).push(Column::new().spacing(8).push(tenshu::label("Cube PIN"))
         .push(pin.face_view().map(|m| wrap(RecoveryKitMessage::PinInput(m)))));
     if let Some(error) = error {

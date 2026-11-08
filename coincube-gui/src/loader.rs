@@ -863,22 +863,6 @@ impl Loader {
     }
 
     pub fn view(&self) -> Element<Message> {
-        self.view_with_worldview(Default::default())
-    }
-
-    pub(crate) fn view_with_worldview(
-        &self,
-        worldview: crate::app::settings::preferences::WorldviewMode,
-    ) -> Element<Message> {
-        let illustration = if matches!(self.step, Step::Error(_)) {
-            &self.current_image_handle
-        } else {
-            crate::worldview_art::illustration(
-                worldview,
-                crate::worldview_art::Slot::Opening,
-                &self.current_image_handle,
-            )
-        };
         let scene = crate::home::launcher_presenter::project_opening(
             &self.cube_settings.name,
             self.cube_settings.network,
@@ -887,7 +871,7 @@ impl Loader {
             scene,
             &self.step,
             &self.current_quote,
-            illustration,
+            &self.current_image_handle,
             !self.can_retry(),
         )
         .map(Message::View)

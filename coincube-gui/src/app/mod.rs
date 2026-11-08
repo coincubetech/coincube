@@ -11498,13 +11498,6 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        self.view_with_worldview(Default::default())
-    }
-
-    pub(crate) fn view_with_worldview(
-        &self,
-        worldview: crate::app::settings::preferences::WorldviewMode,
-    ) -> Element<'_, Message> {
         let journey = self
             .panels
             .imported_bitcoin
@@ -11647,15 +11640,6 @@ impl App {
             // active panel + Cache, so the dispatch lives here — App
             // owns every panel.
             view::dashboard(&self.panels.current, &self.cache, content)
-        } else if matches!(
-            self.panels.current,
-            Menu::Spark(menu::SparkSubMenu::Transactions(_))
-        ) {
-            self.panels.spark_transactions.view_with_worldview(
-                &self.panels.current,
-                &self.cache,
-                worldview,
-            )
         } else {
             self.panels
                 .current()

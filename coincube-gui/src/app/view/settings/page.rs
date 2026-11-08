@@ -43,6 +43,7 @@ pub fn illustrated_flow<'a, M: 'a>(
     title: &'a str,
     detail: &'a str,
     art: iced::widget::image::Handle,
+    slot: coincube_ui::illustration::Slot,
 ) -> Column<'a, M> {
     Column::new()
         .width(Length::Fill)
@@ -61,12 +62,13 @@ pub fn illustrated_flow<'a, M: 'a>(
                         .push(tenshu::heading(title))
                         .push(tenshu::body(detail).style(theme::tenshu::text::muted)),
                 )
-                .push(
-                    iced::widget::image(art)
-                        .width(88)
-                        .height(88)
-                        .content_fit(iced::ContentFit::Contain),
-                ),
+                .push(coincube_ui::illustration::image(
+                    Some(slot),
+                    art,
+                    Length::Fixed(88.0),
+                    Length::Fixed(88.0),
+                    iced::ContentFit::Contain,
+                )),
         )
 }
 

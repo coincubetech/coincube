@@ -77,6 +77,7 @@ pub fn pin_entry_view<'a>(pin: &'a PinInput, error: Option<&'a str>) -> Element<
         "Unlock your seed phrase",
         "Enter your Cube PIN to unlock and display your 12-word recovery phrase.",
         coincube_ui::image::pin_unlock_lock(),
+        coincube_ui::illustration::Slot::Pin,
     )
     .push(
         Column::new()

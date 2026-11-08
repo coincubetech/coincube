@@ -24,10 +24,22 @@ pub mod text;
 pub mod text_input;
 pub mod toggler;
 
+/// Installation-wide presentation choice, independent of the color scheme.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorldviewMode {
+    Suitcoiner,
+    Luke,
+    #[default]
+    #[serde(other)]
+    Samurai,
+}
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Theme {
     pub colors: palette::Palette,
     pub mode: palette::ThemeMode,
+    worldview: WorldviewMode,
 }
 
 impl Default for Theme {
@@ -41,6 +53,7 @@ impl Theme {
         Self {
             colors: palette::Palette::dark(),
             mode: palette::ThemeMode::Dark,
+            worldview: WorldviewMode::default(),
         }
     }
 
@@ -48,6 +61,7 @@ impl Theme {
         Self {
             colors: palette::Palette::light(),
             mode: palette::ThemeMode::Light,
+            worldview: WorldviewMode::default(),
         }
     }
 
@@ -55,7 +69,17 @@ impl Theme {
         Self {
             colors: palette::Palette::from_mode(mode),
             mode,
+            worldview: WorldviewMode::default(),
         }
+    }
+
+    pub fn with_worldview(mut self, worldview: WorldviewMode) -> Self {
+        self.worldview = worldview;
+        self
+    }
+
+    pub fn worldview(&self) -> WorldviewMode {
+        self.worldview
     }
 }
 

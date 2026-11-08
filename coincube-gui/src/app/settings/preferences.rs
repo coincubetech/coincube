@@ -33,16 +33,7 @@ impl From<ThemeMode> for ThemePreference {
     }
 }
 
-/// Installation-wide presentation choice, independent of the color scheme.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorldviewMode {
-    Suitcoiner,
-    Luke,
-    #[default]
-    #[serde(other)]
-    Samurai,
-}
+pub use coincube_ui::theme::WorldviewMode;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

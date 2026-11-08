@@ -4045,12 +4045,8 @@ impl GUI {
             .find(|(id, _)| Some(**id) == self.focus)
             .or_else(|| self.panes.iter().next())
             .expect("GUI always owns its primary pane");
-        let worldview = self.preferences.accepted().map_or_else(
-            crate::app::settings::preferences::WorldviewMode::default,
-            |accepted| accepted.preferences.worldview,
-        );
         let background = pane
-            .view(worldview)
+            .view(self.worldview())
             .map(move |message| Message::Pane(id, message));
         if let Some(sheet) = &self.preferences_sheet {
             if self.overlay_origin_is_current(&sheet.origin) {
@@ -4087,8 +4083,15 @@ impl GUI {
         self.current_zoom().factor()
     }
 
+    fn worldview(&self) -> coincube_ui::theme::WorldviewMode {
+        self.preferences
+            .accepted()
+            .map(|accepted| accepted.preferences.worldview)
+            .unwrap_or_default()
+    }
+
     pub fn theme(&self) -> coincube_ui::theme::Theme {
-        coincube_ui::theme::Theme::from_mode(self.theme_mode)
+        coincube_ui::theme::Theme::from_mode(self.theme_mode).with_worldview(self.worldview())
     }
 }
 

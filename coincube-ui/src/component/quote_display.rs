@@ -249,6 +249,7 @@ pub fn image_handle_for_context(context: &str) -> image::Handle {
 
 /// Props for the [`quote_display`] component.
 pub struct QuoteDisplayProps<'a> {
+    slot: Option<crate::illustration::Slot>,
     pub quote: &'a Quote,
     pub image_handle: &'a image::Handle,
     pub image_size: u16,
@@ -260,12 +261,22 @@ impl<'a> QuoteDisplayProps<'a> {
     pub fn new(context: &str, quote: &'a Quote, image_handle: &'a image::Handle) -> Self {
         let (_, default_size) = default_image_for_context(context);
         Self {
+            slot: match context {
+                "loading" | "syncing" => Some(crate::illustration::Slot::Opening),
+                "empty-wallet" => Some(crate::illustration::Slot::EmptyHistory),
+                _ => None,
+            },
             quote,
             image_handle,
             image_size: default_size,
             show_quote: true,
             show_separator: true,
         }
+    }
+
+    pub(crate) fn illustration_slot(mut self, slot: crate::illustration::Slot) -> Self {
+        self.slot = Some(slot);
+        self
     }
 
     pub fn image_size(mut self, size: u16) -> Self {
@@ -296,9 +307,13 @@ impl<'a> QuoteDisplayProps<'a> {
 /// ```
 pub fn display<'a, M: 'a>(props: &QuoteDisplayProps<'a>) -> Container<'a, M> {
     // Image — uses a pre-built handle to avoid flicker from recreating on every render
-    let img = iced::widget::image(props.image_handle.clone())
-        .height(Length::Fixed(props.image_size as f32))
-        .content_fit(iced::ContentFit::ScaleDown);
+    let img = crate::illustration::image(
+        props.slot,
+        props.image_handle.clone(),
+        Length::Shrink,
+        Length::Fixed(props.image_size as f32),
+        iced::ContentFit::ScaleDown,
+    );
 
     let img_container = Container::new(img).center_x(Length::Fill);
 
