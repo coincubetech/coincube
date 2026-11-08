@@ -1631,9 +1631,7 @@ impl GUI {
     /// Shows or clears the signed-out-by-Connect notice in every tab.
     fn relay_connect_signed_out_by(&mut self, reason: Option<crate::app::SignedOutBy>) {
         for (_, pane) in self.panes.iter_mut() {
-            for tab in &mut pane.tabs {
-                tab.set_connect_signed_out_by(reason);
-            }
+            pane.set_connect_signed_out_by(reason);
         }
     }
 

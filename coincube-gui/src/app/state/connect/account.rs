@@ -1307,6 +1307,8 @@ impl ConnectAccountPanel {
         self.shared_client = false;
         self.admitted_reopen_required = false;
         self.admitted_user_loading = false;
+        // An adopted session supersedes one that was waiting on the network.
+        self.unverified = None;
         self.user = None;
         self.plan = None;
         self.features = None;
@@ -1856,6 +1858,9 @@ impl ConnectAccountPanel {
                 // refresh. Previously this string ended in "Tap to retry" while
                 // the banner had no button at all.
                 self.error = Some(PanelError::retryable(err, RetryAction::Session));
+                // Not a network wait any more: show the retryable error and
+                // stop the automatic re-checks.
+                self.unverified = None;
                 self.scrub_recovery_passphrase();
                 self.step = ConnectFlowStep::Login {
                     email: String::new(),
@@ -9285,5 +9290,36 @@ mod unverified_session_tests {
         panel.unverified = Some(unverified(3));
         drop(panel.update_message(ConnectAccountMessage::LogOut));
         assert_eq!(panel.unverified, None);
+    }
+
+    #[test]
+    fn a_refresh_that_fails_outright_stops_waiting() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.unverified = Some(unverified(2));
+        drop(
+            panel.update_message(ConnectAccountMessage::RefreshFailed(UserError::new(
+                "Temporary failure",
+                "Try again later.",
+                crate::user_error::CC_NET_TIMEOUT,
+                true,
+            ))),
+        );
+        assert_eq!(panel.unverified, None);
+        assert!(panel.error.is_some());
+        assert_eq!(
+            panel
+                .update_message(ConnectAccountMessage::RecheckSession)
+                .units(),
+            0
+        );
+    }
+
+    #[test]
+    fn an_adopted_session_replaces_the_waiting_one() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.unverified = Some(unverified(2));
+        panel.install_shared_client(CoincubeClient::new());
+        assert_eq!(panel.unverified, None);
+        assert!(matches!(panel.step, ConnectFlowStep::CheckingSession));
     }
 }
