@@ -99,14 +99,14 @@ pub fn artwork_thumbnail(mode: WorldviewMode, style: ArtworkStyle) -> Option<Han
 }
 
 /// Artwork on the live Launcher opening face, fading with the other content.
-pub fn opening_image<'a, M: 'a>(opacity: f32) -> Option<Element<'a, M>> {
+pub fn opening_image<'a, M: 'a>(side: f32, opacity: f32) -> Option<Element<'a, M>> {
     static CUBE: LazyLock<Option<Handle>> =
         LazyLock::new(|| decode_png(include_bytes!("../static/images/cube/cube-active.png")));
     Some(Element::new(Illustration {
         slot: Some(Slot::Opening),
         incumbent: CUBE.as_ref()?.clone(),
-        width: Length::Fixed(160.0),
-        height: Length::Fixed(160.0),
+        width: Length::Fixed(side),
+        height: Length::Fixed(side),
         fit: ContentFit::ScaleDown,
         opacity,
     }))
