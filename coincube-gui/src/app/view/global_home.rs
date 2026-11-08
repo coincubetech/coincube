@@ -3398,6 +3398,11 @@ pub fn overview_page<'a>(
     }
     let body = Column::new()
         .spacing(36)
+        .push_maybe(
+            coincube_ui::worldview_copy::VoiceLine::Overview
+                .get()
+                .map(|line| p2_regular(line).style(theme::text::secondary)),
+        )
         .push(overview)
         .push_maybe(recent_activity);
     crate::app::view::dashboard_headed(menu, cache, head, body)

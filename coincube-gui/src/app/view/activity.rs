@@ -9,7 +9,7 @@ use coincube_ui::localized_format;
 use coincube_ui::{
     component::tenshu::{self, page_head, FieldSize, PageWidth},
     font, theme,
-    widget::{action::Action, Column, Element, Row},
+    widget::{action::Action, Column, ColumnExt, Element, Row},
 };
 #[allow(deprecated)]
 use iced::{
@@ -2348,7 +2348,7 @@ fn render_at_width<'a>(
     }
     // Liquid's banners only while the Liquid gate shows it.
     let liquid = activity.liquid_shown();
-    for (wallet, error) in [
+    let history_errors = [
         ("Vault", activity.vault_error.as_deref()),
         ("Vault proposals", activity.psbt_error.as_deref()),
         ("Spark", activity.spark_error.as_deref()),
@@ -2360,7 +2360,9 @@ fn render_at_width<'a>(
             "Liquid refunds",
             activity.refundables_error.as_deref().filter(|_| liquid),
         ),
-    ] {
+    ];
+    let has_history_error = history_errors.iter().any(|(_, error)| error.is_some());
+    for (wallet, error) in history_errors {
         if error.is_none() {
             continue;
         }
@@ -2435,7 +2437,23 @@ fn render_at_width<'a>(
         let mut empty = Column::new()
             .spacing(12)
             .align_x(Alignment::Center)
-            .push(words(message, 16.0, font::SEMIBOLD, glyph::ink));
+            .push(words(
+                localized_copy(message),
+                16.0,
+                font::SEMIBOLD,
+                glyph::ink,
+            ));
+        if entries.is_empty()
+            && cutoff.is_none()
+            && !has_history_error
+            && activity.filters.count() == 0
+        {
+            empty = empty.push_maybe(
+                coincube_ui::worldview_copy::VoiceLine::EmptyHistory
+                    .get()
+                    .map(|line| words(line, 14.0, font::REGULAR, glyph::muted)),
+            );
+        }
         if activity.filters.count() > 0 {
             empty = empty.push(
                 Action::new(

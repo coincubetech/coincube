@@ -480,12 +480,17 @@ fn dashboard_layout<'a, T: Into<Element<'a, Message>>>(
 }
 
 /// Iced invokes responsive builders during layout, after the root view has
-/// returned. Carry the window's language into that deferred view build.
+/// returned. Carry the window's presentation preferences into that build.
 pub(crate) fn responsive<'a, M: 'a>(
     build: impl Fn(iced::Size) -> Element<'a, M> + 'a,
 ) -> iced::widget::Responsive<'a, M, theme::Theme, iced::Renderer> {
     let language = coincube_ui::locale::language();
-    iced::widget::responsive(move |size| coincube_ui::locale::render_in(language, || build(size)))
+    let mode = coincube_ui::worldview_copy::mode();
+    iced::widget::responsive(move |size| {
+        coincube_ui::locale::render_in(language, || {
+            coincube_ui::worldview_copy::render_in(mode, || build(size))
+        })
+    })
 }
 
 const WALLET_PAGE_SCROLL_ID: &str = "tenshu.wallet.page.scroll";

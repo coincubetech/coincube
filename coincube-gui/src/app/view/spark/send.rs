@@ -137,6 +137,7 @@ impl<'a> SparkSendView<'a> {
                 self.sent_quote,
                 self.sent_image_handle,
                 CopyText::HasBeenSentSuccessfully.get(),
+                coincube_ui::worldview_copy::VoiceLine::PaymentSent.get(),
                 Message::SparkSend(crate::app::view::SparkSendMessage::Reset),
             );
         }

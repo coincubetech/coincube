@@ -264,6 +264,7 @@ pub fn liquid_send_with_flow<'a>(config: LiquidSendFlowConfig<'a>) -> Element<'a
                 config.sent_quote,
                 config.sent_image_handle,
                 CopyText::HasBeenSentSuccessfully.get(),
+                coincube_ui::worldview_copy::VoiceLine::PaymentSent.get(),
                 LiquidSendMessage::BackToHome,
             )
             .map(Message::LiquidSend);

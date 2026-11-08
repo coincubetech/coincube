@@ -5541,7 +5541,16 @@ impl Home {
             .max_width(760)
             .into()
         } else {
-            self.creation_form(false)
+            let form = self.creation_form(false);
+            if let Some(line) = coincube_ui::worldview_copy::VoiceLine::CreateCube.get() {
+                Column::new()
+                    .spacing(12)
+                    .push(p2_regular(line).style(theme::text::secondary))
+                    .push(form)
+                    .into()
+            } else {
+                form
+            }
         };
         let body: Element<ViewMessage> =
             // Every step's column is centred in the sheet, so a narrow form

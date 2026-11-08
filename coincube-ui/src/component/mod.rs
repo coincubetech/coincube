@@ -28,7 +28,7 @@ use iced::Length;
 
 use crate::{
     theme,
-    widget::{Column, Container, Element, Row},
+    widget::{Column, ColumnExt, Container, Element, Row},
 };
 
 use self::text::Text;
@@ -78,6 +78,11 @@ pub fn received_celebration_page<'a, M: Clone + 'a>(
                     ..Default::default()
                 })),
         )
+        .push_maybe(
+            crate::worldview_copy::VoiceLine::PaymentReceived
+                .get()
+                .map(|line| text::p2_regular(line).style(theme::text::secondary)),
+        )
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(
             button::primary(None, CopyText::Back.get())
@@ -113,6 +118,7 @@ pub fn sent_celebration_page<'a, M: Clone + 'a>(
     quote: &'a quote_display::Quote,
     image_handle: &'a iced::widget::image::Handle,
     verb_suffix: &'a str,
+    voice: Option<&'static str>,
     on_dismiss: M,
 ) -> Element<'a, M> {
     use quote_display::{self as qd, QuoteDisplayProps};
@@ -150,6 +156,7 @@ pub fn sent_celebration_page<'a, M: Clone + 'a>(
                         }),
                 ),
         )
+        .push_maybe(voice.map(|line| text::p2_regular(line).style(theme::text::secondary)))
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(
             button::primary(None, CopyText::Back.get())

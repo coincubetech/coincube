@@ -17,7 +17,7 @@ use coincube_ui::{
         tenshu::{self, top_bar, ActionButton, ActionKind},
     },
     icon, theme,
-    widget::{action::Action, text_input, Column, Container, Element, Row, TextInput},
+    widget::{action::Action, text_input, Column, ColumnExt, Container, Element, Row, TextInput},
 };
 
 use super::{
@@ -1667,6 +1667,13 @@ fn empty_floor<'a>(home: &'a Home, width: f32, available: f32) -> Element<'a, Vi
             coincube_ui::font::REGULAR,
             true,
         ));
+    let welcome = if at_limit {
+        None
+    } else {
+        coincube_ui::worldview_copy::VoiceLine::Welcome.get()
+    };
+    let words = words
+        .push_maybe(welcome.map(|line| face_words(line, 14.0, coincube_ui::font::REGULAR, true)));
     // The plus sits beside the words, below the Cube, so nothing covers
     // the wireframe (Robert, 2026-11-03).
     let content = Column::new()
@@ -2573,6 +2580,17 @@ fn opening_content<'a, M: 'a>(
             )
             .line_height(iced::widget::text::LineHeight::Absolute(22.0.into())),
         );
+    use super::launcher_opening::Stage;
+    if !face.stalled
+        && matches!(
+            face.stage,
+            Stage::Scanning | Stage::Syncing | Stage::AlmostThere
+        )
+    {
+        if let Some(line) = coincube_ui::worldview_copy::VoiceLine::Syncing.get() {
+            body = body.push(opening_words(line, 13.0, font::REGULAR, Tone::Muted, alpha));
+        }
+    }
     if face.stalled {
         let (note, label, action) = if face.stage == super::launcher_opening::Stage::Spark {
             (
@@ -2828,6 +2846,50 @@ mod tests {
     use iced::Rectangle;
     use launcher_catalog::LauncherMode;
     use std::path::PathBuf;
+
+    #[test]
+    fn worldview_voice_survives_deferred_opening_layout_and_yields_to_stall_guidance() {
+        use super::super::launcher_opening::{Opening, Stage};
+        use coincube_ui::{theme::WorldviewMode, worldview_copy};
+
+        let cube = crate::app::settings::CubeSettings::new_with_raw_id(
+            "voice-opening".into(),
+            "Everyday".into(),
+            ChainId::Bitcoin,
+        );
+        let floor = floor_context(&cube);
+        let quote = coincube_ui::component::quote_display::random_quote("loading");
+        let now = std::time::Instant::now();
+        let opening = Opening::new(Some(floor.clone()), true, Stage::Syncing, now);
+        for stalled in [false, true] {
+            let view = worldview_copy::render_in(WorldviewMode::Luke, || {
+                opening_on_floor(
+                    &floor,
+                    OpeningFace {
+                        cube: &cube,
+                        quote: &quote,
+                        stage: Stage::Syncing,
+                        stalled,
+                        cancel: || (),
+                        without_spark: || (),
+                    },
+                    coincube_ui::theme::palette::ThemeMode::Dark,
+                    &opening,
+                    now,
+                )
+            });
+            let mounted = capture::inspect_filled(
+                "worldview-voice-sync",
+                view,
+                (1024, 768),
+                "dark",
+                theme::Theme::dark().with_worldview(WorldviewMode::Luke),
+                (1024, 768),
+            );
+            assert!(mounted.contains(CopyText::SyncingBlockchain.get()));
+            assert_eq!(mounted.contains("Consulting the ancient rules…"), !stalled);
+        }
+    }
 
     #[test]
     fn spanish_cube_opening_survives_deferred_layout() {

@@ -522,6 +522,11 @@ pub fn broadcast_action_with_identity_review<'a>(
             sent_quote,
             sent_image_handle,
             broadcast_outcome(is_self_transfer, !conflicting_txids.is_empty()),
+            if is_self_transfer {
+                None
+            } else {
+                coincube_ui::worldview_copy::VoiceLine::PaymentSent.get()
+            },
             Message::Spend(super::super::SpendTxMessage::Cancel),
         )
     } else {

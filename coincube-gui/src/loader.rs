@@ -22,7 +22,7 @@ use coincube_ui::{
         text::{p2_regular, text},
     },
     theme,
-    widget::{Column, Container, Element, Row},
+    widget::{Column, ColumnExt, Container, Element, Row},
 };
 use coincubed::{
     config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth, Config, ConfigError},
@@ -1249,6 +1249,11 @@ pub(crate) fn view_with_retry<'a>(
                         CopyText::SyncingBlockchain.get()
                     })
                     .style(theme::text::secondary),
+                )
+                .push_maybe(
+                    coincube_ui::worldview_copy::VoiceLine::Syncing
+                        .get()
+                        .map(|line| p2_regular(line).style(theme::text::secondary)),
                 )
                 .push(p2_regular(bitcoind_logs).style(theme::text::secondary)),
         ),

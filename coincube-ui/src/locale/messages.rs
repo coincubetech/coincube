@@ -44,7 +44,7 @@ catalog! {
     CheckAgain => ("Check again", "Volver a comprobar"),
     CheckingForYourPhoneKey => ("Checking for your phone key…", "Buscando la clave de tu teléfono…"),
     ChooseAPassword => ("Choose a password", "Elige una contraseña"),
-    WorldviewDescription => ("Choose a presentation style for Tenshu on this device.", "Elige cómo se presenta Tenshu en este dispositivo."),
+    WorldviewDescription => ("Worldview Modes change how COINCUBE looks and speaks. Your wallets, networks, and security settings remain unchanged.", "Los modos cambian el aspecto y la voz de COINCUBE. Tus carteras, redes y ajustes de seguridad se mantienen."),
     ChooseARecoveryPassword => ("Choose a recovery password", "Elige una contraseña de recuperación"),
     ChooseHowToProtectYourRecoveryKit => ("Choose how to protect your Recovery Kit", "Elige cómo proteger tu Kit de recuperación"),
     Close => ("Close", "Cerrar"),
