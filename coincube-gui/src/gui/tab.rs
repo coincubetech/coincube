@@ -955,6 +955,9 @@ pub struct Tab {
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
     /// The effective reduce-motion preference, carried into new App caches.
     pub reduce_motion: bool,
+    /// Connect, not the user, signed this computer out: the GUI relays it
+    /// to every tab, and new App caches inherit it (L3).
+    pub connect_signed_out_by: Option<crate::app::SignedOutBy>,
     pub balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
     unlock_motion: Option<Instant>,
     /// Safe, owned Launcher geometry retained only through this unlock.
@@ -1039,6 +1042,7 @@ impl Tab {
             state,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             reduce_motion: false,
+            connect_signed_out_by: None,
             balance_privacy: None,
             unlock_motion: None,
             unlock_floor: None,
@@ -1089,8 +1093,20 @@ impl Tab {
     /// Connect light's pulse).
     pub fn set_reduce_motion(&mut self, reduce: bool) {
         self.reduce_motion = reduce;
-        if let State::App(app) = &mut self.state {
-            app.cache_mut().reduce_motion = reduce;
+        match &mut self.state {
+            State::App(app) => app.cache_mut().reduce_motion = reduce,
+            State::Home(home) => home.reduce_motion = reduce,
+            _ => {}
+        }
+    }
+
+    /// Show or clear the signed-out-by-Connect notice in this tab.
+    pub fn set_connect_signed_out_by(&mut self, reason: Option<crate::app::SignedOutBy>) {
+        self.connect_signed_out_by = reason;
+        match &mut self.state {
+            State::App(app) => app.set_connect_signed_out_by(reason),
+            State::Home(home) => home.connect_account.signed_out_by = reason,
+            _ => {}
         }
     }
 
@@ -1122,9 +1138,12 @@ impl Tab {
                 app.cache_mut().theme_mode = mode;
                 app.cache_mut().reduce_motion = self.reduce_motion;
                 app.cache_mut().balance_privacy = self.balance_privacy;
+                app.set_connect_signed_out_by(self.connect_signed_out_by);
             }
             State::Home(home) => {
                 home.theme_mode = mode;
+                home.reduce_motion = self.reduce_motion;
+                home.connect_account.signed_out_by = self.connect_signed_out_by;
             }
             _ => {}
         }

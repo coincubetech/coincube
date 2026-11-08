@@ -1628,6 +1628,13 @@ impl GUI {
         Task::none()
     }
 
+    /// Shows or clears the signed-out-by-Connect notice in every tab.
+    fn relay_connect_signed_out_by(&mut self, reason: Option<crate::app::SignedOutBy>) {
+        for (_, pane) in self.panes.iter_mut() {
+            pane.set_connect_signed_out_by(reason);
+        }
+    }
+
     fn connect_return_focus(&self, origin: &OverlayOrigin) -> Option<iced::advanced::widget::Id> {
         let saved = origin.focus.as_ref()?;
         let tab = self
@@ -1748,6 +1755,11 @@ impl GUI {
                 iced_runtime::task::widget(iced::advanced::widget::operation::focusable::focus(id))
             }
             ConnectSheetMessage::Close => self.close_connect_sheet(),
+            // Not now: the red light clears in every tab and the sheet closes.
+            ConnectSheetMessage::DismissSignOut => {
+                self.relay_connect_signed_out_by(None);
+                self.close_connect_sheet()
+            }
             ConnectSheetMessage::SelectSection(section) => {
                 let origin = sheet.origin.clone();
                 let was_duress = matches!(
@@ -2464,6 +2476,26 @@ impl GUI {
                 }
             }
         }
+        // The signed-out-by-Connect notice is one notice for the whole app
+        // (L3): whichever tab learns it, or dismisses it, every tab follows.
+        if let Message::Pane(_, pane::Message::Tab(_, inner)) = &message {
+            let relay = match inner.as_ref() {
+                tab::Message::Run(AppMessage::ConnectSignedOutBy(reason))
+                | tab::Message::Launch(home::Message::ConnectSignedOutBy(reason)) => {
+                    Some(Some(*reason))
+                }
+                tab::Message::Run(AppMessage::View(
+                    crate::app::view::Message::DismissConnectSignOut,
+                ))
+                | tab::Message::Launch(home::Message::View(
+                    home::ViewMessage::DismissConnectSignOut,
+                )) => Some(None),
+                _ => None,
+            };
+            if let Some(reason) = relay {
+                self.relay_connect_signed_out_by(reason);
+            }
+        }
         // A log-out or a sign-in from any tab reaches every tab, with its kind
         // and where it came from (`Tab::invalidate_fork_session`). A
         // `SetSession` counts as a sign-in only if the tab it came from will
@@ -2666,6 +2698,10 @@ impl GUI {
                 }),
                 tab::AuthChange::LogOut => true,
             };
+            if accepted && matches!(change, tab::AuthChange::SignIn { .. }) {
+                // A sign-in anywhere ends the signed-out notice everywhere.
+                self.relay_connect_signed_out_by(None);
+            }
             if accepted {
                 for (&pane_id, pane) in self.panes.iter_mut() {
                     for tab in &mut pane.tabs {

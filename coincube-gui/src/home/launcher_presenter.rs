@@ -981,6 +981,7 @@ fn ghost_details<'a>(
 /// state, over a hit area that turns it to its details face.
 fn ghost_slot<'a>(
     cube: &super::RemoteCube,
+    trouble: Option<crate::services::connect::grpc::trouble::Trouble>,
     layout: &launcher_scene::Layout,
     active: bool,
     closes_face: bool,
@@ -1006,7 +1007,7 @@ fn ghost_slot<'a>(
                     // `.st.warn`: nothing restores it here.
                     let warn =
                         launcher_catalog::ghost_kind(cube) == launcher_scene::Ghost::Unrestorable;
-                    iced::widget::text(launcher_catalog::ghost_status(cube))
+                    iced::widget::text(launcher_catalog::ghost_status(cube, trouble))
                         .size(13)
                         .style(move |theme: &theme::Theme| iced::widget::text::Style {
                             color: Some(if warn {
@@ -1860,9 +1861,13 @@ fn floor_layout<'a>(
                 pose.dim > 0.5,
                 closes_face,
             ),
-            FloorEntry::Ghost(cube) => {
-                ghost_slot(cube, &layout, pose.spin > 0.0 || covered, closes_face)
-            }
+            FloorEntry::Ghost(cube) => ghost_slot(
+                cube,
+                projection.connect_trouble,
+                &layout,
+                pose.spin > 0.0 || covered,
+                closes_face,
+            ),
         });
     }
     stage = stage.push(
@@ -4483,6 +4488,7 @@ mod tests {
     #[test]
     fn catalog_projection_keeps_unfiltered_counts() {
         let catalog = Projection {
+            connect_trouble: None,
             locals: Vec::new(),
             remotes: Vec::new(),
             local_total: 3,

@@ -32,6 +32,49 @@ struct StoredSession {
     login: LoginResponse,
 }
 
+/// A stored session waiting to be checked (see `ConnectAccountPanel::unverified`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnverifiedSession {
+    /// The account the stored session belongs to.
+    pub email: String,
+    /// Why it couldn't be checked: no network, or Connect not answering.
+    pub trouble: crate::services::connect::grpc::trouble::Trouble,
+    /// Failed checks in a row; sets the backoff before the next one.
+    pub attempts: u32,
+}
+
+impl UnverifiedSession {
+    /// Ticks after the backoff, for the subscription of whichever screen
+    /// shows this account; it maps the tick to `RecheckSession`.
+    pub fn recheck(&self) -> iced::Subscription<std::time::Instant> {
+        iced::time::every(self.backoff())
+    }
+
+    /// The wait before the next check: 1 s doubling to 30 s, like the
+    /// realtime stream's reconnects.
+    pub fn backoff(&self) -> std::time::Duration {
+        let exp = self.attempts.saturating_sub(1).min(5);
+        std::time::Duration::from_secs((1u64 << exp).min(30))
+    }
+}
+
+/// Whether a failed refresh never reached Connect, and why: transport
+/// failures and Connect's 5xx keep the stored session; anything else is a
+/// real failure.
+fn refresh_trouble(
+    error: &crate::services::coincube::CoincubeError,
+) -> Option<crate::services::connect::grpc::trouble::Trouble> {
+    use crate::services::coincube::CoincubeError;
+    use crate::services::connect::grpc::trouble::{trouble, Trouble};
+    match error {
+        CoincubeError::Network(e) if e.is_connect() || e.is_timeout() || e.is_request() => {
+            Some(trouble(e))
+        }
+        CoincubeError::Unsuccessful(info) if info.status_code >= 500 => Some(Trouble::Unreachable),
+        _ => None,
+    }
+}
+
 // ── Checkout state machine ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -899,6 +942,13 @@ pub struct ConnectAccountPanel {
     /// Presentation-ready failure for this panel's error card, with the retry
     /// it should offer. Never a raw error string — see [`crate::user_error`].
     pub error: Option<PanelError>,
+    /// A stored session that couldn't be checked because there was no
+    /// network or Connect didn't answer. The session stays in the keyring
+    /// and is re-checked with backoff; nobody is signed out for it.
+    pub unverified: Option<UnverifiedSession>,
+    /// Connect, not the user, signed this computer out. The GUI mirrors it
+    /// to every tab; sign-in or Not now clears it.
+    pub signed_out_by: Option<crate::app::SignedOutBy>,
     /// Incremented on each login/logout so stale async completions can be discarded.
     session_generation: u64,
     /// Increments only after this panel accepts a login completion and
@@ -1010,6 +1060,8 @@ impl ConnectAccountPanel {
             overview_seq: 0,
             contacts_state: ContactsState::new(),
             error: None,
+            unverified: None,
+            signed_out_by: None,
             session_generation: 0,
             accepted_auth_revision: 0,
             auth_epoch: 0,
@@ -1255,6 +1307,8 @@ impl ConnectAccountPanel {
         self.shared_client = false;
         self.admitted_reopen_required = false;
         self.admitted_user_loading = false;
+        // An adopted session supersedes one that was waiting on the network.
+        self.unverified = None;
         self.user = None;
         self.plan = None;
         self.features = None;
@@ -1723,6 +1777,11 @@ impl ConnectAccountPanel {
                                 Message::View(view::Message::ConnectAccount(
                                     ConnectAccountMessage::RefreshRejected { epoch },
                                 ))
+                            } else if let Some(trouble) = refresh_trouble(&e) {
+                                log::warn!("[CONNECT] Session refresh didn't reach Connect: {}", e);
+                                Message::View(view::Message::ConnectAccount(
+                                    ConnectAccountMessage::RefreshUnreachable { trouble, epoch },
+                                ))
                             } else {
                                 Message::View(view::Message::ConnectAccount(
                                     ConnectAccountMessage::RefreshFailed((&e).into()),
@@ -1750,6 +1809,48 @@ impl ConnectAccountPanel {
                 ]);
             }
 
+            ConnectAccountMessage::RefreshUnreachable { trouble, epoch } => {
+                if self.stale_completion(epoch, "a refresh that didn't reach Connect") {
+                    return iced::Task::none();
+                }
+                // Keep the stored session (L1): leave the sign-in form idle,
+                // remember whose session it is, and check it again later.
+                let Some(email) = self
+                    .load_session_from_keyring()
+                    .map(|session| session.login.user.email)
+                else {
+                    self.step = ConnectFlowStep::Login {
+                        email: String::new(),
+                        loading: false,
+                    };
+                    return iced::Task::none();
+                };
+                let attempts = self.unverified.as_ref().map_or(0, |u| u.attempts) + 1;
+                let unverified = UnverifiedSession {
+                    email,
+                    trouble,
+                    attempts,
+                };
+                // The Launcher's and the Cube's subscriptions send
+                // `RecheckSession` after `backoff()`, only while mounted.
+                self.unverified = Some(unverified);
+                self.error = None;
+                self.step = ConnectFlowStep::Login {
+                    email: String::new(),
+                    loading: false,
+                };
+            }
+
+            ConnectAccountMessage::RecheckSession => {
+                // Signed in or out meanwhile: nothing to re-check.
+                if self.unverified.is_none()
+                    || !matches!(self.step, ConnectFlowStep::Login { loading: false, .. })
+                {
+                    return iced::Task::none();
+                }
+                return self.update_message(ConnectAccountMessage::Init);
+            }
+
             ConnectAccountMessage::RefreshFailed(err) => {
                 log::warn!("[CONNECT] Session refresh failed (transient): {}", err);
                 // The card renders its own "Try again" button, wired to
@@ -1757,6 +1858,9 @@ impl ConnectAccountPanel {
                 // refresh. Previously this string ended in "Tap to retry" while
                 // the banner had no button at all.
                 self.error = Some(PanelError::retryable(err, RetryAction::Session));
+                // Not a network wait any more: show the retryable error and
+                // stop the automatic re-checks.
+                self.unverified = None;
                 self.scrub_recovery_passphrase();
                 self.step = ConnectFlowStep::Login {
                     email: String::new(),
@@ -2896,6 +3000,8 @@ impl ConnectAccountPanel {
                     // Confirmed not in duress — NOW reveal the dashboard.
                     DuressCheckOutcome::Ok(s) => {
                         self.step = ConnectFlowStep::Dashboard;
+                        self.signed_out_by = None;
+                        self.unverified = None;
                         // Cache the fetched state before any early return, so the
                         // Duress tab reflects the enabled state on its first paint
                         // rather than briefly showing enrollment CTAs.
@@ -3081,6 +3187,7 @@ impl ConnectAccountPanel {
     /// a rejected session can't leave stale state behind for the next `Init`.
     fn clear_session(&mut self) {
         self.auth_commit_pending = false;
+        self.unverified = None;
         let owns_saved_session = !self.admitted_client;
         self.session_generation += 1;
         self.user = None;
@@ -3556,6 +3663,8 @@ impl ConnectAccountPanel {
             DuressMessage::FinishRecovery => {
                 self.scrub_recovery_passphrase();
                 self.step = ConnectFlowStep::Dashboard;
+                self.signed_out_by = None;
+                self.unverified = None;
                 self.error = None;
             }
 
@@ -9113,5 +9222,104 @@ mod connect_review_tests {
             panel.recovery_services,
             RecoveryServicesState::NotLoaded
         ));
+    }
+}
+
+#[cfg(test)]
+mod unverified_session_tests {
+    use super::*;
+    use crate::services::coincube::CoincubeError;
+    use crate::services::connect::grpc::trouble::Trouble;
+    use crate::services::http::NotSuccessResponseInfo;
+
+    fn unverified(attempts: u32) -> UnverifiedSession {
+        UnverifiedSession {
+            email: "alex@example.test".into(),
+            trouble: Trouble::Offline,
+            attempts,
+        }
+    }
+
+    #[test]
+    fn rechecks_back_off_from_one_to_thirty_seconds() {
+        let secs: Vec<u64> = (1..=8).map(|n| unverified(n).backoff().as_secs()).collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 30, 30, 30]);
+    }
+
+    #[test]
+    fn only_a_failure_to_reach_connect_keeps_the_session() {
+        let status = |code| {
+            CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+                status_code: code,
+                text: String::new(),
+            })
+        };
+        assert_eq!(refresh_trouble(&status(503)), Some(Trouble::Unreachable));
+        assert_eq!(refresh_trouble(&status(502)), Some(Trouble::Unreachable));
+        // A real answer from Connect is not a reachability problem.
+        assert_eq!(refresh_trouble(&status(400)), None);
+        assert_eq!(refresh_trouble(&CoincubeError::Api("bad".into())), None);
+    }
+
+    #[test]
+    fn a_recheck_after_sign_in_or_out_does_nothing() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.step = ConnectFlowStep::Login {
+            email: String::new(),
+            loading: false,
+        };
+        assert_eq!(
+            panel
+                .update_message(ConnectAccountMessage::RecheckSession)
+                .units(),
+            0
+        );
+        panel.unverified = Some(unverified(1));
+        panel.step = ConnectFlowStep::Dashboard;
+        assert_eq!(
+            panel
+                .update_message(ConnectAccountMessage::RecheckSession)
+                .units(),
+            0
+        );
+    }
+
+    #[test]
+    fn signing_out_drops_the_waiting_session() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.unverified = Some(unverified(3));
+        drop(panel.update_message(ConnectAccountMessage::LogOut));
+        assert_eq!(panel.unverified, None);
+    }
+
+    #[test]
+    fn a_refresh_that_fails_outright_stops_waiting() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.unverified = Some(unverified(2));
+        drop(
+            panel.update_message(ConnectAccountMessage::RefreshFailed(UserError::new(
+                "Temporary failure",
+                "Try again later.",
+                crate::user_error::CC_NET_TIMEOUT,
+                true,
+            ))),
+        );
+        assert_eq!(panel.unverified, None);
+        assert!(panel.error.is_some());
+        assert_eq!(
+            panel
+                .update_message(ConnectAccountMessage::RecheckSession)
+                .units(),
+            0
+        );
+    }
+
+    #[test]
+    fn an_adopted_session_replaces_the_waiting_one() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.unverified = Some(unverified(2));
+        panel.install_shared_client(CoincubeClient::new());
+        assert_eq!(panel.unverified, None);
+        assert!(matches!(panel.step, ConnectFlowStep::CheckingSession));
     }
 }
