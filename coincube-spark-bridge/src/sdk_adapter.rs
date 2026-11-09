@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use breez_sdk_spark::{
-    default_config, BreezSdk, CrossChainConfig, MaxFee, Network as SparkNetwork, SdkBuilder, Seed,
+    default_config, default_server_config, BreezSdk, CrossChainConfig, MaxFee,
+    Network as SparkNetwork, SdkBuilder, Seed,
 };
 
 /// Mainnet USDB token identifier. Published by Breez in the Stable
@@ -102,8 +103,16 @@ pub async fn connect_mainnet(
     mnemonic: String,
     passphrase: Option<String>,
     storage_dir: String,
+    receive_only: bool,
 ) -> anyhow::Result<SdkHandle> {
-    let config = mainnet_config(api_key);
+    let config = if receive_only {
+        let mut config = default_server_config(SparkNetwork::Mainnet);
+        config.api_key = Some(api_key);
+        config.max_deposit_claim_fee = None;
+        config
+    } else {
+        mainnet_config(api_key)
+    };
     let seed = Seed::Mnemonic {
         mnemonic,
         passphrase,

@@ -1,4 +1,4 @@
-//! Restricted destination Vault admission for a future cross-Cube Transfer.
+//! Restricted destination Vault admission for cross-Cube Transfer.
 //! Neither a signer nor a PRF result enters an Iced message or the global
 //! session. This module cannot sign, construct a source spend, or broadcast.
 
@@ -34,6 +34,8 @@ pub(crate) enum Refusal {
     SameWallet,
     IdentityChanged,
     BackendUnavailable,
+    SparkUnavailable,
+    SameSparkWallet,
     /// The other Cube's daemon is still stopping after a lock.
     StillStopping,
     WrongCredential,
@@ -49,7 +51,9 @@ impl Refusal {
             Self::Unsupported => "This Cube can't receive a cross-Cube transfer.".into(),
             Self::SameWallet => "That Cube holds the same Vault as this one.".into(),
             Self::IdentityChanged => "The other Cube changed. Choose it again.".into(),
-            Self::BackendUnavailable => "The other Cube's Vault isn't available.".into(),
+            Self::BackendUnavailable => "The other Cube's receiving wallet isn't available.".into(),
+            Self::SparkUnavailable => "The other Cube's Spark wallet isn't available.".into(),
+            Self::SameSparkWallet => "That Cube holds the same Spark wallet as this one.".into(),
             Self::StillStopping => {
                 "The other Cube is still finishing locking. Try again in a moment.".into()
             }
@@ -68,8 +72,8 @@ impl Refusal {
 fn selected(
     root: &CoincubeDirectory,
     cube_id: &str,
-    wallet_id: &WalletId,
-) -> Result<(CubeSettings, WalletSettings), Refusal> {
+    wallet_id: Option<&WalletId>,
+) -> Result<(CubeSettings, Option<WalletSettings>), Refusal> {
     let settings = Settings::from_file(&root.network_directory(ChainId::Bitcoin))
         .map_err(|_| Refusal::BackendUnavailable)?;
     let cube = settings
@@ -77,10 +81,14 @@ fn selected(
         .into_iter()
         .find(|cube| cube.id == cube_id)
         .ok_or(Refusal::IdentityChanged)?;
-    if cube.network != ChainId::Bitcoin
-        || cube.bitcoin_import.is_some()
+    if cube.network != ChainId::Bitcoin || cube.master_signer_fingerprint.is_none() {
+        return Err(Refusal::Unsupported);
+    }
+    let Some(wallet_id) = wallet_id else {
+        return Ok((cube, None));
+    };
+    if cube.bitcoin_import.is_some()
         || cube.vault_wallet_id.as_ref() != Some(wallet_id)
-        || cube.master_signer_fingerprint.is_none()
         || cube.vault_fingerprint.as_deref().is_none_or(str::is_empty)
     {
         return Err(Refusal::Unsupported);
@@ -90,22 +98,33 @@ fn selected(
         .into_iter()
         .find(|wallet| wallet.wallet_id() == *wallet_id)
         .ok_or(Refusal::IdentityChanged)?;
-    Ok((cube, wallet))
+    Ok((cube, Some(wallet)))
 }
 
 /// One row of the Other Cube picker, read without unlocking anything.
-/// Locked Cubes show no balances. Only a Bitcoin mainnet Cube with its own
-/// Vault can receive a cross-Cube transfer today; every other Cube is listed
-/// with the reason it cannot.
+/// Locked Cubes show wallet availability without exposing their balances.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CubeChoice {
     pub cube_id: String,
     pub name: String,
     pub chain: ChainId,
     pub has_vault: bool,
+    pub has_spark: bool,
     pub passkey: bool,
     pub vault_wallet_id: Option<WalletId>,
     pub refusal: Option<&'static str>,
+}
+
+impl CubeChoice {
+    pub(crate) fn can_receive(&self, wallet: super::view::global_home::WalletKind) -> bool {
+        use super::view::global_home::WalletKind;
+        self.refusal.is_none()
+            && match wallet {
+                WalletKind::Vault => self.vault_wallet_id.is_some(),
+                WalletKind::Spark => self.has_spark,
+                WalletKind::Liquid => false,
+            }
+    }
 }
 
 /// Every other local Cube on every chain, Bitcoin mainnet first.
@@ -125,8 +144,19 @@ pub(crate) fn other_cubes(root: &CoincubeDirectory, source: &Source) -> Vec<Cube
                     .wallet
                     .shares_vault_descriptor(&WalletIdentity::Vault(id.clone()))
             });
+            let has_spark =
+                cube.network == ChainId::Bitcoin && cube.master_signer_fingerprint.is_some();
+            let vault_ready = has_vault
+                && !shares_source
+                && cube.master_signer_fingerprint.is_some()
+                && cube
+                    .vault_fingerprint
+                    .as_deref()
+                    .is_some_and(|fp| !fp.is_empty());
             let refusal = if cube.network != source.chain {
                 Some("Different network: can’t receive this transfer")
+            } else if has_spark || vault_ready {
+                None
             } else if !has_vault {
                 Some("No Vault to receive this transfer")
             } else if shares_source {
@@ -142,8 +172,9 @@ pub(crate) fn other_cubes(root: &CoincubeDirectory, source: &Source) -> Vec<Cube
                 name: crate::cube_display::name(&cube.name),
                 chain: cube.network,
                 has_vault,
+                has_spark,
                 passkey: cube.is_passkey_cube(),
-                vault_wallet_id: cube.vault_wallet_id.clone(),
+                vault_wallet_id: cube.vault_wallet_id.filter(|_| vault_ready),
                 cube_id: cube.id,
                 refusal,
             }
@@ -186,7 +217,8 @@ pub(crate) struct ScopedDestination {
     root: CoincubeDirectory,
     source: Source,
     cube: CubeSettings,
-    wallet_id: WalletId,
+    /// `None` selects the receiving Cube's seed-backed Spark wallet.
+    wallet_id: Option<WalletId>,
     generation: AppGeneration,
     pin_attempt: Option<AppGeneration>,
     cancelled: Arc<AtomicBool>,
@@ -196,6 +228,7 @@ pub(crate) struct ScopedDestination {
     #[cfg(target_os = "macos")]
     ceremony: Option<crate::services::passkey::macos::NativePasskeyCeremony>,
     backend: Option<BoundBackend>,
+    spark_cancel: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl ScopedDestination {
@@ -203,21 +236,27 @@ impl ScopedDestination {
         root: CoincubeDirectory,
         source: Source,
         destination_cube_id: &str,
-        wallet_id: WalletId,
+        wallet_id: impl Into<Option<WalletId>>,
     ) -> Result<Self, Refusal> {
         if source.cube_id == destination_cube_id
             || source.chain != ChainId::Bitcoin
-            || !matches!(&source.wallet, WalletIdentity::Vault(_))
+            || !matches!(
+                &source.wallet,
+                WalletIdentity::Vault(_) | WalletIdentity::Spark(_)
+            )
         {
             return Err(Refusal::Unsupported);
         }
-        let destination_wallet = WalletIdentity::Vault(wallet_id.clone());
-        if source.wallet == destination_wallet
-            || source.wallet.shares_vault_descriptor(&destination_wallet)
-        {
-            return Err(Refusal::SameWallet);
+        let wallet_id = wallet_id.into();
+        if let Some(id) = &wallet_id {
+            let destination_wallet = WalletIdentity::Vault(id.clone());
+            if source.wallet == destination_wallet
+                || source.wallet.shares_vault_descriptor(&destination_wallet)
+            {
+                return Err(Refusal::SameWallet);
+            }
         }
-        let (cube, _) = selected(&root, destination_cube_id, &wallet_id)?;
+        let (cube, _) = selected(&root, destination_cube_id, wallet_id.as_ref())?;
         Ok(Self {
             root,
             source,
@@ -232,10 +271,11 @@ impl ScopedDestination {
             #[cfg(target_os = "macos")]
             ceremony: None,
             backend: None,
+            spark_cancel: None,
         })
     }
 
-    fn current(&self, source: &Source) -> Result<(), Refusal> {
+    pub(crate) fn current(&self, source: &Source) -> Result<(), Refusal> {
         if !operation_live(
             &self.source,
             source,
@@ -245,7 +285,7 @@ impl ScopedDestination {
         ) {
             return Err(Refusal::Stale);
         }
-        let (cube, _) = selected(&self.root, &self.cube.id, &self.wallet_id)?;
+        let (cube, _) = selected(&self.root, &self.cube.id, self.wallet_id.as_ref())?;
         if !same_selection(&self.cube, &cube) {
             return Err(Refusal::IdentityChanged);
         }
@@ -329,9 +369,14 @@ impl ScopedDestination {
         if self.cube.master_signer_fingerprint != Some(fingerprint) {
             return Err(Refusal::IdentityChanged);
         }
-        // No signer is needed to receive. Dropping it scrubs its mnemonic and
-        // xpriv; only this operation's verified bit remains.
-        drop(signer);
+        // Vault receive needs only the verified bit. Spark needs the signer
+        // once to open its restricted address service.
+        if self.wallet_id.is_none() {
+            *self
+                .pin_signer
+                .lock()
+                .map_err(|_| Refusal::SparkUnavailable)? = Some(signer);
+        }
         self.verified = true;
         Ok(())
     }
@@ -397,7 +442,7 @@ impl ScopedDestination {
         Ok(BackendRequest {
             root: self.root.clone(),
             cube: self.cube.clone(),
-            wallet_id: self.wallet_id.clone(),
+            wallet_id: self.wallet_id.clone().ok_or(Refusal::Unsupported)?,
             generation: self.generation,
             cancelled: Arc::clone(&self.cancelled),
         })
@@ -418,7 +463,7 @@ impl ScopedDestination {
                 generation,
                 &self.cancelled,
             )
-            || backend.wallet_id != self.wallet_id
+            || self.wallet_id.as_ref() != Some(&backend.wallet_id)
         {
             return Err(Refusal::Stale);
         }
@@ -493,6 +538,7 @@ impl ScopedDestination {
             self.ceremony = None;
         }
         self.backend = None;
+        self.spark_cancel = None;
     }
 }
 
@@ -527,7 +573,7 @@ enum PinVerdict {
 pub(crate) struct PinRequest {
     root: CoincubeDirectory,
     cube: CubeSettings,
-    wallet_id: WalletId,
+    wallet_id: Option<WalletId>,
     pin: Zeroizing<String>,
     generation: AppGeneration,
     /// The open (source) Cube: the tab accepts a duress proof only from
@@ -559,8 +605,8 @@ impl PinRequest {
             let loc = unlock::CubeLocation::new(self.root.path(), &self.cube);
             let metadata_changed = std::cell::Cell::new(false);
             let validate = || {
-                let (current, _) =
-                    selected(&self.root, &self.cube.id, &self.wallet_id).map_err(|_| {
+                let (current, _) = selected(&self.root, &self.cube.id, self.wallet_id.as_ref())
+                    .map_err(|_| {
                         metadata_changed.set(true);
                         unlock::UnlockError::Io("Destination Cube changed".into())
                     })?;
@@ -636,7 +682,7 @@ impl BackendRequest {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(Refusal::Stale);
         }
-        let (current, wallet) = selected(&self.root, &self.cube.id, &self.wallet_id)?;
+        let (current, wallet) = selected(&self.root, &self.cube.id, Some(&self.wallet_id))?;
         if !same_selection(&self.cube, &current) {
             return Err(Refusal::IdentityChanged);
         }
@@ -667,7 +713,9 @@ impl BackendRequest {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(Refusal::Stale);
         }
-        let (latest, latest_wallet) = selected(&self.root, &self.cube.id, &self.wallet_id)?;
+        let (latest, latest_wallet) = selected(&self.root, &self.cube.id, Some(&self.wallet_id))?;
+        let wallet = wallet.ok_or(Refusal::Unsupported)?;
+        let latest_wallet = latest_wallet.ok_or(Refusal::Unsupported)?;
         if !same_selection(&current, &latest) || wallet.wallet_id() != latest_wallet.wallet_id() {
             return Err(Refusal::IdentityChanged);
         }
@@ -741,6 +789,10 @@ impl ScopedDestination {
     pub(crate) fn is_passkey(&self) -> bool {
         self.cube.is_passkey_cube()
     }
+
+    pub(crate) fn receives_spark(&self) -> bool {
+        self.wallet_id.is_none()
+    }
 }
 
 /// One `get_new_address` call on B's bound daemon.
@@ -782,12 +834,148 @@ impl AddressRequest {
     }
 }
 
-/// A receive address of the destination Cube's Vault, re-derived from its
-/// verified descriptor.
+/// A checked Bitcoin receive address. Vault addresses include their verified
+/// derivation index. Spark deposit addresses have no Vault derivation index.
 #[derive(Debug, Clone)]
 pub(crate) struct DestinationAddress {
     pub address: coincube_core::miniscript::bitcoin::Address,
     pub index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum OtherReceiveAddress {
+    Bitcoin(DestinationAddress),
+    Spark(String),
+}
+
+pub(crate) struct SparkAddressRequest {
+    signer: MasterSigner,
+    source_identity: Option<String>,
+    generation: AppGeneration,
+    cancelled: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SparkAddressReply {
+    generation: AppGeneration,
+    result: Result<OtherReceiveAddress, Refusal>,
+}
+
+impl ScopedDestination {
+    pub(crate) fn request_spark_address(
+        &mut self,
+        source: &Source,
+    ) -> Result<SparkAddressRequest, Refusal> {
+        self.current(source)?;
+        if !self.verified || self.wallet_id.is_some() {
+            return Err(Refusal::Unsupported);
+        }
+        let signer = self
+            .pin_signer
+            .lock()
+            .map_err(|_| Refusal::SparkUnavailable)?
+            .take()
+            .ok_or(Refusal::Stale)?;
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        self.spark_cancel = Some(cancel);
+        Ok(SparkAddressRequest {
+            signer,
+            source_identity: match &source.wallet {
+                WalletIdentity::Spark(identity) => Some(identity.clone()),
+                _ => None,
+            },
+            generation: self.generation,
+            cancelled,
+        })
+    }
+
+    pub(crate) fn accept_spark_address(
+        &self,
+        source: &Source,
+        reply: SparkAddressReply,
+    ) -> Result<OtherReceiveAddress, Refusal> {
+        self.current(source)?;
+        if !self.verified || self.wallet_id.is_some() || reply.generation != self.generation {
+            return Err(Refusal::Stale);
+        }
+        reply.result
+    }
+}
+
+impl SparkAddressRequest {
+    pub(crate) async fn run(self) -> SparkAddressReply {
+        let Self {
+            signer,
+            source_identity,
+            generation,
+            cancelled,
+        } = self;
+        let result = tokio::select! {
+            biased;
+            _ = cancelled => Err(Refusal::Stale),
+            result = Self::receive(signer, source_identity) => result,
+        };
+        SparkAddressReply { generation, result }
+    }
+
+    async fn receive(
+        signer: MasterSigner,
+        source_identity: Option<String>,
+    ) -> Result<OtherReceiveAddress, Refusal> {
+        use crate::app::breez_spark::{SparkClient, SparkConfig};
+        // The normal wallet may already be open. The SDK's reusable Bitcoin
+        // deposit address is registered with the operator and is recovered by
+        // the regular wallet on sync. Neither address needs this scratch DB.
+        let scratch = tempfile::tempdir().map_err(|_| Refusal::SparkUnavailable)?;
+        let config = SparkConfig::for_network(Network::Bitcoin, scratch.path().to_owned())
+            .map_err(|_| Refusal::SparkUnavailable)?;
+        let mnemonic = signer.mnemonic_str();
+        drop(signer);
+        let client = SparkClient::connect_receive_only(config, mnemonic.as_str())
+            .await
+            .map_err(|_| Refusal::SparkUnavailable)?;
+        drop(mnemonic);
+        let result = Self::read_address(&client, source_identity.as_deref()).await;
+        let _ = client.shutdown().await;
+        result
+    }
+
+    async fn read_address(
+        client: &crate::app::breez_spark::SparkClient,
+        source_identity: Option<&str>,
+    ) -> Result<OtherReceiveAddress, Refusal> {
+        if let Some(source_identity) = source_identity {
+            let identity = client
+                .receive_identity()
+                .await
+                .map_err(|_| Refusal::SparkUnavailable)?;
+            if identity == source_identity {
+                return Err(Refusal::SameSparkWallet);
+            }
+            let address = client
+                .receive_spark()
+                .await
+                .map_err(|_| Refusal::SparkUnavailable)?;
+            Ok(OtherReceiveAddress::Spark(address.payment_request))
+        } else {
+            let response = client
+                .receive_onchain(None)
+                .await
+                .map_err(|_| Refusal::SparkUnavailable)?;
+            let address = response
+                .payment_request
+                .parse::<coincube_core::miniscript::bitcoin::Address<_>>()
+                .ok()
+                .and_then(|address| address.require_network(Network::Bitcoin).ok())
+                .ok_or(Refusal::IdentityChanged)?;
+            Ok(OtherReceiveAddress::Bitcoin(DestinationAddress {
+                address,
+                // Review's on-chain address model carries an index. Other
+                // Cube transfers never expose Vault address details.
+                index: 0.into(),
+            }))
+        }
+    }
 }
 
 async fn destination_daemon(
@@ -895,6 +1083,90 @@ mod tests {
             wallet: WalletIdentity::Vault(WalletId::new("source-id".into(), Some(1))),
             app: AppGeneration::next(),
         }
+    }
+
+    #[tokio::test]
+    async fn both_spark_destination_routes_share_a_cancellable_unlock() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = CoincubeDirectory::new(directory.path().to_owned());
+        let bitcoin = root.network_directory(ChainId::Bitcoin);
+        std::fs::create_dir_all(bitcoin.path()).unwrap();
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
+        let mut cube =
+            CubeSettings::new_with_raw_id("destination".into(), "Archive".into(), ChainId::Bitcoin);
+        let vault_source = source();
+        let mut spark_source = vault_source.clone();
+        spark_source.wallet = WalletIdentity::Spark("sending-identity".into());
+        for (source, identity) in [
+            (&vault_source, None),
+            (&spark_source, Some("sending-identity")),
+        ] {
+            let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+            cube.master_signer_fingerprint = Some(signer.fingerprint(&secp));
+            std::fs::write(
+                bitcoin
+                    .path()
+                    .join(super::super::settings::SETTINGS_FILE_NAME),
+                serde_json::to_vec(&Settings {
+                    cubes: vec![cube.clone()],
+                    ..Settings::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            let mut scope =
+                ScopedDestination::new(root.clone(), source.clone(), &cube.id, None).unwrap();
+            assert!(matches!(
+                scope.request_spark_address(source),
+                Err(Refusal::Unsupported)
+            ));
+            scope.accept_signer(source, signer).unwrap();
+            let job = scope.request_spark_address(source).unwrap();
+            assert_eq!(job.source_identity.as_deref(), identity);
+            assert!(matches!(
+                scope.request_spark_address(source),
+                Err(Refusal::Stale)
+            ));
+            scope.revoke();
+            let reply = job.run().await;
+            assert!(matches!(reply.result, Err(Refusal::Stale)));
+            assert!(matches!(
+                scope.accept_spark_address(source, reply),
+                Err(Refusal::Stale)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn receiving_spark_refuses_the_sending_wallet_identity() {
+        use crate::app::breez_spark::SparkClient;
+        use coincube_spark_protocol::{GetInfoOk, GetInfoParams, Method, OkPayload};
+        let (client, mut requests) = SparkClient::mock_transport();
+        let (result, ()) = tokio::join!(
+            SparkAddressRequest::read_address(&client, Some("same-identity")),
+            async {
+                let request = requests.recv().await.unwrap();
+                assert!(matches!(
+                    request.method,
+                    Method::GetInfo(GetInfoParams {
+                        ensure_synced: Some(false)
+                    })
+                ));
+                client
+                    .mock_reply(
+                        request.id,
+                        Some(OkPayload::GetInfo(GetInfoOk {
+                            balance_sats: 0,
+                            identity_pubkey: "same-identity".into(),
+                            stable_balance: None,
+                            usdb_balance: None,
+                        })),
+                    )
+                    .await;
+            },
+        );
+        assert!(matches!(result, Err(Refusal::SameSparkWallet)));
+        assert!(requests.try_recv().is_err());
     }
 
     #[test]
@@ -1175,7 +1447,7 @@ mod tests {
                 "Destination".into(),
                 ChainId::Bitcoin,
             ),
-            wallet_id: WalletId::new("destination".into(), Some(1)),
+            wallet_id: Some(WalletId::new("destination".into(), Some(1))),
             pin: Zeroizing::new("1234".into()),
             generation: AppGeneration::next(),
             origin: source(),
@@ -1203,7 +1475,7 @@ mod tests {
                 "Destination".into(),
                 ChainId::Bitcoin,
             ),
-            wallet_id: WalletId::new("destination".into(), Some(1)),
+            wallet_id: Some(WalletId::new("destination".into(), Some(1))),
             generation: AppGeneration::next(),
             pin_attempt: None,
             cancelled: Arc::clone(&cancelled),
@@ -1213,6 +1485,7 @@ mod tests {
             #[cfg(target_os = "macos")]
             ceremony: None,
             backend: None,
+            spark_cancel: None,
         };
         let result = PinCheck {
             generation: AppGeneration::next(),
@@ -1281,7 +1554,7 @@ mod tests {
                 "Destination".into(),
                 ChainId::Bitcoin,
             ),
-            wallet_id: WalletId::new("destination".into(), Some(1)),
+            wallet_id: Some(WalletId::new("destination".into(), Some(1))),
             generation: AppGeneration::next(),
             pin_attempt: Some(newer),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -1291,6 +1564,7 @@ mod tests {
             #[cfg(target_os = "macos")]
             ceremony: None,
             backend: None,
+            spark_cancel: None,
         };
         let old = PinCheck {
             generation: AppGeneration::next(),

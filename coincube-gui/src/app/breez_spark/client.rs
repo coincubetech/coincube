@@ -291,6 +291,21 @@ impl SparkClient {
     /// zeroizing wrapper). The bridge keeps it in memory for the
     /// session lifetime.
     pub async fn connect(config: SparkConfig, mnemonic: &str) -> Result<Self, SparkClientError> {
+        Self::connect_with_mode(config, mnemonic, false).await
+    }
+
+    pub(crate) async fn connect_receive_only(
+        config: SparkConfig,
+        mnemonic: &str,
+    ) -> Result<Self, SparkClientError> {
+        Self::connect_with_mode(config, mnemonic, true).await
+    }
+
+    async fn connect_with_mode(
+        config: SparkConfig,
+        mnemonic: &str,
+        receive_only: bool,
+    ) -> Result<Self, SparkClientError> {
         if config.api_key.is_empty() {
             return Err(SparkClientError::Config(
                 "Spark SDK API key is empty — set BREEZ_API_KEY at build time".to_string(),
@@ -301,6 +316,9 @@ impl SparkClient {
         debug!("spawning Spark bridge at {:?}", bridge_path);
 
         let mut command = Command::new(&bridge_path);
+        if receive_only {
+            command.arg("--receive-only");
+        }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -396,9 +414,19 @@ impl SparkClient {
 
     /// Fetch wallet info (balance, identity pubkey).
     pub async fn get_info(&self) -> Result<GetInfoOk, SparkClientError> {
+        self.get_info_with_sync(true).await
+    }
+
+    pub(crate) async fn receive_identity(&self) -> Result<String, SparkClientError> {
+        self.get_info_with_sync(false)
+            .await
+            .map(|info| info.identity_pubkey)
+    }
+
+    async fn get_info_with_sync(&self, ensure_synced: bool) -> Result<GetInfoOk, SparkClientError> {
         match self
             .request(Method::GetInfo(GetInfoParams {
-                ensure_synced: Some(true),
+                ensure_synced: Some(ensure_synced),
             }))
             .await?
         {
@@ -972,9 +1000,15 @@ impl SparkClient {
     /// A client with no bridge behind it: every request fails at once.
     #[cfg(test)]
     pub(crate) fn disconnected_for_test() -> Self {
-        let (request_tx, _) = mpsc::unbounded_channel();
+        Self::mock_transport().0
+    }
+
+    /// A client wired to channels instead of a bridge subprocess.
+    #[cfg(test)]
+    pub(crate) fn mock_transport() -> (Self, mpsc::UnboundedReceiver<Request>) {
+        let (request_tx, request_rx) = mpsc::unbounded_channel();
         let (event_tx, _) = broadcast::channel(16);
-        SparkClient {
+        let client = Self {
             inner: Arc::new(SparkClientInner {
                 next_id: AtomicU64::new(1),
                 request_tx,
@@ -985,6 +1019,21 @@ impl SparkClient {
                 child: Mutex::new(None),
                 closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }),
+        };
+        (client, request_rx)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn mock_reply(&self, id: u64, answer: Option<OkPayload>) {
+        let waiter = self
+            .inner
+            .pending
+            .lock()
+            .await
+            .remove(&id)
+            .expect("a pending request");
+        if let Some(payload) = answer {
+            let _ = waiter.send(Response::ok(id, payload));
         }
     }
 
@@ -2201,21 +2250,7 @@ mod p0_contract_tests {
     /// A client wired to channels instead of a subprocess. The test plays the
     /// bridge with [`bridge_answers`].
     fn fake_client() -> (SparkClient, mpsc::UnboundedReceiver<Request>) {
-        let (request_tx, request_rx) = mpsc::unbounded_channel();
-        let (event_tx, _) = broadcast::channel(16);
-        let client = SparkClient {
-            inner: Arc::new(SparkClientInner {
-                next_id: AtomicU64::new(1),
-                request_tx,
-                pending: Arc::new(Mutex::new(HashMap::new())),
-                late_outcomes: Arc::new(Mutex::new(HashMap::new())),
-                awaiting_late: Arc::new(Mutex::new(std::collections::HashSet::new())),
-                event_tx,
-                child: Mutex::new(None),
-                closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            }),
-        };
-        (client, request_rx)
+        SparkClient::mock_transport()
     }
 
     /// Take the next request off the wire and answer it. `None` drops the
@@ -2227,16 +2262,7 @@ mod p0_contract_tests {
         answer: Option<OkPayload>,
     ) -> Method {
         let request = requests.recv().await.expect("a request was sent");
-        let waiter = client
-            .inner
-            .pending
-            .lock()
-            .await
-            .remove(&request.id)
-            .expect("the caller is waiting");
-        if let Some(payload) = answer {
-            let _ = waiter.send(Response::ok(request.id, payload));
-        }
+        client.mock_reply(request.id, answer).await;
         request.method
     }
 
