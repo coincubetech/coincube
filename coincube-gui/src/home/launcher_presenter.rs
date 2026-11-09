@@ -848,7 +848,7 @@ fn ghost_copy(cube: &super::RemoteCube) -> (&'static str, tenshu::Tone, &'static
         return (
             recovery,
             tone,
-            "Bitcoin Blake2b Cubes can't be restored or imported on this device yet. Open it on the device that holds it.",
+            "Bitcoin Blake2b Cubes can't be restored or imported here yet, so keep this record in Connect until they can. If another device still has this Cube, you can open it there.",
         );
     }
     let restore = launcher_catalog::remote_restore(cube);
@@ -871,7 +871,7 @@ fn ghost_copy(cube: &super::RemoteCube) -> (&'static str, tenshu::Tone, &'static
         None => (
             "No Recovery Kit in Connect",
             tenshu::Tone::Warn,
-            "Connect has this Cube's registration but not its keys, so it can't be restored from here. Open it on the device that holds it and add a Recovery Kit, or import it with its recovery phrase.",
+            "Connect has this Cube's registration but not its keys, so it can't be restored from here. If another device still has this Cube, open it there and add a Recovery Kit, or import it with its recovery phrase.",
         ),
     }
 }
@@ -3392,6 +3392,7 @@ mod tests {
         assert_eq!(recovery, "Recovery Kit in Connect");
         assert!(matches!(tone, tenshu::Tone::Good));
         assert!(note.contains("can't be restored or imported"));
+        assert!(!note.contains("the device that holds it"), "{}", note);
         let status = launcher_catalog::remote_restore(&cube).status;
         assert!(status.starts_with("Recovery Kit in Connect"), "{}", status);
         let edge = launcher_catalog::ghost_status(&cube, None);
