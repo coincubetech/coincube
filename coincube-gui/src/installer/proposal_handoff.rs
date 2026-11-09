@@ -177,7 +177,7 @@ mod tests {
             ("light", theme::Theme::light()),
         ] {
             let mut ui = UserInterface::build(
-                step.view(&hws, (0, 8), None),
+                step.view(&hws, (0, 8)),
                 Size::new(1024.0, 768.0),
                 Cache::new(),
                 &mut renderer,
@@ -294,7 +294,7 @@ mod tests {
         session.revoke();
         assert!(!step.apply(&mut ctx));
         let mut ui = UserInterface::build(
-            step.view(&hws, (0, 8), None),
+            step.view(&hws, (0, 8)),
             Size::new(1024.0, 768.0),
             Cache::new(),
             &mut renderer,
