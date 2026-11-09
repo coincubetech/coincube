@@ -96,9 +96,12 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
         if let Some(err) = cs.error.as_deref() {
             if cs.contacts.is_some() || cs.invites.is_some() || cs.received_invites.is_some() {
                 col = col.push(
-                    container(text::p2_regular(err).color(color::RED))
-                        .padding(8)
-                        .width(Length::Fill),
+                    container(
+                        text::p2_regular(coincube_ui::locale::notice(err.to_owned()))
+                            .color(color::RED),
+                    )
+                    .padding(8)
+                    .width(Length::Fill),
                 );
                 col = col.push(iced::widget::Space::new().height(Length::Fixed(10.0)));
             }
@@ -401,7 +404,7 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
     if let Some(err) = cs.error.as_deref() {
         form = form
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-            .push(text::p2_regular(err).color(color::RED));
+            .push(text::p2_regular(coincube_ui::locale::notice(err.to_owned())).color(color::RED));
     }
 
     if let Some(msg) = cs.invite_cube_error.as_deref() {
@@ -451,7 +454,10 @@ fn invite_cube_conflict_card<'a>(msg: &str) -> Element<'a, ConnectAccountMessage
                 .color(color::RED),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
-            .push(text::p2_regular(msg.to_string()).style(theme::text::primary))
+            .push(
+                text::p2_regular(coincube_ui::locale::notice(msg.to_string()))
+                    .style(theme::text::primary),
+            )
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
             .push(
                 text::p2_regular(localized_copy(
@@ -588,11 +594,12 @@ fn contact_detail_ux<'a>(
     let cubes_section: Element<ConnectAccountMessage> = match &cs.detail_cubes {
         None if cs.detail_cubes_error.is_some() => Column::new()
             .push(
-                text::p2_regular(
+                text::p2_regular(coincube_ui::locale::notice(
                     cs.detail_cubes_error
                         .as_deref()
-                        .unwrap_or("Failed to load cubes"),
-                )
+                        .unwrap_or("Failed to load cubes")
+                        .to_owned(),
+                ))
                 .color(color::RED),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
@@ -762,7 +769,10 @@ fn add_to_cube_dialog_card<'a>(
                 if let Some(err) = dialog.failures.get(&id) {
                     row = row
                         .push(iced::widget::Space::new().width(Length::Fill))
-                        .push(text::p2_regular(err.clone()).color(color::RED));
+                        .push(
+                            text::p2_regular(coincube_ui::locale::notice(err.clone()))
+                                .color(color::RED),
+                        );
                 }
                 col = col.push(row);
             }

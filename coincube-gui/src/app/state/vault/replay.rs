@@ -497,7 +497,7 @@ pub fn not_ready_reason(
     checking: bool,
 ) -> String {
     if checking {
-        return CHECKING_COPY.to_string();
+        return localized_copy(CHECKING_COPY).to_string();
     }
     let blocked = blocked_entangled_inputs(&review.status(), entangled);
     if let Some(required) = blocked_entangled_copy(&blocked) {
@@ -505,7 +505,12 @@ pub fn not_ready_reason(
     }
     let (label, _) = pill_copy(&review.status(), entangled);
     if review.status().needs_acknowledgement() && !review.acknowledged() {
-        return format!("{label}. Tick \"{REPLAYABLE_ACKNOWLEDGEMENT}\" to send.");
+        return localized_format!(
+            "{}. Tick \"{}\" to send.",
+            "{}. Marca «{}» para enviar.",
+            label,
+            localized_copy(REPLAYABLE_ACKNOWLEDGEMENT)
+        );
     }
     label
 }

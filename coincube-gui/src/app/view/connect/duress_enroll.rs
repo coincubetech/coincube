@@ -260,7 +260,8 @@ pub fn disable_ux(state: &DuressDisableState) -> Element<'_, ConnectAccountMessa
         .push(card(body));
 
     if let Some(err) = &state.error {
-        col = col.push(text::p2_regular(err.clone()).color(color::RED));
+        col =
+            col.push(text::p2_regular(coincube_ui::locale::notice(err.clone())).color(color::RED));
     }
 
     col = col.push(
@@ -304,7 +305,8 @@ pub fn enroll_ux(state: &DuressEnrollState) -> Element<'_, ConnectAccountMessage
         .push(body);
 
     if let Some(err) = &state.error {
-        col = col.push(text::p2_regular(err.clone()).color(color::RED));
+        col =
+            col.push(text::p2_regular(coincube_ui::locale::notice(err.clone())).color(color::RED));
     }
 
     // Navigation row: Back + (Next | Complete enrollment).

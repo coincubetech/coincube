@@ -93,8 +93,9 @@ impl ToastContent {
                     use coincube_ui::component::amount::DisplayAmount;
                     bitcoin::Amount::from_sat(*amount_sat).to_formatted_string_with_unit(unit)
                 };
-                format!(
+                coincube_ui::localized_format!(
                     "Incoming payment of {} — swapping to L-BTC, awaiting confirmation",
+                    "Pago entrante de {} — intercambiando a L-BTC, esperando confirmación",
                     amount
                 )
             }
@@ -1131,22 +1132,34 @@ impl ConnectionStatus {
     pub fn line(&self) -> Option<String> {
         match self {
             Self::Inactive | Self::Connecting => {
-                Some("Starting live updates from Connect.".to_owned())
+                Some(coincube_ui::locale::copy("Starting live updates from Connect.").to_owned())
             }
-            Self::Connected => {
-                Some("Keychain signing requests and signatures arrive as they happen.".to_owned())
-            }
-            Self::Offline => Some(format!(
+            Self::Connected => Some(
+                coincube_ui::locale::copy(
+                    "Keychain signing requests and signatures arrive as they happen.",
+                )
+                .to_owned(),
+            ),
+            Self::Offline => Some(coincube_ui::localized_format!(
                 "No internet connection. Tenshu reconnects when you’re back online. \
-                 {CONNECT_WAITS_FOR} wait until then."
+                 {CONNECT_WAITS_FOR} wait until then.",
+                "Sin conexión a internet. Tenshu se vuelve a conectar cuando vuelvas a estar \
+                 en línea. La firma con Keychain, los Kits de recuperación y las copias de \
+                 Cubes en Connect esperan hasta entonces."
             )),
-            Self::Reconnecting => Some(format!(
+            Self::Reconnecting => Some(coincube_ui::localized_format!(
                 "Tenshu can’t reach Connect right now and keeps trying. \
-                 {CONNECT_WAITS_FOR} wait until it’s back."
+                 {CONNECT_WAITS_FOR} wait until it’s back.",
+                "Tenshu no puede conectarse con Connect en este momento y lo sigue intentando. \
+                 La firma con Keychain, los Kits de recuperación y las copias de Cubes en \
+                 Connect esperan hasta que vuelva."
             )),
-            Self::Renewing => {
-                Some("Renewing this computer’s link to Connect. Nothing to do.".to_owned())
-            }
+            Self::Renewing => Some(
+                coincube_ui::locale::copy(
+                    "Renewing this computer’s link to Connect. Nothing to do.",
+                )
+                .to_owned(),
+            ),
             Self::RenewFailed => None,
         }
     }
@@ -1173,9 +1186,12 @@ impl ConnectionStatus {
 pub const RENEW_FAILED_TITLE: &str = "Couldn’t reconnect this computer";
 
 pub fn renew_failed_detail() -> String {
-    format!(
+    coincube_ui::localized_format!(
         "Connect stopped recognizing this computer, and renewing its link automatically \
-         didn’t work. {CONNECT_WAITS_FOR} wait until it does."
+         didn’t work. {CONNECT_WAITS_FOR} wait until it does.",
+        "Connect dejó de reconocer esta computadora y no se pudo renovar su vínculo \
+         automáticamente. La firma con Keychain, los Kits de recuperación y las copias de \
+         Cubes en Connect esperan hasta que se renueve."
     )
 }
 
@@ -1190,14 +1206,18 @@ pub enum SignedOutBy {
 
 impl SignedOutBy {
     pub fn title(&self) -> &'static str {
-        match self {
+        coincube_ui::locale::copy(match self {
             Self::ComputerRemoved => "This computer was removed from your Connect account",
             Self::SessionEnded => "Your Connect session on this computer ended",
-        }
+        })
     }
 
     pub fn detail(&self) -> String {
-        format!("Sign in to use {CONNECT_WAITS_FOR} again.")
+        coincube_ui::localized_format!(
+            "Sign in to use {CONNECT_WAITS_FOR} again.",
+            "Inicia sesión para volver a usar la firma con Keychain, los Kits de recuperación \
+             y las copias de Cubes en Connect."
+        )
     }
 }
 
@@ -1234,16 +1254,16 @@ pub struct VaultAlert {
 impl VaultAlert {
     /// The Vault's status word in place of Synced.
     pub fn word(&self) -> &'static str {
-        match self.stall {
+        coincube_ui::locale::copy(match self.stall {
             VaultStall::Offline => "Offline",
             VaultStall::Reconnecting => "Reconnecting…",
             VaultStall::NotUpdating | VaultStall::NeedsReconnect => "Not updating",
-        }
+        })
     }
 
     /// The notice's title on the Vault page.
     pub fn title(&self) -> &'static str {
-        match self.stall {
+        coincube_ui::locale::copy(match self.stall {
             VaultStall::Offline => "No internet connection",
             VaultStall::Reconnecting => "Can’t reach COINCUBE | Connect",
             VaultStall::NotUpdating if self.needs_sign_in => {
@@ -1251,13 +1271,18 @@ impl VaultAlert {
             }
             VaultStall::NotUpdating => "This Vault isn’t updating",
             VaultStall::NeedsReconnect => crate::app::RENEW_FAILED_TITLE,
-        }
+        })
     }
 
     fn figures_age(&self) -> String {
         match &self.last_synced {
-            Some(at) => format!("Balance and activity are from {at}."),
-            None => "Balance and activity may be out of date.".to_owned(),
+            Some(at) => coincube_ui::localized_format!(
+                "Balance and activity are from {at}.",
+                "El saldo y la actividad son de las {at}."
+            ),
+            None => {
+                coincube_ui::locale::copy("Balance and activity may be out of date.").to_owned()
+            }
         }
     }
 
@@ -1265,30 +1290,50 @@ impl VaultAlert {
     pub fn detail(&self) -> String {
         let from = self.figures_age();
         match self.stall {
-            VaultStall::Offline => format!("{from} They update when you’re back online."),
-            VaultStall::Reconnecting => {
-                format!("{from} Tenshu keeps trying and updates them when Connect is back.")
-            }
-            VaultStall::NotUpdating if self.needs_sign_in => format!(
-                "{from} This Vault gets blockchain data through Connect, which needs you signed in."
+            VaultStall::Offline => coincube_ui::localized_format!(
+                "{from} They update when you’re back online.",
+                "{from} Se actualizan cuando vuelvas a estar en línea."
             ),
-            VaultStall::NotUpdating => format!("{from} Tenshu keeps trying."),
-            VaultStall::NeedsReconnect => {
-                format!("{from} Press Try again in the Connect control to update this Vault.")
-            }
+            VaultStall::Reconnecting => coincube_ui::localized_format!(
+                "{from} Tenshu keeps trying and updates them when Connect is back.",
+                "{from} Tenshu lo sigue intentando y los actualiza cuando Connect vuelva."
+            ),
+            VaultStall::NotUpdating if self.needs_sign_in => coincube_ui::localized_format!(
+                "{from} This Vault gets blockchain data through Connect, which needs you signed in.",
+                "{from} Este Vault obtiene los datos de la cadena de bloques a través de Connect, \
+                 que requiere que hayas iniciado sesión."
+            ),
+            VaultStall::NotUpdating => coincube_ui::localized_format!(
+                "{from} Tenshu keeps trying.",
+                "{from} Tenshu lo sigue intentando."
+            ),
+            VaultStall::NeedsReconnect => coincube_ui::localized_format!(
+                "{from} Press Try again in the Connect control to update this Vault.",
+                "{from} Pulsa Reintentar en el control de Connect para actualizar este Vault."
+            ),
         }
     }
 
     /// The line under "Vault · Not updating" in the Connect panel.
     pub fn panel_line(&self) -> String {
         let shown = match &self.last_synced {
-            Some(at) => format!(" The balance shown is from {at}."),
+            Some(at) => coincube_ui::localized_format!(
+                " The balance shown is from {at}.",
+                " El saldo que se muestra es de las {at}."
+            ),
             None => String::new(),
         };
         if self.needs_sign_in {
-            format!("It gets blockchain data through COINCUBE | Connect, which needs you signed in.{shown}")
+            coincube_ui::localized_format!(
+                "It gets blockchain data through COINCUBE | Connect, which needs you signed in.{shown}",
+                "Obtiene los datos de la cadena de bloques a través de COINCUBE | Connect, que \
+                 requiere que hayas iniciado sesión.{shown}"
+            )
         } else {
-            format!("It gets blockchain data through COINCUBE | Connect.{shown}")
+            coincube_ui::localized_format!(
+                "It gets blockchain data through COINCUBE | Connect.{shown}",
+                "Obtiene los datos de la cadena de bloques a través de COINCUBE | Connect.{shown}"
+            )
         }
     }
 }
@@ -7693,8 +7738,9 @@ impl App {
                             cache::BackgroundNodeInstall::Failed(error.clone());
                         return Task::done(Message::View(view::Message::ShowToast(
                             log::Level::Warn,
-                            format!(
-                                "Local node setup paused: {error}. Connect remains available; retry from Settings → Node."
+                            coincube_ui::localized_format!(
+                                "Local node setup paused: {error}. Connect remains available; retry from Settings → Node.",
+                                "La configuración del nodo local está en pausa: {error}. Connect sigue disponible; vuelve a intentarlo desde Ajustes → Nodo."
                             ),
                         )));
                     }
@@ -10060,7 +10106,11 @@ impl App {
                         ));
                     }
                     Err(e) => tasks.push(Task::done(Message::View(view::Message::ShowError(
-                        format!("Couldn't save the Spark nickname: {}", e),
+                        coincube_ui::localized_format!(
+                            "Couldn't save the Spark nickname: {}",
+                            "No se pudo guardar el apodo de Spark: {}",
+                            e
+                        ),
                     )))),
                 }
                 // A request made while this write ran is written now, after
@@ -10812,10 +10862,13 @@ impl App {
                 let name = match result {
                     Ok(name) => name,
                     Err(e) => {
-                        return Task::done(Message::View(view::Message::ShowError(format!(
-                            "Couldn't save the Cube name: {}",
-                            e
-                        ))));
+                        return Task::done(Message::View(view::Message::ShowError(
+                            coincube_ui::localized_format!(
+                                "Couldn't save the Cube name: {}",
+                                "No se pudo guardar el nombre del Cube: {}",
+                                e
+                            ),
+                        )));
                     }
                 };
                 self.cube_settings.name = name.clone();
@@ -11771,20 +11824,24 @@ fn recovery_alerts_consent_overlay<'a>() -> Element<'a, view::Message> {
     let body = Column::new()
         .spacing(14)
         .max_width(460)
-        .push(text("Alert your keyholders?").size(20).bold())
         .push(
-            text(
+            text(coincube_ui::locale::copy("Alert your keyholders?"))
+                .size(20)
+                .bold(),
+        )
+        .push(
+            text(coincube_ui::locale::copy(
                 "Turn on recovery alerts so COINCUBE can email your keyholders when this Vault's \
                  recovery window opens. Without this, your keyholders are never told when your \
                  recovery window opens.",
-            )
+            ))
             .size(14),
         )
         .push(
-            text(
+            text(coincube_ui::locale::copy(
                 "COINCUBE learns only the block height at which the window opens and that this \
                  desktop checked in — never your addresses or balances.",
-            )
+            ))
             .size(13)
             .style(theme::text::secondary),
         )
@@ -11793,11 +11850,11 @@ fn recovery_alerts_consent_overlay<'a>() -> Element<'a, view::Message> {
             Row::new()
                 .spacing(10)
                 .push(
-                    button::primary(None, "Turn on recovery alerts")
+                    button::primary(None, coincube_ui::locale::copy("Turn on recovery alerts"))
                         .on_press(view::Message::RecoveryAlertsConsent(true)),
                 )
                 .push(
-                    button::secondary(None, "Not now")
+                    button::secondary(None, coincube_ui::locale::copy("Not now"))
                         .on_press(view::Message::RecoveryAlertsConsent(false)),
                 ),
         );

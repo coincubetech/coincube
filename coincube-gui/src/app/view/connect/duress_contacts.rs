@@ -206,7 +206,7 @@ fn list_body<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
 
     if let Some(err) = dc.error.as_deref() {
         col = col
-            .push(text::p2_regular(err).color(color::RED))
+            .push(text::p2_regular(coincube_ui::locale::notice(err.to_owned())).color(color::RED))
             .push(iced::widget::Space::new().height(Length::Fixed(10.0)));
     }
 
@@ -578,7 +578,7 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
     if let Some(err) = dc.error.as_deref() {
         form = form
             .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-            .push(text::p2_regular(err).color(color::RED));
+            .push(text::p2_regular(coincube_ui::locale::notice(err.to_owned())).color(color::RED));
     }
 
     form.into()

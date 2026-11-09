@@ -2200,7 +2200,18 @@ impl GUI {
         )
     }
 
+    /// Messages, errors and dialog titles composed while handling a message
+    /// use the window's language, like the view. Text that is saved, sent or
+    /// compared must stay English: build it in `Language::English` or keep it
+    /// a code and localize it at display.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let (language, worldview) = (self.language(), self.worldview());
+        coincube_ui::locale::render_in(language, || {
+            coincube_ui::worldview_copy::render_in(worldview, || self.update_in_language(message))
+        })
+    }
+
+    fn update_in_language(&mut self, message: Message) -> Task<Message> {
         if self
             .preferences_sheet
             .as_ref()
@@ -4090,12 +4101,7 @@ impl GUI {
     }
 
     fn screen(&self) -> Element<Message> {
-        let language = self
-            .preferences
-            .accepted()
-            .map(|accepted| accepted.preferences.language)
-            .unwrap_or_default();
-        coincube_ui::locale::render_in(language, || {
+        coincube_ui::locale::render_in(self.language(), || {
             coincube_ui::worldview_copy::render_in(self.worldview(), || self.localized_screen())
         })
     }
@@ -4154,6 +4160,13 @@ impl GUI {
 
     pub fn scale_factor(&self) -> f32 {
         self.current_zoom().factor()
+    }
+
+    fn language(&self) -> coincube_ui::locale::Language {
+        self.preferences
+            .accepted()
+            .map(|accepted| accepted.preferences.language)
+            .unwrap_or_default()
     }
 
     fn worldview(&self) -> coincube_ui::theme::WorldviewMode {

@@ -113,7 +113,11 @@ pub fn path(
     Container::new(
         Column::new()
             .spacing(10)
-            .push(title.map(|t| Row::new().push(Space::new().width(10)).push(p1_bold(t))))
+            .push(title.map(|t| {
+                Row::new()
+                    .push(Space::new().width(10))
+                    .push(p1_bold(localized_copy(&t).to_owned()))
+            }))
             .push(defined_sequence(sequence, warning))
             .push(
                 Column::new()
@@ -136,9 +140,9 @@ pub fn path(
                             button::secondary(
                                 Some(icon::plus_icon()),
                                 if sequence.path_kind() == PathKind::SafetyNet {
-                                    "Add Safety Net key"
+                                    localized_copy("Add Safety Net key")
                                 } else {
-                                    "Add key"
+                                    localized_copy("Add key")
                                 },
                             )
                             .on_press(message::DefinePath::AddKey),
@@ -174,10 +178,15 @@ pub fn uneditable_defined_key<'a>(
                     .push(
                         Row::new()
                             .spacing(10)
-                            .push(p1_regular(title.into()).style(theme::text::secondary))
+                            .push(
+                                p1_regular(
+                                    localized_copy(&Into::<Cow<str>>::into(title)).to_owned(),
+                                )
+                                .style(theme::text::secondary),
+                            )
                             .push(p1_bold(alias)),
                     )
-                    .push(warning.map(|w| p2_regular(w).style(theme::text::error))),
+                    .push(warning.map(|w| p2_regular(localized_copy(w)).style(theme::text::error))),
             )
             .push(if warning.is_none() {
                 Some(icon::check_icon().style(theme::text::success))
@@ -212,10 +221,13 @@ pub fn defined_key<'a>(
                     .push(
                         Row::new()
                             .spacing(10)
-                            .push(p1_regular(title).style(theme::text::secondary))
+                            .push(
+                                p1_regular(localized_copy(&title).to_owned())
+                                    .style(theme::text::secondary),
+                            )
                             .push(p1_bold(alias)),
                     )
-                    .push(warning.map(|w| p2_regular(w).style(theme::text::error))),
+                    .push(warning.map(|w| p2_regular(localized_copy(w)).style(theme::text::error))),
             )
             .push(if warning.is_none() {
                 Some(icon::check_icon().style(theme::text::success))
@@ -256,15 +268,12 @@ pub fn undefined_key<'a>(
                     .size(H3_SIZE)
                     .style(theme::text::adaptive(color)),
             )
-            .push(
-                Column::new()
-                    .width(Length::Fill)
-                    .spacing(5)
-                    .push(p1_bold(title.into())),
-            )
+            .push(Column::new().width(Length::Fill).spacing(5).push(p1_bold(
+                localized_copy(&Into::<Cow<str>>::into(title)).to_owned(),
+            )))
             .push(if liquid {
                 Some(
-                    button::primary(Some(icon::pencil_icon()), "Set")
+                    button::primary(Some(icon::pencil_icon()), localized_copy("Set"))
                         .on_press(message::DefineKey::Edit),
                 )
             } else {
@@ -337,6 +346,41 @@ pub fn format_sequence_duration(sequence: u16, short_format: bool) -> Vec<(u32, 
     formatted_duration
 }
 
+/// One long-format unit from [`format_sequence_duration`], e.g. "2 months".
+fn long_duration_label(n: u32, unit: &str) -> String {
+    let plural = n > 1;
+    let spanish = match (unit, plural) {
+        ("year", false) => Some("año"),
+        ("year", true) => Some("años"),
+        ("month", false) => Some("mes"),
+        ("month", true) => Some("meses"),
+        ("day", false) => Some("día"),
+        ("day", true) => Some("días"),
+        ("hour", false) => Some("hora"),
+        ("hour", true) => Some("horas"),
+        ("minute", false) => Some("minuto"),
+        ("minute", true) => Some("minutos"),
+        _ => None,
+    };
+    match (coincube_ui::locale::language(), spanish) {
+        (coincube_ui::locale::Language::Spanish, Some(spanish)) => format!("{} {}", n, spanish),
+        _ => format!("{} {}{}", n, unit, if plural { "s" } else { "" }),
+    }
+}
+
+/// One short-format unit from [`format_sequence_duration`], e.g. "2m".
+pub fn short_duration_label(n: u32, unit: &str) -> String {
+    let spanish = match unit {
+        "y" => "a",
+        "mn" => "min",
+        other => other,
+    };
+    match coincube_ui::locale::language() {
+        coincube_ui::locale::Language::Spanish => format!("{}{}", n, spanish),
+        coincube_ui::locale::Language::English => format!("{}{}", n, unit),
+    }
+}
+
 pub fn edit_sequence_modal<'a>(sequence: &form::Value<String>) -> Element<'a, Message> {
     let mut col = Column::new()
         .width(Length::Fill)
@@ -374,10 +418,7 @@ pub fn edit_sequence_modal<'a>(sequence: &form::Value<String>) -> Element<'a, Me
                     Row::new().spacing(5).push(text("~ ").bold()),
                     |row, (n, unit)| {
                         row.push(if *n > 0 {
-                            Some(
-                                text(format!("{} {}{}", n, unit, if *n > 1 { "s" } else { "" }))
-                                    .bold(),
-                            )
+                            Some(text(long_duration_label(*n, unit)).bold())
                         } else {
                             None
                         })

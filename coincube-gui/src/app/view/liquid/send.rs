@@ -1200,7 +1200,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
                         .padding(10),
                 );
             if let Some(warn) = config.usdt_amount_input.warning {
-                usdt_col = usdt_col.push(text(warn).size(12).color(color::ORANGE));
+                usdt_col = usdt_col.push(text(localized_copy(warn)).size(12).color(color::ORANGE));
             }
 
             // Fee asset toggle (USDt vs L-BTC) — only for same-asset sends
@@ -1291,6 +1291,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
                             LiquidSendMessage::PopupMessage(view::SendPopupMessage::AmountEdited(v))
                         },
                     )
+                    .maybe_warning(config.amount.warning.map(coincube_ui::locale::copy))
                     .padding(10)
                 } else {
                     form::Form::new_amount_sats(
@@ -1300,6 +1301,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
                             LiquidSendMessage::PopupMessage(view::SendPopupMessage::AmountEdited(v))
                         },
                     )
+                    .maybe_warning(config.amount.warning.map(coincube_ui::locale::copy))
                     .padding(10)
                 },
             );
@@ -1312,7 +1314,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
                         amount_input_section = amount_input_section.push(
                             text(localized_format!(
                                 "Enter an amount between {} and {} {}",
-                                "Introduzca una cantidad entre {} y {} {}",
+                                "Introduce un importe entre {} y {} {}",
                                 min_btc.to_formatted_string_with_unit(config.bitcoin_unit),
                                 max_btc.to_formatted_string_with_unit(config.bitcoin_unit),
                                 config.bitcoin_unit,
@@ -1326,7 +1328,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
                     amount_input_section = amount_input_section.push(
                         text(localized_format!(
                             "Enter an amount between {} and {} {}",
-                            "Introduzca una cantidad entre {} y {} {}",
+                            "Introduce un importe entre {} y {} {}",
                             min_btc.to_formatted_string_with_unit(config.bitcoin_unit),
                             max_btc.to_formatted_string_with_unit(config.bitcoin_unit),
                             config.bitcoin_unit,
@@ -1491,6 +1493,7 @@ pub fn fiat_input_model<'a>(
         form::Form::new_amount_numeric(&format!("{} amount", selected_currency), fiat_input, |v| {
             LiquidSendMessage::PopupMessage(view::SendPopupMessage::FiatInputEdited(v))
         })
+        .maybe_warning(fiat_input.warning.map(coincube_ui::locale::copy))
         .padding(10),
     );
 

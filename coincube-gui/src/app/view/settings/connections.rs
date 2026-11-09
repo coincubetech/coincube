@@ -113,7 +113,7 @@ pub fn connections_content<'a>(cache: &'a Cache, support_open: bool) -> Element<
     if status == ConnectionStatus::RenewFailed {
         let mut notice = Column::new()
             .spacing(4)
-            .push(page::heading(crate::app::RENEW_FAILED_TITLE).size(14))
+            .push(page::heading(localized_copy(crate::app::RENEW_FAILED_TITLE)).size(14))
             .push(page::muted(crate::app::renew_failed_detail()))
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
             .push(

@@ -2180,8 +2180,12 @@ impl State for GlobalHome {
                         }
                         #[cfg(not(target_os = "macos"))]
                         {
-                            self.other_error =
-                                Some("Passkey unlock is available on macOS only.".into());
+                            self.other_error = Some(
+                                coincube_ui::locale::copy(
+                                    "Passkey unlock is available on macOS only.",
+                                )
+                                .into(),
+                            );
                         }
                         Task::none()
                     }

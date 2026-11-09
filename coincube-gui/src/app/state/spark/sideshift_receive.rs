@@ -329,8 +329,9 @@ impl SparkSideshiftReceiveFlow {
                         // and reassure the user that a third party is at fault
                         // when it's ours. No deposit address exists yet, so
                         // nothing is at risk.
-                        self.error = Some(nothing_sent_yet(&format!(
-                            "Couldn't load swap settings from Coincube: {e}"
+                        self.error = Some(nothing_sent_yet(&coincube_ui::localized_format!(
+                            "Couldn't load swap settings from Coincube: {e}",
+                            "No se pudo cargar la configuración de intercambio desde COINCUBE: {e}"
                         )));
                         Task::none()
                     }
@@ -507,8 +508,9 @@ fn refund_address_edit_error(network: SideshiftNetwork, value: &str) -> Option<S
 }
 
 fn nothing_sent_yet(detail: &str) -> String {
-    format!(
+    coincube_ui::localized_format!(
         "{}. Nothing has been sent — try again.",
+        "{}. No se envió nada. Inténtalo de nuevo.",
         detail.trim_end().trim_end_matches('.')
     )
 }

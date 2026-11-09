@@ -72,7 +72,7 @@ fn policy_box<'a>(row: &PolicyRow<'a>) -> Element<'a, Message> {
             .align_y(Alignment::Center)
             .spacing(8)
             .push(badges)
-            .push(p2_regular(row.box_label).bold()),
+            .push(p2_regular(localized_copy(row.box_label)).bold()),
     )
     .width(Length::Fill)
     .padding([8, 10])
@@ -98,7 +98,7 @@ enum Window {
 
 fn spend_bar<'a>(label: &'static str, window: Window, width: Length) -> Element<'a, Message> {
     Container::new(
-        p2_regular(label)
+        p2_regular(localized_copy(label))
             .size(13)
             .font(coincube_ui::font::MEDIUM)
             .style(move |t: &Theme| iced::widget::text::Style {
@@ -168,7 +168,7 @@ fn spend_window<'a>(timelock: Timelock, compact: bool) -> Element<'a, Message> {
 fn policy_row<'a>(row: PolicyRow<'a>, compact: bool, key_width: f32) -> Element<'a, Message> {
     let keys = Column::new()
         .spacing(6)
-        .push(caption(row.label).style(theme::text::secondary))
+        .push(caption(localized_copy(row.label)).style(theme::text::secondary))
         .push(policy_box(&row));
     if compact {
         Column::new()
@@ -198,7 +198,7 @@ fn diagram_content<'a>(rows: &[PolicyRow<'a>], available_width: f32) -> Element<
     let header: Element<'a, Message> = if compact {
         Row::new()
             .width(Length::Fill)
-            .push(caption("Receipt of funds").style(theme::text::secondary))
+            .push(caption(localized_copy("Receipt of funds")).style(theme::text::secondary))
             .push(Space::new().width(Length::Fill))
             .push(caption(localized_copy("After inactivity")).style(theme::text::secondary))
             .into()
@@ -209,7 +209,7 @@ fn diagram_content<'a>(rows: &[PolicyRow<'a>], available_width: f32) -> Element<
             .push(
                 Row::new()
                     .width(Length::Fill)
-                    .push(caption("Receipt of funds").style(theme::text::secondary))
+                    .push(caption(localized_copy("Receipt of funds")).style(theme::text::secondary))
                     .push(Space::new().width(Length::Fill))
                     .push(
                         caption(localized_copy("After some time* of wallet inactivity"))

@@ -33,8 +33,8 @@ fn template_card(
         Column::new()
             .align_x(Alignment::Start)
             .spacing(4)
-            .push(p1_regular(title).bold())
-            .push(p2_regular(description).style(theme::text::secondary))
+            .push(p1_regular(localized_copy(title)).bold())
+            .push(p2_regular(localized_copy(description)).style(theme::text::secondary))
             .width(Length::Fill),
         Message::FocusAction,
     )
@@ -131,14 +131,17 @@ pub(super) fn template_introduction(
             .push(
                 Column::new()
                     .spacing(6)
-                    .push(p1_regular(keys_needed))
-                    .push(p2_regular(policy_explanation).style(theme::text::secondary)),
+                    .push(p1_regular(localized_copy(keys_needed)))
+                    .push(
+                        p2_regular(localized_copy(policy_explanation))
+                            .style(theme::text::secondary),
+                    ),
             )
             .push(policy_timeline(rows))
             .push(
                 Column::new()
                     .spacing(6)
-                    .push(p2_regular(tip).style(theme::text::secondary))
+                    .push(p2_regular(localized_copy(tip)).style(theme::text::secondary))
                     .push(show_keychain_tip.then(|| {
                         p2_regular(localized_copy(
                             "A family member or friend can contribute a Keychain key remotely.",

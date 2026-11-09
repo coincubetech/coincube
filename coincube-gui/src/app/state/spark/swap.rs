@@ -252,8 +252,9 @@ impl SparkSwap {
             return Some("That is more than you have.".into());
         }
         if let Some(minimum) = self.minimum().filter(|min| amount < min.amount) {
-            return Some(format!(
+            return Some(coincube_ui::localized_format!(
                 "The minimum is {}.",
+                "El mínimo es {}.",
                 format_asset(minimum.asset, minimum.amount, self.usdb_decimals())
             ));
         }

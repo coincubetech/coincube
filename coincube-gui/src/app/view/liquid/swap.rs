@@ -272,7 +272,7 @@ fn amount_input_field<'a>(
         }
         (SendAsset::Usdt, _) => form::Form::new_amount_numeric("0.00", value, on_edit),
     };
-    form.maybe_warning(value.warning)
+    form.maybe_warning(value.warning.map(coincube_ui::locale::copy))
         .size(H3_SIZE)
         .padding(10)
         .into_container()

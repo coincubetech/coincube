@@ -639,8 +639,9 @@ impl State for SparkReceive {
                     _ => (amount_sat, 1),
                 };
                 self.received_amount_display = if count > 1 {
-                    format!(
+                    coincube_ui::localized_format!(
                         "+{} sats ({} deposits)",
+                        "+{} sats ({} depósitos)",
                         running_total.unsigned_abs(),
                         count
                     )

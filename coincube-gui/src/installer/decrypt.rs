@@ -18,6 +18,8 @@ use coincube_core::{
         DescriptorPublicKey,
     },
 };
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::{
     color,
     component::{
@@ -433,13 +435,13 @@ impl DecryptModal {
                 |m| m.into(),
             )
         } else {
-            self.xpub.warning = Some("Invalid xpub");
+            self.xpub.warning = Some(localized_copy("Invalid xpub"));
             self.xpub.valid = false;
             Task::none()
         }
     }
     fn update_xpub_error(&mut self, error: &'static str) {
-        self.xpub.warning = Some(error);
+        self.xpub.warning = Some(localized_copy(error));
         self.xpub.valid = false;
         self.xpub_busy = false;
     }
@@ -460,7 +462,7 @@ impl DecryptModal {
             Ok(m) => m,
             Err(_) => {
                 self.mnemonic.valid = false;
-                self.mnemonic.warning = Some("Invalid mnemonic");
+                self.mnemonic.warning = Some(localized_copy("Invalid mnemonic"));
                 return Task::none();
             }
         }
@@ -498,9 +500,10 @@ impl DecryptModal {
         self.mnemonic.warning = error;
         self.mnemonic.valid = false;
         if let Some(fg) = fg {
-            self.fetched.insert(fg, "Mnemonic".to_string());
+            self.fetched
+                .insert(fg, localized_copy("Mnemonic").to_string());
         }
-        self.mnemonic.warning = error;
+        self.mnemonic.warning = error.map(localized_copy);
     }
 }
 
@@ -517,7 +520,7 @@ fn invalid_content(hint: &str) -> Container<'_, installer::Message> {
                 ]
                 .align_y(alignment::Vertical::Center),
             )
-            .push(text::text(hint))
+            .push(text::text(localized_copy(hint)))
             .push(Space::new().height(Length::Fill)),
     )
 }
@@ -530,11 +533,14 @@ fn widget_signing_device(
 ) -> Button<'_, installer::Message> {
     let message = if let Some(code) = pairing_code {
         column![
-            p1_regular(message),
-            p1_regular(format!("Pairing code: {code}")),
+            p1_regular(localized_copy(message)),
+            p1_regular(localized_format!(
+                "Pairing code: {code}",
+                "Código de vinculación: {code}"
+            )),
         ]
     } else {
-        column![p1_regular(message)]
+        column![p1_regular(localized_copy(message))]
     }
     .align_x(Horizontal::Center);
     let fg = if let Some(fg) = fingerprint {
@@ -574,7 +580,7 @@ fn fetched_device(name: String, fingerprint: Fingerprint) -> Button<'static, ins
 }
 
 fn valid_content(state: &DecryptModal) -> Container<'static, installer::Message> {
-    let description = text::text("Plug in and unlock a hardware device belonging to this setup to \nautomatically decrypt the backup");
+    let description = text::text(localized_copy("Plug in and unlock a hardware device belonging to this setup to \nautomatically decrypt the backup"));
     let mut devices = state
         .fetching
         .iter()
@@ -589,7 +595,7 @@ fn valid_content(state: &DecryptModal) -> Container<'static, installer::Message>
     }
     let options_btn = modal::optional_section(
         state.show_options,
-        "Other options".to_string(),
+        localized_copy("Other options").to_string(),
         || Decrypt::ShowOptions(true).into(),
         || Decrypt::ShowOptions(false).into(),
     );
@@ -607,7 +613,7 @@ fn valid_content(state: &DecryptModal) -> Container<'static, installer::Message>
 }
 
 fn optional_content(state: &DecryptModal) -> Container<'static, installer::Message> {
-    let mut tt = Column::new().push(text::text("Using an air-gapped device? Export the xpub from your device, then use the upload or paste option. If you don’t know the correct derivation path, try with the following:"));
+    let mut tt = Column::new().push(text::text(localized_copy("Using an air-gapped device? Export the xpub from your device, then use the upload or paste option. If you don’t know the correct derivation path, try with the following:")));
     for d in &state.derivation_paths {
         tt = tt.push(text::text(format!("{d}")));
     }
@@ -617,7 +623,9 @@ fn optional_content(state: &DecryptModal) -> Container<'static, installer::Messa
         .width(300);
 
     let airgap_hint = Row::new()
-        .push(p1_regular("Provide one of the xpubs used in this wallet."))
+        .push(p1_regular(localized_copy(
+            "Provide one of the xpubs used in this wallet.",
+        )))
         .push(tooltip::Tooltip::new(
             icon::tooltip_icon(),
             tt,
@@ -627,16 +635,19 @@ fn optional_content(state: &DecryptModal) -> Container<'static, installer::Messa
 
     let import = modal::button_entry(
         Some(icon::import_icon()),
-        "Upload extended public key file",
+        localized_copy("Upload extended public key file"),
         None,
-        state.import_xpub_error.clone(),
+        state
+            .import_xpub_error
+            .clone()
+            .map(coincube_ui::locale::notice),
         Some(|| Decrypt::SelectImportXpub.into()),
     );
 
     let xpub = modal::collapsible_input_button(
         state.focus == Focus::Xpub,
         Some(icon::round_key_icon()),
-        "Paste an extended public key".to_string(),
+        localized_copy("Paste an extended public key").to_string(),
         example_xpub(state.network),
         &state.xpub,
         Some(|s| Decrypt::Xpub(s).into()),
@@ -671,9 +682,9 @@ pub fn mnemonic_input_button<'a>(
     input_value: &Value<String>,
 ) -> Element<'a, installer::Message> {
     let icon = icon::pencil_icon().color(color::WHITE);
-    let label = "UNSAFE: Enter mnemonic of one of the keys";
+    let label = localized_copy("UNSAFE: Enter mnemonic of one of the keys");
     let input_placeholder = "code code code code code code code code code code code brave";
-    let disclaimer = " This option is not secure. I understand that entering a mnemonic on a computer may result in theft of my funds.";
+    let disclaimer = localized_copy(" This option is not secure. I understand that entering a mnemonic on a computer may result in theft of my funds.");
     let paste_message = Decrypt::PasteMnemonic.into();
     let collapse_message = Decrypt::SelectMnemonic.into();
 
@@ -728,7 +739,7 @@ pub fn mnemonic_input_button<'a>(
 /// Return the modal view for an export task
 pub fn decrypt_view<'a>(state: &DecryptModal) -> Container<'a, installer::Message> {
     let header = modal::header(
-        Some("Decrypt backup file".to_string()),
+        Some(localized_copy("Decrypt backup file").to_string()),
         Some(|| installer::Message::Decrypt(Decrypt::Close)),
     );
 

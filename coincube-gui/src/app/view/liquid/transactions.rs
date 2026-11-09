@@ -101,7 +101,7 @@ fn payment_detail_status(
 fn usdt_description(payment: &DomainPayment) -> String {
     let desc = payment.details.description();
     if desc.is_empty() {
-        "USDt Transfer".to_owned()
+        localized_copy("USDt Transfer").to_owned()
     } else {
         desc.to_owned()
     }
@@ -1113,6 +1113,11 @@ pub fn refundable_detail_view<'a>(
                                             Message::RefundAddressEdited,
                                         )
                                     }
+                                    .maybe_warning(if refunding {
+                                        None
+                                    } else {
+                                        refund_address.warning.map(coincube_ui::locale::copy)
+                                    })
                                     .size(14)
                                     .padding(12),
                                 )

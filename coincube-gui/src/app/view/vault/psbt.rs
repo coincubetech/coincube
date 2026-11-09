@@ -1,4 +1,5 @@
 use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::notice;
 use coincube_ui::localized_format;
 use std::collections::{HashMap, HashSet};
 
@@ -538,7 +539,7 @@ pub fn broadcast_action_with_identity_review<'a>(
                         .width(Length::Fill),
                 )
                 .push(p1_regular(crate::chain::canonical_network_name(chain)))
-                .push(error.map(|err| card::error(CopyText::BroadcastFailed.get(), err)))
+                .push(error.map(|err| card::error(CopyText::BroadcastFailed.get(), notice(err))))
                 .push(if conflicting_txids.is_empty() {
                     None
                 } else {
@@ -1949,7 +1950,7 @@ fn signing_key_row(
         .width(Length::Fill)
         .push(p1_bold(row.label.clone()));
     if let Some(caption) = signing_key_kind_caption(&row.kind) {
-        info = info.push(text::caption(caption));
+        info = info.push(text::caption(localized_copy(caption)));
     }
 
     let right: Element<Message> = match &row.state {
@@ -1959,10 +1960,10 @@ fn signing_key_row(
             .push(p1_regular(localized_copy("Signed")).color(color::GREEN))
             .push(icon::check_icon().style(theme::text::success))
             .into(),
-        SigningKeyState::InProgress(status) => p1_regular(status.clone())
+        SigningKeyState::InProgress(status) => p1_regular(notice(status.clone()))
             .style(theme::text::secondary)
             .into(),
-        SigningKeyState::Disabled(reason) => p1_regular(reason.clone())
+        SigningKeyState::Disabled(reason) => p1_regular(notice(reason.clone()))
             .style(theme::text::secondary)
             .into(),
         // Stack the button *under* the reason rather than beside it: the sibling
@@ -1972,7 +1973,7 @@ fn signing_key_row(
         SigningKeyState::NeedsSignIn(reason) => Column::new()
             .spacing(6)
             .align_x(Alignment::End)
-            .push(p1_regular(reason.clone()).style(theme::text::secondary))
+            .push(p1_regular(notice(reason.clone())).style(theme::text::secondary))
             .push(
                 // Bubbles straight to the tab (which opens/focuses the Home
                 // tab for sign-in) without routing through the PSBT panel, so
@@ -1984,7 +1985,7 @@ fn signing_key_row(
         SigningKeyState::NeedsAccountSwitch(reason) => Column::new()
             .spacing(6)
             .align_x(Alignment::End)
-            .push(p1_regular(reason.clone()).style(theme::text::secondary))
+            .push(p1_regular(notice(reason.clone())).style(theme::text::secondary))
             .push(
                 secondary_action(row_id("switch-account"), localized_copy("Switch account"))
                     .on_press(Message::OpenConnectSwitchAccount),
@@ -2008,7 +2009,7 @@ fn signing_key_row(
             let mut col = Column::new()
                 .spacing(6)
                 .align_x(Alignment::End)
-                .push(p1_regular(reason.clone()).style(theme::text::secondary));
+                .push(p1_regular(notice(reason.clone())).style(theme::text::secondary));
             if *connect {
                 col = col.push(
                     primary_action(
@@ -2050,7 +2051,7 @@ fn signing_key_row(
                     "Request",
                 ),
             };
-            primary_action(row_id("activate"), label)
+            primary_action(row_id("activate"), localized_copy(label))
                 .on_press(msg)
                 .into()
         }
@@ -2121,13 +2122,16 @@ fn signing_path_card(path: SigningPath, action_scope: u64) -> Element<'static, M
         color::BLUE
     };
     let subtitle_text = if is_primary {
-        "Able to move the funds at any time.".to_string()
+        localized_copy("Able to move the funds at any time.").to_string()
     } else {
-        format!(
+        localized_format!(
             "Available after inactivity of ~{}",
+            "Disponible tras ~{} de inactividad",
             sequence.map(humanize_timelock).unwrap_or_default()
         )
     };
+    // Built in English by the signing state; shown in the window's language.
+    let title = localized_copy(&title).to_string();
 
     // Header. For an inactive path it's a toggle button (with a caret and the
     // "not available" note); for the active path it's a plain title + subtitle.
@@ -2243,7 +2247,7 @@ pub fn sign_action<'a>(
             ),
     );
     if let Some(error) = error {
-        col = col.push(card::warning(error));
+        col = col.push(card::warning(notice(error)));
     }
     for notice in &keychain_notices {
         col = col.push(
@@ -2311,7 +2315,7 @@ fn border_wallet_recon_phrase_view(
     let error_text: Option<Element<Message>> = recon
         .error
         .as_ref()
-        .map(|e| p1_regular(e.as_str()).color(color::RED).into());
+        .map(|e| p1_regular(notice(e.clone())).color(color::RED).into());
 
     let cancel_btn = button::transparent(None, CopyText::Cancel.get()).on_press(Message::Spend(
         SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::Cancel),
@@ -2462,7 +2466,7 @@ fn border_wallet_recon_grid_view(recon: &BorderWalletReconstructionState) -> Ele
     let error_text: Option<Element<Message>> = recon
         .error
         .as_ref()
-        .map(|e| p1_regular(e.as_str()).color(color::RED).into());
+        .map(|e| p1_regular(notice(e.clone())).color(color::RED).into());
 
     let next_btn = if recon.pattern.is_complete() {
         button::primary(None, localized_copy("Sign")).on_press(Message::Spend(

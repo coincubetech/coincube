@@ -1003,7 +1003,11 @@ pub fn create_spend_tx<'a>(
                     .size(P2_SIZE)
                     .style(theme::text::warning),
             )
-            .push(text(hint).size(P2_SIZE).style(theme::text::warning))
+            .push(
+                text(coincube_ui::locale::notice(hint))
+                    .size(P2_SIZE)
+                    .style(theme::text::warning),
+            )
             .into()
     } else if generating {
         text(localized_copy("Preparing the unsigned transaction."))
@@ -1272,7 +1276,7 @@ pub fn recipient_view<'a>(
                                         };
                                         Some(
                                             form::Form::new_trimmed(
-                                                &localized_format!("Enter amount in {}", "Ingrese la cantidad en {}", conv.currency()),
+                                                &localized_format!("Enter amount in {}", "Introduce el importe en {}", conv.currency()),
                                                 fiat_form,
                                                 move |msg| {
                                                     CreateSpendMessage::RecipientFiatAmountEdited(

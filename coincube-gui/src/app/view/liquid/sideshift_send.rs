@@ -257,9 +257,13 @@ fn address_input_view<'a>(
     // Error
     if let Some(err) = error {
         content = content.push(
-            Container::new(text(err).size(P2_SIZE).color(color::RED))
-                .padding([8, 12])
-                .style(theme::card::error),
+            Container::new(
+                text(coincube_ui::locale::notice(err.to_string()))
+                    .size(P2_SIZE)
+                    .color(color::RED),
+            )
+            .padding([8, 12])
+            .style(theme::card::error),
         );
     }
 
@@ -424,9 +428,13 @@ fn disambiguation_view<'a>(
 
     if let Some(err) = error {
         col = col.push(
-            Container::new(text(err).size(P2_SIZE).color(color::RED))
-                .padding([8, 12])
-                .style(theme::card::error),
+            Container::new(
+                text(coincube_ui::locale::notice(err.to_string()))
+                    .size(P2_SIZE)
+                    .color(color::RED),
+            )
+            .padding([8, 12])
+            .style(theme::card::error),
         );
     }
 
@@ -577,9 +585,13 @@ fn amount_input_view<'a>(
 
     if let Some(err) = error {
         col = col.push(
-            Container::new(text(err).size(P2_SIZE).color(color::RED))
-                .padding([8, 12])
-                .style(theme::card::error),
+            Container::new(
+                text(coincube_ui::locale::notice(err.to_string()))
+                    .size(P2_SIZE)
+                    .color(color::RED),
+            )
+            .padding([8, 12])
+            .style(theme::card::error),
         );
     }
 
@@ -684,9 +696,13 @@ fn review_view<'a>(
 
     if let Some(err) = error {
         col = col.push(
-            Container::new(text(err).size(P2_SIZE).color(color::RED))
-                .padding([8, 12])
-                .style(theme::card::error),
+            Container::new(
+                text(coincube_ui::locale::notice(err.to_string()))
+                    .size(P2_SIZE)
+                    .color(color::RED),
+            )
+            .padding([8, 12])
+            .style(theme::card::error),
         );
     }
 
@@ -1053,7 +1069,8 @@ fn info_row(label: &str, value: &str) -> Element<'static, SideshiftSendMessage> 
 }
 
 fn error_view(error: Option<&str>) -> Element<SideshiftSendMessage> {
-    let msg = error.unwrap_or("An unknown error occurred.");
+    let msg =
+        coincube_ui::locale::notice(error.unwrap_or("An unknown error occurred.").to_string());
 
     Container::new(
         Column::new()

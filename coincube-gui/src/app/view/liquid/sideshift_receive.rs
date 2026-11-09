@@ -203,9 +203,13 @@ fn external_setup_view<'a>(
 
     if let Some(err) = error {
         inner = inner.push(
-            Container::new(text(err).size(P2_SIZE).color(color::RED))
-                .padding([8, 12])
-                .style(theme::card::error),
+            Container::new(
+                text(coincube_ui::locale::notice(err.to_string()))
+                    .size(P2_SIZE)
+                    .color(color::RED),
+            )
+            .padding([8, 12])
+            .style(theme::card::error),
         );
     }
 
@@ -390,7 +394,8 @@ fn active_shift_view<'a>(
 // ---------------------------------------------------------------------------
 
 fn error_view(error: Option<&str>) -> Element<SideshiftReceiveMessage> {
-    let msg = error.unwrap_or("An unknown error occurred.");
+    let msg =
+        coincube_ui::locale::notice(error.unwrap_or("An unknown error occurred.").to_string());
 
     Container::new(
         Column::new()

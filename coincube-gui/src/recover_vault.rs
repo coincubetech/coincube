@@ -341,24 +341,24 @@ pub fn view(panel: &RecoverVaultPanel) -> Element<'_, RecoverVaultMessage> {
         // `Load` immediately (→ `Loading`), so the pane only lands on `Idle`
         // when Home is still parked here after a logout reset — show the
         // sign-in prompt, not a "Loading…" that will never resolve.
-        ListState::Idle => {
-            Container::new(p1_regular(SIGNED_OUT_PROMPT).style(theme::text::secondary))
-                .padding(20)
-                .center_x(Length::Fill)
-                .into()
-        }
+        ListState::Idle => Container::new(
+            p1_regular(localized_copy(SIGNED_OUT_PROMPT)).style(theme::text::secondary),
+        )
+        .padding(20)
+        .center_x(Length::Fill)
+        .into(),
         ListState::Loading(_) => Container::new(
             p1_regular(localized_copy("Loading recoverable vaults…")).style(theme::text::secondary),
         )
         .padding(20)
         .center_x(Length::Fill)
         .into(),
-        ListState::Error(msg) => {
-            Container::new(p1_regular(msg.clone()).style(theme::text::secondary))
-                .padding(20)
-                .center_x(Length::Fill)
-                .into()
-        }
+        ListState::Error(msg) => Container::new(
+            p1_regular(coincube_ui::locale::notice(msg.clone())).style(theme::text::secondary),
+        )
+        .padding(20)
+        .center_x(Length::Fill)
+        .into(),
         ListState::Loaded(rows) if rows.is_empty() => Container::new(
             p1_regular(localized_copy(
                 "No vaults are available for you to recover right now.",
@@ -405,7 +405,8 @@ fn vault_row<'a>(
 
     // Non-actionable rows carry their status copy under the meta line.
     if let Some(copy) = status_copy(v) {
-        left = left.push(p2_regular(copy).style(theme::text::secondary));
+        left =
+            left.push(p2_regular(coincube_ui::locale::notice(copy)).style(theme::text::secondary));
     }
 
     // The actionable CTA: either the live "Recover" button or, if this row is
@@ -446,7 +447,7 @@ fn recover_status_view(status: &RecoverStatus) -> Element<'_, RecoverVaultMessag
             "Recovery data received — approve on your Keychain",
         ))
         .into(),
-        RecoverStatus::Failed(copy) => p2_regular(copy.clone())
+        RecoverStatus::Failed(copy) => p2_regular(coincube_ui::locale::notice(copy.clone()))
             .style(theme::text::secondary)
             .into(),
     }

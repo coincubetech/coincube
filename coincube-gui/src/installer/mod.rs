@@ -321,10 +321,10 @@ impl RestorePath {
         let label = match stage {
             Some(RestoreStage::SignIn) => "Cube",
             Some(RestoreStage::Cube) => "Cube",
-            Some(RestoreStage::Password) => localized_copy("Password"),
-            Some(RestoreStage::Approve) => localized_copy("Approve"),
+            Some(RestoreStage::Password) => "Password",
+            Some(RestoreStage::Approve) => "Approve",
             Some(RestoreStage::Pin) => "PIN",
-            None => localized_copy("Done"),
+            None => "Done",
         };
         let steps = self.steps();
         steps
@@ -362,7 +362,7 @@ impl VaultStage {
             Self::Backup => localized_copy("Backup"),
             Self::Register => localized_copy("Register"),
             Self::Connect => "Connect",
-            Self::Node => "Node",
+            Self::Node => localized_copy("Node"),
             Self::Name => localized_copy("Name"),
             Self::Done => localized_copy("Done"),
         }
@@ -1442,9 +1442,9 @@ impl Installer {
         #[cfg(feature = "mcp-proposals")]
         if self.proposal_locked {
             return iced::widget::column![
-                coincube_ui::component::text::h3(if self.proposal_failure.is_some() { "Regtest setup needs inspection" } else { "Cube locked" }),
-                coincube_ui::component::text::text(self.proposal_failure.as_deref().unwrap_or("MCP access ended. An already authorized installation may finish. Its result will return to the launcher and require a fresh unlock.")),
-                iced::widget::button("Return to launcher").on_press_maybe(self.proposal_finished.then_some(Message::BackToApp(self.network)))
+                coincube_ui::component::text::h3(localized_copy(if self.proposal_failure.is_some() { "Regtest setup needs inspection" } else { "Cube locked" })),
+                coincube_ui::component::text::text(localized_copy(self.proposal_failure.as_deref().unwrap_or("MCP access ended. An already authorized installation may finish. Its result will return to the launcher and require a fresh unlock."))),
+                iced::widget::button(localized_copy("Return to launcher")).on_press_maybe(self.proposal_finished.then_some(Message::BackToApp(self.network)))
             ].spacing(16).padding(24).into();
         }
         let content = self.step_view();
@@ -1452,12 +1452,12 @@ impl Installer {
         let content = if let Some(error) = &self.navigation_error {
             #[cfg(feature = "mcp-proposals")]
             let return_label = if self.context.mcp_proposal.is_some() {
-                "Return to launcher"
+                localized_copy("Return to launcher")
             } else {
-                "Return to Bitcoin Cube"
+                localized_copy("Return to Bitcoin Cube")
             };
             #[cfg(not(feature = "mcp-proposals"))]
-            let return_label = "Return to Bitcoin Cube";
+            let return_label = localized_copy("Return to Bitcoin Cube");
             Column::new()
                 .push(
                     coincube_ui::widget::Container::new(
@@ -1529,7 +1529,7 @@ impl Installer {
             .spacing(20)
             .width(Length::Fill)
             .max_width(960)
-            .push(h2(CREATE_VAULT_TITLE))
+            .push(h2(localized_copy(CREATE_VAULT_TITLE)))
             .push_maybe(
                 coincube_ui::worldview_copy::VoiceLine::CreateVault
                     .get()
@@ -1578,7 +1578,7 @@ impl Installer {
             .get(self.current)
             .is_some_and(|step| step.restore_done());
         let header = restore_frame::sheet_header(
-            "Import or restore",
+            localized_copy("Import or restore"),
             restore_frame::network_chip(chain, false),
             if done {
                 iced::widget::Space::new().into()
@@ -1595,12 +1595,12 @@ impl Installer {
         };
         let nav = restore_frame::nav()
             .push(restore_frame::nav_action(
-                "Overview",
+                localized_copy("Overview"),
                 false,
                 leave(RestoreDestination::Overview, true),
             ))
             .push(restore_frame::nav_action(
-                "Import Bitcoin wallet",
+                localized_copy("Import Bitcoin wallet"),
                 false,
                 leave(
                     RestoreDestination::ImportBitcoin,
@@ -1608,14 +1608,14 @@ impl Installer {
                 ),
             ))
             .push(restore_frame::nav_action(
-                "Recovery Kit",
+                localized_copy("Recovery Kit"),
                 path == RestorePath::Kit,
                 leave(RestoreDestination::Kit, path != RestorePath::Kit),
             ))
             .push_maybe(
                 crate::feature_flags::OWNER_KEYCHAIN_RECOVERY_ENABLED.then(|| {
                     restore_frame::nav_action(
-                        "Recover with phone",
+                        localized_copy("Recover with phone"),
                         path == RestorePath::Phone,
                         leave(RestoreDestination::Phone, path != RestorePath::Phone),
                     )
@@ -2513,6 +2513,24 @@ mod proposal_handoff_flow_tests {
             installer.navigation_error.is_some(),
             "navigation remains blocked"
         );
+    }
+}
+
+#[cfg(test)]
+mod restore_stepper_tests {
+    use super::*;
+    use coincube_ui::locale::{render_in, Language};
+
+    #[test]
+    fn restore_stepper_follows_the_stage_in_spanish() {
+        for language in [Language::English, Language::Spanish] {
+            render_in(language, || {
+                assert_eq!(RestorePath::Kit.index(Some(RestoreStage::Password)), 1);
+                assert_eq!(RestorePath::Phone.index(Some(RestoreStage::Approve)), 1);
+                assert_eq!(RestorePath::Kit.index(Some(RestoreStage::Pin)), 2);
+                assert_eq!(RestorePath::Kit.index(None), 3);
+            });
+        }
     }
 }
 

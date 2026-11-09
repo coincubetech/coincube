@@ -463,12 +463,16 @@ pub fn liquid_receive_view<'a>(
         Column::new()
             .push(
                 Container::new(
-                    Container::new(text(err).size(14).color(color::RED))
-                        .padding(10)
-                        .center_x(Length::Fill)
-                        .style(theme::card::error)
-                        .width(Length::Fill)
-                        .max_width(800),
+                    Container::new(
+                        text(coincube_ui::locale::notice(err.clone()))
+                            .size(14)
+                            .color(color::RED),
+                    )
+                    .padding(10)
+                    .center_x(Length::Fill)
+                    .style(theme::card::error)
+                    .width(Length::Fill)
+                    .max_width(800),
                 )
                 .width(Length::Fill)
                 .padding([20, 0])
@@ -903,7 +907,7 @@ fn input_fields<'a>(
         hints = hints.push(
             text(localized_format!(
                 "Enter an amount between {} and {} {}",
-                "Introduzca una cantidad entre {} y {} {}",
+                "Introduce un importe entre {} y {} {}",
                 min_btc.to_formatted_string_with_unit(bitcoin_unit),
                 max_btc.to_formatted_string_with_unit(bitcoin_unit),
                 bitcoin_unit,
@@ -919,6 +923,7 @@ fn input_fields<'a>(
             amount_input,
             LiquidReceiveMessage::AmountInput,
         )
+        .maybe_warning(amount_input.warning.map(coincube_ui::locale::copy))
         .size(16)
         .padding(15)
     } else {
@@ -927,6 +932,7 @@ fn input_fields<'a>(
             amount_input,
             LiquidReceiveMessage::AmountInput,
         )
+        .maybe_warning(amount_input.warning.map(coincube_ui::locale::copy))
         .size(16)
         .padding(15)
     };
@@ -1189,12 +1195,16 @@ pub fn usdt_only_receive_view<'a>(
         Column::new()
             .push(
                 Container::new(
-                    Container::new(text(err).size(14).color(color::RED))
-                        .padding(10)
-                        .center_x(Length::Fill)
-                        .style(theme::card::error)
-                        .width(Length::Fill)
-                        .max_width(800),
+                    Container::new(
+                        text(coincube_ui::locale::notice(err.clone()))
+                            .size(14)
+                            .color(color::RED),
+                    )
+                    .padding(10)
+                    .center_x(Length::Fill)
+                    .style(theme::card::error)
+                    .width(Length::Fill)
+                    .max_width(800),
                 )
                 .width(Length::Fill)
                 .padding([20, 40])

@@ -1,4 +1,5 @@
 use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::{Alignment, Length};
 
 use coincube_ui::{
@@ -140,7 +141,11 @@ pub fn two_of_three_inheritance_template<'a>(
                                 defined_key(
                                     &key.name,
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     if use_taproot && !key.source.is_compatible_taproot() {
                                         Some("This device does not support Taproot")
                                     } else {
@@ -151,7 +156,11 @@ pub fn two_of_three_inheritance_template<'a>(
                             } else {
                                 undefined_key(
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     !primary_path.keys[0..i].iter().any(|k| k.is_none()),
                                     true,
                                 )

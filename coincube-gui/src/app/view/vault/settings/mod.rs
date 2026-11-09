@@ -2605,7 +2605,9 @@ pub fn custom_esplora_section<'a>(
             ))
             .size(12)
             .style(theme::text::success),
-            Err(e) => text(e.clone()).size(12).style(theme::text::error),
+            Err(e) => text(coincube_ui::locale::notice(e.clone()))
+                .size(12)
+                .style(theme::text::error),
         });
     }
 

@@ -703,7 +703,7 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts, spark: bool) -> Element<'a, 
         };
         body = body.push(page::note(
             Tone::Bad,
-            text(warning).size(13),
+            text(localized_copy(warning)).size(13),
             Some(
                 Row::new()
                     .spacing(8)
@@ -780,7 +780,7 @@ fn recovery_alerts_card<'a>(ra: &'a RecoveryAlerts, spark: bool) -> Element<'a, 
     );
 
     if let Some(err) = ra.error.as_deref() {
-        body = body.push(page::caption(err));
+        body = body.push(page::caption(coincube_ui::locale::notice(err.to_owned())));
     }
 
     body.into()

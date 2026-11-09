@@ -148,7 +148,7 @@ impl<'a> SparkSendView<'a> {
         // place whatever the phase, so the inputs keep their widget state
         // when a note, a hint or the loading line comes and goes.
         let destination = text_input(
-            self.receive_target.destination_placeholder(),
+            localized_copy(self.receive_target.destination_placeholder()),
             self.destination_input,
         )
         .id(DESTINATION_INPUT_ID)
@@ -1107,7 +1107,7 @@ pub fn pay_from_picker_modal<'a>(
             let enabled = asset == WalletAsset::Bitcoin || usdb_unavailable.is_none();
             let selected = asset == current;
             let line = match (asset, usdb_unavailable) {
-                (WalletAsset::Usdb, Some(reason)) => reason.to_owned(),
+                (WalletAsset::Usdb, Some(reason)) => localized_copy(reason).to_owned(),
                 _ => balance_of(pay_from_label(asset)),
             };
             let row = Row::new()
@@ -1390,7 +1390,7 @@ fn spark_send_cards<'a>(
                         Row::new()
                             .spacing(10)
                             .align_y(Alignment::Center)
-                            .push(orange_badge(target.badge()))
+                            .push(orange_badge(localized_copy(target.badge())))
                             .push_maybe(destination_empty.then(|| {
                                 tile_caption(coincube_ui::locale::copy("Add a destination"))
                             })),
@@ -1433,7 +1433,7 @@ fn target_picker_row<'a>(target: SparkSendTarget, selected: bool) -> Element<'a,
                 .bold()
                 .style(theme::text::primary),
         )
-        .push(orange_badge(target.badge()))
+        .push(orange_badge(localized_copy(target.badge())))
         .push(Space::new().width(Length::Fill))
         .push_maybe(selected.then(|| icon::check2_icon().size(18).color(color::ORANGE)));
 

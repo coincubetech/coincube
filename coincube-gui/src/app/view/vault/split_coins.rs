@@ -476,7 +476,8 @@ pub fn split_overlay<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
                 .style(theme::text::secondary),
         );
     if let Some(error) = &overlay.error {
-        body = body.push(p2_regular(error.clone()).style(theme::text::error));
+        body = body
+            .push(p2_regular(coincube_ui::locale::notice(error.clone())).style(theme::text::error));
     }
 
     let blocked = overlay.blocked();

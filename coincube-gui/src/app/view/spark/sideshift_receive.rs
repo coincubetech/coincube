@@ -78,7 +78,11 @@ fn setup_body(flow: &SparkSideshiftReceiveFlow) -> Element<'_, Msg> {
             .size(P1_SIZE),
         );
     if let Some(err) = flow.refund_error() {
-        refund = refund.push(text(err).size(P2_SIZE).color(color::RED));
+        refund = refund.push(
+            text(coincube_ui::locale::notice(err.to_string()))
+                .size(P2_SIZE)
+                .color(color::RED),
+        );
     }
     let refund_card = Container::new(refund)
         .padding(16)
@@ -113,10 +117,14 @@ fn setup_body(flow: &SparkSideshiftReceiveFlow) -> Element<'_, Msg> {
     let mut col = Column::new().spacing(20).push(refund_card).push(disclosure);
     if let Some(err) = flow.error() {
         col = col.push(
-            Container::new(text(err).size(P2_SIZE).color(color::RED))
-                .padding([8, 12])
-                .width(Length::Fill)
-                .style(theme::card::error),
+            Container::new(
+                text(coincube_ui::locale::notice(err.to_string()))
+                    .size(P2_SIZE)
+                    .color(color::RED),
+            )
+            .padding([8, 12])
+            .width(Length::Fill)
+            .style(theme::card::error),
         );
     }
     col.push(generate_btn).into()
@@ -473,9 +481,11 @@ fn error_body(error: Option<&str>) -> Element<'_, Msg> {
                     .spacing(8)
                     .push(h4_bold(localized_copy("Something went wrong")))
                     .push(
-                        text(error.unwrap_or("The swap couldn't be set up."))
-                            .size(P2_SIZE)
-                            .style(theme::text::secondary),
+                        text(coincube_ui::locale::notice(
+                            error.unwrap_or("The swap couldn't be set up.").to_string(),
+                        ))
+                        .size(P2_SIZE)
+                        .style(theme::text::secondary),
                     ),
             )
             .padding(16)

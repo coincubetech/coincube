@@ -419,9 +419,13 @@ fn details_card<'a>(
             (!quoting).then(|| swap_message(SparkSwapMessage::Max)),
         ));
 
-    let minimum = swap
-        .minimum()
-        .map(|min| format!("Minimum {}", format_asset(min.asset, min.amount, decimals)));
+    let minimum = swap.minimum().map(|min| {
+        coincube_ui::localized_format!(
+            "Minimum {}",
+            "Mínimo {}",
+            format_asset(min.asset, min.amount, decimals)
+        )
+    });
     let shown_error = match swap.phase() {
         SwapPhase::Details { error: Some(error) } => Some(error.clone()),
         // Say what's wrong only once there is something typed (or Max).
@@ -502,7 +506,9 @@ fn details_card<'a>(
                 .push(p2_bold(localized_copy("Amount to swap")))
                 .push(amount_row)
                 .push_maybe(minimum.map(|line| p2_regular(line).style(theme::text::secondary)))
-                .push_maybe(shown_error.map(|error| p2_regular(error).style(theme::text::warning))),
+                .push_maybe(shown_error.map(|error| {
+                    p2_regular(coincube_ui::locale::notice(error)).style(theme::text::warning)
+                })),
         ))
         .push(iced::widget::rule::horizontal(1))
         .push(section(figures))

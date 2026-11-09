@@ -131,7 +131,12 @@ impl Filters {
         if self.date_range.trim().is_empty() {
             return Ok((None, None));
         }
-        let (start, end) = self.date_range.split_once(" to ").ok_or(())?;
+        // English "to" or the Spanish placeholder's "a".
+        let (start, end) = self
+            .date_range
+            .split_once(" to ")
+            .or_else(|| self.date_range.split_once(" a "))
+            .ok_or(())?;
         let start = parse(start)?;
         let end = parse(end)?;
         if start.zip(end).is_some_and(|(start, end)| start > end) {
@@ -2803,6 +2808,9 @@ mod tests {
             date_range: format!("{day} to {day}"),
             ..Default::default()
         };
+        assert!(filters.includes(&row));
+        // The Spanish placeholder reads "AAAA-MM-DD a AAAA-MM-DD".
+        filters.date_range = format!("{day} a {day}");
         assert!(filters.includes(&row));
         filters.date_range = "2026-13-99 to 2026-12-31".into();
         assert!(filters.dates().is_err());

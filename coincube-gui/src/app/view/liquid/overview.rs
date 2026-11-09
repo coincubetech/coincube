@@ -87,11 +87,16 @@ pub fn liquid_overview_view<'a>(
     mask_amounts: bool,
 ) -> Element<'a, LiquidOverviewMessage> {
     if !has_loaded_snapshot {
-        let status = error.unwrap_or(if loading {
-            localized_copy("Loading Liquid balances and activity…")
-        } else {
-            localized_copy("Liquid balance has not loaded yet")
-        });
+        let status = error
+            .map(|error| coincube_ui::locale::notice(error.to_string()))
+            .unwrap_or_else(|| {
+                if loading {
+                    localized_copy("Loading Liquid balances and activity…")
+                } else {
+                    localized_copy("Liquid balance has not loaded yet")
+                }
+                .to_string()
+            });
         return Column::new()
             .spacing(12)
             .push(h2("Liquid"))
@@ -421,7 +426,7 @@ pub fn liquid_overview_view<'a>(
         );
     }
 
-    if let Some(err) = error {
+    if let Some(err) = error.map(|error| coincube_ui::locale::notice(error.to_string())) {
         content = content.push(
             Container::new(
                 text(localized_format!(

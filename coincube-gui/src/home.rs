@@ -401,8 +401,9 @@ pub(crate) fn ghost_import_identity(
     )
     .public_key_hex();
     if !derived.eq_ignore_ascii_case(registered) {
-        return Err(format!(
+        return Err(coincube_ui::localized_format!(
             "This recovery phrase doesn't belong to {}. Check the words, or create a new Cube from them.",
+            "Esta frase de recuperación no pertenece a {}. Revisa las palabras o crea un Cube nuevo con ellas.",
             catalog_display_name(&ghost.name)
         ));
     }
@@ -841,8 +842,9 @@ impl Home {
         if listed && ghost.account == self.connect_account_id() {
             Ok(())
         } else {
-            Err(format!(
+            Err(coincube_ui::localized_format!(
                 "Connect no longer lists {} for this account. Cancel, then pick it again from the Launcher.",
+                "Connect ya no muestra {} en esta cuenta. Cancela y vuelve a elegirlo desde el Launcher.",
                 catalog_display_name(&ghost.name)
             ))
         }
@@ -1069,9 +1071,8 @@ impl Home {
         summary
     }
 
-    /// The Create Cube refusal at the limit. It is stored from `update()`, where
-    /// the language is always English, so the home view rebuilds it in the
-    /// accepted language when the stored error is this one.
+    /// The Create Cube refusal at the limit, stored from `update()` in the
+    /// window's language.
     fn cube_limit_error(&self) -> String {
         localized_format!(
             "Cube limit reached. {} Upgrade your Connect account \
@@ -2108,8 +2109,11 @@ impl Home {
                             }
                             Err(e) => {
                                 self.creating_cube = false;
-                                self.error =
-                                    Some(format!("Failed to start passkey ceremony: {}", e));
+                                self.error = Some(coincube_ui::localized_format!(
+                                    "Failed to start passkey ceremony: {}",
+                                    "No se pudo iniciar la verificación con llave de acceso: {}",
+                                    e
+                                ));
                                 Task::none()
                             }
                         }
@@ -2163,8 +2167,11 @@ impl Home {
                         }
                         Err(e) => {
                             self.creating_cube = false;
-                            self.error =
-                                Some(format!("Failed to generate master seed signer: {}", e));
+                            self.error = Some(coincube_ui::localized_format!(
+                                "Failed to generate master seed signer: {}",
+                                "No se pudo generar el firmante de la frase maestra: {}",
+                                e
+                            ));
                             Task::none()
                         }
                     }
@@ -2458,7 +2465,11 @@ impl Home {
                         } else {
                             self.scrub_creation_seed();
                         }
-                        self.error = Some(format!("Failed to create Cube: {}", e));
+                        self.error = Some(coincube_ui::localized_format!(
+                            "Failed to create Cube: {}",
+                            "No se pudo crear el Cube: {}",
+                            e
+                        ));
                         Task::none()
                     }
                 }
@@ -3068,7 +3079,10 @@ impl Home {
                         ])
                     }
                     Err(e) => {
-                        self.settings_error = Some(format!("Couldn't save developer mode: {e}"));
+                        self.settings_error = Some(coincube_ui::localized_format!(
+                            "Couldn't save developer mode: {e}",
+                            "No se pudo guardar el modo de desarrollador: {e}"
+                        ));
                         Task::none()
                     }
                 }
@@ -3089,8 +3103,10 @@ impl Home {
                         ])
                     }
                     Err(e) => {
-                        self.settings_error =
-                            Some(format!("Couldn't save Bitcoin Blake2b beta: {e}"));
+                        self.settings_error = Some(coincube_ui::localized_format!(
+                            "Couldn't save Bitcoin Blake2b beta: {e}",
+                            "No se pudo guardar la beta de Bitcoin Blake2b: {e}"
+                        ));
                         Task::none()
                     }
                 }
@@ -3297,9 +3313,11 @@ impl Home {
                         // settings.json; trusting it would open the wrong
                         // chain's config, seed folder and provider.
                         if cube.network != source {
-                            self.error = Some(format!(
+                            self.error = Some(coincube_ui::localized_format!(
                                 "This Cube's settings say it lives on {}, but it was found in \
                                  the {} folder. Tenshu won't open it until the two agree.",
+                                "Los ajustes de este Cube indican que está en {}, pero se encontró \
+                                 en la carpeta {}. Tenshu no lo abrirá hasta que coincidan.",
                                 cube.network.label(),
                                 source.label(),
                             ));
@@ -3324,8 +3342,9 @@ impl Home {
                         let cfg = match app::Config::from_file(&path) {
                             Ok(cfg) => cfg,
                             Err(e) => {
-                                self.error = Some(format!(
+                                self.error = Some(coincube_ui::localized_format!(
                                     "Couldn't read the {} folder's configuration ({}): {}",
+                                    "No se pudo leer la configuración de la carpeta {} ({}): {}",
                                     source.label(),
                                     path.display(),
                                     e
@@ -4646,7 +4665,11 @@ impl Home {
                     Ok(signer) => signer,
                     Err(e) => {
                         self.creating_cube = false;
-                        self.error = Some(format!("Failed to derive master signer: {}", e));
+                        self.error = Some(coincube_ui::localized_format!(
+                            "Failed to derive master signer: {}",
+                            "No se pudo derivar el firmante maestro: {}",
+                            e
+                        ));
                         return Task::none();
                     }
                 };
@@ -6290,7 +6313,7 @@ impl Home {
             column = column.push(
                 p2_regular(localized_format!(
                     "No Cube on your Connect account can be recovered with a phone on {}.",
-                    "No Cube en su cuenta Connect se puede recuperar con un teléfono en {}.",
+                    "Ningún Cube de tu cuenta de Connect se puede recuperar con un teléfono en {}.",
                     self.network.label()
                 ))
                 .style(theme::text::secondary),
@@ -6356,7 +6379,7 @@ impl Home {
                             p2_regular(if self.restore_all_networks {
                                 localized_format!(
                                     "Show {} only",
-                                    "Mostrar sólo {}",
+                                    "Mostrar solo {}",
                                     self.network.label()
                                 )
                             } else {
@@ -6463,15 +6486,7 @@ impl Home {
                                 // form — the form renders `self.error` itself.
                                 if !self.showing_create_form() {
                                     self.error.as_ref().map(|e| {
-                                        let limit = coincube_ui::locale::render_in(
-                                            coincube_ui::locale::Language::English,
-                                            || self.cube_limit_error(),
-                                        );
-                                        card::simple(text(if *e == limit {
-                                            self.cube_limit_error()
-                                        } else {
-                                            coincube_ui::locale::notice(e.clone())
-                                        }))
+                                        card::simple(text(coincube_ui::locale::notice(e.clone())))
                                     })
                                 } else {
                                     None

@@ -1,4 +1,5 @@
 use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::{Alignment, Length};
 
 use coincube_ui::{
@@ -197,7 +198,11 @@ pub fn multisig_security_template<'a>(
                                 defined_key(
                                     &key.name,
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     if use_taproot && !key.source.is_compatible_taproot() {
                                         Some("This device does not support Taproot")
                                     } else {
@@ -208,7 +213,11 @@ pub fn multisig_security_template<'a>(
                             } else {
                                 undefined_key(
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     !primary_path.keys[0..i].iter().any(|k| k.is_none()),
                                     true,
                                 )
@@ -246,7 +255,11 @@ pub fn multisig_security_template<'a>(
                                     uneditable_defined_key(
                                         &key.name,
                                         color::GREEN,
-                                        format!("Primary key #{}", j + 1),
+                                        localized_format!(
+                                            "Primary key #{}",
+                                            "Clave principal #{}",
+                                            j + 1
+                                        ),
                                         if use_taproot && !key.source.is_compatible_taproot() {
                                             Some("This device does not support Taproot")
                                         } else {
@@ -270,7 +283,11 @@ pub fn multisig_security_template<'a>(
                                 undefined_key(
                                     if j < 2 { color::GREEN } else { color::ORANGE },
                                     if j < 2 {
-                                        format!("Primary key #{}", j + 1)
+                                        localized_format!(
+                                            "Primary key #{}",
+                                            "Clave principal #{}",
+                                            j + 1
+                                        )
                                     } else {
                                         "Recovery key".to_string()
                                     },
@@ -429,7 +446,11 @@ pub fn multisig_inheritance_recovery_template<'a>(
                                 defined_key(
                                     &key.name,
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     if use_taproot && !key.source.is_compatible_taproot() {
                                         Some("This device does not support Taproot")
                                     } else {
@@ -440,7 +461,11 @@ pub fn multisig_inheritance_recovery_template<'a>(
                             } else {
                                 undefined_key(
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     !primary_path.keys[0..i].iter().any(|k| k.is_none()),
                                     true,
                                 )
@@ -477,7 +502,11 @@ pub fn multisig_inheritance_recovery_template<'a>(
                                 defined_key(
                                     &key.name,
                                     color::BLUE,
-                                    format!("Inheritance key #{}", j + 1),
+                                    localized_format!(
+                                        "Inheritance key #{}",
+                                        "Clave de herencia #{}",
+                                        j + 1
+                                    ),
                                     if use_taproot && !key.source.is_compatible_taproot() {
                                         Some("This device does not support Taproot")
                                     } else {
@@ -488,7 +517,11 @@ pub fn multisig_inheritance_recovery_template<'a>(
                             } else {
                                 undefined_key(
                                     color::BLUE,
-                                    format!("Inheritance key #{}", j + 1),
+                                    localized_format!(
+                                        "Inheritance key #{}",
+                                        "Clave de herencia #{}",
+                                        j + 1
+                                    ),
                                     !(primary_path.keys.iter().any(|k| k.is_none())
                                         || inheritance_path.keys[0..j].iter().any(|k| k.is_none())),
                                     true,
@@ -598,7 +631,11 @@ pub fn expanding_multisig_inheritance_template<'a>(
                                 defined_key(
                                     &key.name,
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     if use_taproot && !key.source.is_compatible_taproot() {
                                         Some("This device does not support Taproot")
                                     } else {
@@ -609,7 +646,11 @@ pub fn expanding_multisig_inheritance_template<'a>(
                             } else {
                                 undefined_key(
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     !primary_path.keys[0..i].iter().any(|k| k.is_none()),
                                     true,
                                 )
@@ -649,7 +690,11 @@ pub fn expanding_multisig_inheritance_template<'a>(
                                     uneditable_defined_key(
                                         &key.name,
                                         color::GREEN,
-                                        format!("Primary key #{}", j + 1),
+                                        localized_format!(
+                                            "Primary key #{}",
+                                            "Clave principal #{}",
+                                            j + 1
+                                        ),
                                         if use_taproot && !key.source.is_compatible_taproot() {
                                             Some("This device does not support Taproot")
                                         } else {
@@ -660,7 +705,11 @@ pub fn expanding_multisig_inheritance_template<'a>(
                                     defined_key(
                                         &key.name,
                                         color::BLUE,
-                                        format!("Inheritance key #{}", j - 2),
+                                        localized_format!(
+                                            "Inheritance key #{}",
+                                            "Clave de herencia #{}",
+                                            j - 2
+                                        ),
                                         if use_taproot && !key.source.is_compatible_taproot() {
                                             Some("This device does not support Taproot")
                                         } else {
@@ -673,9 +722,17 @@ pub fn expanding_multisig_inheritance_template<'a>(
                                 undefined_key(
                                     if j < 3 { color::GREEN } else { color::BLUE },
                                     if j < 3 {
-                                        format!("Primary key #{}", j + 1)
+                                        localized_format!(
+                                            "Primary key #{}",
+                                            "Clave principal #{}",
+                                            j + 1
+                                        )
                                     } else {
-                                        format!("Inheritance key #{}", j - 2)
+                                        localized_format!(
+                                            "Inheritance key #{}",
+                                            "Clave de herencia #{}",
+                                            j - 2
+                                        )
                                     },
                                     !(primary_path.keys.iter().any(|k| k.is_none())
                                         || inheritance_path.keys[0..j].iter().any(|k| k.is_none())),

@@ -8,6 +8,7 @@ use coincube_mcp::{
     ipc::Grant,
     proposal::{Proposal, Quorum, Store, Topology},
 };
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     component::text::{h3, text},
     widget::Element,
@@ -465,20 +466,22 @@ impl Step for Review {
         _progress: (usize, usize),
     ) -> Element<'a, Message> {
         let topology = self.session.topology();
-        let mut content = column![h3("Review and authorize this Regtest Vault"),
-            text(format!("Primary: 3 of 5. Recovery: {} of {} after {} relative blocks for each coin. Block time varies; this is not a calendar deadline.", topology.recovery.quorum.threshold, topology.recovery.quorum.key_count, topology.recovery.relative_delay_blocks)),
-            text("Tenshu validated this actual descriptor. For assistant-supplied keys, the account xpub fingerprint below is computed from the key itself; the origin fingerprint was supplied by the assistant and was not checked. Verify every key on its source device, signer distribution and recovery assumptions before creating. Distinct fingerprints do not prove independent custody."),
+        let mut content = column![h3(localized_copy("Review and authorize this Regtest Vault")),
+            text(coincube_ui::localized_format!("Primary: 3 of 5. Recovery: {} of {} after {} relative blocks for each coin. Block time varies; this is not a calendar deadline.", "Principal: 3 de 5. Recuperación: {} de {} después de {} bloques relativos para cada moneda. El tiempo de los bloques varía; no es una fecha límite de calendario.", topology.recovery.quorum.threshold, topology.recovery.quorum.key_count, topology.recovery.relative_delay_blocks)),
+            text(localized_copy("Tenshu validated this actual descriptor. For assistant-supplied keys, the account xpub fingerprint below is computed from the key itself; the origin fingerprint was supplied by the assistant and was not checked. Verify every key on its source device, signer distribution and recovery assumptions before creating. Distinct fingerprints do not prove independent custody.")),
             text(&self.descriptor),
-            text("Creation ends MCP access. A separate approval is required to read the resulting Vault. Backup possession and recovery testing are not verified by descriptor validation."),
-            text(self.warning.as_deref().unwrap_or("Confirm that this is the exact policy and set of public keys you intend."))].spacing(16).padding(24);
+            text(localized_copy("Creation ends MCP access. A separate approval is required to read the resulting Vault. Backup possession and recovery testing are not verified by descriptor validation.")),
+            text(localized_copy(self.warning.as_deref().unwrap_or("Confirm that this is the exact policy and set of public keys you intend.")))].spacing(16).padding(24);
         for signer in &self.signers {
             content = content.push(text(signer));
         }
         content = content
-            .push(button("Back to setup").on_press(Message::Previous))
-            .push(button("Create this Regtest Vault").on_press_maybe(
-                (self.snapshot.is_some() && self.session.active()).then_some(Message::Next),
-            ));
+            .push(button(localized_copy("Back to setup")).on_press(Message::Previous))
+            .push(
+                button(localized_copy("Create this Regtest Vault")).on_press_maybe(
+                    (self.snapshot.is_some() && self.session.active()).then_some(Message::Next),
+                ),
+            );
         scrollable(content).into()
     }
     fn revert(&self, _ctx: &mut Context) {

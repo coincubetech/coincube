@@ -1438,9 +1438,11 @@ impl ConnectCubePanel {
                              lightning address {:?} (expected user@domain)",
                             db_addr
                         );
-                        self.ln_reconcile_needs_reregister = Some(format!(
+                        self.ln_reconcile_needs_reregister = Some(coincube_ui::localized_format!(
                             "Stored lightning address {:?} is malformed \
                              (expected user@domain) — please re-claim a username",
+                            "La dirección Lightning guardada {:?} no tiene un formato válido \
+                             (se esperaba usuario@dominio). Vuelve a reclamar un nombre de usuario.",
                             db_addr
                         ));
                         return iced::Task::none();
@@ -1990,7 +1992,11 @@ fn validate_ln_username(username: &str) -> Option<String> {
     let special = ['.', '_', '-'];
     for c in username.chars() {
         if !plain(c) && !special.contains(&c) {
-            return Some(format!("Invalid character: '{}'", c));
+            return Some(coincube_ui::localized_format!(
+                "Invalid character: '{}'",
+                "Carácter no válido: '{}'",
+                c
+            ));
         }
     }
     let chars: Vec<char> = username.chars().collect();

@@ -2070,8 +2070,8 @@ fn campaign_redeem_field<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conn
 
     if let Some(result) = &rs.result {
         let (msg, accent) = match result {
-            Ok(m) => (m.clone(), color::GREEN),
-            Err(e) => (e.clone(), color::RED),
+            Ok(m) => (coincube_ui::locale::notice(m.clone()), color::GREEN),
+            Err(e) => (coincube_ui::locale::notice(e.clone()), color::RED),
         };
         col = col
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
@@ -3561,9 +3561,12 @@ pub fn avatar_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMess
             .push(
                 container(
                     Column::new()
-                        .push(text::p1_bold("Error").color(color::RED))
+                        .push(text::p1_bold(localized_copy("Error")).color(color::RED))
                         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                        .push(text::p2_regular(err).color(color::GREY_3))
+                        .push(
+                            text::p2_regular(coincube_ui::locale::notice(err.to_owned()))
+                                .color(color::GREY_3),
+                        )
                         .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
                         .push(retry_button)
                         .padding(16)

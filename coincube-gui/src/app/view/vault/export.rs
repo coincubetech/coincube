@@ -70,7 +70,7 @@ pub fn export_modal<'a, Message: From<ImportExportMessage> + Clone + 'static>(
     };
 
     let msg = if let Some(error) = error {
-        format!("{}", error)
+        coincube_ui::locale::notice(format!("{}", error))
     } else {
         match state {
             ImportExportState::Init => "".to_string(),
@@ -166,7 +166,7 @@ pub fn export_modal<'a, Message: From<ImportExportMessage> + Clone + 'static>(
             .push(
                 Row::new()
                     .push(Space::new().width(20))
-                    .push(h4_bold(title))
+                    .push(h4_bold(localized_copy(title)))
                     .push(Space::new().width(Length::Fill))
                     .push(cross)
                     .align_y(alignment::Vertical::Center),

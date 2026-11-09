@@ -59,7 +59,9 @@ pub fn install_stats_section<'a>(
             Row::new()
                 .spacing(10)
                 .align_y(Alignment::Center)
-                .push(card::warning(err.to_string()).width(Length::Fill))
+                .push(
+                    card::warning(coincube_ui::locale::notice(err.to_string())).width(Length::Fill),
+                )
                 .push(
                     Button::new(text(localized_copy("Retry")).size(13).bold())
                         .padding([6, 16])

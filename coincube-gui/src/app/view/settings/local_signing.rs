@@ -322,16 +322,21 @@ fn error_body<'a>(err: &'a PairingError) -> Element<'a, Message> {
     let (title, body) = match err {
         PairingError::OfferExpired => (
             localized_copy("Offer expired"),
-            "The pairing offer ran out before any phone scanned it. \
-             Generate a new offer and try again."
-                .to_string(),
+            localized_copy(
+                "The pairing offer ran out before any phone scanned it. \
+                 Generate a new offer and try again.",
+            )
+            .to_string(),
         ),
         PairingError::WalletFingerprintMismatch { expected, claimed } => (
             localized_copy("Wrong wallet"),
-            format!(
+            localized_format!(
                 "The phone reports it can sign for wallet {} but \
                  this wallet expects {}. Confirm the phone is paired \
                  with the right vault.",
+                "El teléfono indica que puede firmar para la cartera {}, \
+                 pero esta cartera espera {}. Confirma que el teléfono \
+                 esté vinculado con el Vault correcto.",
                 claimed,
                 expected
                     .iter()
@@ -342,35 +347,47 @@ fn error_body<'a>(err: &'a PairingError) -> Element<'a, Message> {
         ),
         PairingError::ReplayRefused => (
             localized_copy("QR already used"),
-            "This pairing QR has already completed a pairing. Go \
-             back and start a fresh offer rather than re-using it."
-                .to_string(),
+            localized_copy(
+                "This pairing QR has already completed a pairing. Go \
+                 back and start a fresh offer rather than re-using it.",
+            )
+            .to_string(),
         ),
         PairingError::PhoneVerificationFailed => (
             localized_copy("Couldn't verify the phone"),
-            "The device that scanned the QR couldn't prove it's the \
-             phone you're pairing. This can happen on an untrusted \
-             network. Make sure both devices are on a network you \
-             trust, then start a fresh pairing."
-                .to_string(),
+            localized_copy(
+                "The device that scanned the QR couldn't prove it's the \
+                 phone you're pairing. This can happen on an untrusted \
+                 network. Make sure both devices are on a network you \
+                 trust, then start a fresh pairing.",
+            )
+            .to_string(),
         ),
         PairingError::TransportKeyMissing => (
             localized_copy("Keychain needs updating"),
-            "This Keychain didn't send an encryption key, so signing requests \
-             to it couldn't be encrypted. Update the Keychain app on the phone, \
-             then pair again."
-                .to_string(),
+            localized_copy(
+                "This Keychain didn't send an encryption key, so signing requests \
+                 to it couldn't be encrypted. Update the Keychain app on the phone, \
+                 then pair again.",
+            )
+            .to_string(),
         ),
         PairingError::NetworkError(s) => (
             localized_copy("Network error"),
-            format!(
+            localized_format!(
                 "Could not finish the TLS handshake or stream the \
                  pairing envelope. Confirm both devices are on the \
                  same Wi-Fi and try again. ({})",
+                "No se pudo completar el protocolo TLS ni transmitir el \
+                 sobre de vinculación. Confirma que ambos dispositivos \
+                 estén en la misma red Wi-Fi e inténtalo de nuevo. ({})",
                 s
             ),
         ),
-        PairingError::InternalError(s) => (localized_copy("Pairing failed"), s.clone()),
+        PairingError::InternalError(s) => (
+            localized_copy("Pairing failed"),
+            coincube_ui::locale::notice(s.clone()),
+        ),
     };
     let mut actions = Row::new().spacing(8);
     if err.is_retriable() {
@@ -554,7 +571,11 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
     let mut content = Column::new().width(Length::Fill);
     if let Some(notice) = state.unpaired_notice.as_ref() {
         content = content
-            .push(page::note(Tone::Muted, page::muted(notice.as_str()), None))
+            .push(page::note(
+                Tone::Muted,
+                page::muted(coincube_ui::locale::notice(notice.clone())),
+                None,
+            ))
             .push(Space::new().height(Length::Fixed(12.0)));
     }
     page::group(

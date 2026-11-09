@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::localized_format;
 pub mod descriptor;
 pub mod import_descriptor;
@@ -284,11 +285,15 @@ impl Step for Final {
                     // finish so the local install
                     // doesn't stall. The user can re-run the installer
                     // to retry the vault.
-                    self.warning = Some(format!(
+                    self.warning = Some(localized_format!(
                         "This key (#{}) was already used in another Vault. \
                          A key can only participate in one Vault. Your local \
                          wallet is installed; restart the Vault Builder and \
                          pick a different key to create the Connect vault.",
+                        "Esta clave (#{}) ya se usó en otro Vault. Una clave solo \
+                         puede formar parte de un Vault. Tu cartera local está \
+                         instalada. Reinicia el creador de Vaults y elige otra \
+                         clave para crear el Vault de Connect.",
                         key_id
                     ));
                     return Task::perform(async move {}, |_| Message::InstallFinished);
@@ -300,11 +305,15 @@ impl Step for Final {
                     // won't help — the descriptor must be rebuilt without
                     // the recovery key — so the copy says exactly that. The
                     // local install still stands, so finish anyway.
-                    self.warning = Some(format!(
+                    self.warning = Some(localized_format!(
                         "This key (#{}) is a recovery key and can't be a Vault \
                          signer. Your local wallet is installed; rebuild the \
                          Vault descriptor without the recovery key, then restart \
                          the Vault Builder to create the Connect vault.",
+                        "Esta clave (#{}) es una clave de recuperación y no puede \
+                         firmar en un Vault. Tu cartera local está instalada. Vuelve \
+                         a crear el descriptor del Vault sin la clave de recuperación \
+                         y reinicia el creador de Vaults para crear el Vault de Connect.",
                         key_id
                     ));
                     return Task::perform(async move {}, |_| Message::InstallFinished);
@@ -313,9 +322,12 @@ impl Step for Final {
                     // Transient / unexpected failure. Warn but continue
                     // — the local wallet is already persisted, and the
                     // user can retry via the in-app Connect flow later.
-                    self.warning = Some(format!(
+                    self.warning = Some(localized_format!(
                         "Connect vault sync failed: {}. Your local wallet is \
                          installed; the Connect vault can be retried later.",
+                        "No se pudo sincronizar el Vault de Connect: {}. Tu cartera \
+                         local está instalada. Puedes volver a intentar el Vault de \
+                         Connect más tarde.",
                         msg
                     ));
                     return Task::perform(async move {}, |_| Message::InstallFinished);
@@ -377,7 +389,9 @@ impl Step for Final {
         });
         if self.restored {
             view::restored(
-                self.cube_name.as_deref().unwrap_or("Your Cube"),
+                self.cube_name
+                    .as_deref()
+                    .unwrap_or(localized_copy("Your Cube")),
                 self.warning.as_ref(),
             )
         } else if self.claim_setup {
