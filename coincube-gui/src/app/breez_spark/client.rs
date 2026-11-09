@@ -99,6 +99,17 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 /// fresh idempotency key — which is how one payment becomes two.
 const SEND_SOFT_DEADLINE: Duration = Duration::from_secs(120);
 
+/// Windows process creation flag that suppresses the console window.
+///
+/// The bridge is a console-subsystem binary, so when the windows-subsystem
+/// GUI spawns it without `CREATE_NO_WINDOW`, Windows allocates it a visible
+/// console window — the stray terminal that appears when a Cube opens. Only
+/// the window is suppressed; the child stays a supervised process whose
+/// lifetime `kill_on_drop` governs, unlike `detach_spawned_process`, which
+/// detaches bitcoind/tor so they outlive the app.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 /// How long to wait for the [`Method::Init`] handshake.
 ///
 /// `init` is not an ordinary query. It drives `SdkBuilder::build()`, and that
@@ -232,19 +243,21 @@ impl SparkClient {
         let bridge_path = resolve_bridge_path()?;
         debug!("spawning Spark bridge at {:?}", bridge_path);
 
-        let mut child = Command::new(&bridge_path)
+        let mut command = Command::new(&bridge_path);
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
-                SparkClientError::BridgeUnavailable(format!(
-                    "failed to spawn {}: {}",
-                    bridge_path.display(),
-                    e
-                ))
-            })?;
+            .kill_on_drop(true);
+        #[cfg(target_os = "windows")]
+        command.creation_flags(CREATE_NO_WINDOW);
+        let mut child = command.spawn().map_err(|e| {
+            SparkClientError::BridgeUnavailable(format!(
+                "failed to spawn {}: {}",
+                bridge_path.display(),
+                e
+            ))
+        })?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
             SparkClientError::BridgeUnavailable("bridge stdin was not piped".to_string())
