@@ -6,7 +6,7 @@ use iced::advanced::{layout, renderer, widget::Tree, Layout, Widget};
 use iced::widget::image::{Handle, Image};
 use iced::{mouse, ContentFit, Length, Rectangle, Size};
 
-use crate::theme::{Theme, WorldviewMode};
+use crate::theme::{ArtworkStyle, Theme, WorldviewMode};
 use crate::widget::Element;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +19,12 @@ pub enum Slot {
     KitProtection,
     KitRemoval,
     Pin,
+}
+
+impl Slot {
+    fn supports_scene(self) -> bool {
+        matches!(self, Self::Opening | Self::EmptyHistory)
+    }
 }
 
 macro_rules! embedded {
@@ -72,8 +78,57 @@ fn alternate(mode: WorldviewMode, slot: Slot) -> Option<&'static Handle> {
     }
 }
 
-/// Use the same bounds as the incumbent image in every worldview. The
-/// alternate handle affects only the pixels inside that existing slot.
+/// The full scene previewed for opening and empty activity.
+fn scene(mode: WorldviewMode) -> Option<&'static Handle> {
+    match mode {
+        WorldviewMode::Samurai => embedded!("samurai-scene"),
+        WorldviewMode::Suitcoiner => embedded!("suitcoiner-scene"),
+        WorldviewMode::Luke => embedded!("luke-scene"),
+    }
+}
+
+/// Thumbnail for an Appearance option. Use the existing set's empty-history
+/// image so the picker and activity preview share the same artwork.
+pub fn artwork_thumbnail(mode: WorldviewMode, style: ArtworkStyle) -> Option<Handle> {
+    static KAGE: LazyLock<Option<Handle>> =
+        LazyLock::new(|| decode_png(include_bytes!("../static/images/kage/kage-seated.png")));
+    selected(mode, style, Slot::EmptyHistory)
+        .map(|(handle, _)| handle)
+        .or_else(|| KAGE.as_ref())
+        .cloned()
+}
+
+/// Artwork on the live Launcher opening face, fading with the other content.
+pub fn opening_image<'a, M: 'a>(side: f32, opacity: f32) -> Option<Element<'a, M>> {
+    static CUBE: LazyLock<Option<Handle>> =
+        LazyLock::new(|| decode_png(include_bytes!("../static/images/cube/cube-active.png")));
+    Some(Element::new(Illustration {
+        slot: Some(Slot::Opening),
+        incumbent: CUBE.as_ref()?.clone(),
+        width: Length::Fixed(side),
+        height: Length::Fixed(side),
+        fit: ContentFit::ScaleDown,
+        opacity,
+    }))
+}
+
+fn selected(
+    mode: WorldviewMode,
+    style: ArtworkStyle,
+    slot: Slot,
+) -> Option<(&'static Handle, bool)> {
+    let full_scene = if style == ArtworkStyle::Scene && slot.supports_scene() {
+        scene(mode)
+    } else {
+        None
+    };
+    full_scene
+        .map(|handle| (handle, true))
+        .or_else(|| alternate(mode, slot).map(|handle| (handle, false)))
+}
+
+/// Keep the illustration row stable across styles. The scene slots reserve
+/// a square while existing artwork draws in its original, centered bounds.
 pub fn image<'a, M: 'a>(
     slot: Option<Slot>,
     incumbent: Handle,
@@ -87,6 +142,7 @@ pub fn image<'a, M: 'a>(
         width,
         height,
         fit,
+        opacity: 1.0,
     })
 }
 
@@ -96,6 +152,7 @@ struct Illustration {
     width: Length,
     height: Length,
     fit: ContentFit,
+    opacity: f32,
 }
 
 impl Illustration {
@@ -104,6 +161,7 @@ impl Illustration {
             .width(self.width)
             .height(self.height)
             .content_fit(self.fit)
+            .opacity(self.opacity)
     }
 }
 
@@ -118,11 +176,20 @@ impl<M> Widget<M, Theme, iced::Renderer> for Illustration {
         renderer: &iced::Renderer,
         limits: &layout::Limits,
     ) -> layout::Node {
-        <Image as Widget<M, Theme, iced::Renderer>>::layout(
+        let incumbent = <Image as Widget<M, Theme, iced::Renderer>>::layout(
             &mut self.image(&self.incumbent),
             tree,
             renderer,
             limits,
+        );
+        if !self.slot.is_some_and(Slot::supports_scene) {
+            return incumbent;
+        }
+        let size = incumbent.size();
+        let width = size.height.min(limits.max().width).max(size.width);
+        layout::Node::with_children(
+            Size::new(width, size.height),
+            vec![incumbent.move_to(iced::Point::new((width - size.width) / 2.0, 0.0))],
         )
     }
 
@@ -138,11 +205,16 @@ impl<M> Widget<M, Theme, iced::Renderer> for Illustration {
     ) {
         use iced::advanced::image::Renderer as _;
 
-        let handle = self
+        let (handle, full_scene) = self
             .slot
-            .and_then(|slot| alternate(theme.worldview(), slot))
-            .filter(|handle| renderer.measure_image(handle).is_some())
-            .unwrap_or(&self.incumbent);
+            .and_then(|slot| selected(theme.worldview(), theme.artwork(), slot))
+            .filter(|(handle, _)| renderer.measure_image(handle).is_some())
+            .unwrap_or((&self.incumbent, false));
+        let layout = if full_scene {
+            layout
+        } else {
+            layout.children().next().unwrap_or(layout)
+        };
         <Image as Widget<M, Theme, iced::Renderer>>::draw(
             &self.image(handle),
             tree,
@@ -211,6 +283,67 @@ mod tests {
                 "{mode:?} should draw distinct pixels"
             );
             iced::advanced::Renderer::reset(&mut renderer, viewport);
+        }
+    }
+
+    #[test]
+    fn artwork_picker_uses_three_scenes_only_in_the_previewed_slots() {
+        let kage = artwork_thumbnail(WorldviewMode::Samurai, ArtworkStyle::Existing).unwrap();
+        assert_eq!(
+            kage.id(),
+            artwork_thumbnail(WorldviewMode::Samurai, ArtworkStyle::Existing)
+                .unwrap()
+                .id()
+        );
+        let mut ids = std::collections::HashSet::new();
+        for mode in [
+            WorldviewMode::Samurai,
+            WorldviewMode::Suitcoiner,
+            WorldviewMode::Luke,
+        ] {
+            let (opening, full_scene) = selected(mode, ArtworkStyle::Scene, Slot::Opening).unwrap();
+            assert!(full_scene);
+            assert!(ids.insert(opening.id()));
+            assert!(matches!(
+                opening,
+                Handle::Rgba {
+                    width: 480,
+                    height: 480,
+                    ..
+                }
+            ));
+            assert_eq!(
+                artwork_thumbnail(mode, ArtworkStyle::Scene).unwrap().id(),
+                opening.id()
+            );
+            for slot in [
+                Slot::Opening,
+                Slot::EmptyHistory,
+                Slot::Sent,
+                Slot::Received,
+                Slot::Restored,
+                Slot::KitProtection,
+                Slot::KitRemoval,
+                Slot::Pin,
+            ] {
+                let existing = selected(mode, ArtworkStyle::Existing, slot);
+                assert_eq!(
+                    existing.map(|(handle, _)| handle.id()),
+                    alternate(mode, slot).map(Handle::id)
+                );
+                let selected_scene = selected(mode, ArtworkStyle::Scene, slot);
+                if slot.supports_scene() {
+                    assert_eq!(
+                        selected_scene.map(|(handle, square)| (handle.id(), square)),
+                        Some((opening.id(), true))
+                    );
+                } else {
+                    assert_eq!(
+                        selected_scene.map(|(handle, square)| (handle.id(), square)),
+                        existing.map(|(handle, square)| (handle.id(), square))
+                    );
+                }
+            }
         }
     }
 

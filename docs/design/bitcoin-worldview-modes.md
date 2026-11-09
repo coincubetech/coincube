@@ -43,6 +43,21 @@ Retain pane, route, focus, draft, balance privacy and selected-chain state. A
 worldview edit must never run the global reload that reconciles fork availability
 and Split flows.
 
+The **Artwork** row follows Bitcoin Worldview. Each mode saves its own
+`existing` or `scene` choice under the named fields of `artwork` in
+`global_settings.json`. The first option is the default when a mode has no
+saved choice.
+
+| Mode | First option (default) | Second option |
+| --- | --- | --- |
+| Samurai | Kage | Mountain Watch |
+| Suitcoiner | Gilded Exchange | Gilded Wall Street |
+| Luke | The Stone Crossing | Purist’s Woodcut |
+
+Full scenes appear in the 160-point Opening and 240-point empty activity
+slots. The existing sets retain their original presentation at those sizes.
+The other slots use their original state-specific illustrations.
+
 ## Localization
 
 Language is independent of worldview and color scheme. All language and worldview

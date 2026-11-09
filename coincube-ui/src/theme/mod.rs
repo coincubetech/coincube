@@ -35,11 +35,31 @@ pub enum WorldviewMode {
     Samurai,
 }
 
+/// Decorative artwork choice within one worldview.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtworkStyle {
+    Scene,
+    #[default]
+    #[serde(other)]
+    Existing,
+}
+
+impl ArtworkStyle {
+    pub const fn default_for(worldview: WorldviewMode) -> Self {
+        match worldview {
+            WorldviewMode::Samurai => Self::Existing,
+            WorldviewMode::Suitcoiner | WorldviewMode::Luke => Self::Scene,
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Theme {
     pub colors: palette::Palette,
     pub mode: palette::ThemeMode,
     worldview: WorldviewMode,
+    artwork: ArtworkStyle,
 }
 
 impl Default for Theme {
@@ -54,6 +74,7 @@ impl Theme {
             colors: palette::Palette::dark(),
             mode: palette::ThemeMode::Dark,
             worldview: WorldviewMode::default(),
+            artwork: ArtworkStyle::Existing,
         }
     }
 
@@ -62,6 +83,7 @@ impl Theme {
             colors: palette::Palette::light(),
             mode: palette::ThemeMode::Light,
             worldview: WorldviewMode::default(),
+            artwork: ArtworkStyle::Existing,
         }
     }
 
@@ -70,12 +92,23 @@ impl Theme {
             colors: palette::Palette::from_mode(mode),
             mode,
             worldview: WorldviewMode::default(),
+            artwork: ArtworkStyle::Existing,
         }
     }
 
     pub fn with_worldview(mut self, worldview: WorldviewMode) -> Self {
         self.worldview = worldview;
+        self.artwork = ArtworkStyle::default_for(worldview);
         self
+    }
+
+    pub fn with_artwork(mut self, artwork: ArtworkStyle) -> Self {
+        self.artwork = artwork;
+        self
+    }
+
+    pub fn artwork(&self) -> ArtworkStyle {
+        self.artwork
     }
 
     pub fn worldview(&self) -> WorldviewMode {
