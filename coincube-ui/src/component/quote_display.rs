@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::LazyLock;
 
 use iced::widget::image;
@@ -41,6 +41,23 @@ static ALL_QUOTES: LazyLock<Vec<Quote>> = LazyLock::new(|| {
         .expect("loading-quotes.json must be valid")
         .quotes
 });
+
+static SPANISH_QUOTES: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../../static/loading-quotes.es.json"))
+        .expect("Spanish quote catalog must be valid")
+});
+
+impl Quote {
+    /// Resolve text at render time so changing language preserves the selected quote.
+    pub fn localized_text(&self) -> &str {
+        if crate::locale::language() == crate::locale::Language::Spanish {
+            if let Some(text) = SPANISH_QUOTES.get(&self.id) {
+                return text;
+            }
+        }
+        &self.text
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Embedded images (context defaults)
@@ -249,6 +266,7 @@ pub fn image_handle_for_context(context: &str) -> image::Handle {
 
 /// Props for the [`quote_display`] component.
 pub struct QuoteDisplayProps<'a> {
+    slot: Option<crate::illustration::Slot>,
     pub quote: &'a Quote,
     pub image_handle: &'a image::Handle,
     pub image_size: u16,
@@ -260,12 +278,22 @@ impl<'a> QuoteDisplayProps<'a> {
     pub fn new(context: &str, quote: &'a Quote, image_handle: &'a image::Handle) -> Self {
         let (_, default_size) = default_image_for_context(context);
         Self {
+            slot: match context {
+                "loading" | "syncing" => Some(crate::illustration::Slot::Opening),
+                "empty-wallet" => Some(crate::illustration::Slot::EmptyHistory),
+                _ => None,
+            },
             quote,
             image_handle,
             image_size: default_size,
             show_quote: true,
             show_separator: true,
         }
+    }
+
+    pub(crate) fn illustration_slot(mut self, slot: crate::illustration::Slot) -> Self {
+        self.slot = Some(slot);
+        self
     }
 
     pub fn image_size(mut self, size: u16) -> Self {
@@ -296,9 +324,13 @@ impl<'a> QuoteDisplayProps<'a> {
 /// ```
 pub fn display<'a, M: 'a>(props: &QuoteDisplayProps<'a>) -> Container<'a, M> {
     // Image — uses a pre-built handle to avoid flicker from recreating on every render
-    let img = iced::widget::image(props.image_handle.clone())
-        .height(Length::Fixed(props.image_size as f32))
-        .content_fit(iced::ContentFit::ScaleDown);
+    let img = crate::illustration::image(
+        props.slot,
+        props.image_handle.clone(),
+        Length::Shrink,
+        Length::Fixed(props.image_size as f32),
+        iced::ContentFit::ScaleDown,
+    );
 
     let img_container = Container::new(img).center_x(Length::Fill);
 
@@ -319,7 +351,7 @@ pub fn display<'a, M: 'a>(props: &QuoteDisplayProps<'a>) -> Container<'a, M> {
 
     // Quote + attribution
     if props.show_quote {
-        let quote_text = iced::widget::text(&props.quote.text)
+        let quote_text = iced::widget::text(props.quote.localized_text())
             .size(P2_SIZE)
             .font(font::REGULAR)
             .style(theme::text::secondary)
@@ -359,5 +391,24 @@ fn format_attribution(quote: &Quote) -> Option<String> {
     match quote.category.as_str() {
         "scripture" => Some(format!("\u{2014} {}", quote.author)),
         _ => Some(format!("\u{2014} {}, {}", quote.author, quote.source)),
+    }
+}
+
+#[cfg(test)]
+mod localization_tests {
+    use super::*;
+
+    #[test]
+    fn spanish_quotes_cover_every_bundled_id_and_keep_selection() {
+        assert_eq!(SPANISH_QUOTES.len(), ALL_QUOTES.len());
+        for quote in ALL_QUOTES.iter() {
+            let spanish = SPANISH_QUOTES.get(&quote.id).expect("Spanish quote by ID");
+            assert!(!spanish.trim().is_empty());
+            assert_eq!(quote.localized_text(), quote.text);
+            crate::locale::render_in(crate::locale::Language::Spanish, || {
+                assert_eq!(quote.localized_text(), spanish);
+            });
+            assert_eq!(quote.localized_text(), quote.text);
+        }
     }
 }

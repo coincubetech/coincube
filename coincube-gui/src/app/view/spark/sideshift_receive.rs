@@ -8,6 +8,8 @@
 //! picker / Back button — navigation happens via the cards + THEY SEND modal.
 
 use coincube_core::miniscript::bitcoin::Amount;
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::{
     color,
     component::{
@@ -55,11 +57,11 @@ fn setup_body(flow: &SparkSideshiftReceiveFlow) -> Element<'_, Msg> {
     // money back to — and asking for it afterwards is useless.
     let mut refund = Column::new()
         .spacing(10)
-        .push(h4_bold("Refund address"))
+        .push(h4_bold(localized_copy("Refund address")))
         .push(
-            text(format!(
+            text(localized_format!(
                 "Your {} address. If the swap can't complete, your deposit is returned here — \
-                 on {}, not as bitcoin.",
+                 on {}, not as bitcoin.", "Su dirección {}. Si el swap no puede completar, su depósito es devuelto aquí - en {}, no como bitcoin.",
                 selected.network.network_name(),
                 selected.network.network_name(),
             ))
@@ -68,7 +70,7 @@ fn setup_body(flow: &SparkSideshiftReceiveFlow) -> Element<'_, Msg> {
         )
         .push(
             TextInput::new(
-                &format!("Your {} address", selected.network.network_name()),
+                &localized_format!("Your {} address", "Su dirección {}", selected.network.network_name()),
                 flow.refund_address(),
             )
             .on_input(Msg::RefundAddressEdited)
@@ -101,9 +103,9 @@ fn setup_body(flow: &SparkSideshiftReceiveFlow) -> Element<'_, Msg> {
     .style(theme::card::simple);
 
     let generate_btn = if flow.is_loading() {
-        button::primary(None, "Generating…").width(Length::Fill)
+        button::primary(None, localized_copy("Generating…")).width(Length::Fill)
     } else {
-        button::primary(None, "Generate deposit address")
+        button::primary(None, localized_copy("Generate deposit address"))
             .on_press(Msg::Generate)
             .width(Length::Fill)
     };
@@ -139,8 +141,9 @@ fn active_body(
     // constraints are restated here, next to the address, where the quiet
     // "Limits" row in the details card below is easy to miss.
     let mut warning_lines = Column::new().spacing(2).align_x(Alignment::Center).push(
-        text(format!(
+        text(localized_format!(
             "Only send {} on {} ({})",
+            "Sólo envía {} sobre {} ({})",
             selected.coin.to_uppercase(),
             selected.network.network_name(),
             selected.network.standard_label(),
@@ -149,8 +152,9 @@ fn active_body(
     );
     if let (Some(min), Some(max)) = (&shift.deposit_min, &shift.deposit_max) {
         warning_lines = warning_lines.push(
-            text(format!(
+            text(localized_format!(
                 "Send between {min} and {max} {} — amounts outside this range are refunded.",
+                "Enviar entre {min} y {max} {} — cantidades fuera de este rango se reembolsan.",
                 selected.coin.to_uppercase(),
             ))
             .size(P2_SIZE),
@@ -278,9 +282,13 @@ fn arrived_body(
         .align_x(Alignment::Center)
         .width(Length::Fill)
         .push(
-            Container::new(text("Bitcoin arrived").size(P2_SIZE).color(color::GREEN))
-                .padding([4, 10])
-                .style(theme::pill::simple),
+            Container::new(
+                text(localized_copy("Bitcoin arrived"))
+                    .size(P2_SIZE)
+                    .color(color::GREEN),
+            )
+            .padding([4, 10])
+            .style(theme::pill::simple),
         );
 
     if let Some(sats) = flow.arrived_amount_sat() {
@@ -289,12 +297,14 @@ fn arrived_body(
 
     Container::new(
         col.push(
-            text("Your bitcoin has been added to your Spark wallet.")
-                .size(P2_SIZE)
-                .style(theme::text::secondary),
+            text(localized_copy(
+                "Your bitcoin has been added to your Spark wallet.",
+            ))
+            .size(P2_SIZE)
+            .style(theme::text::secondary),
         )
         .push(
-            button::primary(None, "Done")
+            button::primary(None, localized_copy("Done"))
                 .on_press(Msg::Reset)
                 .width(Length::Fixed(160.0)),
         ),
@@ -417,9 +427,12 @@ fn info_card<'a>(
 ) -> Element<'a, Msg> {
     let mut rows = Column::new()
         .spacing(8)
-        .push(kv("Shift ID", shift.id.clone()))
-        .push(kv("You send", selected.label.to_string()))
-        .push(kv("You receive", "Bitcoin (BTC)".to_string()));
+        .push(kv(localized_copy("Shift ID"), shift.id.clone()))
+        .push(kv(localized_copy("You send"), selected.label.to_string()))
+        .push(kv(
+            localized_copy("You receive"),
+            "Bitcoin (BTC)".to_string(),
+        ));
 
     if let (Some(min), Some(max)) = (&shift.deposit_min, &shift.deposit_max) {
         rows = rows.push(kv("Limits", format!("{min} – {max}")));
@@ -458,7 +471,7 @@ fn error_body(error: Option<&str>) -> Element<'_, Msg> {
             Container::new(
                 Column::new()
                     .spacing(8)
-                    .push(h4_bold("Something went wrong"))
+                    .push(h4_bold(localized_copy("Something went wrong")))
                     .push(
                         text(error.unwrap_or("The swap couldn't be set up."))
                             .size(P2_SIZE)
@@ -470,7 +483,7 @@ fn error_body(error: Option<&str>) -> Element<'_, Msg> {
             .style(theme::card::error),
         )
         .push(
-            button::primary(None, "Start over")
+            button::primary(None, localized_copy("Start over"))
                 .on_press(Msg::Reset)
                 .width(Length::Fixed(160.0)),
         )

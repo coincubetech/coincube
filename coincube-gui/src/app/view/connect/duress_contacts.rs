@@ -10,6 +10,8 @@
 //! Gating: Estate-only via the `duress_alerts` entitlement. Non-Estate
 //! accounts see the standard locked-feature affordance instead of the list.
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::{
     color,
     component::{button, text},
@@ -75,13 +77,13 @@ fn owner_label(state: &ConnectAccountPanel) -> String {
 /// (non-Estate) or the contacts list + explainer cards (Estate).
 pub fn section<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
     let mut col = Column::new()
-        .push(text::h4_bold("Emergency contacts").style(theme::text::primary))
+        .push(text::h4_bold(localized_copy("Emergency contacts")).style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
         .push(
-            text::p2_regular(
+            text::p2_regular(localized_copy(
                 "People we'll notify only if you activate duress mode. They get one intro \
                  message now, and nothing else unless an alert fires.",
-            )
+            ))
             .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
@@ -102,18 +104,21 @@ pub fn section<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
 fn locked_card<'a>() -> Element<'a, ConnectAccountMessage> {
     container(
         Column::new()
-            .push(text::p1_bold("Available on the Estate plan").style(theme::text::primary))
+            .push(
+                text::p1_bold(localized_copy("Available on the Estate plan"))
+                    .style(theme::text::primary),
+            )
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
             .push(
-                text::p2_regular(
+                text::p2_regular(localized_copy(
                     "Emergency contacts are part of the Estate plan. Upgrade your Connect plan \
                      to let trusted people be alerted if you ever activate duress mode.",
-                )
+                ))
                 .style(theme::text::secondary),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
             .push(
-                button::primary(None, "View plans")
+                button::primary(None, localized_copy("View plans"))
                     .width(Length::Fixed(160.0))
                     .on_press(ConnectAccountMessage::OpenPlanBilling),
             )
@@ -131,7 +136,7 @@ fn explainer_cards<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcc
 
     let alert_card = container(
         Column::new()
-            .push(text::p1_bold("What the alert says").style(theme::text::primary))
+            .push(text::p1_bold(localized_copy("What the alert says")).style(theme::text::primary))
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
             .push(
                 container(
@@ -151,10 +156,10 @@ fn explainer_cards<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcc
             )
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
             .push(
-                text::p2_regular(
+                text::p2_regular(localized_copy(
                     "It never includes your balances, addresses, or how COINCUBE works — only \
                      that you may need help.",
-                )
+                ))
                 .style(theme::text::secondary),
             )
             .padding(20)
@@ -165,15 +170,18 @@ fn explainer_cards<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcc
 
     let intro_card = container(
         Column::new()
-            .push(text::p1_bold("The one-time intro message").style(theme::text::primary))
+            .push(
+                text::p1_bold(localized_copy("The one-time intro message"))
+                    .style(theme::text::primary),
+            )
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
             .push(text::p2_regular(intro_template_preview(&owner)).style(theme::text::secondary))
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
             .push(
-                text::p2_regular(
+                text::p2_regular(localized_copy(
                     "Anyone can reply STOP at any time to opt out — we'll never message them \
                      again.",
-                )
+                ))
                 .style(theme::text::secondary),
             )
             .padding(20)
@@ -206,17 +214,21 @@ fn list_body<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
     let count = dc.count();
     let header = Row::new()
         .push(
-            text::p1_bold(format!(
+            text::p1_bold(localized_format!(
                 "Contacts ({}/{})",
-                count, MAX_DURESS_ALERT_CONTACTS
+                "Contactos ({}/{})",
+                count,
+                MAX_DURESS_ALERT_CONTACTS
             ))
             .style(theme::text::primary),
         )
         .push(iced::widget::Space::new().width(Length::Fill))
         .push(if dc.at_cap() {
-            Element::from(text::p2_regular("Maximum reached").style(theme::text::secondary))
+            Element::from(
+                text::p2_regular(localized_copy("Maximum reached")).style(theme::text::secondary),
+            )
         } else {
-            button::primary(None, "+ Add contact")
+            button::primary(None, localized_copy("+ Add contact"))
                 .on_press(msg(DuressContactsMessage::ShowAddForm))
                 .width(Length::Shrink)
                 .into()
@@ -235,19 +247,20 @@ fn list_body<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                 container(
                     Column::new()
                         .push(
-                            text::p1_bold("No emergency contacts yet").style(theme::text::primary),
+                            text::p1_bold(localized_copy("No emergency contacts yet"))
+                                .style(theme::text::primary),
                         )
                         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
                         .push(
-                            text::p2_regular(
+                            text::p2_regular(localized_copy(
                                 "Add up to 5 people who should be alerted if you activate \
                                  duress mode.",
-                            )
+                            ))
                             .style(theme::text::secondary),
                         )
                         .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
                         .push(
-                            button::primary(None, "Add a contact")
+                            button::primary(None, localized_copy("Add a contact"))
                                 .on_press(msg(DuressContactsMessage::ShowAddForm)),
                         )
                         .align_x(Alignment::Center)
@@ -322,13 +335,16 @@ fn contact_card<'a>(
             .on_press_maybe(None)
             .into()
     } else {
-        button::secondary(None, "Remove")
+        button::secondary(None, localized_copy("Remove"))
             .on_press(msg(DuressContactsMessage::Delete(id)))
             .into()
     };
 
     let actions = Row::new()
-        .push(button::secondary(None, "Edit").on_press(msg(DuressContactsMessage::EditContact(id))))
+        .push(
+            button::secondary(None, localized_copy("Edit"))
+                .on_press(msg(DuressContactsMessage::EditContact(id))),
+        )
         .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
         .push(remove_btn)
         .align_y(Alignment::Center);
@@ -382,7 +398,7 @@ fn channel_badges<'a>(c: &'a DuressAlertContact) -> Element<'a, ConnectAccountMe
         }
     }
     if !any {
-        return text::p2_regular("No channels selected")
+        return text::p2_regular(localized_copy("No channels selected"))
             .color(color::RED)
             .into();
     }
@@ -401,7 +417,7 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
 
     let back_button = iced::widget::button(
         Row::new()
-            .push(text::p1_medium("‹ Back").style(theme::text::secondary))
+            .push(text::p1_medium(localized_copy("‹ Back")).style(theme::text::secondary))
             .align_y(Alignment::Center),
     )
     .style(theme::button::transparent)
@@ -421,10 +437,10 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
 
     // Name field.
     let name_field = Column::new()
-        .push(text::p2_regular("Name").style(theme::text::secondary))
+        .push(text::p2_regular(localized_copy("Name")).style(theme::text::secondary))
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
-            TextInput::new("e.g. Jane Doe", &dc.form_name)
+            TextInput::new(localized_copy("e.g. Jane Doe"), &dc.form_name)
                 .on_input(|s| msg(DuressContactsMessage::NameChanged(s)))
                 .size(16)
                 .padding(15),
@@ -433,7 +449,10 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
 
     // Phone field + validity hint.
     let mut phone_col = Column::new()
-        .push(text::p2_regular("Phone (international format)").style(theme::text::secondary))
+        .push(
+            text::p2_regular(localized_copy("Phone (international format)"))
+                .style(theme::text::secondary),
+        )
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
             TextInput::new("+15551234567", &dc.form_phone)
@@ -446,14 +465,16 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
         phone_col = phone_col
             .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
             .push(
-                text::caption("Use international format, starting with + and country code.")
-                    .color(color::RED),
+                text::caption(localized_copy(
+                    "Use international format, starting with + and country code.",
+                ))
+                .color(color::RED),
             );
     }
 
     // Email field + validity hint.
     let mut email_col = Column::new()
-        .push(text::p2_regular("Email").style(theme::text::secondary))
+        .push(text::p2_regular(localized_copy("Email")).style(theme::text::secondary))
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
             TextInput::new("jane@example.com", &dc.form_email)
@@ -465,7 +486,9 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
     if email_present && !email_ok {
         email_col = email_col
             .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
-            .push(text::caption("That email doesn't look right.").color(color::RED));
+            .push(
+                text::caption(localized_copy("That email doesn't look right.")).color(color::RED),
+            );
     }
 
     // Channel checkboxes. SMS/WhatsApp require a phone; Email requires an
@@ -490,7 +513,10 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
     );
 
     let channels_section = Column::new()
-        .push(text::p2_regular("How should we reach them?").style(theme::text::secondary))
+        .push(
+            text::p2_regular(localized_copy("How should we reach them?"))
+                .style(theme::text::secondary),
+        )
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
         .push(sms_box)
         .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
@@ -518,9 +544,9 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
         .width(Length::Fill);
 
     let title = if editing {
-        "Edit emergency contact"
+        localized_copy("Edit emergency contact")
     } else {
-        "Add emergency contact"
+        localized_copy("Add emergency contact")
     };
 
     let mut form = Column::new()
@@ -529,10 +555,10 @@ pub fn form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
         .push(text::h4_bold(title).style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
         .push(
-            text::p2_regular(
+            text::p2_regular(localized_copy(
                 "Add a phone number, an email, or both — then pick at least one way to reach \
                  them.",
-            )
+            ))
             .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(18.0)))
@@ -580,9 +606,9 @@ fn channel_checkbox<'a>(
             .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
             .push(
                 text::caption(if label == "Email" {
-                    "add an email first"
+                    localized_copy("add an email first")
                 } else {
-                    "add a phone first"
+                    localized_copy("add a phone first")
                 })
                 .style(theme::text::secondary),
             )

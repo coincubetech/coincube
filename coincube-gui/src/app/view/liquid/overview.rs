@@ -1,4 +1,6 @@
 use coincube_core::miniscript::bitcoin::Amount;
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 
 use crate::app::wallets::{DomainPayment, DomainPaymentStatus};
 use coincube_ui::{
@@ -85,9 +87,9 @@ pub fn liquid_overview_view<'a>(
 ) -> Element<'a, LiquidOverviewMessage> {
     if !has_loaded_snapshot {
         let status = error.unwrap_or(if loading {
-            "Loading Liquid balances and activity…"
+            localized_copy("Loading Liquid balances and activity…")
         } else {
-            "Liquid balance has not loaded yet"
+            localized_copy("Liquid balance has not loaded yet")
         });
         return Column::new()
             .spacing(12)
@@ -138,12 +140,14 @@ pub fn liquid_overview_view<'a>(
     // Total balance header
     let total_col = Column::new()
         .spacing(4)
-        .push(h4_bold("Balance"))
+        .push(h4_bold(localized_copy("Balance")))
         .push(if mask_amounts {
             amount_cell::<LiquidOverviewMessage>(AmountCell::masked(), AmountTier::Card)
         } else if unvalued_usdt {
             amount_cell::<LiquidOverviewMessage>(
-                AmountCell::unavailable("Combined L-BTC and USDt valuation needs a BTC/USD quote"),
+                AmountCell::unavailable(coincube_ui::locale::copy(
+                    "Combined L-BTC and USDt valuation needs a BTC/USD quote",
+                )),
                 AmountTier::Card,
             )
         } else {
@@ -203,7 +207,7 @@ pub fn liquid_overview_view<'a>(
         .push(
             landing_button(
                 landing_control_id(cube_id, "Liquid", "send-lbtc"),
-                "Send",
+                localized_copy("Send"),
                 None,
                 LiquidOverviewMessage::FocusAction,
                 Some(LiquidOverviewMessage::SendLbtc),
@@ -214,7 +218,7 @@ pub fn liquid_overview_view<'a>(
         .push(
             landing_button(
                 landing_control_id(cube_id, "Liquid", "receive-lbtc"),
-                "Receive",
+                localized_copy("Receive"),
                 None,
                 LiquidOverviewMessage::FocusAction,
                 Some(LiquidOverviewMessage::ReceiveLbtc),
@@ -242,7 +246,7 @@ pub fn liquid_overview_view<'a>(
         .push(
             landing_button(
                 landing_control_id(cube_id, "Liquid", "send-usdt"),
-                "Send",
+                localized_copy("Send"),
                 None,
                 LiquidOverviewMessage::FocusAction,
                 Some(LiquidOverviewMessage::SendUsdt),
@@ -253,7 +257,7 @@ pub fn liquid_overview_view<'a>(
         .push(
             landing_button(
                 landing_control_id(cube_id, "Liquid", "receive-usdt"),
-                "Receive",
+                localized_copy("Receive"),
                 None,
                 LiquidOverviewMessage::FocusAction,
                 Some(LiquidOverviewMessage::ReceiveUsdt),
@@ -277,7 +281,7 @@ pub fn liquid_overview_view<'a>(
             Container::new(
                 landing_button(
                     landing_control_id(cube_id, "Liquid", "swap"),
-                    "Swap",
+                    localized_copy("Swap"),
                     Some(icon::arrow_down_up_icon()),
                     LiquidOverviewMessage::FocusAction,
                     Some(LiquidOverviewMessage::Swap),
@@ -294,7 +298,11 @@ pub fn liquid_overview_view<'a>(
 
     content = content.push(balance_section);
 
-    content = content.push(Column::new().spacing(10).push(h4_bold("Last transactions")));
+    content = content.push(
+        Column::new()
+            .spacing(10)
+            .push(h4_bold(localized_copy("Last transactions"))),
+    );
 
     if !recent_transaction.is_empty() {
         for (idx, tx) in recent_transaction.iter().enumerate() {
@@ -337,8 +345,9 @@ pub fn liquid_overview_view<'a>(
                 .then_some(tx.fiat_amount.as_ref())
                 .flatten()
                 .map(|fiat| {
-                    format!(
+                    localized_format!(
                         "{} {} · current rate",
+                        "{} {} · tasa actual",
                         fiat.to_formatted_string(),
                         fiat.currency()
                     )
@@ -378,14 +387,16 @@ pub fn liquid_overview_view<'a>(
     } else {
         content = content.push(placeholder(
             receipt_icon().size(80),
-            "No transactions yet",
-            "Your transaction history will appear here once you send or receive coins.",
+            coincube_ui::locale::copy("No transactions yet"),
+            coincube_ui::locale::copy(
+                "Your transaction history will appear here once you send or receive coins.",
+            ),
         ));
     }
 
     let view_transactions_button = landing_button(
         landing_control_id(cube_id, "Liquid", "history"),
-        "View All Transactions",
+        localized_copy("View All Transactions"),
         None,
         LiquidOverviewMessage::FocusAction,
         Some(LiquidOverviewMessage::History),
@@ -403,7 +414,7 @@ pub fn liquid_overview_view<'a>(
 
     if loading {
         content = content.push(
-            text("Refreshing Liquid balances and activity…")
+            text(localized_copy("Refreshing Liquid balances and activity…"))
                 .size(P2_SIZE)
                 .style(theme::text::secondary),
         );
@@ -412,9 +423,12 @@ pub fn liquid_overview_view<'a>(
     if let Some(err) = error {
         content = content.push(
             Container::new(
-                text(format!("Last known data · {err}"))
-                    .size(14)
-                    .color(color::RED),
+                text(localized_format!(
+                    "Last known data · {err}",
+                    "Últimos datos conocidos · {err}"
+                ))
+                .size(14)
+                .color(color::RED),
             )
             .padding(10)
             .style(theme::card::invalid)

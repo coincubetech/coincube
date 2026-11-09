@@ -1,3 +1,4 @@
+use crate::localized_format;
 use std::fmt::Display;
 
 use crate::{
@@ -20,8 +21,8 @@ pub fn warning<'a, T: 'a + Clone>(message: String, error: String) -> Container<'
     Container::new(
         Column::new()
             .spacing(4)
-            .push(text::p1_bold(message).color(color::LIGHT_BLACK))
-            .push(text::p2_regular(error).color(color::LIGHT_BLACK)),
+            .push(text::p1_bold(crate::locale::notice(message)).color(color::LIGHT_BLACK))
+            .push(text::p2_regular(crate::locale::notice(error)).color(color::LIGHT_BLACK)),
     )
     .padding(15)
     .style(theme::banner::warning)
@@ -66,6 +67,9 @@ pub fn processing_hardware_wallet_error<'a, T: 'a + Clone>(
     message: String,
     error: String,
 ) -> Container<'a, T> {
+    let message = crate::locale::notice(message);
+    let error = crate::locale::notice(error);
+    let learn_more = crate::locale::copy("Learn more");
     let message_clone = message.clone();
     Container::new(Container::new(collapse::Collapse::new(
         move || {
@@ -81,7 +85,7 @@ pub fn processing_hardware_wallet_error<'a, T: 'a + Clone>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text::p1_bold("Learn more").color(color::LIGHT_BLACK))
+                            .push(text::p1_bold(learn_more).color(color::LIGHT_BLACK))
                             .push(icon::collapse_icon().color(color::LIGHT_BLACK)),
                     ),
             )
@@ -98,7 +102,7 @@ pub fn processing_hardware_wallet_error<'a, T: 'a + Clone>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text::p1_bold("Learn more").color(color::LIGHT_BLACK))
+                            .push(text::p1_bold(learn_more).color(color::LIGHT_BLACK))
                             .push(icon::collapsed_icon().color(color::LIGHT_BLACK)),
                     ),
             )
@@ -136,22 +140,25 @@ pub fn error_card<'a, T: 'a + Clone>(
                 .spacing(10)
                 .align_y(Alignment::Center)
                 .push(icon::warning_icon().color(color::RED))
-                .push(text::p1_bold(title.into()).color(color::RED)),
+                .push(text::p1_bold(crate::locale::notice(title.into())).color(color::RED)),
         )
-        .push(text::p2_regular(guidance.into()).color(color::GREY_3));
+        .push(text::p2_regular(crate::locale::notice(guidance.into())).color(color::GREY_3));
 
     if let Some((label, message)) = action {
         col = col
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
             .push(
-                Button::new(text::p2_regular(label))
+                Button::new(text::p2_regular(crate::locale::copy(label)))
                     .style(theme::button::primary)
                     .on_press(message),
             );
     }
 
     Container::new(
-        col.push(text::caption(format!("Ref: {}", reference.into())).color(color::GREY_3)),
+        col.push(
+            text::caption(localized_format!("Ref: {}", "Ref.: {}", reference.into()))
+                .color(color::GREY_3),
+        ),
     )
     .padding(15)
     .style(theme::card::error)

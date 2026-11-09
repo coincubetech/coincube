@@ -1,3 +1,4 @@
+use crate::locale::copy as localized_copy;
 pub mod amount;
 pub mod badge;
 pub mod button;
@@ -19,6 +20,7 @@ pub mod toast;
 pub mod tooltip;
 pub mod transaction;
 
+use crate::locale::Text as CopyText;
 use bitcoin::Network;
 pub use tooltip::{tooltip, tooltip_custom};
 
@@ -26,7 +28,7 @@ use iced::Length;
 
 use crate::{
     theme,
-    widget::{Column, Container, Element, Row},
+    widget::{Column, ColumnExt, Container, Element, Row},
 };
 
 use self::text::Text;
@@ -54,9 +56,11 @@ pub fn received_celebration_page<'a, M: Clone + 'a>(
         .align_x(iced::Alignment::Center)
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .push(qd::display(
-            &QuoteDisplayProps::new(context, quote, image_handle).image_size(480),
+            &QuoteDisplayProps::new(context, quote, image_handle)
+                .illustration_slot(crate::illustration::Slot::Received)
+                .image_size(480),
         ))
-        .push(text::h3("Payment received!"))
+        .push(text::h3(CopyText::PaymentReceived.get()))
         .push(
             Row::new()
                 .spacing(5)
@@ -74,9 +78,14 @@ pub fn received_celebration_page<'a, M: Clone + 'a>(
                     ..Default::default()
                 })),
         )
+        .push_maybe(
+            crate::worldview_copy::VoiceLine::PaymentReceived
+                .get()
+                .map(|line| text::p2_regular(line).style(theme::text::secondary)),
+        )
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(
-            button::primary(None, "Back")
+            button::primary(None, CopyText::Back.get())
                 .width(Length::Fixed(150.0))
                 .on_press(on_dismiss.clone()),
         )
@@ -109,6 +118,7 @@ pub fn sent_celebration_page<'a, M: Clone + 'a>(
     quote: &'a quote_display::Quote,
     image_handle: &'a iced::widget::image::Handle,
     verb_suffix: &'a str,
+    voice: Option<&'static str>,
     on_dismiss: M,
 ) -> Element<'a, M> {
     use quote_display::{self as qd, QuoteDisplayProps};
@@ -120,9 +130,11 @@ pub fn sent_celebration_page<'a, M: Clone + 'a>(
         .align_x(iced::Alignment::Center)
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .push(qd::display(
-            &QuoteDisplayProps::new(context, quote, image_handle).image_size(480),
+            &QuoteDisplayProps::new(context, quote, image_handle)
+                .illustration_slot(crate::illustration::Slot::Sent)
+                .image_size(480),
         ))
-        .push(text::h3("Transaction complete!"))
+        .push(text::h3(CopyText::TransactionComplete.get()))
         .push(
             Row::new()
                 .spacing(5)
@@ -144,9 +156,10 @@ pub fn sent_celebration_page<'a, M: Clone + 'a>(
                         }),
                 ),
         )
+        .push_maybe(voice.map(|line| text::p2_regular(line).style(theme::text::secondary)))
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(
-            button::primary(None, "Back")
+            button::primary(None, CopyText::Back.get())
                 .width(Length::Fixed(150.0))
                 .on_press(on_dismiss.clone()),
         );
@@ -215,18 +228,18 @@ pub fn network_banner<'a, T: 'a>(network: Network) -> Container<'a, T> {
     Container::new(
         Row::new()
             .push(super::icon::warning_icon())
-            .push(text::text("THIS IS A "))
+            .push(text::text(localized_copy("THIS IS A ")))
             .push(
                 text::text(match network {
                     Network::Signet => "SIGNET WALLET",
                     Network::Testnet => "TESTNET WALLET",
                     Network::Testnet4 => "TESTNET4 WALLET",
-                    Network::Regtest => "REGTEST WALLET",
+                    Network::Regtest => localized_copy("REGTEST WALLET"),
                     _ => unreachable!(),
                 })
                 .bold(),
             )
-            .push(text::text(", COINS HAVE "))
+            .push(text::text(localized_copy(", COINS HAVE ")))
             .push(text::text("NO VALUE").bold())
             .align_y(iced::Alignment::Center),
     )

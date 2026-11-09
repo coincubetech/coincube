@@ -3,6 +3,7 @@
 //! This component owns only the source choice, descriptor text and public
 //! hardware-account reader. Callers own discovery, persistence and spending.
 
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::theme::tenshu::button::ActionKind;
 use coincube_ui::{
     component::{tenshu::ActionButton, text::*},
@@ -170,7 +171,7 @@ pub fn view<'a>(form: &'a WalletSourceForm, copy: &SourceFormCopy) -> Element<'a
     };
     let content = Column::new()
         .spacing(12)
-        .push(p1_bold("Source wallet"))
+        .push(p1_bold(localized_copy("Source wallet")))
         .push(
             Row::new()
                 .spacing(10)
@@ -184,7 +185,7 @@ pub fn view<'a>(form: &'a WalletSourceForm, copy: &SourceFormCopy) -> Element<'a
             .into()
     } else {
         content
-            .push(p1_bold("External / receive descriptor"))
+            .push(p1_bold(localized_copy("External / receive descriptor")))
             .push(
                 text_input("wpkh([fingerprint/path]xpub.../0/*)", &form.external)
                     .id("tenshu.source.receive")

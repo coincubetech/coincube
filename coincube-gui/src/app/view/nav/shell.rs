@@ -16,6 +16,7 @@ use crate::{
     },
     chain::{ChainId, ChainIdExt},
 };
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     component::tenshu::top_bar as bar,
     font,
@@ -155,15 +156,21 @@ pub fn top_bar<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
 
 pub fn balance_privacy_label(chrome: BalancePrivacyChrome) -> &'static str {
     match (chrome.busy, chrome.privacy, chrome.intent().is_some()) {
-        (true, _, _) => "Saving balance privacy…",
-        (false, BalancePrivacy::Unresolved, true) => "Balances hidden for now. Show balances",
-        (false, BalancePrivacy::Unresolved, false) => "Balances hidden until your choice loads",
-        (false, BalancePrivacy::Hidden, true) => "Show balances",
-        (false, BalancePrivacy::Hidden, false) => "Balances hidden",
-        (false, BalancePrivacy::HiddenLocally, true) => "Balances hidden now. Retry Hide",
-        (false, BalancePrivacy::HiddenLocally, false) => "Balances hidden now",
-        (false, BalancePrivacy::Shown, true) => "Hide balances",
-        (false, BalancePrivacy::Shown, false) => "Balances shown",
+        (true, _, _) => localized_copy("Saving balance privacy…"),
+        (false, BalancePrivacy::Unresolved, true) => {
+            localized_copy("Balances hidden for now. Show balances")
+        }
+        (false, BalancePrivacy::Unresolved, false) => {
+            localized_copy("Balances hidden until your choice loads")
+        }
+        (false, BalancePrivacy::Hidden, true) => localized_copy("Show balances"),
+        (false, BalancePrivacy::Hidden, false) => localized_copy("Balances hidden"),
+        (false, BalancePrivacy::HiddenLocally, true) => {
+            localized_copy("Balances hidden now. Retry Hide")
+        }
+        (false, BalancePrivacy::HiddenLocally, false) => localized_copy("Balances hidden now"),
+        (false, BalancePrivacy::Shown, true) => localized_copy("Hide balances"),
+        (false, BalancePrivacy::Shown, false) => localized_copy("Balances shown"),
     }
 }
 
@@ -261,11 +268,13 @@ fn connect_label(ctx: &NavContext<'_>) -> String {
     };
     let meaning = match ctx.connect_stream_status {
         ConnectionStatus::Inactive => return account,
-        ConnectionStatus::Connected => "live updates on",
+        ConnectionStatus::Connected => localized_copy("live updates on"),
         ConnectionStatus::Connecting => "connecting",
         ConnectionStatus::Reconnecting | ConnectionStatus::Renewing => "reconnecting",
-        ConnectionStatus::Offline => "offline: no internet connection",
-        ConnectionStatus::RenewFailed => "needs attention: couldn’t reconnect this computer",
+        ConnectionStatus::Offline => localized_copy("offline: no internet connection"),
+        ConnectionStatus::RenewFailed => {
+            localized_copy("needs attention: couldn’t reconnect this computer")
+        }
     };
     format!("{account}, {meaning}")
 }
@@ -441,7 +450,7 @@ fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
                     .push(Space::new().height(Length::Fixed(8.0)))
                     .push(page::primary(
                         CONNECT_PANEL_TRY_AGAIN_ID,
-                        "Try again",
+                        localized_copy("Try again"),
                         Some(Message::Settings(
                             crate::app::view::SettingsMessage::ReregisterConnectDevice,
                         )),
@@ -449,13 +458,13 @@ fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
             } else {
                 foot.push(panel_link(
                     CONNECT_PANEL_ACCOUNT_ID,
-                    "Connect account",
+                    coincube_ui::locale::copy("Connect account"),
                     Message::OpenConnectSwitchAccount,
                 ));
             }
             foot.push(panel_link(
                 CONNECT_PANEL_SETTINGS_ID,
-                "Connections settings",
+                coincube_ui::locale::copy("Connections settings"),
                 Message::Menu(CONNECT_CONNECTIONS_ROUTE),
             ));
         }
@@ -534,16 +543,9 @@ fn nav_row<'a>(
     nested: bool,
     disabled_reason: Option<String>,
 ) -> Element<'a, Message> {
-    let label = label.into();
-    nav_row_with_key(
-        label.clone(),
-        label,
-        icon,
-        active,
-        message,
-        nested,
-        disabled_reason,
-    )
+    let key = label.into();
+    let label = localized_copy(&key).to_owned();
+    nav_row_with_key(key, label, icon, active, message, nested, disabled_reason)
 }
 
 /// A top-level row with the Vault's alert dot after its label.
@@ -960,7 +962,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     // The scroll viewport clips drawing outside its content. Reserve more
     // than the focus ring's 4px outer extent at its first and last actions.
     let mut middle: Column<Message> = Column::new().spacing(4).padding([6, 10]);
-    middle = middle.push(section("Wallets"));
+    middle = middle.push(section(localized_copy("Wallets")));
     // Settings scoped to a wallet highlights Settings, not the wallet.
     let settings_active = is_settings(menu);
     if !ctx.network.is_blake2b() {

@@ -1621,6 +1621,7 @@ impl Modal for BroadcastModal {
         modal::Modal::new(
             content,
             view::vault::psbt::broadcast_action_with_identity_review(
+                self.wallet.chain,
                 &self.conflicting_txids,
                 self.broadcast,
                 self.broadcasting,
@@ -3087,7 +3088,13 @@ impl Modal for SignModal {
                     .or_else(|| self.error.as_ref().map(crate::user_error::report));
                 modal::Modal::new(
                     content,
-                    view::vault::psbt::sign_action(self.action_scope, paths, notices, error),
+                    view::vault::psbt::sign_action(
+                        self.wallet.chain,
+                        self.action_scope,
+                        paths,
+                        notices,
+                        error,
+                    ),
                 )
                 .on_blur(Some(view::Message::Spend(view::SpendTxMessage::Cancel)))
                 .into()

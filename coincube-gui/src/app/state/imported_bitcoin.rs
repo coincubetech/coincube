@@ -3472,7 +3472,7 @@ impl ImportedBitcoinPanel {
             content = content
                 .push(h3("Review Bitcoin wallet"))
                 .push(p1_bold("Wallet details"))
-                .push(p1_regular(format!("Bitcoin mainnet · {script} · {threshold}")))
+                .push(p1_regular(format!("{} · {script} · {threshold}", crate::chain::canonical_network_name(wallet.descriptor.chain()))))
                 .push(p1_regular(format!("Signer fingerprints: {}", if fingerprints.is_empty() { "Not provided" } else { &fingerprints })))
                 .push_maybe(self.keys.as_ref().filter(|keys| !keys.slots.is_empty()).map(|keys| p1_regular(keys.summary())))
                 .push(p1_bold("First receive address"))
@@ -3813,6 +3813,9 @@ impl ImportedBitcoinPanel {
         if let Some(draft) = &self.draft {
             content = content
                 .push(p1_bold("Review transaction"))
+                .push(p1_regular(crate::chain::canonical_network_name(
+                    self.chain(),
+                )))
                 .push(caption(format!(
                     "Draft ID: {}",
                     draft.psbt.unsigned_tx.compute_txid()
@@ -5176,7 +5179,7 @@ mod tests {
             &shown,
             &[
                 "Import or restore",
-                "Bitcoin",
+                "Bitcoin SHA-256 · Mainnet",
                 "Overview",
                 "Import Bitcoin wallet",
                 "Cube",

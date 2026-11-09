@@ -7,6 +7,7 @@
 //! picker, diagnostics). [`SparkPlaceholderView`] is kept around
 //! as a generic "coming soon" slot for future panels.
 
+use coincube_ui::locale::copy as localized_copy;
 pub mod last_tx;
 pub mod overview;
 pub mod receive;
@@ -146,7 +147,7 @@ impl<'a> SparkBalances<'a> {
         };
         let mut column = Column::new()
             .spacing(10)
-            .push(caption("Available in Spark").size(13));
+            .push(caption(localized_copy("Available in Spark")).size(13));
         for (name, figure, unit) in rows {
             column = column.push(row(name.to_owned(), figure, unit));
         }

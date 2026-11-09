@@ -1,3 +1,4 @@
+use coincube_ui::localized_format;
 pub mod descriptor;
 pub mod import_descriptor;
 
@@ -409,9 +410,9 @@ impl Step for Final {
         // with block cadence, so the user should know it's a best-effort
         // figure rather than an exact day count.
         let caption = self.connect_vault_outcome.as_ref().map(|out| {
-            format!(
+            localized_format!(
                 "Connect vault attached — approx. {}-day timelock ({} signer{}). \
-                 The timelock is approximate; on-chain block time drives the actual expiry.",
+                 The timelock is approximate; on-chain block time drives the actual expiry.", "Vault de Connect vinculado · bloqueo de unos {} días ({} firmante{}). El plazo es aproximado. El tiempo de los bloques determina el vencimiento real.",
                 out.timelock_days,
                 out.members_added,
                 if out.members_added == 1 { "" } else { "s" }

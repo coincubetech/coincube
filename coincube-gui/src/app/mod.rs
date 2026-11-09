@@ -26,6 +26,7 @@ pub mod view;
 pub mod wallet;
 pub mod wallets;
 
+use coincube_ui::locale::Text as CopyText;
 use std::collections::{HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -11498,7 +11499,7 @@ impl App {
             displayed_amount,
             &self.received_celebration_quote,
             &self.received_celebration_image,
-            "has arrived.",
+            CopyText::HasArrived.get(),
             view::Message::DismissReceivedCelebration,
         )
     }

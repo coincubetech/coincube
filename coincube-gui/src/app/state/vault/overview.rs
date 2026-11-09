@@ -215,6 +215,7 @@ impl VaultOverview {
             &self.expiring_coins,
             recent_activity,
             &cache.cube_id,
+            cache.chain(),
             &self.sync_status,
             self.show_rescan_prompt,
             self.awaiting_rescan_date,

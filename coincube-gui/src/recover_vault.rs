@@ -19,6 +19,8 @@
 //! ([`crate::services::inheritance::heir::decrypt_envelopes`] → `DecryptedKit`
 //! → the existing Recovery-Kit restore). Rows are labelled by escrow tier.
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::widget::{scrollable, Space};
 use iced::{Alignment, Length, Task};
 
@@ -88,8 +90,8 @@ pub fn status_copy(v: &RecoverableVault) -> Option<String> {
             Some("Recovery is open, but this vault isn't set up for you to recover.".to_string())
         }
         RowKind::NotYetOpen => Some(match v.expected_open_at {
-            Some(at) => format!(
-                "Recovery isn't open yet — expected around {}. We'll email you.",
+            Some(at) => localized_format!(
+                "Recovery isn't open yet — expected around {}. We'll email you.", "La recuperación no está abierta todavía — se espera alrededor de {}. Te enviaremos un correo electrónico.",
                 at.format("%-d %b %Y")
             ),
             None => "Recovery isn't open yet — we'll email you when it is.".to_string(),
@@ -104,28 +106,28 @@ pub fn status_copy(v: &RecoverableVault) -> Option<String> {
 /// or not-escrowed), fall back to a neutral label.
 fn tier_label(v: &RecoverableVault) -> &'static str {
     if v.is_full_cube() {
-        "Full Cube"
+        localized_copy("Full Cube")
     } else if v.has_descriptor_tier() {
-        "Vault only"
+        localized_copy("Vault only")
     } else {
-        "Assisted recovery"
+        localized_copy("Assisted recovery")
     }
 }
 
 /// The "Recover" button label for an actionable row — honest about scope.
 fn recover_button_label(v: &RecoverableVault) -> &'static str {
     if v.is_full_cube() {
-        "Recover full Cube"
+        localized_copy("Recover full Cube")
     } else {
-        "Recover Vault"
+        localized_copy("Recover Vault")
     }
 }
 
 /// Short, display-only label for a vault's recovery-window state.
 fn state_label(state: RecoveryState) -> &'static str {
     match state {
-        RecoveryState::Open => "Recovery open",
-        RecoveryState::Approaching => "Approaching",
+        RecoveryState::Open => localized_copy("Recovery open"),
+        RecoveryState::Approaching => localized_copy("Approaching"),
     }
 }
 
@@ -324,13 +326,13 @@ pub fn view(panel: &RecoverVaultPanel) -> Element<'_, RecoverVaultMessage> {
     let header = Column::new()
         .spacing(8)
         .push(caption("IMPORT OR RESTORE · KEYHOLDER RECOVERY").style(theme::text::secondary))
-        .push(h4_bold("Recover a Vault"))
+        .push(h4_bold(localized_copy("Recover a Vault")))
         .push(
-            p2_regular(
+            p2_regular(localized_copy(
                 "Vaults you're a keyholder for appear here. When a vault's \
                  recovery window opens, you can recover it with your Keychain — \
                  no password needed.",
-            )
+            ))
             .style(theme::text::secondary),
         );
 
@@ -345,12 +347,12 @@ pub fn view(panel: &RecoverVaultPanel) -> Element<'_, RecoverVaultMessage> {
                 .center_x(Length::Fill)
                 .into()
         }
-        ListState::Loading(_) => {
-            Container::new(p1_regular("Loading recoverable vaults…").style(theme::text::secondary))
-                .padding(20)
-                .center_x(Length::Fill)
-                .into()
-        }
+        ListState::Loading(_) => Container::new(
+            p1_regular(localized_copy("Loading recoverable vaults…")).style(theme::text::secondary),
+        )
+        .padding(20)
+        .center_x(Length::Fill)
+        .into(),
         ListState::Error(msg) => {
             Container::new(p1_regular(msg.clone()).style(theme::text::secondary))
                 .padding(20)
@@ -358,8 +360,10 @@ pub fn view(panel: &RecoverVaultPanel) -> Element<'_, RecoverVaultMessage> {
                 .into()
         }
         ListState::Loaded(rows) if rows.is_empty() => Container::new(
-            p1_regular("No vaults are available for you to recover right now.")
-                .style(theme::text::secondary),
+            p1_regular(localized_copy(
+                "No vaults are available for you to recover right now.",
+            ))
+            .style(theme::text::secondary),
         )
         .padding(20)
         .center_x(Length::Fill)
@@ -435,10 +439,13 @@ fn vault_row<'a>(
 /// flight or after it resolves.
 fn recover_status_view(status: &RecoverStatus) -> Element<'_, RecoverVaultMessage> {
     match status {
-        RecoverStatus::Fetching => p2_regular("Preparing recovery…")
+        RecoverStatus::Fetching => p2_regular(localized_copy("Preparing recovery…"))
             .style(theme::text::secondary)
             .into(),
-        RecoverStatus::Ready => p2_bold("Recovery data received — approve on your Keychain").into(),
+        RecoverStatus::Ready => p2_bold(localized_copy(
+            "Recovery data received — approve on your Keychain",
+        ))
+        .into(),
         RecoverStatus::Failed(copy) => p2_regular(copy.clone())
             .style(theme::text::secondary)
             .into(),

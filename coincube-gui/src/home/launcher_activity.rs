@@ -9,6 +9,7 @@
 //! Nothing here moves at rest: a refresh is a message, and the one motion is
 //! a short slide when a new block arrives, skipped under reduced motion.
 
+use coincube_ui::locale::copy as localized_copy;
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
@@ -63,7 +64,7 @@ pub enum Via {
 impl Via {
     pub(super) fn label(self) -> &'static str {
         match self {
-            Via::LocalNode => "Local node",
+            Via::LocalNode => localized_copy("Local node"),
             Via::Connect => "COINCUBE | Connect",
             Via::MempoolSpace => "mempool.space",
         }
@@ -115,14 +116,18 @@ pub enum Unavailable {
 impl Unavailable {
     pub(super) fn label(self) -> &'static str {
         match self {
-            Unavailable::LocalNodeNotRunning => "Local node didn't answer",
-            Unavailable::Unreachable(Via::MempoolSpace) => "mempool.space is unreachable",
-            Unavailable::Unreachable(_) => "COINCUBE | Connect is unreachable",
-            Unavailable::NeitherAnswered(Via::MempoolSpace) => {
-                "Local node and mempool.space didn't answer"
+            Unavailable::LocalNodeNotRunning => localized_copy("Local node didn't answer"),
+            Unavailable::Unreachable(Via::MempoolSpace) => {
+                localized_copy("mempool.space is unreachable")
             }
-            Unavailable::NeitherAnswered(_) => "Local node and Connect didn't answer",
-            Unavailable::NoSource => "No public explorer for this network",
+            Unavailable::Unreachable(_) => localized_copy("COINCUBE | Connect is unreachable"),
+            Unavailable::NeitherAnswered(Via::MempoolSpace) => {
+                localized_copy("Local node and mempool.space didn't answer")
+            }
+            Unavailable::NeitherAnswered(_) => {
+                localized_copy("Local node and Connect didn't answer")
+            }
+            Unavailable::NoSource => localized_copy("No public explorer for this network"),
         }
     }
 }

@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::widget::action::Action;
 use coincube_ui::{
     component::{card, form, text::*},
@@ -93,13 +94,13 @@ fn book_columns<'a>(
 
 pub fn order_table_header<'a>() -> Element<'a, view::Message> {
     container(book_columns(
-        caption("Side").style(theme::text::secondary),
-        caption("Amount").style(theme::text::secondary),
-        caption("Payment Method")
+        caption(localized_copy("Side")).style(theme::text::secondary),
+        caption(localized_copy("Amount")).style(theme::text::secondary),
+        caption(localized_copy("Payment Method"))
             .wrapping(Wrapping::None)
             .style(theme::text::secondary),
-        caption("Market Price").style(theme::text::secondary),
-        caption("Creator Reputation").style(theme::text::secondary),
+        caption(localized_copy("Market Price")).style(theme::text::secondary),
+        caption(localized_copy("Creator Reputation")).style(theme::text::secondary),
         caption(""),
     ))
     .padding([8, 12])
@@ -142,8 +143,8 @@ fn book_reputation(order: &P2POrder) -> String {
 
 fn book_side_label(order: &P2POrder) -> &'static str {
     match (&order.order_type, order.is_mine) {
-        (OrderType::Buy, true) => "YOU ARE BUYING",
-        (OrderType::Sell, true) => "YOU ARE SELLING",
+        (OrderType::Buy, true) => localized_copy("YOU ARE BUYING"),
+        (OrderType::Sell, true) => localized_copy("YOU ARE SELLING"),
         (OrderType::Sell, false) => "BUYING",
         (OrderType::Buy, false) => "SELLING",
     }
@@ -295,13 +296,13 @@ pub fn order_detail<'a>(
 
     let heading = if order.is_mine {
         match order.order_type {
-            OrderType::Buy => "You are buying",
-            OrderType::Sell => "You are selling",
+            OrderType::Buy => localized_copy("You are buying"),
+            OrderType::Sell => localized_copy("You are selling"),
         }
     } else {
         match order.order_type {
-            OrderType::Buy => "Someone is buying",
-            OrderType::Sell => "Someone is selling",
+            OrderType::Buy => localized_copy("Someone is buying"),
+            OrderType::Sell => localized_copy("Someone is selling"),
         }
     };
 

@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 mod message;
 
 pub mod activity;
@@ -478,6 +479,20 @@ fn dashboard_layout<'a, T: Into<Element<'a, Message>>>(
     )
 }
 
+/// Iced invokes responsive builders during layout, after the root view has
+/// returned. Carry the window's presentation preferences into that build.
+pub(crate) fn responsive<'a, M: 'a>(
+    build: impl Fn(iced::Size) -> Element<'a, M> + 'a,
+) -> iced::widget::Responsive<'a, M, theme::Theme, iced::Renderer> {
+    let language = coincube_ui::locale::language();
+    let mode = coincube_ui::worldview_copy::mode();
+    iced::widget::responsive(move |size| {
+        coincube_ui::locale::render_in(language, || {
+            coincube_ui::worldview_copy::render_in(mode, || build(size))
+        })
+    })
+}
+
 const WALLET_PAGE_SCROLL_ID: &str = "tenshu.wallet.page.scroll";
 
 /// A reading page with Activity's detail pane (`.det`) for a selected row:
@@ -492,7 +507,7 @@ pub fn dashboard_with_detail<'a>(
     content: impl Fn() -> Element<'a, Message> + 'a,
     detail: impl Fn() -> Option<Element<'a, Message>> + 'a,
 ) -> Element<'a, Message> {
-    let body = iced::widget::responsive(move |size: iced::Size| {
+    let body = responsive(move |size: iced::Size| {
         let page_body = Column::new()
             .push(head_slot(Some(head())))
             .push(
@@ -638,7 +653,10 @@ pub fn modal<'a, T: Into<Element<'a, Message>>, F: Into<Element<'a, Message>>>(
                         Column::new().width(Length::Fill)
                     })
                     .align_y(iced::Alignment::Center)
-                    .push(button::secondary(Some(cross_icon()), "Close").on_press(Message::Close)),
+                    .push(
+                        button::secondary(Some(cross_icon()), localized_copy("Close"))
+                            .on_press(Message::Close),
+                    ),
             )
             .padding(10)
             .style(theme::container::background),
@@ -705,7 +723,7 @@ pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
                     Column::new()
                         .push(text(reason).bold())
                         .push(
-                            text("Your other wallets are unaffected.")
+                            text(localized_copy("Your other wallets are unaffected."))
                                 .size(P2_SIZE)
                                 .style(theme::text::secondary),
                         )
@@ -713,7 +731,7 @@ pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
                             button::secondary_action(
                                 liquid_account_overview_id(),
                                 None,
-                                "Back to Overview",
+                                coincube_ui::locale::copy("Back to Overview"),
                                 Message::FocusAction,
                             )
                             .on_press(overview.clone()),
@@ -729,7 +747,7 @@ pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
                 button::secondary_action(
                     liquid_account_back_id(),
                     Some(coincube_ui::icon::arrow_back()),
-                    "Overview",
+                    coincube_ui::locale::copy("Overview"),
                     Message::FocusAction,
                 )
                 .style(theme::button::transparent)
@@ -753,7 +771,7 @@ pub fn feature_unavailable_panel(reason: String) -> Element<'static, Message> {
                 .style(theme::text::secondary),
         )
         .push(
-            text("Not available on this network")
+            text(localized_copy("Not available on this network"))
                 .style(theme::text::secondary)
                 .bold(),
         )
@@ -848,7 +866,7 @@ pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
         };
 
         let inner = iced::widget::row![
-            container(text::p1_bold(content).color(text_color))
+            container(text::p1_bold(coincube_ui::locale::notice(content)).color(text_color))
                 .width(600)
                 .height(WIDGET_HEIGHT)
                 .padding(15)
@@ -1422,6 +1440,29 @@ mod page_head_tests {
                 menu
             );
         }
+    }
+
+    #[test]
+    fn spanish_dashboard_detail_survives_deferred_layout() {
+        use coincube_ui::locale::{language, render_in, Language, Text};
+        let renderer = renderer();
+        let cache = Cache::default();
+        let menu = Menu::Vault(VaultSubMenu::Overview);
+        let mut element = render_in(Language::Spanish, || {
+            super::dashboard_with_detail(
+                &menu,
+                &cache,
+                || vault_page_head(&cache, "Vault"),
+                || iced::widget::text(Text::Review.get()).into(),
+                || Some(iced::widget::text(Text::TransactionReplacement.get()).into()),
+            )
+        });
+        assert_eq!(language(), Language::English);
+        let mut tree = Tree::new(element.as_widget());
+        let (_, probe) = frame(&mut tree, &renderer, &mut element);
+        probe.text("Revisión");
+        probe.text("Reemplazo de transacción");
+        assert_eq!(language(), Language::English);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 mod claim;
 pub(crate) mod connect_vault;
 mod context;
@@ -157,9 +158,10 @@ pub(crate) fn connect_esplora_config<C: Into<crate::chain::ChainId>>(
 }
 
 use coincube_core::miniscript::bitcoin::{self, Network};
+use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     component::network_banner,
-    widget::{Column, Element},
+    widget::{Column, ColumnExt, Element},
 };
 use coincubed::config::EsploraConfig;
 use coincubed::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth, Config};
@@ -313,8 +315,8 @@ impl RestorePath {
 
     pub(crate) fn title(self) -> &'static str {
         match self {
-            Self::Kit => "Restore from Cube Recovery Kit",
-            Self::Phone => "Recover with phone",
+            Self::Kit => localized_copy("Restore from Cube Recovery Kit"),
+            Self::Phone => localized_copy("Recover with phone"),
         }
     }
 
@@ -332,10 +334,10 @@ impl RestorePath {
         let label = match stage {
             Some(RestoreStage::SignIn) => "Cube",
             Some(RestoreStage::Cube) => "Cube",
-            Some(RestoreStage::Password) => "Password",
-            Some(RestoreStage::Approve) => "Approve",
+            Some(RestoreStage::Password) => localized_copy("Password"),
+            Some(RestoreStage::Approve) => localized_copy("Approve"),
             Some(RestoreStage::Pin) => "PIN",
-            None => "Done",
+            None => localized_copy("Done"),
         };
         let steps = self.steps();
         steps
@@ -368,14 +370,14 @@ impl VaultStage {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Vault => "Vault",
-            Self::Policy => "Policy",
-            Self::Keys => "Keys",
-            Self::Backup => "Backup",
-            Self::Register => "Register",
+            Self::Policy => localized_copy("Policy"),
+            Self::Keys => localized_copy("Keys"),
+            Self::Backup => localized_copy("Backup"),
+            Self::Register => localized_copy("Register"),
             Self::Connect => "Connect",
             Self::Node => "Node",
-            Self::Name => "Name",
-            Self::Done => "Done",
+            Self::Name => localized_copy("Name"),
+            Self::Done => localized_copy("Done"),
         }
     }
 
@@ -1599,6 +1601,13 @@ impl Installer {
             .width(Length::Fill)
             .max_width(960)
             .push(h2(CREATE_VAULT_TITLE))
+            .push_maybe(
+                coincube_ui::worldview_copy::VoiceLine::CreateVault
+                    .get()
+                    .map(|line| {
+                        coincube_ui::component::text::p2_regular(line).style(theme::text::secondary)
+                    }),
+            )
             .push(restore_frame::stepper(&steps, active))
             .push(content);
         Container::new(iced::widget::scrollable(
@@ -1697,14 +1706,25 @@ impl Installer {
             coincube_ui::widget::Row::new()
                 .push(iced::widget::Space::new().width(Length::Fill))
                 .push(
-                    coincube_ui::component::button::primary(None, "Open Cube")
+                    coincube_ui::component::button::primary(None, CopyText::OpenCube.get())
                         .width(Length::Shrink)
                         .on_press(Message::OpenRestoredCube),
                 )
                 .into()
         });
         let region = restore_frame::region(
-            Some(restore_frame::step_rail(path.steps(), active)),
+            Some(restore_frame::step_rail(
+                match (coincube_ui::locale::language(), path) {
+                    (coincube_ui::locale::Language::Spanish, RestorePath::Kit) => {
+                        &["Cube", "Contraseña", "PIN", "Listo"]
+                    }
+                    (coincube_ui::locale::Language::Spanish, RestorePath::Phone) => {
+                        &["Cube", "Aprobar", "PIN", "Listo"]
+                    }
+                    _ => path.steps(),
+                },
+                active,
+            )),
             body,
             footer,
         );
@@ -4214,7 +4234,7 @@ mod restore_frame_tests {
         let shown = rendered_labels(kit.view()).await;
         for label in [
             "Import or restore",
-            "Bitcoin",
+            "Bitcoin SHA-256 · Mainnet",
             "Recovery Kit",
             "Recover with phone",
             "Restore from Cube Recovery Kit",

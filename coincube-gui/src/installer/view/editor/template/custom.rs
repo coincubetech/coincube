@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::{
     widget::{tooltip, Container},
     Alignment, Length,
@@ -83,7 +85,7 @@ pub fn custom_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapse_icon()),
                     )
                     .style(theme::button::transparent)
@@ -93,7 +95,7 @@ pub fn custom_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapsed_icon()),
                     )
                     .style(theme::button::transparent)
@@ -145,7 +147,11 @@ pub fn custom_template<'a>(
                     col.push(
                         path(
                             color::ORANGE,
-                            Some(format!("Recovery option #{}:", i + 1)),
+                            Some(localized_format!(
+                                "Recovery option #{}:",
+                                "Opción de recuperación #{}:",
+                                i + 1
+                            )),
                             p.sequence,
                             p.warning,
                             p.threshold,
@@ -194,11 +200,14 @@ pub fn custom_template<'a>(
             .push(
                 Row::new()
                     .push(
-                        button::secondary(Some(icon::plus_icon()), "Add recovery option")
-                            .width(Length::Fixed(210.0))
-                            .on_press(Message::DefineDescriptor(
-                                message::DefineDescriptor::AddRecoveryPath,
-                            )),
+                        button::secondary(
+                            Some(icon::plus_icon()),
+                            localized_copy("Add recovery option"),
+                        )
+                        .width(Length::Fixed(210.0))
+                        .on_press(Message::DefineDescriptor(
+                            message::DefineDescriptor::AddRecoveryPath,
+                        )),
                     )
                     .push(
                         (ENABLE_SAFETY_NET_KEYS && safety_net_path.is_none()).then_some(
@@ -269,12 +278,12 @@ pub fn custom_template<'a>(
             .spacing(12)
             .align_y(Alignment::Center)
             .push(
-                button::secondary(None, "Clear All")
+                button::secondary(None, localized_copy("Clear All"))
                     .width(Length::Shrink)
                     .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
             )
             .push(
-                button::primary(None, "Continue")
+                button::primary(None, localized_copy("Continue"))
                     .width(Length::Shrink)
                     .on_press_maybe(if valid { Some(Message::Next) } else { None }),
             )

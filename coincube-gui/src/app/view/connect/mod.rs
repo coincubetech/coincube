@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 mod contacts;
 pub mod cube_members;
 pub mod duress_contacts;
@@ -52,17 +54,17 @@ use crate::app::view::Message as ViewMessage;
 pub fn connect_panel<'a>(state: &'a ConnectPanel) -> Element<'a, ViewMessage> {
     let acct = &state.account;
     if acct.requires_authenticated_reopen() {
-        return text::p1_regular("Connect authorization ended. Close and reopen this Cube through authenticated Connect startup to reconnect.").into();
+        return text::p1_regular(localized_copy("Connect authorization ended. Close and reopen this Cube through authenticated Connect startup to reconnect.")).into();
     }
 
     let header = Row::new()
         .push(coincube_wordmark::<ViewMessage>(20.0))
-        .push(text::h5_regular(" | CONNECT").color(color::GREY_3))
+        .push(text::h5_regular(localized_copy(" | CONNECT")).color(color::GREY_3))
         .align_y(Alignment::Center);
 
     let body: Element<ViewMessage> = match &acct.step {
         ConnectFlowStep::CheckingSession => Column::new()
-            .push(text::p1_regular("Loading…").color(color::GREY_3))
+            .push(text::p1_regular(localized_copy("Loading…")).color(color::GREY_3))
             .align_x(Alignment::Center)
             .into(),
 
@@ -138,11 +140,11 @@ pub fn connect_account_panel<'a>(
     acct: &'a ConnectAccountPanel,
 ) -> Element<'a, ConnectAccountMessage> {
     if acct.requires_authenticated_reopen() {
-        return text::p1_regular("Connect authorization ended. Close and reopen this Cube through authenticated Connect startup to reconnect.").into();
+        return text::p1_regular(localized_copy("Connect authorization ended. Close and reopen this Cube through authenticated Connect startup to reconnect.")).into();
     }
     let header = Row::new()
         .push(coincube_wordmark::<ConnectAccountMessage>(20.0))
-        .push(text::h5_regular(" | CONNECT").color(color::GREY_3))
+        .push(text::h5_regular(localized_copy(" | CONNECT")).color(color::GREY_3))
         .align_y(Alignment::Center);
 
     let body = connect_account_body(acct);
@@ -263,7 +265,7 @@ pub fn connect_sheet<'a>(
         .or(unverified.map(|u| u.email.as_str()));
     let mut heading = Row::new()
         .push(
-            iced::widget::text(title)
+            iced::widget::text(localized_copy(title))
                 .size(24)
                 .font(coincube_ui::font::SEMIBOLD)
                 .style(theme::tenshu::text::ink),
@@ -282,7 +284,7 @@ pub fn connect_sheet<'a>(
                 centred(
                     Row::new()
                         .push(cross_icon().size(14).style(theme::tenshu::text::ink))
-                        .push(tenshu_text::label("Close"))
+                        .push(tenshu_text::label(localized_copy("Close")))
                         .spacing(6)
                         .align_y(Alignment::Center),
                 ),
@@ -303,7 +305,7 @@ pub fn connect_sheet<'a>(
     } else if acct.is_checking_session() {
         Column::new()
             .push(sheet_title(section_label(active_section)))
-            .push(lead("Loading your Connect account…"))
+            .push(lead(localized_copy("Loading your Connect account…")))
             .spacing(4)
             .into()
     } else if signed_in {
@@ -397,7 +399,7 @@ pub fn connect_sheet<'a>(
             .push(iced::widget::Space::new().height(Length::Fill))
             .push(
                 container(tenshu_text::caption(
-                    "Account-wide. Each Cube's own service connection stays in that Cube's Settings › Connections.",
+                    localized_copy("Account-wide. Each Cube's own service connection stays in that Cube's Settings › Connections."),
                 ))
                 .padding([0, 12]),
             );
@@ -480,12 +482,12 @@ pub fn connect_sheet<'a>(
 
 fn section_label(section: ConnectSheetSection) -> &'static str {
     match section {
-        ConnectSheetSection::Account => "Account",
-        ConnectSheetSection::PlanBilling => "Plan & billing",
-        ConnectSheetSection::Contacts => "Contacts",
-        ConnectSheetSection::DevicesSecurity => "Devices & security",
-        ConnectSheetSection::Duress => "Duress mode",
-        ConnectSheetSection::RecoveryServices => "Recovery services",
+        ConnectSheetSection::Account => localized_copy("Account"),
+        ConnectSheetSection::PlanBilling => localized_copy("Plan & billing"),
+        ConnectSheetSection::Contacts => localized_copy("Contacts"),
+        ConnectSheetSection::DevicesSecurity => localized_copy("Devices & security"),
+        ConnectSheetSection::Duress => localized_copy("Duress mode"),
+        ConnectSheetSection::RecoveryServices => localized_copy("Recovery services"),
     }
 }
 
@@ -734,7 +736,7 @@ fn unverified_account_ux<'a>(
         ),
     };
     Column::new()
-        .push(sheet_title("Account"))
+        .push(sheet_title(localized_copy("Account")))
         .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
         .push(sheet_notice(false, title, detail.to_owned(), None))
         .width(Length::Fill)
@@ -855,7 +857,7 @@ fn sheet_account_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
         ..Default::default()
     });
     let column = Column::new()
-        .push(sheet_title("Account"))
+        .push(sheet_title(localized_copy("Account")))
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .push(
             Row::new()
@@ -863,7 +865,7 @@ fn sheet_account_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
                 .push(
                     Column::new()
                         .push(tenshu_text::section(email).width(Length::Fill))
-                        .push(lead("Signed in on this device"))
+                        .push(lead(localized_copy("Signed in on this device")))
                         .width(Length::Fill),
                 )
                 .spacing(16)
@@ -873,11 +875,11 @@ fn sheet_account_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
         .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
         .push(ruled_list([key_value_row(
             "Sign-in method",
-            tenshu_text::body("Email · one-time code").into(),
+            tenshu_text::body(localized_copy("Email · one-time code")).into(),
         )]));
     let mut column = column
         .push(iced::widget::Space::new().height(Length::Fixed(32.0)))
-        .push(group_title("What Connect provides"))
+        .push(group_title(localized_copy("What Connect provides")))
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
         .push(connect_benefits(false))
         .push(iced::widget::Space::new().height(Length::Fixed(32.0)));
@@ -886,7 +888,10 @@ fn sheet_account_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
         column = column.push(
             container(
                 Column::new()
-                    .push(group_title(format!("Sign out {email} on this device?")))
+                    .push(group_title(localized_format!(
+                        "Sign out {email} on this device?",
+                        "¿Señalar {email} en este dispositivo?"
+                    )))
                     .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
                     .push(tenshu_text::body(consequence).size(13))
                     .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
@@ -923,7 +928,10 @@ fn signed_out_section_ux<'a>(section: ConnectSheetSection) -> Element<'a, Connec
     Column::new()
         .push(sheet_title(section_label(section)))
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-        .push(tenshu_text::body("Sign in to see this").style(theme::tenshu::text::muted))
+        .push(
+            tenshu_text::body(localized_copy("Sign in to see this"))
+                .style(theme::tenshu::text::muted),
+        )
         .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
         .push(sheet_action(
             "tenshu.connect.gate.sign-in",
@@ -940,7 +948,7 @@ fn signed_out_section_ux<'a>(section: ConnectSheetSection) -> Element<'a, Connec
 fn connect_account_body<'a>(acct: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
     let body: Element<ConnectAccountMessage> = match &acct.step {
         ConnectFlowStep::CheckingSession => Column::new()
-            .push(text::p1_regular("Loading…").color(color::GREY_3))
+            .push(text::p1_regular(localized_copy("Loading…")).color(color::GREY_3))
             .align_x(Alignment::Center)
             .into(),
         ConnectFlowStep::Login { email, loading } => login_ux(email, *loading),
@@ -1146,7 +1154,7 @@ fn login_ux<'a>(email: &'a str, loading: bool) -> Element<'a, ConnectAccountMess
 
     let submit: Element<ConnectAccountMessage> = if loading {
         iced::widget::button(
-            container(text::p1_regular("Signing in…").color(color::GREY_3))
+            container(text::p1_regular(localized_copy("Signing in…")).color(color::GREY_3))
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
         )
@@ -1155,29 +1163,33 @@ fn login_ux<'a>(email: &'a str, loading: bool) -> Element<'a, ConnectAccountMess
         .style(theme::button::primary)
         .into()
     } else {
-        button::primary(None, "Continue")
+        button::primary(None, localized_copy("Continue"))
             .on_press_maybe(valid.then_some(ConnectAccountMessage::SubmitLogin))
             .width(Length::Fill)
             .into()
     };
 
     Column::new()
-        .push(text::h3("Sign in to COINCUBE").style(theme::text::primary))
+        .push(text::h3(localized_copy("Sign in to COINCUBE")).style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(
-            text::p1_regular("Sign in to access your COINCUBE | Connect features:")
-                .style(theme::text::secondary),
+            text::p1_regular(localized_copy(
+                "Sign in to access your COINCUBE | Connect features:",
+            ))
+            .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
         .push(connect_benefits(true))
         .push(iced::widget::Space::new().height(Length::Fixed(18.0)))
         .push(
-            text::p2_regular("Enter your email address to receive a verification code.")
-                .style(theme::text::secondary),
+            text::p2_regular(localized_copy(
+                "Enter your email address to receive a verification code.",
+            ))
+            .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
         .push(
-            text::p2_medium("Email")
+            text::p2_medium(localized_copy("Email"))
                 .style(theme::text::primary)
                 .width(Length::Fill)
                 .align_x(Alignment::Start),
@@ -1196,8 +1208,11 @@ fn login_ux<'a>(email: &'a str, loading: bool) -> Element<'a, ConnectAccountMess
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(
             iced::widget::button(
-                container(text::p2_regular("Don't have an account? Sign up").color(color::ORANGE))
-                    .padding(5),
+                container(
+                    text::p2_regular(localized_copy("Don't have an account? Sign up"))
+                        .color(color::ORANGE),
+                )
+                .padding(5),
             )
             .style(theme::button::link)
             .on_press(ConnectAccountMessage::CreateAccount),
@@ -1218,7 +1233,7 @@ fn register_ux<'a>(
 
     let submit: Element<ConnectAccountMessage> = if loading {
         iced::widget::button(
-            container(text::p1_regular("Signing up…").color(color::GREY_3))
+            container(text::p1_regular(localized_copy("Signing up…")).color(color::GREY_3))
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
         )
@@ -1227,7 +1242,7 @@ fn register_ux<'a>(
         .style(theme::button::primary)
         .into()
     } else {
-        button::primary(None, "Continue")
+        button::primary(None, localized_copy("Continue"))
             .on_press_maybe(valid.then_some(ConnectAccountMessage::SubmitRegistration))
             .width(Length::Fill)
             .into()
@@ -1235,21 +1250,23 @@ fn register_ux<'a>(
 
     Column::new()
         .push(
-            button::secondary(Some(previous_icon()), "Back")
+            button::secondary(Some(previous_icon()), localized_copy("Back"))
                 .width(Length::Fixed(150.0))
                 .on_press_maybe((!loading).then_some(ConnectAccountMessage::LogOut)),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-        .push(text::h3("Create an Account").style(theme::text::primary))
+        .push(text::h3(localized_copy("Create an Account")).style(theme::text::primary))
         .push(
-            text::p1_regular("Create a COINCUBE | Connect account to access these features:")
-                .style(theme::text::secondary),
+            text::p1_regular(localized_copy(
+                "Create a COINCUBE | Connect account to access these features:",
+            ))
+            .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
         .push(connect_benefits(true))
         .push(iced::widget::Space::new().height(Length::Fixed(18.0)))
         .push(
-            text::p2_medium("Email")
+            text::p2_medium(localized_copy("Email"))
                 .style(theme::text::primary)
                 .width(Length::Fill)
                 .align_x(Alignment::Start),
@@ -1267,7 +1284,7 @@ fn register_ux<'a>(
         )
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
         .push(
-            text::p2_medium("Promo or referral code (optional)")
+            text::p2_medium(localized_copy("Promo or referral code (optional)"))
                 .style(theme::text::primary)
                 .width(Length::Fill)
                 .align_x(Alignment::Start),
@@ -1293,7 +1310,8 @@ fn register_ux<'a>(
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
         .push(
             iced::widget::button(
-                text::p2_regular("Already have an account? Sign in").color(color::ORANGE),
+                text::p2_regular(localized_copy("Already have an account? Sign in"))
+                    .color(color::ORANGE),
             )
             .style(theme::button::link)
             .on_press_maybe((!loading).then_some(ConnectAccountMessage::LogOut)),
@@ -1315,7 +1333,7 @@ fn otp_ux<'a>(
 
     let submit: Element<ConnectAccountMessage> = if sending {
         iced::widget::button(
-            container(text::p1_regular("Verifying…").color(color::GREY_3))
+            container(text::p1_regular(localized_copy("Verifying…")).color(color::GREY_3))
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
         )
@@ -1324,7 +1342,7 @@ fn otp_ux<'a>(
         .style(theme::button::primary)
         .into()
     } else {
-        button::primary(None, "Verify")
+        button::primary(None, localized_copy("Verify"))
             .on_press_maybe(valid.then_some(ConnectAccountMessage::VerifyOtp))
             .width(Length::Fill)
             .into()
@@ -1339,13 +1357,13 @@ fn otp_ux<'a>(
     let can_resend = cooldown == 0 && !sending;
 
     Column::new()
-        .push(text::h3("Enter your token").style(theme::text::primary))
+        .push(text::h3(localized_copy("Enter your token")).style(theme::text::primary))
         .push(text::p2_regular(sent_to).style(theme::text::secondary))
         .push(iced::widget::Space::new().height(Length::Fixed(25.0)))
         .push(text::p2_medium("Token").style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
-            TextInput::new("6-digit code", otp)
+            TextInput::new(localized_copy("6-digit code"), otp)
                 .id(OTP_INPUT_ID)
                 .on_input(ConnectAccountMessage::OtpChanged)
                 .on_submit_maybe((!sending && valid).then_some(ConnectAccountMessage::VerifyOtp))
@@ -1368,9 +1386,11 @@ fn otp_ux<'a>(
             .on_press_maybe(can_resend.then_some(ConnectAccountMessage::ResendOtp)),
         )
         .push(
-            iced::widget::button(text::p2_regular("Go back").style(theme::text::secondary))
-                .style(theme::button::link)
-                .on_press_maybe((!sending).then_some(ConnectAccountMessage::BackToEmail)),
+            iced::widget::button(
+                text::p2_regular(localized_copy("Go back")).style(theme::text::secondary),
+            )
+            .style(theme::button::link)
+            .on_press_maybe((!sending).then_some(ConnectAccountMessage::BackToEmail)),
         )
         .align_x(Alignment::Center)
         .spacing(2)
@@ -1393,27 +1413,33 @@ pub fn recovery_services_ux<'a>(
     // Plan-wide: Connect does not report per-Cube alert setup yet.
     let eligibility = state.recovery_alert_eligibility();
     let alerts_status = move || match eligibility {
-        RecoveryAlertEligibility::Included => {
-            status_line(check_circle_icon(), "Included in plan", Tone::Good)
-        }
-        RecoveryAlertEligibility::NotIncluded => {
-            status_line(dash_circle_icon(), "Not in this plan", Tone::Muted)
-        }
-        RecoveryAlertEligibility::Unknown => {
-            status_line(question_circle_icon(), "Unknown", Tone::Muted)
-        }
+        RecoveryAlertEligibility::Included => status_line(
+            check_circle_icon(),
+            localized_copy("Included in plan"),
+            Tone::Good,
+        ),
+        RecoveryAlertEligibility::NotIncluded => status_line(
+            dash_circle_icon(),
+            localized_copy("Not in this plan"),
+            Tone::Muted,
+        ),
+        RecoveryAlertEligibility::Unknown => status_line(
+            question_circle_icon(),
+            localized_copy("Unknown"),
+            Tone::Muted,
+        ),
     };
     let mut col = Column::new()
-        .push(sheet_title("Recovery services"))
+        .push(sheet_title(localized_copy("Recovery services")))
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
-        .push(lead("Recovery Kit and recovery alerts per Cube, as reported by Connect. Open a Cube from the launcher to manage Backup & protection."))
+        .push(lead(localized_copy("Recovery Kit and recovery alerts per Cube, as reported by Connect. Open a Cube from the launcher to manage Backup & protection.")))
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .width(Length::Fill);
 
     match &state.recovery_services {
         RecoveryServicesState::NotLoaded => {
             col = col
-                .push(lead("Cube status has not been loaded."))
+                .push(lead(localized_copy("Cube status has not been loaded.")))
                 .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
                 .push(
                     sheet_button("Load Cube status", ActionKind::Secondary, false)
@@ -1421,7 +1447,7 @@ pub fn recovery_services_ux<'a>(
                 );
         }
         RecoveryServicesState::Loading => {
-            col = col.push(lead("Loading Cube status…"));
+            col = col.push(lead(localized_copy("Loading Cube status…")));
         }
         RecoveryServicesState::Failed(error) => {
             col = col.push(notification::error_card(
@@ -1432,7 +1458,9 @@ pub fn recovery_services_ux<'a>(
             ));
         }
         RecoveryServicesState::Ready(rows) if rows.is_empty() => {
-            col = col.push(lead("No Cubes are registered with Connect yet."));
+            col = col.push(lead(localized_copy(
+                "No Cubes are registered with Connect yet.",
+            )));
         }
         RecoveryServicesState::Ready(rows) => {
             let cell = |content: Element<'a, ConnectAccountMessage>| {
@@ -1440,9 +1468,13 @@ pub fn recovery_services_ux<'a>(
             };
             let header = Row::new()
                 .push(cell(tenshu_text::caption("Cube").into()))
-                .push(cell(tenshu_text::caption("Network").into()))
-                .push(cell(tenshu_text::caption("Recovery Kit").into()))
-                .push(cell(tenshu_text::caption("Recovery alerts").into()))
+                .push(cell(tenshu_text::caption(localized_copy("Network")).into()))
+                .push(cell(
+                    tenshu_text::caption(localized_copy("Recovery Kit")).into(),
+                ))
+                .push(cell(
+                    tenshu_text::caption(localized_copy("Recovery alerts")).into(),
+                ))
                 .spacing(12);
             col = col
                 .push(container(header).padding(iced::Padding {
@@ -1617,7 +1649,7 @@ fn renewal_banner<'a>(
         actions = actions
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
             .push(
-                button::secondary(None, "Dismiss")
+                button::secondary(None, localized_copy("Dismiss"))
                     .on_press(ConnectAccountMessage::DismissRenewalBanner),
             );
     }
@@ -1656,10 +1688,10 @@ fn renewal_banner<'a>(
 /// (D4). Non-blocking — the picker still renders the plans it understands.
 fn schema_update_note<'a>() -> Element<'a, ConnectAccountMessage> {
     container(
-        text::p2_regular(
+        text::p2_regular(localized_copy(
             "A newer pricing update is available. Some plan details may be \
              incomplete — update Coincube to see the latest plans and prices.",
-        )
+        ))
         .color(color::GREY_3),
     )
     .padding(12)
@@ -1683,10 +1715,10 @@ fn schema_update_note<'a>() -> Element<'a, ConnectAccountMessage> {
 /// Copy is campaign-agnostic.
 fn purchasing_unavailable_note<'a>() -> Element<'a, ConnectAccountMessage> {
     container(
-        text::p2_regular(
+        text::p2_regular(localized_copy(
             "Purchasing is currently unavailable, so plans can't be bought \
              right now. You can still review what each tier includes below.",
-        )
+        ))
         .color(color::GREY_3),
     )
     .padding(12)
@@ -1724,7 +1756,7 @@ fn billing_management_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conn
         .as_ref()
         .is_some_and(|plan| matches!(plan.status, PlanStatus::Canceled));
     let mut col = Column::new()
-        .push(sheet_title("Plan & billing"))
+        .push(sheet_title(localized_copy("Plan & billing")))
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .push(current_plan_summary(state));
     if cancelled {
@@ -1792,7 +1824,7 @@ fn billing_management_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conn
     });
     col = col
         .push(iced::widget::Space::new().height(Length::Fixed(32.0)))
-        .push(group_title("Features on this account"))
+        .push(group_title(localized_copy("Features on this account")))
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)));
     let current_features = current_features.map(|info| {
         info.features
@@ -1805,25 +1837,31 @@ fn billing_management_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conn
             col = col.push(ruled_list(features.into_iter().map(|feature| {
                 Row::new()
                     .push(tenshu_text::label(feature).width(Length::Fill))
-                    .push(status_line(check_circle_icon(), "Included", Tone::Good))
+                    .push(status_line(
+                        check_circle_icon(),
+                        localized_copy("Included"),
+                        Tone::Good,
+                    ))
                     .spacing(16)
                     .align_y(Alignment::Center)
                     .into()
             })));
         }
         Some(_) => {
-            col = col.push(lead("No feature details are available for this plan."));
+            col = col.push(lead(localized_copy(
+                "No feature details are available for this plan.",
+            )));
         }
         None => {
-            col = col.push(lead(
+            col = col.push(lead(localized_copy(
                 "Current plan features are unavailable. Try again when Connect is online.",
-            ));
+            )));
         }
     }
     col.push(iced::widget::Space::new().height(Length::Fixed(32.0)))
-        .push(group_title("Billing history"))
+        .push(group_title(localized_copy("Billing history")))
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
-        .push(lead("Payments use Bitcoin (Lightning or on-chain). Plans are paid upfront, with no recurring subscription."))
+        .push(lead(localized_copy("Payments use Bitcoin (Lightning or on-chain). Plans are paid upfront, with no recurring subscription.")))
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
         .push(
             sheet_link("View billing history")
@@ -1844,9 +1882,9 @@ fn current_plan_summary<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conne
         let mut main = Column::new().push(tenshu_text::label(plan.tier().to_string()));
         if let Some(date) = plan.renewal_at.as_deref() {
             let label = match plan.status {
-                PlanStatus::Active => "Paid through",
-                PlanStatus::PastDue => "Payment due",
-                PlanStatus::Canceled => "Access until",
+                PlanStatus::Active => localized_copy("Paid through"),
+                PlanStatus::PastDue => localized_copy("Payment due"),
+                PlanStatus::Canceled => localized_copy("Access until"),
             };
             main = main.push(lead(format!("{label} {}", format_date(date))));
         }
@@ -1857,10 +1895,10 @@ fn current_plan_summary<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conne
             .align_y(Alignment::Center)
             .into()
     } else {
-        lead("Checking your current plan…").into()
+        lead(localized_copy("Checking your current plan…")).into()
     };
     ruled_list([Row::new()
-        .push(lead("Current plan").width(Length::Fixed(168.0)))
+        .push(lead(localized_copy("Current plan")).width(Length::Fixed(168.0)))
         .push(value)
         .spacing(16)
         .align_y(Alignment::Center)
@@ -1953,7 +1991,14 @@ fn plan_provenance_card<'a>(plan: &'a ConnectPlan) -> Option<Element<'a, Connect
     if let Some(exp) = prov.expires_at.as_deref().filter(|e| !e.is_empty()) {
         card_col = card_col
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
-            .push(text::p2_regular(format!("Expires {}", format_date(exp))).color(color::GREY_3));
+            .push(
+                text::p2_regular(localized_format!(
+                    "Expires {}",
+                    "Gastos {}",
+                    format_date(exp)
+                ))
+                .color(color::GREY_3),
+            );
     }
 
     Some(
@@ -1982,17 +2027,17 @@ fn campaign_redeem_field<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conn
     let valid = !rs.code.trim().is_empty();
 
     let submit: Element<ConnectAccountMessage> = if rs.submitting {
-        button::secondary(None, "Redeeming…")
+        button::secondary(None, localized_copy("Redeeming…"))
             .width(Length::Fixed(130.0))
             .into()
     } else {
-        button::primary(None, "Redeem")
+        button::primary(None, localized_copy("Redeem"))
             .on_press_maybe(valid.then_some(ConnectAccountMessage::RedeemCampaignCode))
             .width(Length::Fixed(130.0))
             .into()
     };
 
-    let input = TextInput::new("Promo or referral code", &rs.code)
+    let input = TextInput::new(localized_copy("Promo or referral code"), &rs.code)
         // Locked while a redeem is in flight so the in-flight code can't drift
         // out of sync with the result that comes back.
         .on_input_maybe((!rs.submitting).then_some(ConnectAccountMessage::CampaignCodeChanged))
@@ -2003,7 +2048,10 @@ fn campaign_redeem_field<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conn
         .padding(12);
 
     let mut col = Column::new()
-        .push(text::p2_bold("Have a promo or referral code?").style(theme::text::primary))
+        .push(
+            text::p2_bold(localized_copy("Have a promo or referral code?"))
+                .style(theme::text::primary),
+        )
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
         .push(
             Row::new()
@@ -2143,10 +2191,10 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
         // otherwise an expired user routed to Plan & Billing only sees the
         // generic "unavailable" copy and loses the renew messaging.
         let mut col = Column::new()
-            .push(text::h4_bold("Plan & Billing").style(theme::text::primary))
+            .push(text::h4_bold(localized_copy("Plan & Billing")).style(theme::text::primary))
             .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
             .push(
-                button::secondary(None, "Back to billing")
+                button::secondary(None, localized_copy("Back to billing"))
                     .on_press(ConnectAccountMessage::ComparePlans(false)),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
@@ -2174,20 +2222,20 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
                 .push(iced::widget::Space::new().height(Length::Fixed(12.0)));
         }
         col = col.push(
-            text::p1_regular(
+            text::p1_regular(localized_copy(
                 "Pricing temporarily unavailable.\n\
                      Reconnect to the internet to view current plans and features.",
-            )
+            ))
             .color(color::GREY_3),
         );
         return container(col).padding([16, 0]).into();
     }
 
     let mut col = Column::new()
-        .push(text::h4_bold("Plan & Billing").style(theme::text::primary))
+        .push(text::h4_bold(localized_copy("Plan & Billing")).style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
         .push(
-            button::secondary(None, "Back to billing")
+            button::secondary(None, localized_copy("Back to billing"))
                 .on_press(ConnectAccountMessage::ComparePlans(false)),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
@@ -2262,7 +2310,7 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
             .align_y(Alignment::Center);
         if is_estate {
             header = header.push(
-                container(text::caption("BEST VALUE").color(color::INFO_BLUE))
+                container(text::caption(localized_copy("BEST VALUE")).color(color::INFO_BLUE))
                     .padding([3, 8])
                     .style(|_t| container::Style {
                         background: Some(iced::Background::Color(iced::Color {
@@ -2297,7 +2345,8 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
                     );
             }
             None => {
-                price_row = price_row.push(text::h1("Free").style(theme::text::primary));
+                price_row =
+                    price_row.push(text::h1(localized_copy("Free")).style(theme::text::primary));
             }
         }
 
@@ -2306,24 +2355,24 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
         let cta = if is_current {
             // Non-pressable, but drawn in its normal state rather than iced's
             // faded Disabled one so the label stays readable.
-            button::secondary(None, "Current plan")
+            button::secondary(None, localized_copy("Current plan"))
                 .width(Length::Fill)
                 .style(|t, _status| {
                     theme::button::secondary(t, iced::widget::button::Status::Active)
                 })
         } else if is_upgrade {
             let label = match &card.tier {
-                PlanTier::Pro => "Upgrade to Pro",
-                PlanTier::Estate => "Upgrade to Estate",
-                PlanTier::Free => "Upgrade",
+                PlanTier::Pro => localized_copy("Upgrade to Pro"),
+                PlanTier::Estate => localized_copy("Upgrade to Estate"),
+                PlanTier::Free => localized_copy("Upgrade"),
             };
             button::primary(None, label).width(Length::Fill)
         } else {
             // A lower tier, or the current tier on the other billing cycle.
             let label = match &card.tier {
-                PlanTier::Free => "Switch to Free",
-                PlanTier::Pro => "Switch to Pro",
-                PlanTier::Estate => "Switch to Estate",
+                PlanTier::Free => localized_copy("Switch to Free"),
+                PlanTier::Pro => localized_copy("Switch to Pro"),
+                PlanTier::Estate => localized_copy("Switch to Estate"),
             };
             button::secondary(None, label).width(Length::Fill)
         };
@@ -2429,7 +2478,8 @@ fn checkout_ux<'a>(
 
     match &checkout_state.phase {
         CheckoutPhase::Creating => {
-            col = col.push(text::p1_regular("Creating invoice…").color(color::GREY_3));
+            col = col
+                .push(text::p1_regular(localized_copy("Creating invoice…")).color(color::GREY_3));
         }
 
         CheckoutPhase::AwaitingPayment | CheckoutPhase::Processing => {
@@ -2470,7 +2520,7 @@ fn checkout_ux<'a>(
                                 .width(Length::Fill),
                         )
                         .push(
-                            button::secondary(None, "Copy")
+                            button::secondary(None, localized_copy("Copy"))
                                 .on_press(ConnectAccountMessage::CopyToClipboard(
                                     resp.lightning_invoice.clone(),
                                 ))
@@ -2491,7 +2541,7 @@ fn checkout_ux<'a>(
                                 .width(Length::Fill),
                         )
                         .push(
-                            button::secondary(None, "Copy")
+                            button::secondary(None, localized_copy("Copy"))
                                 .on_press(ConnectAccountMessage::CopyToClipboard(
                                     resp.on_chain_address.clone(),
                                 ))
@@ -2505,7 +2555,7 @@ fn checkout_ux<'a>(
 
                 // Open in browser
                 col = col.push(
-                    button::secondary(None, "Open in Browser")
+                    button::secondary(None, localized_copy("Open in Browser"))
                         .on_press(ConnectAccountMessage::OpenCheckoutUrl(
                             resp.checkout_url.clone(),
                         ))
@@ -2516,15 +2566,20 @@ fn checkout_ux<'a>(
 
                 // Expires
                 col = col.push(
-                    text::p2_regular(format!("Expires: {}", format_datetime(&resp.expires_at)))
-                        .style(theme::text::secondary),
+                    text::p2_regular(localized_format!(
+                        "Expires: {}",
+                        "Gastos: {}",
+                        format_datetime(&resp.expires_at)
+                    ))
+                    .style(theme::text::secondary),
                 );
 
                 if matches!(checkout_state.phase, CheckoutPhase::Processing) {
                     col = col
                         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
                         .push(
-                            text::p2_regular("Payment detected, confirming…").color(color::ORANGE),
+                            text::p2_regular(localized_copy("Payment detected, confirming…"))
+                                .color(color::ORANGE),
                         );
                 }
             }
@@ -2532,7 +2587,7 @@ fn checkout_ux<'a>(
             col = col
                 .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
                 .push(
-                    button::secondary(None, "Cancel")
+                    button::secondary(None, localized_copy("Cancel"))
                         .on_press(ConnectAccountMessage::DismissCheckout)
                         .width(Length::Fill),
                 );
@@ -2546,12 +2601,16 @@ fn checkout_ux<'a>(
                 .unwrap_or_else(|| "your new plan".to_string());
             col = col
                 .push(
-                    text::p1_bold(format!("Payment confirmed! Upgraded to {}.", plan_name))
-                        .color(color::ORANGE),
+                    text::p1_bold(localized_format!(
+                        "Payment confirmed! Upgraded to {}.",
+                        "Pago confirmado! Actualizado a {}.",
+                        plan_name
+                    ))
+                    .color(color::ORANGE),
                 )
                 .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
                 .push(
-                    button::primary(None, "Done")
+                    button::primary(None, localized_copy("Done"))
                         .on_press(ConnectAccountMessage::DismissCheckout)
                         .width(Length::Fill),
                 );
@@ -2559,10 +2618,10 @@ fn checkout_ux<'a>(
 
         CheckoutPhase::Expired => {
             col = col
-                .push(text::p1_regular("Invoice expired.").color(color::RED))
+                .push(text::p1_regular(localized_copy("Invoice expired.")).color(color::RED))
                 .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
                 .push(
-                    button::primary(None, "Try Again")
+                    button::primary(None, localized_copy("Try Again"))
                         .on_press(ConnectAccountMessage::DismissCheckout)
                         .width(Length::Fill),
                 );
@@ -2573,7 +2632,7 @@ fn checkout_ux<'a>(
                 .push(text::p1_regular(format!("Error: {}", msg)).color(color::RED))
                 .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
                 .push(
-                    button::primary(None, "Try Again")
+                    button::primary(None, localized_copy("Try Again"))
                         .on_press(ConnectAccountMessage::DismissCheckout)
                         .width(Length::Fill),
                 );
@@ -2590,7 +2649,7 @@ fn billing_history_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Connect
         Row::new()
             .push(previous_icon().style(theme::text::primary))
             .push(iced::widget::Space::new().width(Length::Fixed(5.0)))
-            .push(text::p1_medium("Back").style(theme::text::secondary))
+            .push(text::p1_medium(localized_copy("Back")).style(theme::text::secondary))
             .spacing(5)
             .align_y(Alignment::Center),
     )
@@ -2602,15 +2661,17 @@ fn billing_history_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Connect
     let mut col = Column::new()
         .push(back_button)
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-        .push(sheet_title("Billing history"))
+        .push(sheet_title(localized_copy("Billing history")))
         .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
 
     match &state.billing_history {
         None => {
-            col = col.push(text::p1_regular("Loading…").color(color::GREY_3));
+            col = col.push(text::p1_regular(localized_copy("Loading…")).color(color::GREY_3));
         }
         Some(entries) if entries.is_empty() => {
-            col = col.push(text::p1_regular("No billing history yet.").color(color::GREY_3));
+            col = col.push(
+                text::p1_regular(localized_copy("No billing history yet.")).color(color::GREY_3),
+            );
         }
         Some(entries) => {
             for entry in entries {
@@ -2681,8 +2742,10 @@ fn billing_history_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Connect
 
 fn security_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
     let devices_section: Element<ConnectAccountMessage> = match &state.verified_devices {
-        None => lead("Loading devices…").into(),
-        Some(devices) if devices.is_empty() => lead("No verified devices on record.").into(),
+        None => lead(localized_copy("Loading devices…")).into(),
+        Some(devices) if devices.is_empty() => {
+            lead(localized_copy("No verified devices on record.")).into()
+        }
         Some(devices) => {
             let mut col = Column::new().push(horizontal_rule());
 
@@ -2734,12 +2797,15 @@ fn security_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
                     col = col.push(
                         container(
                             Column::new()
-                                .push(group_title(format!("Remove {name}?")))
+                                .push(group_title(localized_format!(
+                                    "Remove {name}?",
+                                    "¿Retirar {name}?"
+                                )))
                                 .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
                                 .push(
-                                    tenshu_text::body(
+                                    tenshu_text::body(localized_copy(
                                         "This removes the device from your verified devices.",
-                                    )
+                                    ))
                                     .size(13),
                                 )
                                 .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
@@ -2747,7 +2813,10 @@ fn security_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
                                     Row::new()
                                         .push(
                                             sheet_button(
-                                                format!("Remove {name}"),
+                                                localized_format!(
+                                                    "Remove {name}",
+                                                    "Eliminar a {name}"
+                                                ),
                                                 ActionKind::Primary,
                                                 false,
                                             )
@@ -2779,8 +2848,10 @@ fn security_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
 
     let mut activity_summary = None;
     let activity_section: Element<ConnectAccountMessage> = match &state.login_activity {
-        None => lead("Loading activity…").into(),
-        Some(activity) if activity.is_empty() => lead("No login activity on record.").into(),
+        None => lead(localized_copy("Loading activity…")).into(),
+        Some(activity) if activity.is_empty() => {
+            lead(localized_copy("No login activity on record.")).into()
+        }
         Some(activity) => {
             let shown = &activity[..activity.len().min(50)];
             let succeeded = shown.iter().filter(|a| a.success == Some(true)).count();
@@ -2821,16 +2892,16 @@ fn security_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
     };
 
     let mut activity_heading = Row::new()
-        .push(group_title("Login Activity").width(Length::Fill))
+        .push(group_title(localized_copy("Login Activity")).width(Length::Fill))
         .align_y(Alignment::Center);
     if let Some(summary) = activity_summary {
         activity_heading = activity_heading.push(lead(summary));
     }
 
     Column::new()
-        .push(sheet_title("Devices & security"))
+        .push(sheet_title(localized_copy("Devices & security")))
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-        .push(group_title("Verified Devices"))
+        .push(group_title(localized_copy("Verified Devices")))
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
         .push(devices_section)
         .push(iced::widget::Space::new().height(Length::Fixed(32.0)))
@@ -2852,18 +2923,23 @@ fn checking_duress_ux<'a>(status: DuressGateStatus) -> Element<'a, ConnectAccoun
     let mut col = Column::new().spacing(16).align_x(Alignment::Center);
     match status {
         DuressGateStatus::Checking => {
-            col = col.push(text::p1_regular("Checking your account…").color(color::GREY_3));
+            col = col.push(
+                text::p1_regular(localized_copy("Checking your account…")).color(color::GREY_3),
+            );
         }
         DuressGateStatus::Unreachable => {
             col = col
-                .push(text::p1_regular("Couldn't verify your account status.").color(color::GREY_3))
                 .push(
-                    button::primary(None, "Retry")
+                    text::p1_regular(localized_copy("Couldn't verify your account status."))
+                        .color(color::GREY_3),
+                )
+                .push(
+                    button::primary(None, localized_copy("Retry"))
                         .width(Length::Fixed(160.0))
                         .on_press(ConnectAccountMessage::RetryDuressCheck),
                 )
                 .push(
-                    button::secondary(None, "Sign Out")
+                    button::secondary(None, localized_copy("Sign Out"))
                         .width(Length::Fixed(160.0))
                         .on_press(ConnectAccountMessage::LogOut),
                 );
@@ -2871,19 +2947,22 @@ fn checking_duress_ux<'a>(status: DuressGateStatus) -> Element<'a, ConnectAccoun
         DuressGateStatus::Incompatible => {
             col = col
                 .push(
-                    text::p1_regular("We couldn't read your account status.").color(color::GREY_3),
-                )
-                .push(
-                    text::caption("Make sure Tenshu is up to date, then try again.")
+                    text::p1_regular(localized_copy("We couldn't read your account status."))
                         .color(color::GREY_3),
                 )
                 .push(
-                    button::primary(None, "Retry")
+                    text::caption(localized_copy(
+                        "Make sure Tenshu is up to date, then try again.",
+                    ))
+                    .color(color::GREY_3),
+                )
+                .push(
+                    button::primary(None, localized_copy("Retry"))
                         .width(Length::Fixed(160.0))
                         .on_press(ConnectAccountMessage::RetryDuressCheck),
                 )
                 .push(
-                    button::secondary(None, "Sign Out")
+                    button::secondary(None, localized_copy("Sign Out"))
                         .width(Length::Fixed(160.0))
                         .on_press(ConnectAccountMessage::LogOut),
                 );
@@ -2907,8 +2986,8 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
     // its payload for local arming without resurfacing the entered secrets.
     if state.duress_enroll_abandoned {
         return Column::new()
-            .push(text::h4_bold("Duress Mode").style(theme::text::primary))
-            .push(text::p1_regular("Finishing enrollment…"))
+            .push(text::h4_bold(localized_copy("Duress Mode")).style(theme::text::primary))
+            .push(text::p1_regular(localized_copy("Finishing enrollment…")))
             .into();
     }
 
@@ -2933,7 +3012,7 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
     }
 
     let mut col = Column::new()
-        .push(text::h4_bold("Duress Mode").style(theme::text::primary))
+        .push(text::h4_bold(localized_copy("Duress Mode")).style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
 
     if !state.is_duress_entitled() {
@@ -2942,12 +3021,12 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                 container(
                     Column::new()
                         .spacing(12)
-                        .push(text::p1_regular(
+                        .push(text::p1_regular(localized_copy(
                             "Duress mode is available on Pro and Estate plans. Upgrade your \
                              Connect plan to enable it.",
-                        ))
+                        )))
                         .push(
-                            button::primary(None, "View plans")
+                            button::primary(None, localized_copy("View plans"))
                                 .width(Length::Fixed(160.0))
                                 .on_press(ConnectAccountMessage::OpenPlanBilling),
                         )
@@ -2975,15 +3054,17 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
     // sections. Keep the security explanation ahead of every account state.
     col = col.push(
         Column::new()
-            .push(text::p1_bold("What duress mode does").style(theme::text::primary))
+            .push(
+                text::p1_bold(localized_copy("What duress mode does")).style(theme::text::primary),
+            )
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
             .push(
-                text::p2_regular(
+                text::p2_regular(localized_copy(
                     "Unlocking any one Cube with your duress PIN wipes every Cube on this \
                      device and signals Connect to lock your entire account — this locks all \
                      of your Cubes, not just the one you opened. The device then shows a \
                      dead-end screen until you clear duress from another trusted device.",
-                )
+                ))
                 .width(Length::Fill)
                 .style(theme::text::secondary),
             )
@@ -3021,14 +3102,17 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
     if locally_armed {
         col = col.push(
             Column::new()
-                .push(text::p1_bold("Duress mode is enabled").style(theme::text::success))
+                .push(
+                    text::p1_bold(localized_copy("Duress mode is enabled"))
+                        .style(theme::text::success),
+                )
                 .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
                 .push(
-                    text::p2_regular(
+                    text::p2_regular(localized_copy(
                         "Your duress PIN is armed on every Cube on this device. Entering it \
                          at any Cube's unlock screen triggers a duress wipe and locks your \
                          account.",
-                    )
+                    ))
                     .width(Length::Fill)
                     .style(theme::text::secondary),
                 )
@@ -3053,15 +3137,15 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
         if !duress_active {
             col = col.push(iced::widget::Space::new().height(Length::Fixed(16.0)));
             col = col.push(
-                button::secondary(None, "Disable Duress Mode")
+                button::secondary(None, localized_copy("Disable Duress Mode"))
                     .width(Length::Fixed(240.0))
                     .on_press(ConnectAccountMessage::Duress(DuressMessage::DisableStart)),
             );
             col = col.push(iced::widget::Space::new().height(Length::Fixed(6.0)));
             col = col.push(
-                text::p2_regular(
+                text::p2_regular(localized_copy(
                     "Turns off duress on all your devices. You can re-enable it anytime.",
-                )
+                ))
                 .width(Length::Fill)
                 .style(theme::text::secondary),
             );
@@ -3075,16 +3159,16 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
         col = col.push(
             Column::new()
                 .push(
-                    text::p1_bold("Duress mode is enabled on your account")
+                    text::p1_bold(localized_copy("Duress mode is enabled on your account"))
                         .style(theme::text::primary),
                 )
                 .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
                 .push(
-                    text::p2_regular(
+                    text::p2_regular(localized_copy(
                         "It was set up on another device, so it is not armed on this one — \
                          entering your duress PIN here will not trigger a wipe. Manage duress \
                          mode from the device where you enabled it.",
-                    )
+                    ))
                     .width(Length::Fill)
                     .style(theme::text::secondary),
                 )
@@ -3098,15 +3182,15 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
         if !duress_active {
             col = col.push(iced::widget::Space::new().height(Length::Fixed(16.0)));
             col = col.push(
-                button::secondary(None, "Disable Duress Mode")
+                button::secondary(None, localized_copy("Disable Duress Mode"))
                     .width(Length::Fixed(240.0))
                     .on_press(ConnectAccountMessage::Duress(DuressMessage::DisableStart)),
             );
             col = col.push(iced::widget::Space::new().height(Length::Fixed(6.0)));
             col = col.push(
-                text::p2_regular(
+                text::p2_regular(localized_copy(
                     "Turns off duress on all your devices. You can re-enable it anytime.",
-                )
+                ))
                 .width(Length::Fill)
                 .style(theme::text::secondary),
             );
@@ -3121,31 +3205,31 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
         // Credentials the user will set during enrollment.
         col = col.push(
             Column::new()
-                .push(text::p1_bold("You'll set").style(theme::text::primary))
+                .push(text::p1_bold(localized_copy("You'll set")).style(theme::text::primary))
                 .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
                 .push(
                     text::p2_regular(
-                        "• A duress PIN — one you don't use to unlock any of your Cubes.",
+                        localized_copy("• A duress PIN — one you don't use to unlock any of your Cubes."),
                     )
                     .width(Length::Fill)
                     .style(theme::text::secondary),
                 )
                 .push(
-                    text::p2_regular(format!(
+                    text::p2_regular(localized_format!(
                         "• An all-clear passphrase — at least {} characters, used to unlock \
-                         your account from a trusted device.",
+                         your account from a trusted device.", "• Una contraseña completa —al menos caracteres de {}— usada para desbloquear su cuenta desde un dispositivo de confianza.",
                         MIN_ALL_CLEAR_LEN
                     ))
                     .width(Length::Fill)
                     .style(theme::text::secondary),
                 )
                 .push(
-                    text::p2_regular("• A duress recovery-kit password — covers all your Cubes.")
+                    text::p2_regular(localized_copy("• A duress recovery-kit password — covers all your Cubes."))
                         .width(Length::Fill)
                         .style(theme::text::secondary),
                 )
                 .push(
-                    text::p2_regular(format!("• An unlock delay: {}.", delays))
+                    text::p2_regular(localized_format!("• An unlock delay: {}.", "• Un retraso de desbloqueo: {}.", delays))
                         .width(Length::Fill)
                         .style(theme::text::secondary),
                 )
@@ -3166,18 +3250,18 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
         col = col.push({
             let mut card_col = Column::new()
                 .push(
-                    text::p1_bold("Set up a Cube Recovery Kit for each Cube")
+                    text::p1_bold(localized_copy("Set up a Cube Recovery Kit for each Cube"))
                         .style(theme::text::warning),
                 )
                 .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
                 .push(
-                    text::p2_regular(
+                    text::p2_regular(localized_copy(
                         "Without a Cube Recovery Kit, a duress wipe is irreversible from Connect. \
                          Seed-only Cubes need their Master Seed Phrase backed up; Cubes with a \
                          Vault need both the Master Seed Phrase and the Vault Wallet Descriptor. \
                          Finish the Recovery Kit for each of your Vault Cubes before enabling \
                          duress mode.",
-                    )
+                    ))
                     .width(Length::Fill)
                     .style(theme::text::secondary),
                 );
@@ -3201,11 +3285,11 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
                 card_col = card_col
                     .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
                     .push(
-                        text::caption(
+                        text::caption(localized_copy(
                             "Cubes on your other devices are shown as reported to Connect. A \
                              Vault created on another device that hasn't synced yet may not \
                              appear here — open that device to confirm its Recovery Kit.",
-                        )
+                        ))
                         .width(Length::Fill)
                         .style(theme::text::secondary),
                     );
@@ -3232,7 +3316,10 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
             // Disabled CTA — `button::primary` with no `.on_press` renders
             // inert. The state handler re-checks the gate too, so a stale view
             // that somehow fires `StartEnrollment` no-ops (belt-and-suspenders).
-            col = col.push(button::primary(None, "Set up Duress Mode").width(Length::Fixed(240.0)));
+            col = col.push(
+                button::primary(None, localized_copy("Set up Duress Mode"))
+                    .width(Length::Fixed(240.0)),
+            );
             col = col.push(iced::widget::Space::new().height(Length::Fixed(6.0)));
             // Distinguish "still verifying" from "known incomplete": the former
             // shouldn't accuse the user of an unfinished kit before we've even
@@ -3249,7 +3336,7 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
             );
         } else {
             col = col.push(
-                button::primary(None, "Set up Duress Mode")
+                button::primary(None, localized_copy("Set up Duress Mode"))
                     .width(Length::Fixed(240.0))
                     .on_press(ConnectAccountMessage::Duress(
                         DuressMessage::StartEnrollment,
@@ -3276,9 +3363,11 @@ fn duress_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMe
 fn checklist_badge(cube: &DuressCube) -> (&'static str, iced::Color, Option<String>) {
     use CubeBackupCompleteness::*;
     let fix = |cta: &str| {
-        Some(format!(
+        Some(localized_format!(
             "Open {} → Settings → Recovery Kit → {}.",
-            cube.name, cta
+            "Abrir {} → Ajustes → Kit de recuperación → {}.",
+            cube.name,
+            cta
         ))
     };
     match cube.completeness() {
@@ -3361,7 +3450,7 @@ fn duress_recovery_kit_list<'a>(
             row_col = row_col.push(text::caption(copy).color(color::GREY_3));
             if is_unknown {
                 row_col = row_col.push(
-                    button::transparent(None, "Retry")
+                    button::transparent(None, localized_copy("Retry"))
                         .on_press(ConnectAccountMessage::Duress(DuressMessage::ReloadCubes)),
                 );
             }
@@ -3389,14 +3478,17 @@ fn duress_enrolled_kit_warning<'a>(
     Some(
         container(
             Column::new()
-                .push(text::p1_bold("Finish your Recovery Kits").style(theme::text::warning))
+                .push(
+                    text::p1_bold(localized_copy("Finish your Recovery Kits"))
+                        .style(theme::text::warning),
+                )
                 .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
                 .push(
-                    text::p2_regular(
+                    text::p2_regular(localized_copy(
                         "Duress is on, but one of your Vault Cubes isn't fully backed up — a \
                          duress wipe of it would be irreversible from Connect. Add the missing \
                          Recovery-Kit material below. Duress stays enabled.",
-                    )
+                    ))
                     .color(color::GREY_3),
                 )
                 .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
@@ -3428,12 +3520,12 @@ pub fn avatar_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMess
         AvatarFlowStep::Idle | AvatarFlowStep::Questionnaire => avatar_questionnaire_ux(state),
         AvatarFlowStep::Generating => container(
             Column::new()
-                .push(text::p1_bold("Forging your identity…").color(color::ORANGE))
+                .push(text::p1_bold(localized_copy("Forging your identity…")).color(color::ORANGE))
                 .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
                 .push(
-                    text::p2_regular(
+                    text::p2_regular(localized_copy(
                         "Generating your sumi-e avatar. This may take up to 30 seconds.",
-                    )
+                    ))
                     .color(color::GREY_3),
                 )
                 .padding(24)
@@ -3448,11 +3540,11 @@ pub fn avatar_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMess
 
     if let Some(err) = state.avatar_error.as_deref() {
         let retry_button: Element<ConnectCubeMessage> = if state.registration_error.is_some() {
-            button::primary(None, "Retry Connection")
+            button::primary(None, localized_copy("Retry Connection"))
                 .on_press(ConnectCubeMessage::RetryRegistration)
                 .into()
         } else {
-            button::primary(None, "Try Again")
+            button::primary(None, localized_copy("Try Again"))
                 .on_press(ConnectCubeMessage::Avatar(AvatarMessage::Retry))
                 .into()
         };
@@ -3617,17 +3709,17 @@ fn avatar_questionnaire_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, Conne
 
     let has_ln = state.lightning_address.is_some();
     let generate_btn = if has_ln {
-        button::primary(None, "Generate Avatar")
+        button::primary(None, localized_copy("Generate Avatar"))
             .on_press(ConnectCubeMessage::Avatar(AvatarMessage::Generate))
     } else {
-        button::primary(None, "Set Lightning Address First")
+        button::primary(None, localized_copy("Set Lightning Address First"))
     };
 
     container(
         Column::new()
-            .push(text::p1_bold("Choose Your Traits").style(theme::text::primary))
+            .push(text::p1_bold(localized_copy("Choose Your Traits")).style(theme::text::primary))
             .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
-            .push(text::p2_regular("Your selections, combined with a hash of your Lightning address, create your unique avatar.").color(color::GREY_3))
+            .push(text::p2_regular(localized_copy("Your selections, combined with a hash of your Lightning address, create your unique avatar.")).color(color::GREY_3))
             .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
             .push(gender_row)
             .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
@@ -3654,11 +3746,13 @@ fn avatar_questionnaire_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, Conne
 
 fn avatar_settings_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage> {
     let Some(ref data) = state.avatar_data else {
-        return container(text::p2_regular("Loading avatar data…").color(color::GREY_3))
-            .padding(16)
-            .style(card_style)
-            .width(Length::Fill)
-            .into();
+        return container(
+            text::p2_regular(localized_copy("Loading avatar data…")).color(color::GREY_3),
+        )
+        .padding(16)
+        .style(card_style)
+        .width(Length::Fill)
+        .into();
     };
 
     let active_url = data.active_avatar_url.as_deref().unwrap_or("");
@@ -3677,12 +3771,12 @@ fn avatar_settings_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCub
                 .height(Length::Fixed(200.0))
                 .into()
         } else {
-            text::p2_regular("Loading image…")
+            text::p2_regular(localized_copy("Loading image…"))
                 .color(color::GREY_3)
                 .into()
         }
     } else {
-        text::p2_regular("No active variant")
+        text::p2_regular(localized_copy("No active variant"))
             .color(color::GREY_3)
             .into()
     };
@@ -3753,14 +3847,14 @@ fn avatar_settings_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCub
     };
 
     let regen_btn = if regen_remaining == 0 {
-        button::primary(None, "No Regenerations Remaining")
+        button::primary(None, localized_copy("No Regenerations Remaining"))
     } else {
-        button::primary(None, "Regenerate Avatar").on_press(ConnectCubeMessage::Avatar(
-            AvatarMessage::SetStep(AvatarFlowStep::Questionnaire),
-        ))
+        button::primary(None, localized_copy("Regenerate Avatar")).on_press(
+            ConnectCubeMessage::Avatar(AvatarMessage::SetStep(AvatarFlowStep::Questionnaire)),
+        )
     };
 
-    let download_btn = button::secondary(None, "Download PNG")
+    let download_btn = button::secondary(None, localized_copy("Download PNG"))
         .on_press(ConnectCubeMessage::Avatar(AvatarMessage::DownloadAvatar));
 
     container(

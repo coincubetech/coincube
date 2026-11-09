@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use iced::{Subscription, Task};
@@ -1169,10 +1170,10 @@ impl Tab {
         match &self.state {
             State::Installer(_) => "Installer",
             State::Loader(_) => "Loading...",
-            State::Home(_) => "Home",
-            State::Login(_) => "Login",
-            State::PinEntry(_) => "Enter PIN",
-            State::PasskeyUnlock(_) => "Unlock with passkey",
+            State::Home(_) => localized_copy("Home"),
+            State::Login(_) => localized_copy("Login"),
+            State::PinEntry(_) => localized_copy("Enter PIN"),
+            State::PasskeyUnlock(_) => localized_copy("Unlock with passkey"),
             State::App(a) => a.title(),
             State::DuressActive(_) => "COINCUBE",
         }
@@ -4952,9 +4953,12 @@ impl Tab {
         }
     }
 
-    pub fn view(&self) -> Element<Message> {
+    pub(crate) fn view(
+        &self,
+        worldview: crate::app::settings::preferences::WorldviewMode,
+    ) -> Element<Message> {
         let Some(opening) = self.opening.as_ref() else {
-            return self.state_view();
+            return self.state_view(worldview);
         };
         let now = Instant::now();
         let (cube, app) = match &self.state {
@@ -4964,10 +4968,10 @@ impl Tab {
                 (&loader.cube_settings, false)
             }
             State::App(app) => (app.cube_settings(), opening.scene.shows_app(now)),
-            _ => return self.state_view(),
+            _ => return self.state_view(worldview),
         };
         let base = if app {
-            self.state_view()
+            self.state_view(worldview)
         } else {
             let face = home::launcher_presenter::OpeningFace {
                 cube,
@@ -5004,7 +5008,10 @@ impl Tab {
         }
     }
 
-    fn state_view(&self) -> Element<Message> {
+    fn state_view(
+        &self,
+        worldview: crate::app::settings::preferences::WorldviewMode,
+    ) -> Element<Message> {
         match &self.state {
             State::Installer(v) => v.view().map(Message::Install),
             State::App(v) if v.cube_settings().network.is_blake2b() => {
@@ -5019,7 +5026,7 @@ impl Tab {
                     Message::AppAsync(generation, Box::new(Message::Run(message)))
                 })
             }
-            State::Home(v) => v.view().map(Message::Launch),
+            State::Home(v) => v.view_with_worldview(worldview).map(Message::Launch),
             State::Loader(v) => v.view().map(Message::Load),
             State::Login(v) => v.view().map(Message::Login),
             State::PinEntry(v) => {

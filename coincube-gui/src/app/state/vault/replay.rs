@@ -39,6 +39,7 @@ use coincube_core::{
 };
 
 use crate::{chain::ChainId, services::entangled::Entanglement};
+use coincube_ui::{locale::copy as localized_copy, localized_format};
 
 /// The acknowledgement a user gives before broadcasting a replayable spend
 /// (`#276` I4). Verbatim from the lane brief.
@@ -523,16 +524,25 @@ pub fn blocked_entangled_copy(blocked: &[usize]) -> Option<String> {
         .collect::<Vec<_>>()
         .join(", ");
     let (noun, verb, pronoun) = if blocked.len() == 1 {
-        ("Input", "exists", "it")
+        (
+            localized_copy("Input"),
+            localized_copy("exists"),
+            localized_copy("it"),
+        )
     } else {
-        ("Inputs", "exist", "them")
+        (
+            localized_copy("Inputs"),
+            localized_copy("exist"),
+            localized_copy("them"),
+        )
     };
-    Some(format!(
+    Some(localized_format!(
         "{noun} {list} also {verb} on Bitcoin, so this cannot be sent without a replay-capable \
          signature on {pronoun} (the Cube key or a Border Wallet key). If enough legacy \
          signatures were already collected to form a Bitcoin witness, create a new spend and \
          collect the replay-capable signature first; Coincube refuses to retain both complete \
-         alternatives. Or split the coins first in Coin control."
+         alternatives. Or split the coins first in Coin control.",
+        "{noun} {list} también {verb} en Bitcoin. Para enviar se necesita una firma protegida contra repetición en {pronoun}, con la clave del Cube o de Border Wallet. Si ya hay suficientes firmas antiguas para formar un testigo válido en Bitcoin, crea un gasto nuevo y recopila primero la firma protegida. Coincube rechaza conservar ambas alternativas completas. También puedes separar primero las monedas en Control de monedas."
     ))
 }
 
@@ -550,10 +560,13 @@ pub enum PillTone {
 pub fn pill_copy(status: &ReplayStatus, entangled: &[(usize, Entanglement)]) -> (String, PillTone) {
     match status {
         ReplayStatus::Protected => (
-            "This witness is replay protected".to_string(),
+            localized_copy("This witness is replay protected").to_owned(),
             PillTone::Success,
         ),
-        ReplayStatus::Split => ("Split — cannot replay".to_string(), PillTone::Success),
+        ReplayStatus::Split => (
+            localized_copy("Split — cannot replay").to_owned(),
+            PillTone::Success,
+        ),
         ReplayStatus::Replayable { inputs } => {
             let blocked: BTreeSet<usize> = blocked_entangled_inputs(status, entangled)
                 .into_iter()
@@ -563,31 +576,42 @@ pub fn pill_copy(status: &ReplayStatus, entangled: &[(usize, Entanglement)]) -> 
                 .iter()
                 .map(|index| {
                     if blocked.contains(index) {
-                        format!("{index} (also exists on Bitcoin — signature required)")
+                        localized_format!(
+                            "{index} (also exists on Bitcoin — signature required)",
+                            "{index} (también existe en Bitcoin · requiere firma)"
+                        )
                     } else if entangled.contains(index) {
-                        format!("{index} (not yet checked against Bitcoin)")
+                        localized_format!(
+                            "{index} (not yet checked against Bitcoin)",
+                            "{index} (aún sin comprobar en Bitcoin)"
+                        )
                     } else {
                         index.to_string()
                     }
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            let noun = if inputs.len() == 1 { "input" } else { "inputs" };
+            let noun = localized_copy(if inputs.len() == 1 { "input" } else { "inputs" });
             (
-                format!("Replayable — no replay-capable signature on {noun} {list}"),
+                localized_format!(
+                    "Replayable — no replay-capable signature on {noun} {list}",
+                    "Repetible · sin firma protegida contra repetición en {noun} {list}"
+                ),
                 PillTone::Warning,
             )
         }
-        ReplayStatus::Unknown(UnknownReason::NotYetChecked) => {
-            ("Not yet checked".to_string(), PillTone::Neutral)
-        }
-        ReplayStatus::Unknown(UnknownReason::Incomplete) => (
-            "Unknown — not enough signatures to check yet".to_string(),
+        ReplayStatus::Unknown(UnknownReason::NotYetChecked) => (
+            localized_copy("Not yet checked").to_owned(),
             PillTone::Neutral,
         ),
-        ReplayStatus::Unknown(UnknownReason::Refused(reason)) => {
-            (format!("Unknown — {reason}"), PillTone::Neutral)
-        }
+        ReplayStatus::Unknown(UnknownReason::Incomplete) => (
+            localized_copy("Unknown — not enough signatures to check yet").to_owned(),
+            PillTone::Neutral,
+        ),
+        ReplayStatus::Unknown(UnknownReason::Refused(reason)) => (
+            localized_format!("Unknown — {reason}", "Desconocido · {reason}"),
+            PillTone::Neutral,
+        ),
     }
 }
 

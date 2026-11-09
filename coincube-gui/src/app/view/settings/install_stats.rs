@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use iced::widget::{Column, Row, Space};
 use iced::{Alignment, Color, Length, Point, Rectangle};
@@ -59,7 +61,7 @@ pub fn install_stats_section<'a>(
                 .align_y(Alignment::Center)
                 .push(card::warning(err.to_string()).width(Length::Fill))
                 .push(
-                    Button::new(text("Retry").size(13).bold())
+                    Button::new(text(localized_copy("Retry")).size(13).bold())
                         .padding([6, 16])
                         .style(theme::button::transparent_border)
                         .on_press(refresh_msg),
@@ -101,9 +103,13 @@ fn downloads_card<'a>(
         inner
             .push(text(format_count(total)).size(38).bold())
             .push(
-                text(format!("of {} downloads", format_count(DOWNLOAD_GOAL)))
-                    .size(13)
-                    .style(theme::text::secondary),
+                text(localized_format!(
+                    "of {} downloads",
+                    "de {} descargas",
+                    format_count(DOWNLOAD_GOAL)
+                ))
+                .size(13)
+                .style(theme::text::secondary),
             )
             .push(Space::new().height(Length::Fixed(4.0)))
             .push(ProgressBar::new(0.0..=1.0, bar_pct))
@@ -116,10 +122,14 @@ fn downloads_card<'a>(
             )
     } else {
         inner.push(
-            text(if loading { "Loading…" } else { "—" })
-                .size(38)
-                .bold()
-                .style(theme::text::secondary),
+            text(if loading {
+                localized_copy("Loading…")
+            } else {
+                "—"
+            })
+            .size(38)
+            .bold()
+            .style(theme::text::secondary),
         )
     };
 
@@ -142,7 +152,11 @@ fn chart_card<'a>(
     let chart_area: Element<'a, Message> = if loading && timeseries.is_none() {
         Row::new()
             .push(Space::new().width(Length::Fill))
-            .push(text("Loading…").size(13).style(theme::text::secondary))
+            .push(
+                text(localized_copy("Loading…"))
+                    .size(13)
+                    .style(theme::text::secondary),
+            )
             .push(Space::new().width(Length::Fill))
             .height(Length::Fixed(160.0))
             .into()
@@ -150,7 +164,11 @@ fn chart_card<'a>(
         if points.is_empty() {
             Row::new()
                 .push(Space::new().width(Length::Fill))
-                .push(text("No data").size(13).style(theme::text::secondary))
+                .push(
+                    text(localized_copy("No data"))
+                        .size(13)
+                        .style(theme::text::secondary),
+                )
                 .push(Space::new().width(Length::Fill))
                 .height(Length::Fixed(160.0))
                 .into()

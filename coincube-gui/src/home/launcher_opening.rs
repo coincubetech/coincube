@@ -15,6 +15,7 @@
 //! This is presentation only. The loader's own `Step` decides the stage, and
 //! nothing here starts, stops or retries a load.
 
+use coincube_ui::locale::Text as CopyText;
 use std::time::{Duration, Instant};
 
 use super::launcher_catalog::LauncherSceneContext;
@@ -76,13 +77,13 @@ pub(crate) enum Stage {
 impl Stage {
     pub fn text(self) -> &'static str {
         match self {
-            Stage::Connecting => "Connecting to daemon...",
-            Stage::StartingDaemon => "Starting daemon...",
-            Stage::Scanning => "Scanning the blockchain...",
-            Stage::Syncing => "Syncing blockchain...",
-            Stage::AlmostThere => "Almost there...",
-            Stage::Spark => "Loading your Spark wallet...",
-            Stage::Ready => "Ready",
+            Stage::Connecting => CopyText::ConnectingToDaemon.get(),
+            Stage::StartingDaemon => CopyText::StartingDaemon.get(),
+            Stage::Scanning => CopyText::ScanningTheBlockchain.get(),
+            Stage::Syncing => CopyText::SyncingBlockchain.get(),
+            Stage::AlmostThere => CopyText::AlmostThere.get(),
+            Stage::Spark => CopyText::LoadingYourSparkWallet.get(),
+            Stage::Ready => CopyText::Ready.get(),
         }
     }
 

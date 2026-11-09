@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use std::sync::{Arc, Mutex};
 
 use coincube_core::signer::MasterSigner;
@@ -16,7 +17,7 @@ use crate::app::view::message::Message;
 pub fn liquid_settings_view<'a>(
     _liquid_signer: Option<Arc<Mutex<MasterSigner>>>,
 ) -> Element<'a, Message> {
-    let header = Button::new(text("Liquid Settings").size(30).bold())
+    let header = Button::new(text(localized_copy("Liquid Settings")).size(30).bold())
         .style(theme::button::transparent)
         .on_press(Message::Menu(crate::app::menu::Menu::Liquid(
             crate::app::menu::LiquidSubMenu::Settings(None),
@@ -27,8 +28,10 @@ pub fn liquid_settings_view<'a>(
         .width(Length::Fill)
         .push(header)
         .push(
-            text("Seed phrase backup has moved to Cube Settings (General section).")
-                .style(theme::text::secondary),
+            text(localized_copy(
+                "Seed phrase backup has moved to Cube Settings (General section).",
+            ))
+            .style(theme::text::secondary),
         )
         .into()
 }

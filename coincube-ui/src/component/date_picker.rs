@@ -1,5 +1,6 @@
 //! A compact calendar trigger with an overlay that does not enlarge its form.
 
+use crate::locale::copy as localized_copy;
 use chrono::NaiveDate;
 use iced::widget::{button, text, Themer};
 use iced_aw::DatePicker;
@@ -21,7 +22,7 @@ pub fn calendar_button<'a, Message: Clone + 'static>(
 ) -> Element<'a, Message> {
     // Match the compact secondary trigger while using a calendar-only theme.
     let trigger: iced::widget::Button<'a, Message, CalendarTheme> = button(
-        text("Choose date")
+        text(localized_copy("Choose date"))
             .font(font::REGULAR)
             .shaping(iced::advanced::text::Shaping::Advanced)
             .size(16),

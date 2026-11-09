@@ -4,6 +4,7 @@
 //! loaded cube. Consumes [`ConnectCubePanel`] state and emits
 //! [`ConnectCubeMessage::Members`] messages.
 
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     color,
     component::{tenshu::action::ActionButton, text},
@@ -79,7 +80,7 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
     let header = Row::new()
         .push(
             Column::new()
-                .push(text::h4_bold("Members").style(theme::text::primary))
+                .push(text::h4_bold(localized_copy("Members")).style(theme::text::primary))
                 .push(
                     text::p2_regular(format!(
                         "{} · {}",
@@ -89,15 +90,17 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
                     .style(theme::text::secondary),
                 )
                 .push(
-                    text::p2_regular("People who can view this Cube and contribute signing keys.")
-                        .style(theme::text::secondary),
+                    text::p2_regular(localized_copy(
+                        "People who can view this Cube and contribute signing keys.",
+                    ))
+                    .style(theme::text::secondary),
                 )
                 .spacing(2),
         )
         .push(iced::widget::Space::new().width(Length::Fill))
         .push(action(
             refresh_action_id(),
-            "Refresh",
+            coincube_ui::locale::copy("Refresh"),
             ActionKind::Secondary,
             (ready && !panel.loading).then_some(ConnectCubeMessage::Members(
                 ConnectCubeMembersMessage::Reload,
@@ -143,7 +146,7 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
         {
             not_ready = not_ready.push(action(
                 action_id("retry-registration"),
-                "Retry",
+                coincube_ui::locale::copy("Retry"),
                 ActionKind::Secondary,
                 Some(ConnectCubeMessage::RetryRegistration),
             ));
@@ -159,14 +162,16 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
     }
 
     col = col
-        .push(text::p1_bold("Add Member").style(theme::text::primary))
+        .push(text::p1_bold(localized_copy("Add Member")).style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(invite_form(panel))
         .push(iced::widget::Space::new().height(Length::Fixed(28.0)));
 
     if panel.loading {
-        col = col
-            .push(text::p1_regular("Loading members and invites…").style(theme::text::secondary));
+        col = col.push(
+            text::p1_regular(localized_copy("Loading members and invites…"))
+                .style(theme::text::secondary),
+        );
     }
 
     // Pending invites section
@@ -191,7 +196,7 @@ pub fn cube_members_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCu
     {
         col = col.push(empty_state());
     } else if !panel.members.is_empty() {
-        col = col.push(text::p1_bold("Members").style(theme::text::primary));
+        col = col.push(text::p1_bold(localized_copy("Members")).style(theme::text::primary));
         col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
         col = col.push(iced::widget::rule::horizontal(1));
         let vault_created_at = panel.vault_created_at.as_deref();
@@ -213,13 +218,13 @@ fn invite_form<'a>(
     let can_submit = !panel.invite_sending;
 
     let submit: Element<ConnectCubeMessage> = if panel.invite_sending {
-        text::p1_regular("Sending…")
+        text::p1_regular(localized_copy("Sending…"))
             .style(theme::text::secondary)
             .into()
     } else {
         action(
             add_action_id(),
-            "Add Member",
+            coincube_ui::locale::copy("Add Member"),
             ActionKind::Primary,
             can_submit.then_some(ConnectCubeMessage::Members(
                 ConnectCubeMembersMessage::SubmitInvite,
@@ -244,19 +249,17 @@ fn invite_form<'a>(
 
     Column::new()
         .push(
-            text::p2_regular(
+            text::p2_regular(localized_copy(
                 "Invite by email. Existing contacts are added immediately; new emails \
                  get an invite and join on accept.",
-            )
+            ))
             .style(theme::text::secondary),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(row)
-        .push_maybe(
-            panel
-                .invite_email_invalid
-                .then(|| text::p2_regular("Please enter a valid email address").color(color::RED)),
-        )
+        .push_maybe(panel.invite_email_invalid.then(|| {
+            text::p2_regular(localized_copy("Please enter a valid email address")).color(color::RED)
+        }))
         .spacing(0)
         .width(Length::Fill)
         .into()
@@ -301,11 +304,14 @@ fn member_card<'a>(
     let badge_row: Option<Element<'_, ConnectCubeMessage>> = if joined_after_vault {
         Some(
             Column::new()
-                .push(text::p2_regular("Joined after Vault").style(theme::text::secondary))
                 .push(
-                    text::p2_regular(
+                    text::p2_regular(localized_copy("Joined after Vault"))
+                        .style(theme::text::secondary),
+                )
+                .push(
+                    text::p2_regular(localized_copy(
                         "Can attach keys, but cannot sign for this Vault until it is rebuilt.",
-                    )
+                    ))
                     .style(theme::text::secondary),
                 )
                 .spacing(2)
@@ -399,12 +405,12 @@ fn empty_state<'a>() -> Element<'a, ConnectCubeMessage> {
         Column::new()
             .push(person_icon().size(40).color(color::GREY_3))
             .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-            .push(text::p1_bold("No members yet").style(theme::text::primary))
+            .push(text::p1_bold(localized_copy("No members yet")).style(theme::text::primary))
             .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
             .push(
-                text::p2_regular(
+                text::p2_regular(localized_copy(
                     "Add a contact by email to let them contribute a signing key to this Cube.",
-                )
+                ))
                 .style(theme::text::secondary),
             )
             .align_x(Alignment::Center)
@@ -419,11 +425,14 @@ fn empty_state<'a>() -> Element<'a, ConnectCubeMessage> {
 fn error_banner<'a>(err: &str) -> Element<'a, ConnectCubeMessage> {
     container(
         Row::new()
-            .push(text::p2_regular(err.to_string()).style(theme::text::error))
+            .push(
+                text::p2_regular(coincube_ui::locale::notice(err.to_string()))
+                    .style(theme::text::error),
+            )
             .push(iced::widget::Space::new().width(Length::Fill))
             .push(action(
                 Id::new(ERROR_DISMISS_ID),
-                "Dismiss",
+                coincube_ui::locale::copy("Dismiss"),
                 ActionKind::Quiet,
                 Some(ConnectCubeMessage::Members(
                     ConnectCubeMembersMessage::DismissError,
@@ -448,13 +457,17 @@ fn error_banner<'a>(err: &str) -> Element<'a, ConnectCubeMessage> {
 fn remove_conflict_banner<'a>(msg: &str) -> Element<'a, ConnectCubeMessage> {
     container(
         Column::new()
-            .push(text::p1_bold("Can't remove this member").style(theme::text::error))
+            .push(
+                text::p1_bold(localized_copy("Can't remove this member")).style(theme::text::error),
+            )
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
             .push(text::p2_regular(msg.to_string()).style(theme::text::primary))
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
             .push(
-                text::p2_regular("Wind down the Vault(s) first, then try again.")
-                    .style(theme::text::secondary),
+                text::p2_regular(localized_copy(
+                    "Wind down the Vault(s) first, then try again.",
+                ))
+                .style(theme::text::secondary),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
             .push(
@@ -462,7 +475,7 @@ fn remove_conflict_banner<'a>(msg: &str) -> Element<'a, ConnectCubeMessage> {
                     .push(iced::widget::Space::new().width(Length::Fill))
                     .push(action(
                         Id::new(REMOVE_CONFLICT_DISMISS_ID),
-                        "Dismiss",
+                        coincube_ui::locale::copy("Dismiss"),
                         ActionKind::Secondary,
                         Some(ConnectCubeMessage::Members(
                             ConnectCubeMembersMessage::DismissRemoveConflict,
@@ -532,7 +545,9 @@ fn expiry_element<'a>(expires_at: &str) -> Element<'a, ConnectCubeMessage> {
     // though it's already past.
     let expiry_utc = expiry.with_timezone(&chrono::Utc);
     if expiry_utc <= now {
-        return text::p2_regular("Expired").style(theme::text::error).into();
+        return text::p2_regular(localized_copy("Expired"))
+            .style(theme::text::error)
+            .into();
     }
     let days = (expiry_utc.date_naive() - now.date_naive()).num_days();
     match days {

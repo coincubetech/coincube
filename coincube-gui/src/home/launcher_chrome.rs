@@ -3,6 +3,8 @@
 //! prototype's CSS; every control keeps the catalog's existing ids and
 //! messages, so focus, the network gate and the quota stay authoritative.
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::{
     advanced::widget::Id,
     widget::{button as iced_button, container, mouse_area, svg, text, Space},
@@ -484,7 +486,12 @@ fn clear_filters<'a>(id: Id) -> Element<'a, ViewMessage> {
         iced::widget::Stack::new()
             .push(
                 Column::new()
-                    .push(words("Clear filters", 13.0, font::REGULAR, Ink::Body))
+                    .push(words(
+                        localized_copy("Clear filters"),
+                        13.0,
+                        font::REGULAR,
+                        Ink::Body,
+                    ))
                     .push(Space::new().height(Length::Fixed(3.0))),
             )
             .push(
@@ -766,7 +773,12 @@ fn activity_button<'a>(home: &Home) -> Option<Element<'a, ViewMessage>> {
                     .spacing(8)
                     .align_y(Alignment::Center)
                     .push(dot)
-                    .push(words("Network activity", 13.0, font::REGULAR, Ink::Body))
+                    .push(words(
+                        localized_copy("Network activity"),
+                        13.0,
+                        font::REGULAR,
+                        Ink::Body,
+                    ))
                     .push(Space::new().width(Length::Fill))
                     .push(glyph(CHEVRON, 14.0, Ink::Muted)),
             )
@@ -931,8 +943,9 @@ pub(super) fn activity_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>
                     .spacing(2)
                     .padding([6.0, 10.0])
                     .push(words(
-                        format!(
+                        localized_format!(
                             "Network activity · {}",
+                            "Actividad de red · {}",
                             network_menu_name(home.activity_chain())
                         ),
                         12.0,
@@ -960,12 +973,12 @@ pub(super) fn activity_layer<'a>(home: &Home) -> Option<Element<'a, ViewMessage>
                     .spacing(8)
                     .push(rule)
                     .push(
-                        text(
+                        text(localized_copy(
                             "Follows the Network filter, or the network picked above. Automatic \
                              reads a local node that is already running, else COINCUBE | Connect, \
                              or mempool.space for the test networks Connect does not serve. The \
                              Launcher never starts a node.",
-                        )
+                        ))
                         .size(12)
                         .style(|theme: &theme::Theme| text::Style {
                             color: Some(theme.colors.shell.muted),
@@ -1078,7 +1091,11 @@ pub(super) fn plan_rows(projection: &Projection<'_>) -> Vec<PlanRow> {
                     network,
                     used: "Not counted".to_string(),
                     note: Some(if usage.remote > 0 {
-                        format!("{} in Connect; this device not counted", usage.remote)
+                        localized_format!(
+                            "{} in Connect; this device not counted",
+                            "{} en Connect; este dispositivo no cuenta",
+                            usage.remote
+                        )
                     } else {
                         "This device's Cubes could not be counted".to_string()
                     }),
@@ -1127,7 +1144,12 @@ pub(super) fn plan_layer<'a>(
         ));
         if row.current {
             // Create and Import add Cubes here; the dock no longer captions it.
-            title = title.push(words("New Cubes", 12.0, font::MEDIUM, Ink::Accent));
+            title = title.push(words(
+                localized_copy("New Cubes"),
+                12.0,
+                font::MEDIUM,
+                Ink::Accent,
+            ));
         }
         let mut name = Column::new().spacing(2).width(Length::Fill).push(title);
         if let Some(note) = row.note {
@@ -1140,7 +1162,7 @@ pub(super) fn plan_layer<'a>(
             Ink::Body,
         ));
         if row.full {
-            used = used.push(words("Full", 12.0, font::MEDIUM, Ink::Warn));
+            used = used.push(words(localized_copy("Full"), 12.0, font::MEDIUM, Ink::Warn));
         }
         rows = rows.push(
             Container::new(
@@ -1207,9 +1229,11 @@ pub(super) fn plan_layer<'a>(
             .spacing(0)
             .push(
                 Container::new(words(
-                    format!(
+                    localized_format!(
                         "{} plan · {} Cubes per network",
-                        projection.tier, projection.cube_limit
+                        "Plan {} · {} Cubes por red",
+                        projection.tier,
+                        projection.cube_limit
                     ),
                     12.0,
                     font::REGULAR,
@@ -1260,7 +1284,7 @@ fn key_button<'a>(open: bool) -> Element<'a, ViewMessage> {
                 .spacing(6)
                 .align_y(Alignment::Center)
                 .push(glyph(KEY, 16.0, Ink::Body))
-                .push(words("Key", 13.0, font::REGULAR, Ink::Body)),
+                .push(words(localized_copy("Key"), 13.0, font::REGULAR, Ink::Body)),
         )
         .center_y(Length::Fill),
         focus,
@@ -1478,8 +1502,13 @@ pub(super) fn key_card<'a>(home: &Home, ghosts: bool) -> Element<'a, ViewMessage
             ..Padding::ZERO
         })
         .push(
-            Container::new(words("Face", 11.0, font::REGULAR, Ink::Muted))
-                .width(Length::Fixed(KEY_FACE_WIDTH)),
+            Container::new(words(
+                localized_copy("Face"),
+                11.0,
+                font::REGULAR,
+                Ink::Muted,
+            ))
+            .width(Length::Fixed(KEY_FACE_WIDTH)),
         )
         .push(head("On this device", false))
         .push(head("Only in Connect", true));
@@ -1509,7 +1538,7 @@ pub(super) fn key_card<'a>(home: &Home, ghosts: bool) -> Element<'a, ViewMessage
                     Ink::Body,
                 ))
                 .push(words(
-                    "Vault, imported wallet, Spark",
+                    localized_copy("Vault, imported wallet, Spark"),
                     13.0,
                     font::REGULAR,
                     Ink::Muted,
@@ -1525,7 +1554,7 @@ pub(super) fn key_card<'a>(home: &Home, ghosts: bool) -> Element<'a, ViewMessage
                     Ink::Body,
                 ))
                 .push(words(
-                    "Wallets Connect knows of, greyed, then a cloud",
+                    localized_copy("Wallets Connect knows of, greyed, then a cloud"),
                     13.0,
                     font::REGULAR,
                     Ink::Muted,
@@ -1626,7 +1655,9 @@ pub(super) fn key_card<'a>(home: &Home, ghosts: bool) -> Element<'a, ViewMessage
     if ghosts {
         card = card.push(
             Container::new(words(
-                "Select a Cube that's only in Connect to restore it or delete it from Connect.",
+                localized_copy(
+                    "Select a Cube that's only in Connect to restore it or delete it from Connect.",
+                ),
                 12.0,
                 font::REGULAR,
                 Ink::Muted,
@@ -1770,7 +1801,7 @@ pub(super) fn network_layer<'a>(
         )
         .push(Space::new().height(Length::Fixed(8.0)))
         .push(words(
-            "Filters change what is shown, never a Cube's network.",
+            localized_copy("Filters change what is shown, never a Cube's network."),
             12.0,
             font::REGULAR,
             Ink::Muted,
@@ -2007,7 +2038,13 @@ pub(crate) fn quiet_top_bar<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M
     .lead(chips)
     .lead(words(chrome.count.clone(), 13.0, font::REGULAR, Ink::Muted))
     .lead(chrome.filtered.then(|| {
-        Container::new(words("Clear filters", 13.0, font::REGULAR, Ink::Muted)).padding([2.0, 4.0])
+        Container::new(words(
+            localized_copy("Clear filters"),
+            13.0,
+            font::REGULAR,
+            Ink::Muted,
+        ))
+        .padding([2.0, 4.0])
     }))
     .chip(resting(connect, 32.0, 10.0, resting_bar))
     .into()
@@ -2032,8 +2069,11 @@ pub(crate) fn quiet_dock<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M> {
         .spacing(8)
         .align_y(Alignment::Center)
         .height(Length::Fill)
-        .push(action(PLUS, "Create Cube"))
-        .push(action(IMPORT, "Import or restore Bitcoin wallet"));
+        .push(action(PLUS, coincube_ui::locale::copy("Create Cube")))
+        .push(action(
+            IMPORT,
+            coincube_ui::locale::copy("Import or restore Bitcoin wallet"),
+        ));
     for link in &chrome.links {
         row = row.push(
             Container::new(words(*link, 13.0, font::MEDIUM, Ink::Accent)).padding([4.0, 6.0]),
@@ -2059,7 +2099,12 @@ pub(crate) fn quiet_dock<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M> {
                 Row::new()
                     .spacing(8)
                     .align_y(Alignment::Center)
-                    .push(words("Network activity", 13.0, font::REGULAR, body(quiet)))
+                    .push(words(
+                        localized_copy("Network activity"),
+                        13.0,
+                        font::REGULAR,
+                        body(quiet),
+                    ))
                     .push(Space::new().width(Length::Fill))
                     .push(glyph(CHEVRON, 14.0, Ink::Muted)),
                 KEY_BUTTON_HEIGHT,
@@ -2076,7 +2121,7 @@ pub(crate) fn quiet_dock<'a, M: 'a>(chrome: &ChromeSnapshot) -> Element<'a, M> {
                 .spacing(6)
                 .align_y(Alignment::Center)
                 .push(glyph(KEY, 16.0, Ink::Body))
-                .push(words("Key", 13.0, font::REGULAR, Ink::Body)),
+                .push(words(localized_copy("Key"), 13.0, font::REGULAR, Ink::Body)),
             KEY_BUTTON_HEIGHT,
             10.0,
             |theme| bar_button(theme, iced_button::Status::Active, false),

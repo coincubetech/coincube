@@ -1,5 +1,6 @@
 #![allow(deprecated)]
 
+use coincube_ui::locale::copy as localized_copy;
 pub mod template;
 
 use iced::widget::{container, pick_list, slider, Button, Space};
@@ -56,11 +57,11 @@ pub fn define_descriptor_advanced_settings<'a>(
     allow_taproot: bool,
 ) -> Element<'a, Message> {
     if !allow_taproot {
-        return text("Bitcoin Blake2b Vaults use P2WSH").into();
+        return text(localized_copy("Bitcoin Blake2b Vaults use P2WSH")).into();
     }
     let col_wallet = Column::new()
         .spacing(10)
-        .push(text("Descriptor type").bold())
+        .push(text(localized_copy("Descriptor type")).bold())
         .push(container(
             pick_list(
                 &DESCRIPTOR_KINDS[..],
@@ -87,8 +88,10 @@ pub fn define_descriptor_advanced_settings<'a>(
             // upstream app-version wording this notice used to carry.
             .push(if use_taproot {
                 Some(
-                    p1_regular("Taproot requires Bitcoin Core or Knots 26.0 or above")
-                        .style(theme::text::secondary),
+                    p1_regular(localized_copy(
+                        "Taproot requires Bitcoin Core or Knots 26.0 or above",
+                    ))
+                    .style(theme::text::secondary),
                 )
             } else {
                 None
@@ -220,7 +223,7 @@ pub fn defined_key<'a>(
                 None
             })
             .push(
-                button::secondary(Some(icon::pencil_icon()), "Edit")
+                button::secondary(Some(icon::pencil_icon()), localized_copy("Edit"))
                     .on_press(message::DefineKey::EditAlias),
             )
             .push(if fixed {
@@ -339,7 +342,9 @@ pub fn edit_sequence_modal<'a>(sequence: &form::Value<String>) -> Element<'a, Me
         .width(Length::Fill)
         .spacing(20)
         .align_x(Alignment::Center)
-        .push(text("Keys can move the funds after inactivity of:"))
+        .push(text(localized_copy(
+            "Keys can move the funds after inactivity of:",
+        )))
         .push(
             Row::new()
                 .push(
@@ -351,12 +356,14 @@ pub fn edit_sequence_modal<'a>(sequence: &form::Value<String>) -> Element<'a, Me
                                 ),
                             )
                         })
-                        .warning("Value must be superior to 0 and inferior to 65535"),
+                        .warning(localized_copy(
+                            "Value must be superior to 0 and inferior to 65535",
+                        )),
                     )
                     .width(Length::Fixed(200.0)),
                 )
                 .spacing(10)
-                .push(text("blocks").bold())
+                .push(text(localized_copy("blocks")).bold())
                 .align_y(alignment::Vertical::Center),
         );
 
@@ -398,7 +405,7 @@ pub fn edit_sequence_modal<'a>(sequence: &form::Value<String>) -> Element<'a, Me
     }
 
     card::modal(col.push(if sequence.valid {
-        button::primary(None, "Apply")
+        button::primary(None, localized_copy("Apply"))
             .on_press(Message::DefineDescriptor(
                 message::DefineDescriptor::ThresholdSequenceModal(
                     message::ThresholdSequenceModal::Confirm,
@@ -406,7 +413,7 @@ pub fn edit_sequence_modal<'a>(sequence: &form::Value<String>) -> Element<'a, Me
             ))
             .width(Length::Fixed(200.0))
     } else {
-        button::primary(None, "Apply").width(Length::Fixed(200.0))
+        button::primary(None, localized_copy("Apply")).width(Length::Fixed(200.0))
     }))
     .width(Length::Fixed(800.0))
     .into()
@@ -428,7 +435,7 @@ pub fn edit_threshold_modal<'a>(threshold: (usize, usize)) -> Element<'a, Messag
                 },
             ))
             .push(
-                button::primary(None, "Apply")
+                button::primary(None, localized_copy("Apply"))
                     .on_press(Message::DefineDescriptor(
                         message::DefineDescriptor::ThresholdSequenceModal(
                             message::ThresholdSequenceModal::Confirm,
@@ -516,7 +523,7 @@ mod threshsold_input {
             Column::new()
                 .width(Length::Fixed(150.0))
                 .push(button(icon::up_icon().size(30), Event::IncrementPressed))
-                .push(text("Threshold:").small().bold())
+                .push(text(coincube_ui::locale::copy("Threshold:")).small().bold())
                 .push(
                     Container::new(text(format!("{}/{}", self.value, self.max)).size(30))
                         .align_y(alignment::Vertical::Center),

@@ -989,6 +989,7 @@ impl State for SparkSend {
                 quote_countdown: self.quote_countdown.clone(),
                 receive_target: self.receive_target,
                 network: cache.network,
+                chain: cache.chain(),
                 theme_mode: cache.theme_mode,
             }
             .render(),

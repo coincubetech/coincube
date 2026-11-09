@@ -19,6 +19,7 @@
 //! required before daemon writes. The isolated managed local path instead uses
 //! the anonymous global flag and saved beta preference, with exact local-chain
 //! admission. Neither path enables generic startup.
+use coincube_ui::locale::Text as CopyText;
 
 pub use coincube_core::chain::{ChainId, UnknownChainId};
 
@@ -277,10 +278,98 @@ impl ChainIdExt for ChainId {
     }
 }
 
+/// Stable technical identity for transaction, signing, and address review.
+pub(crate) fn canonical_network_name(chain: ChainId) -> &'static str {
+    match chain {
+        ChainId::Bitcoin => CopyText::BitcoinSha256Mainnet.get(),
+        ChainId::BitcoinBlake2b => CopyText::BitcoinBlake2bMainnet.get(),
+        ChainId::Testnet => "Bitcoin SHA-256 · Testnet",
+        ChainId::Testnet4 => "Bitcoin SHA-256 · Testnet4",
+        ChainId::Signet => "Bitcoin SHA-256 · Signet",
+        ChainId::Regtest => "Bitcoin SHA-256 · Regtest",
+        ChainId::BitcoinBlake2bTestnet4 => "Bitcoin BLAKE2b · Testnet4",
+    }
+}
+
+/// Optional flavor for passive chain labels. The result is display copy only.
+pub(crate) fn worldview_chain_label(
+    chain: ChainId,
+    worldview: crate::app::settings::preferences::WorldviewMode,
+) -> &'static str {
+    use crate::app::settings::preferences::WorldviewMode::{Luke, Samurai, Suitcoiner};
+
+    match (chain, worldview) {
+        (ChainId::Bitcoin, Samurai | Suitcoiner) => "Bitcoin (BTC)",
+        (ChainId::Bitcoin, Luke) => "Spamcoin (BTC)",
+        (ChainId::BitcoinBlake2b, Samurai) => "Bitcoin BLAKE2b (BTCB2)",
+        (ChainId::BitcoinBlake2b, Suitcoiner) => "LukeCoin (BTCB2)",
+        (ChainId::BitcoinBlake2b, Luke) => "Bitcoin (XBT)",
+        _ => chain.label(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use coincube_core::miniscript::bitcoin::Network;
+
+    #[test]
+    fn worldview_aliases_and_canonical_identity_are_distinct() {
+        use crate::app::settings::preferences::WorldviewMode::{Luke, Samurai, Suitcoiner};
+        let chains = [
+            (
+                ChainId::Bitcoin,
+                "Bitcoin SHA-256 · Mainnet",
+                ["Bitcoin (BTC)", "Bitcoin (BTC)", "Spamcoin (BTC)"],
+            ),
+            (
+                ChainId::BitcoinBlake2b,
+                "Bitcoin BLAKE2b · Mainnet",
+                [
+                    "Bitcoin BLAKE2b (BTCB2)",
+                    "LukeCoin (BTCB2)",
+                    "Bitcoin (XBT)",
+                ],
+            ),
+            (
+                ChainId::Testnet,
+                "Bitcoin SHA-256 · Testnet",
+                ["Testnet"; 3],
+            ),
+            (
+                ChainId::Testnet4,
+                "Bitcoin SHA-256 · Testnet4",
+                ["Testnet4"; 3],
+            ),
+            (ChainId::Signet, "Bitcoin SHA-256 · Signet", ["Signet"; 3]),
+            (
+                ChainId::Regtest,
+                "Bitcoin SHA-256 · Regtest",
+                ["Regtest"; 3],
+            ),
+            (
+                ChainId::BitcoinBlake2bTestnet4,
+                "Bitcoin BLAKE2b · Testnet4",
+                ["Bitcoin Blake2b Testnet4"; 3],
+            ),
+        ];
+        for (chain, canonical, aliases) in chains {
+            assert_eq!(canonical_network_name(chain), canonical);
+            for (worldview, alias) in [Samurai, Suitcoiner, Luke].iter().copied().zip(aliases) {
+                assert_eq!(worldview_chain_label(chain, worldview), alias);
+                assert_eq!(chain.dir_name().parse::<ChainId>(), Ok(chain));
+                assert_eq!(ChainId::from_api_str(chain.api_str()), Some(chain));
+            }
+        }
+        assert_eq!(
+            ChainId::Bitcoin.bitcoin_network(),
+            ChainId::BitcoinBlake2b.bitcoin_network()
+        );
+        assert_ne!(
+            canonical_network_name(ChainId::Bitcoin),
+            canonical_network_name(ChainId::BitcoinBlake2b)
+        );
+    }
 
     /// Compile-time proof that the GUI and core hand around one type: a
     /// value built through the core path is accepted where the GUI path is

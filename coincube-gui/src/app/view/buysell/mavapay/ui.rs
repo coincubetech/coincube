@@ -5,6 +5,8 @@ use crate::{
     },
     services::{coincube::Country, mavapay::*},
 };
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 
 use iced::{widget, Alignment, Length};
 
@@ -131,7 +133,7 @@ fn buy_input_form<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMess
     .style(theme::card::simple)
     .width(Length::Fixed(600.0));
 
-    let previous_btn = button::secondary(Some(previous_icon()), "Back")
+    let previous_btn = button::secondary(Some(previous_icon()), localized_copy("Back"))
         .width(Length::Fixed(150.0))
         .on_press(BuySellMessage::Mavapay(MavapayMessage::NavigateBack));
 
@@ -365,7 +367,7 @@ fn sell_input_form<'a>(
     .spacing(10)
     .width(iced::Length::Fill);
 
-    let previous_btn = button::secondary(Some(previous_icon()), "Back")
+    let previous_btn = button::secondary(Some(previous_icon()), localized_copy("Back"))
         .width(Length::Fixed(150.0))
         .on_press(BuySellMessage::Mavapay(MavapayMessage::NavigateBack));
 
@@ -775,7 +777,7 @@ fn history_view<'a>(
             })
             .width(Length::Fill)
             .into(),
-        (false, None) => button::primary(Some(reload_icon()), "Retry")
+        (false, None) => button::primary(Some(reload_icon()), localized_copy("Retry"))
             .on_press(BuySellMessage::Mavapay(MavapayMessage::FetchTransactions))
             .into(),
     };
@@ -1060,7 +1062,7 @@ fn order_detail_view<'a>(
                 });
 
                 let title = if quotes.len() > 1 {
-                    format!("Quote #{}", idx + 1)
+                    localized_format!("Quote #{}", "Cotización #{}", idx + 1)
                 } else {
                     "Quote Details".to_string()
                 };

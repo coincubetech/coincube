@@ -2,8 +2,10 @@
 //! The wide composition keeps policy keys beside labelled spend windows; the
 //! compact composition stacks them so the timing labels remain readable.
 
+use crate::app::view::responsive;
+use coincube_ui::locale::copy as localized_copy;
 use iced::{
-    widget::{container, responsive, Space},
+    widget::{container, Space},
     Alignment, Background, Border, Color, Length, Size,
 };
 
@@ -198,7 +200,7 @@ fn diagram_content<'a>(rows: &[PolicyRow<'a>], available_width: f32) -> Element<
             .width(Length::Fill)
             .push(caption("Receipt of funds").style(theme::text::secondary))
             .push(Space::new().width(Length::Fill))
-            .push(caption("After inactivity").style(theme::text::secondary))
+            .push(caption(localized_copy("After inactivity")).style(theme::text::secondary))
             .into()
     } else {
         Row::new()
@@ -210,7 +212,7 @@ fn diagram_content<'a>(rows: &[PolicyRow<'a>], available_width: f32) -> Element<
                     .push(caption("Receipt of funds").style(theme::text::secondary))
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        caption("After some time* of wallet inactivity")
+                        caption(localized_copy("After some time* of wallet inactivity"))
                             .style(theme::text::secondary),
                     ),
             )
@@ -222,8 +224,10 @@ fn diagram_content<'a>(rows: &[PolicyRow<'a>], available_width: f32) -> Element<
     );
     Container::new(
         content.push(
-            caption("*Recovery delays can be configured in the next step.")
-                .style(theme::text::secondary),
+            caption(localized_copy(
+                "*Recovery delays can be configured in the next step.",
+            ))
+            .style(theme::text::secondary),
         ),
     )
     .width(Length::Fill)

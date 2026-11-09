@@ -573,6 +573,7 @@ pub struct VerifyAddressModal {
     warning: Option<Error>,
     chosen_hws: HashSet<Fingerprint>,
     hws: HardwareWallets,
+    chain: crate::chain::ChainId,
     address: Address,
     derivation_index: ChildNumber,
 }
@@ -588,6 +589,7 @@ impl VerifyAddressModal {
         Self {
             warning: None,
             chosen_hws: HashSet::new(),
+            chain: wallet.chain,
             hws: HardwareWallets::new(data_dir, network).with_wallet(wallet),
             address,
             derivation_index,
@@ -598,6 +600,7 @@ impl VerifyAddressModal {
 impl VerifyAddressModal {
     pub fn view(&self) -> Element<'_, view::Message> {
         view::vault::receive::verify_address_modal(
+            self.chain,
             &self.hws.list,
             &self.chosen_hws,
             &self.address,
