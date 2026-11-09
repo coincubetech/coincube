@@ -40,7 +40,7 @@ pytest tests/test_rpc.py::test_startup -vvv --log-cli-level=DEBUG
 
 Env knobs (`tests/test_framework/utils.py`): `COINCUBED_PATH` (default `target/release/coincubed`), `BITCOIND_PATH`, `BITCOIN_BACKEND_TYPE=bitcoind|electrs`, `ELECTRS_PATH`, `USE_TAPROOT=1` (needs bitcoind ≥26), `TIMEOUT`, `TEST_DIR` (failing tests keep their datadir there), `OLD_COINCUBED_PATH` (else `test_migration` skips). The four reorg tests in `test_chain.py` are run serially in CI with `TIMEOUT=240`.
 
-Other test surfaces: `cargo test -p coincube-gui --features integration-tests` hits the live Connect dev API (needs `COINCUBE_INTEGRATION_TOKEN`; nightly-only in CI); `contrib/coverage.sh` / `contrib/coverage-bridge.sh` run cargo-llvm-cov; `fuzz/` is a cargo-fuzz crate over `coincube_core::descriptors`.
+Other test surfaces: `cargo test -p coincube-gui --features integration-tests` hits a real Connect API: production with a dedicated test account, or a local API (there is no dev server; needs `COINCUBE_API_URL` and `COINCUBE_INTEGRATION_TOKEN`; the connect-integration workflow is off unless enabled); `contrib/coverage.sh` / `contrib/coverage-bridge.sh` run cargo-llvm-cov; `fuzz/` is a cargo-fuzz crate over `coincube_core::descriptors`.
 
 ### `.env` is baked in at compile time
 

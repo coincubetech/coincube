@@ -84,8 +84,8 @@ async fn stream_connects_and_emits_connected_message() {
     let stream = connect_stream(&config);
     tokio::pin!(stream);
 
-    // Allow a few seconds for the gRPC handshake. If the dev API is
-    // slow this may need bumping; integration tests run on nightly CI
+    // Allow a few seconds for the gRPC handshake. If the target API is
+    // slow this may need bumping; integration tests are opt-in
     // so a 10s budget is acceptable.
     let timeout = Duration::from_secs(10);
     let evt = tokio::time::timeout(timeout, stream.next())
