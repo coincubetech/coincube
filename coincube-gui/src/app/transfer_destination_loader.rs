@@ -962,12 +962,8 @@ impl SparkAddressRequest {
                 .receive_onchain(None)
                 .await
                 .map_err(|_| Refusal::SparkUnavailable)?;
-            let address = response
-                .payment_request
-                .parse::<coincube_core::miniscript::bitcoin::Address<_>>()
-                .ok()
-                .and_then(|address| address.require_network(Network::Bitcoin).ok())
-                .ok_or(Refusal::IdentityChanged)?;
+            let address = spark_deposit_address(&response.payment_request)
+                .ok_or(Refusal::SparkUnavailable)?;
             Ok(OtherReceiveAddress::Bitcoin(DestinationAddress {
                 address,
                 // Review's on-chain address model carries an index. Other
@@ -976,6 +972,24 @@ impl SparkAddressRequest {
             }))
         }
     }
+}
+
+/// Spark's on-chain `payment_request` may be a bare address or a BIP21 URI.
+/// Keep only the mainnet address; any other scheme is refused.
+fn spark_deposit_address(
+    payment_request: &str,
+) -> Option<coincube_core::miniscript::bitcoin::Address> {
+    let address = match payment_request.split_once(':') {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("bitcoin") => rest,
+        Some(_) => return None,
+        None => payment_request,
+    };
+    let address = address.split('?').next().unwrap_or(address);
+    address
+        .parse::<coincube_core::miniscript::bitcoin::Address<_>>()
+        .ok()?
+        .require_network(Network::Bitcoin)
+        .ok()
 }
 
 async fn destination_daemon(
@@ -1082,6 +1096,30 @@ mod tests {
             chain: ChainId::Bitcoin,
             wallet: WalletIdentity::Vault(WalletId::new("source-id".into(), Some(1))),
             app: AppGeneration::next(),
+        }
+    }
+
+    #[test]
+    fn spark_deposit_address_accepts_a_bip21_uri() {
+        let bare = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
+        for request in [
+            bare.to_string(),
+            format!("bitcoin:{bare}"),
+            format!("BITCOIN:{bare}?amount=0.1&label=Cube"),
+        ] {
+            assert_eq!(
+                spark_deposit_address(&request).map(|address| address.to_string()),
+                Some(bare.to_string()),
+                "{}",
+                request
+            );
+        }
+        for request in [
+            format!("liquidnetwork:{bare}"),
+            "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".to_string(),
+            "not an address".to_string(),
+        ] {
+            assert!(spark_deposit_address(&request).is_none(), "{}", request);
         }
     }
 
