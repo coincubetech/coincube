@@ -142,7 +142,10 @@ luke-{bitcoin,lightning,note,spark}-{send,receive}.png
 Use the corresponding mascot portrait as the character reference. Center a
 waist-up vignette with the payment motif as a readable second focal point.
 Send releases the object away from the mascot. Receive brings it in close.
-Use a Bitcoin coin, a lightning bolt, a sealed note, or interlocking rings
-with a small glint for Spark. Keep the silhouette, clothing, print medium and
-palette consistent within each set. The Warden variants use the armored
-portrait as the costume reference and preserve the original payment pose.
+Use a Bitcoin coin for Bitcoin and a sealed envelope for Note. For Lightning,
+the Warden sends a branching bolt from an outstretched gauntlet and catches
+an incoming bolt in cupped gauntlets. For Spark, show one compact glint at
+the Warden's wand or the Broker's fountain-pen nib. Point the tool outward
+for send and hold it close for receive. Keep the silhouette, clothing,
+print medium and palette consistent within each set. The Warden variants
+use the armored portrait as the costume reference.
