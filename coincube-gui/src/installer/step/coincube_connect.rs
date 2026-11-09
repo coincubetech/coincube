@@ -96,7 +96,6 @@ impl CoincubeConnectStep {
                 .and_then(|c| c.token())
                 .is_none())
             || ctx.network == coincube_core::miniscript::bitcoin::Network::Regtest
-            || ctx.remote_backend.is_some()
     }
 }
 
@@ -418,19 +417,13 @@ impl Step for CoincubeConnectStep {
 #[cfg(test)]
 mod chain_auth_tests {
     use super::*;
-    use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+    use crate::{chain::ChainId, dir::CoincubeDirectory};
 
     #[test]
     fn login_and_retained_sessions_keep_authenticated_client_for_startup() {
         for retained in [false, true] {
             let dir = CoincubeDirectory::new(Default::default());
-            let mut ctx = Context::new_for_chain(
-                ChainId::BitcoinBlake2b,
-                dir.clone(),
-                RemoteBackend::None,
-                None,
-                None,
-            );
+            let mut ctx = Context::new_for_chain(ChainId::BitcoinBlake2b, dir.clone(), None, None);
             let mut client = CoincubeClient::for_test("http://127.0.0.1:1/custom-connect");
             if retained {
                 client.set_token("synthetic-session");
@@ -472,7 +465,6 @@ mod chain_auth_tests {
             let mut ctx = Context::new_for_chain(
                 chain,
                 CoincubeDirectory::new(Default::default()),
-                RemoteBackend::None,
                 None,
                 None,
             );
@@ -522,7 +514,6 @@ mod chain_auth_tests {
         let mut ctx = Context::new_for_chain(
             ChainId::BitcoinBlake2b,
             CoincubeDirectory::new(Default::default()),
-            RemoteBackend::None,
             None,
             None,
         );
@@ -550,8 +541,7 @@ mod chain_auth_tests {
             ChainId::BitcoinBlake2bTestnet4,
         ] {
             let dir = CoincubeDirectory::new(Default::default());
-            let mut ctx =
-                Context::new_for_chain(chain, dir.clone(), RemoteBackend::None, None, None);
+            let mut ctx = Context::new_for_chain(chain, dir.clone(), None, None);
             let mut step = CoincubeConnectStep::new();
             step.load_context(&ctx);
             let mut hws = HardwareWallets::new(dir, chain.bitcoin_network());

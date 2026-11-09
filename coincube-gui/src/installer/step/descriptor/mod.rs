@@ -81,11 +81,6 @@ impl ImportDescriptor {
 }
 
 impl Step for ImportDescriptor {
-    // ImportRemoteWallet is used instead
-    fn skip(&self, ctx: &Context) -> bool {
-        ctx.remote_backend.is_some()
-    }
-
     fn subscription(&self, hws: &HardwareWallets) -> Subscription<Message> {
         self.modal.subscriptions(hws)
     }

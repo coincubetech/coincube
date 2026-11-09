@@ -25,10 +25,7 @@ use crate::{
         bitcoind::{Bitcoind, ConfigField, RpcAuthType},
         electrum, esplora, NodeType,
     },
-    services::{
-        self,
-        connect::client::{auth::AuthClient, backend::api},
-    },
+    services,
 };
 
 /// Result handed to `Message::CubeSaved` after post-install
@@ -69,8 +66,6 @@ pub enum Message {
     CreateTaprootDescriptor(bool),
     FocusAction(iced::advanced::widget::Id),
     SelectDescriptorTemplate(context::DescriptorTemplate),
-    SelectBackend(SelectBackend),
-    ImportRemoteWallet(ImportRemoteWallet),
     SelectBitcoindType(SelectBitcoindTypeMsg),
     InternalBitcoind(InternalBitcoindMsg),
     DefineNode(DefineNode),
@@ -107,8 +102,8 @@ pub enum Message {
     /// `spark_backend = None` and the Spark panels stayed empty until
     /// the user closed and re-opened the Cube (at which point the
     /// normal PIN-entry path loads Spark correctly). For every other
-    /// flow (fresh install, remote backend, etc.) the clients are
-    /// built downstream (PIN entry, login) and these slots stay `None`.
+    /// flow (fresh install, etc.) the clients are built downstream
+    /// (PIN entry) and these slots stay `None`.
     CubeSaved(
         CubeSaveResult,
         Option<Box<settings::WalletSettings>>,
@@ -157,36 +152,6 @@ impl From<(Fingerprint, ChildNumber)> for Message {
     fn from(value: (Fingerprint, ChildNumber)) -> Self {
         Self::SelectAccount(value.0, value.1)
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum SelectBackend {
-    // view messages
-    RequestOTP,
-    EditEmail,
-    EmailEdited(String),
-    OTPEdited(String),
-    ContinueWithLocalWallet(bool),
-    // Commands messages
-    OTPRequested(Result<(AuthClient, String), Error>),
-    OTPResent(Result<(), Error>),
-    ExistingConnectAccounts(Vec<String>),
-    SelectConnectAccount(String),
-    Connected(Result<context::RemoteBackend, Error>),
-}
-
-#[derive(Debug, Clone)]
-pub enum ImportRemoteWallet {
-    RemoteWallets(Result<Vec<api::Wallet>, Error>),
-    ImportDescriptor(String),
-    ConfirmDescriptor,
-    ImportInvitationToken(String),
-    FetchInvitation,
-    InvitationFetched(Result<api::WalletInvitation, Error>),
-    AcceptInvitation,
-    InvitationAccepted(Result<api::Wallet, Error>),
-    ImportDescriptorFromFile,
-    ImportExport(ImportExportMessage),
 }
 
 #[derive(Debug, Clone)]

@@ -1,7 +1,6 @@
 pub mod descriptor;
 pub mod import_descriptor;
 
-mod backend;
 mod claim_overview;
 pub use claim_overview::ClaimOverview;
 mod coincube_connect;
@@ -26,7 +25,6 @@ pub use descriptor::{
     BackupDescriptor, ImportDescriptor, RegisterDescriptor,
 };
 
-pub use backend::{ChooseBackend, ImportRemoteWallet, RemoteBackendLogin};
 pub use coincube_connect::CoincubeConnectStep;
 pub use inheritance_restore::InheritanceRestoreStep;
 pub use mnemonic::{BackupMnemonic, RecoverMnemonic};
@@ -446,7 +444,7 @@ impl From<Final> for Box<dyn Step> {
 #[cfg(test)]
 mod chain_registration_tests {
     use super::*;
-    use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+    use crate::{chain::ChainId, dir::CoincubeDirectory};
 
     #[test]
     fn final_registration_preserves_chain_identity() {
@@ -462,7 +460,6 @@ mod chain_registration_tests {
             let mut ctx = Context::new(
                 chain.bitcoin_network(),
                 CoincubeDirectory::new(Default::default()),
-                RemoteBackend::None,
                 None,
                 None,
             );

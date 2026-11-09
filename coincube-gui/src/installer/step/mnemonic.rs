@@ -223,7 +223,6 @@ mod fork_backup_tests {
         let mut ctx = Context::new_for_chain(
             crate::chain::ChainId::BitcoinBlake2b,
             dir.clone(),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );

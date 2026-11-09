@@ -93,7 +93,6 @@ impl Session {
             || ctx.cube_id.as_deref() != Some(&self.cube_id)
             || ctx.bitcoin_config.chain != crate::chain::ChainId::Regtest
             || ctx.network != coincube_core::miniscript::bitcoin::Network::Regtest
-            || !ctx.remote_backend.is_none()
             || ctx.use_coincube_connect
             || ctx.coincube_client.is_some()
             || ctx.backup.is_some()
@@ -570,7 +569,6 @@ pub(crate) mod tests {
         let mut ctx = Context::new(
             Network::Regtest,
             crate::dir::CoincubeDirectory::new(root.to_owned()),
-            super::super::RemoteBackend::None,
             Some(&cube),
             None,
         );
@@ -766,7 +764,6 @@ pub(crate) mod tests {
         let mut ctx = Context::new(
             coincube_core::miniscript::bitcoin::Network::Regtest,
             crate::dir::CoincubeDirectory::new(root),
-            super::super::RemoteBackend::None,
             None,
             None,
         );

@@ -851,7 +851,7 @@ mod tests {
         write(&settings);
         drop(panel.reload(Some(daemon.clone()), Some(wallet)));
         assert!(!panel.restore_rescan_clear, "reload must start unknown");
-        panel.daemon_backend = Some(DaemonBackend::RemoteBackend);
+        panel.daemon_backend = Some(DaemonBackend::ExternalCoincubed);
         drop(panel.update(Some(daemon.clone()), &cache, Message::Tick));
         assert!(!panel.restore_rescan_clear, "tick sees pending restore");
 

@@ -1927,7 +1927,6 @@ mod tests {
             crate::dir::CoincubeDirectory::new(
                 std::env::temp_dir().join("imported-restore-context-only"),
             ),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );
@@ -1958,7 +1957,6 @@ mod tests {
             crate::dir::CoincubeDirectory::new(
                 std::env::temp_dir().join("imported-restore-context-only"),
             ),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );

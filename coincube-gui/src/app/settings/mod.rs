@@ -24,11 +24,13 @@ use crate::{
     chain::{ChainId, ChainIdExt},
     dir::NetworkDirectory,
     hw::HardwareWalletConfig,
-    services::{self, connect::client::backend},
+    services,
     utils::serde::ok_or_none,
 };
 
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
+/// Longest wallet alias accepted by the alias editors.
+pub const WALLET_ALIAS_MAXIMUM_LENGTH: usize = 64;
 
 /// A settings endpoint refused by path policy rather than by the OS.
 fn unsafe_endpoint(reason: &str) -> std::io::Error {
@@ -1314,6 +1316,7 @@ pub fn network_to_api_string<C: Into<ChainId>>(chain: C) -> String {
     network_to_api_str(chain).to_string()
 }
 
+/// Liana Connect account a legacy remote-backend Vault was registered under.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthConfig {
     pub email: String,
@@ -1333,6 +1336,19 @@ impl AuthConfig {
             refresh_token: None,
         }
     }
+
+    /// Why a legacy Liana Connect Vault cannot be opened here, and where its
+    /// wallet still lives. Shown wherever such a Cube is opened or deleted.
+    pub fn retired_backend_notice(&self) -> String {
+        format!(
+            "This Cube's Vault was set up on Liana Connect, which COINCUBE no longer \
+             supports. The wallet itself still exists on Liana Connect: open it in the \
+             Liana desktop app and sign in as {} to reach your funds. Deleting this Cube \
+             removes only the copy on this computer — before you do, make sure you can \
+             open the wallet in Liana or have its recovery phrase and descriptor backed up.",
+            self.email
+        )
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1341,14 +1357,14 @@ pub struct WalletSettings {
     pub alias: Option<String>,
     pub descriptor_checksum: String,
     pub pinned_at: Option<i64>,
-    // if wallet is using remote backend, then this information is stored on the remote backend
-    // wallet metadata
     #[serde(default)]
     pub keys: Vec<KeySetting>,
-    // if wallet is using remote backend, then this information is stored on the remote backend
-    // wallet metadata
     #[serde(default)]
     pub hardware_wallets: Vec<HardwareWalletConfig>,
+    /// Set on Vaults created on the retired Liana Connect remote backend
+    /// (lianalite). COINCUBE no longer talks to that backend: such a Vault
+    /// cannot be opened here and is only offered for local deletion, with a
+    /// pointer to the Liana app where the wallet still lives.
     pub remote_backend_auth: Option<AuthConfig>,
     /// Start internal bitcoind executable.
     /// if None, the app must refer to the gui.toml start_internal_bitcoind field.
@@ -1608,15 +1624,6 @@ pub struct Provider {
     pub name: String,
 }
 
-impl From<backend::api::Provider> for Provider {
-    fn from(provider: backend::api::Provider) -> Self {
-        Self {
-            uuid: provider.uuid,
-            name: provider.name,
-        }
-    }
-}
-
 impl From<services::keys::api::Provider> for Provider {
     fn from(provider: services::keys::api::Provider) -> Self {
         Self {
@@ -1631,16 +1638,6 @@ pub struct ProviderKey {
     pub uuid: String,
     pub token: String,
     pub provider: Provider,
-}
-
-impl From<backend::api::ProviderKey> for ProviderKey {
-    fn from(pk: backend::api::ProviderKey) -> Self {
-        Self {
-            uuid: pk.uuid.clone(),
-            token: pk.token.clone(),
-            provider: pk.provider.into(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

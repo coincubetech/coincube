@@ -1164,7 +1164,6 @@ mod tests {
 
     #[test]
     fn fork_descriptor_refuses_taproot_messages_and_stale_state() {
-        use crate::installer::context::RemoteBackend;
         for chain in [
             crate::chain::ChainId::BitcoinBlake2b,
             crate::chain::ChainId::BitcoinBlake2bTestnet4,
@@ -1173,8 +1172,7 @@ mod tests {
             let signer = Arc::new(Mutex::new(
                 Signer::generate(chain.bitcoin_network()).unwrap(),
             ));
-            let mut ctx =
-                Context::new_for_chain(chain, dir.clone(), RemoteBackend::None, None, None);
+            let mut ctx = Context::new_for_chain(chain, dir.clone(), None, None);
             let mut step = DefineDescriptor::new(chain.bitcoin_network(), signer);
             step.use_taproot = true;
             step.load_context(&ctx);
@@ -1305,7 +1303,6 @@ mod tests {
     /// the device's place is still refused.
     #[test]
     fn fork_descriptor_applies_with_a_device_key_and_refuses_a_keychain_key() {
-        use crate::installer::context::RemoteBackend;
         use coincube_core::miniscript::bitcoin::bip32::DerivationPath;
         for chain in [
             crate::chain::ChainId::BitcoinBlake2b,
@@ -1338,7 +1335,7 @@ mod tests {
             let backup = key_from(&backup_signer, KeySource::Manual, "Backup");
 
             let dir = CoincubeDirectory::new(PathBuf::new());
-            let mut ctx = Context::new_for_chain(chain, dir, RemoteBackend::None, None, None);
+            let mut ctx = Context::new_for_chain(chain, dir, None, None);
             let mut step = DefineDescriptor::new(
                 network,
                 Arc::new(Mutex::new(Signer::generate(network).unwrap())),
@@ -1361,13 +1358,8 @@ mod tests {
             assert_eq!(ctx.bitcoin_config.chain, chain);
 
             // A Keychain key in the device's place is still refused.
-            let mut ctx = Context::new_for_chain(
-                chain,
-                CoincubeDirectory::new(PathBuf::new()),
-                RemoteBackend::None,
-                None,
-                None,
-            );
+            let mut ctx =
+                Context::new_for_chain(chain, CoincubeDirectory::new(PathBuf::new()), None, None);
             let mut phone = device.clone();
             phone.source = KeySource::KeychainKey {
                 owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
@@ -1386,13 +1378,8 @@ mod tests {
             assert!(ctx.descriptor.is_none());
 
             // Amendment A: a Border Wallet key in the device's place applies.
-            let mut ctx = Context::new_for_chain(
-                chain,
-                CoincubeDirectory::new(PathBuf::new()),
-                RemoteBackend::None,
-                None,
-                None,
-            );
+            let mut ctx =
+                Context::new_for_chain(chain, CoincubeDirectory::new(PathBuf::new()), None, None);
             let mut border = device.clone();
             border.source = KeySource::BorderWallet {
                 grid_seed_source: crate::app::settings::GridSeedSource::Independent,
@@ -1410,7 +1397,6 @@ mod tests {
     /// Keychain, on every path, and marks that record complete.
     #[test]
     fn apply_records_keychain_provenance_per_key() {
-        use crate::installer::context::RemoteBackend;
         use coincube_core::miniscript::bitcoin::bip32::DerivationPath;
         let network = Network::Signet;
         let key_from = |signer: &Signer, source: KeySource, name: &str| {
@@ -1445,7 +1431,7 @@ mod tests {
         let backup_key = key_from(&backup, KeySource::Manual, "Backup");
 
         let dir = CoincubeDirectory::new(PathBuf::new());
-        let mut ctx = Context::new(network, dir, RemoteBackend::None, None, None);
+        let mut ctx = Context::new(network, dir, None, None);
         let mut step = DefineDescriptor::new(
             network,
             Arc::new(Mutex::new(Signer::generate(network).unwrap())),
@@ -1504,7 +1490,6 @@ mod tests {
         let mut ctx = Context::new(
             Network::Signet,
             CoincubeDirectory::new(PathBuf::from_str("/").unwrap()),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );
@@ -1588,7 +1573,6 @@ mod tests {
         let mut ctx = Context::new(
             Network::Testnet,
             CoincubeDirectory::new(PathBuf::from_str("/").unwrap()),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );
@@ -1700,7 +1684,6 @@ mod tests {
         let mut ctx = Context::new(
             Network::Signet,
             CoincubeDirectory::new(PathBuf::from_str("/").unwrap()),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );
@@ -1835,7 +1818,6 @@ mod tests {
         let mut ctx = Context::new(
             Network::Bitcoin,
             CoincubeDirectory::new(PathBuf::from_str("/").unwrap()),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );

@@ -1,24 +1,14 @@
-use std::{collections::HashSet, path::Path, time::Duration};
+use std::{path::Path, time::Duration};
 
 use crate::{
     app::settings::{self, SettingsError, WalletSettings},
     dir::NetworkDirectory,
-    services::connect::{
-        client::{
-            auth::AuthClient,
-            cache::{self, ConnectCacheError},
-            get_service_config,
-        },
-        login::{connect_with_credentials, BackendState},
-    },
     signer,
 };
 
 pub enum DeleteError {
     Io(std::io::Error),
     Settings(SettingsError),
-    ConnectCache(ConnectCacheError),
-    Connect(String),
     /// The wallet's daemon is still stopping after a lock; nothing was removed.
     DaemonStopping,
 }
@@ -28,8 +18,6 @@ impl std::fmt::Display for DeleteError {
         match self {
             Self::Io(e) => write!(f, "{}", e),
             Self::Settings(e) => write!(f, "{}", e),
-            Self::ConnectCache(e) => write!(f, "{}", e),
-            Self::Connect(e) => write!(f, "{}", e),
             Self::DaemonStopping => write!(f, "{}", crate::daemon::stopping::STILL_STOPPING),
         }
     }
@@ -87,21 +75,10 @@ async fn delete_failed_install_within(
         )?;
     }
 
-    let mut remaining_accounts = HashSet::<String>::new();
     settings::update_settings_file(network_dir, |mut settings| {
         settings
             .wallets
             .retain(|settings| settings.wallet_id() != *wallet_id);
-        remaining_accounts = settings
-            .wallets
-            .iter()
-            .filter_map(|settings| {
-                settings
-                    .remote_backend_auth
-                    .as_ref()
-                    .map(|auth| auth.email.clone())
-            })
-            .collect();
         // Delete file if both cubes and wallets are empty
         if settings.cubes.is_empty() && settings.wallets.is_empty() {
             None
@@ -111,10 +88,6 @@ async fn delete_failed_install_within(
     })
     .await
     .map_err(DeleteError::Settings)?;
-
-    cache::filter_connect_cache(network_dir, &remaining_accounts)
-        .await
-        .map_err(DeleteError::ConnectCache)?;
 
     signer::delete_wallet_mnemonics(
         network_dir,
@@ -126,15 +99,13 @@ async fn delete_failed_install_within(
     Ok(())
 }
 
-pub async fn delete_wallet<C: Into<crate::chain::ChainId>>(
-    chain: C,
+/// Remove a Vault's local files and settings entry. A legacy Liana Connect
+/// Vault is removed only from this computer; its copy on Liana Connect is
+/// left alone.
+pub async fn delete_wallet(
     network_dir: &NetworkDirectory,
     wallet: &WalletSettings,
-    delete_liana_connect: bool,
 ) -> Result<(), DeleteError> {
-    // `network` is only used to pick the legacy remote-backend service config
-    // below — a Bitcoin-family service, reached for Cubes the launcher lists.
-    let network = chain.into().bitcoin_network();
     let wallet_id = wallet.wallet_id();
     let coincubed_directory = network_dir.coincubed_data_directory(&wallet_id);
     // Deleting a Cube right after locking it: its daemon may still be stopping
@@ -158,54 +129,10 @@ pub async fn delete_wallet<C: Into<crate::chain::ChainId>>(
         )?;
     }
 
-    if delete_liana_connect {
-        if let Some(auth) = &wallet.remote_backend_auth {
-            let service_config = get_service_config(network)
-                .await
-                .map_err(|e| DeleteError::Connect(e.to_string()))?;
-
-            let client = AuthClient::new(
-                service_config.auth_api_url,
-                service_config.auth_api_public_key,
-                auth.email.to_string(),
-            );
-            if let BackendState::WalletExists(client, _, _) = connect_with_credentials(
-                client,
-                auth.wallet_id.clone(),
-                service_config.backend_api_url,
-                None,
-                network,
-                network_dir,
-            )
-            .await
-            .map_err(|e| DeleteError::Connect(e.to_string()))?
-            {
-                tracing::info!("Deleting wallet on Liana-Connect {} backend", network);
-                client
-                    .delete_wallet()
-                    .await
-                    .map_err(|e| DeleteError::Connect(e.to_string()))?;
-            } else {
-                tracing::warn!("Wallet not found on the platform");
-            }
-        }
-    }
-
-    let mut remaining_accounts = HashSet::<String>::new();
     settings::update_settings_file(network_dir, |mut settings| {
         settings
             .wallets
             .retain(|settings| settings.wallet_id() != wallet_id);
-        remaining_accounts = settings
-            .wallets
-            .iter()
-            .filter_map(|settings| {
-                settings
-                    .remote_backend_auth
-                    .as_ref()
-                    .map(|auth| auth.email.clone())
-            })
-            .collect();
         // Delete file if both cubes and wallets are empty
         if settings.cubes.is_empty() && settings.wallets.is_empty() {
             None
@@ -215,10 +142,6 @@ pub async fn delete_wallet<C: Into<crate::chain::ChainId>>(
     })
     .await
     .map_err(DeleteError::Settings)?;
-
-    cache::filter_connect_cache(network_dir, &remaining_accounts)
-        .await
-        .map_err(DeleteError::ConnectCache)?;
 
     signer::delete_wallet_mnemonics(
         network_dir,

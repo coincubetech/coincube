@@ -119,7 +119,7 @@ impl DefineEsplora {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+    use crate::{chain::ChainId, dir::CoincubeDirectory};
 
     #[test]
     fn fork_provider_refuses_genesis_only_validation_without_network_io() {
@@ -127,7 +127,6 @@ mod tests {
             let mut ctx = Context::new_for_chain(
                 chain,
                 CoincubeDirectory::new(std::path::PathBuf::new()),
-                RemoteBackend::None,
                 None,
                 None,
             );

@@ -103,8 +103,4 @@ impl ImportDescriptorModal {
         }
         Task::none()
     }
-
-    pub fn is_some(&self) -> bool {
-        !matches!(self, ImportDescriptorModal::None)
-    }
 }

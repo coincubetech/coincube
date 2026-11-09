@@ -380,7 +380,7 @@ pub struct KeychainSignModal {
     /// calls (vault members, cube keys) don't share lifecycle with the
     /// session gRPC connection.
     coincube_client: CoincubeClient,
-    /// Shared with the REST `BackendClient` so token refreshes flow
+    /// The shared Connect session tokens, so token refreshes flow
     /// through automatically. Used to construct `GrpcSessionClient`
     /// instances on demand (`make_session_client`).
     tokens: Arc<RwLock<AccessTokenResponse>>,

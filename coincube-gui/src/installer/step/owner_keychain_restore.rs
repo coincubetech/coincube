@@ -336,7 +336,6 @@ mod tests {
     use crate::{
         chain::ChainId,
         dir::CoincubeDirectory,
-        installer::context::RemoteBackend,
         services::recovery::{
             ImportedDescriptorBlob, ImportedDescriptorBlobWallet, SeedBlobCube, SeedBlobMnemonic,
         },
@@ -403,7 +402,6 @@ mod tests {
             CoincubeDirectory::new(
                 std::env::temp_dir().join("owner-imported-restore-context-only"),
             ),
-            RemoteBackend::None,
             None,
             None,
         )
