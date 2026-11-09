@@ -250,6 +250,8 @@ pub fn image_handle_for_context(context: &str) -> image::Handle {
 /// Props for the [`quote_display`] component.
 pub struct QuoteDisplayProps<'a> {
     slot: Option<crate::illustration::Slot>,
+    payment: Option<crate::illustration::PaymentArt>,
+    existing_only: bool,
     pub quote: &'a Quote,
     pub image_handle: &'a image::Handle,
     pub image_size: u16,
@@ -264,8 +266,13 @@ impl<'a> QuoteDisplayProps<'a> {
             slot: match context {
                 "loading" | "syncing" => Some(crate::illustration::Slot::Opening),
                 "empty-wallet" => Some(crate::illustration::Slot::EmptyHistory),
+                "first-launch" | "idle" | "backup-reminder" | "error" => {
+                    Some(crate::illustration::Slot::Mascot)
+                }
                 _ => None,
             },
+            payment: crate::illustration::PaymentArt::from_context(context),
+            existing_only: matches!(context, "liquid-send" | "liquid-receive"),
             quote,
             image_handle,
             image_size: default_size,
@@ -276,6 +283,13 @@ impl<'a> QuoteDisplayProps<'a> {
 
     pub(crate) fn illustration_slot(mut self, slot: crate::illustration::Slot) -> Self {
         self.slot = Some(slot);
+        self
+    }
+
+    /// Use the existing set on deprecated Liquid-only screens.
+    pub fn existing_artwork(mut self) -> Self {
+        self.existing_only = true;
+        self.payment = None;
         self
     }
 
@@ -307,12 +321,12 @@ impl<'a> QuoteDisplayProps<'a> {
 /// ```
 pub fn display<'a, M: 'a>(props: &QuoteDisplayProps<'a>) -> Container<'a, M> {
     // Image — uses a pre-built handle to avoid flicker from recreating on every render
-    let img = crate::illustration::image(
+    let img = crate::illustration::quote_image(
         props.slot,
         props.image_handle.clone(),
-        Length::Shrink,
-        Length::Fixed(props.image_size as f32),
-        iced::ContentFit::ScaleDown,
+        props.image_size,
+        props.payment,
+        props.existing_only,
     );
 
     let img_container = Container::new(img).center_x(Length::Fill);

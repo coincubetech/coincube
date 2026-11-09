@@ -92,7 +92,7 @@ fn artwork_row<'a>(saved: DevicePreferences, enabled: bool) -> Element<'a, Messa
         (
             ArtworkStyle::Scene,
             scene_name,
-            "New scene",
+            "Full scenes",
             "tenshu.preferences.artwork.scene",
         ),
     ];
@@ -135,9 +135,7 @@ fn artwork_row<'a>(saved: DevicePreferences, enabled: bool) -> Element<'a, Messa
     setting_row("Artwork", choices)
         .tag(SCOPE)
         .trailing_tag()
-        .description(format!(
-            "Choose the artwork for {mode_name} on opening and empty activity."
-        ))
+        .description(format!("Choose the artwork set for {mode_name}."))
         .note("Each worldview remembers its own choice.", Tone::Muted)
         .into()
 }

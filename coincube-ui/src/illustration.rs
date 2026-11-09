@@ -19,20 +19,21 @@ pub enum Slot {
     KitProtection,
     KitRemoval,
     Pin,
+    Mascot,
 }
 
 impl Slot {
     fn supports_scene(self) -> bool {
-        matches!(self, Self::Opening | Self::EmptyHistory)
+        !matches!(self, Self::Mascot)
     }
 }
 
 macro_rules! embedded {
-    ($name:literal) => {{
+    ($($part:literal),+) => {{
         static HANDLE: LazyLock<Option<Handle>> = LazyLock::new(|| {
             decode_png(include_bytes!(concat!(
                 "../static/images/worldview/",
-                $name,
+                $($part,)+
                 ".png"
             )))
         });
@@ -67,6 +68,7 @@ fn alternate(mode: WorldviewMode, slot: Slot) -> Option<&'static Handle> {
         (Suitcoiner, KitProtection) => embedded!("suitcoiner-protected"),
         (Suitcoiner, KitRemoval) => embedded!("suitcoiner-withdrawn"),
         (Suitcoiner, Pin) => embedded!("suitcoiner-pin"),
+        (Suitcoiner, Mascot) => embedded!("suitcoiner-mascot"),
         (Luke, Opening) => embedded!("luke-loading"),
         (Luke, EmptyHistory) => embedded!("luke-empty"),
         (Luke, Sent) => embedded!("luke-sent"),
@@ -75,16 +77,89 @@ fn alternate(mode: WorldviewMode, slot: Slot) -> Option<&'static Handle> {
         (Luke, KitProtection) => embedded!("luke-protected"),
         (Luke, KitRemoval) => embedded!("luke-withdrawn"),
         (Luke, Pin) => embedded!("luke-pin"),
+        (Luke, Mascot) => embedded!("luke-mascot"),
     }
 }
 
-/// The full scene previewed for opening and empty activity.
-fn scene(mode: WorldviewMode) -> Option<&'static Handle> {
-    match mode {
-        WorldviewMode::Samurai => embedded!("samurai-scene"),
-        WorldviewMode::Suitcoiner => embedded!("suitcoiner-scene"),
-        WorldviewMode::Luke => embedded!("luke-scene"),
+/// Existing transaction contexts select an illustration without changing
+/// the payment rail or the text shown on the celebration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaymentArt {
+    BitcoinSend,
+    BitcoinReceive,
+    LightningSend,
+    LightningReceive,
+    NoteSend,
+    NoteReceive,
+    SparkSend,
+    SparkReceive,
+}
+
+impl PaymentArt {
+    pub(crate) fn from_context(context: &str) -> Option<Self> {
+        Some(match context {
+            "bitcoin-send" => Self::BitcoinSend,
+            "bitcoin-receive" => Self::BitcoinReceive,
+            "lightning-send" => Self::LightningSend,
+            "lightning-receive" => Self::LightningReceive,
+            "note-send" => Self::NoteSend,
+            "note-receive" => Self::NoteReceive,
+            "spark-send" => Self::SparkSend,
+            "spark-receive" => Self::SparkReceive,
+            _ => return None,
+        })
     }
+}
+
+fn rail_art(mode: WorldviewMode, payment: PaymentArt) -> Option<&'static Handle> {
+    macro_rules! collection {
+        ($mode:literal) => {
+            match payment {
+                PaymentArt::BitcoinSend => embedded!($mode, "-bitcoin-send"),
+                PaymentArt::BitcoinReceive => embedded!($mode, "-bitcoin-receive"),
+                PaymentArt::LightningSend => embedded!($mode, "-lightning-send"),
+                PaymentArt::LightningReceive => embedded!($mode, "-lightning-receive"),
+                PaymentArt::NoteSend => embedded!($mode, "-note-send"),
+                PaymentArt::NoteReceive => embedded!($mode, "-note-receive"),
+                PaymentArt::SparkSend => embedded!($mode, "-spark-send"),
+                PaymentArt::SparkReceive => embedded!($mode, "-spark-receive"),
+            }
+        };
+    }
+
+    match mode {
+        WorldviewMode::Samurai => None,
+        WorldviewMode::Suitcoiner => collection!("suitcoiner"),
+        WorldviewMode::Luke => collection!("luke"),
+    }
+}
+
+fn scene(mode: WorldviewMode, slot: Slot) -> Option<&'static Handle> {
+    macro_rules! collection {
+        ($mode:literal) => {
+            match slot {
+                Slot::Opening | Slot::EmptyHistory => embedded!($mode, "-scene"),
+                Slot::Sent => embedded!($mode, "-scene-sent"),
+                Slot::Received => embedded!($mode, "-scene-received"),
+                Slot::Restored => embedded!($mode, "-scene-restored"),
+                Slot::KitProtection => embedded!($mode, "-scene-protected"),
+                Slot::KitRemoval => embedded!($mode, "-scene-withdrawn"),
+                Slot::Pin => embedded!($mode, "-scene-pin"),
+                Slot::Mascot => None,
+            }
+        };
+    }
+
+    match mode {
+        WorldviewMode::Samurai => collection!("samurai"),
+        WorldviewMode::Suitcoiner => collection!("suitcoiner"),
+        WorldviewMode::Luke => collection!("luke"),
+    }
+}
+
+/// Whether the selected Restore art replaces the original Samurai backdrop.
+pub fn has_full_scene(theme: &Theme, slot: Slot) -> bool {
+    theme.artwork() == ArtworkStyle::Scene && scene(theme.worldview(), slot).is_some()
 }
 
 /// Thumbnail for an Appearance option. Use the existing set's empty-history
@@ -109,6 +184,8 @@ pub fn opening_image<'a, M: 'a>(side: f32, opacity: f32) -> Option<Element<'a, M
         height: Length::Fixed(side),
         fit: ContentFit::ScaleDown,
         opacity,
+        payment: None,
+        existing_only: false,
     }))
 }
 
@@ -118,7 +195,7 @@ fn selected(
     slot: Slot,
 ) -> Option<(&'static Handle, bool)> {
     let full_scene = if style == ArtworkStyle::Scene && slot.supports_scene() {
-        scene(mode)
+        scene(mode, slot)
     } else {
         None
     };
@@ -136,14 +213,26 @@ pub fn image<'a, M: 'a>(
     height: Length,
     fit: ContentFit,
 ) -> Element<'a, M> {
-    Element::new(Illustration {
+    Element::new(Illustration::new(slot, incumbent, width, height, fit))
+}
+
+pub(crate) fn quote_image<'a, M: 'a>(
+    slot: Option<Slot>,
+    incumbent: Handle,
+    height: u16,
+    payment: Option<PaymentArt>,
+    existing_only: bool,
+) -> Element<'a, M> {
+    let mut art = Illustration::new(
         slot,
         incumbent,
-        width,
-        height,
-        fit,
-        opacity: 1.0,
-    })
+        Length::Shrink,
+        Length::Fixed(f32::from(height)),
+        ContentFit::ScaleDown,
+    );
+    art.payment = payment;
+    art.existing_only = existing_only;
+    Element::new(art)
 }
 
 struct Illustration {
@@ -153,9 +242,48 @@ struct Illustration {
     height: Length,
     fit: ContentFit,
     opacity: f32,
+    payment: Option<PaymentArt>,
+    existing_only: bool,
 }
 
 impl Illustration {
+    fn new(
+        slot: Option<Slot>,
+        incumbent: Handle,
+        width: Length,
+        height: Length,
+        fit: ContentFit,
+    ) -> Self {
+        Self {
+            slot,
+            incumbent,
+            width,
+            height,
+            fit,
+            opacity: 1.0,
+            payment: None,
+            existing_only: false,
+        }
+    }
+
+    fn choice(&self, theme: &Theme) -> Option<(&'static Handle, bool)> {
+        let artwork = if self.existing_only {
+            ArtworkStyle::Existing
+        } else {
+            theme.artwork()
+        };
+        let rail = if artwork == ArtworkStyle::Existing {
+            self.payment
+                .and_then(|payment| rail_art(theme.worldview(), payment))
+        } else {
+            None
+        };
+        rail.map(|handle| (handle, false)).or_else(|| {
+            self.slot
+                .and_then(|slot| selected(theme.worldview(), artwork, slot))
+        })
+    }
+
     fn image(&self, handle: &Handle) -> Image {
         Image::new(handle.clone())
             .width(self.width)
@@ -182,7 +310,10 @@ impl<M> Widget<M, Theme, iced::Renderer> for Illustration {
             renderer,
             limits,
         );
-        if !self.slot.is_some_and(Slot::supports_scene) {
+        if self.width != Length::Shrink
+            || self.existing_only
+            || !self.slot.is_some_and(Slot::supports_scene)
+        {
             return incumbent;
         }
         let size = incumbent.size();
@@ -206,8 +337,7 @@ impl<M> Widget<M, Theme, iced::Renderer> for Illustration {
         use iced::advanced::image::Renderer as _;
 
         let (handle, full_scene) = self
-            .slot
-            .and_then(|slot| selected(theme.worldview(), theme.artwork(), slot))
+            .choice(theme)
             .filter(|(handle, _)| renderer.measure_image(handle).is_some())
             .unwrap_or((&self.incumbent, false));
         let layout = if full_scene {
@@ -287,14 +417,8 @@ mod tests {
     }
 
     #[test]
-    fn artwork_picker_uses_three_scenes_only_in_the_previewed_slots() {
-        let kage = artwork_thumbnail(WorldviewMode::Samurai, ArtworkStyle::Existing).unwrap();
-        assert_eq!(
-            kage.id(),
-            artwork_thumbnail(WorldviewMode::Samurai, ArtworkStyle::Existing)
-                .unwrap()
-                .id()
-        );
+    fn artwork_picker_resolves_full_scenes_for_all_eight_slots() {
+        assert!(artwork_thumbnail(WorldviewMode::Samurai, ArtworkStyle::Existing).is_some());
         let mut ids = std::collections::HashSet::new();
         for mode in [
             WorldviewMode::Samurai,
@@ -331,18 +455,102 @@ mod tests {
                     existing.map(|(handle, _)| handle.id()),
                     alternate(mode, slot).map(Handle::id)
                 );
-                let selected_scene = selected(mode, ArtworkStyle::Scene, slot);
-                if slot.supports_scene() {
-                    assert_eq!(
-                        selected_scene.map(|(handle, square)| (handle.id(), square)),
-                        Some((opening.id(), true))
-                    );
+                let (chosen, full_scene) = selected(mode, ArtworkStyle::Scene, slot).unwrap();
+                assert!(full_scene);
+                if slot == Slot::Opening || slot == Slot::EmptyHistory {
+                    assert_eq!(chosen.id(), opening.id());
                 } else {
-                    assert_eq!(
-                        selected_scene.map(|(handle, square)| (handle.id(), square)),
-                        existing.map(|(handle, square)| (handle.id(), square))
-                    );
+                    assert!(ids.insert(chosen.id()));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn artwork_payment_routes_preserve_scenes_and_distinguish_rails() {
+        use crate::component::quote_display::{
+            default_image_for_context, image_handle_for_context,
+        };
+
+        let mut art_contents = std::collections::HashSet::<&[u8]>::new();
+        for (context, slot) in [
+            ("bitcoin-send", Slot::Sent),
+            ("bitcoin-receive", Slot::Received),
+            ("lightning-send", Slot::Sent),
+            ("lightning-receive", Slot::Received),
+            ("note-send", Slot::Sent),
+            ("note-receive", Slot::Received),
+            ("spark-send", Slot::Sent),
+            ("spark-receive", Slot::Received),
+        ] {
+            let mut art = Illustration::new(
+                Some(slot),
+                image_handle_for_context(context),
+                Length::Shrink,
+                Length::Fixed(240.0),
+                ContentFit::ScaleDown,
+            );
+            art.payment = Some(PaymentArt::from_context(context).unwrap());
+            let samurai = Theme::dark().with_worldview(WorldviewMode::Samurai);
+            assert!(art
+                .choice(&samurai.with_artwork(ArtworkStyle::Existing))
+                .is_none());
+            assert!(art_contents.insert(default_image_for_context(context).0));
+
+            for mode in [WorldviewMode::Suitcoiner, WorldviewMode::Luke] {
+                let theme = Theme::dark().with_worldview(mode);
+                let (payment, full_scene) = art
+                    .choice(&theme.with_artwork(ArtworkStyle::Existing))
+                    .unwrap();
+                assert!(!full_scene);
+                let Handle::Rgba { pixels, .. } = payment else {
+                    panic!("{mode:?} {context} must decode before drawing");
+                };
+                assert!(art_contents.insert(pixels.as_ref()));
+            }
+            for mode in [
+                WorldviewMode::Samurai,
+                WorldviewMode::Suitcoiner,
+                WorldviewMode::Luke,
+            ] {
+                let theme = Theme::dark()
+                    .with_worldview(mode)
+                    .with_artwork(ArtworkStyle::Scene);
+                let (handle, full_scene) = art.choice(&theme).unwrap();
+                assert!(full_scene);
+                assert_eq!(handle.id(), scene(mode, slot).unwrap().id());
+            }
+        }
+        assert!(PaymentArt::from_context("liquid-send").is_none());
+        assert!(PaymentArt::from_context("liquid-receive").is_none());
+        assert!(PaymentArt::from_context("transaction-sent").is_none());
+    }
+
+    #[test]
+    fn artwork_keeps_the_mascot_shared_and_liquid_on_existing_art() {
+        use crate::component::quote_display::image_handle_for_context;
+
+        for mode in [WorldviewMode::Suitcoiner, WorldviewMode::Luke] {
+            let theme = Theme::dark()
+                .with_worldview(mode)
+                .with_artwork(ArtworkStyle::Scene);
+            let mut art = Illustration::new(
+                Some(Slot::Mascot),
+                image_handle_for_context("error"),
+                Length::Shrink,
+                Length::Fixed(160.0),
+                ContentFit::ScaleDown,
+            );
+            let (mascot, full_scene) = art.choice(&theme).unwrap();
+            assert!(!full_scene);
+            assert_eq!(mascot.id(), alternate(mode, Slot::Mascot).unwrap().id());
+
+            for slot in [Slot::Sent, Slot::Received, Slot::EmptyHistory] {
+                art.slot = Some(slot);
+                art.existing_only = true;
+                let (liquid, full_scene) = art.choice(&theme).unwrap();
+                assert!(!full_scene);
+                assert_eq!(liquid.id(), alternate(mode, slot).unwrap().id());
             }
         }
     }
@@ -364,6 +572,7 @@ mod tests {
             Slot::KitProtection,
             Slot::KitRemoval,
             Slot::Pin,
+            Slot::Mascot,
         ] {
             assert!(alternate(WorldviewMode::Samurai, slot).is_none());
             for mode in [WorldviewMode::Suitcoiner, WorldviewMode::Luke] {

@@ -54,9 +54,10 @@ saved choice.
 | Suitcoiner | Gilded Exchange | Gilded Wall Street |
 | Luke | The Stone Crossing | Purist’s Woodcut |
 
-Full scenes appear in the 160-point Opening and 240-point empty activity
-slots. The existing sets retain their original presentation at those sizes.
-The other slots use their original state-specific illustrations.
+Full scenes cover the 160-point Opening and 240-point empty activity slots,
+plus Sent, Received, Restore complete, Recovery Kit protection and removal,
+and the PIN prompt. Opening and empty activity share a scene. The six other
+slots each have their own scene.
 
 ## Localization
 
@@ -109,13 +110,18 @@ wallet and chain data as input to presentation.
   empty and celebration contexts. `image.rs` supplies the castle mark, sealed
   Cube art for Restore and the recovery illustrations used by Backup and
   Recovery Kit. Preserve these files and their current Samurai bindings.
-- Bundle eight illustrations per alternate mode under
-  `coincube-ui/static/images/worldview`. The slots cover opening and syncing,
-  empty activity, send and receive celebrations, restore completion, Recovery
-  Kit protection and removal, and Backup and Recovery Kit PIN prompts.
-  Celebrations share their artwork across payment rails. Each slot keeps the
-  incumbent Samurai image and its layout as the fallback. Quote choice stays
-  stable during a mode switch.
+- Bundle artwork under `coincube-ui/static/images/worldview`. The existing
+  sets keep their original screen illustrations, with dedicated send and
+  receive artwork for Bitcoin, Lightning, Note, and Spark. Generic payment
+  contexts continue to use the existing Sent or Received illustration.
+  Full-scene sets use their approved Sent or Received scene across those
+  payment methods. Liquid-native payments and Liquid empty activity use the
+  existing presentation.
+- Suitcoiner's Broker and Luke's Warden appear in their existing sets'
+  payment variants and the shared mascot quote illustration. The startup
+  error screen uses that illustration with either artwork option. Kage
+  remains Samurai's mascot.
+  Quote choice stays stable during a mode switch.
 - Use restrained decorative accents in both color schemes. Preserve established
   warning, error, success, focus and chain-identification semantics. Keep asset
   symbols, user avatars, the interactive Launcher Cube and the app mark outside

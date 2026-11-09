@@ -485,7 +485,12 @@ pub(crate) fn done_art<'a, M: 'a>(light: bool) -> Element<'a, M> {
                                 .width(Length::Fixed(radius * 2.0))
                                 .height(Length::Fixed(radius * 2.0))
                                 .style(move |theme: &theme::Theme| {
-                                    if theme.worldview() != theme::WorldviewMode::Samurai {
+                                    if theme.worldview() != theme::WorldviewMode::Samurai
+                                        || coincube_ui::illustration::has_full_scene(
+                                            theme,
+                                            coincube_ui::illustration::Slot::Restored,
+                                        )
+                                    {
                                         return iced::widget::container::Style::default();
                                     }
                                     iced::widget::container::Style {
