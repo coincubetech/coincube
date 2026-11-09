@@ -182,7 +182,6 @@ use crate::{
     delete,
     dir::{CoincubeDirectory, NetworkDirectory},
     hw::{HardwareWalletConfig, HardwareWalletMessage, HardwareWallets},
-    services,
     signer::Signer,
 };
 
@@ -1195,9 +1194,7 @@ impl Installer {
                 message,
                 Message::Installed(..)
                     | Message::ConnectVaultCreated(..)
-                    | Message::AllKeysRedeemed
-                    | Message::KeyRedeemed(..)
-                    | Message::RedeemNextKey
+                    | Message::InstallFinished
                     | Message::Exit(..)
                     | Message::CubeSaved(..)
                     | Message::CubeSaveFailed(..)
@@ -1505,7 +1502,7 @@ impl Installer {
             .map(|(path, _)| path.title())
             .or(self.create_vault.then_some(CREATE_VAULT_TITLE))
             .map(view::FramedGuard::enter);
-        step.view(&self.hws, self.progress(), None)
+        step.view(&self.hws, self.progress())
     }
 
     /// The Create Vault stepper for the current step.
@@ -2296,7 +2293,6 @@ pub enum Error {
     // DaemonError does not implement Clone.
     // TODO: maybe Arc is overkill
     Backend(Arc<DaemonError>),
-    Services(services::keys::Error),
     Settings(SettingsError),
     Bitcoind(String),
     Electrum(String),
@@ -2346,7 +2342,6 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Self::Backend(e) => write!(f, "Wallet backend error: {}", e),
-            Self::Services(e) => write!(f, "Services error: {}", e),
             Self::Settings(e) => write!(f, "Settings file error: {}", e),
             Self::Bitcoind(e) => write!(f, "Failed to ping bitcoind: {}", e),
             Self::Electrum(e) => write!(f, "Failed to ping Electrum: {}", e),
@@ -3990,7 +3985,7 @@ mod restore_frame_tests {
             restore.current = restore.steps.len() - 1;
             let mut hws = HardwareWallets::new(restore.datadir.clone(), Network::Bitcoin);
             let step = restore.steps.last_mut().unwrap();
-            drop(step.update(&mut hws, Message::AllKeysRedeemed));
+            drop(step.update(&mut hws, Message::InstallFinished));
             assert!(step.restore_done(), "Done waits for Open Cube");
             let shown = rendered_labels(restore.view()).await;
             for label in ["Your Cube is restored", "Open Cube", "Done"] {
@@ -4006,7 +4001,7 @@ mod restore_frame_tests {
             CoincubeDirectory::new(std::env::temp_dir()),
             Network::Bitcoin,
         );
-        drop(plain.update(&mut hws, Message::AllKeysRedeemed));
+        drop(plain.update(&mut hws, Message::InstallFinished));
         assert!(!plain.restore_done());
     }
 

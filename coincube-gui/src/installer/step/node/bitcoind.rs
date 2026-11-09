@@ -823,12 +823,7 @@ impl Step for SelectBitcoindTypeStep {
         true
     }
 
-    fn view(
-        &self,
-        _hws: &HardwareWallets,
-        progress: (usize, usize),
-        _email: Option<&str>,
-    ) -> Element<Message> {
+    fn view(&self, _hws: &HardwareWallets, progress: (usize, usize)) -> Element<Message> {
         view::select_bitcoind_type(
             progress,
             self.ui_instance,
@@ -1824,12 +1819,7 @@ impl Step for InternalBitcoindStep {
         false
     }
 
-    fn view(
-        &self,
-        _hws: &HardwareWallets,
-        progress: (usize, usize),
-        _email: Option<&str>,
-    ) -> Element<Message> {
+    fn view(&self, _hws: &HardwareWallets, progress: (usize, usize)) -> Element<Message> {
         if self.wait_for_local_fork
             && matches!(self.started, Some(Ok(())))
             && !self.local_sync_ready
@@ -1842,7 +1832,6 @@ impl Step for InternalBitcoindStep {
             }
             return view::layout(
                 progress,
-                None,
                 "Local node synchronization",
                 content,
                 true,

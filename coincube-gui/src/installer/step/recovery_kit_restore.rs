@@ -1103,7 +1103,6 @@ impl Step for RecoveryKitRestoreStep {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        _email: Option<&'a str>,
     ) -> Element<'a, Message> {
         view::recovery_kit_restore(
             progress,

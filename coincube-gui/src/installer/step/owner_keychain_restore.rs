@@ -313,13 +313,11 @@ impl Step for OwnerKeychainRestoreStep {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         match &self.phase {
             Phase::Decrypting | Phase::Ready { .. } => view::install_titled(
                 "Approve on your phone",
                 progress,
-                email,
                 true,
                 false,
                 None,
@@ -331,7 +329,6 @@ impl Step for OwnerKeychainRestoreStep {
             Phase::Error { message } => view::install_titled(
                 "Approve on your phone",
                 progress,
-                email,
                 false,
                 false,
                 Some(message),

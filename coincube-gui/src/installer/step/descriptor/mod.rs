@@ -237,11 +237,9 @@ impl Step for ImportDescriptor {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         let content = view::import_descriptor(
             progress,
-            email,
             &self.imported_descriptor,
             self.imported_backup.is_some(),
             self.wrong_network,
@@ -388,13 +386,11 @@ impl Step for RegisterDescriptor {
         &'a self,
         hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         let desc = self.descriptor.as_ref().unwrap();
 
         view::register_descriptor(
             progress,
-            email,
             desc,
             &hws.list,
             &self.registered,
@@ -518,11 +514,9 @@ impl Step for BackupDescriptor {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         let content = view::backup_descriptor(
             progress,
-            email,
             self.descriptor.as_ref().expect("Must be a descriptor"),
             &self.keys,
             self.error.as_ref(),
