@@ -948,16 +948,20 @@ fn head_frame(width: f32, rows: Frame) -> Frame {
 /// `.day`: a relative name, then the date in the muted ink.
 fn day_heading(day: Option<NaiveDate>, today: NaiveDate) -> (String, String) {
     let Some(day) = day else {
-        return ("Pending".to_owned(), String::new());
+        return (localized_copy("Pending").to_owned(), String::new());
     };
-    let date = day.format("%a %-d %b %Y").to_string();
+    let date = day
+        .format(&coincube_ui::locale::date_pattern("%a %-d %b %Y", &day))
+        .to_string();
     let age = (today - day).num_days();
     let relative = match age {
-        0 => "Today".to_owned(),
-        1 => "Yesterday".to_owned(),
-        2..=6 => day.format("%A").to_string(),
-        7..=13 => "Last week".to_owned(),
-        _ => "Earlier".to_owned(),
+        0 => localized_copy("Today").to_owned(),
+        1 => localized_copy("Yesterday").to_owned(),
+        2..=6 => day
+            .format(&coincube_ui::locale::date_pattern("%A", &day))
+            .to_string(),
+        7..=13 => localized_copy("Last week").to_owned(),
+        _ => localized_copy("Earlier").to_owned(),
     };
     (relative, date)
 }
@@ -2112,7 +2116,12 @@ fn detail_pane<'a>(activity: &'a Activity, entry: &Entry, cache: &'a Cache) -> C
         detail = detail.push(iced::widget::tooltip(
             fact(
                 localized_copy("Date"),
-                local.format("%a %-d %b %Y, %H:%M").to_string(),
+                local
+                    .format(&coincube_ui::locale::date_pattern(
+                        "%a %-d %b %Y, %H:%M",
+                        &local,
+                    ))
+                    .to_string(),
                 false,
             ),
             container(words(

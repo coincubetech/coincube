@@ -377,11 +377,11 @@ fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
                 .font(font::SEMIBOLD)
                 .wrapping(text::Wrapping::WordOrGlyph),
             muted(
-                if signed_in {
+                localized_copy(if signed_in {
                     "Signed in to COINCUBE | Connect"
                 } else {
                     "Signed out of COINCUBE | Connect"
-                },
+                }),
                 12,
             ),
         ]
@@ -424,11 +424,11 @@ fn connect_panel<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
             };
             body = body.push(
                 row![
-                    text("Live updates on this computer")
+                    text(localized_copy("Live updates on this computer"))
                         .size(13)
                         .font(font::MEDIUM)
                         .width(Length::Fill),
-                    page::status(kind, status.word()),
+                    page::status(kind, localized_copy(status.word())),
                 ]
                 .spacing(12)
                 .align_y(Alignment::Center),
@@ -665,7 +665,7 @@ fn nav_row_inner<'a>(
     if let Some(reason) = disabled_reason {
         iced::widget::tooltip(
             row,
-            container(muted(reason, 12))
+            container(muted(localized_copy(&reason), 12))
                 .padding([6, 10])
                 .style(theme::container::shell_menu),
             iced::widget::tooltip::Position::Right,
@@ -872,14 +872,14 @@ pub const BACKUP_ATTENTION_ID: &str = "tenshu.shell.backup-attention";
 fn backup_attention<'a>() -> Element<'a, Message> {
     let body = row![
         glyph::glyph(glyph::WARNING, 16.0, glyph::warn),
-        text("Backup not confirmed")
+        text(localized_copy("Backup not confirmed"))
             .size(12.5)
             .font(font::MEDIUM)
             .style(|t: &theme::Theme| iced::widget::text::Style {
                 color: Some(t.colors.shell.warn),
             }),
         Space::new().width(Length::Fill),
-        text("Review")
+        text(localized_copy("Review"))
             .size(12.5)
             .font(font::SEMIBOLD)
             .style(|t: &theme::Theme| iced::widget::text::Style {

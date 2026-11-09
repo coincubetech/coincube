@@ -201,8 +201,13 @@ fn tx_list_view(
     let date = tx
         .time
         .and_then(|t| DateTime::<Utc>::from_timestamp(t as i64, 0))
-        .map(|t| t.with_timezone(&Local).format("%b %d, %H:%M").to_string())
-        .unwrap_or_else(|| "Pending".to_owned());
+        .map(|t| {
+            let local = t.with_timezone(&Local);
+            local
+                .format(&coincube_ui::locale::date_pattern("%b %d, %H:%M", &local))
+                .to_string()
+        })
+        .unwrap_or_else(|| localized_copy("Pending").to_owned());
     let status = if tx.time.is_none() {
         localized_copy("Unconfirmed")
     } else {
@@ -588,11 +593,14 @@ pub fn transaction_detail_view<'a>(
             .push(card::simple(
                 Column::new()
                     .push(tx.time.and_then(|t| DateTime::<Utc>::from_timestamp(t as i64, 0)).map(|t| {
-                        let date = t.with_timezone(&Local).format("%b. %d, %Y - %T %Z");
+                        let local = t.with_timezone(&Local);
+                        let date = local
+                            .format(&coincube_ui::locale::date_pattern("%b. %d, %Y - %T %Z", &local))
+                            .to_string();
                         Row::new()
                             .width(Length::Fill)
                             .push(Container::new(text(localized_copy("Date:")).bold()).width(Length::Fill))
-                            .push(Container::new(text(format!("{}", date))).width(Length::Shrink))
+                            .push(Container::new(text(date)).width(Length::Shrink))
                     }))
                     .push(
                         Row::new()

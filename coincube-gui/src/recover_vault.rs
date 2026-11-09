@@ -92,7 +92,7 @@ pub fn status_copy(v: &RecoverableVault) -> Option<String> {
         RowKind::NotYetOpen => Some(match v.expected_open_at {
             Some(at) => localized_format!(
                 "Recovery isn't open yet — expected around {}. We'll email you.", "La recuperación no está abierta todavía — se espera alrededor de {}. Te enviaremos un correo electrónico.",
-                at.format("%-d %b %Y")
+                at.format(&coincube_ui::locale::date_pattern("%-d %b %Y", &at))
             ),
             None => "Recovery isn't open yet — we'll email you when it is.".to_string(),
         }),

@@ -231,16 +231,16 @@ pub fn network_banner<'a, T: 'a>(network: Network) -> Container<'a, T> {
             .push(text::text(localized_copy("THIS IS A ")))
             .push(
                 text::text(match network {
-                    Network::Signet => "SIGNET WALLET",
-                    Network::Testnet => "TESTNET WALLET",
-                    Network::Testnet4 => "TESTNET4 WALLET",
+                    Network::Signet => localized_copy("SIGNET WALLET"),
+                    Network::Testnet => localized_copy("TESTNET WALLET"),
+                    Network::Testnet4 => localized_copy("TESTNET4 WALLET"),
                     Network::Regtest => localized_copy("REGTEST WALLET"),
                     _ => unreachable!(),
                 })
                 .bold(),
             )
             .push(text::text(localized_copy(", COINS HAVE ")))
-            .push(text::text("NO VALUE").bold())
+            .push(text::text(localized_copy("NO VALUE")).bold())
             .align_y(iced::Alignment::Center),
     )
     .padding(5)

@@ -141,6 +141,105 @@ fn notice_value(english: &str) -> Cow<'_, str> {
     Cow::Borrowed(english)
 }
 
+/// The chrono pattern for showing `date` in the accepted language. English
+/// keeps `english` as written. Spanish puts the day first and writes month
+/// and weekday names out as literals, e.g. "%b %d, %Y" → "5 nov 2026".
+/// Use it for display only; exports, file names and protocol headers keep
+/// their fixed English or ISO patterns.
+pub fn date_pattern(english: &str, date: &impl chrono::Datelike) -> String {
+    if language() == Language::English {
+        return english.to_owned();
+    }
+    const MONTHS: [&str; 12] = [
+        "enero",
+        "febrero",
+        "marzo",
+        "abril",
+        "mayo",
+        "junio",
+        "julio",
+        "agosto",
+        "septiembre",
+        "octubre",
+        "noviembre",
+        "diciembre",
+    ];
+    const MONTHS_SHORT: [&str; 12] = [
+        "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic",
+    ];
+    const DAYS: [&str; 7] = [
+        "lunes",
+        "martes",
+        "miércoles",
+        "jueves",
+        "viernes",
+        "sábado",
+        "domingo",
+    ];
+    const DAYS_SHORT: [&str; 7] = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"];
+    // US month-first patterns in use, rewritten day-first.
+    let spanish = match english {
+        "%b. %d, %Y - %T" => "%-d %b %Y - %T",
+        "%b. %d, %Y - %T %Z" => "%-d %b %Y - %T %Z",
+        "%b %-d, %H:%M" | "%b %d, %H:%M" => "%-d %b, %H:%M",
+        "%b %d, %Y" => "%-d %b %Y",
+        "%b %d, %Y %H:%M" => "%-d %b %Y, %H:%M",
+        "%b %d, %Y %H:%M %Z" => "%-d %b %Y, %H:%M %Z",
+        "%B %d, %Y" => "%-d de %B de %Y",
+        other => other,
+    };
+    let month = date.month0() as usize;
+    let day = date.weekday().num_days_from_monday() as usize;
+    spanish
+        .replace("%A", DAYS[day])
+        .replace("%a", DAYS_SHORT[day])
+        .replace("%B", MONTHS[month])
+        .replace("%b", MONTHS_SHORT[month])
+}
+
+/// Rendered text that is still English on a Spanish screen, for tests. A
+/// string leaks when it is an English key whose Spanish copy differs (the
+/// call site skipped `copy`), or when it reads as English prose and has no
+/// Spanish entry at all. Brand names, numbers and data carry no English
+/// function words, so they pass.
+#[doc(hidden)]
+pub fn english_leaks<'a>(rendered: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    const ENGLISH: &[&str] = &[
+        "the", "to", "your", "you", "is", "are", "and", "of", "this", "that", "on", "with", "for",
+        "not", "be", "can", "will", "from", "it", "or", "has", "have", "was", "been", "here",
+        "there", "yet", "only", "when", "before", "after", "once", "until", "isn't", "can't",
+        "don't", "doesn't", "won't", "couldn't", "an", "by", "at", "into", "any",
+    ];
+    let spanish: std::collections::HashSet<&str> =
+        SPANISH_DESKTOP.values().map(String::as_str).collect();
+    let mut leaks = Vec::new();
+    for value in rendered {
+        let text = value.trim();
+        if text.is_empty() || spanish.contains(text) {
+            continue;
+        }
+        let keyed = SPANISH_DESKTOP
+            .get(text)
+            .or_else(|| SPANISH_DESKTOP.get(value))
+            .is_some_and(|es| es.trim() != text);
+        let words: Vec<String> = text
+            .split(|c: char| !(c.is_ascii_alphabetic() || c == '\'' || c == '’'))
+            .filter(|w| !w.is_empty())
+            .map(|w| w.replace('’', "'").to_ascii_lowercase())
+            .collect();
+        let english = words.len() >= 3
+            && words
+                .iter()
+                .filter(|w| ENGLISH.contains(&w.as_str()))
+                .count()
+                >= 2;
+        if (keyed || english) && !leaks.iter().any(|l| l == text) {
+            leaks.push(text.to_owned());
+        }
+    }
+    leaks
+}
+
 /// Format full UI messages in the accepted language. Both templates are Rust
 /// format literals, so argument types and formatting are checked at build time.
 #[macro_export]
@@ -156,6 +255,42 @@ macro_rules! localized_format {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spanish_dates_put_the_day_first_with_spanish_names() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 11, 3)
+            .unwrap()
+            .and_hms_opt(18, 24, 0)
+            .unwrap();
+        let show = |pattern: &str| date.format(&date_pattern(pattern, &date)).to_string();
+        assert_eq!(show("%b %d, %Y"), "Nov 03, 2026");
+        render_in(Language::Spanish, || {
+            assert_eq!(show("%b %d, %Y"), "3 nov 2026");
+            assert_eq!(show("%a %-d %b %Y"), "mar 3 nov 2026");
+            assert_eq!(show("%A"), "martes");
+            assert_eq!(show("%B %d, %Y"), "3 de noviembre de 2026");
+            assert_eq!(show("%-d %b %Y, %H:%M UTC"), "3 nov 2026, 18:24 UTC");
+        });
+    }
+
+    #[test]
+    fn english_leaks_flags_skipped_copy_and_unkeyed_prose_only() {
+        let leaks = english_leaks([
+            "Backup not confirmed",                     // keyed, copy skipped
+            "Copia sin confirmar",                      // already Spanish
+            "This screen was never translated at all.", // no entry, English prose
+            "Bitcoin mainnet",                          // product name
+            "Allen Family",                             // user data
+            "975,147",
+        ]);
+        assert_eq!(
+            leaks,
+            [
+                "Backup not confirmed",
+                "This screen was never translated at all."
+            ]
+        );
+    }
 
     #[test]
     fn spanish_error_copy_preserves_network_references_and_raw_detail() {

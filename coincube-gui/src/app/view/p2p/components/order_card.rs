@@ -388,7 +388,8 @@ pub fn order_detail<'a>(
         let dt = chrono::DateTime::from_timestamp(order.created_at_ts as i64, 0)
             .unwrap_or_default()
             .with_timezone(&chrono::Local);
-        dt.format("%b %d, %Y %H:%M").to_string()
+        dt.format(&coincube_ui::locale::date_pattern("%b %d, %Y %H:%M", &dt))
+            .to_string()
     };
 
     let time_card = card::simple(

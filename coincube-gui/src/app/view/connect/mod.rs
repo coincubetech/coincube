@@ -1006,7 +1006,10 @@ fn connect_account_body<'a>(acct: &'a ConnectAccountPanel) -> Element<'a, Connec
 /// views.
 pub(super) fn format_date(iso: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(iso)
-        .map(|dt| dt.format("%b %d, %Y").to_string())
+        .map(|dt| {
+            dt.format(&coincube_ui::locale::date_pattern("%b %d, %Y", &dt))
+                .to_string()
+        })
         .unwrap_or_else(|_| iso.to_string())
 }
 
@@ -1015,8 +1018,12 @@ pub(super) fn format_date(iso: &str) -> String {
 pub(super) fn format_datetime(iso: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(iso)
         .map(|dt| {
-            dt.with_timezone(&chrono::Local)
-                .format("%b %d, %Y %H:%M %Z")
+            let local = dt.with_timezone(&chrono::Local);
+            local
+                .format(&coincube_ui::locale::date_pattern(
+                    "%b %d, %Y %H:%M %Z",
+                    &local,
+                ))
                 .to_string()
         })
         .unwrap_or_else(|_| iso.to_string())

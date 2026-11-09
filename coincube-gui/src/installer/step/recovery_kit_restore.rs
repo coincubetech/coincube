@@ -922,8 +922,15 @@ impl Step for RecoveryKitRestoreStep {
                                 } => format!(
                                     "Recovery kit download is delayed on new devices. \
                                      Available at {}.",
-                                    at.with_timezone(&chrono::Local)
-                                        .format("%b %d, %Y %H:%M %Z")
+                                    {
+                                        let local = at.with_timezone(&chrono::Local);
+                                        local
+                                            .format(&coincube_ui::locale::date_pattern(
+                                                "%b %d, %Y %H:%M %Z",
+                                                &local,
+                                            ))
+                                            .to_string()
+                                    }
                                 ),
                                 // DURESS_LOCKED and a timeless delay use the
                                 // typed Display message.

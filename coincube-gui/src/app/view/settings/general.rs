@@ -1162,9 +1162,12 @@ pub(crate) fn backup_methods_present(status: Option<&RecoveryKitStatus>) -> (boo
 fn format_backup_time(raw: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(raw)
         .map(|dt| {
-            dt.with_timezone(&chrono::Utc)
-                .format("%-d %b %Y, %H:%M UTC")
-                .to_string()
+            let utc = dt.with_timezone(&chrono::Utc);
+            utc.format(&coincube_ui::locale::date_pattern(
+                "%-d %b %Y, %H:%M UTC",
+                &utc,
+            ))
+            .to_string()
         })
         .unwrap_or_else(|_| raw.to_string())
 }
@@ -1819,6 +1822,26 @@ fn drift_warning_line(d: &DescriptorDrift) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backup_page_is_spanish() {
+        use crate::app::state::preferences::BalancePrivacy;
+        use crate::app::view::{nav::shell::capture_tests, shared::landing::capture};
+        use coincube_ui::locale::{render_in, Language};
+        for confirmed in [false, true] {
+            let mut cache = capture_tests::cache(false, BalancePrivacy::Shown);
+            cache.current_cube_backed_up = confirmed;
+            let view = render_in(Language::Spanish, || recovery_overview(&cache, None, None));
+            capture::inspect(
+                "backup-es",
+                view,
+                (1440, 900),
+                "dark",
+                coincube_ui::theme::Theme::dark(),
+            )
+            .assert_spanish("Cube › Settings › Backup & protection");
+        }
+    }
+
     #[test]
     fn backup_page_has_one_seed_action_in_each_confirmation_state() {
         use crate::app::state::preferences::BalancePrivacy;

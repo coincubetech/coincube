@@ -1046,9 +1046,11 @@ impl Home {
         let limit = self.cube_limit();
         let tier = self.account_tier.display_name();
         let Some(local) = local else {
-            return format!(
+            return localized_format!(
                 "{name}: {remote} Cubes registered in Connect, of {limit} on the \
-                 {tier} plan; this device's Cubes there could not be counted."
+                 {tier} plan; this device's Cubes there could not be counted.",
+                "{name}: {remote} Cubes registrados en Connect, de {limit} en el plan \
+                 {tier}; no se pudieron contar los Cubes de este dispositivo en esa red."
             );
         };
         let mut summary = localized_format!(
@@ -1057,13 +1059,27 @@ impl Home {
             local + remote
         );
         if remote > 0 {
-            summary.push_str(&format!(
+            summary.push_str(&localized_format!(
                 ", {} of them registered in Connect but not on this device",
+                ", {} de ellos registrados en Connect pero no en este dispositivo",
                 remote
             ));
         }
         summary.push('.');
         summary
+    }
+
+    /// The Create Cube refusal at the limit. It is stored from `update()`, where
+    /// the language is always English, so the home view rebuilds it in the
+    /// accepted language when the stored error is this one.
+    fn cube_limit_error(&self) -> String {
+        localized_format!(
+            "Cube limit reached. {} Upgrade your Connect account \
+             or delete a Cube on this network to create more.",
+            "Alcanzaste el límite de Cubes. {} Mejora tu plan de Connect \
+             o elimina un Cube de esta red para crear más.",
+            self.cube_limit_summary(self.network),
+        )
     }
 
     /// The server's reason for refusing this Cube's registration, as user copy —
@@ -2038,11 +2054,7 @@ impl Home {
                 let cube_count = self.total_cube_count();
                 let limit = self.cube_limit();
                 if cube_count >= limit {
-                    self.error = Some(format!(
-                        "Cube limit reached. {} Upgrade your Connect account \
-                         or delete a Cube on this network to create more.",
-                        self.cube_limit_summary(self.network),
-                    ));
+                    self.error = Some(self.cube_limit_error());
                     return Task::none();
                 }
 
@@ -6450,7 +6462,17 @@ impl Home {
                                 // Only show error at top if not in create cube
                                 // form — the form renders `self.error` itself.
                                 if !self.showing_create_form() {
-                                    self.error.as_ref().map(|e| card::simple(text(coincube_ui::locale::notice(e.clone()))))
+                                    self.error.as_ref().map(|e| {
+                                        let limit = coincube_ui::locale::render_in(
+                                            coincube_ui::locale::Language::English,
+                                            || self.cube_limit_error(),
+                                        );
+                                        card::simple(text(if *e == limit {
+                                            self.cube_limit_error()
+                                        } else {
+                                            coincube_ui::locale::notice(e.clone())
+                                        }))
+                                    })
                                 } else {
                                     None
                                 }

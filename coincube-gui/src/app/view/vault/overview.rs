@@ -174,7 +174,12 @@ fn retry_note(retry_progress: Option<f64>) -> String {
 /// When a run of failed polls began, in local time.
 fn format_failure_time(since: u32) -> String {
     DateTime::<Utc>::from_timestamp(i64::from(since), 0)
-        .map(|at| at.with_timezone(&Local).format("%b %-d, %H:%M").to_string())
+        .map(|at| {
+            let local = at.with_timezone(&Local);
+            local
+                .format(&coincube_ui::locale::date_pattern("%b %-d, %H:%M", &local))
+                .to_string()
+        })
         .unwrap_or_else(|| localized_copy("recently").to_owned())
 }
 
@@ -566,17 +571,22 @@ pub fn payment_view<'a>(
             .push(card::simple(
                 Column::new()
                     .push(tx.time.map(|t| {
-                        let date = DateTime::<Utc>::from_timestamp(t as i64, 0)
+                        let local = DateTime::<Utc>::from_timestamp(t as i64, 0)
                             .unwrap()
-                            .with_timezone(&Local)
-                            .format("%b. %d, %Y - %T");
+                            .with_timezone(&Local);
+                        let date = local
+                            .format(&coincube_ui::locale::date_pattern(
+                                "%b. %d, %Y - %T",
+                                &local,
+                            ))
+                            .to_string();
                         Row::new()
                             .width(Length::Fill)
                             .push(
                                 Container::new(text(localized_copy("Date:")).bold())
                                     .width(Length::Fill),
                             )
-                            .push(Container::new(text(format!("{}", date))).width(Length::Shrink))
+                            .push(Container::new(text(date)).width(Length::Shrink))
                     }))
                     .push(
                         Row::new()

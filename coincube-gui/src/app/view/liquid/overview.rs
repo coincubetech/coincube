@@ -43,8 +43,9 @@ fn payment_display_time(payment: Option<&DomainPayment>) -> (String, Option<Stri
             chrono::DateTime::<chrono::Utc>::from_timestamp(i64::from(payment.timestamp), 0)
         })
         .map(|date| {
-            date.with_timezone(&chrono::Local)
-                .format("%b %-d, %H:%M")
+            let local = date.with_timezone(&chrono::Local);
+            local
+                .format(&coincube_ui::locale::date_pattern("%b %-d, %H:%M", &local))
                 .to_string()
         });
     match historical_date {

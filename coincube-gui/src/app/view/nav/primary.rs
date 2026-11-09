@@ -126,7 +126,7 @@ fn item_with_route<'a>(
 
     let body: Column<Message> = column![
         icon_el,
-        iced::widget::text(t.label())
+        iced::widget::text(coincube_ui::locale::copy(t.label()))
             .size(LABEL_SIZE)
             .align_x(Alignment::Center),
     ]
@@ -182,9 +182,11 @@ fn item_with_route<'a>(
             r,
             // Padded, bordered popover so the text reads as a floating
             // bubble instead of overlapping the adjacent rail icons.
-            container(coincube_ui::component::text::caption(reason))
-                .padding([6, 10])
-                .style(theme::container::border_grey),
+            container(coincube_ui::component::text::caption(
+                coincube_ui::locale::copy(&reason).to_owned(),
+            ))
+            .padding([6, 10])
+            .style(theme::container::border_grey),
             iced::widget::tooltip::Position::Right,
         )
         .gap(6)

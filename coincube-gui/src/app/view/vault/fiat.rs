@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::localized_format;
 use std::convert::TryFrom;
 use std::num::ParseFloatError;
@@ -216,16 +217,17 @@ impl FiatAmountConverter {
                     "Fuente: {}",
                     self.source()
                 )))
-                .push(text(localized_format!(
-                    "Last updated at source: {}",
-                    "Última actualización en la fuente: {}",
-                    self.updated_at()
-                        .map(|t| format!("{} seconds ago", now().as_secs().saturating_sub(t)))
-                        .unwrap_or("N/A".to_string())
-                )))
+                .push(text(match self.updated_at() {
+                    Some(t) => localized_format!(
+                        "Last updated at source: {} seconds ago",
+                        "Última actualización en la fuente: hace {} segundos",
+                        now().as_secs().saturating_sub(t)
+                    ),
+                    None => localized_copy("Last updated at source: N/A").to_string(),
+                }))
                 .push(text(localized_format!(
                     "Last requested: {} seconds ago",
-                    "Última solicitud: {} hace segundos",
+                    "Última solicitud: hace {} segundos",
                     self.requested_at().elapsed().as_secs()
                 ))),
         )

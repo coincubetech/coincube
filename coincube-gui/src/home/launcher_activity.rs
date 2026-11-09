@@ -320,7 +320,8 @@ pub(super) fn blocks_to_halving(chain: ChainId, tip: u32) -> u32 {
 /// Month and year of the next halving, at ten-minute blocks from `today`.
 pub(super) fn halving_month(blocks: u32, today: chrono::NaiveDate) -> String {
     let date = today + chrono::Duration::minutes(i64::from(blocks) * 10);
-    date.format("%b %Y").to_string()
+    date.format(&coincube_ui::locale::date_pattern("%b %Y", &date))
+        .to_string()
 }
 
 /// The hashrate a difficulty implies at ten-minute blocks.

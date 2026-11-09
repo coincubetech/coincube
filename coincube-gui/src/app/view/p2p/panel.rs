@@ -2875,7 +2875,8 @@ impl P2PPanel {
             let dt = chrono::DateTime::from_timestamp(trade.created_at_ts, 0)
                 .unwrap_or_default()
                 .with_timezone(&chrono::Local);
-            dt.format("%B %d, %Y").to_string()
+            dt.format(&coincube_ui::locale::date_pattern("%B %d, %Y", &dt))
+                .to_string()
         };
 
         let trade_info_panel: Element<'_, view::Message> = if self.chat_show_trade_info {
@@ -4275,7 +4276,8 @@ impl P2PPanel {
                         if dt.date_naive() == today {
                             dt.format("%H:%M").to_string()
                         } else {
-                            dt.format("%b %d, %H:%M").to_string()
+                            dt.format(&coincube_ui::locale::date_pattern("%b %d, %H:%M", &dt))
+                                .to_string()
                         }
                     };
                     let subtitle = format!("{} · {}", action_label, order_short);

@@ -68,9 +68,9 @@ fn sats(amount: Amount) -> String {
 
 fn coins_count(n: usize) -> String {
     if n == 1 {
-        "1 coin".to_string()
+        localized_copy("1 coin").to_string()
     } else {
-        format!("{} coins", n)
+        localized_format!("{} coins", "{} monedas", n)
     }
 }
 
@@ -82,13 +82,28 @@ pub fn both_chains_banner<'a>(
     can_split: bool,
     mask_amounts: bool,
 ) -> Element<'a, Message> {
-    let text = localized_format!(
-        "{} · {} also {} on {}. Until split, a transaction on one chain can be copied to the other.", "{} · {} también {} en {}. Hasta la división, una transacción en una cadena se puede copiar a la otra.",
-        coins_count(count),
-        if mask_amounts { "•••••• sats".to_string() } else { sats(total) },
-        if count == 1 { "exists" } else { "exist" },
-        chain_name(twin(here)),
-    );
+    let amount = if mask_amounts {
+        "•••••• sats".to_string()
+    } else {
+        sats(total)
+    };
+    let text = if count == 1 {
+        localized_format!(
+            "{} · {} also exists on {}. Until split, a transaction on one chain can be copied to the other.",
+            "{} · {} también existe en {}. Hasta separarla, una transacción en una cadena se puede copiar a la otra.",
+            coins_count(count),
+            amount,
+            chain_name(twin(here)),
+        )
+    } else {
+        localized_format!(
+            "{} · {} also exist on {}. Until split, a transaction on one chain can be copied to the other.",
+            "{} · {} también existen en {}. Hasta separarlas, una transacción en una cadena se puede copiar a la otra.",
+            coins_count(count),
+            amount,
+            chain_name(twin(here)),
+        )
+    };
     Container::new(
         Row::new()
             .spacing(16)
@@ -409,9 +424,16 @@ pub fn split_overlay<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
     }
 
     let fee = match (overlay.fee(), overlay.feerate) {
-        (Some(fee), Some(rate)) => format!("Fee ≈ {} at {} sat/vB", sats(fee), rate),
-        _ if overlay.fee_failed => "Fee rate unavailable".to_string(),
-        _ => "Getting the fee rate…".to_string(),
+        (Some(fee), Some(rate)) => {
+            localized_format!(
+                "Fee ≈ {} at {} sat/vB",
+                "Comisión ≈ {} a {} sat/vB",
+                sats(fee),
+                rate
+            )
+        }
+        _ if overlay.fee_failed => localized_copy("Fee rate unavailable").to_string(),
+        _ => localized_copy("Getting the fee rate…").to_string(),
     };
     let back = overlay
         .fee()
@@ -426,7 +448,7 @@ pub fn split_overlay<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
                 coins_count(coins),
                 sats(spent),
                 if overlay.method == Method::SplitKey && overlay.has_key() {
-                    " including the split key"
+                    localized_copy(" including the split key")
                 } else {
                     ""
                 }
@@ -434,10 +456,10 @@ pub fn split_overlay<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
             .push(p2_regular(match back {
                 Some(back) => localized_format!(
                     "Back to this Vault · fresh address · ≈ {}",
-                    "Volver a este Vault · dirección nueva · ♥ {}",
+                    "Volver a este Vault · dirección nueva · ≈ {}",
                     sats(back)
                 ),
-                None => "Back to this Vault · fresh address".to_string(),
+                None => localized_copy("Back to this Vault · fresh address").to_string(),
             }))
             .push(p2_regular(fee).style(theme::text::secondary)),
     );

@@ -67,8 +67,12 @@ pub fn recovery_ux<'a>(
     if locked {
         let when = unlock_at
             .map(|u| {
-                u.with_timezone(&chrono::Local)
-                    .format("%b %d, %Y %H:%M %Z")
+                let local = u.with_timezone(&chrono::Local);
+                local
+                    .format(&coincube_ui::locale::date_pattern(
+                        "%b %d, %Y %H:%M %Z",
+                        &local,
+                    ))
                     .to_string()
             })
             .unwrap_or_else(|| "later".to_string());

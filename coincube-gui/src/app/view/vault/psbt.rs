@@ -1242,18 +1242,11 @@ pub fn path_view<'a>(
                     .push(Space::new().width(Length::Fixed(20.0))),
             )
             .push(
-                p1_regular(localized_format!(
-                    "{} more signature{}",
-                    "{} firma{} pendiente",
-                    missing_signatures,
-                    if missing_signatures > 1 {
-                        "s from "
-                    } else if missing_signatures == 0 {
-                        ""
-                    } else {
-                        " from "
-                    }
-                ))
+                p1_regular(match missing_signatures {
+                    0 => localized_copy("0 more signature").to_owned(),
+                    1 => localized_format!("{} more signature from ", "Falta {} firma de ", 1),
+                    n => localized_format!("{} more signatures from ", "Faltan {} firmas de ", n),
+                })
                 .style(theme::text::secondary),
             )
             .push(row_unsigned)

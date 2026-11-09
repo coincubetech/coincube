@@ -12,6 +12,7 @@ use coincube_core::{
 };
 use coincube_ui::{
     component::{button, text::*},
+    locale::copy as localized_copy,
     theme,
     widget::{Column, Element, Row},
 };
@@ -157,17 +158,18 @@ impl KeysState {
                 .count();
             if count > 0 {
                 sources.push(if source == KeySource::Words {
-                    "recovery words"
+                    localized_copy("recovery words")
                 } else {
-                    "hardware wallet"
+                    localized_copy("hardware wallet")
                 });
             }
         }
-        let mut line = format!(
+        let mut line = coincube_ui::localized_format!(
             "Keys: {} of {} provided · {} · verified against the fingerprint",
+            "Claves: {} de {} aportadas · {} · verificadas con la huella",
             self.provided(),
             self.slots.len(),
-            sources.join(" and ")
+            sources.join(localized_copy(" and "))
         );
         let elsewhere = self
             .slots
@@ -175,7 +177,10 @@ impl KeysState {
             .filter(|slot| slot.source == KeySource::Elsewhere)
             .count();
         if elsewhere > 0 {
-            line.push_str(&format!(" · {elsewhere} signs elsewhere"));
+            line.push_str(&coincube_ui::localized_format!(
+                " · {elsewhere} signs elsewhere",
+                " · {elsewhere} con firma externa"
+            ));
         }
         line
     }
@@ -230,46 +235,58 @@ pub(super) fn step<'a>(
 ) -> (Element<'a, view::Message>, Element<'a, view::Message>) {
     let count = keys.slots.len();
     let lead = if adding {
-        "Enter the recovery words for any of this wallet's signers. Each set is checked \
-         against its signer's fingerprint, then stored on this device for this Cube."
+        localized_copy("Enter the recovery words for any of this wallet's signers. Each set is checked against its signer's fingerprint, then stored on this device for this Cube.")
             .to_string()
     } else if keys.multisig() {
-        format!(
+        coincube_ui::localized_format!(
             "The descriptor names {count} signers and needs {} to spend. Provide at least {} \
              of them; mark the others as signing elsewhere. Each key is checked against its \
              fingerprint before it is accepted.",
-            keys.threshold, keys.threshold
+            "El descriptor indica {count} firmantes y se necesitan {} para gastar. Aporta al \
+             menos {} de sus claves; marca las demás como firma en otro lugar. Cada clave se \
+             verifica con su huella antes de aceptarla.",
+            keys.threshold,
+            keys.threshold
         )
     } else {
-        "The descriptor names 1 signer. Provide its key; it is checked against its \
-         fingerprint before it is accepted."
+        localized_copy("The descriptor names 1 signer. Provide its key; it is checked against its fingerprint before it is accepted.")
             .to_string()
     };
     let mut content = Column::new()
         .spacing(20)
-        .push(h3("Add the wallet's keys"))
+        .push(h3(localized_copy("Add the wallet's keys")))
         .push(p1_regular(lead).style(theme::text::secondary));
     let busy = keys.checking();
     for (index, slot) in keys.slots.iter().enumerate() {
-        let mut card = Column::new().spacing(12).push(p1_bold(format!(
-            "Key {} of {count} · fingerprint {} · path {}",
-            index + 1,
-            slot.account.fingerprint,
-            slot.account.origin
-        )));
+        let mut card = Column::new()
+            .spacing(12)
+            .push(p1_bold(coincube_ui::localized_format!(
+                "Key {} of {count} · fingerprint {} · path {}",
+                "Clave {} de {count} · huella {} · ruta {}",
+                index + 1,
+                slot.account.fingerprint,
+                slot.account.origin
+            )));
         card = card.push(match &slot.status {
             KeyStatus::Verified if slot.source == KeySource::Elsewhere => {
-                p2_regular("Signs elsewhere").style(theme::text::secondary)
+                p2_regular(localized_copy("Signs elsewhere")).style(theme::text::secondary)
             }
-            KeyStatus::Verified => p2_regular(format!(
+            KeyStatus::Verified => p2_regular(coincube_ui::localized_format!(
                 "Verified · matches {} · {}",
+                "Verificada · coincide con {} · {}",
                 slot.account.fingerprint,
-                slot.source.label().to_lowercase()
+                localized_copy(slot.source.label()).to_lowercase()
             ))
             .style(theme::text::success),
-            KeyStatus::Checking => p2_regular("Checking…").style(theme::text::secondary),
-            KeyStatus::Failed(reason) => p2_regular(reason.clone()).style(theme::text::error),
-            KeyStatus::Missing => p2_regular("Not provided yet").style(theme::text::secondary),
+            KeyStatus::Checking => {
+                p2_regular(localized_copy("Checking…")).style(theme::text::secondary)
+            }
+            KeyStatus::Failed(reason) => {
+                p2_regular(super::shown_notice(reason)).style(theme::text::error)
+            }
+            KeyStatus::Missing => {
+                p2_regular(localized_copy("Not provided yet")).style(theme::text::secondary)
+            }
         });
         let mut sources = Row::new().spacing(8);
         // Adding to an attached wallet only stores words; a device needs
@@ -283,21 +300,21 @@ pub(super) fn step<'a>(
         }
         for source in choices {
             let pick = if slot.source == source {
-                button::primary(None, source.label())
+                button::primary(None, localized_copy(source.label()))
             } else {
-                button::secondary(None, source.label())
+                button::secondary(None, localized_copy(source.label()))
             };
             sources = sources.push(pick.width(Length::Shrink).on_press_maybe(
                 (!busy).then_some(message(ImportMessage::KeySourcePicked(index, source))),
             ));
         }
         card = card
-            .push(p2_regular("Where is this key?").style(theme::text::secondary))
+            .push(p2_regular(localized_copy("Where is this key?")).style(theme::text::secondary))
             .push(sources);
         card = match slot.source {
             // Verified words leave the screen; changing them starts over.
             KeySource::Words if slot.status == KeyStatus::Verified => card.push(
-                button::secondary(None, "Enter different words")
+                button::secondary(None, localized_copy("Enter different words"))
                     .width(Length::Shrink)
                     .on_press_maybe((!busy).then_some(message(ImportMessage::KeySourcePicked(
                         index,
@@ -305,9 +322,12 @@ pub(super) fn step<'a>(
                     )))),
             ),
             KeySource::Words => card
-                .push(p1_bold("Recovery words"))
+                .push(p1_bold(localized_copy("Recovery words")))
                 .push(
-                    text_input("12 or 24 words, separated by spaces", slot.words.as_str())
+                    text_input(
+                        localized_copy("12 or 24 words, separated by spaces"),
+                        slot.words.as_str(),
+                    )
                         .on_input(move |value| {
                             message(ImportMessage::KeyWordsEdited(
                                 index,
@@ -317,16 +337,12 @@ pub(super) fn step<'a>(
                         .padding(10),
                 )
                 .push(
-                    caption(
-                        "Words are checked here, then stored encrypted on this device for this \
-                         Cube. They are not in the Recovery Kit yet, so keep your original \
-                         backup.",
-                    )
+                    caption(localized_copy("Words are checked here, then stored encrypted on this device for this Cube. They are not in the Recovery Kit yet, so keep your original backup."))
                     .style(theme::text::secondary),
                 )
-                .push(p1_bold("Passphrase (if the wallet used one)"))
+                .push(p1_bold(localized_copy("Passphrase (if the wallet used one)")))
                 .push(
-                    text_input("Optional", slot.passphrase.as_str())
+                    text_input(localized_copy("Optional"), slot.passphrase.as_str())
                         .on_input(move |value| {
                             message(ImportMessage::KeyPassphraseEdited(
                                 index,
@@ -338,7 +354,7 @@ pub(super) fn step<'a>(
                         .width(Length::Fixed(320.0)),
                 )
                 .push(
-                    button::secondary(None, "Verify key")
+                    button::secondary(None, localized_copy("Verify key"))
                         .width(Length::Shrink)
                         .on_press_maybe(
                             (!busy
@@ -351,14 +367,16 @@ pub(super) fn step<'a>(
                 let connected = hardware_connected(&slot.account);
                 card.push(
                     caption(if connected {
-                        "The seed stays on the device. It signs whenever this wallet spends."
+                        localized_copy(
+                            "The seed stays on the device. It signs whenever this wallet spends.",
+                        )
                     } else {
-                        "Connect and unlock the device with this fingerprint."
+                        localized_copy("Connect and unlock the device with this fingerprint.")
                     })
                     .style(theme::text::secondary),
                 )
                 .push(
-                    button::secondary(None, "Check device")
+                    button::secondary(None, localized_copy("Check device"))
                         .width(Length::Shrink)
                         .on_press_maybe(
                             (!busy && connected && slot.status != KeyStatus::Verified)
@@ -367,10 +385,9 @@ pub(super) fn step<'a>(
                 )
             }
             KeySource::Elsewhere => card.push(
-                caption(
-                    "Another wallet or person signs with this key. Tenshu saves the PSBT \
-                     for them.",
-                )
+                caption(localized_copy(
+                    "Another wallet or person signs with this key. Tenshu saves the PSBT for them.",
+                ))
                 .style(theme::text::secondary),
             ),
         };
@@ -383,8 +400,9 @@ pub(super) fn step<'a>(
     }
     if !adding && keys.multisig() && keys.provided() < keys.threshold {
         content = content.push(
-            p2_regular(format!(
+            p2_regular(coincube_ui::localized_format!(
                 "{} of {} keys needed to sign are provided.",
+                "Se aportaron {} de las {} claves necesarias para firmar.",
                 keys.provided(),
                 keys.threshold
             ))
@@ -392,13 +410,13 @@ pub(super) fn step<'a>(
         );
     }
     if let Some(error) = error {
-        content = content.push(p1_regular(error).style(theme::text::error));
+        content = content.push(p1_regular(super::shown_notice(error)).style(theme::text::error));
     }
     let actions = Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
         .push((!adding).then(|| {
-            button::secondary(None, "Back")
+            button::secondary(None, localized_copy("Back"))
                 .width(Length::Shrink)
                 .on_press_maybe((!busy).then_some(message(ImportMessage::Edit)))
         }))
@@ -407,9 +425,9 @@ pub(super) fn step<'a>(
             button::primary(
                 None,
                 if adding {
-                    "Store words"
+                    localized_copy("Store words")
                 } else {
-                    "Review wallet"
+                    localized_copy("Review wallet")
                 },
             )
             .width(Length::Shrink)

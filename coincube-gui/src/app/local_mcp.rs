@@ -5,6 +5,8 @@ use crate::daemon::Daemon;
 use coincube_mcp as wire;
 #[cfg(feature = "mcp-proposals")]
 use coincube_ui::component::text::{h3, text};
+#[cfg(feature = "mcp-proposals")]
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::widget::Element;
 #[cfg(feature = "mcp-proposals")]
 use iced::widget::{button, checkbox, column, text_input};
@@ -160,8 +162,9 @@ impl Settings {
         coincube_ui::widget::action::Action::new(
             "tenshu.ai-access.enable",
             iced::widget::text(format!(
-                "{} Enable AI access for this Cube",
-                if self.enabled { "☑" } else { "☐" }
+                "{} {}",
+                if self.enabled { "☑" } else { "☐" },
+                localized_copy("Enable AI access for this Cube")
             )),
             view::Message::FocusAction,
         )
@@ -940,53 +943,57 @@ impl Settings {
 impl Settings {
     fn proposal_view(&self) -> Element<'_, view::Message> {
         let msg = |m| view::Message::LocalMcp(m);
-        let mut content = column![h3("AI wallet preparation — Regtest experiment"),
-            text("Choose topology-only access, or allow the assistant to assemble public account keys for a 3-of-5 wallet with explicitly chosen recovery. Your AI provider may receive the public keys you give it. Neither permission allows secrets, signing, sending coins or creation approval."),
-            text("Tenshu validates the descriptor and fills its builder. You verify keys on the source devices, handle hardware, seed backups and PIN/passkey steps, and authorize creation here. Pairing survives lock and restart; each draft ends on lock/close or creation admission. Wallet reads require their own permission."),
+        let mut content = column![h3(localized_copy("AI wallet preparation — Regtest experiment")),
+            text(localized_copy("Choose topology-only access, or allow the assistant to assemble public account keys for a 3-of-5 wallet with explicitly chosen recovery. Your AI provider may receive the public keys you give it. Neither permission allows secrets, signing, sending coins or creation approval.")),
+            text(localized_copy("Tenshu validates the descriptor and fills its builder. You verify keys on the source devices, handle hardware, seed backups and PIN/passkey steps, and authorize creation here. Pairing survives lock and restart; each draft ends on lock/close or creation admission. Wallet reads require their own permission.")),
             self.enable_action()].spacing(16);
         if self.enabled {
             content = content
                 .push(
-                    text_input("Client label (for your reference)", &self.client_name)
+                    text_input(localized_copy("Client label (for your reference)"), &self.client_name)
                         .on_input(move |v| msg(Message::ClientName(v))),
                 )
                 .push(
                     checkbox(self.proposals_allowed)
-                        .label("Allow this client to prepare a Regtest wallet proposal")
+                        .label(localized_copy("Allow this client to prepare a Regtest wallet proposal"))
                         .on_toggle(move |v| msg(Message::Proposals(v))),
                 )
                 .push(
                     checkbox(self.creation_allowed)
-                        .label("Allow this client to prepare a Regtest wallet using public account keys")
+                        .label(localized_copy("Allow this client to prepare a Regtest wallet using public account keys"))
                         .on_toggle(move |v| msg(Message::Creation(v))),
                 )
                 .push(
-                    button("Pair setup client until revoked").on_press_maybe(
+                    button(localized_copy("Pair setup client until revoked")).on_press_maybe(
                         ((self.proposals_allowed || self.creation_allowed) && !self.client_name.trim().is_empty())
                             .then(|| msg(Message::Pair)),
                     ),
                 );
             if let Some(server) = &self.server {
                 content = content
-                    .push(text(if server.grant.active() {
+                    .push(text(localized_copy(if server.grant.active() {
                         "Proposal client authorized"
                     } else {
                         "Inactive — approve again"
-                    }))
-                    .push(button("Revoke access now").on_press(msg(Message::Revoke)));
+                    })))
+                    .push(
+                        button(localized_copy("Revoke access now")).on_press(msg(Message::Revoke)),
+                    );
                 if server.grant.active() {
-                    content = content.push(button("Copy private client configuration").on_press(msg(Message::CopyConfig)))
-                        .push(text("Save the temporary grant only in your client's private local configuration. Never paste it into chat."));
+                    content = content.push(button(localized_copy("Copy private client configuration")).on_press(msg(Message::CopyConfig)))
+                        .push(text(localized_copy("Save the temporary grant only in your client's private local configuration. Never paste it into chat.")));
                     if let Some(proposal) = self
                         .proposals
                         .as_ref()
                         .and_then(|s| s.pending().ok())
                         .flatten()
                     {
-                        content = content.push(text(format!("3-of-5 primary; recovery {}-of-{} after {} blocks. Actual keys and descriptor are not selected yet.", proposal.topology.recovery.quorum.threshold, proposal.topology.recovery.quorum.key_count, proposal.topology.recovery.relative_delay_blocks)))
-                            .push(button("Review proposal and select keys in Tenshu").on_press(msg(Message::ReviewProposal)));
+                        content = content.push(text(coincube_ui::localized_format!("3-of-5 primary; recovery {}-of-{} after {} blocks. Actual keys and descriptor are not selected yet.", "Principal 3 de 5; recuperación {} de {} después de {} bloques. Aún no se seleccionaron las claves ni el descriptor reales.", proposal.topology.recovery.quorum.threshold, proposal.topology.recovery.quorum.key_count, proposal.topology.recovery.relative_delay_blocks)))
+                            .push(button(localized_copy("Review proposal and select keys in Tenshu")).on_press(msg(Message::ReviewProposal)));
                     } else {
-                        content = content.push(text("Waiting for a proposal from your client."));
+                        content = content.push(text(localized_copy(
+                            "Waiting for a proposal from your client.",
+                        )));
                     }
                 }
             } else if self
@@ -994,11 +1001,13 @@ impl Settings {
                 .as_ref()
                 .is_none_or(|s| s.clients().is_empty())
             {
-                content = content.push(text("No proposal client is authorized."));
+                content = content.push(text(localized_copy("No proposal client is authorized.")));
             }
         }
         if self.failed {
-            content = content.push(text("Could not start local MCP. No access was granted."));
+            content = content.push(text(localized_copy(
+                "Could not start local MCP. No access was granted.",
+            )));
         }
         content.push(self.paired_clients_view()).into()
     }
@@ -1783,6 +1792,12 @@ mod tests {
                 assert!(!inspection.contains("Your AI provider may receive financial information"));
                 assert!(!inspection.contains("TENSHU_MCP_CREDENTIAL"));
             }
+            let spanish =
+                coincube_ui::locale::render_in(coincube_ui::locale::Language::Spanish, || {
+                    settings.view_for_cube(true, false)
+                });
+            capture::inspect(scenario, spanish, (1440, 900), "dark", theme::Theme::dark())
+                .assert_spanish(&format!("AI access ({scenario})"));
         };
         render("r23-empty", &empty);
         let empty_focus = capture::inspect(

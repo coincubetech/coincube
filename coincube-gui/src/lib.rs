@@ -15,6 +15,8 @@ pub mod home;
 pub mod hw;
 pub mod hw_advisory;
 pub mod installer;
+#[cfg(test)]
+mod l10n_guard_tests;
 #[cfg(target_os = "linux")]
 pub mod linux_backend;
 pub mod loader;
