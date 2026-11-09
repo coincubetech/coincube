@@ -2,7 +2,7 @@
 //!
 //! This file is a **placeholder**: a true E2E happy-path test requires a
 //! phone-side mock (or CLI) that can approve a session and submit a
-//! partial signature against the dev API. We don't have that fixture
+//! partial signature against a real Connect API. We don't have that fixture
 //! yet, so the tests below are currently skeletons that document the
 //! expected shape.
 //!
