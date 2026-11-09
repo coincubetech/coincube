@@ -1994,7 +1994,7 @@ fn plan_provenance_card<'a>(plan: &'a ConnectPlan) -> Option<Element<'a, Connect
             .push(
                 text::p2_regular(localized_format!(
                     "Expires {}",
-                    "Gastos {}",
+                    "Vence el {}",
                     format_date(exp)
                 ))
                 .color(color::GREY_3),
@@ -2568,7 +2568,7 @@ fn checkout_ux<'a>(
                 col = col.push(
                     text::p2_regular(localized_format!(
                         "Expires: {}",
-                        "Gastos: {}",
+                        "Vence: {}",
                         format_datetime(&resp.expires_at)
                     ))
                     .style(theme::text::secondary),
