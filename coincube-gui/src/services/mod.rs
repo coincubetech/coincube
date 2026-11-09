@@ -34,7 +34,6 @@ pub(crate) mod split_test_connect;
 pub(crate) mod split_test_wallets;
 
 pub mod http;
-pub mod keys;
 
 pub mod chain_status;
 pub mod coincube;
