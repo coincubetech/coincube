@@ -153,7 +153,6 @@ pub fn multisig_security_template<'a>(
 ) -> Element<'a, Message> {
     layout_with_actions(
         progress,
-        None,
         "Set keys",
         Column::new()
             .align_x(Alignment::Start)
@@ -386,7 +385,6 @@ pub fn multisig_inheritance_recovery_template<'a>(
 ) -> Element<'a, Message> {
     layout_with_actions(
         progress,
-        None,
         "Set keys",
         Column::new()
             .align_x(Alignment::Start)
@@ -556,7 +554,6 @@ pub fn expanding_multisig_inheritance_template<'a>(
 ) -> Element<'a, Message> {
     layout_with_actions(
         progress,
-        None,
         "Set keys",
         Column::new()
             .align_x(Alignment::Start)

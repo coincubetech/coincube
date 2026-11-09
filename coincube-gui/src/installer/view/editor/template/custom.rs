@@ -72,7 +72,6 @@ pub fn custom_template<'a>(
     let prim_keys_fixed = primary_path.keys.len() < 2; // can only delete a primary key if there are 2 or more
     layout_with_actions(
         progress,
-        None,
         "Set keys",
         Column::new()
             .align_x(Alignment::Start)

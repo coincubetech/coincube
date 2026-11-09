@@ -60,7 +60,6 @@ impl Step for ChooseDescriptorTemplate {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        _email: Option<&'a str>,
     ) -> Element<'a, Message> {
         view::editor::template::choose_descriptor_template(progress, self.ui_instance)
     }
@@ -103,7 +102,6 @@ impl Step for DescriptorTemplateDescription {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        _email: Option<&'a str>,
     ) -> Element<'a, Message> {
         match self.template {
             DescriptorTemplate::SimpleInheritance => {

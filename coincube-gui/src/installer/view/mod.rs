@@ -48,7 +48,6 @@ use crate::{
 
 pub fn import_descriptor<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     imported_descriptor: &form::Value<String>,
     imported_backup: bool,
     wrong_network: bool,
@@ -110,7 +109,6 @@ pub fn import_descriptor<'a>(
 
     layout(
         progress,
-        email,
         "Import a public wallet descriptor",
         Column::new()
             .push(p2_regular(
@@ -151,7 +149,6 @@ pub fn import_descriptor<'a>(
 #[allow(clippy::too_many_arguments)]
 pub fn register_descriptor<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     descriptor: &'a CoincubeDescriptor,
     hws: &'a [HardwareWallet],
     registered: &HashSet<bitcoin::bip32::Fingerprint>,
@@ -238,7 +235,6 @@ pub fn register_descriptor<'a>(
         };
     layout(
         progress,
-        email,
         "Register descriptor",
         Column::new()
             .push((!created_desc).then_some(
@@ -311,7 +307,6 @@ pub fn register_descriptor<'a>(
 
 pub fn backup_descriptor<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     descriptor: &'a CoincubeDescriptor,
     keys: &'a HashMap<Fingerprint, settings::KeySetting>,
     error: Option<&Error>,
@@ -327,7 +322,6 @@ pub fn backup_descriptor<'a>(
 
     layout(
         progress,
-        email,
         "Back Up your wallet configuration (Descriptor)",
         Column::new()
             .push(
@@ -685,7 +679,6 @@ pub fn define_bitcoin_node<'a>(
 
     layout(
         progress,
-        None,
         "Set up connection to the Bitcoin node",
         col,
         true,
@@ -954,7 +947,6 @@ pub fn define_coincube_connect<'a>(
 
     layout(
         progress,
-        None,
         "COINCUBE | Connect",
         content,
         true,
@@ -1314,7 +1306,6 @@ pub fn select_bitcoind_type<'a>(
         let content = Container::new(choices).padding(30).center_x(Length::Fill);
         return layout(
             progress,
-            None,
             if chain == crate::chain::ChainId::BitcoinBlake2b {
                 "Bitcoin Blake2b node management"
             } else {
@@ -1472,7 +1463,6 @@ pub fn select_bitcoind_type<'a>(
 
     layout(
         progress,
-        None,
         "Bitcoin node management",
         content,
         true,
@@ -1542,7 +1532,6 @@ pub fn start_internal_bitcoind<'a>(
             .into()]));
         return layout(
             progress,
-            None,
             if flavor == crate::node::bitcoind::NodeFlavor::KnotsBlake2b {
                 "Start a pruned Bitcoin Blake2b node"
             } else {
@@ -1558,7 +1547,6 @@ pub fn start_internal_bitcoind<'a>(
 
     layout(
         progress,
-        None,
         if flavor == crate::node::bitcoind::NodeFlavor::KnotsBlake2b {
             "Start a pruned Bitcoin Blake2b node"
         } else {
@@ -1696,13 +1684,11 @@ pub fn restored<'a>(cube_name: &str, warning: Option<&'a String>) -> Element<'a,
 
 pub fn claim_setup_install<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     generating: bool,
     warning: Option<&'a String>,
 ) -> Element<'a, Message> {
     layout(
         progress,
-        email,
         "Bitcoin Blake2b copy",
         Column::new().spacing(20)
             .push(p1_regular(if generating {
@@ -1719,7 +1705,6 @@ pub fn claim_setup_install<'a>(
 
 pub fn install<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     generating: bool,
     installed: bool,
     warning: Option<&'a String>,
@@ -1728,7 +1713,6 @@ pub fn install<'a>(
     install_titled(
         "Finalize installation",
         progress,
-        email,
         generating,
         installed,
         warning,
@@ -1741,7 +1725,6 @@ pub fn install<'a>(
 pub fn install_titled<'a>(
     title: &'static str,
     progress: (usize, usize),
-    email: Option<&'a str>,
     generating: bool,
     installed: bool,
     warning: Option<&'a String>,
@@ -1754,7 +1737,6 @@ pub fn install_titled<'a>(
     };
     layout(
         progress,
-        email,
         title,
         Column::new()
             .push(warning.map(|e| card::invalid(text(e))))
@@ -2035,11 +2017,10 @@ pub fn hw_list_view<'a>(
 
 pub fn backup_fresh_fork_mnemonic<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     words: String,
     confirmed: bool,
 ) -> Element<'a, Message> {
-    layout(progress, email, "Back Up Your Cube Master Seed",
+    layout(progress, "Back Up Your Cube Master Seed",
         Column::new()
             .push(text("Write these words down in order and keep them private. They recover this Cube; the PIN only unlocks this device."))
             .push(text(words))
@@ -2049,13 +2030,9 @@ pub fn backup_fresh_fork_mnemonic<'a>(
             .spacing(30), true, Some(Message::Previous))
 }
 
-pub fn backup_mnemonic<'a>(
-    progress: (usize, usize),
-    email: Option<&'a str>,
-) -> Element<'a, Message> {
+pub fn backup_mnemonic<'a>(progress: (usize, usize)) -> Element<'a, Message> {
     layout(
         progress,
-        email,
         "Reminder: Back Up Your Master Seed",
         Column::new()
             .push(
@@ -2075,7 +2052,6 @@ pub fn backup_mnemonic<'a>(
 
 pub fn recover_mnemonic<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     words: &'a [(String, bool); 12],
     current: usize,
     suggestions: &'a [String],
@@ -2084,7 +2060,6 @@ pub fn recover_mnemonic<'a>(
 ) -> Element<'a, Message> {
     layout(
         progress,
-        email,
         "Import Mnemonic",
         Column::new()
             .push(text(prompt::RECOVER_MNEMONIC_HELP))
@@ -2189,7 +2164,6 @@ pub fn recover_mnemonic<'a>(
 /// stays dumb — the caller owns the matching rule.
 pub fn restore_pin_setup<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     entry: &'a crate::pin_input::PinInput,
     confirm: &'a crate::pin_input::PinInput,
     error: Option<&'static str>,
@@ -2206,7 +2180,6 @@ pub fn restore_pin_setup<'a>(
 
     layout(
         progress,
-        email,
         "Create a PIN to secure your Cube",
         Column::new()
             .spacing(40)
@@ -2240,12 +2213,10 @@ pub fn restore_pin_setup<'a>(
 
 pub fn wallet_alias<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     wallet_alias: &form::Value<String>,
 ) -> Element<'a, Message> {
     layout(
         progress,
-        email,
         "Give your wallet an alias",
         Column::new()
             .push(
@@ -2308,7 +2279,6 @@ impl Drop for FramedGuard {
 
 pub(super) fn layout<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     title: &'static str,
     content: impl Into<Element<'a, Message>>,
     padding_left: bool,
@@ -2316,7 +2286,7 @@ pub(super) fn layout<'a>(
 ) -> Element<'a, Message> {
     titled_layout(
         progress,
-        email,
+        None,
         title,
         alignment::Horizontal::Center,
         content,
@@ -2332,7 +2302,6 @@ pub(super) fn layout<'a>(
 /// right-aligned.
 pub(super) fn layout_with_actions<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     title: &'static str,
     content: impl Into<Element<'a, Message>>,
     padding_left: bool,
@@ -2341,7 +2310,7 @@ pub(super) fn layout_with_actions<'a>(
 ) -> Element<'a, Message> {
     titled_layout(
         progress,
-        email,
+        None,
         title,
         alignment::Horizontal::Center,
         content,
@@ -3069,17 +3038,16 @@ mod tests {
         let invalid_alias = value("This alias is too long", false);
         let warn = "Seed backup still recommended".to_string();
 
-        let _ = install((4, 4), Some("user@example.com"), true, false, None, None);
+        let _ = install((4, 4), true, false, None, None);
         let _ = install(
             (4, 4),
-            None,
             false,
             true,
             Some(&warn),
             Some("Connect backup enabled".to_string()),
         );
-        let _ = wallet_alias((1, 2), None, &alias);
-        let _ = wallet_alias((1, 2), Some("user@example.com"), &invalid_alias);
+        let _ = wallet_alias((1, 2), &alias);
+        let _ = wallet_alias((1, 2), &invalid_alias);
     }
 
     #[test]
@@ -3462,7 +3430,7 @@ mod policy_layout_tests {
                 )
                 .await
                 .expect("software renderer");
-                let mut element = backup_descriptor((0, 0), None, &descriptor, &keys, None, false);
+                let mut element = backup_descriptor((0, 0), &descriptor, &keys, None, false);
                 let mut tree = Tree::new(element.as_widget());
                 let size = iced::Size::new(width as f32, height as f32);
                 let node = element.as_widget_mut().layout(
