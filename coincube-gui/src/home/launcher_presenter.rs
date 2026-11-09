@@ -835,22 +835,6 @@ pub(super) fn ghost_avatar<'a, M: 'a>(size: f32) -> Element<'a, M> {
 
 /// The Recovery fact on a ghost's face, and the note under the facts.
 fn ghost_copy(cube: &super::RemoteCube) -> (&'static str, tenshu::Tone, &'static str) {
-    if launcher_catalog::restore_unsupported(cube) {
-        // What Connect really holds, and that this chain can't use it yet.
-        let (recovery, tone) = match launcher_catalog::remote_recovery(cube) {
-            (true, _) => ("Recovery Kit in Connect", tenshu::Tone::Good),
-            (false, true) => ("Phone recovery in Connect", tenshu::Tone::Good),
-            (false, false) if cube.has_recovery_kit => {
-                ("Recovery Kit has no Master Seed", tenshu::Tone::Warn)
-            }
-            (false, false) => ("No Recovery Kit in Connect", tenshu::Tone::Warn),
-        };
-        return (
-            recovery,
-            tone,
-            "Bitcoin Blake2b Cubes can't be restored or imported here yet, so keep this record in Connect until they can. If another device still has this Cube, you can open it there.",
-        );
-    }
     let restore = launcher_catalog::remote_restore(cube);
     match restore.action {
         Some((ViewMessage::RestoreWithPhone { .. }, _)) => (
@@ -877,9 +861,8 @@ fn ghost_copy(cube: &super::RemoteCube) -> (&'static str, tenshu::Tone, &'static
 }
 
 /// G-Ghost-Details: the one face a ghost turns to. Restore when Connect can
-/// restore it here, else the recovery phrase, or neither on a chain this
-/// build can't restore or import (Bitcoin Blake2b); Back; and Delete from
-/// Connect, which removes only the registration.
+/// restore it here, else the recovery phrase; Back; and Delete from Connect,
+/// which removes only the registration.
 fn ghost_details<'a>(
     cube: &super::RemoteCube,
     network: ChainId,
@@ -902,39 +885,29 @@ fn ghost_details<'a>(
         ));
     // The primary action's ID is the details Open ID, so the face's arrival
     // focuses it as it focuses Open on a local Cube.
-    // With no primary, Back takes that ID so arrival still lands focus.
-    let unsupported = launcher_catalog::restore_unsupported(cube);
-    let primary: Option<Element<'a, ViewMessage>> =
-        match launcher_catalog::remote_restore(cube).action {
-            Some((message, _)) => Some(face_primary(
-                launcher_catalog::details_open_id(&key),
-                "Restore to this device",
-                message,
-            )),
-            None if unsupported => None,
-            None => Some(
-                Action::new(
-                    launcher_catalog::details_open_id(&key),
-                    face_button_label("Import with recovery phrase…"),
-                    focus,
-                )
-                .height(Length::Fixed(36.0))
-                .padding([0.0, 16.0])
-                .style(face_secondary_style)
-                .on_press(ViewMessage::ImportGhostWithPhrase(cube.uuid.clone()))
-                .into(),
-            ),
-        };
+    let primary: Element<'a, ViewMessage> = match launcher_catalog::remote_restore(cube).action {
+        Some((message, _)) => face_primary(
+            launcher_catalog::details_open_id(&key),
+            "Restore to this device",
+            message,
+        ),
+        None => Action::new(
+            launcher_catalog::details_open_id(&key),
+            face_button_label("Import with recovery phrase…"),
+            focus,
+        )
+        .height(Length::Fixed(36.0))
+        .padding([0.0, 16.0])
+        .style(face_secondary_style)
+        .on_press(ViewMessage::ImportGhostWithPhrase(cube.uuid.clone()))
+        .into(),
+    };
     let actions = Row::new()
         .spacing(14)
         .align_y(Alignment::Center)
         .push(primary)
         .push(face_link(
-            if unsupported {
-                launcher_catalog::details_open_id(&key)
-            } else {
-                launcher_catalog::close_details_id()
-            },
+            launcher_catalog::close_details_id(),
             "Back",
             ViewMessage::Catalog(CatalogMessage::ClearSelection),
         ));
@@ -3371,53 +3344,6 @@ mod tests {
         let passkey = rest_face_svg(Face::Right, launcher_gpu::marks(&cube), false).unwrap();
         assert_eq!(unlock_prompt(&cube), "Passkey prompt");
         assert!(!passkey.contains(lock));
-    }
-
-    #[test]
-    fn a_blake2b_ghost_keeps_its_kit_but_offers_no_restore_or_import() {
-        // Its Recovery Kit in Connect holds the seed.
-        let mut cube = super::super::RemoteCube {
-            id: 7,
-            uuid: "kept".into(),
-            name: "Kept".into(),
-            network: crate::app::settings::network_to_api_string(ChainId::BitcoinBlake2b),
-            has_recovery_kit: true,
-            has_encrypted_seed: true,
-            phone_recoverable: false,
-            phone_full_cube: false,
-            encryption_pubkey: None,
-            has_vault: None,
-        };
-        let (recovery, tone, note) = ghost_copy(&cube);
-        assert_eq!(recovery, "Recovery Kit in Connect");
-        assert!(matches!(tone, tenshu::Tone::Good));
-        assert!(note.contains("can't be restored or imported"));
-        assert!(!note.contains("the device that holds it"), "{}", note);
-        let status = launcher_catalog::remote_restore(&cube).status;
-        assert!(status.starts_with("Recovery Kit in Connect"), "{}", status);
-        let edge = launcher_catalog::ghost_status(&cube, None);
-        assert!(!edge.contains("No Recovery Kit"), "{}", edge);
-
-        let key = launcher_catalog::ghost_key(&cube);
-        let mounted = capture::inspect(
-            "blake2b-ghost-details",
-            ghost_details(&cube, ChainId::BitcoinBlake2b, false),
-            (1440, 900),
-            "dark",
-            theme::Theme::dark(),
-        );
-        assert!(mounted.contains("Recovery Kit in Connect"));
-        assert!(!mounted.contains("no Master Seed"));
-        assert!(!mounted.contains("Import with recovery phrase"));
-        assert!(!mounted.contains("Restore to this device"));
-        assert!(mounted.contains("Delete from Connect"));
-        // Back carries the arrival focus in place of a primary action.
-        assert!(mounted.has_focus(launcher_catalog::details_open_id(&key)));
-        assert!(mounted.has_focus(launcher_catalog::remote_delete_id("kept")));
-
-        // A kit without its seed still says so, as on Bitcoin.
-        cube.has_encrypted_seed = false;
-        assert_eq!(ghost_copy(&cube).0, "Recovery Kit has no Master Seed");
     }
 
     #[test]

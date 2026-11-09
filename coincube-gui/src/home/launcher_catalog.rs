@@ -1136,25 +1136,6 @@ pub(super) struct RemoteRestore {
 
 pub(super) fn remote_restore(cube: &RemoteCube) -> RemoteRestore {
     let (password_recoverable, phone_recoverable) = remote_recovery(cube);
-    // No restore route exists for Bitcoin Blake2b yet, whatever Connect holds:
-    // its ghosts can be deleted from Connect, never restored. The status
-    // still names what Connect holds, so a kept backup doesn't read as gone.
-    if restore_unsupported(cube) {
-        let status = match (password_recoverable, phone_recoverable) {
-            (true, _) => "Recovery Kit in Connect \u{b7} Restore isn\u{2019}t available on Bitcoin Blake2b yet",
-            (false, true) => "Phone recovery in Connect \u{b7} Restore isn\u{2019}t available on Bitcoin Blake2b yet",
-            (false, false) if cube.has_recovery_kit => {
-                "Recovery Kit has no Master Seed \u{b7} Restore isn\u{2019}t available on Bitcoin Blake2b yet"
-            }
-            (false, false) => {
-                "No Recovery Kit in Connect \u{b7} Restore isn\u{2019}t available on Bitcoin Blake2b yet"
-            }
-        };
-        return RemoteRestore {
-            status,
-            action: None,
-        };
-    }
     let status = match (password_recoverable, phone_recoverable) {
         (true, true) => "Recovery Kit + Phone recovery available",
         (true, false) => "Recovery Kit available",
@@ -1185,14 +1166,8 @@ pub(super) fn remote_restore(cube: &RemoteCube) -> RemoteRestore {
     RemoteRestore { status, action }
 }
 
-/// This build has no restore or import route for `cube`'s chain (Bitcoin
-/// Blake2b), whatever Connect holds for it.
-pub(super) fn restore_unsupported(cube: &RemoteCube) -> bool {
-    ghost_chain(cube).is_some_and(ChainId::is_blake2b)
-}
-
-/// The ways Connect holds to restore `cube` (password, phone), whether or not
-/// this build can restore its chain. Deleting it from Connect takes these.
+/// The ways Connect holds to restore `cube` (password, phone). Deleting it
+/// from Connect takes these.
 pub(super) fn remote_recovery(cube: &RemoteCube) -> (bool, bool) {
     (
         cube.has_recovery_kit && cube.has_encrypted_seed,
@@ -1472,9 +1447,6 @@ pub(super) fn ghost_status(
         Some(Trouble::Offline) => return "In Connect · Offline",
         Some(Trouble::Unreachable) => return "In Connect · Reconnecting…",
         None => {}
-    }
-    if restore_unsupported(cube) {
-        return "In Connect \u{b7} Can\u{2019}t restore on Blake2b yet";
     }
     match ghost_kind(cube) {
         super::launcher_scene::Ghost::Restorable => "In Connect · Restore",
@@ -3914,7 +3886,7 @@ mod tests {
     }
 
     #[test]
-    fn blake2b_connect_only_cubes_are_listed_counted_and_deleted_not_restored() {
+    fn blake2b_connect_only_cubes_are_listed_counted_restored_and_deleted() {
         let mut home = home_with(&[("a", "Fork Vault")]);
         home.connect_account.bitcoin_blake2b_opt_in = true;
         home.global_blake2b_enabled = true;
@@ -3939,16 +3911,12 @@ mod tests {
         assert_eq!(home.cube_usage(ChainId::BitcoinBlake2b), (Some(1), 1));
         assert_eq!(home.cube_usage(ChainId::Bitcoin).1, 0);
 
-        // Nothing restores it, whatever Connect holds.
+        // It restores as a Bitcoin Cube does.
         let restore = remote_restore(&kept);
-        assert!(restore.action.is_none());
-        assert!(restore.status.starts_with("Recovery Kit in Connect"));
-        assert!(restore
-            .status
-            .ends_with("Restore isn\u{2019}t available on Bitcoin Blake2b yet"));
+        assert!(restore.action.is_some());
         assert!(matches!(
             ghost_kind(&kept),
-            super::super::launcher_scene::Ghost::Unrestorable
+            super::super::launcher_scene::Ghost::Restorable
         ));
         let inspection = capture::inspect(
             "catalog-blake2b-connect-only",
@@ -3958,7 +3926,7 @@ mod tests {
             theme::Theme::dark(),
         );
         assert!(inspection.has_focus(remote_delete_id("kept")));
-        assert!(!inspection.has_focus(restore_id("kept")));
+        assert!(inspection.has_focus(restore_id("kept")));
 
         // Delete from Connect gets past the Blake2b allowlist.
         for pointer in [false, true] {
@@ -3972,6 +3940,18 @@ mod tests {
         ))));
         assert!(home.error.is_none());
         assert!(home.delete_remote_cube_modal.is_some());
+
+        // So do its restore and the Recovery Kit launch.
+        home.delete_remote_cube_modal = None;
+        let (open, _) = remote_restore(&kept).action.expect("restorable");
+        drop(home.update(Message::View(open)));
+        assert!(home.error.is_none());
+        drop(
+            home.update(Message::View(ViewMessage::RestoreFromRecoveryKit(
+                "kept".to_string(),
+            ))),
+        );
+        assert!(home.error.is_none());
     }
 
     #[test]
