@@ -34,7 +34,6 @@ impl Step for ProposalHandoff {
         &'a self,
         _hws: &'a crate::hw::HardwareWallets,
         _progress: (usize, usize),
-        _email: Option<&'a str>,
     ) -> Element<'a, Message> {
         let topology = self.session.topology();
         let active = self.session.active();

@@ -51,7 +51,6 @@ pub fn choose_descriptor_template(
 ) -> Element<'static, Message> {
     layout(
         progress,
-        None,
         "Choose a Vault policy",
         Column::new()
             .align_x(Alignment::Center)
@@ -125,7 +124,6 @@ pub(super) fn template_introduction(
 ) -> Element<'static, Message> {
     layout_with_actions(
         progress,
-        None,
         title,
         Column::new()
             .spacing(20)

@@ -1402,7 +1402,6 @@ impl GUI {
                     tab::State::App(_)
                         | tab::State::Loader(_)
                         | tab::State::Installer(_)
-                        | tab::State::Login(_)
                         | tab::State::PinEntry(_)
                         | tab::State::PasskeyUnlock(_)
                 )
@@ -3417,7 +3416,6 @@ impl GUI {
                                     tab::State::App(_)
                                         | tab::State::Loader(_)
                                         | tab::State::Installer(_)
-                                        | tab::State::Login(_)
                                         | tab::State::PinEntry(_)
                                         | tab::State::PasskeyUnlock(_)
                                 ))
@@ -3610,7 +3608,6 @@ impl GUI {
                                 tab::State::App(_)
                                     | tab::State::Loader(_)
                                     | tab::State::Installer(_)
-                                    | tab::State::Login(_)
                                     | tab::State::PinEntry(_)
                                     | tab::State::PasskeyUnlock(_)
                             )
@@ -5510,7 +5507,6 @@ mod fork_auth_dispatch_tests {
         let (mut installer, _) = installer::Installer::new(
             root.clone(),
             bitcoin::Network::Bitcoin,
-            None,
             installer::UserFlow::CreateWallet,
             false,
             None,
@@ -7279,7 +7275,6 @@ mod lock_cube_dispatch_tests {
         let (installing, install_task) = crate::installer::Installer::try_new_for_chain(
             root.clone(),
             same_settings.network,
-            None,
             crate::installer::UserFlow::CreateWallet,
             true,
             Some(same_settings),
@@ -7570,34 +7565,6 @@ mod single_open_lifecycle_tests {
                     drop(startup);
                     let mut gui = GUI::reviewer_app_home_gui(source, home);
                     let pane_id = gui.focus.unwrap();
-                    let login_settings = app::settings::WalletSettings {
-                        name: "Synthetic remote shell".into(),
-                        alias: None,
-                        descriptor_checksum: "remote-shell".into(),
-                        pinned_at: None,
-                        keys: Vec::new(),
-                        hardware_wallets: Vec::new(),
-                        remote_backend_auth: Some(app::settings::AuthConfig::new(
-                            "test@example.invalid".into(),
-                            "remote-wallet".into(),
-                        )),
-                        start_internal_bitcoind: None,
-                        pending_rescan: None,
-                        keychain_keys_recorded: false,
-                    };
-                    let (login, startup) = crate::services::connect::login::CoincubeLiteLogin::new(
-                        root.clone(),
-                        bitcoin::Network::Bitcoin,
-                        login_settings,
-                        None,
-                        None,
-                    );
-                    drop(startup);
-                    gui.panes
-                        .get_mut(pane_id)
-                        .unwrap()
-                        .tabs
-                        .push(tab::Tab::new(3, tab::State::Login(login)));
                     app::session::open(source_id, zeroize::Zeroizing::new("2468".into()));
                     drop(gui.update(Message::Pane(
                         pane_id,
@@ -7619,10 +7586,6 @@ mod single_open_lifecycle_tests {
                     assert!(pane
                         .tabs
                         .iter()
-                        .all(|tab| !matches!(tab.state, tab::State::Login(_))));
-                    assert!(pane
-                        .tabs
-                        .iter()
                         .any(|tab| matches!(tab.state, tab::State::Installer(_))));
                     assert!(!app::session::is_open());
                     drop(gui);
@@ -7637,7 +7600,7 @@ mod single_open_lifecycle_tests {
     }
 
     #[test]
-    fn accepted_remote_cube_open_retires_old_owner_before_login_screen() {
+    fn legacy_liana_connect_cube_returns_to_the_launcher_with_its_notice() {
         let result = std::thread::Builder::new()
             .name("remote-login-admission".into())
             .stack_size(8 * 1024 * 1024)
@@ -7709,7 +7672,8 @@ mod single_open_lifecycle_tests {
                     tab::State::PinEntry(_)
                 ));
                 // The public unlock callback is synthetic; the real Tab
-                // completion chooses Login from the saved remote wallet type.
+                // completion refuses the retired backend from the saved
+                // wallet type and says where the wallet still lives.
                 drop(gui.update(Message::Pane(
                     pane_id,
                     pane::Message::tab(
@@ -7732,10 +7696,12 @@ mod single_open_lifecycle_tests {
                         },
                     ),
                 )));
-                assert!(matches!(
-                    gui.panes.get(pane_id).unwrap().tabs[0].state,
-                    tab::State::Login(_)
-                ));
+                let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+                    panic!("a legacy Liana Connect Cube must return to the Launcher");
+                };
+                let notice = home.error().expect("the retired backend is explained");
+                assert!(notice.contains("Liana Connect"));
+                assert!(notice.contains("test@example.invalid"));
                 drop(gui);
                 std::fs::remove_dir_all(path).ok();
             })

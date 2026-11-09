@@ -35,11 +35,9 @@ impl Step for ClaimOverview {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         view::layout(
             progress,
-            email,
             "Bitcoin Blake2b copy",
             Column::new()
                 .spacing(20)

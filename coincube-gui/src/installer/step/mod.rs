@@ -2,7 +2,6 @@ use coincube_ui::localized_format;
 pub mod descriptor;
 pub mod import_descriptor;
 
-mod backend;
 mod claim_overview;
 pub use claim_overview::ClaimOverview;
 mod coincube_connect;
@@ -27,24 +26,20 @@ pub use descriptor::{
     BackupDescriptor, ImportDescriptor, RegisterDescriptor,
 };
 
-pub use backend::{ChooseBackend, ImportRemoteWallet, RemoteBackendLogin};
 pub use coincube_connect::CoincubeConnectStep;
 pub use inheritance_restore::InheritanceRestoreStep;
 pub use mnemonic::{BackupMnemonic, RecoverMnemonic};
 pub use owner_keychain_restore::OwnerKeychainRestoreStep;
 pub use recovery_kit_restore::{RecoveryKitRestoreStep, RestoreScope};
 pub use restore_pin_setup::RestorePinSetupStep;
-use tracing::warn;
 pub use wallet_alias::WalletAlias;
-
-use std::collections::HashMap;
 
 use iced::{Subscription, Task};
 
 use coincube_ui::widget::*;
 
 use crate::{
-    app::settings::{ProviderKey, WalletSettings},
+    app::settings::WalletSettings,
     hw::HardwareWallets,
     installer::{
         connect_vault::{self, ConnectVaultError, ConnectVaultOutcome},
@@ -53,7 +48,7 @@ use crate::{
         view,
     },
     node::bitcoind::Bitcoind,
-    services::{self, coincube::CoincubeClient},
+    services::coincube::CoincubeClient,
 };
 
 pub trait Step {
@@ -67,7 +62,6 @@ pub trait Step {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message>;
 
     fn load_context(&mut self, _ctx: &Context) {}
@@ -111,7 +105,6 @@ pub struct Final {
     internal_bitcoind: Option<Bitcoind>,
     warning: Option<String>,
     wallet_settings: Option<WalletSettings>,
-    key_redemptions: HashMap<ProviderKey, Option<Result<(), services::keys::Error>>>,
     // --- Backend `ConnectVault` hand-off (populated in `load_context`) ---
     coincube_client: Option<CoincubeClient>,
     cube_uuid: Option<String>,
@@ -142,7 +135,6 @@ impl Final {
             claim_setup: false,
             warning: None,
             wallet_settings: None,
-            key_redemptions: HashMap::new(),
             coincube_client: None,
             cube_uuid: None,
             cube_name: None,
@@ -193,11 +185,6 @@ impl Step for Final {
     fn load_context(&mut self, ctx: &Context) {
         self.claim_setup = ctx.claim_source.is_some();
         self.internal_bitcoind.clone_from(&ctx.internal_bitcoind);
-        self.key_redemptions = ctx
-            .keys
-            .values()
-            .filter_map(|ks| ks.provider_key.as_ref().map(|pk| (pk.clone(), None)))
-            .collect();
         self.coincube_client.clone_from(&ctx.coincube_client);
         self.cube_uuid.clone_from(&ctx.cube_id);
         self.cube_name.clone_from(&ctx.cube_name);
@@ -222,42 +209,13 @@ impl Step for Final {
     }
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
         match message {
-            Message::RedeemNextKey => {
-                if let Some((pk, _)) = self.key_redemptions.iter().find(|(_, v)| v.is_none()) {
-                    let client = services::keys::Client::new();
-                    let pk = pk.clone();
-                    return Task::perform(
-                        async move { (pk.clone(), client.redeem_key(pk.uuid, pk.token).await) },
-                        |(pk, res)| Message::KeyRedeemed(pk, res.map(|_| ())),
-                    );
-                }
-                return Task::perform(async move {}, |_| Message::AllKeysRedeemed);
-            }
-            Message::KeyRedeemed(pk, res) => {
-                if let Some(v) = self.key_redemptions.get_mut(&pk) {
-                    *v = Some(res);
-                }
-                return Task::perform(async move {}, |_| Message::RedeemNextKey);
-            }
-            Message::AllKeysRedeemed => {
+            Message::InstallFinished => {
                 self.generating = false;
-                // If any errors occurred redeeming tokens, add a warning to the log.
-                for (pk, res) in &self.key_redemptions {
-                    if let Some(res) = res {
-                        if let Err(e) = res {
-                            warn!("Error redeeming key for token '{}': '{}'.", pk.token, e);
-                        }
-                    } else {
-                        // We expect to have all redemption results by now.
-                        warn!("Missing redemption info for token '{}'.", pk.token);
-                    }
-                }
                 // A restore waits on its Done screen for Open Cube.
                 if self.restore_done_screen {
                     self.restored = true;
                     return Task::none();
                 }
-                // Now exit the installer whether or not any redemption errors occurred.
                 return self.exit();
             }
             Message::OpenRestoredCube => {
@@ -276,7 +234,7 @@ impl Step for Final {
                 Ok(Some(wallet_settings)) => {
                     self.wallet_settings = Some(wallet_settings);
                     // Kick off the backend vault-create orchestration
-                    // before token redemption. If it isn't applicable
+                    // before finishing. If it isn't applicable
                     // (no Connect client or no keychain members) the
                     // inner function short-circuits and the Final step
                     // treats the `NotApplicable` error as a no-op.
@@ -303,7 +261,7 @@ impl Step for Final {
                 Ok(None) => {
                     self.generating = false;
                     self.wallet_settings = None;
-                    return Task::perform(async move {}, |_| Message::RedeemNextKey);
+                    return Task::perform(async move {}, |_| Message::InstallFinished);
                 }
             },
             Message::ConnectVaultCreated(result) => match result {
@@ -312,18 +270,18 @@ impl Step for Final {
                     // Clear any previous warning so the success caption
                     // wins over a transient banner from an earlier retry.
                     self.warning = None;
-                    return Task::perform(async move {}, |_| Message::RedeemNextKey);
+                    return Task::perform(async move {}, |_| Message::InstallFinished);
                 }
                 Err(ConnectVaultError::NotApplicable) => {
                     // No Connect client, no cube, or no keychain
                     // members — silently continue with the local-only
                     // install.
-                    return Task::perform(async move {}, |_| Message::RedeemNextKey);
+                    return Task::perform(async move {}, |_| Message::InstallFinished);
                 }
                 Err(ConnectVaultError::KeyAlreadyUsedInVault { key_id }) => {
                     // W9 race condition: the vault shell was rolled
                     // back upstream. Surface the dedicated copy and
-                    // continue with redemption so the local install
+                    // finish so the local install
                     // doesn't stall. The user can re-run the installer
                     // to retry the vault.
                     self.warning = Some(format!(
@@ -333,7 +291,7 @@ impl Step for Final {
                          pick a different key to create the Connect vault.",
                         key_id
                     ));
-                    return Task::perform(async move {}, |_| Message::RedeemNextKey);
+                    return Task::perform(async move {}, |_| Message::InstallFinished);
                 }
                 Err(ConnectVaultError::KeyIsRecoveryRecipient { key_id }) => {
                     // I2: the descriptor was sealed with a recovery key,
@@ -341,7 +299,7 @@ impl Step for Final {
                     // was rolled back upstream. Unlike W9, a plain retry
                     // won't help — the descriptor must be rebuilt without
                     // the recovery key — so the copy says exactly that. The
-                    // local install still stands, so continue with redemption.
+                    // local install still stands, so finish anyway.
                     self.warning = Some(format!(
                         "This key (#{}) is a recovery key and can't be a Vault \
                          signer. Your local wallet is installed; rebuild the \
@@ -349,7 +307,7 @@ impl Step for Final {
                          the Vault Builder to create the Connect vault.",
                         key_id
                     ));
-                    return Task::perform(async move {}, |_| Message::RedeemNextKey);
+                    return Task::perform(async move {}, |_| Message::InstallFinished);
                 }
                 Err(ConnectVaultError::Other(msg)) => {
                     // Transient / unexpected failure. Warn but continue
@@ -360,7 +318,7 @@ impl Step for Final {
                          installed; the Connect vault can be retried later.",
                         msg
                     ));
-                    return Task::perform(async move {}, |_| Message::RedeemNextKey);
+                    return Task::perform(async move {}, |_| Message::InstallFinished);
                 }
             },
             Message::RetryCubeSave => {
@@ -403,7 +361,6 @@ impl Step for Final {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         // Surface the approximate-timelock caveat here — the days
         // value is derived client-side from block-count, which varies
@@ -424,11 +381,10 @@ impl Step for Final {
                 self.warning.as_ref(),
             )
         } else if self.claim_setup {
-            view::claim_setup_install(progress, email, self.generating, self.warning.as_ref())
+            view::claim_setup_install(progress, self.generating, self.warning.as_ref())
         } else {
             view::install(
                 progress,
-                email,
                 self.generating,
                 self.wallet_settings.is_some() && self.warning.is_none(),
                 self.warning.as_ref(),
@@ -447,7 +403,7 @@ impl From<Final> for Box<dyn Step> {
 #[cfg(test)]
 mod chain_registration_tests {
     use super::*;
-    use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+    use crate::{chain::ChainId, dir::CoincubeDirectory};
 
     #[test]
     fn final_registration_preserves_chain_identity() {
@@ -463,7 +419,6 @@ mod chain_registration_tests {
             let mut ctx = Context::new(
                 chain.bitcoin_network(),
                 CoincubeDirectory::new(Default::default()),
-                RemoteBackend::None,
                 None,
                 None,
             );

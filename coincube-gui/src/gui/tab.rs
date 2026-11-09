@@ -8,12 +8,11 @@ extern crate serde_json;
 
 use coincube_core::miniscript::bitcoin;
 use coincube_ui::widget::Element;
-use coincubed::commands::ListCoinsResult;
 
 use crate::{
     app::{
         self, breez_liquid,
-        cache::{Cache, DaemonCache},
+        cache::Cache,
         settings::{update_settings_file, VaultIdentity, WalletSettings},
         wallet::Wallet,
         App,
@@ -22,13 +21,8 @@ use crate::{
     dir::{CoincubeDirectory, NetworkDirectory},
     export::import_backup_at_launch,
     home::{self, Home},
-    hw::HardwareWalletConfig,
     installer::{self, Installer, UserFlow},
     loader::{self, Loader},
-    services::connect::{
-        client::backend::{api, BackendWalletClient},
-        login,
-    },
 };
 
 /// The unlock screen a Cube needs, decided in exactly one place.
@@ -71,7 +65,6 @@ pub enum State {
     Home(Home),
     Installer(Box<Installer>),
     Loader(Loader),
-    Login(login::CoincubeLiteLogin),
     PinEntry(crate::pin_entry::PinEntry),
     /// Unlock screen for a passkey Cube. Its own state rather than a mode of
     /// `PinEntry` because it shares nothing with one: no PIN buffer, no
@@ -433,7 +426,6 @@ pub enum Message {
     Install(installer::Message),
     Load(loader::Message),
     Run(app::Message),
-    Login(login::Message),
     PinEntry(crate::pin_entry::Message),
     PasskeyUnlock(crate::passkey_unlock::Message),
     /// Frame clock only while a selected Launcher details face turns toward
@@ -458,20 +450,6 @@ pub enum Message {
         datadir: CoincubeDirectory,
         network: bitcoin::Network,
         queue_pending: bool,
-    },
-    RemoteBackendBreezLoaded {
-        wallet_settings: WalletSettings,
-        backend_client: BackendWalletClient,
-        wallet: api::Wallet,
-        coins: ListCoinsResult,
-        datadir: CoincubeDirectory,
-        network: bitcoin::Network,
-        config: app::Config,
-        breez_client: Result<Arc<app::breez_liquid::BreezClient>, app::breez_liquid::BreezError>,
-        /// Spark backend carried over from the Login state (loaded during
-        /// PIN entry alongside the Liquid client). `None` if the cube has
-        /// no Spark signer or the bridge failed to spawn.
-        spark_backend: Option<Arc<app::wallets::SparkBackend>>,
     },
     /// A passkey unlock succeeded, but the session it parked its signer in was
     /// closed before the wallets finished loading — a lock, a return to the
@@ -1171,7 +1149,6 @@ impl Tab {
             State::Installer(_) => "Installer",
             State::Loader(_) => "Loading...",
             State::Home(_) => localized_copy("Home"),
-            State::Login(_) => localized_copy("Login"),
             State::PinEntry(_) => localized_copy("Enter PIN"),
             State::PasskeyUnlock(_) => localized_copy("Unlock with passkey"),
             State::App(a) => a.title(),
@@ -1362,7 +1339,7 @@ impl Tab {
                 }
                 Task::none()
             }
-            State::Loader(_) | State::Login(_) => {
+            State::Loader(_) => {
                 if idle_expired {
                     tracing::info!("idle: dropping session secrets held during load / sign-in");
                     crate::app::session::close();
@@ -2162,7 +2139,6 @@ impl Tab {
                     let (install, command) = match Installer::try_new_for_chain(
                         datadir.clone(),
                         network,
-                        None,
                         init,
                         false,
                         None,
@@ -2406,83 +2382,6 @@ impl Tab {
                 home::Message::ConnectSignedInBubble => Task::done(Message::ConnectSignedIn),
                 _ => l.update(msg).map(Message::Launch),
             },
-            (State::Login(l), Message::Login(msg)) => match msg {
-                login::Message::View(login::ViewMessage::BackToHome(network)) => {
-                    let (home, command) = Home::new(l.datadir.clone(), Some(network));
-                    self.state = State::Home(home);
-                    command.map(Message::Launch)
-                }
-                login::Message::Install(remote_backend) => {
-                    // Bitcoin family only and no Cube here, so the gate cannot
-                    // refuse; the arm still reports rather than unwraps.
-                    match Installer::new(
-                        l.datadir.clone(),
-                        l.network,
-                        remote_backend,
-                        installer::UserFlow::CreateWallet,
-                        false,
-                        None,
-                        None, // No breez_client from login screen
-                        None, // No spark_backend from login screen
-                        false,
-                        None, // No coincube_client from login screen
-                    ) {
-                        Ok((install, command)) => {
-                            self.state = State::Installer(Box::new(install));
-                            command.map(Message::Install)
-                        }
-                        Err(error) => {
-                            error!("Installer refused from login: {}", error);
-                            Task::none()
-                        }
-                    }
-                }
-                login::Message::Run(Ok((backend_client, wallet, coins))) => {
-                    let config = app::Config::from_file(
-                        &l.datadir
-                            .network_directory(l.network)
-                            .path()
-                            .join(app::config::DEFAULT_FILE_NAME),
-                    )
-                    .expect("A gui configuration file must be present");
-
-                    // Check if BreezClient is already loaded (from PIN entry)
-                    if let Some(breez) = l.breez_client.clone() {
-                        // Use pre-loaded BreezClient - already has PIN
-                        return Task::done(Message::RemoteBackendBreezLoaded {
-                            wallet_settings: l.settings.clone(),
-                            backend_client,
-                            wallet,
-                            coins,
-                            datadir: l.datadir.clone(),
-                            network: l.network,
-                            config,
-                            breez_client: Ok(breez),
-                            spark_backend: l.spark_backend.clone(),
-                        });
-                    }
-
-                    // ERROR: BreezClient should have been pre-loaded after PIN entry
-                    // With mandatory PINs, this path should never execute
-                    error!("Login state missing pre-loaded BreezClient - architectural bug");
-                    Task::done(Message::RemoteBackendBreezLoaded {
-                        wallet_settings: l.settings.clone(),
-                        backend_client,
-                        wallet,
-                        coins,
-                        datadir: l.datadir.clone(),
-                        network: l.network,
-                        config,
-                        breez_client: Err(breez_liquid::BreezError::SignerError(
-                            "BreezClient missing - should have been pre-loaded after PIN entry. \
-                             Liquid wallet is encrypted and cannot be loaded without PIN."
-                                .to_string(),
-                        )),
-                        spark_backend: l.spark_backend.clone(),
-                    })
-                }
-                _ => l.update(msg).map(Message::Login),
-            },
             (State::Installer(i), Message::Install(msg)) => {
                 #[cfg(feature = "mcp-proposals")]
                 if i.proposal_failure.is_some() && !matches!(msg, installer::Message::BackToApp(..))
@@ -2531,8 +2430,7 @@ impl Tab {
                     // The Vault's identity, both halves. The installer context
                     // is the only place the descriptor is in hand at exit —
                     // `WalletSettings` carries the checksum but not the
-                    // descriptor, and for a remote-backend wallet it is never
-                    // written to disk here at all. Persisting the fingerprint
+                    // descriptor. Persisting the fingerprint
                     // now is what lets the home cube list render a vault id
                     // without parsing a descriptor per row
                     // (`plans/PLAN-vault-identity-unification.md` D1).
@@ -2695,9 +2593,8 @@ impl Tab {
                             }
 
                             // Only the restore path needs to build a
-                            // BreezClient up-front — fresh-install +
-                            // remote-backend flows build it at PIN
-                            // entry / login. On `NetworkNotSupported`
+                            // BreezClient up-front — the fresh-install
+                            // flow builds it at PIN entry. On `NetworkNotSupported`
                             // (testnet/signet) we mirror the PIN-entry
                             // branch (`BreezClientLoadedAfterPin`
                             // handler) and hand back a disconnected
@@ -2956,24 +2853,57 @@ impl Tab {
                         self.state = State::Home(home);
                         return task.map(Message::Launch);
                     }
-                    let remote_backend_auth = settings_opt
-                        .as_ref()
-                        .and_then(|s| s.remote_backend_auth.clone());
-                    if remote_backend_auth.is_some() {
-                        let settings = settings_opt.expect("Remote backend auth requires settings");
-                        let (login, command) = login::CoincubeLiteLogin::new(
-                            i.datadir.clone(),
-                            i.network,
-                            *settings,
-                            // Prefer the just-loaded BreezClient from
-                            // the restore path; fall back to whatever
-                            // the installer was launched with.
-                            restored_breez_client.or_else(|| i.breez_client.clone()),
-                            restored_spark_backend.or_else(|| i.spark_backend.clone()),
-                        );
-                        self.state = State::Login(login);
-                        command.map(Message::Login)
-                    } else if settings_opt.is_none() {
+                    if let Some(settings) = settings_opt {
+                        let cfg = app::Config::from_file(
+                            &i.datadir
+                                .network_directory(i.network)
+                                .path()
+                                .join(app::config::DEFAULT_FILE_NAME),
+                        )
+                        .expect("A gui configuration file must be present");
+
+                        let imported = cube
+                            .bitcoin_import
+                            .as_ref()
+                            .is_some_and(|i| i.active_attachment().is_some());
+                        let (loader, command) = if imported {
+                            Loader::new_imported(
+                                i.datadir.clone(),
+                                cfg,
+                                i.network,
+                                internal_bitcoind,
+                                i.context.backup.clone(),
+                                *settings,
+                                cube.clone(),
+                                restored_breez_client.or_else(|| i.breez_client.clone()),
+                                restored_spark_backend.or_else(|| i.spark_backend.clone()),
+                                i.context.coincube_client.clone(),
+                            )
+                        } else {
+                            Loader::new(
+                                i.datadir.clone(),
+                                cfg,
+                                i.network,
+                                internal_bitcoind,
+                                i.context.backup.clone(),
+                                Some(*settings),
+                                cube.clone(),
+                                // The restored BreezClient (built against
+                                // the user's new PIN) wins over the
+                                // installer-launched one.
+                                restored_breez_client.or_else(|| i.breez_client.clone()),
+                                // Spark backend built against the user's
+                                // new PIN during the restore async block.
+                                // Falling back to the installer's existing
+                                // handle covers the non-restore flows that
+                                // already had Spark wired in before this
+                                // Message arm widened.
+                                restored_spark_backend.or_else(|| i.spark_backend.clone()),
+                            )
+                        };
+                        self.state = State::Loader(loader);
+                        command.map(Message::Load)
+                    } else {
                         if let Some(bitcoind) = internal_bitcoind {
                             tracing::info!("Stopping internal bitcoind as it is not needed for Seed-Only cubes");
                             bitcoind.stop();
@@ -3023,57 +2953,6 @@ impl Tab {
                         };
                         self.state = State::App(app);
                         command.map(Message::Run)
-                    } else {
-                        let cfg = app::Config::from_file(
-                            &i.datadir
-                                .network_directory(i.network)
-                                .path()
-                                .join(app::config::DEFAULT_FILE_NAME),
-                        )
-                        .expect("A gui configuration file must be present");
-
-                        let imported = cube
-                            .bitcoin_import
-                            .as_ref()
-                            .is_some_and(|i| i.active_attachment().is_some());
-                        let (loader, command) = if imported {
-                            Loader::new_imported(
-                                i.datadir.clone(),
-                                cfg,
-                                i.network,
-                                internal_bitcoind,
-                                i.context.backup.clone(),
-                                *settings_opt.expect("attached import has wallet settings"),
-                                cube.clone(),
-                                restored_breez_client.or_else(|| i.breez_client.clone()),
-                                restored_spark_backend.or_else(|| i.spark_backend.clone()),
-                                i.context.coincube_client.clone(),
-                            )
-                        } else {
-                            Loader::new(
-                                i.datadir.clone(),
-                                cfg,
-                                i.network,
-                                internal_bitcoind,
-                                i.context.backup.clone(),
-                                settings_opt.map(|s| *s),
-                                cube.clone(),
-                                // Same preference chain as the Login arm —
-                                // the restored BreezClient (built against
-                                // the user's new PIN) wins over the
-                                // installer-launched one.
-                                restored_breez_client.or_else(|| i.breez_client.clone()),
-                                // Spark backend built against the user's
-                                // new PIN during the restore async block.
-                                // Falling back to the installer's existing
-                                // handle covers the non-restore flows that
-                                // already had Spark wired in before this
-                                // Message arm widened.
-                                restored_spark_backend.or_else(|| i.spark_backend.clone()),
-                            )
-                        };
-                        self.state = State::Loader(loader);
-                        command.map(Message::Load)
                     }
                 } else if let installer::Message::BackToApp(network) = msg {
                     if let Some(owner) = self.copy_owner.take() {
@@ -3230,7 +3109,6 @@ impl Tab {
                     match Installer::try_new_for_chain(
                         loader.datadir_path.clone(),
                         loader.cube_settings.network,
-                        None,
                         UserFlow::CreateWallet,
                         true, // launched from app (loader is part of app flow)
                         Some(loader.cube_settings.clone()), // pass cube settings for returning
@@ -3394,8 +3272,7 @@ impl Tab {
                     cube_settings,
                 } => {
                     // Restore Connect auth cached at `<network>/connect.json`
-                    // by a prior sign-in, mirroring the remote-backend path
-                    // (which threads its live tokens in). Without this, every
+                    // by a prior sign-in. Without this, every
                     // local-node launch discards persisted Connect auth and
                     // `connect_stream_ready_task` never runs, leaving
                     // Connect-dependent features — Sign via Keychain in
@@ -3472,7 +3349,6 @@ impl Tab {
                         match Installer::try_new_for_chain(
                             app.datadir().clone(),
                             app.cube_settings().network,
-                            None,
                             UserFlow::CreateWallet,
                             true,
                             Some(app.cube_settings().clone()),
@@ -3528,7 +3404,6 @@ impl Tab {
                         match Installer::try_new_for_chain(
                             app.datadir().clone(),
                             app.cube_settings().network,
-                            None,
                             UserFlow::CreateWallet,
                             true,                              // launched from app
                             Some(app.cube_settings().clone()), // pass cube settings for returning
@@ -3581,7 +3456,6 @@ impl Tab {
                         match Installer::try_new_for_chain(
                             app.datadir().clone(),
                             app.cube_settings().network,
-                            None,
                             UserFlow::RestoreVaultFromRecoveryKit,
                             true,
                             Some(app.cube_settings().clone()),
@@ -4702,57 +4576,6 @@ impl Tab {
                 self.state = State::DuressActive(screen);
                 Task::none()
             }
-            (
-                _,
-                Message::RemoteBackendBreezLoaded {
-                    wallet_settings,
-                    backend_client,
-                    wallet,
-                    coins,
-                    datadir,
-                    network,
-                    config,
-                    breez_client,
-                    spark_backend,
-                },
-            ) => {
-                // The Vault is independent of Liquid: any Breez load failure
-                // should fall back to a disconnected client so the rest of the
-                // app continues to work. The user will see Liquid features
-                // surface their own errors on demand.
-                let breez = match breez_client {
-                    Ok(breez) => breez,
-                    Err(e) => {
-                        tracing::warn!(
-                            "BreezClient unavailable for remote backend, continuing in disconnected mode: {}",
-                            e
-                        );
-                        Arc::new(app::breez_liquid::BreezClient::disconnected(network))
-                    }
-                };
-                match create_app_with_remote_backend(
-                    wallet_settings,
-                    backend_client,
-                    wallet,
-                    coins,
-                    datadir.clone(),
-                    network,
-                    config,
-                    breez,
-                    spark_backend,
-                ) {
-                    Ok((app, command)) => {
-                        self.state = State::App(app);
-                        command.map(Message::Run)
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to create app with remote backend: {}", e);
-                        let (home, command) = Home::new(datadir, Some(network));
-                        self.state = State::Home(home);
-                        command.map(Message::Launch)
-                    }
-                }
-            }
             // Still in `PasskeyUnlock` — nothing mutates the tab state between
             // the assertion and the wallet load — so the screen is reused in
             // place rather than rebuilt. If the user has since navigated away,
@@ -4809,16 +4632,11 @@ impl Tab {
                     }
                 };
                 if let Some(wallet_settings) = wallet_settings {
-                    if wallet_settings.remote_backend_auth.is_some() {
-                        let (login, command) = login::CoincubeLiteLogin::new(
-                            datadir.clone(),
-                            network,
-                            wallet_settings.clone(),
-                            Some(breez),
-                            spark_backend,
-                        );
-                        self.state = State::Login(login);
-                        command.map(Message::Login)
+                    if let Some(auth) = &wallet_settings.remote_backend_auth {
+                        let (mut home, command) = Home::new(datadir.clone(), Some(network));
+                        home.set_error(auth.retired_backend_notice());
+                        self.state = State::Home(home);
+                        command.map(Message::Launch)
                     } else {
                         let (loader, command) = if cube
                             .bitcoin_import
@@ -4925,7 +4743,6 @@ impl Tab {
                     })
             }
             State::Home(v) => v.subscription(foreground).map(Message::Launch),
-            State::Login(_) => Subscription::none(),
             State::PinEntry(_) => Subscription::none(),
             // Unlike `PinEntry`, this one needs a subscription: the macOS
             // authorization delegate answers on a channel with no waker to
@@ -5028,7 +4845,6 @@ impl Tab {
             }
             State::Home(v) => v.view_with_worldview(worldview).map(Message::Launch),
             State::Loader(v) => v.view().map(Message::Load),
-            State::Login(v) => v.view().map(Message::Login),
             State::PinEntry(v) => {
                 let progress = self
                     .unlock_motion
@@ -5097,8 +4913,8 @@ impl Tab {
     /// `Some(None)` keeps it but has no stage (a loader error page).
     fn opening_stage(&self) -> Option<Option<home::launcher_opening::Stage>> {
         use home::launcher_opening::Stage;
-        // The unlock routes past its screen (to the Loader, or to Login for a
-        // remote backend) exactly when it carries Bitcoin wallet settings: a
+        // The unlock routes past its screen (to the Loader, or back to the
+        // Launcher for a legacy Liana Connect Vault) exactly when it carries Bitcoin wallet settings: a
         // Vault or an imported wallet. Without them there is no daemon to
         // start: the wallets load and the Cube is almost there.
         let unlocked = |on_success: &crate::pin_entry::PinEntrySuccess| {
@@ -5262,7 +5078,6 @@ impl Tab {
             State::Installer(s) => s.stop(),
             State::App(s) if in_background => s.stop_in_background(),
             State::App(s) => s.stop(),
-            State::Login(_) => {}
             State::PinEntry(_) => {}
             State::PasskeyUnlock(_) => {}
             State::DuressActive(_) => {}
@@ -5401,7 +5216,7 @@ pub(crate) fn installer_exit_identity(i: &Installer) -> Option<RestoreCubeIdenti
         .map(|(uuid, name)| RestoreCubeIdentity { uuid, name })
 }
 
-/// Reopen the source through its normal local or remote Vault loader.
+/// Reopen the source through its normal Vault loader.
 /// This preserves the source's wallet identity and parked SDK handles.
 fn reopen_claim_source(
     datadir: &CoincubeDirectory,
@@ -5422,24 +5237,17 @@ fn reopen_claim_source(
     // restore the Vault the Cube actually points at.
     let wallet_settings =
         vault_settings_for_cube(datadir, source.settings.network, &source.settings);
-    // A remote-backed source has no local daemon to start:
-    // its ordinary unlock goes to `CoincubeLiteLogin`, and
-    // handing it to the Loader would try to bring up a
-    // daemon for a Vault that lives on the backend. Cancel
-    // must restore the backend the source actually uses,
-    // not the one most sources use.
-    if let Some(settings) = wallet_settings
-        .clone()
-        .filter(|w| w.remote_backend_auth.is_some())
+    // A legacy Liana Connect source has no local daemon to start, and
+    // handing it to the Loader would try to bring up a daemon for a Vault
+    // that lives on that retired backend: go back to the Launcher instead.
+    if let Some(auth) = wallet_settings
+        .as_ref()
+        .and_then(|w| w.remote_backend_auth.as_ref())
     {
-        let (login, command) = login::CoincubeLiteLogin::new(
-            datadir.clone(),
-            source.settings.network.bitcoin_network(),
-            settings,
-            source.breez_client.clone(),
-            source.spark_backend.clone(),
-        );
-        return Ok((State::Login(login), command.map(Message::Login)));
+        let (mut home, command) =
+            Home::new_for_chain(datadir.clone(), Some(source.settings.network));
+        home.set_error(auth.retired_backend_notice());
+        return Ok((State::Home(home), command.map(Message::Launch)));
     }
     let (loader, command) = Loader::new(
         datadir.clone(),
@@ -5898,265 +5706,6 @@ pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
             .await
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn create_app_with_remote_backend(
-    wallet_settings: WalletSettings,
-    remote_backend: BackendWalletClient,
-    wallet: api::Wallet,
-    coins: ListCoinsResult,
-    coincube_dir: CoincubeDirectory,
-    network: bitcoin::Network,
-    config: app::Config,
-    breez_client: Arc<app::breez_liquid::BreezClient>,
-    spark_backend: Option<Arc<app::wallets::SparkBackend>>,
-) -> Result<(app::App, iced::Task<app::Message>), String> {
-    // If someone modified the wallet_alias on Liana-Connect,
-    // then the new alias is imported and stored in the settings file.
-    if wallet.metadata.wallet_alias != wallet_settings.alias {
-        let network_directory = coincube_dir.network_directory(network);
-        if let Err(e) = tokio::runtime::Handle::current().block_on(async {
-            update_settings_file(&network_directory, |mut settings| {
-                if let Some(w) = settings
-                    .wallets
-                    .iter_mut()
-                    .find(|w| w.wallet_id() == wallet_settings.wallet_id())
-                {
-                    w.alias = wallet.metadata.wallet_alias.clone();
-                    tracing::info!("Wallet alias was changed. Settings updated.");
-                }
-                Some(settings)
-            })
-            .await
-        }) {
-            tracing::error!("Failed to update wallet settings with remote alias: {}", e);
-        }
-    }
-
-    let hws: Vec<HardwareWalletConfig> = wallet
-        .metadata
-        .ledger_hmacs
-        .into_iter()
-        .map(|ledger_hmac| HardwareWalletConfig {
-            kind: async_hwi::DeviceKind::Ledger.to_string(),
-            fingerprint: ledger_hmac.fingerprint,
-            token: ledger_hmac.hmac,
-        })
-        .collect();
-    let aliases: HashMap<bitcoin::bip32::Fingerprint, String> = wallet
-        .metadata
-        .fingerprint_aliases
-        .into_iter()
-        .filter_map(|a| {
-            if a.user_id == remote_backend.user_id() {
-                Some((a.fingerprint, a.alias))
-            } else {
-                None
-            }
-        })
-        .collect();
-    let provider_keys: HashMap<_, _> = wallet
-        .metadata
-        .provider_keys
-        .into_iter()
-        .map(|pk| (pk.fingerprint, pk.into()))
-        .collect();
-
-    // Load cube settings for this wallet
-    let network_dir = coincube_dir.network_directory(network);
-    let wallet_id = wallet_settings.wallet_id();
-
-    let cube_settings = match app::settings::Settings::from_file(&network_dir) {
-        Ok(settings) => {
-            if let Some(found_cube) = settings
-                .cubes
-                .iter()
-                .find(|c| c.vault_wallet_id.as_ref() == Some(&wallet_id))
-            {
-                found_cube.clone()
-            } else {
-                tracing::error!("No cube found for vault wallet in settings file");
-                return Err(
-                    "No cube found for this wallet. Please ensure your settings are properly configured."
-                        .to_string(),
-                );
-            }
-        }
-        Err(_) => {
-            tracing::error!("No settings file found for remote backend");
-            return Err(
-                "No settings file found. Please ensure your wallet is properly set up with a PIN."
-                    .to_string(),
-            );
-        }
-    };
-
-    // The Vault's hot signer is encrypted under the Cube's unlock credential —
-    // the session PIN, or a passkey Cube's seed-derived password. `None` here
-    // means the wallet loads without it and simply cannot sign with that key.
-    let seed_password = crate::app::session::seed_file_password(&cube_settings);
-
-    // Reuse the existing `Arc<RwLock<AccessTokenResponse>>` from the
-    // remote backend so the gRPC interceptor and the REST client share
-    // a single source of truth — token refreshes propagate to both
-    // without manual fan-out.
-    let connect_auth = Some((
-        remote_backend.inner_client().auth.clone(),
-        remote_backend.user_email().to_string(),
-    ));
-
-    App::new(
-        Cache {
-            app_generation: crate::app::cache::AppGeneration::next(),
-            unswept_notice: None,
-            node_history: crate::app::node_history::Status::default(),
-            node_history_switch_requested: false,
-            local_node_transfer_visible: false,
-            background_node_install: Default::default(),
-            connect_transport_key: None,
-            cube_encryption_key: None,
-            cube_switcher_open: false,
-            connect_panel_open: false,
-            cube_lock_confirmation: false,
-            network,
-            fiat_chain: cube_settings.network,
-            btcb2_price_request: None,
-            datadir_path: coincube_dir.clone(),
-            // Recomputed from the P2P panel's Mostro config once panels are built.
-            p2p_test_coordinator: false,
-            // Fail-closed until `/connect/features` loads and the account panel
-            // mirrors the real flags in (see `App::update`'s ConnectAccount arm).
-            marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
-            // Same fail-closed stance for the fork account grant.
-            btcb2_server_enabled: false,
-            // Resolved from disk in `App::new_inner`.
-            btcb2_already_claimed: false,
-            // Liquid sunset gate. Both halves are filled in later: the local
-            // half in `App::new` (from whether the Liquid SDK actually
-            // connected), the server half when `/connect/features` loads.
-            liquid_gate: crate::app::features::LiquidGate::HIDDEN,
-            entangled: std::collections::HashMap::new(),
-            chain_proofs: std::collections::HashMap::new(),
-            split_records: Vec::new(),
-            splitting: std::collections::HashMap::new(),
-            split_unconfirmed: std::collections::HashSet::new(),
-            separated: std::collections::HashMap::new(),
-            // We ignore last poll fields for remote backend.
-            last_poll_at_startup: None,
-            daemon_cache: DaemonCache {
-                coins: coins.coins,
-                rescan_progress: None,
-                sync_progress: 1.0, // Remote backend is always synced
-                blockheight: wallet.tip_height.unwrap_or(0),
-                // We ignore last poll fields for remote backend.
-                last_poll_timestamp: None,
-                history_sync: Default::default(),
-                last_tick: Instant::now(),
-            },
-            fiat_price: None,
-            bitcoin_unit: cube_settings.unit_setting.display_unit,
-            display_mode: crate::app::settings::Settings::from_file(
-                &coincube_dir.network_directory(network),
-            )
-            .ok()
-            .map(|s| s.display_mode)
-            .unwrap_or_default(),
-            node_bitcoind_sync_progress: None,
-            node_bitcoind_sync_heights: None,
-            node_bitcoind_ibd: None,
-            node_bitcoind_subversion: None,
-            node_bitcoind_pruning: None,
-            local_switch_history: None,
-            daemon_switch_in_progress: false,
-            node_bitcoind_last_log: None,
-            node_net_stats: None,
-            connect_authenticated: false,
-            sidebar_connect_signed_in: false,
-            // Remote backend implies an authenticated Connect session from the
-            // start, even before the Connect panel reaches its Dashboard step.
-            has_connect_session: true,
-            restorable_connect_session: false,
-            has_vault: true,
-            has_imported_bitcoin: false,
-            vault_lacks_keychain_key: false,
-            cube_name: cube_settings.name.clone(),
-            wallet_names: Default::default(),
-            cube_connect_owner: cube_settings.connect_owner.clone(),
-            cube_owned_by_other_account: false,
-            current_cube_backed_up: cube_settings.backed_up,
-            spark_notice: None,
-            has_p2p: false, // Set later by App::new based on mnemonic availability
-            theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
-            reduce_motion: false,
-            connect_light_dim: false,
-            balance_privacy: None,
-            btc_usd_price: None,
-            show_direction_badges: true,
-            lightning_address: None,
-            avatar_handle: None,
-            avatar_regenerations_remaining: None,
-            cube_id: cube_settings.id.clone(),
-            current_cube_server_id: None,
-            current_descriptor_fingerprint: None,
-            recovery_kit_last_backed_up_descriptor_fingerprint: cube_settings
-                .recovery_kit_last_backed_up_descriptor_fingerprint
-                .clone(),
-            recovery_kit_last_backed_up_keychain_descriptor_fingerprint: cube_settings
-                .recovery_kit_last_backed_up_keychain_descriptor_fingerprint
-                .clone(),
-            recovery_kit_password_backed_up: cube_settings.recovery_kit_password_backed_up,
-            // grpc_url isn't known yet — `Message::ConnectStreamReady`
-            // backfills both fields once `get_service_config` returns.
-            // Tokens we have right now (shared Arc with the REST client)
-            // so populate them eagerly.
-            connect_grpc_url: None,
-            connect_tokens: Some(remote_backend.inner_client().auth.clone()),
-            connect_stream_status: crate::app::ConnectionStatus::default(),
-            connect_signed_out_by: None,
-            vault_alert: None,
-            vault_via_connect: false,
-            connect_device_id: None,
-            connect_email: Some(remote_backend.user_email().to_string()),
-        },
-        Arc::new(
-            Wallet::new(wallet.descriptor)
-                // Same chain source as the local loader (`CubeSettings::network`):
-                // the signing, merge and finalisation paths key on it, so a
-                // Cube opened through the remote backend must not default to
-                // Bitcoin.
-                .with_chain(cube_settings.network)
-                .with_name(wallet.name)
-                .with_alias(wallet.metadata.wallet_alias)
-                .with_pinned_at(wallet_settings.pinned_at)
-                .with_key_aliases(aliases)
-                .with_provider_keys(provider_keys)
-                .with_border_wallet_fingerprints(wallet_settings.border_wallet_fingerprints())
-                .with_border_wallet_grid_seed(wallet_settings.border_wallet_grid_seed_sources())
-                .with_replay_marks(wallet_settings.replay_marks())
-                .with_keychain_keys(
-                    wallet_settings.keychain_key_ids(),
-                    wallet_settings.keychain_keys_recorded,
-                )
-                .with_hardware_wallets(hws)
-                .load_hotsigners(
-                    &coincube_dir,
-                    cube_settings.network,
-                    &cube_settings.id,
-                    seed_password.as_deref().map(|p| p.as_str()),
-                )
-                .expect("Datadir should be conform"),
-        ),
-        breez_client,
-        spark_backend,
-        config,
-        Arc::new(remote_backend),
-        coincube_dir,
-        None,
-        cube_settings,
-        connect_auth,
-    )
-    .map_err(|error| crate::user_error::report(&error))
 }
 
 /// The client the unlock handler falls back to when the Liquid load fails.
@@ -8213,7 +7762,6 @@ mod fork_completion_tests {
         let (mut installer, _) = Installer::new(
             root.clone(),
             bitcoin::Network::Bitcoin,
-            None,
             installer::UserFlow::CreateWallet,
             false,
             None,
@@ -8415,7 +7963,6 @@ mod mcp_proposal_routing_tests {
         let (mut installer, _) = Installer::try_new_for_chain(
             ctx.coincube_directory.clone(),
             crate::chain::ChainId::Regtest,
-            None,
             UserFlow::CreateWallet,
             true,
             Some(cube),

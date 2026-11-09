@@ -960,8 +960,7 @@ pub fn sync_status(
         // being performed.
         // For external daemon or if we otherwise don't know the node type,
         // treat it the same as bitcoind to be sure we don't mislead the user.
-        if daemon_backend == DaemonBackend::RemoteBackend
-            || daemon_backend == DaemonBackend::EmbeddedCoincubed(Some(NodeType::Electrum))
+        if daemon_backend == DaemonBackend::EmbeddedCoincubed(Some(NodeType::Electrum))
             || daemon_backend == DaemonBackend::EmbeddedCoincubed(Some(NodeType::Esplora))
         {
             return SyncStatus::WalletFullScan { progress: None };
@@ -969,7 +968,6 @@ pub fn sync_status(
     }
     // For an existing wallet with any local node type, if the first poll has
     // not completed, then the wallet has not yet caught up with the tip.
-    // An existing wallet with remote backend remains synced so we can ignore it.
     // If external daemon, we cannot be sure it will return last poll as it
     // depends on the version, so assume it won't unless the last poll at
     // startup is set.

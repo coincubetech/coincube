@@ -195,8 +195,8 @@ pub struct Cache {
     /// Display-only account status shared across tabs. Never authorizes Cube operations.
     pub sidebar_connect_signed_in: bool,
     /// Whether a Connect account session exists for this install — a
-    /// launch-time restore from `connect.json`, or a live remote-backend
-    /// session — *independent of* whether the Connect panel has advanced to
+    /// launch-time restore from `connect.json`, or a live in-app sign-in —
+    /// *independent of* whether the Connect panel has advanced to
     /// its `Dashboard` UI step yet. Distinct from `connect_authenticated`,
     /// which only tracks that panel step and therefore lags a session that
     /// was restored at launch (or never visited). Surfaces that must treat a
@@ -421,7 +421,7 @@ pub struct Cache {
     /// — the Keychain "Sign via Keychain" button stays disabled while
     /// this is `None`.
     pub connect_grpc_url: Option<String>,
-    /// Shared `Arc<RwLock<AccessTokenResponse>>` from the remote backend,
+    /// Shared `Arc<RwLock<AccessTokenResponse>>` for the Connect session,
     /// mirrored into Cache so deep panels (PsbtState et al.) can spin up
     /// a `GrpcSessionClient` on demand without re-plumbing the auth
     /// handle. `None` when no live or persisted Connect session is available.

@@ -10,10 +10,7 @@ use std::io::ErrorKind;
 use std::iter::FromIterator;
 
 use coincube_core::miniscript::bitcoin::{
-    address,
-    bip32::{ChildNumber, Fingerprint},
-    psbt::Psbt,
-    secp256k1, Address, BlockHash, Network, OutPoint, Txid,
+    address, bip32::ChildNumber, psbt::Psbt, secp256k1, Address, BlockHash, Network, OutPoint, Txid,
 };
 use coincubed::bip329::Labels;
 use coincubed::commands::UpdateDerivIndexesResult;
@@ -23,7 +20,7 @@ use coincubed::{
     StartupError,
 };
 
-use crate::{hw::HardwareWalletConfig, node};
+use crate::node;
 
 #[derive(Debug)]
 pub enum DaemonError {
@@ -83,7 +80,6 @@ impl std::fmt::Display for DaemonError {
 pub enum DaemonBackend {
     EmbeddedCoincubed(Option<node::NodeType>),
     ExternalCoincubed,
-    RemoteBackend,
 }
 
 impl DaemonBackend {
@@ -96,10 +92,6 @@ impl DaemonBackend {
             self,
             DaemonBackend::EmbeddedCoincubed(_) | DaemonBackend::ExternalCoincubed
         )
-    }
-
-    pub fn is_remote(&self) -> bool {
-        matches!(self, DaemonBackend::RemoteBackend)
     }
 
     pub fn node_type(&self) -> Option<node::NodeType> {
@@ -213,9 +205,6 @@ pub trait Daemon: Debug {
         labels: &HashMap<LabelItem, Option<String>>,
     ) -> Result<(), DaemonError>;
     async fn get_labels_bip329(&self, offset: u32, limit: u32) -> Result<Labels, DaemonError>;
-    async fn send_wallet_invitation(&self, _email: &str) -> Result<(), DaemonError> {
-        Ok(())
-    }
 
     // List spend transactions, optionally filtered to the specified `txids`.
     // Set `txids` to `None` for no filter (passing an empty slice returns no transactions).
@@ -445,16 +434,6 @@ pub trait Daemon: Debug {
         });
 
         Ok(events)
-    }
-
-    /// Reimplemented by LianaLite backend
-    async fn update_wallet_metadata(
-        &self,
-        _wallet_alias: Option<String>,
-        _fingerprint_aliases: &HashMap<Fingerprint, String>,
-        _hws: &[HardwareWalletConfig],
-    ) -> Result<(), DaemonError> {
-        Ok(())
     }
 }
 
