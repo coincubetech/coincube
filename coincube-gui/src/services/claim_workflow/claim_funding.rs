@@ -1713,6 +1713,83 @@ mod tests {
         assert!(!current(&generation, 7));
     }
 
+    fn reserved_deposits(
+        bitcoin_deposit: u32,
+        btcb2_deposit: u32,
+    ) -> Result<ClaimFundingReservation, Error> {
+        let descriptor = descriptor();
+        let identity = WalletIdentity {
+            bitcoin_cube: "bitcoin-cube".into(),
+            fork_cube: "fork-cube".into(),
+            descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+        };
+        ClaimFundingReservation::new(
+            &descriptor,
+            &identity,
+            &Context {
+                generation: 1,
+                account: "account".into(),
+                provider: "https://connect.example".into(),
+            },
+            FreshDepositAddresses {
+                bitcoin_deposit,
+                btcb2_deposit,
+            },
+        )
+    }
+
+    /// Bitcoin and BTCB2 must not be told to fund the same receive script.
+    /// One shared index collapses both chains onto one address; a hardened
+    /// index is not a receive derivation. Change follows the same rule once
+    /// the reservation is released.
+    #[test]
+    fn paired_deposits_keep_distinct_receive_and_change_indices() {
+        let saved = reserved_deposits(4, 5).unwrap();
+        let [bitcoin, fork] = saved.addresses().unwrap();
+        assert_ne!(
+            bitcoin, fork,
+            "distinct receive indices must not derive one script"
+        );
+        assert!(matches!(reserved_deposits(4, 4), Err(Error::InvalidPlan)));
+        assert!(matches!(
+            reserved_deposits(1 << 31, 0),
+            Err(Error::InvalidPlan)
+        ));
+        assert!(matches!(
+            reserved_deposits(0, 1 << 31),
+            Err(Error::InvalidPlan)
+        ));
+
+        let released = saved.released_copy();
+        assert!(matches!(
+            released.with_change_indices(ClaimChangeIndices {
+                bitcoin: 3,
+                fork: 3,
+            }),
+            Err(Error::InvalidPlan)
+        ));
+        assert!(matches!(
+            released.with_change_indices(ClaimChangeIndices {
+                bitcoin: 1 << 31,
+                fork: 2,
+            }),
+            Err(Error::InvalidPlan)
+        ));
+        let advanced = released
+            .with_change_indices(ClaimChangeIndices {
+                bitcoin: 3,
+                fork: 4,
+            })
+            .unwrap();
+        assert_eq!(
+            advanced.change_indices(),
+            Some(ClaimChangeIndices {
+                bitcoin: 3,
+                fork: 4,
+            })
+        );
+    }
+
     #[test]
     fn deposit_preparation_matches_the_journal_provider_identity() {
         let (sender, generation) = watch::channel(7);
