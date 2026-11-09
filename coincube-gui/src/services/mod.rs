@@ -48,9 +48,10 @@ pub mod unlock;
 /// 2. Compile-time `option_env!("COINCUBE_API_URL")` — values baked in by
 ///    `build.rs` from `.env` at build time. Release builds started from a
 ///    directory that has no `.env` still work via this path.
-/// 3. Hardcoded `https://dev-api.coincube.io` as a debug fallback. Release
-///    builds require the env var at build time via `env!`, so they never
-///    reach step 3.
+/// 3. Hardcoded `https://api.coincube.io` (production) as a debug fallback.
+///    COINCUBE has no dev API server; point COINCUBE_API_URL at a local API
+///    (`http://127.0.0.1:8080`) for backend work. Release builds require the
+///    env var at build time via `env!`, so they never reach step 3.
 ///
 /// Any trailing slashes are trimmed so callers can safely use
 /// `format!("{}/api/v1/...", base)` without producing double-slash paths.
@@ -74,7 +75,7 @@ pub fn coincube_api_base_url() -> String {
 fn default_base_url() -> String {
     #[cfg(debug_assertions)]
     {
-        "https://dev-api.coincube.io".to_string()
+        "https://api.coincube.io".to_string()
     }
     #[cfg(not(debug_assertions))]
     {
