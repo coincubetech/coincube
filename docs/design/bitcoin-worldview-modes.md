@@ -112,10 +112,10 @@ wallet and chain data as input to presentation.
   Recovery Kit. Preserve these files and their current Samurai bindings.
 - Bundle artwork under `coincube-ui/static/images/worldview`. The existing
   sets keep their original screen illustrations, with dedicated send and
-  receive artwork for Bitcoin, Lightning, Note, and Spark. Generic payment
-  contexts continue to use the existing Sent or Received illustration.
-  Full-scene sets use their approved Sent or Received scene across those
-  payment methods. Liquid-native payments and Liquid empty activity use the
+  receive artwork for Bitcoin, Lightning, Note, and Spark. The full-scene
+  sets also have a separate scene for each of those payment directions and
+  methods. Generic payment contexts use the corresponding Sent or Received
+  artwork. Liquid-native payments and Liquid empty activity use the
   existing presentation.
 - Suitcoiner's Broker and Luke's Warden appear in their existing sets'
   payment variants and the shared mascot quote illustration. The startup

@@ -111,26 +111,33 @@ impl PaymentArt {
     }
 }
 
-fn rail_art(mode: WorldviewMode, payment: PaymentArt) -> Option<&'static Handle> {
+fn rail_art(
+    mode: WorldviewMode,
+    artwork: ArtworkStyle,
+    payment: PaymentArt,
+) -> Option<&'static Handle> {
     macro_rules! collection {
-        ($mode:literal) => {
+        ($mode:literal, $style:literal) => {
             match payment {
-                PaymentArt::BitcoinSend => embedded!($mode, "-bitcoin-send"),
-                PaymentArt::BitcoinReceive => embedded!($mode, "-bitcoin-receive"),
-                PaymentArt::LightningSend => embedded!($mode, "-lightning-send"),
-                PaymentArt::LightningReceive => embedded!($mode, "-lightning-receive"),
-                PaymentArt::NoteSend => embedded!($mode, "-note-send"),
-                PaymentArt::NoteReceive => embedded!($mode, "-note-receive"),
-                PaymentArt::SparkSend => embedded!($mode, "-spark-send"),
-                PaymentArt::SparkReceive => embedded!($mode, "-spark-receive"),
+                PaymentArt::BitcoinSend => embedded!($mode, $style, "-bitcoin-send"),
+                PaymentArt::BitcoinReceive => embedded!($mode, $style, "-bitcoin-receive"),
+                PaymentArt::LightningSend => embedded!($mode, $style, "-lightning-send"),
+                PaymentArt::LightningReceive => embedded!($mode, $style, "-lightning-receive"),
+                PaymentArt::NoteSend => embedded!($mode, $style, "-note-send"),
+                PaymentArt::NoteReceive => embedded!($mode, $style, "-note-receive"),
+                PaymentArt::SparkSend => embedded!($mode, $style, "-spark-send"),
+                PaymentArt::SparkReceive => embedded!($mode, $style, "-spark-receive"),
             }
         };
     }
 
-    match mode {
-        WorldviewMode::Samurai => None,
-        WorldviewMode::Suitcoiner => collection!("suitcoiner"),
-        WorldviewMode::Luke => collection!("luke"),
+    match (mode, artwork) {
+        (WorldviewMode::Samurai, ArtworkStyle::Existing) => None,
+        (WorldviewMode::Suitcoiner, ArtworkStyle::Existing) => collection!("suitcoiner", ""),
+        (WorldviewMode::Luke, ArtworkStyle::Existing) => collection!("luke", ""),
+        (WorldviewMode::Samurai, ArtworkStyle::Scene) => collection!("samurai", "-scene"),
+        (WorldviewMode::Suitcoiner, ArtworkStyle::Scene) => collection!("suitcoiner", "-scene"),
+        (WorldviewMode::Luke, ArtworkStyle::Scene) => collection!("luke", "-scene"),
     }
 }
 
@@ -272,16 +279,13 @@ impl Illustration {
         } else {
             theme.artwork()
         };
-        let rail = if artwork == ArtworkStyle::Existing {
-            self.payment
-                .and_then(|payment| rail_art(theme.worldview(), payment))
-        } else {
-            None
-        };
-        rail.map(|handle| (handle, false)).or_else(|| {
-            self.slot
-                .and_then(|slot| selected(theme.worldview(), artwork, slot))
-        })
+        self.payment
+            .and_then(|payment| rail_art(theme.worldview(), artwork, payment))
+            .map(|handle| (handle, artwork == ArtworkStyle::Scene))
+            .or_else(|| {
+                self.slot
+                    .and_then(|slot| selected(theme.worldview(), artwork, slot))
+            })
     }
 
     fn image(&self, handle: &Handle) -> Image {
@@ -467,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn artwork_payment_routes_preserve_scenes_and_distinguish_rails() {
+    fn artwork_payment_routes_distinguish_rails_in_both_styles() {
         use crate::component::quote_display::{
             default_image_for_context, image_handle_for_context,
         };
@@ -490,7 +494,8 @@ mod tests {
                 Length::Fixed(240.0),
                 ContentFit::ScaleDown,
             );
-            art.payment = Some(PaymentArt::from_context(context).unwrap());
+            let rail = PaymentArt::from_context(context).unwrap();
+            art.payment = Some(rail);
             let samurai = Theme::dark().with_worldview(WorldviewMode::Samurai);
             assert!(art
                 .choice(&samurai.with_artwork(ArtworkStyle::Existing))
@@ -518,7 +523,18 @@ mod tests {
                     .with_artwork(ArtworkStyle::Scene);
                 let (handle, full_scene) = art.choice(&theme).unwrap();
                 assert!(full_scene);
-                assert_eq!(handle.id(), scene(mode, slot).unwrap().id());
+                assert_ne!(handle.id(), scene(mode, slot).unwrap().id());
+                let Handle::Rgba { pixels, .. } = handle else {
+                    panic!("{mode:?} {context} scene must decode before drawing");
+                };
+                assert!(art_contents.insert(pixels.as_ref()));
+
+                art.payment = None;
+                assert_eq!(
+                    art.choice(&theme).unwrap().0.id(),
+                    scene(mode, slot).unwrap().id()
+                );
+                art.payment = Some(rail);
             }
         }
         assert!(PaymentArt::from_context("liquid-send").is_none());

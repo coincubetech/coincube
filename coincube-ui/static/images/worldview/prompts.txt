@@ -149,3 +149,17 @@ the Warden's wand or the Broker's fountain-pen nib. Point the tool outward
 for send and hold it close for receive. Keep the silhouette, clothing,
 print medium and palette consistent within each set. The Warden variants
 use the armored portrait as the costume reference.
+
+Network-specific full scenes generated with built-in ImageGen on 2026-11-09.
+Each mode's approved Sent or Received scene is the visual reference for the
+matching direction. Export square full-bleed PNGs at 640 px.
+
+{samurai,suitcoiner,luke}-scene-{bitcoin,lightning,note,spark}-{send,receive}.png
+Show the payment action in the setting, with room around the figure and its
+gesture. Bitcoin uses a single coin. Lightning uses a long branching bolt.
+Note uses a messenger bird with a sealed note. Spark uses a small glint at a
+bamboo wand for Mountain Watch, a fountain pen for Gilded Exchange, or a
+carved wooden wand for The Stone Crossing. Send moves the motif outward.
+Receive brings it into the figure's hands or toward their tool. Avoid loops,
+interlocking rings, lettering and framing. Use a clear silhouette readable
+at the wallet's existing illustration size.
