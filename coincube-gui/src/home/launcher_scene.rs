@@ -1255,12 +1255,10 @@ pub(super) fn details_svg(network: ChainId, light: bool, text: FaceText<'_>) -> 
         svg,
         "<rect x=\"28\" y=\"330.5\" width=\"66.5\" height=\"36\" rx=\"8\" fill=\"#f3821d\"/><text x=\"61.25\" y=\"353\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"500\" fill=\"#201407\">Open</text><text x=\"114.5\" y=\"352\" font-size=\"14\" fill=\"{ink}\">Back</text><rect x=\"114.5\" y=\"358\" width=\"32\" height=\"1\" fill=\"{accent}\"/>"
     );
-    if !network.is_blake2b() {
-        let _ = write!(
-            svg,
-            "<text x=\"170.5\" y=\"352\" font-size=\"14\" fill=\"{ink}\">Delete…</text><rect x=\"170.5\" y=\"358\" width=\"50\" height=\"1\" fill=\"{accent}\"/>"
-        );
-    }
+    let _ = write!(
+        svg,
+        "<text x=\"170.5\" y=\"352\" font-size=\"14\" fill=\"{ink}\">Delete…</text><rect x=\"170.5\" y=\"358\" width=\"50\" height=\"1\" fill=\"{accent}\"/>"
+    );
     let _ = write!(
         svg,
         "<text x=\"28\" y=\"389\" font-size=\"12\" fill=\"{muted}\">Next step · {}</text></svg>",

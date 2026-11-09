@@ -218,6 +218,17 @@ impl Step for OwnerKeychainRestoreStep {
         let Phase::Ready { seed, descriptor } = &self.phase else {
             return false;
         };
+        // A Bitcoin Blake2b Cube and its Bitcoin twin share a seed, so the
+        // seed's own Cube must be on the chain being restored.
+        if seed
+            .as_ref()
+            .is_some_and(|seed| seed.cube.network != ctx.bitcoin_config.chain.api_str())
+        {
+            self.phase = Phase::Error {
+                message: "This phone backup belongs to a Cube on another network.".into(),
+            };
+            return false;
+        }
         // Reuse the shared seam: parse descriptor + derive the seed signer (Full
         // only), all-or-nothing.
         let (vault_blob, imported_blob) = match descriptor.as_ref() {

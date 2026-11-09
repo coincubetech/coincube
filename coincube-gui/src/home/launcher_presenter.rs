@@ -490,7 +490,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
                 .compact()
                 .on_press(ViewMessage::RenameCatalog(row.key.clone())),
             )
-            .push((!row.cube.network.is_blake2b()).then(|| {
+            .push(
                 ActionButton::new(
                     launcher_catalog::delete_id(&row.key),
                     "Delete…",
@@ -498,8 +498,8 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
                     focus,
                 )
                 .compact()
-                .on_press(ViewMessage::DeleteCatalog(row.key.clone()))
-            })),
+                .on_press(ViewMessage::DeleteCatalog(row.key.clone())),
+            ),
     );
     tenshu::card(content).max_width(DETAILS_WIDTH).into()
 }
@@ -748,13 +748,11 @@ fn floor_details<'a>(
             "Back",
             ViewMessage::Catalog(CatalogMessage::ClearSelection),
         ))
-        .push((!row.cube.network.is_blake2b()).then(|| {
-            face_link(
-                launcher_catalog::delete_id(&row.key),
-                "Delete…",
-                ViewMessage::DeleteCatalog(row.key.clone()),
-            )
-        }));
+        .push(face_link(
+            launcher_catalog::delete_id(&row.key),
+            "Delete…",
+            ViewMessage::DeleteCatalog(row.key.clone()),
+        ));
     Container::new(
         Column::new()
             .push(
@@ -857,7 +855,7 @@ fn ghost_copy(cube: &super::RemoteCube) -> (&'static str, tenshu::Tone, &'static
         None => (
             "No Recovery Kit in Connect",
             tenshu::Tone::Warn,
-            "Connect has this Cube's registration but not its keys, so it can't be restored from here. Open it on the device that holds it and add a Recovery Kit, or import it with its recovery phrase.",
+            "Connect has this Cube's registration but not its keys, so it can't be restored from here. If another device still has this Cube, open it there and add a Recovery Kit, or import it with its recovery phrase.",
         ),
     }
 }
