@@ -1,0 +1,192 @@
+[2m2026-04-08T18:53:19.706217Z[0m [32m INFO[0m [2mcoincube_gui::services::coincube::client[0m[2m:[0m Coincube Base URL: https://api.coincube.io, Release = false
+[2m2026-04-08T18:53:19.876848Z[0m [31mERROR[0m [2msctk_adwaita::config[0m[2m:[0m XDG Settings Portal did not return response in time: timeout: 100ms, key: color-scheme
+[2m2026-04-08T18:53:20.978742Z[0m [32m INFO[0m [2mcoincube_gui::app::config[0m[2m:[0m Done writing gui configuration file
+[2m2026-04-08T18:58:31.839917Z[0m [31mERROR[0m [2mcoincube_gui::app::state::connect::account[0m[2m:[0m [CONNECT] Error: Invalid credentials
+
+[2m2026-04-08T18:59:26.964810Z[0m [32m INFO[0m [2mcoincube_gui::app::config[0m[2m:[0m Done writing gui configuration file
+[2m2026-04-08T18:59:36.116837Z[0m [32m INFO[0m [2mcoincube_gui::launcher[0m[2m:[0m Liquid wallet signer created and stored (encrypted with PIN) with fingerprint: 3e3b1eaa
+[2m2026-04-08T18:59:42.821093Z[0m [32m INFO[0m [2mcoincube_gui::services::coincube::client[0m[2m:[0m Coincube Base URL: https://api.coincube.io, Release = false
+[2m2026-04-08T18:59:42.829020Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m P2P panel disabled: no mnemonic available from liquid signer
+[2m2026-04-08T18:59:42.829487Z[0m [31mERROR[0m [2mcoincube_gui::app::state::global_home[0m[2m:[0m USDt balance fetch failed: NetworkNotSupported(Testnet)
+[2m2026-04-08T19:00:35.716641Z[0m [32m INFO[0m [2mcoincube_gui::app::state::connect::cube[0m[2m:[0m [CONNECT-CUBE] Registered cube debcb8f2-3d8f-49eb-a4bf-3af5c567fa35 (server ID: 21)
+[2m2026-04-08T19:00:35.785888Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:00:35.786073Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:00:35.787067Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:00:36.790912Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:00:37.585693Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:00:37.585942Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:00:37.587700Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:00:39.593931Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:00:40.090838Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:00:40.091011Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:00:40.091856Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:00:44.098621Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:00:44.650478Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:00:44.650646Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:00:44.651741Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:00:52.657292Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:00:53.238939Z[0m [31mERROR[0m [2mcoincube_gui::app::state::connect::cube[0m[2m:[0m [CONNECT-CUBE] Error: Failed to generate BOLT12 offer. The Lightning wallet may still be syncing. Please try again in a moment. (Liquid wallet is not supported on testnet network)
+[2m2026-04-08T19:00:53.252022Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:00:53.252170Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:00:53.255413Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:01:09.257853Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:01:09.842530Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:01:09.842788Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:01:09.844105Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:01:24.411279Z[0m [31mERROR[0m [2mcoincube_gui::app::state::global_home[0m[2m:[0m USDt balance fetch failed: NetworkNotSupported(Testnet)
+[2m2026-04-08T19:01:41.847659Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:01:42.407613Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:01:42.407879Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:01:42.409289Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:01:56.429631Z[0m [31mERROR[0m [2mcoincube_gui::app::state::global_home[0m[2m:[0m USDt balance fetch failed: NetworkNotSupported(Testnet)
+[2m2026-04-08T19:02:05.868843Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m Saving cube fiat price setting: PriceSetting { source: Coincube, currency: USD, is_enabled: true }
+[2m2026-04-08T19:02:05.872938Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m GeneralSettingsState: SettingsSaved received
+[2m2026-04-08T19:02:05.873003Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m GeneralSettingsState: Loading settings from "./data/testnet"
+[2m2026-04-08T19:02:05.873085Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m GeneralSettingsState: Loaded settings, searching for cube_id: debcb8f2-3d8f-49eb-a4bf-3af5c567fa35
+[2m2026-04-08T19:02:05.873140Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m GeneralSettingsState: Available cubes: ["debcb8f2-3d8f-49eb-a4bf-3af5c567fa35"]
+[2m2026-04-08T19:02:05.873174Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m GeneralSettingsState: Found cube, reloading unit_setting: BTC
+[2m2026-04-08T19:02:05.873197Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m GeneralSettingsState: new_unit_setting now set to: BTC
+[2m2026-04-08T19:02:42.414563Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:02:43.027000Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:02:43.027193Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:02:43.028255Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:03:35.331333Z[0m [31mERROR[0m [2mcoincube_gui::app::state::global_home[0m[2m:[0m USDt balance fetch failed: NetworkNotSupported(Testnet)
+[2m2026-04-08T19:03:43.035669Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:03:43.751831Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:03:43.752145Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:03:43.753559Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:04:43.758781Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:04:44.633524Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:04:44.633698Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:04:44.635044Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:05:44.636960Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:05:45.404609Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:05:45.404845Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:05:45.406654Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:06:45.408927Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:06:45.981635Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:06:45.981807Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:06:45.982903Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:07:45.990414Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:07:46.657762Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:07:46.658030Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:07:46.659355Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:08:46.660988Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:08:47.433892Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:08:47.434045Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:08:47.434915Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:09:47.439504Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:09:48.403545Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:09:48.403785Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:09:48.405311Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:10:48.411292Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:10:49.391990Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:10:49.392271Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:10:49.394088Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:11:49.396816Z[0m [33m WARN[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] Stream error: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:11:51.133169Z[0m [32m INFO[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:11:51.133452Z[0m [31mERROR[0m [2mcoincube_gui::services::lnurl::stream[0m[2m:[0m [LNURL] Failed to get event source: expecting status code `200`, found: 404 Not Found
+[2m2026-04-08T19:11:51.134798Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m [LNURL] SSE stream connected
+[2m2026-04-08T19:11:57.616558Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m Saving cube fiat price setting: PriceSetting { source: Coincube, currency: USD, is_enabled: true }
+[2m2026-04-08T19:11:57.619684Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m GeneralSettingsState: SettingsSaved received
+[2m2026-04-08T19:11:57.619739Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m GeneralSettingsState: Loading settings from "./data/testnet"
+[2m2026-04-08T19:11:57.619810Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m GeneralSettingsState: Loaded settings, searching for cube_id: debcb8f2-3d8f-49eb-a4bf-3af5c567fa35
+[2m2026-04-08T19:11:57.619851Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m GeneralSettingsState: Available cubes: ["debcb8f2-3d8f-49eb-a4bf-3af5c567fa35"]
+[2m2026-04-08T19:11:57.619879Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m GeneralSettingsState: Found cube, reloading unit_setting: BTC
+[2m2026-04-08T19:11:57.619900Z[0m [32m INFO[0m [2mcoincube_gui::app::state::settings::general[0m[2m:[0m GeneralSettingsState: new_unit_setting now set to: BTC
+[2m2026-04-08T19:12:04.654535Z[0m [32m INFO[0m [2mcoincube_gui::services::coincube::client[0m[2m:[0m Coincube Base URL: https://api.coincube.io, Release = false
+[2m2026-04-08T19:12:07.024400Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m Close requested
+[2m2026-04-08T19:13:04.557421Z[0m [32m INFO[0m [2mcoincube_gui::launcher[0m[2m:[0m Liquid wallet signer created and stored (encrypted with PIN) with fingerprint: 6a97c8c8
+[2m2026-04-08T19:13:16.931136Z[0m [32m INFO[0m [2mrusqlite_migration[0m[2m:[0m Database migrated to version 44
+[2m2026-04-08T19:13:16.975909Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Starting track-new-blocks task
+[2m2026-04-08T19:13:16.975955Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Starting track-swap-updates task
+[2m2026-04-08T19:13:16.976598Z[0m [32m INFO[0m [2mbreez_sdk_liquid::utils[0m[2m:[0m 
+            ↘↘↘
+         ↘↘↘↘↘↘↘↘       
+           ↘↘↘↘↘↘↘↘    
+     ↘↘↘↘↘       ↘↘↘↘   
+                 ↘↘↘      Breez SDK Nodeless - version 0.11.7
+ ↘↘↘↘↘↘↘↘↘  ↘↘↘↘↘↘↘↘↘     Initialization time: 87.219362ms
+                  ↘↘↘↘    Github: https://github.com/breez/breez-sdk-liquid
+   ↘↘↘↘↘↘↘↘↘↘↘↘    ↘↘↘↘   Docs: https://sdk-doc-liquid.breez.technology/
+                  ↘↘↘↘↘ 
+      ↘↘↘↘↘↘↘↘↘↘↘↘↘↘↘   
+        ↘↘↘↘↘↘↘↘↘↘
+            ↘↘↘
+    
+[2m2026-04-08T19:13:16.978706Z[0m [32m INFO[0m [2mcoincube_gui::services::coincube::client[0m[2m:[0m Coincube Base URL: https://api.coincube.io, Release = false
+[2m2026-04-08T19:13:16.982549Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Track new blocks iteration started
+[2m2026-04-08T19:13:19.138003Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Fetched liquid tip in (2155 ms)
+[2m2026-04-08T19:13:20.380386Z[0m [32m INFO[0m [2mbreez_sdk_liquid::swapper::subscription_handler[0m[2m:[0m On stream reconnection, got 0 initial ongoing swaps
+[2m2026-04-08T19:13:20.381619Z[0m [32m INFO[0m [2mbreez_sdk_liquid::swapper::subscription_handler[0m[2m:[0m On stream reconnection, got 0 initial BOLT12 offers
+[2m2026-04-08T19:13:23.636568Z[0m [31mERROR[0m [2mnostr_relay_pool::relay::inner[0m[2m:[0m Connection failed. [3murl[0m[2m=[0mwss://relay.mostro.network [3merror[0m[2m=[0mfailed to lookup address information: No address associated with hostname
+[2m2026-04-08T19:13:26.994935Z[0m [32m INFO[0m [2mcoincube_gui::app::view::p2p::mostro[0m[2m:[0m No local trades found — attempting DM-scan restore
+[2m2026-04-08T19:13:26.995100Z[0m [32m INFO[0m [2mcoincube_gui::app::view::p2p::mostro[0m[2m:[0m Restore: sending RestoreSession request
+[2m2026-04-08T19:13:28.464235Z[0m [32m INFO[0m [2mnostr_relay_pool::relay::inner[0m[2m:[0m Connected to 'wss://relay.mostro.network'
+[2m2026-04-08T19:13:29.658557Z[0m [32m INFO[0m [2mnostr_relay_pool::relay::inner[0m[2m:[0m Completely disconnected from 'wss://relay.mostro.network'
+[2m2026-04-08T19:13:29.661902Z[0m [32m INFO[0m [2mcoincube_gui::app::view::p2p::mostro[0m[2m:[0m Restore: no orders in restore data
+[2m2026-04-08T19:13:29.661920Z[0m [32m INFO[0m [2mcoincube_gui::app::view::p2p::mostro[0m[2m:[0m Restore: no trades found on relay
+[2m2026-04-08T19:13:37.900164Z[0m [32m INFO[0m [2mnostr_relay_pool::relay::inner[0m[2m:[0m Connected to 'wss://relay.mostro.network'
+[2m2026-04-08T19:14:07.732183Z[0m [32m INFO[0m [2mbreez_sdk_liquid::wallet[0m[2m:[0m lwk wallet full_scan duration: (48581 ms)
+[2m2026-04-08T19:14:07.733704Z[0m [32m INFO[0m [2mbreez_sdk_liquid::event[0m[2m:[0m Pausing event notifications
+[2m2026-04-08T19:14:07.736049Z[0m [32m INFO[0m [2mbreez_sdk_liquid::chain::liquid::esplora[0m[2m:[0m Fetching scripts history for 0 scripts
+[2m2026-04-08T19:14:07.736138Z[0m [32m INFO[0m [2mbreez_sdk_liquid::recover::recoverer[0m[2m:[0m Recoverer::fetch_lbtc_history_map: executed liquid get_scripts_history for 0 scripts in 0 milliseconds
+[2m2026-04-08T19:14:07.746113Z[0m [32m INFO[0m [2mbreez_sdk_liquid::event[0m[2m:[0m Resuming event notifications
+[2m2026-04-08T19:14:07.751790Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Synchronized with mempool and onchain data (48601 ms)
+[2m2026-04-08T19:14:07.754899Z[0m [32m INFO[0m [2mbreez_sdk_liquid::chain_swap[0m[2m:[0m Rescanning 0 incoming Chain Swap(s) server lockup txs at height 3833535
+[2m2026-04-08T19:14:07.756127Z[0m [32m INFO[0m [2mbreez_sdk_liquid::receive_swap[0m[2m:[0m Rescanning 0 Receive Swap(s) lockup txs at height 3833535
+[2m2026-04-08T19:14:07.757992Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m App received Breez Event: Synced
+[2m2026-04-08T19:15:07.758518Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Track new blocks iteration started
+[2m2026-04-08T19:15:08.820117Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Fetched liquid tip in (1061 ms)
+[2m2026-04-08T19:15:09.022435Z[0m [32m INFO[0m [2mbreez_sdk_liquid::wallet[0m[2m:[0m lwk wallet full_scan duration: (161 ms)
+[2m2026-04-08T19:15:09.022485Z[0m [31mERROR[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Failed to scan wallet: Generic { err: "Reqwest(reqwest::Error { kind: Request, source: hyper_util::client::legacy::Error(SendRequest, hyper::Error(Io, Os { code: 104, kind: ConnectionReset, message: \"Connection reset by peer\" })) })" }
+[2m2026-04-08T19:15:09.022514Z[0m [31mERROR[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Failed to sync while tracking new blocks: Error: Generic error: Reqwest(reqwest::Error { kind: Request, source: hyper_util::client::legacy::Error(SendRequest, hyper::Error(Io, Os { code: 104, kind: ConnectionReset, message: "Connection reset by peer" })) })
+[2m2026-04-08T19:15:09.023083Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m App received Breez Event: SyncFailed { error: "Error: Generic error: Reqwest(reqwest::Error { kind: Request, source: hyper_util::client::legacy::Error(SendRequest, hyper::Error(Io, Os { code: 104, kind: ConnectionReset, message: \"Connection reset by peer\" })) })" }
+[2m2026-04-08T19:16:09.024463Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Track new blocks iteration started
+[2m2026-04-08T19:16:09.169597Z[0m [31mERROR[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Failed to fetch liquid tip: error sending request
+[2m2026-04-08T19:17:09.174973Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Track new blocks iteration started
+[2m2026-04-08T19:17:10.355405Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Fetched liquid tip in (1180 ms)
+[2m2026-04-08T19:17:40.560593Z[0m [32m INFO[0m [2mbreez_sdk_liquid::wallet[0m[2m:[0m lwk wallet full_scan duration: (30193 ms)
+[2m2026-04-08T19:17:40.564977Z[0m [32m INFO[0m [2mbreez_sdk_liquid::chain::liquid::esplora[0m[2m:[0m Fetching scripts history for 0 scripts
+[2m2026-04-08T19:17:40.565106Z[0m [32m INFO[0m [2mbreez_sdk_liquid::recover::recoverer[0m[2m:[0m Recoverer::fetch_lbtc_history_map: executed liquid get_scripts_history for 0 scripts in 0 milliseconds
+[2m2026-04-08T19:17:40.576720Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Synchronized with mempool and onchain data (30209 ms)
+[2m2026-04-08T19:17:40.578489Z[0m [32m INFO[0m [2mbreez_sdk_liquid::chain_swap[0m[2m:[0m Rescanning 0 incoming Chain Swap(s) server lockup txs at height 3833538
+[2m2026-04-08T19:17:40.579215Z[0m [32m INFO[0m [2mbreez_sdk_liquid::receive_swap[0m[2m:[0m Rescanning 0 Receive Swap(s) lockup txs at height 3833538
+[2m2026-04-08T19:17:40.580482Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m App received Breez Event: Synced
+[2m2026-04-08T19:18:40.581648Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Track new blocks iteration started
+[2m2026-04-08T19:18:42.114717Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Fetched liquid tip in (1532 ms)
+[2m2026-04-08T19:18:42.270675Z[0m [32m INFO[0m [2mbreez_sdk_liquid::wallet[0m[2m:[0m lwk wallet full_scan duration: (144 ms)
+[2m2026-04-08T19:18:42.270762Z[0m [31mERROR[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Failed to scan wallet: Generic { err: "Reqwest(reqwest::Error { kind: Request, source: hyper_util::client::legacy::Error(SendRequest, hyper::Error(Io, Os { code: 104, kind: ConnectionReset, message: \"Connection reset by peer\" })) })" }
+[2m2026-04-08T19:18:42.270824Z[0m [31mERROR[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Failed to sync while tracking new blocks: Error: Generic error: Reqwest(reqwest::Error { kind: Request, source: hyper_util::client::legacy::Error(SendRequest, hyper::Error(Io, Os { code: 104, kind: ConnectionReset, message: "Connection reset by peer" })) })
+[2m2026-04-08T19:18:42.272851Z[0m [32m INFO[0m [2mbreez_sdk_liquid::chain_swap[0m[2m:[0m Rescanning 0 incoming Chain Swap(s) server lockup txs at height 3833541
+[2m2026-04-08T19:18:42.273877Z[0m [32m INFO[0m [2mbreez_sdk_liquid::receive_swap[0m[2m:[0m Rescanning 0 Receive Swap(s) lockup txs at height 3833541
+[2m2026-04-08T19:18:42.275724Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m App received Breez Event: SyncFailed { error: "Error: Generic error: Reqwest(reqwest::Error { kind: Request, source: hyper_util::client::legacy::Error(SendRequest, hyper::Error(Io, Os { code: 104, kind: ConnectionReset, message: \"Connection reset by peer\" })) })" }
+[2m2026-04-08T19:19:42.276670Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Track new blocks iteration started
+[2m2026-04-08T19:19:42.884132Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Fetched liquid tip in (607 ms)
+[2m2026-04-08T19:20:13.578498Z[0m [32m INFO[0m [2mbreez_sdk_liquid::wallet[0m[2m:[0m lwk wallet full_scan duration: (30682 ms)
+[2m2026-04-08T19:20:13.581929Z[0m [32m INFO[0m [2mbreez_sdk_liquid::chain::liquid::esplora[0m[2m:[0m Fetching scripts history for 0 scripts
+[2m2026-04-08T19:20:13.582013Z[0m [32m INFO[0m [2mbreez_sdk_liquid::recover::recoverer[0m[2m:[0m Recoverer::fetch_lbtc_history_map: executed liquid get_scripts_history for 0 scripts in 0 milliseconds
+[2m2026-04-08T19:20:13.591576Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Synchronized with mempool and onchain data (30695 ms)
+[2m2026-04-08T19:20:13.592480Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m App received Breez Event: Synced
+[2m2026-04-08T19:21:13.593115Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Track new blocks iteration started
+[2m2026-04-08T19:21:14.448382Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Fetched liquid tip in (854 ms)
+[2m2026-04-08T19:21:14.609844Z[0m [32m INFO[0m [2mbreez_sdk_liquid::wallet[0m[2m:[0m lwk wallet full_scan duration: (150 ms)
+[2m2026-04-08T19:21:14.609987Z[0m [31mERROR[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Failed to scan wallet: Generic { err: "Reqwest(reqwest::Error { kind: Request, source: hyper_util::client::legacy::Error(SendRequest, hyper::Error(Io, Os { code: 104, kind: ConnectionReset, message: \"Connection reset by peer\" })) })" }
+[2m2026-04-08T19:21:14.610086Z[0m [31mERROR[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Failed to sync while tracking new blocks: Error: Generic error: Reqwest(reqwest::Error { kind: Request, source: hyper_util::client::legacy::Error(SendRequest, hyper::Error(Io, Os { code: 104, kind: ConnectionReset, message: "Connection reset by peer" })) })
+[2m2026-04-08T19:21:14.613604Z[0m [32m INFO[0m [2mbreez_sdk_liquid::chain_swap[0m[2m:[0m Rescanning 0 incoming Chain Swap(s) server lockup txs at height 3833543
+[2m2026-04-08T19:21:14.615532Z[0m [32m INFO[0m [2mbreez_sdk_liquid::receive_swap[0m[2m:[0m Rescanning 0 Receive Swap(s) lockup txs at height 3833543
+[2m2026-04-08T19:21:14.618563Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m App received Breez Event: SyncFailed { error: "Error: Generic error: Reqwest(reqwest::Error { kind: Request, source: hyper_util::client::legacy::Error(SendRequest, hyper::Error(Io, Os { code: 104, kind: ConnectionReset, message: \"Connection reset by peer\" })) })" }
+[2m2026-04-08T19:22:14.618804Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Track new blocks iteration started
+[2m2026-04-08T19:22:14.765989Z[0m [31mERROR[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Failed to fetch liquid tip: error sending request
+[2m2026-04-08T19:23:14.772271Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Track new blocks iteration started
+[2m2026-04-08T19:23:16.103266Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Fetched liquid tip in (1330 ms)
+[2m2026-04-08T19:23:44.981692Z[0m [32m INFO[0m [2mbreez_sdk_liquid::wallet[0m[2m:[0m lwk wallet full_scan duration: (28869 ms)
+[2m2026-04-08T19:23:44.985153Z[0m [32m INFO[0m [2mbreez_sdk_liquid::chain::liquid::esplora[0m[2m:[0m Fetching scripts history for 0 scripts
+[2m2026-04-08T19:23:44.985268Z[0m [32m INFO[0m [2mbreez_sdk_liquid::recover::recoverer[0m[2m:[0m Recoverer::fetch_lbtc_history_map: executed liquid get_scripts_history for 0 scripts in 0 milliseconds
+[2m2026-04-08T19:23:44.996857Z[0m [32m INFO[0m [2mbreez_sdk_liquid::sdk[0m[2m:[0m Synchronized with mempool and onchain data (28884 ms)
+[2m2026-04-08T19:23:44.999198Z[0m [32m INFO[0m [2mbreez_sdk_liquid::chain_swap[0m[2m:[0m Rescanning 0 incoming Chain Swap(s) server lockup txs at height 3833546
+[2m2026-04-08T19:23:45.000152Z[0m [32m INFO[0m [2mbreez_sdk_liquid::receive_swap[0m[2m:[0m Rescanning 0 Receive Swap(s) lockup txs at height 3833546
+[2m2026-04-08T19:23:45.001895Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m App received Breez Event: Synced
+[2m2026-04-08T19:23:57.706463Z[0m [32m INFO[0m [2mcoincube_gui::gui[0m[2m:[0m Signal received, exiting
+[2m2026-04-08T19:23:57.715534Z[0m [32m INFO[0m [2mcoincube_gui::app[0m[2m:[0m Close requested
+[2m2026-04-08T19:23:57.928303Z[0m [32m INFO[0m [2mnostr_relay_pool::relay::inner[0m[2m:[0m Completely disconnected from 'wss://relay.mostro.network'
