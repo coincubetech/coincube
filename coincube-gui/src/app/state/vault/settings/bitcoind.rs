@@ -1620,7 +1620,7 @@ impl State for BitcoindSettingsState {
                     advanced_disclosure = true;
                     setting_panels.push(crate::app::view::settings::page::disclosure(
                         "tenshu.settings.node.advanced",
-                        "Advanced node settings",
+                        coincube_ui::locale::copy("Advanced node settings"),
                         None,
                         self.node_advanced,
                         map_node_msg(view::NodeSettingsMessage::NodeAdvancedToggled),

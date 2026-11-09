@@ -452,7 +452,11 @@ fn recovery_overview<'a>(
 
     let mut col = Column::new().width(Length::Fill);
     if let Some(notice) = cache.unswept_recovery_notice() {
-        col = col.push(page::note(Tone::Muted, page::muted(notice), None));
+        col = col.push(page::note(
+            Tone::Muted,
+            page::muted(localized_copy(notice)),
+            None,
+        ));
     }
     col = col.push(page::group(
         localized_copy("Backup methods"),
@@ -495,7 +499,7 @@ fn recovery_overview<'a>(
     }
     col = col.push(page::group(
         localized_copy("Vault recovery path"),
-        Some("Spending, not backup. A backup never unlocks it.".into()),
+        Some(localized_copy("Spending, not backup. A backup never unlocks it.").into()),
         path,
     ));
 
@@ -1213,9 +1217,9 @@ fn method_gap_sentence(m: &MethodBackup, has_vault: bool, label: &str) -> Option
     };
     Some(localized_format!(
         "Your {} backup is missing the {}.",
-        "Su respaldo de {} está perdiendo el {}.",
-        label,
-        missing_half
+        "A tu copia con {} le falta: {}.",
+        localized_copy(label),
+        localized_copy(missing_half)
     ))
 }
 
@@ -1288,7 +1292,7 @@ fn recovery_kit_card_state(
 
     if pw_complete && kc_complete {
         // Every enabled method complete → backed up.
-        let title = localized_copy("Recovery Kit backed up");
+        let title = "Recovery Kit backed up";
         let subtitle = localized_format!(
             "Last updated {}.",
             "Última actualización de {}.",
@@ -1391,13 +1395,13 @@ fn recovery_kit_card<'a>(
         (None, primary_label, primary_mode)
     } else if stale && status.is_some() {
         (
-            Some("Showing the last known Recovery Kit state. Reconnect and refresh before changing it.".to_string()),
+            Some(localized_copy("Showing the last known Recovery Kit state. Reconnect and refresh before changing it.").to_string()),
             primary_label,
             primary_mode,
         )
     } else if imported_state_unknown {
         (
-            Some("Connect and refresh this Bitcoin wallet before checking or updating its Recovery Kit.".to_string()),
+            Some(localized_copy("Connect and refresh this Bitcoin wallet before checking or updating its Recovery Kit.").to_string()),
             primary_label,
             primary_mode,
         )
@@ -1413,7 +1417,7 @@ fn recovery_kit_card<'a>(
         (Some(subtitle), primary_label, primary_mode)
     };
 
-    let mut row = row.accessory(page::status(kind, word));
+    let mut row = row.accessory(page::status(kind, localized_copy(word)));
     if let Some(detail) = detail {
         row = row.line(page::muted(detail));
     }
@@ -1430,7 +1434,11 @@ fn recovery_kit_card<'a>(
         row = row.line(page::muted(localized_format!(
             "Protected by: {}",
             "Protegido por: {}",
-            methods.join(" · ")
+            methods
+                .iter()
+                .map(|method| localized_copy(method))
+                .collect::<Vec<_>>()
+                .join(" · ")
         )));
     }
     // What's actually *in* the backup, not only how it is protected.
@@ -1440,22 +1448,31 @@ fn recovery_kit_card<'a>(
             row = row.line(page::muted(localized_format!(
                 "Includes: {}",
                 "Incluye: {}",
-                halves.join(" · ")
+                halves
+                    .iter()
+                    .map(|half| localized_copy(half))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
             )));
         }
         BackupContents::PerMethod(per_method) => {
             for (method, halves) in per_method {
-                row = row.line(page::muted(format!(
+                row = row.line(page::muted(localized_format!(
                     "{} holds: {}",
-                    method,
-                    halves.join(" · ")
+                    "{} contiene: {}",
+                    localized_copy(method),
+                    halves
+                        .iter()
+                        .map(|half| localized_copy(half))
+                        .collect::<Vec<_>>()
+                        .join(" · ")
                 )));
             }
         }
     }
     if drift.any() {
         row = row.line(
-            text(drift_warning_line(&drift))
+            text(localized_copy(drift_warning_line(&drift)))
                 .size(12)
                 .style(coincube_ui::theme::text::warning),
         );
@@ -1477,9 +1494,9 @@ fn recovery_kit_card<'a>(
             SettingsMessage::RecoveryKit(RecoveryKitMessage::Start(primary_mode)).into(),
         );
         row = row.control(if drift.any() || word == "Incomplete" {
-            page::primary(KIT_PRIMARY_ID, label, press)
+            page::primary(KIT_PRIMARY_ID, localized_copy(label), press)
         } else {
-            page::button(KIT_PRIMARY_ID, label, press)
+            page::button(KIT_PRIMARY_ID, localized_copy(label), press)
         });
     }
     if has_kit && !stale && !loading {
@@ -2566,6 +2583,19 @@ mod tests {
         assert_eq!(s.primary_label, "Update");
         assert!(s.subtitle.contains("Last updated"));
         assert!(s.subtitle.contains("8 May 2026"));
+    }
+
+    #[test]
+    fn backed_up_state_survives_spanish() {
+        // The card reads its status word from `title`, so the title must stay
+        // English; translating it once made a backed-up kit read "Incomplete".
+        let st = status(true, true, Some("2026-05-08T14:36:50Z"), None);
+        let s = coincube_ui::locale::render_in(coincube_ui::locale::Language::Spanish, || {
+            mnemonic_vault_state(&st)
+        });
+        assert_eq!(s.title, "Recovery Kit backed up");
+        assert_eq!(s.primary_label, "Update");
+        assert!(s.subtitle.starts_with("Última actualización"));
     }
 
     #[test]

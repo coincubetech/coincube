@@ -45,7 +45,7 @@ pub fn live_updates_status(status: ConnectionStatus) -> (page::Status, &'static 
         ConnectionStatus::Reconnecting | ConnectionStatus::Renewing => page::Status::Warn,
         ConnectionStatus::Offline | ConnectionStatus::RenewFailed => page::Status::Off,
     };
-    (kind, status.word())
+    (kind, localized_copy(status.word()))
 }
 
 pub fn connections_content<'a>(cache: &'a Cache, support_open: bool) -> Element<'a, Message> {
