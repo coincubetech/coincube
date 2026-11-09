@@ -1,7 +1,4 @@
-use iced::{
-    widget::{tooltip, Container},
-    Alignment, Length,
-};
+use iced::{Alignment, Length};
 
 use coincube_ui::{
     color,
@@ -14,7 +11,7 @@ use coincube_ui::{
 };
 
 use crate::installer::{
-    descriptor::{Path, ENABLE_SAFETY_NET_KEYS},
+    descriptor::Path,
     message::{self, Message},
     view::{
         editor::{
@@ -25,8 +22,6 @@ use crate::installer::{
         layout_with_actions,
     },
 };
-
-const SAFETY_NET_DESCRIPTION: &str = "This adds a final recovery option containing keys from professional key agents.\n\nUse this option if you have been provided one or more Safety Net tokens.";
 
 pub fn custom_template_description(
     progress: (usize, usize),
@@ -198,21 +193,6 @@ pub fn custom_template<'a>(
                             .on_press(Message::DefineDescriptor(
                                 message::DefineDescriptor::AddRecoveryPath,
                             )),
-                    )
-                    .push(
-                        (ENABLE_SAFETY_NET_KEYS && safety_net_path.is_none()).then_some(
-                            tooltip::Tooltip::new(
-                                button::secondary(Some(icon::plus_icon()), "Add Safety Net")
-                                    .width(Length::Fixed(210.0))
-                                    .on_press(Message::DefineDescriptor(
-                                        message::DefineDescriptor::AddSafetyNetPath,
-                                    )),
-                                Container::new(text(SAFETY_NET_DESCRIPTION))
-                                    .style(theme::card::simple)
-                                    .padding(10),
-                                tooltip::Position::Bottom,
-                            ),
-                        ),
                     )
                     .spacing(10),
             )

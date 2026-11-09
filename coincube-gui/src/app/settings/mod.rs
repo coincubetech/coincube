@@ -24,7 +24,6 @@ use crate::{
     chain::{ChainId, ChainIdExt},
     dir::NetworkDirectory,
     hw::HardwareWalletConfig,
-    services,
     utils::serde::ok_or_none,
 };
 
@@ -1618,21 +1617,17 @@ impl std::fmt::Display for WalletId {
     }
 }
 
+/// A key provider recorded by Vaults built with the retired Liana provider
+/// token service. Kept so those settings files still load and their keys keep
+/// their labels; nothing creates new ones.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct Provider {
     pub uuid: String,
     pub name: String,
 }
 
-impl From<services::keys::api::Provider> for Provider {
-    fn from(provider: services::keys::api::Provider) -> Self {
-        Self {
-            uuid: provider.uuid,
-            name: provider.name,
-        }
-    }
-}
-
+/// A provider (Safety Net / Cosigner) key from the retired Liana provider
+/// token service. Kept for existing Vaults only; see [`Provider`].
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
 pub struct ProviderKey {
     pub uuid: String,

@@ -14,7 +14,7 @@ use super::{
 };
 use crate::{
     app::{
-        settings::{self, CubeSettings, ProviderKey},
+        settings::{self, CubeSettings},
         view::Close,
     },
     backup::Backup,
@@ -25,7 +25,6 @@ use crate::{
         bitcoind::{Bitcoind, ConfigField, RpcAuthType},
         electrum, esplora, NodeType,
     },
-    services,
 };
 
 /// Result handed to `Message::CubeSaved` after post-install
@@ -76,9 +75,7 @@ pub enum Message {
     MnemonicWord(usize, String),
     ConfirmFreshSeedBackup(bool),
     ImportMnemonic(bool),
-    RedeemNextKey,
-    KeyRedeemed(ProviderKey, Result<(), services::keys::Error>),
-    AllKeysRedeemed,
+    InstallFinished,
     BackupDescriptor,
     ExportEncryptedDescriptor(Result<Box<CoincubeDescriptor>, encrypted_backup::Error>),
     ImportExport(ImportExportMessage),
@@ -481,7 +478,6 @@ pub enum DefineDescriptor {
     KeysEdit(PathKind, Vec<(usize, usize)>),
     Path(usize, DefinePath),
     AddRecoveryPath,
-    AddSafetyNetPath,
     ThresholdSequenceModal(ThresholdSequenceModal),
     Reset,
     AliasEdited(Fingerprint, String /* alias*/),
