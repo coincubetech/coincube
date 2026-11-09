@@ -163,3 +163,16 @@ carved wooden wand for The Stone Crossing. Send moves the motif outward.
 Receive brings it into the figure's hands or toward their tool. Avoid loops,
 interlocking rings, lettering and framing. Use a clear silhouette readable
 at the wallet's existing illustration size.
+
+Full-scene mascot portraits generated with built-in ImageGen. Use each set's
+Spark Receive scene as the character and printmaking reference. Create an
+opaque square portrait with a quiet background and a strong silhouette at
+160 points. Use a new pose and omit payment objects, magic effects and text.
+Export at 480 px.
+
+samurai-scene-mascot.png — The unhelmeted samurai sits on a pine-covered
+overlook, with his sheathed sword and a distant castle in ink-wash mist.
+suitcoiner-scene-mascot.png — The Broker reads a ledger at the exchange,
+with a stepped skyline and a gold and navy engraved Art Deco interior.
+luke-scene-mascot.png — The armored Warden holds a closed ledger at the gate,
+with the bridge and ravine in a charcoal and oxblood woodcut.

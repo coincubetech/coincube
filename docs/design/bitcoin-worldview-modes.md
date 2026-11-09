@@ -117,11 +117,10 @@ wallet and chain data as input to presentation.
   methods. Generic payment contexts use the corresponding Sent or Received
   artwork. Liquid-native payments and Liquid empty activity use the
   existing presentation.
-- Suitcoiner's Broker and Luke's Warden appear in their existing sets'
-  payment variants and the shared mascot quote illustration. The startup
-  error screen uses that illustration with either artwork option. Kage
-  remains Samurai's mascot.
-  Quote choice stays stable during a mode switch.
+- Mascot quote illustrations follow the selected artwork set, including on
+  the startup error screen. Kage, the Broker, and the armored Warden are
+  available in their existing artwork sets. Each full-scene set has its own
+  portrait in the scene's style. Quote choice stays stable during a mode switch.
 - Use restrained decorative accents in both color schemes. Preserve established
   warning, error, success, focus and chain-identification semantics. Keep asset
   symbols, user avatars, the interactive Launcher Cube and the app mark outside

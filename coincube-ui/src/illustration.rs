@@ -22,12 +22,6 @@ pub enum Slot {
     Mascot,
 }
 
-impl Slot {
-    fn supports_scene(self) -> bool {
-        !matches!(self, Self::Mascot)
-    }
-}
-
 macro_rules! embedded {
     ($($part:literal),+) => {{
         static HANDLE: LazyLock<Option<Handle>> = LazyLock::new(|| {
@@ -152,7 +146,7 @@ fn scene(mode: WorldviewMode, slot: Slot) -> Option<&'static Handle> {
                 Slot::KitProtection => embedded!($mode, "-scene-protected"),
                 Slot::KitRemoval => embedded!($mode, "-scene-withdrawn"),
                 Slot::Pin => embedded!($mode, "-scene-pin"),
-                Slot::Mascot => None,
+                Slot::Mascot => embedded!($mode, "-scene-mascot"),
             }
         };
     }
@@ -201,7 +195,7 @@ fn selected(
     style: ArtworkStyle,
     slot: Slot,
 ) -> Option<(&'static Handle, bool)> {
-    let full_scene = if style == ArtworkStyle::Scene && slot.supports_scene() {
+    let full_scene = if style == ArtworkStyle::Scene {
         scene(mode, slot)
     } else {
         None
@@ -314,10 +308,7 @@ impl<M> Widget<M, Theme, iced::Renderer> for Illustration {
             renderer,
             limits,
         );
-        if self.width != Length::Shrink
-            || self.existing_only
-            || !self.slot.is_some_and(Slot::supports_scene)
-        {
+        if self.width != Length::Shrink || self.existing_only || self.slot.is_none() {
             return incumbent;
         }
         let size = incumbent.size();
@@ -421,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn artwork_picker_resolves_full_scenes_for_all_eight_slots() {
+    fn artwork_picker_resolves_full_scenes_for_every_slot() {
         assert!(artwork_thumbnail(WorldviewMode::Samurai, ArtworkStyle::Existing).is_some());
         let mut ids = std::collections::HashSet::new();
         for mode in [
@@ -453,6 +444,7 @@ mod tests {
                 Slot::KitProtection,
                 Slot::KitRemoval,
                 Slot::Pin,
+                Slot::Mascot,
             ] {
                 let existing = selected(mode, ArtworkStyle::Existing, slot);
                 assert_eq!(
@@ -543,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn artwork_keeps_the_mascot_shared_and_liquid_on_existing_art() {
+    fn artwork_keeps_liquid_on_existing_art() {
         use crate::component::quote_display::image_handle_for_context;
 
         for mode in [WorldviewMode::Suitcoiner, WorldviewMode::Luke] {
@@ -551,19 +543,16 @@ mod tests {
                 .with_worldview(mode)
                 .with_artwork(ArtworkStyle::Scene);
             let mut art = Illustration::new(
-                Some(Slot::Mascot),
-                image_handle_for_context("error"),
+                Some(Slot::Sent),
+                image_handle_for_context("liquid-send"),
                 Length::Shrink,
                 Length::Fixed(160.0),
                 ContentFit::ScaleDown,
             );
-            let (mascot, full_scene) = art.choice(&theme).unwrap();
-            assert!(!full_scene);
-            assert_eq!(mascot.id(), alternate(mode, Slot::Mascot).unwrap().id());
+            art.existing_only = true;
 
             for slot in [Slot::Sent, Slot::Received, Slot::EmptyHistory] {
                 art.slot = Some(slot);
-                art.existing_only = true;
                 let (liquid, full_scene) = art.choice(&theme).unwrap();
                 assert!(!full_scene);
                 assert_eq!(liquid.id(), alternate(mode, slot).unwrap().id());
