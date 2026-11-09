@@ -782,10 +782,10 @@ pub fn unsaved_provider_key<'a, T: 'a, F: Display>(
 pub fn advisory_badge<'a, T: 'a>(label: &'static str, tip: &'static str) -> Container<'a, T> {
     Container::new(
         tooltip::Tooltip::new(
-            Container::new(text::caption(label))
+            Container::new(text::caption(localized_copy(label)))
                 .padding([4, 10])
                 .style(theme::pill::warning),
-            Container::new(text::p2_regular(tip))
+            Container::new(text::p2_regular(localized_copy(tip)))
                 .padding(10)
                 .style(theme::card::simple),
             tooltip::Position::Top,
@@ -808,6 +808,7 @@ pub fn advisory_panel<'a, T: 'a + Clone>(
     on_guide: Option<T>,
     on_dismiss: Option<T>,
 ) -> Container<'a, T> {
+    let headline = localized_copy(headline);
     let title = match line {
         Some(line) => format!("{headline} — {line}"),
         None => headline.to_string(),
@@ -816,11 +817,12 @@ pub fn advisory_panel<'a, T: 'a + Clone>(
     let actions = Row::new()
         .spacing(10)
         .push(on_guide.map(|m| {
-            crate::component::button::link(Some(icon::link_icon()), guide_label).on_press(m)
+            crate::component::button::link(Some(icon::link_icon()), localized_copy(guide_label))
+                .on_press(m)
         }))
-        .push(
-            on_dismiss.map(|m| crate::component::button::transparent(None, "Dismiss").on_press(m)),
-        );
+        .push(on_dismiss.map(|m| {
+            crate::component::button::transparent(None, localized_copy("Dismiss")).on_press(m)
+        }));
 
     Container::new(
         Row::new()
@@ -830,7 +832,7 @@ pub fn advisory_panel<'a, T: 'a + Clone>(
                 iced::widget::Column::new()
                     .spacing(5)
                     .push(text::p1_bold(title).style(theme::text::warning))
-                    .push(text::p2_regular(body))
+                    .push(text::p2_regular(localized_copy(body)))
                     .push(actions)
                     .width(Length::Fill),
             )
