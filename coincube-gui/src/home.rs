@@ -36,7 +36,7 @@ use crate::{
         settings::{
             self,
             global::{AccountTier, GlobalSettings},
-            AuthConfig, BitcoinImport, CubeSettings, WalletSettings,
+            BitcoinImport, CubeSettings, WalletSettings,
         },
         state::{
             connect::{
@@ -50,10 +50,6 @@ use crate::{
     delete::{delete_wallet, DeleteError},
     dir::{CoincubeDirectory, NetworkDirectory},
     installer::UserFlow,
-    services::connect::{
-        client::{auth::AuthClient, backend::api::UserRole, get_service_config},
-        login::{connect_with_credentials, BackendState},
-    },
 };
 use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
 
@@ -474,6 +470,9 @@ pub struct Home {
     /// Recover with phone's Cube step lists every network's Cubes, not
     /// only the current network's.
     restore_all_networks: bool,
+    /// The Import or restore path to open once the Cube list is checked:
+    /// the installer's restore left for it from its path list.
+    pending_restore_destination: Option<crate::installer::RestoreDestination>,
     /// Opens a newly created Cube through the ordinary unlock path after the
     /// settings reload makes its row available, so the Cube's own screens
     /// (Create Vault, or an import's descriptor steps) come next.
@@ -524,6 +523,10 @@ pub struct Home {
     /// App preferences is open over this Launcher; its top-bar entry shows
     /// the current state (`.tbtn.on`). Set by the GUI that owns the sheet.
     pub(crate) app_preferences_open: bool,
+    /// The effective reduce-motion preference: the Connect light holds steady.
+    pub(crate) reduce_motion: bool,
+    /// The pulsing Connect light's dim phase.
+    pub(crate) connect_light_dim: bool,
     /// Last native accessibility observation used by Follow system motion.
     system_reduces_motion: Option<bool>,
     /// A Liquid wallet exists on this device (the sunset gate's local half),
@@ -682,6 +685,7 @@ impl Home {
                 restore_hub: false,
                 restore_phone: false,
                 restore_all_networks: false,
+                pending_restore_destination: None,
                 open_created_cube: None,
                 delete_after_check: None,
                 open_after_registration: None,
@@ -705,6 +709,8 @@ impl Home {
                 active_section: HomeSection::Cubes,
                 theme_mode: GlobalSettings::load_theme_mode(&GlobalSettings::path(&datadir_path)),
                 app_preferences_open: false,
+                reduce_motion: false,
+                connect_light_dim: false,
                 system_reduces_motion,
                 liquid_on_disk: false,
                 // Recomputed whenever the Create Cube form opens — see
@@ -987,8 +993,7 @@ impl Home {
     }
 
     /// Cubes on `chain` that count toward its limit: (on this device,
-    /// registered in Connect but not on this device). Blake2b Cubes are never
-    /// registered in Connect.
+    /// registered in Connect but not on this device).
     ///
     /// The local count is `None` when this device's list for `chain` cannot be
     /// counted right now: the checked list is still another network's (a
@@ -1007,15 +1012,12 @@ impl Home {
                 .find(|(c, _)| *c == chain)
                 .map(|(_, cubes)| cubes.len()),
         };
-        let remote = if chain.is_blake2b() {
-            0
-        } else {
-            let network_str = settings::network_to_api_str(chain);
-            self.remote_cubes
-                .iter()
-                .filter(|rc| rc.network == network_str)
-                .count()
-        };
+        let network_str = settings::network_to_api_str(chain);
+        let remote = self
+            .remote_cubes
+            .iter()
+            .filter(|rc| rc.network == network_str)
+            .count();
         (local, remote)
     }
 
@@ -1148,6 +1150,12 @@ impl Home {
 
     pub fn stop(&mut self) {}
 
+    /// Opens Import or restore on `destination` once the Cube list is
+    /// checked: the installer's restore left for it from its path list.
+    pub fn open_restore_destination(&mut self, destination: crate::installer::RestoreDestination) {
+        self.pending_restore_destination = Some(destination);
+    }
+
     /// Set a top-level error message shown on the home screen.
     /// Used by outer state machines (e.g. `gui::tab`) to surface issues
     /// they detect while handling home-originated messages.
@@ -1173,9 +1181,33 @@ impl Home {
     }
 
     pub fn subscription(&self, foreground: bool) -> Subscription<Message> {
+        // The Connect light pulses while the session is checked or Connect
+        // can't be reached, unless motion is reduced.
+        let pulse = if foreground
+            && !self.reduce_motion
+            && matches!(
+                launcher_chrome::launcher_connect_state(self).1,
+                Some(crate::app::ConnectLight::Connecting | crate::app::ConnectLight::Reconnecting)
+            ) {
+            iced::time::every(std::time::Duration::from_millis(800))
+                .map(|_| Message::ConnectLightTick)
+        } else {
+            Subscription::none()
+        };
+        // A stored session that couldn't be checked is checked again (L1).
+        let recheck = match self.connect_account.unverified.as_ref() {
+            Some(unverified) if foreground => unverified.recheck().map(|_| {
+                Message::View(ViewMessage::ConnectAccount(
+                    app::view::ConnectAccountMessage::RecheckSession,
+                ))
+            }),
+            _ => Subscription::none(),
+        };
         let base = Subscription::batch([
             self.launcher_subscription(foreground),
             self.activity_subscription(foreground),
+            pulse,
+            recheck,
         ]);
         // Escape closes the network menu first, then the activity source
         // menu, then the plan menu, then shuts the Key card.
@@ -1420,11 +1452,40 @@ impl Home {
             &message,
             Message::View(ViewMessage::ConnectAccount(_) | ViewMessage::ConnectSheetAccount(_))
         );
+        let checked = matches!(&message, Message::Checked { .. });
         let task = match message {
             Message::View(ViewMessage::Catalog(message)) => self.update_catalog(message),
+            Message::ConnectLightTick => {
+                self.connect_light_dim = !self.connect_light_dim;
+                Task::none()
+            }
+            // Connect, not the user, ended the session; the GUI mirrors it to
+            // every tab (L3).
+            Message::ConnectSignedOutBy(reason) => {
+                self.connect_account.signed_out_by = Some(reason);
+                Task::none()
+            }
+            Message::View(ViewMessage::DismissConnectSignOut) => {
+                self.connect_account.signed_out_by = None;
+                Task::none()
+            }
             message => self.update_lifecycle(message),
         };
         self.reconcile_catalog();
+        // The path a restore left for opens through its own message, with
+        // that path's guards, once the list it opens over is checked.
+        if checked && matches!(self.state, State::Cubes { .. } | State::NoCube { .. }) {
+            if let Some(destination) = self.pending_restore_destination.take() {
+                use crate::installer::RestoreDestination;
+                let open = match destination {
+                    RestoreDestination::Overview => ViewMessage::ShowRestoreHub,
+                    RestoreDestination::ImportBitcoin => ViewMessage::ShowImportBitcoin,
+                    RestoreDestination::Kit => ViewMessage::RestoreFromAnyRecoveryKit,
+                    RestoreDestination::Phone => ViewMessage::ShowRestorePhone,
+                };
+                return Task::batch([task, Task::done(Message::View(open))]);
+            }
+        }
         // Once the first probe has finished, read the networks such a change
         // lists, whatever screen Home is on: a creation backup or recovery
         // returns to the list without another check. A Bitcoin-only start
@@ -1556,10 +1617,11 @@ impl Home {
         self.refresh_displayed_networks();
         if self.network.is_blake2b() {
             // Explicitly supported launcher actions only: the Create Cube
-            // journey (name, PIN or passkey, backup) and opening a Cube. Its
-            // Vault is created from inside the Cube. No import, seed
-            // recovery, Recovery Kit restore, phone restore or duress
-            // completion route.
+            // journey (name, PIN or passkey, backup), opening, renaming and
+            // deleting a Cube, and bringing a Connect Cube back from its
+            // recovery phrase, its Recovery Kit or a paired phone. Its Vault
+            // is created from inside the Cube. No Bitcoin wallet import or
+            // duress completion route.
             let allowed = match &message {
                 // An unfinished import's Cube is never on this chain; its
                 // request switches the Launcher to the Cube's network.
@@ -1604,8 +1666,38 @@ impl Home {
                         )
                         | ViewMessage::OpenUrl(_)
                         | ViewMessage::DismissAdvisoryNotice
+                        | ViewMessage::RenameCube(_)
+                        | ViewMessage::RenameCubeNameEdited(_)
+                        | ViewMessage::RenameCubeConfirm
+                        | ViewMessage::RenameCubeCancel
+                        | ViewMessage::ImportGhostWithPhrase(_)
+                        | ViewMessage::RecoveryWordInput { .. }
+                        | ViewMessage::SelectRecoverySuggestion { .. }
+                        | ViewMessage::SubmitRecovery
+                        | ViewMessage::CancelRecovery
+                        | ViewMessage::RestoreFromRecoveryKit(_)
+                        | ViewMessage::RestoreFromAnyRecoveryKit
+                        | ViewMessage::RestoreWithPhone { .. }
+                        | ViewMessage::RestoreWithPhoneOn { .. }
+                        | ViewMessage::ShowRecoveryMethodPicker(_)
+                        | ViewMessage::CloseRecoveryMethodPicker
+                        | ViewMessage::DeleteCube(
+                            DeleteCubeMessage::ShowModal(_)
+                                | DeleteCubeMessage::CloseModal
+                                | DeleteCubeMessage::Confirm(_)
+                                | DeleteCubeMessage::DeleteConnectBackup(_)
+                                | DeleteCubeMessage::Deleted
+                                | DeleteCubeMessage::DaemonStopped(_)
+                                | DeleteCubeMessage::PinInput(_)
+                                | DeleteCubeMessage::ShowRemoteModal(_)
+                                | DeleteCubeMessage::CloseRemoteModal
+                                | DeleteCubeMessage::RemoteNameInput(_)
+                                | DeleteCubeMessage::ConfirmRemoteDelete(_)
+                                | DeleteCubeMessage::RestoreInstead(_)
+                        )
                 ),
-                Message::Checked { .. }
+                Message::StartRecovery
+                | Message::Checked { .. }
                 | Message::CubeLimitsLoaded(_)
                 | Message::RemoteCubesLoaded { .. }
                 | Message::NetworkCatalogLoaded { .. }
@@ -1614,6 +1706,9 @@ impl Home {
                 | Message::CubeRemoteRegistered { .. }
                 | Message::CubeRemoteUpdated { .. }
                 | Message::CubeCreated(_)
+                | Message::CubeBackupDeleted(_)
+                | Message::RemoteCubeDeleted(_)
+                | Message::CubeRenamed(_)
                 | Message::PasskeyWindowId(_)
                 | Message::PasskeyWebviewUpdate(_)
                 | Message::PasskeyCeremonyResult(_)
@@ -2830,10 +2925,12 @@ impl Home {
                 Task::none()
             }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::RestoreInstead(uuid))) => {
-                let Some(modal) = self
-                    .delete_remote_cube_modal
-                    .take_if(|modal| !modal.deleting && modal.cube.uuid == uuid)
-                else {
+                // A Cube with nothing this build can restore keeps its modal
+                // open: no button offers this, and a stale press must not
+                // close it.
+                let Some(modal) = self.delete_remote_cube_modal.take_if(|modal| {
+                    !modal.deleting && modal.cube.uuid == uuid && modal.restorable()
+                }) else {
                     return Task::none();
                 };
                 match launcher_catalog::remote_restore(&modal.cube).action {
@@ -3280,12 +3377,6 @@ impl Home {
                 Task::none()
             }
             Message::View(ViewMessage::SubmitRecovery) => {
-                if self.network.is_blake2b() {
-                    self.set_error(
-                        "Bitcoin Blake2b Cubes can't be restored from a recovery phrase yet",
-                    );
-                    return Task::none();
-                }
                 let words = self.recovery_words.join(" ");
                 match bip39::Mnemonic::parse_in(bip39::Language::English, words) {
                     Ok(mnemonic) => {
@@ -5229,12 +5320,9 @@ impl Home {
                 LEGACY_CONNECT_SIGN_IN_ID
             });
         }
+        // The Launcher's control keeps one id in every state (L6).
         if launcher_catalog::catalog_visible(self) {
-            return if self.connect_account.is_authenticated() {
-                launcher_catalog::connect_id()
-            } else {
-                launcher_catalog::sign_in_id()
-            };
+            return launcher_catalog::connect_id();
         }
         if !self.connect_account.is_authenticated() {
             return Id::new(LEGACY_CONNECT_SIGN_IN_ID);
@@ -5251,9 +5339,12 @@ impl Home {
             || *saved == Id::new(LEGACY_CONNECT_SIGN_IN_ID)
             || *saved == Id::new(CREATE_BACKUP_SIGN_IN_ID)
         {
-            // Both Launcher modes replace their action with status-only copy
-            // during a pending session check, so there is no control to focus.
-            (!self.connect_account.is_checking_session()).then(|| self.connect_sheet_origin_id())
+            // Both Launcher modes make the control inert while the session is
+            // first checked, so there is no control to focus then. A stored
+            // session waiting to be re-checked keeps it pressable.
+            (!self.connect_account.is_checking_session()
+                || self.connect_account.unverified.is_some())
+            .then(|| self.connect_sheet_origin_id())
         } else {
             Some(saved.clone())
         }
@@ -5761,12 +5852,9 @@ impl Home {
     }
 
     /// Recovery Kit and phone restores open Cubes saved on Connect, so they
-    /// need a session. Bitcoin Blake2b Cubes cannot be restored in this
-    /// build: the installer refuses every Blake2b flow but Vault creation.
+    /// need a session.
     fn connect_restore_reason(&self) -> Option<&'static str> {
-        if self.network.is_blake2b() {
-            Some("Not yet on Bitcoin Blake2b in this build.")
-        } else if !self.connect_account.is_authenticated() {
+        if !self.connect_account.is_authenticated() {
             Some("Sign in to Connect")
         } else {
             None
@@ -5952,13 +6040,14 @@ impl Home {
             })
             .into()
         };
+        // Counts only Connect Cubes missing from this device, so say so:
+        // a bare "N Cubes" reads as the whole account.
         let connected = |phone: bool| -> Element<'static, ViewMessage> {
             let count = self.restorable_here(phone);
             pill(
                 format!(
-                    "Connected · {count} {} on {}",
+                    "Connected · {count} {} not on this device",
                     if count == 1 { "Cube" } else { "Cubes" },
-                    self.network.label()
                 ),
                 true,
             )
@@ -5998,9 +6087,7 @@ impl Home {
         ));
         let signed_in = self.connect_account.is_authenticated();
         let connect_tag = |phone: bool| -> Element<'static, ViewMessage> {
-            if self.network.is_blake2b() {
-                pill(format!("Not on {}", self.network.label()), false)
-            } else if signed_in {
+            if signed_in {
                 connected(phone)
             } else {
                 sign_in()
@@ -6060,7 +6147,7 @@ impl Home {
                 .style(theme::text::warning),
             );
         }
-        if !signed_in && !self.network.is_blake2b() {
+        if !signed_in {
             content = content.push(
                 Container::new(
                     Row::new()
@@ -6127,13 +6214,12 @@ impl Home {
         }
         let network = settings::network_to_api_string(self.network);
         // A descriptor-only phone recovery restores a Vault into an existing
-        // Cube, not a Cube. Blake2b Cubes cannot be restored in this build.
+        // Cube, not a Cube.
         let phones: Vec<(ChainId, &RemoteCube)> = self
             .remote_cubes
             .iter()
             .filter(|cube| cube.phone_recoverable && cube.phone_full_cube)
             .filter_map(|cube| restore_chain(&cube.network).map(|chain| (chain, cube)))
-            .filter(|(chain, _)| !chain.is_blake2b())
             .collect();
         let here = phones
             .iter()
@@ -6362,7 +6448,7 @@ impl Home {
                                     let remote_for_net: Vec<_> = self
                                         .remote_cubes
                                         .iter()
-                                        .filter(|rc| !self.network.is_blake2b() && rc.network == current_net_str)
+                                        .filter(|rc| rc.network == current_net_str)
                                         .collect();
                                     let total_count = self.total_cube_count();
                                     let at_limit = total_count >= self.cube_limit();
@@ -7692,6 +7778,7 @@ fn map_connect_task(task: Task<app::message::Message>) -> Task<Message> {
         app::message::Message::CompleteDuressEnrollment(payload) => {
             Message::PersistDuressEnrollment(payload)
         }
+        app::message::Message::ConnectSignedOutBy(reason) => Message::ConnectSignedOutBy(reason),
         // The duress-disable confirmation toast (Issue 2). Home has no toast
         // surface; the Duress panel already reflects the disabled state in its
         // own fields, so swallow it quietly rather than warn.
@@ -7709,6 +7796,11 @@ fn map_connect_task(task: Task<app::message::Message>) -> Task<Message> {
 pub enum Message {
     /// Bubble successful preference writes to the GUI for every open tab.
     GlobalSettingsChanged,
+    /// Flips the pulsing Connect light between its bright and dim phase.
+    ConnectLightTick,
+    /// Connect, not the user, ended the session (from this Launcher's account
+    /// panel or relayed by the GUI from another tab).
+    ConnectSignedOutBy(crate::app::SignedOutBy),
     GlobalFeatureLoaded(u64, bool),
     RecoveryServiceResolved {
         target: RecoveryServiceTarget,
@@ -7837,6 +7929,9 @@ pub enum Message {
 
 #[derive(Debug, Clone)]
 pub enum ViewMessage {
+    /// "Not now" on the Connect sheet's signed-out notice: clears the red
+    /// light everywhere (the GUI relays it to every tab).
+    DismissConnectSignOut,
     /// A message from the creation-time backup step. The payload is the
     /// Settings backup wizard's own message type: `State::CreationBackup`
     /// renders that wizard's views, and this variant is the `fn` mapper they
@@ -7996,7 +8091,6 @@ pub enum DeleteCubeMessage {
     ShowRemoteModal(String), // uuid of remote-only cube
     CloseModal,
     Confirm(String), // Cube ID
-    DeleteLianaConnect(bool),
     DeleteConnectBackup(bool),
     Deleted,
     /// A daemon this Cube left stopping when it was locked has finished, so
@@ -8017,12 +8111,10 @@ struct DeleteCubeModal {
     wallet_settings: Option<WalletSettings>,
     warning: Option<DeleteError>,
     deleted: bool,
-    delete_liana_connect: bool,
     /// Whether to also delete the cube from the Connect API (frees a cube slot).
     delete_connect_backup: bool,
     /// Whether the user is authenticated and the cube is synced (backup exists).
     can_delete_backup: bool,
-    user_role: Option<UserRole>,
     // `None` means we were not able to determine whether wallet uses internal bitcoind.
     internal_bitcoind: Option<bool>,
     /// Data root. The PIN is verified by decrypting this Cube's seed file, so
@@ -8157,23 +8249,31 @@ impl DeleteRemoteCubeModal {
             .is_some()
     }
 
-    /// A restorable Cube is confirmed by typing its name as the Launcher
-    /// shows it; one with nothing to restore needs only the button.
+    /// Connect holds a way to restore this Cube, whether or not this build
+    /// can use it (a Recovery Kit with no Master Seed, say): deleting it takes
+    /// that backup.
+    fn holds_backup(&self) -> bool {
+        let (password, phone) = launcher_catalog::remote_recovery(&self.cube);
+        password || phone
+    }
+
+    /// A Cube with a backup in Connect is confirmed by typing its name as the
+    /// Launcher shows it; one with none needs only the button.
     fn name_confirmed(&self) -> bool {
-        !self.restorable() || self.typed_name.trim() == catalog_display_name(&self.cube.name)
+        !self.holds_backup() || self.typed_name.trim() == catalog_display_name(&self.cube.name)
     }
 
     fn view(&self) -> Element<Message> {
         let display_name = catalog_display_name(&self.cube.name);
-        let restore = launcher_catalog::remote_restore(&self.cube);
-        let restorable = restore.action.is_some();
+        let restorable = self.restorable();
+        let holds_backup = self.holds_backup();
         let network = ChainId::from_api_str(&self.cube.network)
             .map(|chain| chain.label())
             .unwrap_or("Unknown network");
-        let backup = match &restore.action {
-            Some((ViewMessage::RestoreWithPhone { .. }, _)) => "Phone recovery in Connect",
-            Some(_) => "Recovery Kit in Connect",
-            None => "No Recovery Kit in Connect",
+        let backup = match launcher_catalog::remote_recovery(&self.cube) {
+            (true, _) => "Recovery Kit in Connect",
+            (false, true) => "Phone recovery in Connect",
+            (false, false) => "No Recovery Kit in Connect",
         };
 
         let header = Row::new()
@@ -8204,9 +8304,13 @@ impl DeleteRemoteCubeModal {
         let consequences = Column::new()
             .spacing(8)
             .push(consequence("Its Cube slot is freed"))
-            .push_maybe(
-                restorable.then(|| consequence("You can\u{2019}t restore it from Connect anymore")),
-            )
+            .push_maybe(if restorable {
+                Some(consequence(
+                    "You can\u{2019}t restore it from Connect anymore",
+                ))
+            } else {
+                holds_backup.then(|| consequence("Its backup in Connect is deleted"))
+            })
             .push(consequence(
                 "Its members, Lightning address and Vault monitoring end",
             ));
@@ -8224,16 +8328,22 @@ impl DeleteRemoteCubeModal {
             .push(Space::new().height(14.0))
             .push(consequences);
 
-        if restorable {
-            let restore_btn = button::secondary_compact_action(
-                DELETE_REMOTE_RESTORE_ID,
-                None,
-                "Restore instead",
-                delete_modal_focus,
-            )
-            .on_press_maybe((!self.deleting).then(|| {
-                ViewMessage::DeleteCube(DeleteCubeMessage::RestoreInstead(self.cube.uuid.clone()))
-            }));
+        if holds_backup {
+            // Only where this build can restore the Cube is there anything to
+            // restore instead.
+            let restore_btn = restorable.then(|| {
+                button::secondary_compact_action(
+                    DELETE_REMOTE_RESTORE_ID,
+                    None,
+                    "Restore instead",
+                    delete_modal_focus,
+                )
+                .on_press_maybe((!self.deleting).then(|| {
+                    ViewMessage::DeleteCube(DeleteCubeMessage::RestoreInstead(
+                        self.cube.uuid.clone(),
+                    ))
+                }))
+            });
             col = col.push(Space::new().height(18.0)).push(
                 Container::new(
                     Row::new()
@@ -8245,11 +8355,14 @@ impl DeleteRemoteCubeModal {
                                 .width(Length::Fill)
                                 .spacing(2)
                                 .push(p1_bold("Is Connect its only backup?"))
-                                .push(p2_regular(
+                                .push(p2_regular(if restorable {
                                     "Without its recovery phrase or another device, any funds \
                                      in this Cube will be lost. Restore it first if you\u{2019}re \
-                                     not sure.",
-                                )),
+                                     not sure."
+                                } else {
+                                    "Without its recovery phrase or another device, any funds \
+                                     in this Cube will be lost."
+                                })),
                         )
                         .push(restore_btn),
                 )
@@ -8267,7 +8380,7 @@ impl DeleteRemoteCubeModal {
             .style(theme::text::secondary),
         );
 
-        if restorable {
+        if holds_backup {
             use coincube_ui::widget::TextInput;
             let mut input = TextInput::new(&display_name, &self.typed_name)
                 .id(DELETE_REMOTE_NAME_ID)
@@ -8403,40 +8516,21 @@ impl DeleteCubeModal {
         is_authenticated: bool,
     ) -> Self {
         let can_delete_backup = is_authenticated && cube.remote_synced;
-        let mut modal = Self {
-            cube: cube.clone(),
-            wallet_settings: wallet_settings.clone(),
+        Self {
+            cube,
+            wallet_settings,
             network_directory,
             datadir_root,
             warning: None,
             deleted: false,
-            delete_liana_connect: false,
             delete_connect_backup: false,
             can_delete_backup,
             internal_bitcoind,
-            user_role: None,
             pin_input: pin_input::PinInput::new(),
             pin_error: None,
             waiting_for_stop: false,
             stop_refused: false,
-        };
-        if let Some(wallet) = &wallet_settings {
-            if let Some(auth) = &wallet.remote_backend_auth {
-                match Handle::current().block_on(check_membership(
-                    cube.network,
-                    &modal.network_directory,
-                    auth,
-                )) {
-                    Err(e) => {
-                        modal.warning = Some(e);
-                    }
-                    Ok(user_role) => {
-                        modal.user_role = user_role;
-                    }
-                }
-            }
         }
-        modal
     }
 
     /// Directories whose daemon a delete must wait for: the Vault's, or an
@@ -8520,12 +8614,9 @@ impl DeleteCubeModal {
 
         // Delete vault if it exists
         if let Some(wallet_settings) = &self.wallet_settings {
-            if let Err(e) = Handle::current().block_on(delete_wallet(
-                self.cube.network,
-                &self.network_directory,
-                wallet_settings,
-                self.delete_liana_connect,
-            )) {
+            if let Err(e) =
+                Handle::current().block_on(delete_wallet(&self.network_directory, wallet_settings))
+            {
                 if matches!(e, DeleteError::DaemonStopping) {
                     self.stop_refused = true;
                 } else {
@@ -8644,11 +8735,6 @@ impl DeleteCubeModal {
                     return self.delete();
                 }
             }
-            Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::DeleteLianaConnect(
-                delete,
-            ))) => {
-                self.delete_liana_connect = delete;
-            }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::DeleteConnectBackup(
                 delete,
             ))) => {
@@ -8685,17 +8771,16 @@ impl DeleteCubeModal {
 
         // Determine what's being deleted
         let has_vault = self.wallet_settings.is_some();
-        let has_remote_backend = self
+        let legacy_backend = self
             .wallet_settings
             .as_ref()
-            .and_then(|w| w.remote_backend_auth.as_ref())
-            .is_some();
+            .and_then(|w| w.remote_backend_auth.as_ref());
 
         let help_text_1 = if has_vault {
             format!(
                 "Are you sure you want to delete the Cube \"{}\" and {}?",
                 display_name,
-                if has_remote_backend {
+                if legacy_backend.is_some() {
                     "its associated Vault configuration"
                 } else {
                     "all its associated data (including Vault)"
@@ -8725,6 +8810,12 @@ impl DeleteCubeModal {
             ))
             .push(Row::new().push(text(help_text_1)))
             .push(help_text_2.map(|t| Row::new().push(p1_regular(t).style(theme::text::secondary))))
+            // A legacy Liana Connect Vault still lives on that backend; say so
+            // before the user removes the only copy COINCUBE can show them.
+            .push(legacy_backend.map(|auth| {
+                Row::new()
+                    .push(p1_regular(auth.retired_backend_notice()).style(theme::text::warning))
+            }))
             .push(Row::new())
             .push(Row::new().push(text(help_text_3)));
 
@@ -8825,45 +8916,6 @@ impl DeleteCubeModal {
                 .style(delete_modal_card),
         )
         .map(Message::View)
-    }
-}
-
-pub async fn check_membership<C: Into<crate::chain::ChainId>>(
-    chain: C,
-    network_dir: &NetworkDirectory,
-    auth: &AuthConfig,
-) -> Result<Option<UserRole>, DeleteError> {
-    // The legacy remote backend is a Bitcoin-family service; a chain this
-    // build cannot run never reaches here (the delete modal only lists Cubes
-    // the launcher can open), so the projection is lossless.
-    let network = chain.into().bitcoin_network();
-    let service_config = get_service_config(network)
-        .await
-        .map_err(|e| DeleteError::Connect(e.to_string()))?;
-
-    if let BackendState::WalletExists(client, _, _) = connect_with_credentials(
-        AuthClient::new(
-            service_config.auth_api_url,
-            service_config.auth_api_public_key,
-            auth.email.to_string(),
-        ),
-        auth.wallet_id.clone(),
-        service_config.backend_api_url,
-        None,
-        network,
-        network_dir,
-    )
-    .await
-    .map_err(|e| DeleteError::Connect(e.to_string()))?
-    {
-        Ok(Some(
-            client
-                .user_wallet_membership()
-                .await
-                .map_err(|e| DeleteError::Connect(e.to_string()))?,
-        ))
-    } else {
-        Ok(None)
     }
 }
 
@@ -9104,6 +9156,48 @@ mod tests {
 
     fn home() -> Home {
         Home::new(test_datadir(), Some(Network::Bitcoin)).0
+    }
+
+    /// A restore that left from the installer's path list opens that path
+    /// over the checked list, through the path's own message, and only once.
+    #[test]
+    fn a_restore_left_from_its_path_list_opens_that_path() {
+        use crate::installer::RestoreDestination;
+        for (destination, opens) in [
+            (RestoreDestination::Overview, "ShowRestoreHub"),
+            (RestoreDestination::ImportBitcoin, "ShowImportBitcoin"),
+            (RestoreDestination::Kit, "RestoreFromAnyRecoveryKit"),
+            (RestoreDestination::Phone, "ShowRestorePhone"),
+        ] {
+            let mut home = home();
+            home.open_restore_destination(destination);
+            let checked = || Message::Checked {
+                for_chain: ChainId::Bitcoin,
+                res: Ok(State::NoCube { create_cube: false }),
+            };
+            let next = drain(home.update(checked()));
+            let opened: Vec<_> = next
+                .iter()
+                .filter_map(|message| match message {
+                    Message::View(view) => Some(format!("{view:?}")),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(opened, [opens], "{:?}", destination);
+            assert!(drain(home.update(checked()))
+                .iter()
+                .all(|message| !matches!(message, Message::View(_))));
+        }
+
+        let mut home = home();
+        home.open_restore_destination(RestoreDestination::Overview);
+        for message in drain(home.update(Message::Checked {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::NoCube { create_cube: false }),
+        })) {
+            drop(home.update(message));
+        }
+        assert!(home.restore_hub && home.showing_create_form());
     }
 
     #[test]
@@ -10019,7 +10113,9 @@ mod tests {
         assert_eq!(home.connect_restore_reason(), None);
         let shown = restore_frame::rendered_labels(home.create_journey_frame()).await;
         assert!(
-            shown.iter().any(|l| l == "Connected · 0 Cubes on Signet"),
+            shown
+                .iter()
+                .any(|l| l == "Connected · 0 Cubes not on this device"),
             "{:?}",
             shown
         );
@@ -10096,6 +10192,83 @@ mod tests {
         let mut cube = CubeSettings::new("Imported".to_string(), Network::Bitcoin);
         cube.bitcoin_import = home.pending_bitcoin_import.clone();
         assert_eq!(vault_subtitle(&cube), "Vault import pending");
+    }
+
+    /// The Launcher's control describes the account (it has no live updates):
+    /// the light and words follow the session, never "Sign in" for a session
+    /// that is only waiting for the network.
+    #[test]
+    fn the_launcher_connect_control_describes_the_account() {
+        use crate::app::state::connect::account::UnverifiedSession;
+        use crate::app::view::shared::connect_control::ConnectDetail;
+        use crate::app::{ConnectLight, SignedOutBy};
+        use crate::services::connect::grpc::trouble::Trouble;
+        let state = |home: &Home| {
+            let (detail, light, label) = launcher_chrome::launcher_connect_state(home);
+            (format!("{detail:?}"), light, label)
+        };
+        let signed_in = signed_in_home();
+        let (detail, light, label) = state(&signed_in);
+        assert_eq!(
+            detail,
+            format!("{:?}", ConnectDetail::Account("founder@example.com"))
+        );
+        assert_eq!(light, Some(ConnectLight::On));
+        assert_eq!(label, "Connect account, founder@example.com, signed in");
+
+        let idle = || ConnectFlowStep::Login {
+            email: String::new(),
+            loading: false,
+        };
+        let waiting = |trouble| {
+            let mut home = home();
+            home.connect_account.step = idle();
+            home.connect_account.unverified = Some(UnverifiedSession {
+                email: "alex@example.test".into(),
+                trouble,
+                attempts: 1,
+            });
+            home
+        };
+        let (detail, light, label) = state(&waiting(Trouble::Offline));
+        assert_eq!(detail, format!("{:?}", ConnectDetail::Offline));
+        assert_eq!(light, Some(ConnectLight::Offline));
+        assert!(label.ends_with("offline: no internet connection"));
+        let (detail, light, _) = state(&waiting(Trouble::Unreachable));
+        assert_eq!(
+            detail,
+            format!("{:?}", ConnectDetail::Account("alex@example.test"))
+        );
+        assert_eq!(light, Some(ConnectLight::Reconnecting));
+
+        let mut ended = home();
+        ended.connect_account.step = idle();
+        ended.connect_account.signed_out_by = Some(SignedOutBy::SessionEnded);
+        let (detail, light, label) = state(&ended);
+        assert_eq!(detail, format!("{:?}", ConnectDetail::SignIn));
+        assert_eq!(light, Some(ConnectLight::NeedsYou));
+        assert!(label.contains("needs attention"));
+
+        let mut plain = home();
+        plain.connect_account.step = idle();
+        let (detail, light, label) = state(&plain);
+        assert_eq!(detail, format!("{:?}", ConnectDetail::SignIn));
+        assert_eq!(light, None);
+        assert_eq!(label, "Connect: Sign in");
+    }
+
+    /// Not now and the relayed notice reach the Launcher's account (L3).
+    #[test]
+    fn the_signed_out_notice_comes_and_goes() {
+        use crate::app::SignedOutBy;
+        let mut home = home();
+        drop(home.update(Message::ConnectSignedOutBy(SignedOutBy::ComputerRemoved)));
+        assert_eq!(
+            home.connect_account.signed_out_by,
+            Some(SignedOutBy::ComputerRemoved)
+        );
+        drop(home.update(Message::View(ViewMessage::DismissConnectSignOut)));
+        assert_eq!(home.connect_account.signed_out_by, None);
     }
 
     fn signed_in_home() -> Home {
@@ -10347,6 +10520,48 @@ mod tests {
         let _ = home.update(Message::View(ViewMessage::CancelRecovery));
         assert_ne!(
             home.pending_cube_id.map(|id| id.to_string()).as_deref(),
+            Some(uuid)
+        );
+    }
+
+    #[test]
+    fn a_blake2b_ghost_imports_from_its_recovery_phrase() {
+        let phrase = abandon_phrase();
+        let uuid = "0b2b2b2b-2b4d-4c8e-9a10-3f2e1d0c9b8a";
+        let mut home = home();
+        enable_btcb2(&mut home);
+        home.network = ChainId::BitcoinBlake2b;
+        home.state = State::NoCube { create_cube: false };
+        let mut ghost = remote_cube(uuid, "Old laptop", Network::Bitcoin);
+        ghost.network = settings::network_to_api_string(ChainId::BitcoinBlake2b);
+        ghost.encryption_pubkey = Some(registered_key(&phrase, ChainId::BitcoinBlake2b));
+        home.remote_cubes = vec![ghost];
+        let _ = home.update(Message::View(ViewMessage::ImportGhostWithPhrase(
+            uuid.into(),
+        )));
+        assert!(home.error.is_none(), "{:?}", home.error);
+        assert!(matches!(home.state, State::RecoveryInput));
+        assert_eq!(
+            home.ghost_import.as_ref().map(|ghost| ghost.network),
+            Some(ChainId::BitcoinBlake2b)
+        );
+        for (index, word) in phrase.words().enumerate() {
+            home.recovery_words[index] = word.to_string();
+        }
+        for (index, digit) in ["1", "2", "3", "4"].iter().enumerate() {
+            let _ = home
+                .create_cube_pin
+                .update(pin_input::Message::DigitChanged(index, digit.to_string()));
+            let _ = home
+                .create_cube_pin_confirm
+                .update(pin_input::Message::DigitChanged(index, digit.to_string()));
+        }
+        let _ = home.update(Message::View(ViewMessage::SubmitRecovery));
+        assert!(home.error.is_none(), "{:?}", home.error);
+        assert!(home.creating_cube, "the matching phrase is accepted");
+        // It reclaims the ghost's Connect identity, as on Bitcoin.
+        assert_eq!(
+            home.ghost_claim.as_ref().map(|(id, _)| id.as_str()),
             Some(uuid)
         );
     }
@@ -11086,6 +11301,121 @@ mod tests {
 
         let _ = home.update(Message::View(ViewMessage::RenameCubeCancel));
         assert!(home.rename_cube_modal.is_none());
+    }
+
+    #[test]
+    fn a_blake2b_cube_renames_on_its_own_launcher() {
+        let datadir = fresh_datadir();
+        let directory = datadir.network_directory(ChainId::BitcoinBlake2b);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let fork =
+            CubeSettings::new_with_raw_id("fork".into(), "Fork".into(), ChainId::BitcoinBlake2b);
+        let settings_path = directory.path().join(settings::SETTINGS_FILE_NAME);
+        std::fs::write(
+            &settings_path,
+            serde_json::to_vec(&settings::Settings {
+                cubes: vec![fork.clone()],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
+        enable_btcb2(&mut home);
+        home.network = ChainId::BitcoinBlake2b;
+        home.state = State::Cubes {
+            cubes: vec![fork.clone()],
+            create_cube: false,
+            source: ChainId::BitcoinBlake2b,
+        };
+        let key = CubeCatalogKey {
+            chain: ChainId::BitcoinBlake2b,
+            cube_id: fork.id.clone(),
+        };
+
+        drop(home.update(Message::View(ViewMessage::RenameCatalog(key.clone()))));
+        assert_eq!(home.rename_cube_modal, Some((key, "Fork".to_string())));
+        drop(home.update(Message::View(ViewMessage::RenameCubeNameEdited(
+            "Fork renamed".into(),
+        ))));
+        let output = drain(home.update(Message::View(ViewMessage::RenameCubeConfirm)));
+        assert!(matches!(output.as_slice(), [Message::CubeRenamed(Ok(()))]));
+        assert!(home.error().is_none());
+        let saved: settings::Settings =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(saved.cubes[0].name, "Fork renamed");
+
+        // The local write's result closes the dialog on this chain too.
+        drop(home.update(Message::CubeRenamed(Ok(()))));
+        assert!(home.rename_cube_modal.is_none());
+        assert!(home.error().is_none());
+    }
+
+    #[test]
+    fn a_blake2b_connect_only_cube_restores_or_deletes_from_connect() {
+        let mut home = home();
+        enable_btcb2(&mut home);
+        home.network = ChainId::BitcoinBlake2b;
+        home.state = State::NoCube { create_cube: false };
+        let mut kept = remote_cube("kept", "Kept", Network::Bitcoin);
+        kept.network = settings::network_to_api_string(ChainId::BitcoinBlake2b);
+        home.remote_cubes = vec![kept];
+        assert_eq!(home.total_cube_count(), 1);
+
+        let open = Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ShowRemoteModal(
+            "kept".to_string(),
+        )));
+        drop(home.update(open));
+        assert!(home.error().is_none());
+        let modal = home
+            .delete_remote_cube_modal
+            .as_ref()
+            .expect("remote modal");
+        // Connect holds its Recovery Kit, and it restores as on Bitcoin.
+        assert!(modal.restorable());
+        assert!(modal.holds_backup());
+
+        // Restore instead closes the modal and starts the restore.
+        let restore = drain(home.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::RestoreInstead("kept".to_string()),
+        ))));
+        assert!(home.error().is_none());
+        assert!(home.delete_remote_cube_modal.is_none());
+        assert!(
+            home.recovery_method_modal.is_some()
+                || matches!(
+                    restore.as_slice(),
+                    [Message::Install(_, ChainId::BitcoinBlake2b, _, _)]
+                ),
+            "{:?}",
+            restore.len()
+        );
+        home.recovery_method_modal = None;
+        drop(home.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::ShowRemoteModal("kept".to_string()),
+        ))));
+        assert!(home.delete_remote_cube_modal.is_some());
+
+        // Its backup goes with it, so Delete still waits for its name.
+        drop(home.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::ConfirmRemoteDelete("kept".to_string()),
+        ))));
+        assert!(!home.delete_remote_cube_modal.as_ref().unwrap().deleting);
+        drop(home.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::RemoteNameInput("Kept".to_string()),
+        ))));
+        drop(home.update(Message::View(ViewMessage::DeleteCube(
+            DeleteCubeMessage::ConfirmRemoteDelete("kept".to_string()),
+        ))));
+        assert!(home.error().is_none());
+        assert!(home.delete_remote_cube_modal.as_ref().unwrap().deleting);
+
+        // Connect's answer frees the slot.
+        drop(home.update(Message::RemoteCubeDeleted(Ok(()))));
+        assert!(home.error().is_none());
+        assert!(home.delete_remote_cube_modal.is_none());
+        assert!(home.remote_cubes.is_empty());
+        assert_eq!(home.total_cube_count(), 0);
     }
 
     #[test]
@@ -12166,6 +12496,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A Vault on the retired Liana Connect backend is delete-only. Delete
+    /// never contacts that backend, so nothing about it can block removing the
+    /// Cube, and the modal says where the wallet still lives. No runtime is
+    /// entered: an old check blocked on one.
+    #[test]
+    fn a_legacy_remote_backend_does_not_block_deleting_the_cube() {
+        let started = std::time::Instant::now();
+        let root =
+            std::env::temp_dir().join(format!("delete-legacy-backend-{}", uuid::Uuid::new_v4()));
+        let datadir = CoincubeDirectory::new(root.clone());
+        let wallet = WalletSettings {
+            name: "Coincube-kt6ht0kt".to_string(),
+            alias: None,
+            descriptor_checksum: "kt6ht0kt".to_string(),
+            pinned_at: Some(1_720_000_000),
+            keys: Vec::new(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: Some(crate::app::settings::AuthConfig::new(
+                "alex@example.test".into(),
+                "legacy-wallet".into(),
+            )),
+            start_internal_bitcoind: Some(false),
+            pending_rescan: None,
+            keychain_keys_recorded: false,
+        };
+        let cube = cube("local-a", "Local A", Network::Bitcoin);
+        let modal = DeleteCubeModal::new(
+            cube,
+            datadir.network_directory(Network::Bitcoin),
+            root.clone(),
+            Some(wallet),
+            Some(false),
+            false,
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "opening Delete must not wait on the legacy backend"
+        );
+        assert!(
+            modal.warning.is_none(),
+            "an unreachable legacy backend must not disable Delete"
+        );
+        assert!(
+            modal
+                .wallet_settings
+                .as_ref()
+                .and_then(|wallet| wallet.remote_backend_auth.as_ref())
+                .is_some(),
+            "the legacy backend is still recorded; Delete no longer asks it"
+        );
+        let _ = modal.view();
+        // The confirm button is enabled exactly when the PIN is ready, there
+        // is no warning, and no daemon stop is in progress.
+        assert!(!modal.cube.has_pin(&root));
+        assert!(!modal.waiting_for_stop);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn modal_views_and_non_destructive_modal_updates_build() {
         let cube = cube("local-a", "Local A", Network::Bitcoin);
@@ -12184,11 +12572,6 @@ mod tests {
             DeleteCubeMessage::DeleteConnectBackup(true),
         )));
         assert!(delete_modal.delete_connect_backup);
-
-        let _ = delete_modal.update(Message::View(ViewMessage::DeleteCube(
-            DeleteCubeMessage::DeleteLianaConnect(true),
-        )));
-        assert!(delete_modal.delete_liana_connect);
 
         let remote = remote_cube("remote-a", "Remote A", Network::Bitcoin);
         let _ = DeleteRemoteCubeModal {
@@ -12359,7 +12742,7 @@ mod tests {
         }
 
         let mut blocked_local = local();
-        blocked_local.warning = Some(DeleteError::Connect("blocked".into()));
+        blocked_local.warning = Some(DeleteError::Io(std::io::Error::other("blocked")));
         let blocked_view = capture::inspect_full_window(
             "delete-cube-blocked-keyboard",
             blocked_local.view(),
@@ -15474,7 +15857,7 @@ mod chain_identity_open_tests {
     }
 
     #[test]
-    fn authenticated_flag_controls_fork_launcher_and_never_enables_restore() {
+    fn authenticated_flag_controls_fork_launcher_and_its_restore() {
         let dir = tmp_datadir("fork-feature-entry");
         let mut home = Home::new(CoincubeDirectory::new(dir.clone()), Some(Network::Bitcoin)).0;
         let mut client = CoincubeClient::new();
@@ -15508,15 +15891,25 @@ mod chain_identity_open_tests {
                 }
                 assert_eq!(home.network, ChainId::BitcoinBlake2b);
                 assert!(!dir.join("bitcoin-blake2b").exists());
-                // Creation is the Cube journey; import and restore stay closed.
-                for event in [
-                    ViewMessage::CreateWallet,
-                    ViewMessage::ImportWallet,
-                    ViewMessage::SubmitRecovery,
-                    ViewMessage::RestoreFromRecoveryKit("synthetic".into()),
-                ] {
+                // Creation is the Cube journey; the Vault installer's own
+                // create and import routes stay closed.
+                for event in [ViewMessage::CreateWallet, ViewMessage::ImportWallet] {
                     assert!(drain(home.update(Message::View(event))).is_empty());
                 }
+                // A Connect Cube restores from its Recovery Kit as on Bitcoin.
+                let restore = drain(home.update(Message::View(
+                    ViewMessage::RestoreFromRecoveryKit("synthetic".into()),
+                )));
+                assert!(matches!(
+                    restore.as_slice(),
+                    [Message::Install(
+                        _,
+                        ChainId::BitcoinBlake2b,
+                        UserFlow::RestoreFromRecoveryKit { cube_uuid: Some(uuid) },
+                        _,
+                    )] if uuid == "synthetic"
+                ));
+                assert!(!dir.join("bitcoin-blake2b").exists());
                 home.developer_mode = true;
                 home.refresh_displayed_networks();
                 assert!(home

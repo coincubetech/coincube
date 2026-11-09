@@ -637,7 +637,7 @@ fn no_cube_signed_out_launcher_close_focuses_mounted_sign_in() {
         assert_eq!(
             focus,
             Some(iced::advanced::widget::Id::new(
-                "tenshu.launcher.catalog:control:sign-in"
+                "tenshu.launcher.catalog:control:connect"
             ))
         );
         assert!(
@@ -705,7 +705,6 @@ fn launcher_auth_changes_return_focus_to_mounted_control() {
                         tab::State::Home(home) => home.connect_sheet_origin_id(),
                         _ => unreachable!(),
                     };
-                    assert_ne!(origin.focus, Some(expected.clone()));
                     assert_eq!(gui.connect_return_focus(&origin), Some(expected.clone()));
                     let task = if escape {
                         gui.update(Message::KeyPressed(Key::Escape))

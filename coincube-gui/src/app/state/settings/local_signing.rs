@@ -356,10 +356,7 @@ impl LocalSigningState {
         }
         let checksum = wallet.descriptor_checksum.clone();
         self.keychain_lookup_started = Some(checksum.clone());
-        // A remote-backend Vault keeps its keys on the backend, not in the
-        // local settings file, so its answer lasts for this session only.
-        let persist =
-            daemon.is_some_and(|d| d.backend() != crate::daemon::DaemonBackend::RemoteBackend);
+        let persist = daemon.is_some();
         Task::perform(
             super::keychain_backfill::lookup(
                 cache.datadir_path.clone(),

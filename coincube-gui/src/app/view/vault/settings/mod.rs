@@ -35,7 +35,6 @@ use crate::{
         settings::ProviderKey,
         view::vault::hw,
     },
-    help,
     hw::HardwareWallet,
     node::{
         bitcoind::{NodeFlavor, RpcAuthType, RpcAuthValues},
@@ -51,11 +50,7 @@ fn header<'a>(title: &'a str, _msg: SettingsMessage) -> Row<'a, Message> {
     Row::new().push(h3(title).bold())
 }
 
-pub fn list<'a>(
-    menu: &'a Menu,
-    cache: &'a Cache,
-    _is_remote_backend: bool,
-) -> Element<'a, Message> {
+pub fn list<'a>(menu: &'a Menu, cache: &'a Cache) -> Element<'a, Message> {
     // Defensive fallback for Settings(None) + no inner section state.
     let header = Button::new(text("Settings").size(30).bold())
         .style(theme::button::transparent)
@@ -341,64 +336,6 @@ pub fn plaintext_export_review<'a>() -> Element<'a, Message> {
             ),
     )
     .into()
-}
-
-pub fn remote_backend_section<'a>(
-    menu: &'a Menu,
-    cache: &'a Cache,
-    email_form: &form::Value<String>,
-    processing: bool,
-    success: bool,
-) -> Element<'a, Message> {
-    let header = header("Backend", SettingsMessage::EditRemoteBackendSettings);
-
-    let content = card::simple(
-        Column::new()
-            .spacing(20)
-            .push(text("Grant access to wallet to another user"))
-            .push(
-                form::Form::new_trimmed("User email", email_form, |email| {
-                    Message::Settings(SettingsMessage::RemoteBackendSettings(
-                        RemoteBackendSettingsMessage::EditInvitationEmail(email),
-                    ))
-                })
-                .warning("Email is invalid")
-                .size(P1_SIZE)
-                .padding(10),
-            )
-            .push(
-                Row::new()
-                    .push(if success {
-                        Some(text("Invitation was sent").style(theme::text::success))
-                    } else {
-                        None
-                    })
-                    .push(Space::new().width(Length::Fill))
-                    .push(button::secondary(None, "Send invitation").on_press_maybe(
-                        if !processing && email_form.valid {
-                            Some(Message::Settings(SettingsMessage::RemoteBackendSettings(
-                                RemoteBackendSettingsMessage::SendInvitation,
-                            )))
-                        } else {
-                            None
-                        },
-                    )),
-            ),
-    )
-    .width(Length::Fill);
-
-    dashboard(
-        menu,
-        cache,
-        Column::new()
-            .spacing(20)
-            .push(header)
-            .push(content)
-            .push(link(
-                help::CHANGE_BACKEND_OR_NODE_URL,
-                "I want to connect to my own node",
-            )),
-    )
 }
 
 pub fn bitcoind_edit<'a>(
@@ -3513,16 +3450,12 @@ mod tests {
     fn dashboard_wrapped_settings_sections_build() {
         let menu = menu();
         let cache = Cache::default();
-        let valid_email = value("friend@example.com", true);
-        let invalid_email = value("not an email", false);
 
         let _ = link("https://example.com/docs", "Docs");
-        let _ = list(&menu, &cache, false);
+        let _ = list(&menu, &cache);
         let _ = bitcoind_settings(&menu, &cache, vec![text("child").into()]);
         let _ = import_export(&menu, &cache, true);
         let _ = import_export(&menu, &cache, false);
-        let _ = remote_backend_section(&menu, &cache, &valid_email, false, true);
-        let _ = remote_backend_section(&menu, &cache, &invalid_email, true, false);
     }
 
     #[test]

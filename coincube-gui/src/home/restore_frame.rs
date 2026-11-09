@@ -273,6 +273,21 @@ pub(crate) fn nav_label<'a, M: Clone + 'a>(label: &'static str, current: bool) -
         .into()
 }
 
+/// A path list row for screens with no focus routing (the installer):
+/// pressed, it leaves for that path; without a message it only shows it.
+pub(crate) fn nav_action<'a, M: Clone + 'a>(
+    label: &'static str,
+    current: bool,
+    on_press: Option<M>,
+) -> Element<'a, M> {
+    iced::widget::Button::new(p2_regular(label))
+        .width(Length::Fill)
+        .padding([10, 12])
+        .style(nav_style(current))
+        .on_press_maybe(on_press)
+        .into()
+}
+
 /// The wizard sheet over a plain backdrop, for screens with no Launcher
 /// behind them (the installer's restores, an open Cube's import): the same
 /// dimmed modal presentation, under a bar with the brand.

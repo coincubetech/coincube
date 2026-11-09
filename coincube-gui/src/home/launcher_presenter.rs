@@ -503,7 +503,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
                 .compact()
                 .on_press(ViewMessage::RenameCatalog(row.key.clone())),
             )
-            .push((!row.cube.network.is_blake2b()).then(|| {
+            .push(
                 ActionButton::new(
                     launcher_catalog::delete_id(&row.key),
                     "Delete…",
@@ -511,8 +511,8 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
                     focus,
                 )
                 .compact()
-                .on_press(ViewMessage::DeleteCatalog(row.key.clone()))
-            })),
+                .on_press(ViewMessage::DeleteCatalog(row.key.clone())),
+            ),
     );
     tenshu::card(content).max_width(DETAILS_WIDTH).into()
 }
@@ -761,13 +761,11 @@ fn floor_details<'a>(
             "Back",
             ViewMessage::Catalog(CatalogMessage::ClearSelection),
         ))
-        .push((!row.cube.network.is_blake2b()).then(|| {
-            face_link(
-                launcher_catalog::delete_id(&row.key),
-                "Delete…",
-                ViewMessage::DeleteCatalog(row.key.clone()),
-            )
-        }));
+        .push(face_link(
+            launcher_catalog::delete_id(&row.key),
+            "Delete…",
+            ViewMessage::DeleteCatalog(row.key.clone()),
+        ));
     Container::new(
         Column::new()
             .push(
@@ -870,7 +868,7 @@ fn ghost_copy(cube: &super::RemoteCube) -> (&'static str, tenshu::Tone, &'static
         None => (
             "No Recovery Kit in Connect",
             tenshu::Tone::Warn,
-            "Connect has this Cube's registration but not its keys, so it can't be restored from here. Open it on the device that holds it and add a Recovery Kit, or import it with its recovery phrase.",
+            "Connect has this Cube's registration but not its keys, so it can't be restored from here. If another device still has this Cube, open it there and add a Recovery Kit, or import it with its recovery phrase.",
         ),
     }
 }
@@ -994,6 +992,7 @@ fn ghost_details<'a>(
 /// state, over a hit area that turns it to its details face.
 fn ghost_slot<'a>(
     cube: &super::RemoteCube,
+    trouble: Option<crate::services::connect::grpc::trouble::Trouble>,
     layout: &launcher_scene::Layout,
     active: bool,
     closes_face: bool,
@@ -1019,7 +1018,7 @@ fn ghost_slot<'a>(
                     // `.st.warn`: nothing restores it here.
                     let warn =
                         launcher_catalog::ghost_kind(cube) == launcher_scene::Ghost::Unrestorable;
-                    iced::widget::text(launcher_catalog::ghost_status(cube))
+                    iced::widget::text(launcher_catalog::ghost_status(cube, trouble))
                         .size(13)
                         .style(move |theme: &theme::Theme| iced::widget::text::Style {
                             color: Some(if warn {
@@ -1884,9 +1883,13 @@ fn floor_layout<'a>(
                 pose.dim > 0.5,
                 closes_face,
             ),
-            FloorEntry::Ghost(cube) => {
-                ghost_slot(cube, &layout, pose.spin > 0.0 || covered, closes_face)
-            }
+            FloorEntry::Ghost(cube) => ghost_slot(
+                cube,
+                projection.connect_trouble,
+                &layout,
+                pose.spin > 0.0 || covered,
+                closes_face,
+            ),
         });
     }
     stage = stage.push(
@@ -4648,6 +4651,7 @@ mod tests {
     #[test]
     fn catalog_projection_keeps_unfiltered_counts() {
         let catalog = Projection {
+            connect_trouble: None,
             locals: Vec::new(),
             remotes: Vec::new(),
             local_total: 3,

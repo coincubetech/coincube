@@ -1401,7 +1401,6 @@ impl GUI {
                     tab::State::App(_)
                         | tab::State::Loader(_)
                         | tab::State::Installer(_)
-                        | tab::State::Login(_)
                         | tab::State::PinEntry(_)
                         | tab::State::PasskeyUnlock(_)
                 )
@@ -1628,6 +1627,13 @@ impl GUI {
         Task::none()
     }
 
+    /// Shows or clears the signed-out-by-Connect notice in every tab.
+    fn relay_connect_signed_out_by(&mut self, reason: Option<crate::app::SignedOutBy>) {
+        for (_, pane) in self.panes.iter_mut() {
+            pane.set_connect_signed_out_by(reason);
+        }
+    }
+
     fn connect_return_focus(&self, origin: &OverlayOrigin) -> Option<iced::advanced::widget::Id> {
         let saved = origin.focus.as_ref()?;
         let tab = self
@@ -1748,6 +1754,11 @@ impl GUI {
                 iced_runtime::task::widget(iced::advanced::widget::operation::focusable::focus(id))
             }
             ConnectSheetMessage::Close => self.close_connect_sheet(),
+            // Not now: the red light clears in every tab and the sheet closes.
+            ConnectSheetMessage::DismissSignOut => {
+                self.relay_connect_signed_out_by(None);
+                self.close_connect_sheet()
+            }
             ConnectSheetMessage::SelectSection(section) => {
                 let origin = sheet.origin.clone();
                 let was_duress = matches!(
@@ -2464,6 +2475,26 @@ impl GUI {
                 }
             }
         }
+        // The signed-out-by-Connect notice is one notice for the whole app
+        // (L3): whichever tab learns it, or dismisses it, every tab follows.
+        if let Message::Pane(_, pane::Message::Tab(_, inner)) = &message {
+            let relay = match inner.as_ref() {
+                tab::Message::Run(AppMessage::ConnectSignedOutBy(reason))
+                | tab::Message::Launch(home::Message::ConnectSignedOutBy(reason)) => {
+                    Some(Some(*reason))
+                }
+                tab::Message::Run(AppMessage::View(
+                    crate::app::view::Message::DismissConnectSignOut,
+                ))
+                | tab::Message::Launch(home::Message::View(
+                    home::ViewMessage::DismissConnectSignOut,
+                )) => Some(None),
+                _ => None,
+            };
+            if let Some(reason) = relay {
+                self.relay_connect_signed_out_by(reason);
+            }
+        }
         // A log-out or a sign-in from any tab reaches every tab, with its kind
         // and where it came from (`Tab::invalidate_fork_session`). A
         // `SetSession` counts as a sign-in only if the tab it came from will
@@ -2666,6 +2697,10 @@ impl GUI {
                 }),
                 tab::AuthChange::LogOut => true,
             };
+            if accepted && matches!(change, tab::AuthChange::SignIn { .. }) {
+                // A sign-in anywhere ends the signed-out notice everywhere.
+                self.relay_connect_signed_out_by(None);
+            }
             if accepted {
                 for (&pane_id, pane) in self.panes.iter_mut() {
                     for tab in &mut pane.tabs {
@@ -3367,7 +3402,6 @@ impl GUI {
                                     tab::State::App(_)
                                         | tab::State::Loader(_)
                                         | tab::State::Installer(_)
-                                        | tab::State::Login(_)
                                         | tab::State::PinEntry(_)
                                         | tab::State::PasskeyUnlock(_)
                                 ))
@@ -3560,7 +3594,6 @@ impl GUI {
                                 tab::State::App(_)
                                     | tab::State::Loader(_)
                                     | tab::State::Installer(_)
-                                    | tab::State::Login(_)
                                     | tab::State::PinEntry(_)
                                     | tab::State::PasskeyUnlock(_)
                             )
@@ -5387,7 +5420,6 @@ mod fork_auth_dispatch_tests {
         let (mut installer, _) = installer::Installer::new(
             root.clone(),
             bitcoin::Network::Bitcoin,
-            None,
             installer::UserFlow::CreateWallet,
             false,
             None,
@@ -7156,7 +7188,6 @@ mod lock_cube_dispatch_tests {
         let (installing, install_task) = crate::installer::Installer::try_new_for_chain(
             root.clone(),
             same_settings.network,
-            None,
             crate::installer::UserFlow::CreateWallet,
             true,
             Some(same_settings),
@@ -7447,34 +7478,6 @@ mod single_open_lifecycle_tests {
                     drop(startup);
                     let mut gui = GUI::reviewer_app_home_gui(source, home);
                     let pane_id = gui.focus.unwrap();
-                    let login_settings = app::settings::WalletSettings {
-                        name: "Synthetic remote shell".into(),
-                        alias: None,
-                        descriptor_checksum: "remote-shell".into(),
-                        pinned_at: None,
-                        keys: Vec::new(),
-                        hardware_wallets: Vec::new(),
-                        remote_backend_auth: Some(app::settings::AuthConfig::new(
-                            "test@example.invalid".into(),
-                            "remote-wallet".into(),
-                        )),
-                        start_internal_bitcoind: None,
-                        pending_rescan: None,
-                        keychain_keys_recorded: false,
-                    };
-                    let (login, startup) = crate::services::connect::login::CoincubeLiteLogin::new(
-                        root.clone(),
-                        bitcoin::Network::Bitcoin,
-                        login_settings,
-                        None,
-                        None,
-                    );
-                    drop(startup);
-                    gui.panes
-                        .get_mut(pane_id)
-                        .unwrap()
-                        .tabs
-                        .push(tab::Tab::new(3, tab::State::Login(login)));
                     app::session::open(source_id, zeroize::Zeroizing::new("2468".into()));
                     drop(gui.update(Message::Pane(
                         pane_id,
@@ -7496,10 +7499,6 @@ mod single_open_lifecycle_tests {
                     assert!(pane
                         .tabs
                         .iter()
-                        .all(|tab| !matches!(tab.state, tab::State::Login(_))));
-                    assert!(pane
-                        .tabs
-                        .iter()
                         .any(|tab| matches!(tab.state, tab::State::Installer(_))));
                     assert!(!app::session::is_open());
                     drop(gui);
@@ -7514,7 +7513,7 @@ mod single_open_lifecycle_tests {
     }
 
     #[test]
-    fn accepted_remote_cube_open_retires_old_owner_before_login_screen() {
+    fn legacy_liana_connect_cube_returns_to_the_launcher_with_its_notice() {
         let result = std::thread::Builder::new()
             .name("remote-login-admission".into())
             .stack_size(8 * 1024 * 1024)
@@ -7586,7 +7585,8 @@ mod single_open_lifecycle_tests {
                     tab::State::PinEntry(_)
                 ));
                 // The public unlock callback is synthetic; the real Tab
-                // completion chooses Login from the saved remote wallet type.
+                // completion refuses the retired backend from the saved
+                // wallet type and says where the wallet still lives.
                 drop(gui.update(Message::Pane(
                     pane_id,
                     pane::Message::tab(
@@ -7609,10 +7609,12 @@ mod single_open_lifecycle_tests {
                         },
                     ),
                 )));
-                assert!(matches!(
-                    gui.panes.get(pane_id).unwrap().tabs[0].state,
-                    tab::State::Login(_)
-                ));
+                let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+                    panic!("a legacy Liana Connect Cube must return to the Launcher");
+                };
+                let notice = home.error().expect("the retired backend is explained");
+                assert!(notice.contains("Liana Connect"));
+                assert!(notice.contains("test@example.invalid"));
                 drop(gui);
                 std::fs::remove_dir_all(path).ok();
             })

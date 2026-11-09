@@ -14,7 +14,7 @@ use super::{
 };
 use crate::{
     app::{
-        settings::{self, CubeSettings, ProviderKey},
+        settings::{self, CubeSettings},
         view::Close,
     },
     backup::Backup,
@@ -24,10 +24,6 @@ use crate::{
     node::{
         bitcoind::{Bitcoind, ConfigField, RpcAuthType},
         electrum, esplora, NodeType,
-    },
-    services::{
-        self,
-        connect::client::{auth::AuthClient, backend::api},
     },
 };
 
@@ -53,6 +49,9 @@ pub enum Message {
     Skip,
     Previous,
     BackToApp(Network),
+    /// A press on Import or restore's path list: back to the Launcher, on
+    /// that path.
+    LeaveRestore(super::RestoreDestination),
     /// A Recovery Kit or phone restore's Done: open the restored Cube.
     OpenRestoredCube,
     Install,
@@ -66,8 +65,6 @@ pub enum Message {
     CreateTaprootDescriptor(bool),
     FocusAction(iced::advanced::widget::Id),
     SelectDescriptorTemplate(context::DescriptorTemplate),
-    SelectBackend(SelectBackend),
-    ImportRemoteWallet(ImportRemoteWallet),
     SelectBitcoindType(SelectBitcoindTypeMsg),
     InternalBitcoind(InternalBitcoindMsg),
     DefineNode(DefineNode),
@@ -78,9 +75,7 @@ pub enum Message {
     MnemonicWord(usize, String),
     ConfirmFreshSeedBackup(bool),
     ImportMnemonic(bool),
-    RedeemNextKey,
-    KeyRedeemed(ProviderKey, Result<(), services::keys::Error>),
-    AllKeysRedeemed,
+    InstallFinished,
     BackupDescriptor,
     ExportEncryptedDescriptor(Result<Box<CoincubeDescriptor>, encrypted_backup::Error>),
     ImportExport(ImportExportMessage),
@@ -104,8 +99,8 @@ pub enum Message {
     /// `spark_backend = None` and the Spark panels stayed empty until
     /// the user closed and re-opened the Cube (at which point the
     /// normal PIN-entry path loads Spark correctly). For every other
-    /// flow (fresh install, remote backend, etc.) the clients are
-    /// built downstream (PIN entry, login) and these slots stay `None`.
+    /// flow (fresh install, etc.) the clients are built downstream
+    /// (PIN entry) and these slots stay `None`.
     CubeSaved(
         CubeSaveResult,
         Option<Box<settings::WalletSettings>>,
@@ -154,36 +149,6 @@ impl From<(Fingerprint, ChildNumber)> for Message {
     fn from(value: (Fingerprint, ChildNumber)) -> Self {
         Self::SelectAccount(value.0, value.1)
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum SelectBackend {
-    // view messages
-    RequestOTP,
-    EditEmail,
-    EmailEdited(String),
-    OTPEdited(String),
-    ContinueWithLocalWallet(bool),
-    // Commands messages
-    OTPRequested(Result<(AuthClient, String), Error>),
-    OTPResent(Result<(), Error>),
-    ExistingConnectAccounts(Vec<String>),
-    SelectConnectAccount(String),
-    Connected(Result<context::RemoteBackend, Error>),
-}
-
-#[derive(Debug, Clone)]
-pub enum ImportRemoteWallet {
-    RemoteWallets(Result<Vec<api::Wallet>, Error>),
-    ImportDescriptor(String),
-    ConfirmDescriptor,
-    ImportInvitationToken(String),
-    FetchInvitation,
-    InvitationFetched(Result<api::WalletInvitation, Error>),
-    AcceptInvitation,
-    InvitationAccepted(Result<api::Wallet, Error>),
-    ImportDescriptorFromFile,
-    ImportExport(ImportExportMessage),
 }
 
 #[derive(Debug, Clone)]
@@ -513,7 +478,6 @@ pub enum DefineDescriptor {
     KeysEdit(PathKind, Vec<(usize, usize)>),
     Path(usize, DefinePath),
     AddRecoveryPath,
-    AddSafetyNetPath,
     ThresholdSequenceModal(ThresholdSequenceModal),
     Reset,
     AliasEdited(Fingerprint, String /* alias*/),

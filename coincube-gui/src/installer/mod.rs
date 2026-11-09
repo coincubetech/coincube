@@ -163,9 +163,8 @@ use coincube_ui::{
 };
 use coincubed::config::EsploraConfig;
 use coincubed::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth, Config};
-pub use context::{Context, RemoteBackend, RestoreSource};
+pub use context::{Context, RestoreSource};
 use iced::{clipboard, Subscription, Task};
-use std::{collections::HashMap, ops::Deref};
 use tokio::runtime::Handle;
 use tracing::{error, info, warn};
 
@@ -176,24 +175,13 @@ use std::sync::{Arc, Mutex};
 use crate::{
     app::{
         config as gui_config,
-        settings::{update_settings_file, AuthConfig, SettingsError, WalletId, WalletSettings},
+        settings::{update_settings_file, SettingsError, WalletId, WalletSettings},
         wallet::wallet_name,
     },
-    daemon::{Daemon, DaemonError},
+    daemon::DaemonError,
     delete,
     dir::{CoincubeDirectory, NetworkDirectory},
     hw::{HardwareWalletConfig, HardwareWalletMessage, HardwareWallets},
-    services::{
-        self,
-        connect::client::{
-            auth::AuthError,
-            backend::{
-                api::payload::{Provider, ProviderKey},
-                BackendClient, BackendWalletClient,
-            },
-            cache::{update_connect_cache, CacheAccountAction},
-        },
-    },
     signer::Signer,
 };
 
@@ -201,12 +189,11 @@ pub use claim::ClaimSource;
 pub use descriptor::{KeySource, KeySourceKind, KeychainKeyOwner, PathKind, PathSequence};
 pub use message::Message;
 use step::{
-    BackupDescriptor, BackupMnemonic, ChooseBackend, ChooseDescriptorTemplate, ClaimOverview,
-    CoincubeConnectStep, DefineDescriptor, DefineNode, DescriptorTemplateDescription, Final,
-    ImportDescriptor, ImportRemoteWallet, InheritanceRestoreStep, InternalBitcoindStep,
-    OwnerKeychainRestoreStep, RecoverMnemonic, RecoveryKitRestoreStep, RegisterDescriptor,
-    RemoteBackendLogin, RestorePinSetupStep, RestoreScope, SelectBitcoindTypeStep, Step,
-    WalletAlias,
+    BackupDescriptor, BackupMnemonic, ChooseDescriptorTemplate, ClaimOverview, CoincubeConnectStep,
+    DefineDescriptor, DefineNode, DescriptorTemplateDescription, Final, ImportDescriptor,
+    InheritanceRestoreStep, InternalBitcoindStep, OwnerKeychainRestoreStep, RecoverMnemonic,
+    RecoveryKitRestoreStep, RegisterDescriptor, RestorePinSetupStep, RestoreScope,
+    SelectBitcoindTypeStep, Step, WalletAlias,
 };
 
 #[derive(Debug, Clone)]
@@ -276,6 +263,16 @@ pub enum RestorePath {
     /// Restore from Cube Recovery Kit.
     Kit,
     /// Recover with phone (the owner's Keychain).
+    Phone,
+}
+
+/// A row of Import or restore's path list, pressed in the installer: the
+/// Launcher owns every path, so the installer hands the press back to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreDestination {
+    Overview,
+    ImportBitcoin,
+    Kit,
     Phone,
 }
 
@@ -437,6 +434,8 @@ pub struct Installer {
     steps: Vec<Box<dyn Step>>,
     /// A Cube restore drawn in Import or restore (P-Restore), and its chain.
     restore: Option<(RestorePath, crate::chain::ChainId)>,
+    /// The path list row that left the restore, for the Launcher to open.
+    restore_exit: Option<RestoreDestination>,
     /// Create Vault from inside an open Cube, drawn under its own heading
     /// and stepper. Bitcoin Blake2b keeps the installer's layout.
     create_vault: bool,
@@ -509,6 +508,11 @@ impl Installer {
         Task::none()
     }
 
+    /// The path list row that left a restore, taken once by the Launcher.
+    pub fn take_restore_exit(&mut self) -> Option<RestoreDestination> {
+        self.restore_exit.take()
+    }
+
     /// Public identifier of the generated Cube master signer.
     pub fn master_signer_fingerprint(&self) -> bitcoin::bip32::Fingerprint {
         self.signer.lock().unwrap().fingerprint()
@@ -520,7 +524,6 @@ impl Installer {
     pub fn try_new_for_chain(
         destination_path: CoincubeDirectory,
         chain: crate::chain::ChainId,
-        remote_backend: Option<BackendClient>,
         user_flow: UserFlow,
         launched_from_app: bool,
         cube_settings: Option<crate::app::settings::CubeSettings>,
@@ -565,14 +568,20 @@ impl Installer {
             }
         }
         if chain.is_blake2b()
-            && (remote_backend.is_some()
-                || !matches!(
-                    user_flow,
-                    UserFlow::CreateWallet | UserFlow::ClaimBlake2b { .. }
-                ))
+            && !matches!(
+                user_flow,
+                UserFlow::CreateWallet
+                    | UserFlow::ClaimBlake2b { .. }
+                    | UserFlow::RestoreFromRecoveryKit { .. }
+                    | UserFlow::RecoverOwnCubeWithPhone {
+                        full_cube: true,
+                        ..
+                    }
+            )
         {
             return Err(Error::Unexpected(
-                "Bitcoin Blake2b supports only a Connect-backed Vault creation or claim flow"
+                "Bitcoin Blake2b supports only a Connect-backed Vault creation, claim or \
+                 Cube restore flow"
                     .to_string(),
             ));
         }
@@ -601,7 +610,6 @@ impl Installer {
             let (mut installer, task) = Self::build_for_chain(
                 destination_path,
                 chain,
-                remote_backend,
                 user_flow,
                 launched_from_app,
                 cube_settings,
@@ -616,7 +624,6 @@ impl Installer {
         Ok(Self::build_for_chain(
             destination_path,
             chain,
-            remote_backend,
             user_flow,
             launched_from_app,
             cube_settings,
@@ -635,7 +642,6 @@ impl Installer {
     pub fn new(
         destination_path: CoincubeDirectory,
         network: bitcoin::Network,
-        remote_backend: Option<BackendClient>,
         user_flow: UserFlow,
         launched_from_app: bool,
         cube_settings: Option<crate::app::settings::CubeSettings>,
@@ -647,7 +653,6 @@ impl Installer {
         Self::try_new_for_chain(
             destination_path,
             network.into(),
-            remote_backend,
             user_flow,
             launched_from_app,
             cube_settings,
@@ -662,7 +667,6 @@ impl Installer {
     fn build_for_chain(
         destination_path: CoincubeDirectory,
         chain: crate::chain::ChainId,
-        remote_backend: Option<BackendClient>,
         user_flow: UserFlow,
         launched_from_app: bool,
         cube_settings: Option<crate::app::settings::CubeSettings>,
@@ -699,35 +703,6 @@ impl Installer {
         let mut context = Context::new_for_chain(
             chain,
             destination_path.clone(),
-            remote_backend
-                .map(RemoteBackend::WithoutWallet)
-                .unwrap_or_else(|| {
-                    match (&user_flow, network) {
-                        // CreateWallet no longer has a ChooseBackend step; always local.
-                        (UserFlow::CreateWallet, _) => RemoteBackend::None,
-                        // Restore flows also have no ChooseBackend step — the
-                        // user is restoring a descriptor (and optionally a
-                        // seed) into a fresh local install. Connect auth still
-                        // happens via the `CoincubeConnectStep` further down
-                        // the flow, which sets `ctx.connect_jwt` and lets
-                        // Final idempotently re-register the Cube. Without
-                        // this match arm `ctx.remote_backend` stays at
-                        // `Undefined` and the `Message::Install` match panics
-                        // with `unreachable!("Must be defined at this point")`.
-                        // A claim target is always local + Connect Esplora;
-                        // `try_new_for_chain` refuses a remote backend on the
-                        // fork chain outright.
-                        (UserFlow::ClaimBlake2b { .. }, _)
-                        | (UserFlow::RestoreFromRecoveryKit { .. }, _)
-                        | (UserFlow::RestoreVaultFromRecoveryKit, _)
-                        | (UserFlow::RecoverInheritedVault { .. }, _)
-                        | (UserFlow::RecoverOwnCubeWithPhone { .. }, _) => RemoteBackend::None,
-                        // AddWallet still has ChooseBackend which transitions away from Undefined.
-                        (_, Network::Bitcoin | Network::Signet) => RemoteBackend::Undefined,
-                        // Non-mainnet/signet AddWallet skips backend choice.
-                        _ => RemoteBackend::None,
-                    }
-                }),
             cube_settings.as_ref(),
             coincube_client,
         );
@@ -839,6 +814,7 @@ impl Installer {
             && (!chain.is_blake2b() || context.in_cube_fork_vault);
         let mut installer = Installer {
             restore,
+            restore_exit: None,
             create_vault,
             navigation_error: None,
             claim_target_saved: false,
@@ -919,13 +895,6 @@ impl Installer {
                         Final::new().into(),
                     ],
                     UserFlow::AddWallet => vec![
-                        ChooseBackend::new(network).into(),
-                        RemoteBackendLogin::new(
-                            network,
-                            destination_path.network_directory(network),
-                        )
-                        .into(),
-                        ImportRemoteWallet::new(network).into(),
                         ImportDescriptor::new(network).into(),
                         RecoverMnemonic::default().into(),
                         // W14 — offer to pull the descriptor from Connect
@@ -1099,7 +1068,6 @@ impl Installer {
         self.context.mcp_proposal = Some(proposal.clone());
         // This local demo has no Connect enrollment or remote key fetching.
         self.context.coincube_client = None;
-        self.context.remote_backend = RemoteBackend::None;
         self.context.use_coincube_connect = false;
         self.steps = vec![
             Box::new(proposal_handoff::ProposalHandoff::new(proposal.clone())),
@@ -1226,9 +1194,7 @@ impl Installer {
                 message,
                 Message::Installed(..)
                     | Message::ConnectVaultCreated(..)
-                    | Message::AllKeysRedeemed
-                    | Message::KeyRedeemed(..)
-                    | Message::RedeemNextKey
+                    | Message::InstallFinished
                     | Message::Exit(..)
                     | Message::CubeSaved(..)
                     | Message::CubeSaveFailed(..)
@@ -1294,6 +1260,10 @@ impl Installer {
             }
             Message::Next => self.next(),
             Message::Previous => self.previous(),
+            Message::LeaveRestore(destination) => {
+                self.restore_exit = Some(destination);
+                Task::done(Message::BackToApp(self.network))
+            }
             Message::Install => {
                 #[cfg(feature = "mcp-proposals")]
                 if self.context.mcp_proposal.is_some() {
@@ -1302,8 +1272,10 @@ impl Installer {
                     }
                     self.proposal_install_dispatched = true;
                 }
+                // A restored Cube with no Vault is its seed alone.
                 if self.context.bitcoin_config.chain.is_blake2b()
-                    && (self.context.descriptor.is_none() || !self.context.remote_backend.is_none())
+                    && self.context.descriptor.is_none()
+                    && self.context.recovered_signer.is_none()
                 {
                     return Task::done(Message::Installed(
                         None,
@@ -1321,30 +1293,13 @@ impl Installer {
                     let wallet_id = WalletId::generate(descriptor);
                     let context = self.context.clone();
                     let signer = self.signer.clone();
-                    let task = match &self.context.remote_backend {
-                        RemoteBackend::WithoutWallet(backend) => Task::perform(
-                            with_wallet_id(
-                                wallet_id.clone(),
-                                create_remote_wallet(context, wallet_id, signer, backend.clone()),
-                            ),
-                            |(id, res)| Message::Installed(Some(id), res.map(Some)),
+                    let task = Task::perform(
+                        with_wallet_id(
+                            wallet_id.clone(),
+                            install_local_wallet(context, wallet_id, signer),
                         ),
-                        RemoteBackend::WithWallet(backend) => Task::perform(
-                            with_wallet_id(
-                                wallet_id.clone(),
-                                import_remote_wallet(context, wallet_id, backend.clone()),
-                            ),
-                            |(id, res)| Message::Installed(Some(id), res.map(Some)),
-                        ),
-                        RemoteBackend::None => Task::perform(
-                            with_wallet_id(
-                                wallet_id.clone(),
-                                install_local_wallet(context, wallet_id, signer),
-                            ),
-                            |(id, res)| Message::Installed(Some(id), res.map(Some)),
-                        ),
-                        RemoteBackend::Undefined => unreachable!("Must be defined at this point"),
-                    };
+                        |(id, res)| Message::Installed(Some(id), res.map(Some)),
+                    );
                     if self.context.bitcoin_config.chain.is_blake2b() {
                         let (task, handle) = task.abortable();
                         self.fork_install_task = Some(handle.abort_on_drop());
@@ -1547,11 +1502,7 @@ impl Installer {
             .map(|(path, _)| path.title())
             .or(self.create_vault.then_some(CREATE_VAULT_TITLE))
             .map(view::FramedGuard::enter);
-        step.view(
-            &self.hws,
-            self.progress(),
-            self.context.remote_backend.user_email(),
-        )
+        step.view(&self.hws, self.progress())
     }
 
     /// The Create Vault stepper for the current step.
@@ -1601,6 +1552,7 @@ impl Installer {
     ) -> Element<'a, Message> {
         use crate::home::restore_frame;
         use coincube_ui::component::text::*;
+        use coincube_ui::widget::ColumnExt;
         use iced::Length;
 
         let stage = self
@@ -1627,17 +1579,39 @@ impl Installer {
                 )
             },
         );
+        // Before anything is written, as for Close, the path list leaves
+        // for the Launcher's path; after, it only shows where the user is.
+        let leave = |destination: RestoreDestination, open: bool| {
+            (stage.is_some() && open).then_some(Message::LeaveRestore(destination))
+        };
         let nav = restore_frame::nav()
-            .push(restore_frame::nav_label("Overview", false))
-            .push(restore_frame::nav_label("Import Bitcoin wallet", false))
-            .push(restore_frame::nav_label(
+            .push(restore_frame::nav_action(
+                "Overview",
+                false,
+                leave(RestoreDestination::Overview, true),
+            ))
+            .push(restore_frame::nav_action(
+                "Import Bitcoin wallet",
+                false,
+                leave(
+                    RestoreDestination::ImportBitcoin,
+                    chain == crate::chain::ChainId::Bitcoin,
+                ),
+            ))
+            .push(restore_frame::nav_action(
                 "Recovery Kit",
                 path == RestorePath::Kit,
+                leave(RestoreDestination::Kit, path != RestorePath::Kit),
             ))
-            .push(restore_frame::nav_label(
-                "Recover with phone",
-                path == RestorePath::Phone,
-            ));
+            .push_maybe(
+                crate::feature_flags::OWNER_KEYCHAIN_RECOVERY_ENABLED.then(|| {
+                    restore_frame::nav_action(
+                        "Recover with phone",
+                        path == RestorePath::Phone,
+                        leave(RestoreDestination::Phone, path != RestorePath::Phone),
+                    )
+                }),
+            );
         let body = iced::widget::scrollable(
             Column::new()
                 .spacing(20)
@@ -1906,17 +1880,6 @@ fn require_installable_chain(ctx: &Context) -> Result<(), Error> {
     Ok(())
 }
 
-/// Remote wallet creation/import cannot represent a Bitcoin Blake2b Vault.
-/// Keep this check at both side-effect boundaries, independent of constructors.
-fn require_remote_installable_chain(ctx: &Context) -> Result<(), Error> {
-    if ctx.bitcoin_config.chain.is_blake2b() {
-        return Err(Error::Unexpected(
-            "Bitcoin Blake2b requires a local Vault with an authenticated Connect backend".into(),
-        ));
-    }
-    require_installable_chain(ctx)
-}
-
 pub async fn install_local_wallet(
     ctx: Context,
     wallet_id: WalletId,
@@ -2116,262 +2079,6 @@ pub async fn install_local_wallet(
     .map_err(|e| Error::Unexpected(e.to_string()))?;
 
     info!("Settings file created");
-
-    Ok(wallet_settings)
-}
-
-pub async fn create_remote_wallet(
-    ctx: Context,
-    wallet_id: WalletId,
-    signer: Arc<Mutex<Signer>>,
-    remote_backend: BackendClient,
-) -> Result<WalletSettings, Error> {
-    require_remote_installable_chain(&ctx)?;
-    let network_datadir = ctx
-        .coincube_directory
-        .network_directory(ctx.bitcoin_config.chain);
-    network_datadir
-        .init()
-        .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
-
-    let descriptor = ctx
-        .descriptor
-        .as_ref()
-        .expect("There must be a descriptor at this point");
-
-    if descriptor
-        .to_string()
-        .contains(&signer.lock().unwrap().fingerprint().to_string())
-    {
-        let password = seed_password(&ctx)?;
-        signer
-            .lock()
-            .unwrap()
-            .store_encrypted_for_chain(
-                &ctx.coincube_directory,
-                ctx.bitcoin_config.chain,
-                &wallet_id.descriptor_checksum,
-                wallet_id
-                    .timestamp
-                    .expect("Every new wallet have now a timestamp"),
-                password.as_str(),
-                ctx.seed_cube_id(),
-                seed_device_secret(&ctx)?.as_ref(),
-            )
-            .map_err(|e| Error::Unexpected(format!("Failed to store mnemonic: {}", e)))?;
-
-        info!("Master signer mnemonic stored (encrypted)");
-    }
-
-    if let Some(signer) = &ctx.recovered_signer {
-        let password = seed_password(&ctx)?;
-        signer
-            .store_encrypted_for_chain(
-                &ctx.coincube_directory,
-                ctx.bitcoin_config.chain,
-                &wallet_id.descriptor_checksum,
-                wallet_id
-                    .timestamp
-                    .expect("Every new wallet have now a timestamp"),
-                password.as_str(),
-                ctx.seed_cube_id(),
-                seed_device_secret(&ctx)?.as_ref(),
-            )
-            .map_err(|e| Error::Unexpected(format!("Failed to store mnemonic: {}", e)))?;
-
-        info!("Recovered signer mnemonic stored (encrypted)");
-    }
-
-    // create coincube GUI configuration file
-    ensure_gui_config(&network_datadir, false)?;
-
-    let pks: Vec<_> = ctx
-        .keys
-        .values()
-        .filter_map(|key| {
-            key.provider_key.as_ref().map(|pk| ProviderKey {
-                fingerprint: key.master_fingerprint.to_string(),
-                uuid: pk.uuid.clone(),
-                token: pk.token.clone(),
-                provider: Provider {
-                    uuid: pk.provider.uuid.clone(),
-                    name: pk.provider.name.clone(),
-                },
-            })
-        })
-        .collect();
-    let wallet = remote_backend
-        .create_wallet(&wallet_name(descriptor), descriptor, &pks)
-        .await
-        .map_err(|e| Error::Unexpected(e.to_string()))?;
-
-    let hws: Vec<HardwareWalletConfig> = ctx
-        .hws
-        .iter()
-        .filter_map(|(kind, fingerprint, token)| {
-            token
-                .as_ref()
-                .map(|token| HardwareWalletConfig::new(kind, *fingerprint, token))
-        })
-        .collect();
-    let descriptor_str = descriptor.to_string();
-    let aliases = ctx
-        .keys
-        .values()
-        .filter_map(|k| {
-            if descriptor_str.contains(&k.master_fingerprint.to_string()) {
-                Some((k.master_fingerprint, k.name.to_string()))
-            } else {
-                None
-            }
-        })
-        .collect();
-    remote_backend
-        .update_wallet_metadata(&wallet.id, Some(ctx.wallet_alias.clone()), &aliases, &hws)
-        .await
-        .map_err(|e| Error::Unexpected(e.to_string()))?;
-
-    let remote_backend = remote_backend.connect_wallet(wallet).0;
-
-    // create coincube GUI settings file
-    // if the wallet is using the remote backend, then the hardware wallet settings and
-    // keys will be store on the remote backend side and not in the settings file.
-    let wallet_settings = WalletSettings {
-        name: wallet_name(descriptor),
-        alias: Some(ctx.wallet_alias.clone()),
-        descriptor_checksum: wallet_id.descriptor_checksum,
-        pinned_at: wallet_id.timestamp,
-        keys: Vec::new(),
-        hardware_wallets: Vec::new(),
-        remote_backend_auth: Some(AuthConfig::new(
-            remote_backend.user_email().to_string(),
-            remote_backend.wallet_id(),
-        )),
-        start_internal_bitcoind: None,
-        // Remote backend: no local node, so no scan window to fall short.
-        pending_rescan: None,
-        // Keys live on the remote backend, not in this file.
-        keychain_keys_recorded: false,
-    };
-    update_settings_file(&network_datadir, |mut settings| {
-        settings.wallets.push(wallet_settings.clone());
-        Some(settings)
-    })
-    .await
-    .map_err(|e| Error::Unexpected(e.to_string()))?;
-
-    info!("Settings file created");
-
-    let backend = remote_backend.inner_client();
-    if let Err(e) = update_connect_cache(
-        &network_datadir,
-        backend.auth.read().await.deref(),
-        backend.auth_client(),
-        false,
-        CacheAccountAction::Activate,
-    )
-    .await
-    {
-        // this error is not critical, the liana-connect backend stored the wallet
-        // and user can reauthenticate.
-        tracing::error!("Failed to update Liana-Connect cache: {}", e);
-    } else {
-        info!("Liana-Connect cache updated");
-    }
-
-    Ok(wallet_settings)
-}
-
-pub async fn import_remote_wallet(
-    ctx: Context,
-    wallet_id: WalletId,
-    backend: BackendWalletClient,
-) -> Result<WalletSettings, Error> {
-    require_remote_installable_chain(&ctx)?;
-    tracing::info!("Importing wallet from remote backend");
-
-    if let Some(signer) = &ctx.recovered_signer {
-        let password = seed_password(&ctx)?;
-        signer
-            .store_encrypted_for_chain(
-                &ctx.coincube_directory,
-                ctx.bitcoin_config.chain,
-                &wallet_id.descriptor_checksum,
-                wallet_id
-                    .timestamp
-                    .expect("Every new wallet have now a timestamp"),
-                password.as_str(),
-                ctx.seed_cube_id(),
-                seed_device_secret(&ctx)?.as_ref(),
-            )
-            .map_err(|e| Error::Unexpected(format!("Failed to store mnemonic: {}", e)))?;
-
-        info!("Recovered signer mnemonic stored (encrypted)");
-    }
-
-    let network_datadir = ctx
-        .coincube_directory
-        .network_directory(ctx.bitcoin_config.chain);
-    network_datadir
-        .init()
-        .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
-
-    backend
-        .update_wallet_metadata(Some(ctx.wallet_alias.clone()), &HashMap::new(), &[])
-        .await?;
-
-    // create coincube GUI settings file
-    // if the wallet is using the remote backend, then the hardware wallet settings and
-    // keys will be store on the remote backend side and not in the settings file.
-    let wallet_settings = WalletSettings {
-        name: wallet_name(
-            ctx.descriptor
-                .as_ref()
-                .expect("Context must have a descriptor at this point"),
-        ),
-        alias: Some(ctx.wallet_alias.clone()),
-        descriptor_checksum: wallet_id.descriptor_checksum,
-        pinned_at: wallet_id.timestamp,
-        keys: Vec::new(),
-        hardware_wallets: Vec::new(),
-        remote_backend_auth: Some(AuthConfig::new(
-            backend.user_email().to_string(),
-            backend.wallet_id(),
-        )),
-        start_internal_bitcoind: None,
-        // Remote backend: no local node, so no scan window to fall short.
-        pending_rescan: None,
-        // Keys live on the remote backend, not in this file.
-        keychain_keys_recorded: false,
-    };
-    update_settings_file(&network_datadir, |mut settings| {
-        settings.wallets.push(wallet_settings.clone());
-        Some(settings)
-    })
-    .await
-    .map_err(|e| Error::Unexpected(e.to_string()))?;
-
-    info!("Settings file created");
-
-    // create coincube GUI configuration file
-    ensure_gui_config(&network_datadir, false)?;
-
-    let backend = backend.inner_client();
-    if let Err(e) = update_connect_cache(
-        &network_datadir,
-        backend.auth.read().await.deref(),
-        backend.auth_client(),
-        false,
-        CacheAccountAction::Activate,
-    )
-    .await
-    {
-        // this error is not critical, the liana-connect backend stored the wallet
-        // and user can reauthenticate.
-        tracing::error!("Failed to update Liana-Connect cache: {}", e);
-    } else {
-        info!("Liana-Connect cache updated");
-    }
 
     Ok(wallet_settings)
 }
@@ -2583,11 +2290,9 @@ pub fn extract_daemon_config(ctx: &Context, settings: &WalletSettings) -> Result
 
 #[derive(Debug, Clone)]
 pub enum Error {
-    Auth(AuthError),
     // DaemonError does not implement Clone.
     // TODO: maybe Arc is overkill
     Backend(Arc<DaemonError>),
-    Services(services::keys::Error),
     Settings(SettingsError),
     Bitcoind(String),
     Electrum(String),
@@ -2627,12 +2332,6 @@ impl From<DaemonError> for Error {
     }
 }
 
-impl From<AuthError> for Error {
-    fn from(value: AuthError) -> Self {
-        Self::Auth(value)
-    }
-}
-
 impl From<SettingsError> for Error {
     fn from(value: SettingsError) -> Self {
         Self::Settings(value)
@@ -2642,9 +2341,7 @@ impl From<SettingsError> for Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Auth(e) => write!(f, "Authentication error: {}", e),
-            Self::Backend(e) => write!(f, "Remote backend error: {}", e),
-            Self::Services(e) => write!(f, "Services error: {}", e),
+            Self::Backend(e) => write!(f, "Wallet backend error: {}", e),
             Self::Settings(e) => write!(f, "Settings file error: {}", e),
             Self::Bitcoind(e) => write!(f, "Failed to ping bitcoind: {}", e),
             Self::Electrum(e) => write!(f, "Failed to ping Electrum: {}", e),
@@ -2682,7 +2379,6 @@ mod proposal_handoff_flow_tests {
         let (mut installer, _) = Installer::try_new_for_chain(
             ctx.coincube_directory.clone(),
             crate::chain::ChainId::Regtest,
-            None,
             UserFlow::CreateWallet,
             true,
             Some(cube),
@@ -2723,7 +2419,6 @@ mod proposal_handoff_flow_tests {
         let (mut installer, _) = Installer::try_new_for_chain(
             ctx.coincube_directory.clone(),
             crate::chain::ChainId::Regtest,
-            None,
             UserFlow::CreateWallet,
             true,
             Some(cube),
@@ -2768,7 +2463,6 @@ mod proposal_handoff_flow_tests {
         let (mut installer, _) = Installer::try_new_for_chain(
             ctx.coincube_directory.clone(),
             crate::chain::ChainId::Regtest,
-            None,
             UserFlow::CreateWallet,
             true,
             Some(cube),
@@ -2814,7 +2508,6 @@ mod pending_rescan_tests {
         Context::new(
             bitcoin::Network::Bitcoin,
             CoincubeDirectory::new(std::path::PathBuf::from("/nonexistent")),
-            RemoteBackend::None,
             None,
             None,
         )
@@ -2849,7 +2542,6 @@ mod pending_rescan_tests {
             Installer::new(
                 CoincubeDirectory::new(root.clone()),
                 bitcoin::Network::Bitcoin,
-                None,
                 UserFlow::CreateWallet,
                 true,
                 Some(cube),
@@ -2901,7 +2593,6 @@ mod pending_rescan_tests {
             let (installer, _) = Installer::build_for_chain(
                 CoincubeDirectory::new(root.clone()),
                 chain,
-                None,
                 UserFlow::CreateWallet,
                 true,
                 Some(cube.clone()),
@@ -2919,7 +2610,6 @@ mod pending_rescan_tests {
             let (from_home, _) = Installer::build_for_chain(
                 CoincubeDirectory::new(root.clone()),
                 chain,
-                None,
                 UserFlow::CreateWallet,
                 false,
                 Some(cube.clone()),
@@ -2937,7 +2627,6 @@ mod pending_rescan_tests {
             let (vaulted, _) = Installer::build_for_chain(
                 CoincubeDirectory::new(root.clone()),
                 chain,
-                None,
                 UserFlow::CreateWallet,
                 true,
                 Some(vaulted),
@@ -2962,7 +2651,6 @@ mod pending_rescan_tests {
             let (installer, _) = Installer::build_for_chain(
                 CoincubeDirectory::new(root.clone()),
                 chain,
-                None,
                 UserFlow::CreateWallet,
                 false,
                 None,
@@ -2973,7 +2661,6 @@ mod pending_rescan_tests {
             );
             assert_eq!(installer.context.bitcoin_config.chain, chain);
             assert_eq!(installer.context.network, chain.bitcoin_network());
-            assert!(installer.context.remote_backend.is_none());
             assert!(!installer.context.install_node_alongside_connect);
             assert!(installer.context.internal_bitcoind.is_none());
             assert!(installer.breez_client.is_none());
@@ -2990,7 +2677,6 @@ mod pending_rescan_tests {
             assert!(Installer::try_new_for_chain(
                 CoincubeDirectory::new(root),
                 chain,
-                None,
                 UserFlow::CreateWallet,
                 false,
                 None,
@@ -3014,7 +2700,6 @@ mod pending_rescan_tests {
             let result = Installer::try_new_for_chain(
                 CoincubeDirectory::new(temp.clone()),
                 chain,
-                None,
                 UserFlow::CreateWallet,
                 false,
                 None,
@@ -3033,16 +2718,15 @@ mod pending_rescan_tests {
     }
 
     #[test]
-    fn remote_install_boundary_refuses_fork_even_with_valid_local_context() {
+    fn install_boundary_accepts_a_valid_local_context_without_io() {
         for chain in crate::chain::ChainId::ALL {
-            let root = std::env::temp_dir()
-                .join(format!("remote-chain-boundary-{}", uuid::Uuid::new_v4()));
+            let root =
+                std::env::temp_dir().join(format!("local-chain-boundary-{}", uuid::Uuid::new_v4()));
             let mut client = crate::services::coincube::CoincubeClient::new();
             client.set_token("synthetic-boundary-token");
             let ctx = Context::new_for_chain(
                 chain,
                 CoincubeDirectory::new(root.clone()),
-                RemoteBackend::None,
                 None,
                 Some(client),
             );
@@ -3051,14 +2735,6 @@ mod pending_rescan_tests {
                 "valid local context for {:?}",
                 chain
             );
-            let result = require_remote_installable_chain(&ctx);
-            if chain.is_blake2b() {
-                assert!(
-                    matches!(result, Err(Error::Unexpected(reason)) if reason.contains("requires a local Vault"))
-                );
-            } else {
-                assert!(result.is_ok());
-            }
             assert!(!root.exists(), "boundary checks must not perform file IO");
         }
     }
@@ -3068,13 +2744,8 @@ mod pending_rescan_tests {
         for chain in crate::chain::ChainId::ALL {
             let temp =
                 std::env::temp_dir().join(format!("btcb2-installer-{}", uuid::Uuid::new_v4()));
-            let mut context = Context::new_for_chain(
-                chain,
-                CoincubeDirectory::new(temp.clone()),
-                RemoteBackend::None,
-                None,
-                None,
-            );
+            let mut context =
+                Context::new_for_chain(chain, CoincubeDirectory::new(temp.clone()), None, None);
             assert_eq!(
                 require_installable_chain(&context).is_ok(),
                 !chain.is_blake2b()
@@ -3094,7 +2765,6 @@ mod pending_rescan_tests {
         let mut ctx = Context::new_for_chain(
             crate::chain::ChainId::BitcoinBlake2b,
             CoincubeDirectory::new(Default::default()),
-            RemoteBackend::None,
             None,
             None,
         );
@@ -3810,7 +3480,6 @@ mod create_vault_frame_tests {
         Installer::try_new_for_chain(
             root,
             chain,
-            None,
             UserFlow::CreateWallet,
             true,
             None,
@@ -3976,7 +3645,6 @@ mod create_vault_frame_tests {
             let (installer, _) = Installer::build_for_chain(
                 CoincubeDirectory::new(root.clone()),
                 chain,
-                None,
                 UserFlow::CreateWallet,
                 true,
                 Some(cube),
@@ -4017,7 +3685,6 @@ mod create_vault_frame_tests {
             match Installer::try_new_for_chain(
                 root(),
                 chain,
-                None,
                 flow,
                 true,
                 None,
@@ -4112,7 +3779,6 @@ mod create_vault_frame_tests {
         let fresh = Installer::try_new_for_chain(
             root,
             ChainId::Bitcoin,
-            None,
             UserFlow::CreateWallet,
             false,
             None,
@@ -4146,7 +3812,6 @@ mod restore_frame_tests {
         Installer::new(
             root,
             bitcoin::Network::Bitcoin,
-            None,
             flow,
             false,
             None,
@@ -4194,6 +3859,29 @@ mod restore_frame_tests {
         let shown = rendered_labels(create.view()).await;
         assert!(!has(&shown, "Import or restore"), "{:?}", shown);
         assert!(shown.iter().any(|text| text.contains(" | ")), "{:?}", shown);
+    }
+
+    /// The Kit's first step has no Back: like every Import or restore path,
+    /// its path list and Close leave it. A path list press goes back to the
+    /// Launcher, which takes the path to open once.
+    #[tokio::test]
+    async fn a_recovery_kit_restore_leaves_from_its_path_list() {
+        use iced_runtime::futures::futures::StreamExt;
+
+        let mut kit = installer(UserFlow::RestoreFromRecoveryKit { cube_uuid: None });
+        let shown = rendered_labels(kit.view()).await;
+        assert!(!has(&shown, "Back"), "{:?}", shown);
+
+        let task = kit.update(Message::LeaveRestore(RestoreDestination::Phone));
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        assert!(matches!(
+            stream.next().await,
+            Some(iced_runtime::Action::Output(Message::BackToApp(
+                bitcoin::Network::Bitcoin
+            )))
+        ));
+        assert_eq!(kit.take_restore_exit(), Some(RestoreDestination::Phone));
+        assert_eq!(kit.take_restore_exit(), None);
     }
 
     /// Opt-in frames: `LAUNCHER_CAPTURE_DIR=<dir> cargo test -p coincube-gui
@@ -4297,7 +3985,7 @@ mod restore_frame_tests {
             restore.current = restore.steps.len() - 1;
             let mut hws = HardwareWallets::new(restore.datadir.clone(), Network::Bitcoin);
             let step = restore.steps.last_mut().unwrap();
-            drop(step.update(&mut hws, Message::AllKeysRedeemed));
+            drop(step.update(&mut hws, Message::InstallFinished));
             assert!(step.restore_done(), "Done waits for Open Cube");
             let shown = rendered_labels(restore.view()).await;
             for label in ["Your Cube is restored", "Open Cube", "Done"] {
@@ -4313,7 +4001,7 @@ mod restore_frame_tests {
             CoincubeDirectory::new(std::env::temp_dir()),
             Network::Bitcoin,
         );
-        drop(plain.update(&mut hws, Message::AllKeysRedeemed));
+        drop(plain.update(&mut hws, Message::InstallFinished));
         assert!(!plain.restore_done());
     }
 

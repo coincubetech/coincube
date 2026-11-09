@@ -218,6 +218,17 @@ impl Step for OwnerKeychainRestoreStep {
         let Phase::Ready { seed, descriptor } = &self.phase else {
             return false;
         };
+        // A Bitcoin Blake2b Cube and its Bitcoin twin share a seed, so the
+        // seed's own Cube must be on the chain being restored.
+        if seed
+            .as_ref()
+            .is_some_and(|seed| seed.cube.network != ctx.bitcoin_config.chain.api_str())
+        {
+            self.phase = Phase::Error {
+                message: "This phone backup belongs to a Cube on another network.".into(),
+            };
+            return false;
+        }
         // Reuse the shared seam: parse descriptor + derive the seed signer (Full
         // only), all-or-nothing.
         let (vault_blob, imported_blob) = match descriptor.as_ref() {
@@ -302,13 +313,11 @@ impl Step for OwnerKeychainRestoreStep {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         match &self.phase {
             Phase::Decrypting | Phase::Ready { .. } => view::install_titled(
                 "Approve on your phone",
                 progress,
-                email,
                 true,
                 false,
                 None,
@@ -320,7 +329,6 @@ impl Step for OwnerKeychainRestoreStep {
             Phase::Error { message } => view::install_titled(
                 "Approve on your phone",
                 progress,
-                email,
                 false,
                 false,
                 Some(message),
@@ -336,7 +344,6 @@ mod tests {
     use crate::{
         chain::ChainId,
         dir::CoincubeDirectory,
-        installer::context::RemoteBackend,
         services::recovery::{
             ImportedDescriptorBlob, ImportedDescriptorBlobWallet, SeedBlobCube, SeedBlobMnemonic,
         },
@@ -403,7 +410,6 @@ mod tests {
             CoincubeDirectory::new(
                 std::env::temp_dir().join("owner-imported-restore-context-only"),
             ),
-            RemoteBackend::None,
             None,
             None,
         )

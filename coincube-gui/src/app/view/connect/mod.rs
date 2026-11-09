@@ -178,7 +178,11 @@ pub enum ConnectSheetMessage {
     Account(ConnectAccountMessage),
     FocusAction(Id),
     SelectSection(ConnectSheetSection),
-    OpenAuthentication { create_account: bool },
+    OpenAuthentication {
+        create_account: bool,
+    },
+    /// "Not now" on the signed-out-by-Connect notice.
+    DismissSignOut,
     Close,
 }
 
@@ -242,7 +246,12 @@ pub fn connect_sheet<'a>(
         } else {
             requested_section
         };
-    let title = if signed_in {
+    // A stored session that couldn't be checked is still this account's:
+    // the sheet says why instead of offering the sign-in form (L1).
+    let unverified = (!signed_in && !blocked)
+        .then_some(acct.unverified.as_ref())
+        .flatten();
+    let title = if signed_in || unverified.is_some() {
         "Connect account"
     } else {
         "Connect"
@@ -250,7 +259,8 @@ pub fn connect_sheet<'a>(
     let identity = signed_in
         .then_some(acct.user.as_ref())
         .flatten()
-        .map(|user| user.email.as_str());
+        .map(|user| user.email.as_str())
+        .or(unverified.map(|u| u.email.as_str()));
     let mut heading = Row::new()
         .push(
             iced::widget::text(title)
@@ -286,6 +296,8 @@ pub fn connect_sheet<'a>(
 
     let content: Element<ConnectSheetMessage> = if blocked {
         text::p1_regular("Connect authorization ended. Close and reopen this Cube through authenticated Connect startup to reconnect.").into()
+    } else if let Some(unverified) = unverified.filter(|_| !show_auth) {
+        unverified_account_ux(unverified)
     } else if show_auth {
         connect_account_body(acct).map(ConnectSheetMessage::Account)
     } else if acct.is_checking_session() {
@@ -310,7 +322,7 @@ pub fn connect_sheet<'a>(
         let content: Element<ConnectAccountMessage> = column.push(section_content).into();
         content.map(ConnectSheetMessage::Account)
     } else if active_section == ConnectSheetSection::Account {
-        signed_out_account_ux()
+        signed_out_account_ux(acct.signed_out_by)
     } else {
         signed_out_section_ux(active_section)
     };
@@ -669,8 +681,102 @@ fn review_style(theme: &theme::Theme) -> container::Style {
     }
 }
 
-fn signed_out_account_ux<'a>() -> Element<'a, ConnectSheetMessage> {
+/// A bordered notice at the top of the sheet: a title, a line and actions.
+fn sheet_notice<'a>(
+    bad: bool,
+    title: &'static str,
+    detail: String,
+    actions: Option<Element<'a, ConnectSheetMessage>>,
+) -> Element<'a, ConnectSheetMessage> {
+    let mut column = Column::new()
+        .spacing(4)
+        .push(group_title(title))
+        .push(lead(detail));
+    if let Some(actions) = actions {
+        column = column
+            .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+            .push(actions);
+    }
+    container(column)
+        .padding([14, 16])
+        .width(Length::Fill)
+        .style(move |t: &theme::Theme| iced::widget::container::Style {
+            border: iced::Border {
+                color: if bad {
+                    t.colors.shell.bad
+                } else {
+                    t.colors.shell.line
+                },
+                width: 1.0,
+                radius: 10.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// The sheet for a stored session that couldn't be checked: still signed
+/// in, waiting for the network or Connect (L1).
+fn unverified_account_ux<'a>(
+    unverified: &crate::app::state::connect::account::UnverifiedSession,
+) -> Element<'a, ConnectSheetMessage> {
+    use crate::services::connect::grpc::trouble::Trouble;
+    let (title, detail) = match unverified.trouble {
+        Trouble::Offline => (
+            "No internet connection",
+            "You’re still signed in. Tenshu checks your Connect session again when you’re back \
+             online. Connect-only Cubes can be restored then.",
+        ),
+        Trouble::Unreachable => (
+            "Can’t reach COINCUBE | Connect",
+            "You’re still signed in. Tenshu keeps trying. Connect-only Cubes can be restored once \
+             it’s back.",
+        ),
+    };
     Column::new()
+        .push(sheet_title("Account"))
+        .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
+        .push(sheet_notice(false, title, detail.to_owned(), None))
+        .width(Length::Fill)
+        .into()
+}
+
+/// The signed-out sheet, led by the reason when Connect ended the session.
+fn signed_out_account_ux<'a>(
+    signed_out_by: Option<crate::app::SignedOutBy>,
+) -> Element<'a, ConnectSheetMessage> {
+    let mut column = Column::new();
+    if let Some(reason) = signed_out_by {
+        column = column
+            .push(sheet_notice(
+                true,
+                reason.title(),
+                "Sign in to see your Connect-only Cubes and to back up Recovery Kits to Connect \
+                 again."
+                    .to_owned(),
+                Some(
+                    Row::new()
+                        .push(sheet_action(
+                            "tenshu.connect.notice.sign-in",
+                            "Sign in",
+                            ActionKind::Primary,
+                            ConnectSheetMessage::OpenAuthentication {
+                                create_account: false,
+                            },
+                        ))
+                        .push(sheet_action(
+                            "tenshu.connect.notice.not-now",
+                            "Not now",
+                            ActionKind::Secondary,
+                            ConnectSheetMessage::DismissSignOut,
+                        ))
+                        .spacing(12)
+                        .into(),
+                ),
+            ))
+            .push(iced::widget::Space::new().height(Length::Fixed(24.0)));
+    }
+    column
         .push(sheet_title("Account"))
         .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
         .push(connect_benefits(true).map(ConnectSheetMessage::Account))
@@ -5493,6 +5599,73 @@ mod renewal_banner_tests {
     }
 
     /// The sheet follows the Connect artboard's copy: sentence-case section
+    /// A stored session waiting for the network keeps its account in the
+    /// sheet, and Connect ending the session leads with the reason (L1, L3).
+    #[tokio::test]
+    async fn connect_sheet_says_why_the_session_is_waiting_or_ended() {
+        use crate::services::connect::grpc::trouble::Trouble;
+        use iced::advanced::renderer::Headless;
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let page = ConnectSheetPage::Sections(ConnectSheetSection::Account);
+
+        let mut waiting = ConnectAccountPanel::new();
+        waiting.step = ConnectFlowStep::Login {
+            email: String::new(),
+            loading: true,
+        };
+        waiting.unverified = Some(crate::app::state::connect::account::UnverifiedSession {
+            email: "alex@example.test".into(),
+            trouble: Trouble::Offline,
+            attempts: 2,
+        });
+        let labels = visible_labels(connect_sheet(&waiting, page), &renderer);
+        for expected in [
+            "Connect account",
+            "alex@example.test",
+            "No internet connection",
+        ] {
+            assert!(
+                labels.iter().any(|l| l == expected),
+                "{}: {:?}",
+                expected,
+                labels
+            );
+        }
+        assert!(!labels
+            .iter()
+            .any(|l| l == "Sign in" || l.starts_with("Loading")));
+
+        let mut ended = ConnectAccountPanel::new();
+        ended.step = ConnectFlowStep::Login {
+            email: String::new(),
+            loading: false,
+        };
+        ended.signed_out_by = Some(crate::app::SignedOutBy::SessionEnded);
+        let labels = visible_labels(connect_sheet(&ended, page), &renderer);
+        for expected in [
+            "Your Connect session on this computer ended",
+            "Not now",
+            "Sign in",
+        ] {
+            assert!(
+                labels.iter().any(|l| l == expected),
+                "{}: {:?}",
+                expected,
+                labels
+            );
+        }
+        let plain = ConnectAccountPanel::new();
+        let labels = visible_labels(connect_sheet(&plain, page), &renderer);
+        assert!(!labels.iter().any(|l| l == "Not now"));
+    }
+
     /// titles, the artboard's benefit wording and its list headings.
     #[tokio::test]
     async fn connect_sheet_sections_use_artboard_copy() {

@@ -468,7 +468,6 @@ impl Panels {
                 VaultSettingsState::new(
                     data_dir.clone(),
                     wallet.clone(),
-                    daemon_backend,
                     internal_bitcoind.is_some(),
                     config.clone(),
                 )
@@ -594,7 +593,6 @@ impl Panels {
             VaultSettingsState::new(
                 data_dir.clone(),
                 wallet.clone(),
-                daemon_backend,
                 internal_bitcoind.is_some(),
                 config.clone(),
             )
@@ -1015,7 +1013,7 @@ pub struct App {
     /// Connect tab to sign in; on the next auth transition (false → true) we
     /// jump back to Vault Settings → Node and re-fire the switch.
     pending_switch_to_connect_after_login: bool,
-    /// Shared `Arc<RwLock<AccessTokenResponse>>` from the remote backend,
+    /// Shared `Arc<RwLock<AccessTokenResponse>>` for the Connect session,
     /// reused by the gRPC interceptor so token refreshes are observed by
     /// both the REST and gRPC paths. `None` when no live or persisted
     /// Connect session is available.
@@ -2789,9 +2787,9 @@ fn make_connect_stream(
     crate::services::connect::grpc::stream::connect_stream(&key.cfg)
 }
 
-/// Background task that assembles a `ConnectStreamConfig` from
-/// `ServiceConfig` + the on-disk Connect cache. Runs once at App startup
-/// when a remote backend is in play. Yields `Message::ConnectStreamReady`
+/// Background task that assembles a `ConnectStreamConfig` from the
+/// resolved gRPC URL + the on-disk Connect cache. Runs once at App startup
+/// when a Connect session is available. Yields `Message::ConnectStreamReady`
 /// with `None` if the API config lacks a `grpc_url` (gRPC not enabled
 /// for this environment), or with `Some(cfg)` otherwise. The handler
 /// stashes the config and the next `subscription()` tick wires the
@@ -3781,7 +3779,7 @@ impl App {
         panels.show_liquid(cache_with_vault.liquid_gate);
         cache_with_vault.connect_tokens = connect_auth_arc.clone();
         cache_with_vault.connect_email = connect_email.clone();
-        // A restored on-disk session (or a threaded remote-backend one) means
+        // A restored on-disk session means
         // the user is signed in to Connect even though the Connect panel won't
         // reach its `Dashboard` step — and so won't flip `connect_authenticated`
         // — until its keyring session check completes. Mirror it now so the
@@ -4932,6 +4930,12 @@ impl App {
         &self.cube_settings
     }
 
+    /// The signed-out-by-Connect notice, as the GUI relays it to every tab.
+    pub fn set_connect_signed_out_by(&mut self, reason: Option<SignedOutBy>) {
+        self.cache.connect_signed_out_by = reason;
+        self.panels.connect.account.signed_out_by = reason;
+    }
+
     pub(crate) fn dismiss_shell_disclosures(&mut self) {
         self.cache.cube_switcher_open = false;
         self.cache.cube_lock_confirmation = false;
@@ -5136,7 +5140,8 @@ impl App {
         self.daemon
             .as_ref()
             .map(|d| d.backend())
-            .unwrap_or(DaemonBackend::RemoteBackend)
+            // No Vault daemon: claim nothing about local sync progress.
+            .unwrap_or(DaemonBackend::ExternalCoincubed)
     }
 
     /// The Vault scan a backend switch would discard, if one is running.
@@ -5563,25 +5568,12 @@ impl App {
                         self.cache.history_sync(),
                     ) {
                         SyncStatus::BlockchainSync(_) => 5, // Only applies to local backends
-                        SyncStatus::WalletFullScan { .. }
-                            if self.daemon_backend() == DaemonBackend::RemoteBackend =>
-                        {
-                            10
-                        } // If remote backend, don't ping too often
                         SyncStatus::WalletFullScan { .. } | SyncStatus::LatestWalletSync => 3,
                         // Polls are being retried; refresh often enough to notice recovery.
                         SyncStatus::SyncFailing { .. } => 5,
-                        SyncStatus::Synced => {
-                            if self.daemon_backend() == DaemonBackend::RemoteBackend {
-                                // Remote backend has no rescan feature. For a synced wallet,
-                                // cache refresh is only used to warn user about recovery availability.
-                                120
-                            } else {
-                                // For the rescan feature, we refresh more often in order
-                                // to give user an up-to-date view of the rescan progress.
-                                10
-                            }
-                        }
+                        // For the rescan feature, we refresh often enough to give
+                        // user an up-to-date view of the rescan progress.
+                        SyncStatus::Synced => 10,
                     },
                 ))
                 .map(|_| Message::Tick),
@@ -5679,6 +5671,14 @@ impl App {
         // has populated `connect_stream_config`. The subscription identity is
         // keyed on `(device_id, grpc_url)`; the stream tracks its event cursor
         // without restarting the subscription for each received event.
+        // A stored Connect session that couldn't be checked is checked again.
+        if let Some(unverified) = self.panels.connect.account.unverified.as_ref() {
+            subscriptions.push(unverified.recheck().map(|_| {
+                Message::View(view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::RecheckSession,
+                ))
+            }));
+        }
         // The Connect light pulses while connecting, reconnecting or
         // renewing, unless the user reduces motion.
         if !self.cache.reduce_motion
@@ -5892,25 +5892,12 @@ impl App {
                 self.cache.history_sync(),
             ) {
                 SyncStatus::BlockchainSync(_) => 5, // Only applies to local backends
-                SyncStatus::WalletFullScan { .. }
-                    if self.daemon_backend() == DaemonBackend::RemoteBackend =>
-                {
-                    10
-                } // If remote backend, don't ping too often
                 SyncStatus::WalletFullScan { .. } | SyncStatus::LatestWalletSync => 3,
                 // Polls are being retried; refresh often enough to notice recovery.
                 SyncStatus::SyncFailing { .. } => 5,
-                SyncStatus::Synced => {
-                    if self.daemon_backend() == DaemonBackend::RemoteBackend {
-                        // Remote backend has no rescan feature. For a synced wallet,
-                        // cache refresh is only used to warn user about recovery availability.
-                        120
-                    } else {
-                        // For the rescan feature, we refresh more often in order
-                        // to give user an up-to-date view of the rescan progress.
-                        10
-                    }
-                }
+                // For the rescan feature, we refresh often enough to give user an
+                // up-to-date view of the rescan progress.
+                SyncStatus::Synced => 10,
             },
         );
         if self.cache.daemon_cache.last_tick + duration <= tick {
@@ -7088,9 +7075,7 @@ impl App {
                 }
                 return Task::perform(
                     async move {
-                        use crate::services::connect::client::auth::{
-                            AccessTokenResponse, AuthClient,
-                        };
+                        use crate::services::connect::client::auth::AccessTokenResponse;
                         use crate::services::connect::client::cache;
                         let tokens = AccessTokenResponse {
                             access_token: login.token.clone(),
@@ -7162,15 +7147,10 @@ impl App {
                                 }
                             }
                         } else if let Some(snapshot) = snapshot.as_ref() {
-                            let auth = AuthClient::new(
-                                String::new(),
-                                String::new(),
-                                login.user.email.clone(),
-                            );
                             cache::update_connect_cache_for_login(
                                 &network_dir,
                                 &tokens,
-                                &auth,
+                                &login.user.email,
                                 snapshot,
                             )
                             .await
@@ -13962,7 +13942,6 @@ pub(crate) mod tests {
             DaemonBackend::EmbeddedCoincubed(Some(NodeType::Bitcoind)),
             DaemonBackend::EmbeddedCoincubed(None),
             DaemonBackend::ExternalCoincubed,
-            DaemonBackend::RemoteBackend,
         ] {
             assert!(!full_scan_settles_rescan_obligation(
                 &backend, false, &completed
@@ -16647,9 +16626,9 @@ pub(crate) mod shell_tests {
             .unwrap();
     }
 
-    /// A transient refresh failure in the open Cube leaves a truthful,
-    /// retryable error instead of a silent "Sign in" prompt or a loop, and
-    /// the Cube's own retry signs it in once the backend recovers.
+    /// A transient refresh failure in the open Cube keeps the stored session,
+    /// waiting to be checked again, instead of a silent "Sign in" prompt or a
+    /// loop, and the Cube's own retry signs it in once the backend recovers.
     #[test]
     fn open_cube_shows_retryable_error_when_its_refresh_fails() {
         std::thread::Builder::new()
@@ -16689,8 +16668,8 @@ pub(crate) mod shell_tests {
                     assert!(!cube.panels.connect.account.is_authenticated());
                     assert!(!cube.panels.connect.account.is_checking_session());
                     assert!(
-                        cube.panels.connect.account.error.is_some(),
-                        "a failed check is shown as an error, not as signed out"
+                        cube.panels.connect.account.unverified.is_some(),
+                        "a failed check keeps the session waiting, not signed out"
                     );
                     // The backend recovers; the panel's "Try again" re-runs Init.
                     let healthy = signin_server(200).await;

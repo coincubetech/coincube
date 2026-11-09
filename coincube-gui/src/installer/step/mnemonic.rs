@@ -70,7 +70,6 @@ impl Step for BackupMnemonic {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         if self.fresh_fork_cube {
             let words = self
@@ -83,9 +82,9 @@ impl Step for BackupMnemonic {
                 .map(|(i, word)| format!("{}. {}", i + 1, word))
                 .collect::<Vec<_>>()
                 .join("   ");
-            return view::backup_fresh_fork_mnemonic(progress, email, words, self.confirmed);
+            return view::backup_fresh_fork_mnemonic(progress, words, self.confirmed);
         }
-        view::backup_mnemonic(progress, email)
+        view::backup_mnemonic(progress)
     }
 }
 
@@ -200,11 +199,9 @@ impl Step for RecoverMnemonic {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         view::recover_mnemonic(
             progress,
-            email,
             &self.words,
             self.current,
             &self.suggestions,
@@ -223,7 +220,6 @@ mod fork_backup_tests {
         let mut ctx = Context::new_for_chain(
             crate::chain::ChainId::BitcoinBlake2b,
             dir.clone(),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );

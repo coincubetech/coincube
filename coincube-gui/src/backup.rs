@@ -26,10 +26,9 @@ use crate::{
         Config,
     },
     chain::ChainId,
-    daemon::{model::HistoryTransaction, Daemon, DaemonBackend, DaemonError},
+    daemon::{model::HistoryTransaction, Daemon, DaemonError},
     dir::CoincubeDirectory,
-    export::Progress,
-    services::connect::client::backend::api::DEFAULT_LIMIT,
+    export::{Progress, DEFAULT_LIMIT},
     utils::now,
     VERSION,
 };
@@ -320,10 +319,7 @@ impl Backup {
 async fn get_transactions(
     daemon: &Arc<dyn Daemon + Sync + Send>,
 ) -> Result<Vec<HistoryTransaction>, Error> {
-    let max = match daemon.backend() {
-        DaemonBackend::RemoteBackend => DEFAULT_LIMIT as u64,
-        _ => u32::MAX as u64,
-    };
+    let max = u32::MAX as u64;
 
     // look 2 hour forward
     // https://github.com/bitcoin/bitcoin/blob/62bd61de110b057cbfd6e31e4d0b727d93119c72/src/chain.h#L29

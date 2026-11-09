@@ -284,86 +284,113 @@ pub(super) fn network_option_id(chain: ChainId) -> Id {
     Id::from(format!("tenshu.launcher.network.{chain:?}"))
 }
 
-fn connect_entry<'a>(home: &Home, quiet: bool) -> Element<'a, ViewMessage> {
-    connect_control(
-        home,
-        quiet,
-        launcher_catalog::connect_id(),
-        launcher_catalog::sign_in_id(),
-        true,
-    )
+fn connect_entry<'a>(home: &'a Home, quiet: bool) -> Element<'a, ViewMessage> {
+    connect_control(home, quiet, launcher_catalog::connect_id(), true)
 }
 
-/// The Launcher's Connect entry under the caller's focus ids, so another bar
-/// (Create Cube) draws the same control. `enabled` gates the press on top of
-/// the entry's own rule.
-pub(super) fn connect_control<'a>(
+/// What the Launcher's Connect control shows, from the account alone: the
+/// Launcher has no live updates, so its light says whether the session is
+/// signed in, being checked, waiting for the network or Connect, or ended by
+/// Connect.
+pub(super) fn launcher_connect_state(
     home: &Home,
+) -> (
+    crate::app::view::shared::connect_control::ConnectDetail<'_>,
+    Option<crate::app::ConnectLight>,
+    String,
+) {
+    use crate::app::view::shared::connect_control::ConnectDetail;
+    use crate::app::ConnectLight;
+    use crate::services::connect::grpc::trouble::Trouble;
+    let account = &home.connect_account;
+    if account.is_authenticated() {
+        let email = account
+            .user
+            .as_ref()
+            .map(|u| u.email.as_str())
+            .filter(|e| !e.is_empty());
+        let label = match email {
+            Some(email) => format!("Connect account, {email}, signed in"),
+            None => "Connect account, signed in".to_owned(),
+        };
+        return (
+            email.map_or(ConnectDetail::Account("Signed in"), ConnectDetail::Account),
+            Some(ConnectLight::On),
+            label,
+        );
+    }
+    if let Some(unverified) = account.unverified.as_ref() {
+        return match unverified.trouble {
+            Trouble::Offline => (
+                ConnectDetail::Offline,
+                Some(ConnectLight::Offline),
+                format!(
+                    "Connect account, {}, offline: no internet connection",
+                    unverified.email
+                ),
+            ),
+            Trouble::Unreachable => (
+                ConnectDetail::Account(unverified.email.as_str()),
+                Some(ConnectLight::Reconnecting),
+                format!("Connect account, {}, reconnecting", unverified.email),
+            ),
+        };
+    }
+    if account.is_checking_session() {
+        return (
+            ConnectDetail::Checking,
+            Some(ConnectLight::Connecting),
+            "Connect account, checking your session".to_owned(),
+        );
+    }
+    match account.signed_out_by {
+        Some(reason) => (
+            ConnectDetail::SignIn,
+            Some(ConnectLight::NeedsYou),
+            match reason {
+                crate::app::SignedOutBy::ComputerRemoved => "Connect: Sign in, needs attention: \
+                     this computer was removed from your Connect account"
+                    .to_owned(),
+                crate::app::SignedOutBy::SessionEnded => {
+                    "Connect: Sign in, needs attention: your Connect session ended".to_owned()
+                }
+            },
+        ),
+        None => (ConnectDetail::SignIn, None, "Connect: Sign in".to_owned()),
+    }
+}
+
+/// The Launcher's Connect control under the caller's focus id, so another
+/// bar (Create Cube) draws the same control: the one an open Cube draws,
+/// without a panel. It keeps one id in every state (L6). `enabled` gates the
+/// press on top of the control's own rule; a quiet bar takes no input.
+pub(super) fn connect_control<'a>(
+    home: &'a Home,
     quiet: bool,
-    entry_id: Id,
-    sign_in_id: Id,
+    id: Id,
     enabled: bool,
 ) -> Element<'a, ViewMessage> {
-    let account = &home.connect_account;
     let overview = ViewMessage::GoToSection(HomeSection::Connect(
         crate::app::menu::ConnectSubMenu::Overview,
     ));
-    let dot = || words("·", 13.0, font::REGULAR, Ink::Muted);
-    let (id, content, message): (Id, Row<'a, ViewMessage>, Option<ViewMessage>) = if account
-        .is_authenticated()
-    {
-        let mut row = Row::new()
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .push(glyph(PERSON, 16.0, body(quiet)))
-            .push(words("Connect", 13.0, font::REGULAR, body(quiet)));
-        if let Some(user) = account.user.as_ref().filter(|u| !u.email.is_empty()) {
-            row = row
-                .push(dot())
-                .push(words(user.email.clone(), 13.0, font::REGULAR, body(quiet)));
-        }
-        let state = if account.is_checking_session() {
-            "Checking…"
-        } else {
-            "Signed in"
-        };
-        (
-            entry_id,
-            row.push(words(state, 12.0, font::REGULAR, Ink::Muted)),
-            Some(overview),
-        )
-    } else if account.is_checking_session() {
-        (
-            entry_id,
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(glyph(PERSON, 16.0, body(quiet)))
-                .push(words("Connect", 13.0, font::REGULAR, body(quiet)))
-                .push(dot())
-                .push(words("Checking…", 12.0, font::REGULAR, Ink::Muted)),
-            None,
-        )
-    } else {
-        // `.tbtn.out .who`: the sign-in call to action in accent ink.
-        (
-            sign_in_id,
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(glyph(PERSON, 16.0, body(quiet)))
-                .push(words("Connect", 13.0, font::REGULAR, body(quiet)))
-                .push(dot())
-                .push(words("Sign in", 13.0, font::SEMIBOLD, Ink::Accent)),
-            Some(overview),
-        )
-    };
-    Action::new(id, Container::new(content).center_y(Length::Fill), focus)
-        .height(Length::Fixed(32.0))
-        .padding([0.0, 10.0])
-        .style(|theme, status| bar_button(theme, status, false))
-        .on_press_maybe(message.filter(|_| enabled))
-        .into()
+    let (detail, light, label) = launcher_connect_state(home);
+    // Inert while the session is first checked, as before.
+    let pressable = enabled
+        && !quiet
+        && detail != crate::app::view::shared::connect_control::ConnectDetail::Checking;
+    crate::app::view::shared::connect_control::connect_control(
+        crate::app::view::shared::connect_control::ConnectControl {
+            id,
+            detail,
+            light,
+            light_dim: home.connect_light_dim,
+            chevron: false,
+            open: false,
+            label,
+        },
+        pressable.then_some(overview),
+        focus,
+    )
 }
 
 /// One `.chip`: a 32px filter toggle, `.chip.on` while it applies.
@@ -1849,32 +1876,16 @@ pub(crate) struct ChromeSnapshot {
 }
 
 pub(super) fn snapshot(home: &Home, projection: &Projection<'_>) -> ChromeSnapshot {
+    use crate::app::view::shared::connect_control::ConnectDetail;
     let account = &home.connect_account;
     let mut connect = vec![("Connect".to_string(), Ink::Muted, 13.0, false)];
-    let dot = || ("·".to_string(), Ink::Muted, 13.0, false);
-    if account.is_authenticated() {
-        if let Some(user) = account.user.as_ref().filter(|u| !u.email.is_empty()) {
-            connect.push(dot());
-            connect.push((user.email.clone(), Ink::Muted, 13.0, false));
-        }
-        connect.push((
-            if account.is_checking_session() {
-                "Checking…"
-            } else {
-                "Signed in"
-            }
-            .to_string(),
-            Ink::Muted,
-            12.0,
-            false,
-        ));
-    } else if account.is_checking_session() {
-        connect.push(dot());
-        connect.push(("Checking…".to_string(), Ink::Muted, 12.0, false));
-    } else {
-        connect.push(dot());
-        connect.push(("Sign in".to_string(), Ink::Accent, 13.0, true));
-    }
+    connect.push(("·".to_string(), Ink::Muted, 13.0, false));
+    connect.push(match launcher_connect_state(home).0 {
+        ConnectDetail::Account(email) => (email.to_string(), Ink::Muted, 13.0, false),
+        ConnectDetail::Offline => ("Offline".to_string(), Ink::Muted, 13.0, false),
+        ConnectDetail::Checking => ("Checking…".to_string(), Ink::Muted, 13.0, false),
+        ConnectDetail::SignIn => ("Sign in".to_string(), Ink::Accent, 13.0, true),
+    });
     let mut links = Vec::new();
     if account.is_authenticated()
         && !home.network.is_blake2b()
@@ -2431,7 +2442,7 @@ mod top_bar_tests {
                 );
             }
             for (id, name) in [
-                (launcher_catalog::sign_in_id(), "connect"),
+                (launcher_catalog::connect_id(), "connect"),
                 (launcher_catalog::settings_id(), "preferences"),
             ] {
                 save(

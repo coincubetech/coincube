@@ -151,7 +151,6 @@ async fn a_claim_target_reuses_the_descriptor_and_takes_its_own_cube_identity() 
     let (installer, _) = Installer::try_new_for_chain(
         root,
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(source),
         },
@@ -268,7 +267,6 @@ async fn a_fork_installer_is_never_handed_the_callers_breez_or_spark_clients() {
     let (installer, _) = Installer::try_new_for_chain(
         temp_root("clients"),
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(source),
         },
@@ -320,7 +318,6 @@ async fn an_unauthenticated_claim_is_refused_before_anything_is_built() {
     let refused = Installer::try_new_for_chain(
         root,
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(source),
         },
@@ -335,10 +332,10 @@ async fn an_unauthenticated_claim_is_refused_before_anything_is_built() {
     assert!(!root_path.exists(), "and nothing on disk");
 }
 
-/// Every other flow stays refused on the fork chain — the gate was widened to
-/// exactly one more flow, not opened.
+/// Every other flow stays refused on the fork chain: beyond creation and
+/// claim, only a whole Cube's restore (Recovery Kit, or phone) is admitted.
 #[tokio::test]
-async fn the_fork_chain_still_refuses_every_flow_but_creation_and_claim() {
+async fn the_fork_chain_refuses_every_flow_but_creation_claim_and_cube_restore() {
     // One process-global session slot: serialise with every other test that
     // opens one, or a sibling's `open` replaces this source's PIN.
     let _guard = crate::app::session::test_guard();
@@ -346,7 +343,6 @@ async fn the_fork_chain_still_refuses_every_flow_but_creation_and_claim() {
     for flow in [
         UserFlow::AddWallet,
         UserFlow::RestoreVaultFromRecoveryKit,
-        UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
         UserFlow::RecoverInheritedVault {
             cube_id: 1,
             full_cube: true,
@@ -359,7 +355,6 @@ async fn the_fork_chain_still_refuses_every_flow_but_creation_and_claim() {
         let refused = Installer::try_new_for_chain(
             temp_root("flows"),
             ChainId::BitcoinBlake2b,
-            None,
             flow.clone(),
             false,
             None,
@@ -369,6 +364,33 @@ async fn the_fork_chain_still_refuses_every_flow_but_creation_and_claim() {
             Some(authenticated_client(&server)),
         );
         assert!(refused.is_err(), "{:?} must stay refused on the fork", flow);
+    }
+    for flow in [
+        UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
+        UserFlow::RecoverOwnCubeWithPhone {
+            cube_id: 1,
+            full_cube: true,
+        },
+    ] {
+        let root = temp_root("restore");
+        let (installer, _) = Installer::try_new_for_chain(
+            root.clone(),
+            ChainId::BitcoinBlake2b,
+            flow.clone(),
+            false,
+            None,
+            None,
+            None,
+            false,
+            Some(authenticated_client(&server)),
+        )
+        .unwrap_or_else(|e| panic!("{:?} restores on the fork: {}", flow, e));
+        // A restored Cube is never handed a Breez or Spark client, and
+        // building it touches nothing on disk.
+        assert!(installer.breez_client.is_none());
+        assert!(installer.spark_backend.is_none());
+        assert!(!installer.context.fresh_fork_cube);
+        assert!(!root.path().exists());
     }
 }
 
@@ -385,7 +407,6 @@ async fn the_claim_flow_never_asks_for_a_pin_a_descriptor_or_the_mnemonic_again(
     let (mut installer, _) = Installer::try_new_for_chain(
         temp_root("steps"),
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(source),
         },
@@ -545,7 +566,6 @@ async fn a_claim_install_writes_a_seed_the_minted_cube_can_open() {
     let (installer, _) = Installer::try_new_for_chain(
         root.clone(),
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(source),
         },
@@ -646,7 +666,6 @@ async fn a_claim_is_refused_when_the_source_cube_has_no_pin_in_this_session() {
     let refused = Installer::try_new_for_chain(
         root,
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(passkey_source),
         },
@@ -674,7 +693,6 @@ async fn a_claim_is_refused_when_the_source_cube_has_no_pin_in_this_session() {
     let refused = Installer::try_new_for_chain(
         root,
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(lapsed),
         },
@@ -720,7 +738,6 @@ async fn a_passkey_source_cube_can_create_its_copy() {
     let (installer, _) = Installer::try_new_for_chain(
         temp_root("passkey-copy"),
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(passkey_source),
         },
@@ -773,7 +790,6 @@ async fn backing_out_of_a_claim_returns_to_the_source_cube_not_to_home() {
     let (installer, _) = Installer::try_new_for_chain(
         root.clone(),
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(source),
         },
@@ -840,7 +856,6 @@ async fn the_real_install_writes_a_target_the_exit_seams_credential_opens() {
     let (mut installer, _) = Installer::try_new_for_chain(
         root.clone(),
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(source),
         },
@@ -937,7 +952,6 @@ async fn every_exit_from_a_claim_releases_the_parked_source_handle() {
         Installer::try_new_for_chain(
             root,
             ChainId::BitcoinBlake2b,
-            None,
             UserFlow::ClaimBlake2b {
                 from_cube: Box::new(source),
             },
@@ -1031,7 +1045,6 @@ async fn a_claim_interrupted_after_the_seed_write_can_be_retried_after_a_restart
         let (mut installer, _) = Installer::try_new_for_chain(
             root.clone(),
             ChainId::BitcoinBlake2b,
-            None,
             UserFlow::ClaimBlake2b {
                 from_cube: Box::new(src),
             },
@@ -1246,7 +1259,6 @@ async fn an_install_interrupted_between_the_wallet_and_the_cube_stays_retryable(
         let (mut installer, _) = Installer::try_new_for_chain(
             root.clone(),
             ChainId::BitcoinBlake2b,
-            None,
             UserFlow::ClaimBlake2b {
                 from_cube: Box::new(src),
             },
@@ -1371,12 +1383,12 @@ async fn an_install_interrupted_between_the_wallet_and_the_cube_stays_retryable(
     let _ = std::fs::remove_dir_all(root.path());
 }
 
-/// Cancel must restore the backend the source Cube actually uses. A
-/// remote-backed source opens through `CoincubeLiteLogin`, never a local
-/// daemon, so returning it through the Loader would try to bring up a daemon
-/// for a Vault that lives on the backend.
+/// A source Vault on the retired Liana Connect backend has no local daemon, so
+/// returning it through the Loader would try to bring up a daemon for a Vault
+/// that lives on that backend. Cancel goes back to the Launcher and says where
+/// the wallet still lives.
 #[tokio::test]
-async fn cancelling_a_claim_from_a_remote_backed_source_returns_to_its_own_backend() {
+async fn cancelling_a_claim_from_a_legacy_liana_connect_source_returns_to_the_launcher() {
     let _guard = crate::app::session::test_guard();
     let server = MockServer::start_async().await;
     let (mut source, _) = source("Connect Cube");
@@ -1391,7 +1403,7 @@ async fn cancelling_a_claim_from_a_remote_backed_source_returns_to_its_own_backe
     )
     .unwrap();
 
-    // A Vault served by the remote backend, recorded the way the source Cube's
+    // A Vault on the retired Liana Connect backend, recorded the way the source Cube's
     // own settings record it.
     let wallet_id = WalletId::generate(&source.descriptor);
     source.cube.vault_wallet_id = Some(wallet_id.clone());
@@ -1427,7 +1439,6 @@ async fn cancelling_a_claim_from_a_remote_backed_source_returns_to_its_own_backe
     let (installer, _) = Installer::try_new_for_chain(
         root.clone(),
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(source),
         },
@@ -1447,11 +1458,14 @@ async fn cancelling_a_claim_from_a_remote_backed_source_returns_to_its_own_backe
     let _ = tab.update(crate::gui::tab::Message::Install(Message::BackToApp(
         Network::Bitcoin,
     )));
-    assert!(
-        matches!(tab.state, crate::gui::tab::State::Login(_)),
-        "a Connect-backed source must come back through its own login, not a \
-         local daemon startup"
-    );
+    let crate::gui::tab::State::Home(home) = &tab.state else {
+        panic!(
+            "a legacy Liana Connect source must return to the Launcher, not a local daemon startup"
+        );
+    };
+    assert!(home
+        .error()
+        .is_some_and(|e| e.contains("user@example.test")));
     let _ = std::fs::remove_dir_all(root.path());
 }
 
@@ -1513,7 +1527,6 @@ async fn cancelling_a_claim_restores_the_vault_the_source_cube_points_at() {
     let (installer, _) = Installer::try_new_for_chain(
         root.clone(),
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(source),
         },
@@ -1600,7 +1613,6 @@ async fn completing_copy_setup_returns_to_the_source_without_a_claim_handoff() {
     let (installer, _) = Installer::try_new_for_chain(
         root.clone(),
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(source),
         },
@@ -1662,7 +1674,6 @@ async fn backing_out_of_an_owned_copy_returns_to_the_pane() {
     let (installer, _) = Installer::try_new_for_chain(
         root.clone(),
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::ClaimBlake2b {
             from_cube: Box::new(source),
         },

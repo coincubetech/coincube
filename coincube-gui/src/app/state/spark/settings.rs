@@ -28,10 +28,10 @@ use iced::{Length, Task};
 use crate::app::cache::Cache;
 use crate::app::menu::Menu;
 use crate::app::message::Message;
+use crate::app::settings::WALLET_ALIAS_MAXIMUM_LENGTH;
 use crate::app::state::State;
 use crate::app::view::spark::{SparkSettingsStatus, SparkSettingsView};
 use crate::app::wallets::SparkBackend;
-use crate::services::connect::client::backend::api::WALLET_ALIAS_MAXIMUM_LENGTH;
 
 pub struct SparkSettings {
     backend: Option<Arc<SparkBackend>>,

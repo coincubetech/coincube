@@ -1,7 +1,7 @@
 pub mod editor;
 
 use async_hwi::utils::extract_keys_and_template;
-use iced::widget::{checkbox, radio, scrollable, tooltip, Button, Space, TextInput};
+use iced::widget::{checkbox, radio, scrollable, Button, Space, TextInput};
 use iced::{
     alignment,
     widget::{progress_bar, tooltip as iced_tooltip},
@@ -31,7 +31,6 @@ use coincube_ui::{
 use crate::node::electrum::validate_domain_checkbox;
 use crate::{
     app::settings,
-    help,
     hw::{is_compatible_with_tapminiscript, HardwareWallet, UnsupportedReason},
     installer::{
         descriptor::{PathSequence, PathWarning},
@@ -47,246 +46,8 @@ use crate::{
     },
 };
 
-pub fn import_wallet_or_descriptor<'a>(
-    progress: (usize, usize),
-    email: Option<&'a str>,
-    invitation: &'a form::Value<String>,
-    invitation_wallet: Option<&'a str>,
-    imported_descriptor: &'a form::Value<String>,
-    error: Option<&'a String>,
-    wallets: Vec<(&'a String, Option<&'a String>)>,
-) -> Element<'a, Message> {
-    let mut col_wallets = Column::new()
-        .spacing(20)
-        .push(h4_bold("Wallets on this Connect account"))
-        .push(p2_regular("Choose a wallet on this Connect account."));
-    let no_wallets = wallets.is_empty();
-    for (i, (name, alias)) in wallets.into_iter().enumerate() {
-        col_wallets = col_wallets.push(
-            Button::new(
-                Column::new()
-                    .push(alias.map(p1_bold))
-                    .push(p1_regular(name))
-                    .width(Length::Fill),
-            )
-            .style(theme::button::secondary)
-            .padding(10)
-            .on_press(Message::Select(i)),
-        );
-    }
-    let card_wallets: Element<'a, Message> = if no_wallets {
-        p2_regular("No previously used wallets are available on this account.").into()
-    } else {
-        card::simple(col_wallets).into()
-    };
-
-    let col_invitation_token = collapse::Collapse::new(
-        || {
-            Button::new(
-                Column::new()
-                    .spacing(5)
-                    .push(h4_bold("Load a shared wallet").style(theme::text::primary))
-                    .push(
-                        text("Use an invitation token from a shared wallet")
-                            .style(theme::text::secondary),
-                    ),
-            )
-            .padding(15)
-            .width(Length::Fill)
-            .style(theme::button::transparent_border)
-        },
-        || {
-            Button::new(
-                Column::new()
-                    .spacing(5)
-                    .push(h4_bold("Load a shared wallet").style(theme::text::primary))
-                    .push(
-                        text("Paste the invitation token you received by email")
-                            .style(theme::text::secondary),
-                    ),
-            )
-            .padding(15)
-            .width(Length::Fill)
-            .style(theme::button::transparent_border)
-        },
-        move || {
-            if let Some(wallet) = invitation_wallet {
-                Element::<'a, Message>::from(
-                    Column::new()
-                        .push(Space::new().height(0))
-                        .push(
-                            Row::new()
-                                .spacing(5)
-                                .push(Space::new().width(15))
-                                .push(text("Accept invitation for wallet:"))
-                                .push(text(wallet).bold()),
-                        )
-                        .push(
-                            Row::new()
-                                .push(Space::new().width(Length::Fill))
-                                .push(
-                                    button::secondary(None, "Accept")
-                                        .width(Length::Fixed(200.0))
-                                        .on_press(Message::ImportRemoteWallet(
-                                            message::ImportRemoteWallet::AcceptInvitation,
-                                        )),
-                                )
-                                .push(Space::new().width(Length::Fill)),
-                        )
-                        .push(Space::new().width(5))
-                        .spacing(20),
-                )
-            } else {
-                Element::<'a, Message>::from(
-                    Container::new(
-                        Column::new()
-                            .push(Space::new().height(0))
-                            .push(
-                                Column::new()
-                                    .push(text("Paste invitation:").bold())
-                                    .push(
-                                        form::Form::new_trimmed("Invitation", invitation, |msg| {
-                                            Message::ImportRemoteWallet(
-                                                message::ImportRemoteWallet::ImportInvitationToken(
-                                                    msg,
-                                                ),
-                                            )
-                                        })
-                                        .warning("Invitation token is invalid or expired")
-                                        .size(text::P1_SIZE)
-                                        .padding(10),
-                                    )
-                                    .spacing(10),
-                            )
-                            .push(
-                                Row::new().push(Space::new().width(Length::Fill)).push(
-                                    button::secondary(None, "Next")
-                                        .width(Length::Fixed(200.0))
-                                        .on_press_maybe(if !invitation.value.is_empty() {
-                                            Some(Message::ImportRemoteWallet(
-                                                message::ImportRemoteWallet::FetchInvitation,
-                                            ))
-                                        } else {
-                                            None
-                                        }),
-                                ),
-                            )
-                            .spacing(20),
-                    )
-                    .padding(15),
-                )
-            }
-        },
-    );
-
-    let col_descriptor = collapse::Collapse::new(
-        || {
-            Button::new(
-                Column::new()
-                    .spacing(5)
-                    .push(h4_bold("Load a wallet from descriptor").style(theme::text::primary))
-                    .push(
-                        text("Import its public descriptor; signing keys are not imported here")
-                            .style(theme::text::secondary),
-                    ),
-            )
-            .padding(15)
-            .width(Length::Fill)
-            .style(theme::button::transparent_border)
-        },
-        || {
-            Button::new(
-                Column::new()
-                    .spacing(5)
-                    .push(h4_bold("Load a wallet from descriptor").style(theme::text::primary))
-                    .push(
-                        text("Import its public descriptor; signing keys are not imported here")
-                            .style(theme::text::secondary),
-                    ),
-            )
-            .padding(15)
-            .width(Length::Fill)
-            .style(theme::button::transparent_border)
-        },
-        move || {
-            Element::<'a, Message>::from(
-                Container::new(
-                    Column::new()
-                        .push(Space::new().height(0))
-                        .push(
-                            Column::new()
-                                .push(text("Descriptor:").bold())
-                                .push(
-                                    form::Form::new_trimmed(
-                                        "Descriptor",
-                                        imported_descriptor,
-                                        |msg| {
-                                            Message::ImportRemoteWallet(
-                                                message::ImportRemoteWallet::ImportDescriptor(msg),
-                                            )
-                                        },
-                                    )
-                                    .warning(
-                                        "Either descriptor is invalid or incompatible with network",
-                                    )
-                                    .size(text::P1_SIZE)
-                                    .padding(10),
-                                )
-                                .push(text("or").bold())
-                                .push(button::primary(None, "Import descriptor").on_press(
-                                    Message::ImportRemoteWallet(
-                                        message::ImportRemoteWallet::ImportDescriptorFromFile,
-                                    ),
-                                ))
-                                .spacing(10),
-                        )
-                        .push(
-                            Row::new().push(Space::new().width(Length::Fill)).push(
-                                button::secondary(None, "Next")
-                                    .width(Length::Fixed(200.0))
-                                    .on_press_maybe(
-                                        if imported_descriptor.value.is_empty()
-                                            || !imported_descriptor.valid
-                                        {
-                                            None
-                                        } else {
-                                            Some(Message::ImportRemoteWallet(
-                                                message::ImportRemoteWallet::ConfirmDescriptor,
-                                            ))
-                                        },
-                                    ),
-                            ),
-                        )
-                        .spacing(20),
-                )
-                .padding(15),
-            )
-        },
-    );
-
-    layout(
-        progress,
-        email,
-        "Add an existing wallet",
-        Column::new()
-            .spacing(24)
-            .push(h4_bold("Choose a wallet source"))
-            .push(p2_regular(
-                "Use a wallet on this account, a shared invitation, or a public descriptor. To restore a Cube from its Recovery Kit, use the Cube restore path.",
-            ))
-            .push(error.map(|e| card::error("Something wrong happened", e.to_string())))
-            .push(card_wallets)
-            .push(card::simple(col_invitation_token).padding(0))
-            .push(card::simple(col_descriptor).padding(0))
-            .push(Space::new().height(10)),
-        true,
-        Some(Message::Previous),
-    )
-}
-
 pub fn import_descriptor<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     imported_descriptor: &form::Value<String>,
     imported_backup: bool,
     wrong_network: bool,
@@ -348,7 +109,6 @@ pub fn import_descriptor<'a>(
 
     layout(
         progress,
-        email,
         "Import a public wallet descriptor",
         Column::new()
             .push(p2_regular(
@@ -389,7 +149,6 @@ pub fn import_descriptor<'a>(
 #[allow(clippy::too_many_arguments)]
 pub fn register_descriptor<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     descriptor: &'a CoincubeDescriptor,
     hws: &'a [HardwareWallet],
     registered: &HashSet<bitcoin::bip32::Fingerprint>,
@@ -476,7 +235,6 @@ pub fn register_descriptor<'a>(
         };
     layout(
         progress,
-        email,
         "Register descriptor",
         Column::new()
             .push((!created_desc).then_some(
@@ -549,7 +307,6 @@ pub fn register_descriptor<'a>(
 
 pub fn backup_descriptor<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     descriptor: &'a CoincubeDescriptor,
     keys: &'a HashMap<Fingerprint, settings::KeySetting>,
     error: Option<&Error>,
@@ -565,7 +322,6 @@ pub fn backup_descriptor<'a>(
 
     layout(
         progress,
-        email,
         "Back Up your wallet configuration (Descriptor)",
         Column::new()
             .push(
@@ -923,7 +679,6 @@ pub fn define_bitcoin_node<'a>(
 
     layout(
         progress,
-        None,
         "Set up connection to the Bitcoin node",
         col,
         true,
@@ -1192,7 +947,6 @@ pub fn define_coincube_connect<'a>(
 
     layout(
         progress,
-        None,
         "COINCUBE | Connect",
         content,
         true,
@@ -1552,7 +1306,6 @@ pub fn select_bitcoind_type<'a>(
         let content = Container::new(choices).padding(30).center_x(Length::Fill);
         return layout(
             progress,
-            None,
             if chain == crate::chain::ChainId::BitcoinBlake2b {
                 "Bitcoin Blake2b node management"
             } else {
@@ -1710,7 +1463,6 @@ pub fn select_bitcoind_type<'a>(
 
     layout(
         progress,
-        None,
         "Bitcoin node management",
         content,
         true,
@@ -1780,7 +1532,6 @@ pub fn start_internal_bitcoind<'a>(
             .into()]));
         return layout(
             progress,
-            None,
             if flavor == crate::node::bitcoind::NodeFlavor::KnotsBlake2b {
                 "Start a pruned Bitcoin Blake2b node"
             } else {
@@ -1796,7 +1547,6 @@ pub fn start_internal_bitcoind<'a>(
 
     layout(
         progress,
-        None,
         if flavor == crate::node::bitcoind::NodeFlavor::KnotsBlake2b {
             "Start a pruned Bitcoin Blake2b node"
         } else {
@@ -1934,13 +1684,11 @@ pub fn restored<'a>(cube_name: &str, warning: Option<&'a String>) -> Element<'a,
 
 pub fn claim_setup_install<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     generating: bool,
     warning: Option<&'a String>,
 ) -> Element<'a, Message> {
     layout(
         progress,
-        email,
         "Bitcoin Blake2b copy",
         Column::new().spacing(20)
             .push(p1_regular(if generating {
@@ -1957,7 +1705,6 @@ pub fn claim_setup_install<'a>(
 
 pub fn install<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     generating: bool,
     installed: bool,
     warning: Option<&'a String>,
@@ -1966,7 +1713,6 @@ pub fn install<'a>(
     install_titled(
         "Finalize installation",
         progress,
-        email,
         generating,
         installed,
         warning,
@@ -1979,7 +1725,6 @@ pub fn install<'a>(
 pub fn install_titled<'a>(
     title: &'static str,
     progress: (usize, usize),
-    email: Option<&'a str>,
     generating: bool,
     installed: bool,
     warning: Option<&'a String>,
@@ -1992,7 +1737,6 @@ pub fn install_titled<'a>(
     };
     layout(
         progress,
-        email,
         title,
         Column::new()
             .push(warning.map(|e| card::invalid(text(e))))
@@ -2273,11 +2017,10 @@ pub fn hw_list_view<'a>(
 
 pub fn backup_fresh_fork_mnemonic<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     words: String,
     confirmed: bool,
 ) -> Element<'a, Message> {
-    layout(progress, email, "Back Up Your Cube Master Seed",
+    layout(progress, "Back Up Your Cube Master Seed",
         Column::new()
             .push(text("Write these words down in order and keep them private. They recover this Cube; the PIN only unlocks this device."))
             .push(text(words))
@@ -2287,13 +2030,9 @@ pub fn backup_fresh_fork_mnemonic<'a>(
             .spacing(30), true, Some(Message::Previous))
 }
 
-pub fn backup_mnemonic<'a>(
-    progress: (usize, usize),
-    email: Option<&'a str>,
-) -> Element<'a, Message> {
+pub fn backup_mnemonic<'a>(progress: (usize, usize)) -> Element<'a, Message> {
     layout(
         progress,
-        email,
         "Reminder: Back Up Your Master Seed",
         Column::new()
             .push(
@@ -2313,7 +2052,6 @@ pub fn backup_mnemonic<'a>(
 
 pub fn recover_mnemonic<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     words: &'a [(String, bool); 12],
     current: usize,
     suggestions: &'a [String],
@@ -2322,7 +2060,6 @@ pub fn recover_mnemonic<'a>(
 ) -> Element<'a, Message> {
     layout(
         progress,
-        email,
         "Import Mnemonic",
         Column::new()
             .push(text(prompt::RECOVER_MNEMONIC_HELP))
@@ -2419,226 +2156,6 @@ pub fn recover_mnemonic<'a>(
     )
 }
 
-pub fn choose_backend(progress: (usize, usize)) -> Element<'static, Message> {
-    layout(
-        progress,
-        None,
-        "Choose backend",
-        Column::new()
-            .push(
-                Row::new()
-                    .spacing(20)
-                    .push(
-                        Column::new()
-                            .spacing(20)
-                            .width(Length::FillPortion(1))
-                            .push(h3("Use your own node"))
-                            .push(text::p2_medium(LOCAL_WALLET_DESC).style(theme::text::secondary)),
-                    )
-                    .push(
-                        Column::new()
-                            .spacing(20)
-                            .width(Length::FillPortion(1))
-                            .push(h3("Use COINCUBE | Connect"))
-                            .push(
-                                text::p2_medium(REMOTE_BACKEND_DESC).style(theme::text::secondary),
-                            ),
-                    ),
-            )
-            .push(
-                Row::new()
-                    .spacing(20)
-                    .push(
-                        Container::new(
-                            button::secondary(None, "Select")
-                                .on_press(Message::SelectBackend(
-                                    message::SelectBackend::ContinueWithLocalWallet(true),
-                                ))
-                                .width(Length::Fixed(200.0)),
-                        )
-                        .width(Length::FillPortion(1)),
-                    )
-                    .push(
-                        Container::new(
-                            button::secondary(None, "Select")
-                                .on_press(Message::SelectBackend(
-                                    message::SelectBackend::ContinueWithLocalWallet(false),
-                                ))
-                                .width(Length::Fixed(200.0)),
-                        )
-                        .width(Length::FillPortion(1)),
-                    ),
-            )
-            .push(Space::new().height(20)) // ensures mouse cursor is not already on link when arriving at this step
-            .push(tooltip::Tooltip::new(
-                button::link(
-                    Some(icon::link_icon()),
-                    "More information about backend and node options",
-                )
-                .on_press(Message::OpenUrl(
-                    help::CHANGE_BACKEND_OR_NODE_URL.to_string(),
-                )),
-                Container::new(text(help::CHANGE_BACKEND_OR_NODE_URL))
-                    .style(theme::card::simple)
-                    .padding(10),
-                tooltip::Position::Bottom,
-            ))
-            .spacing(20),
-        true,
-        Some(Message::Previous),
-    )
-}
-
-pub fn login(progress: (usize, usize), connection_step: Element<Message>) -> Element<Message> {
-    layout_start(
-        progress,
-        None,
-        "Sign in to Connect",
-        Container::new(
-            Column::new()
-                .spacing(20)
-                .max_width(700)
-                .width(Length::Fill)
-                .push(p2_regular("ADD WALLET · CONNECT").style(theme::text::secondary))
-                .push(p2_regular(
-                    "Use the Connect account that holds your wallet or invitation. The emailed sign-in code submits when complete. If you have an invitation, enter its token on the next screen.",
-                ))
-                .push(connection_step),
-        ),
-        Some(Message::Previous),
-    )
-}
-
-pub fn connection_step_enter_email<'a>(
-    email: &'a form::Value<String>,
-    processing: bool,
-    connection_error: Option<&'a Error>,
-    accounts: &'a [String],
-    auth_error: Option<&'a str>,
-) -> Element<'a, Message> {
-    Column::new()
-        .spacing(20)
-        .push(if !accounts.is_empty() {
-            Some(text("Choose an account you are already using:"))
-        } else {
-            None
-        })
-        .push(
-            accounts
-                .iter()
-                .fold(Row::new().spacing(10), |row, a| {
-                    row.push(
-                        Button::new(Container::new(p1_regular(a)).padding(5))
-                            .style(theme::button::secondary)
-                            .on_press(Message::SelectBackend(
-                                message::SelectBackend::SelectConnectAccount(a.clone()),
-                            )),
-                    )
-                })
-                .wrap(),
-        )
-        .push(connection_error.map(|e| text(e.to_string()).style(theme::text::warning)))
-        .push(auth_error.map(|e| text(e.to_string()).style(theme::text::warning)))
-        .push(if accounts.is_empty() {
-            text("Enter an email you want to associate with the wallet:")
-        } else {
-            text("Or enter a new email you want to associate with the wallet:")
-        })
-        .push(
-            form::Form::new_trimmed("email", email, |msg| {
-                Message::SelectBackend(message::SelectBackend::EmailEdited(msg))
-            })
-            .size(text::P1_SIZE)
-            .padding(10)
-            .warning("Email is not valid"),
-        )
-        .push(
-            Row::new().push(Space::new().width(Length::Fill)).push(
-                button::secondary(None, "Send token")
-                    .on_press_maybe(if processing || !email.valid {
-                        None
-                    } else {
-                        Some(Message::SelectBackend(message::SelectBackend::RequestOTP))
-                    })
-                    .width(Length::Fixed(200.0)),
-            ),
-        )
-        .into()
-}
-
-pub fn connection_step_enter_otp<'a>(
-    email: &'a str,
-    otp: &form::Value<String>,
-    processing: bool,
-    connection_error: Option<&Error>,
-    auth_error: Option<&'static str>,
-) -> Element<'a, Message> {
-    Column::new()
-        .spacing(20)
-        // The address is still unverified until this sign-in code succeeds.
-        .push(text(email).style(theme::text::secondary))
-        .push(text("A sign-in code has been emailed to you"))
-        .push(connection_error.map(|e| text(e.to_string()).style(theme::text::warning)))
-        .push(auth_error.map(|e| text(e.to_string()).style(theme::text::warning)))
-        .push(
-            form::Form::new_trimmed("Sign-in code", otp, |msg| {
-                Message::SelectBackend(message::SelectBackend::OTPEdited(msg))
-            })
-            .size(text::P1_SIZE)
-            .padding(10)
-            .warning("Code is not valid"),
-        )
-        .push(
-            Row::new()
-                .spacing(10)
-                .push(
-                    button::secondary(Some(icon::previous_icon()), "Change Email")
-                        .on_press(Message::SelectBackend(message::SelectBackend::EditEmail)),
-                )
-                .push(
-                    button::secondary(None, "Resend code").on_press_maybe(if processing {
-                        None
-                    } else {
-                        Some(Message::SelectBackend(message::SelectBackend::RequestOTP))
-                    }),
-                ),
-        )
-        .into()
-}
-
-pub fn connection_step_connected<'a>(
-    email: &'a str,
-    processing: bool,
-    connection_error: Option<&Error>,
-    auth_error: Option<&'static str>,
-) -> Element<'a, Message> {
-    Column::new()
-        .spacing(20)
-        .push(text(email).style(theme::text::success))
-        .push(connection_error.map(|e| text(e.to_string()).style(theme::text::warning)))
-        .push(auth_error.map(|e| text(e.to_string()).style(theme::text::warning)))
-        .push(Container::new(
-            Row::new()
-                .spacing(10)
-                .push(
-                    button::secondary(Some(icon::previous_icon()), "Change Email")
-                        .on_press(Message::SelectBackend(message::SelectBackend::EditEmail)),
-                )
-                .push(
-                    button::secondary(None, "Continue").on_press_maybe(if processing {
-                        None
-                    } else {
-                        Some(Message::Next)
-                    }),
-                ),
-        ))
-        .into()
-}
-
-pub const REMOTE_BACKEND_DESC: &str = "Use COINCUBE | Connect to instantly be ready to transact. COINCUBE runs the infrastructure, allowing multiple computers or participants to connect and synchronize.\n\nThis is a simpler and safer option for people who want COINCUBE to keep a backup of their descriptor. You are still in control of your keys, and COINCUBE does not have any control over your funds, but it will be able to see your wallet's information, associated to an email address. Privacy focused users should run their own infrastructure instead.";
-
-pub const LOCAL_WALLET_DESC: &str = "Use your already existing Bitcoin node or automatically install one. The Vault wallet will not connect to any external server.\n\nThis is the most private option, but the data is locally stored on this computer, only. You must perform your own backups, and share the descriptor with other people you want to be able to access the wallet.";
-
 /// View for `RestorePinSetupStep`. Two `PinInput` pads stacked
 /// vertically, an optional inline error under the confirm pad, and a
 /// Next button gated on both pads being complete + matching.
@@ -2647,7 +2164,6 @@ pub const LOCAL_WALLET_DESC: &str = "Use your already existing Bitcoin node or a
 /// stays dumb — the caller owns the matching rule.
 pub fn restore_pin_setup<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     entry: &'a crate::pin_input::PinInput,
     confirm: &'a crate::pin_input::PinInput,
     error: Option<&'static str>,
@@ -2664,7 +2180,6 @@ pub fn restore_pin_setup<'a>(
 
     layout(
         progress,
-        email,
         "Create a PIN to secure your Cube",
         Column::new()
             .spacing(40)
@@ -2698,12 +2213,10 @@ pub fn restore_pin_setup<'a>(
 
 pub fn wallet_alias<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     wallet_alias: &form::Value<String>,
 ) -> Element<'a, Message> {
     layout(
         progress,
-        email,
         "Give your wallet an alias",
         Column::new()
             .push(
@@ -2766,7 +2279,6 @@ impl Drop for FramedGuard {
 
 pub(super) fn layout<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     title: &'static str,
     content: impl Into<Element<'a, Message>>,
     padding_left: bool,
@@ -2774,7 +2286,7 @@ pub(super) fn layout<'a>(
 ) -> Element<'a, Message> {
     titled_layout(
         progress,
-        email,
+        None,
         title,
         alignment::Horizontal::Center,
         content,
@@ -2790,7 +2302,6 @@ pub(super) fn layout<'a>(
 /// right-aligned.
 pub(super) fn layout_with_actions<'a>(
     progress: (usize, usize),
-    email: Option<&'a str>,
     title: &'static str,
     content: impl Into<Element<'a, Message>>,
     padding_left: bool,
@@ -2799,7 +2310,7 @@ pub(super) fn layout_with_actions<'a>(
 ) -> Element<'a, Message> {
     titled_layout(
         progress,
-        email,
+        None,
         title,
         alignment::Horizontal::Center,
         content,
@@ -2842,10 +2353,13 @@ fn titled_layout<'a>(
     actions: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     if let Some(path_title) = FRAMED.with(|framed| framed.get()) {
-        let mut back = button::secondary(Some(icon::previous_icon()), "Back").width(Length::Shrink);
-        if let Some(message) = previous_message {
-            back = back.on_press(message);
-        }
+        // A step with nowhere to go back to has no Back: the frame's Close
+        // and path list leave it.
+        let back = previous_message.map(|message| {
+            button::secondary(Some(icon::previous_icon()), "Back")
+                .width(Length::Shrink)
+                .on_press(message)
+        });
         // The frame already heads the page with the path's title. The step's
         // title sits on its content, and Back shares the footer row with the
         // step's actions.
@@ -3326,7 +2840,9 @@ pub fn recovery_kit_restore<'a>(
         }),
         title,
         content,
-        Some(Message::Previous),
+        // A full restore opens its Import or restore path, whose path list
+        // and Close leave it; a descriptor-only restore steps back.
+        (!matches!(scope, crate::installer::step::RestoreScope::Full)).then_some(Message::Previous),
     )
 }
 
@@ -3426,22 +2942,6 @@ mod tests {
         let _ = define_bitcoind(&remote, &auth, &RpcAuthType::UserPass);
         let _ = define_electrum(&valid, true);
         let _ = define_esplora(&invalid, "https://example.test/api");
-
-        let _ = choose_backend((1, 3));
-        let _ = connection_step_enter_email(
-            &value("user@example.com", true),
-            false,
-            None,
-            &["user@example.com".to_string()],
-            None,
-        );
-        let otp = value("123456", true);
-        let _ = connection_step_enter_otp("user@example.com", &otp, false, None, None);
-        let _ = connection_step_connected("user@example.com", false, None, None);
-        let _ = login(
-            (2, 3),
-            connection_step_connected("user@example.com", true, None, None),
-        );
     }
 
     #[test]
@@ -3538,17 +3038,16 @@ mod tests {
         let invalid_alias = value("This alias is too long", false);
         let warn = "Seed backup still recommended".to_string();
 
-        let _ = install((4, 4), Some("user@example.com"), true, false, None, None);
+        let _ = install((4, 4), true, false, None, None);
         let _ = install(
             (4, 4),
-            None,
             false,
             true,
             Some(&warn),
             Some("Connect backup enabled".to_string()),
         );
-        let _ = wallet_alias((1, 2), None, &alias);
-        let _ = wallet_alias((1, 2), Some("user@example.com"), &invalid_alias);
+        let _ = wallet_alias((1, 2), &alias);
+        let _ = wallet_alias((1, 2), &invalid_alias);
     }
 
     #[test]
@@ -3626,89 +3125,6 @@ mod tests {
 
         fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
             self.0.push((value.to_owned(), bounds));
-        }
-    }
-
-    #[tokio::test]
-    async fn connect_login_has_one_aligned_heading_and_distinct_code_copy() {
-        for bytes in coincube_ui::font::load() {
-            iced::advanced::graphics::text::font_system()
-                .write()
-                .unwrap()
-                .load_font(bytes);
-        }
-        let mut renderer = <iced::Renderer as Headless>::new(
-            coincube_ui::font::REGULAR,
-            iced::Pixels(16.0),
-            Some("tiny-skia"),
-        )
-        .await
-        .expect("software renderer");
-        let otp = value("", true);
-        let mut element = login(
-            (2, 8),
-            connection_step_enter_otp("user@example.com", &otp, false, None, None),
-        );
-        let mut tree = Tree::new(element.as_widget());
-        let node = element.as_widget_mut().layout(
-            &mut tree,
-            &renderer,
-            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1440.0, 900.0)),
-        );
-        let mut labels = RestoreLabels::default();
-        element
-            .as_widget_mut()
-            .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
-        let title_bounds: Vec<_> = labels
-            .0
-            .iter()
-            .filter(|(label, _)| label == "Sign in to Connect")
-            .map(|(_, bounds)| bounds)
-            .collect();
-        assert_eq!(title_bounds.len(), 1, "login heading should appear once");
-        let eyebrow_x = labels
-            .0
-            .iter()
-            .find(|(label, _)| label == "ADD WALLET · CONNECT")
-            .expect("Connect eyebrow")
-            .1
-            .x;
-        assert!((title_bounds[0].x - eyebrow_x).abs() < 1.0);
-        assert!(labels
-            .0
-            .iter()
-            .any(|(label, _)| label == "A sign-in code has been emailed to you"));
-        assert!(labels.0.iter().any(|(label, _)| label == "Resend code"));
-
-        if let Ok(directory) = std::env::var("R14_LOGIN_CAPTURE_DIR") {
-            std::fs::create_dir_all(&directory).unwrap();
-            let theme = theme::Theme::dark();
-            let size = iced::Size::new(1440.0, 900.0);
-            let screen = iced::Rectangle::with_size(size);
-            element.as_widget().draw(
-                &tree,
-                &mut renderer,
-                &theme,
-                &iced::advanced::renderer::Style {
-                    text_color: theme.colors.text.primary,
-                },
-                Layout::new(&node),
-                iced::mouse::Cursor::Unavailable,
-                &screen,
-            );
-            let pixels = renderer.screenshot(
-                iced::Size::new(1440, 900),
-                1.0,
-                theme.colors.general.background,
-            );
-            image::save_buffer(
-                std::path::Path::new(&directory).join("r14-connect-login-dark-1440x900.png"),
-                &pixels,
-                1440,
-                900,
-                image::ColorType::Rgba8,
-            )
-            .unwrap();
         }
     }
 
@@ -4014,7 +3430,7 @@ mod policy_layout_tests {
                 )
                 .await
                 .expect("software renderer");
-                let mut element = backup_descriptor((0, 0), None, &descriptor, &keys, None, false);
+                let mut element = backup_descriptor((0, 0), &descriptor, &keys, None, false);
                 let mut tree = Tree::new(element.as_widget());
                 let size = iced::Size::new(width as f32, height as f32);
                 let node = element.as_widget_mut().layout(

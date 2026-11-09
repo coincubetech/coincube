@@ -9,7 +9,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncSeekExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::auth::{AccessTokenResponse, AuthClient, AuthError};
+use super::auth::AccessTokenResponse;
 
 pub const CONNECT_CACHE_FILENAME: &str = "connect.json";
 const REREGISTER_LOCK_FILENAME_PREFIX: &str = "connect-reregister-";
@@ -232,11 +232,10 @@ impl Account {
 pub async fn update_connect_cache(
     network_dir: &NetworkDirectory,
     current_tokens: &AccessTokenResponse,
-    client: &AuthClient,
-    refresh: bool,
+    email: &str,
     action: CacheAccountAction,
 ) -> Result<AccessTokenResponse, ConnectCacheError> {
-    update_connect_cache_inner(network_dir, current_tokens, client, refresh, action, None).await
+    update_connect_cache_inner(network_dir, current_tokens, email, action, None).await
 }
 
 enum CacheUpdateGuard<'a> {
@@ -253,12 +252,10 @@ pub async fn persist_refreshed_tokens(
     previous_refresh_token: &str,
     tokens: &AccessTokenResponse,
 ) -> Result<AccessTokenResponse, ConnectCacheError> {
-    let auth = AuthClient::new(String::new(), String::new(), email.to_string());
     update_connect_cache_inner(
         network_dir,
         tokens,
-        &auth,
-        false,
+        email,
         CacheAccountAction::PreserveSelection,
         Some(CacheUpdateGuard::RefreshToken(previous_refresh_token)),
     )
@@ -274,12 +271,10 @@ pub async fn persist_restored_tokens(
     tokens: &AccessTokenResponse,
     started_from: &ConnectCache,
 ) -> Result<AccessTokenResponse, ConnectCacheError> {
-    let auth = AuthClient::new(String::new(), String::new(), email.to_string());
     update_connect_cache_inner(
         network_dir,
         tokens,
-        &auth,
-        false,
+        email,
         CacheAccountAction::Activate,
         Some(CacheUpdateGuard::RestoreSnapshot(started_from)),
     )
@@ -291,14 +286,13 @@ pub async fn persist_restored_tokens(
 pub async fn update_connect_cache_for_login(
     network_dir: &NetworkDirectory,
     tokens: &AccessTokenResponse,
-    client: &AuthClient,
+    email: &str,
     started_from: &ConnectCache,
 ) -> Result<AccessTokenResponse, ConnectCacheError> {
     update_connect_cache_inner(
         network_dir,
         tokens,
-        client,
-        false,
+        email,
         CacheAccountAction::NewLogin,
         Some(CacheUpdateGuard::LoginSnapshot(started_from)),
     )
@@ -308,12 +302,10 @@ pub async fn update_connect_cache_for_login(
 async fn update_connect_cache_inner(
     network_dir: &NetworkDirectory,
     current_tokens: &AccessTokenResponse,
-    client: &AuthClient,
-    refresh: bool,
+    email: &str,
     action: CacheAccountAction,
     guard: Option<CacheUpdateGuard<'_>>,
 ) -> Result<AccessTokenResponse, ConnectCacheError> {
-    let email = &client.email;
     let mut path = network_dir.path().to_path_buf();
     path.push(CONNECT_CACHE_FILENAME);
 
@@ -340,8 +332,8 @@ async fn update_connect_cache_inner(
                         "Parsing guarded Connect cache: {e}"
                     )));
                 }
-                tracing::warn!("Something wrong with Liana-Connect cache file: {:?}", e);
-                tracing::warn!("Liana-Connect cache file is reset");
+                tracing::warn!("Something wrong with Connect cache file: {:?}", e);
+                tracing::warn!("Connect cache file is reset");
                 ConnectCache::default()
             }
         }
@@ -420,13 +412,8 @@ async fn update_connect_cache_inner(
         .map(|account| account.tokens.clone());
 
     let tokens = if let Some(tokens) = newer_cached_tokens {
-        tracing::debug!("Liana-Connect authentication tokens are up to date");
+        tracing::debug!("Connect authentication tokens are up to date");
         tokens
-    } else if refresh {
-        client
-            .refresh_token(&current_tokens.refresh_token)
-            .await
-            .map_err(ConnectCacheError::Updating)?
     } else {
         current_tokens.clone()
     };
@@ -759,8 +746,8 @@ pub async fn filter_connect_cache(
         match serde_json::from_slice::<ConnectCache>(&file_content) {
             Ok(cache) => cache,
             Err(e) => {
-                tracing::warn!("Something wrong with Liana-Connect cache file: {:?}", e);
-                tracing::warn!("Liana-Connect cache file is reset");
+                tracing::warn!("Something wrong with Connect cache file: {:?}", e);
+                tracing::warn!("Connect cache file is reset");
                 ConnectCache::default()
             }
         }
@@ -804,7 +791,6 @@ pub enum ConnectCacheError {
     ReadingFile(String),
     WritingFile(String),
     Unexpected(String),
-    Updating(AuthError),
 }
 impl std::fmt::Display for ConnectCacheError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -813,7 +799,6 @@ impl std::fmt::Display for ConnectCacheError {
             Self::ReadingFile(e) => write!(f, "Error while reading file: {}", e),
             Self::WritingFile(e) => write!(f, "Error while writing file: {}", e),
             Self::Unexpected(e) => write!(f, "Unexpected error: {}", e),
-            Self::Updating(e) => write!(f, "Error while updating cache file: {}", e),
         }
     }
 }
@@ -859,12 +844,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let auth = super::AuthClient::new("http://unused".into(), String::new(), email.into());
         update_connect_cache(
             &dir,
             &tokens("restored"),
-            &auth,
-            false,
+            email,
             CacheAccountAction::Activate,
         )
         .await
@@ -906,24 +889,18 @@ mod tests {
 
         let mut newer = tokens("newer");
         newer.expires_at = 300;
-        update_connect_cache_for_login(
-            &dir,
-            &newer,
-            &super::AuthClient::new("http://unused".into(), String::new(), email.into()),
-            &stale_login_snapshot,
-        )
-        .await
-        .unwrap();
+        update_connect_cache_for_login(&dir, &newer, email, &stale_login_snapshot)
+            .await
+            .unwrap();
 
         let claim = begin_device_reregistration(&dir, email, "device-a")
             .await
             .unwrap()
             .unwrap();
-        let auth = super::AuthClient::new("http://unused".into(), String::new(), email.into());
         assert!(update_connect_cache_for_login(
             &dir,
             &tokens("slower"),
-            &auth,
+            email,
             &stale_login_snapshot,
         )
         .await
@@ -942,7 +919,7 @@ mod tests {
         assert!(update_connect_cache_for_login(
             &dir,
             &tokens("slower"),
-            &auth,
+            email,
             &stale_login_snapshot,
         )
         .await
@@ -974,8 +951,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let auth = super::AuthClient::new("http://unused".into(), String::new(), email.into());
-        let returned = update_connect_cache_for_login(&dir, &tokens("new"), &auth, &snapshot)
+        let returned = update_connect_cache_for_login(&dir, &tokens("new"), email, &snapshot)
             .await
             .unwrap();
         assert_eq!(returned.access_token, "new-access");
@@ -1147,8 +1123,7 @@ mod tests {
         cache.upsert_credential(email, tokens("old"), CacheAccountAction::NewLogin);
         std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
         let snapshot = ConnectCache::from_file(&dir).unwrap();
-        let auth = super::AuthClient::new("http://unused".into(), String::new(), email.into());
-        update_connect_cache_for_login(&dir, &tokens("new"), &auth, &snapshot)
+        update_connect_cache_for_login(&dir, &tokens("new"), email, &snapshot)
             .await
             .unwrap();
 
@@ -1264,12 +1239,10 @@ mod tests {
         cache.accounts[0].reregister_claim = Some("abandoned-claim".into());
         std::fs::write(&path, serde_json::to_vec(&cache).unwrap()).unwrap();
 
-        let auth = super::AuthClient::new("http://unused".into(), String::new(), email.into());
         update_connect_cache(
             &dir,
             &tokens("restored"),
-            &auth,
-            false,
+            email,
             CacheAccountAction::Activate,
         )
         .await

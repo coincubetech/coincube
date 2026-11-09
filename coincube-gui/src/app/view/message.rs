@@ -491,8 +491,6 @@ pub enum SettingsMessage {
     ElectrumSettings(SettingsEditMessage),
     RescanSettings(SettingsEditMessage),
     ImportExport(ImportExportMessage),
-    EditRemoteBackendSettings,
-    RemoteBackendSettings(RemoteBackendSettingsMessage),
     EditWalletSettings,
     ToggleWalletExpert,
     ReviewDescriptorCopy,
@@ -820,12 +818,6 @@ pub enum NodeSettingsMessage {
     /// Probe result: the tip height the endpoint reported, or why it didn't
     /// answer. A failure never changes the daemon config.
     CustomEsploraProbeResult(Result<u32, String>),
-}
-
-#[derive(Debug, Clone)]
-pub enum RemoteBackendSettingsMessage {
-    EditInvitationEmail(String),
-    SendInvitation,
 }
 
 #[derive(Debug, Clone)]
@@ -1782,6 +1774,15 @@ pub enum ConnectAccountMessage {
     RefreshRejected {
         epoch: u64,
     },
+    /// A refresh that never reached Connect: no network, or Connect didn't
+    /// answer. The stored session is kept and re-checked (`RecheckSession`)
+    /// instead of falling back to the sign-in form.
+    RefreshUnreachable {
+        trouble: crate::services::connect::grpc::trouble::Trouble,
+        epoch: u64,
+    },
+    /// The wait before re-checking an unverified session is over.
+    RecheckSession,
     LogOut,
     /// Open or dismiss the account's inline sign-out review.
     ReviewSignOut(bool),

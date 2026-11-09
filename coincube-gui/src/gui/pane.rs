@@ -78,6 +78,44 @@ mod launcher_delete_tests {
 }
 
 #[cfg(test)]
+mod connect_notice_tests {
+    use super::*;
+    use crate::{app::SignedOutBy, dir::CoincubeDirectory, home};
+
+    #[test]
+    fn a_new_tab_shows_the_signed_out_notice_its_siblings_show() {
+        let _guard = app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("connect-notice-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (first, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        let mut pane = Pane::new_with_tab(tab::State::Home(first));
+        pane.set_connect_signed_out_by(Some(SignedOutBy::SessionEnded));
+
+        drop(pane.add_tab(&Config::new(root.clone(), None)));
+        let added = pane.tabs.last().unwrap();
+        assert_eq!(added.connect_signed_out_by, Some(SignedOutBy::SessionEnded));
+        if let tab::State::Home(home) = &added.state {
+            assert_eq!(
+                home.connect_account.signed_out_by,
+                Some(SignedOutBy::SessionEnded)
+            );
+        }
+
+        pane.set_connect_signed_out_by(None);
+        drop(pane.add_tab(&Config::new(root, None)));
+        assert_eq!(pane.tabs.last().unwrap().connect_signed_out_by, None);
+        drop(pane);
+        std::fs::remove_dir_all(path).ok();
+    }
+}
+
+#[cfg(test)]
 mod copy_owner_tests {
     use super::*;
     use crate::{dir::CoincubeDirectory, home};
@@ -221,6 +259,8 @@ pub struct Pane {
     // current theme mode — applied to new tabs on creation
     theme_mode: coincube_ui::theme::palette::ThemeMode,
     balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
+    // the signed-out-by-Connect notice — applied to new tabs on creation
+    connect_signed_out_by: Option<crate::app::SignedOutBy>,
 }
 
 impl Pane {
@@ -286,7 +326,6 @@ impl Pane {
                     let (installer, task) = crate::installer::Installer::try_new_for_chain(
                         root.clone(),
                         crate::chain::ChainId::BitcoinBlake2b,
-                        None,
                         crate::installer::UserFlow::ClaimBlake2b {
                             from_cube: Box::new(source),
                         },
@@ -317,6 +356,7 @@ impl Pane {
         tab.set_copy_owner(owner);
         tab.set_theme_mode(self.theme_mode);
         tab.set_balance_privacy(self.balance_privacy);
+        tab.set_connect_signed_out_by(self.connect_signed_out_by);
         self.tabs.push(tab);
         self.focused_tab = self.tabs.len() - 1;
         task.map(move |message| Message::tab(id, tab::Message::Install(message)))
@@ -331,6 +371,7 @@ impl Pane {
                 tabs_created: 1,
                 theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
                 balance_privacy: None,
+                connect_signed_out_by: None,
             },
             task.map(|msg| Message::tab(1, msg)),
         )
@@ -343,6 +384,7 @@ impl Pane {
             tabs_created: 1,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             balance_privacy: None,
+            connect_signed_out_by: None,
         }
     }
 
@@ -353,6 +395,7 @@ impl Pane {
         let mut tab = tab::Tab::new(id, state);
         tab.set_theme_mode(self.theme_mode);
         tab.set_balance_privacy(self.balance_privacy);
+        tab.set_connect_signed_out_by(self.connect_signed_out_by);
         self.tabs.push(tab);
         self.focused_tab = self.tabs.len() - 1;
         task.map(move |msg| Message::tab(id, msg))
@@ -508,6 +551,7 @@ impl Pane {
             let mut new_tab = tab::Tab::new(id, tab.state);
             new_tab.set_theme_mode(self.theme_mode);
             new_tab.set_balance_privacy(self.balance_privacy);
+            new_tab.set_connect_signed_out_by(self.connect_signed_out_by);
             self.tabs.push(new_tab);
         }
         if self.focused_tab + focused_tab + 1 < self.tabs.len() {
@@ -525,6 +569,13 @@ impl Pane {
     pub fn set_reduce_motion(&mut self, reduce: bool) {
         for tab in &mut self.tabs {
             tab.set_reduce_motion(reduce);
+        }
+    }
+
+    pub fn set_connect_signed_out_by(&mut self, reason: Option<crate::app::SignedOutBy>) {
+        self.connect_signed_out_by = reason;
+        for tab in &mut self.tabs {
+            tab.set_connect_signed_out_by(reason);
         }
     }
 

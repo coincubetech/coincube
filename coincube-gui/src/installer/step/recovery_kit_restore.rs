@@ -1103,7 +1103,6 @@ impl Step for RecoveryKitRestoreStep {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        _email: Option<&'a str>,
     ) -> Element<'a, Message> {
         view::recovery_kit_restore(
             progress,
@@ -1927,7 +1926,6 @@ mod tests {
             crate::dir::CoincubeDirectory::new(
                 std::env::temp_dir().join("imported-restore-context-only"),
             ),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );
@@ -1958,7 +1956,6 @@ mod tests {
             crate::dir::CoincubeDirectory::new(
                 std::env::temp_dir().join("imported-restore-context-only"),
             ),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );
