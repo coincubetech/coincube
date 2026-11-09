@@ -391,7 +391,6 @@ impl Step for CoincubeConnectStep {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        _email: Option<&'a str>,
     ) -> Element<'a, Message> {
         let email_display = if self.email_touched {
             self.email.clone()

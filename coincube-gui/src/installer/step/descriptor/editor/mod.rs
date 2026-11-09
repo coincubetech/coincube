@@ -822,7 +822,6 @@ impl Step for DefineDescriptor {
         &'a self,
         hws: &'a HardwareWallets,
         progress: (usize, usize),
-        _email: Option<&'a str>,
     ) -> Element<'a, Message> {
         let content = match self.descriptor_template {
             DescriptorTemplate::SimpleInheritance => {
@@ -1138,7 +1137,7 @@ mod tests {
             crate::installer::view::FramedGuard::enter(crate::installer::CREATE_VAULT_TITLE);
         // As the Create Vault frame draws a step: inside its scrolled column.
         let element: Element<'_, Message> = iced::widget::scrollable(
-            coincube_ui::widget::Container::new(step.view(&hws, (0, 0), None)).padding([40, 24]),
+            coincube_ui::widget::Container::new(step.view(&hws, (0, 0))).padding([40, 24]),
         )
         .into();
         let mut ui = UserInterface::build(element, window, Cache::new(), &mut renderer);

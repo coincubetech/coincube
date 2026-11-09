@@ -249,12 +249,7 @@ impl Step for DefineNode {
         self.selected_mut().definition.apply(ctx)
     }
 
-    fn view(
-        &self,
-        _hws: &HardwareWallets,
-        progress: (usize, usize),
-        _email: Option<&str>,
-    ) -> Element<Message> {
+    fn view(&self, _hws: &HardwareWallets, progress: (usize, usize)) -> Element<Message> {
         // TODO: Make input fields read-only while waiting for a ping result.
         view::define_bitcoin_node(
             progress,

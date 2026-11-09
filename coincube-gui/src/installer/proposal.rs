@@ -463,7 +463,6 @@ impl Step for Review {
         &'a self,
         _hws: &'a crate::hw::HardwareWallets,
         _progress: (usize, usize),
-        _email: Option<&'a str>,
     ) -> Element<'a, Message> {
         let topology = self.session.topology();
         let mut content = column![h3("Review and authorize this Regtest Vault"),

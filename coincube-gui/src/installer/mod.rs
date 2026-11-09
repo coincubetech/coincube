@@ -1496,7 +1496,7 @@ impl Installer {
             .map(|(path, _)| path.title())
             .or(self.create_vault.then_some(CREATE_VAULT_TITLE))
             .map(view::FramedGuard::enter);
-        step.view(&self.hws, self.progress(), None)
+        step.view(&self.hws, self.progress())
     }
 
     /// The Create Vault stepper for the current step.

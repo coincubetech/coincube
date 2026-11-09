@@ -64,7 +64,6 @@ pub trait Step {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message>;
 
     fn load_context(&mut self, _ctx: &Context) {}
@@ -400,7 +399,6 @@ impl Step for Final {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         // Surface the approximate-timelock caveat here — the days
         // value is derived client-side from block-count, which varies
@@ -421,11 +419,10 @@ impl Step for Final {
                 self.warning.as_ref(),
             )
         } else if self.claim_setup {
-            view::claim_setup_install(progress, email, self.generating, self.warning.as_ref())
+            view::claim_setup_install(progress, self.generating, self.warning.as_ref())
         } else {
             view::install(
                 progress,
-                email,
                 self.generating,
                 self.wallet_settings.is_some() && self.warning.is_none(),
                 self.warning.as_ref(),
