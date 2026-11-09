@@ -61,3 +61,9 @@ contrib/release/macos/build-sign-local.sh
 
 # BTCB2 two-chain harness: verified Knots downloads (tests/tools/fetch_knots.sh)
 tests/tools/knots/
+
+# Local dev daemon runs: `data_dir = "./data"` in a repo-root config.toml
+# drops a full coincubed datadir (sqlite, logs, mnemonic backups) into the
+# working tree. Neither the datadir nor the scratch config belongs in git.
+/data/
+/config.toml
