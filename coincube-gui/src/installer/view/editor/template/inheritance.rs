@@ -96,7 +96,6 @@ pub fn two_of_three_inheritance_template<'a>(
 ) -> Element<'a, Message> {
     layout_with_actions(
         progress,
-        None,
         "Set keys",
         Column::new()
             .align_x(Alignment::Start)
@@ -265,7 +264,6 @@ pub fn inheritance_template<'a>(
     };
     layout_with_actions(
         progress,
-        None,
         "Set keys",
         Column::new()
             .align_x(Alignment::Start)

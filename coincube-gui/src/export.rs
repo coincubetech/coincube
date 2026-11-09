@@ -43,14 +43,16 @@ use crate::{
     backup::{self, Backup},
     daemon::{
         model::{HistoryTransaction, Labelled},
-        Daemon, DaemonBackend, DaemonError,
+        Daemon, DaemonError,
     },
     dir::{CoincubeDirectory, NetworkDirectory},
     node::bitcoind::Bitcoind,
-    services::connect::client::backend::api::DEFAULT_LIMIT,
 };
 
 const DUMP_LABELS_LIMIT: u32 = 100;
+/// Step by which a history page grows when every transaction in it shares one
+/// timestamp.
+pub const DEFAULT_LIMIT: usize = 20;
 
 macro_rules! send_progress {
     ($sender:ident, $progress:ident) => {
@@ -518,10 +520,7 @@ pub async fn export_transactions(
         send_progress!(sender, Progress(5.0));
     }
 
-    let max = match daemon.backend() {
-        DaemonBackend::RemoteBackend => DEFAULT_LIMIT as u64,
-        _ => u32::MAX as u64,
-    };
+    let max = u32::MAX as u64;
 
     // store txs in a map to avoid duplicates
     let mut map = HashMap::<Txid, HistoryTransaction>::new();
@@ -1111,13 +1110,6 @@ pub async fn import_backup(
         ));
     }
 
-    // TODO: drop after support for restore to liana-connect
-    if matches!(daemon.backend(), DaemonBackend::RemoteBackend) {
-        return Err(Error::BackupImport(
-            "Restore to a Liana-connect backend is not yet supported!".into(),
-        ));
-    }
-
     // Load backup from file
     let mut file = File::open(&path)?;
 
@@ -1373,7 +1365,6 @@ pub enum RestoreBackupError {
     WrongDescriptor,
     NoAccount,
     SeveralAccounts,
-    LianaConnectNotSupported,
     GetLabels,
     LabelsNotEmpty,
     InvalidPsbt,
@@ -1391,9 +1382,6 @@ impl Display for RestoreBackupError {
             RestoreBackupError::NoAccount => write!(f, "There is no account in the backup"),
             RestoreBackupError::SeveralAccounts => {
                 write!(f, "There is several accounts in the backup")
-            }
-            RestoreBackupError::LianaConnectNotSupported => {
-                write!(f, "Restore a backup to Liana-connect is not yet supported")
             }
             RestoreBackupError::GetLabels => write!(f, "Fails to get labels during backup restore"),
             RestoreBackupError::LabelsNotEmpty => write!(
@@ -1548,11 +1536,6 @@ pub async fn import_backup_at_launch(
     ),
     RestoreBackupError,
 > {
-    // TODO: drop after support for restore to liana-connect
-    if matches!(daemon.backend(), DaemonBackend::RemoteBackend) {
-        return Err(RestoreBackupError::LianaConnectNotSupported);
-    }
-
     if wallet.chain.is_blake2b()
         || cache.chain() != wallet.chain
         || !backup.matches_chain(wallet.chain)
@@ -1986,7 +1969,6 @@ mod tests {
             RestoreBackupError::WrongDescriptor,
             RestoreBackupError::NoAccount,
             RestoreBackupError::SeveralAccounts,
-            RestoreBackupError::LianaConnectNotSupported,
             RestoreBackupError::GetLabels,
             RestoreBackupError::LabelsNotEmpty,
             RestoreBackupError::InvalidPsbt,

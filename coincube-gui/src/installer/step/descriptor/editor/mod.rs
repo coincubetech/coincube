@@ -21,18 +21,16 @@ use coincube_ui::{
     widget::{modal::Modal, Element},
 };
 
-use crate::installer::KeySourceKind;
 use crate::{
     app::settings::KeySetting,
     hw::HardwareWallets,
     installer::{
         context::DescriptorTemplate,
-        descriptor::{Key, Path, PathKind, PathSequence, PathWarning, ENABLE_SAFETY_NET_KEYS},
+        descriptor::{Key, Path, PathKind, PathSequence, PathWarning},
         message::{self, Message},
         step::{Context, Step},
         view,
     },
-    services::keys::api::KeyKind,
     signer::Signer,
 };
 
@@ -117,12 +115,6 @@ impl DefineDescriptor {
         for path in &mut self.paths {
             if duplicate_sequences.contains(&path.sequence.as_u16()) {
                 path.warning = Some(PathWarning::DuplicateSequence);
-            } else if path.keys.iter().all(|key| {
-                // All keys must be Some for warning to apply.
-                key.as_ref()
-                    .is_some_and(|k| k.source.provider_key_kind() == Some(KeyKind::Cosigner))
-            }) {
-                path.warning = Some(PathWarning::OnlyCosignerKeys);
             } else if path
                 .keys
                 .iter()
@@ -246,26 +238,9 @@ impl DefineDescriptor {
         out
     }
 
-    fn edit_key_modal(
-        &self,
-        path_kind: PathKind,
-        coordinates: Vec<(usize, usize)>,
-    ) -> SelectKeySource {
-        let mut token_kind = vec![];
-        if ENABLE_SAFETY_NET_KEYS && path_kind == PathKind::SafetyNet {
-            token_kind.push(KeyKind::SafetyNet);
-        }
-        if path_kind.can_choose_key_source_kind(&KeySourceKind::Token(KeyKind::Cosigner))
-            && path_kind != PathKind::SafetyNet
-        {
-            token_kind.push(KeyKind::Cosigner);
-        }
+    fn edit_key_modal(&self, coordinates: Vec<(usize, usize)>) -> SelectKeySource {
         let keys = self.path_keys(coordinates.iter().map(|c| c.0).collect());
-        let actual_path = PathData {
-            coordinates,
-            keys,
-            token_kind,
-        };
+        let actual_path = PathData { coordinates, keys };
         let keys = self.keys();
         SelectKeySource::new_for_chain(
             self.chain,
@@ -350,11 +325,6 @@ impl Step for DefineDescriptor {
             Message::DefineDescriptor(message::DefineDescriptor::AddRecoveryPath) => {
                 self.paths.push(Path::new_recovery_path());
             }
-            Message::DefineDescriptor(message::DefineDescriptor::AddSafetyNetPath) => {
-                if !self.paths.iter().any(|p| p.kind() == PathKind::SafetyNet) {
-                    self.paths.push(Path::new_safety_net_path());
-                }
-            }
             Message::DefineDescriptor(message::DefineDescriptor::OpenBorderWalletWizard(
                 coordinates,
             )) => {
@@ -422,21 +392,16 @@ impl Step for DefineDescriptor {
                     }
                 }
             }
-            Message::DefineDescriptor(message::DefineDescriptor::KeysEdit(
-                path_kind,
-                coordinates,
-            )) => {
-                let modal = self.edit_key_modal(path_kind, coordinates);
+            Message::DefineDescriptor(message::DefineDescriptor::KeysEdit(_, coordinates)) => {
+                let modal = self.edit_key_modal(coordinates);
                 self.modal = Some(Box::new(modal));
             }
             Message::DefineDescriptor(message::DefineDescriptor::ReopenKeyModal(coordinates)) => {
-                // Derive path_kind from the first coordinate's path
-                // index (every coordinate in the Vec belongs to the
-                // same path, by construction of the picker call sites).
+                // Every coordinate in the Vec belongs to the same path,
+                // by construction of the picker call sites.
                 if let Some((path_idx, _)) = coordinates.first() {
-                    if let Some(path) = self.paths.get(*path_idx) {
-                        let path_kind = path.sequence.into();
-                        let modal = self.edit_key_modal(path_kind, coordinates);
+                    if self.paths.get(*path_idx).is_some() {
+                        let modal = self.edit_key_modal(coordinates);
                         self.modal = Some(Box::new(modal));
                     }
                 }
@@ -536,8 +501,7 @@ impl Step for DefineDescriptor {
                             }
                             message::DefineKey::Edit => {
                                 let coordinates = vec![(i, j)];
-                                let path_kind = self.paths[i].sequence.into();
-                                let modal = self.edit_key_modal(path_kind, coordinates);
+                                let modal = self.edit_key_modal(coordinates);
                                 self.modal = Some(Box::new(modal));
                             }
                             message::DefineKey::Delete => {
@@ -571,11 +535,8 @@ impl Step for DefineDescriptor {
                         return modal.update(hws, Message::EditKeyAlias(msg));
                     }
                 }
-                key::EditKeyAliasMessage::DoReplace {
-                    path_kind,
-                    coordinates,
-                } => {
-                    let modal = self.edit_key_modal(path_kind, coordinates);
+                key::EditKeyAliasMessage::DoReplace { coordinates, .. } => {
+                    let modal = self.edit_key_modal(coordinates);
                     self.modal = Some(Box::new(modal));
                 }
                 key::EditKeyAliasMessage::Close => self.modal = None,
@@ -650,7 +611,7 @@ impl Step for DefineDescriptor {
                         KeySetting {
                             master_fingerprint,
                             name: key.name.clone(),
-                            provider_key: key.source.provider_key(),
+                            provider_key: None,
                             is_border_wallet: matches!(
                                 key.source,
                                 crate::installer::descriptor::KeySource::BorderWallet { .. }
@@ -693,7 +654,7 @@ impl Step for DefineDescriptor {
                             KeySetting {
                                 master_fingerprint,
                                 name: key.name.clone(),
-                                provider_key: key.source.provider_key(),
+                                provider_key: None,
                                 is_border_wallet: matches!(
                                     key.source,
                                     crate::installer::descriptor::KeySource::BorderWallet { .. }
@@ -822,7 +783,6 @@ impl Step for DefineDescriptor {
         &'a self,
         hws: &'a HardwareWallets,
         progress: (usize, usize),
-        _email: Option<&'a str>,
     ) -> Element<'a, Message> {
         let content = match self.descriptor_template {
             DescriptorTemplate::SimpleInheritance => {
@@ -1138,7 +1098,7 @@ mod tests {
             crate::installer::view::FramedGuard::enter(crate::installer::CREATE_VAULT_TITLE);
         // As the Create Vault frame draws a step: inside its scrolled column.
         let element: Element<'_, Message> = iced::widget::scrollable(
-            coincube_ui::widget::Container::new(step.view(&hws, (0, 0), None)).padding([40, 24]),
+            coincube_ui::widget::Container::new(step.view(&hws, (0, 0))).padding([40, 24]),
         )
         .into();
         let mut ui = UserInterface::build(element, window, Cache::new(), &mut renderer);
@@ -1164,7 +1124,6 @@ mod tests {
 
     #[test]
     fn fork_descriptor_refuses_taproot_messages_and_stale_state() {
-        use crate::installer::context::RemoteBackend;
         for chain in [
             crate::chain::ChainId::BitcoinBlake2b,
             crate::chain::ChainId::BitcoinBlake2bTestnet4,
@@ -1173,8 +1132,7 @@ mod tests {
             let signer = Arc::new(Mutex::new(
                 Signer::generate(chain.bitcoin_network()).unwrap(),
             ));
-            let mut ctx =
-                Context::new_for_chain(chain, dir.clone(), RemoteBackend::None, None, None);
+            let mut ctx = Context::new_for_chain(chain, dir.clone(), None, None);
             let mut step = DefineDescriptor::new(chain.bitcoin_network(), signer);
             step.use_taproot = true;
             step.load_context(&ctx);
@@ -1225,16 +1183,7 @@ mod tests {
 
     /// Every key source the creation gate knows, one of each.
     fn every_key_source() -> Vec<KeySource> {
-        use crate::app::settings::{GridSeedSource, Provider, ProviderKey};
-        use crate::services::keys::api::KeyKind;
-        let provider_key = ProviderKey {
-            uuid: "uuid".to_string(),
-            token: "token".to_string(),
-            provider: Provider {
-                uuid: "provider".to_string(),
-                name: "Provider".to_string(),
-            },
-        };
+        use crate::app::settings::GridSeedSource;
         vec![
             KeySource::MasterSigner,
             KeySource::Manual,
@@ -1247,8 +1196,6 @@ mod tests {
                 key_id: 1,
                 name: "phone".to_string(),
             },
-            KeySource::Token(KeyKind::SafetyNet, provider_key.clone()),
-            KeySource::Token(KeyKind::Cosigner, provider_key),
             KeySource::BorderWallet {
                 grid_seed_source: GridSeedSource::Independent,
             },
@@ -1257,11 +1204,10 @@ mod tests {
 
     /// HW-1 and its Amendment A (Robert, 2026-10-06): on both Bitcoin
     /// Blake2b chains the Cube key, xpubs, hardware devices and Border
-    /// Wallet keys may build a Vault; Keychain keys and provider tokens may
-    /// not. Every source stays
-    /// available on every Bitcoin-family chain.
+    /// Wallet keys may build a Vault; Keychain keys may not. Every source
+    /// stays available on every Bitcoin-family chain.
     #[test]
-    fn creation_gate_on_bitcoin_blake2b_refuses_only_keychain_and_token_sources() {
+    fn creation_gate_on_bitcoin_blake2b_refuses_only_keychain_sources() {
         use crate::chain::ChainId;
         for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
             for source in every_key_source() {
@@ -1305,7 +1251,6 @@ mod tests {
     /// the device's place is still refused.
     #[test]
     fn fork_descriptor_applies_with_a_device_key_and_refuses_a_keychain_key() {
-        use crate::installer::context::RemoteBackend;
         use coincube_core::miniscript::bitcoin::bip32::DerivationPath;
         for chain in [
             crate::chain::ChainId::BitcoinBlake2b,
@@ -1338,7 +1283,7 @@ mod tests {
             let backup = key_from(&backup_signer, KeySource::Manual, "Backup");
 
             let dir = CoincubeDirectory::new(PathBuf::new());
-            let mut ctx = Context::new_for_chain(chain, dir, RemoteBackend::None, None, None);
+            let mut ctx = Context::new_for_chain(chain, dir, None, None);
             let mut step = DefineDescriptor::new(
                 network,
                 Arc::new(Mutex::new(Signer::generate(network).unwrap())),
@@ -1361,13 +1306,8 @@ mod tests {
             assert_eq!(ctx.bitcoin_config.chain, chain);
 
             // A Keychain key in the device's place is still refused.
-            let mut ctx = Context::new_for_chain(
-                chain,
-                CoincubeDirectory::new(PathBuf::new()),
-                RemoteBackend::None,
-                None,
-                None,
-            );
+            let mut ctx =
+                Context::new_for_chain(chain, CoincubeDirectory::new(PathBuf::new()), None, None);
             let mut phone = device.clone();
             phone.source = KeySource::KeychainKey {
                 owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
@@ -1386,13 +1326,8 @@ mod tests {
             assert!(ctx.descriptor.is_none());
 
             // Amendment A: a Border Wallet key in the device's place applies.
-            let mut ctx = Context::new_for_chain(
-                chain,
-                CoincubeDirectory::new(PathBuf::new()),
-                RemoteBackend::None,
-                None,
-                None,
-            );
+            let mut ctx =
+                Context::new_for_chain(chain, CoincubeDirectory::new(PathBuf::new()), None, None);
             let mut border = device.clone();
             border.source = KeySource::BorderWallet {
                 grid_seed_source: crate::app::settings::GridSeedSource::Independent,
@@ -1410,7 +1345,6 @@ mod tests {
     /// Keychain, on every path, and marks that record complete.
     #[test]
     fn apply_records_keychain_provenance_per_key() {
-        use crate::installer::context::RemoteBackend;
         use coincube_core::miniscript::bitcoin::bip32::DerivationPath;
         let network = Network::Signet;
         let key_from = |signer: &Signer, source: KeySource, name: &str| {
@@ -1445,7 +1379,7 @@ mod tests {
         let backup_key = key_from(&backup, KeySource::Manual, "Backup");
 
         let dir = CoincubeDirectory::new(PathBuf::new());
-        let mut ctx = Context::new(network, dir, RemoteBackend::None, None, None);
+        let mut ctx = Context::new(network, dir, None, None);
         let mut step = DefineDescriptor::new(
             network,
             Arc::new(Mutex::new(Signer::generate(network).unwrap())),
@@ -1504,7 +1438,6 @@ mod tests {
         let mut ctx = Context::new(
             Network::Signet,
             CoincubeDirectory::new(PathBuf::from_str("/").unwrap()),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );
@@ -1588,7 +1521,6 @@ mod tests {
         let mut ctx = Context::new(
             Network::Testnet,
             CoincubeDirectory::new(PathBuf::from_str("/").unwrap()),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );
@@ -1700,7 +1632,6 @@ mod tests {
         let mut ctx = Context::new(
             Network::Signet,
             CoincubeDirectory::new(PathBuf::from_str("/").unwrap()),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );
@@ -1835,7 +1766,6 @@ mod tests {
         let mut ctx = Context::new(
             Network::Bitcoin,
             CoincubeDirectory::new(PathBuf::from_str("/").unwrap()),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );

@@ -9,10 +9,7 @@ use crate::{
     dir::CoincubeDirectory,
     installer::descriptor::PathKind,
     node::bitcoind::{Bitcoind, InternalBitcoindConfig, NodeFlavor},
-    services::{
-        coincube::CoincubeClient,
-        connect::client::backend::{BackendClient, BackendWalletClient},
-    },
+    services::coincube::CoincubeClient,
     signer::Signer,
 };
 use async_hwi::DeviceKind;
@@ -41,36 +38,6 @@ pub struct ConnectVaultMemberPayload {
     /// inference; all members currently default to `Keyholder` per the
     /// 2026-04-18 plan direction.
     pub path_kind: PathKind,
-}
-
-#[derive(Debug, Clone)]
-pub enum RemoteBackend {
-    Undefined,
-    None,
-    // The installer will have to create a wallet from the created descriptor.
-    WithoutWallet(BackendClient),
-    // The installer will have to fetch the wallet and only install the missing configuration files.
-    WithWallet(BackendWalletClient),
-}
-
-impl RemoteBackend {
-    pub fn user_email(&self) -> Option<&str> {
-        match self {
-            Self::WithWallet(b) => Some(b.user_email()),
-            Self::WithoutWallet(b) => Some(b.user_email()),
-            _ => None,
-        }
-    }
-
-    pub fn is_none(&self) -> bool {
-        matches!(self, RemoteBackend::None)
-    }
-    pub fn is_some(&self) -> bool {
-        matches!(
-            self,
-            RemoteBackend::WithoutWallet { .. } | RemoteBackend::WithWallet { .. }
-        )
-    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -188,7 +155,6 @@ pub struct Context {
     /// sync. Connect-first setup leaves this empty until background install
     /// completes and the running app records the pending node.
     pub pending_bitcoind_config: Option<coincubed::config::BitcoindConfig>,
-    pub remote_backend: RemoteBackend,
     pub backup: Option<Backup>,
     pub wallet_alias: String,
     /// Cube UUID (from CubeSettings.id) — present when the Vault installer
@@ -389,14 +355,12 @@ impl Context {
     pub fn new(
         network: bitcoin::Network,
         coincube_directory: CoincubeDirectory,
-        remote_backend: RemoteBackend,
         cube_settings: Option<&crate::app::settings::CubeSettings>,
         coincube_client: Option<CoincubeClient>,
     ) -> Self {
         Self::new_for_chain(
             network.into(),
             coincube_directory,
-            remote_backend,
             cube_settings,
             coincube_client,
         )
@@ -408,7 +372,6 @@ impl Context {
     pub fn new_for_chain(
         chain: crate::chain::ChainId,
         coincube_directory: CoincubeDirectory,
-        remote_backend: RemoteBackend,
         cube_settings: Option<&crate::app::settings::CubeSettings>,
         coincube_client: Option<CoincubeClient>,
     ) -> Self {
@@ -448,7 +411,6 @@ impl Context {
             internal_bitcoind_config: None,
             internal_bitcoind: None,
             pending_bitcoind_config: None,
-            remote_backend,
             wallet_alias: String::new(),
             backup: None,
             cube_id: cube_settings.map(|cs| cs.id.clone()),
@@ -469,7 +431,7 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
-    use super::{Context, RemoteBackend};
+    use super::Context;
     use crate::dir::CoincubeDirectory;
     use crate::installer::step::Step;
     use coincube_core::miniscript::bitcoin::Network;
@@ -480,13 +442,8 @@ mod tests {
     fn explicit_chain_context_keeps_encoding_and_identity_separate() {
         use crate::chain::ChainId;
         for chain in ChainId::ALL {
-            let context = Context::new_for_chain(
-                chain,
-                CoincubeDirectory::new(PathBuf::new()),
-                RemoteBackend::None,
-                None,
-                None,
-            );
+            let context =
+                Context::new_for_chain(chain, CoincubeDirectory::new(PathBuf::new()), None, None);
             assert_eq!(context.bitcoin_config.chain, chain);
             assert_eq!(context.network, chain.bitcoin_network());
             assert_eq!(context.bitcoin_config.network, chain.bitcoin_network());
@@ -519,7 +476,6 @@ mod tests {
         Context::new(
             Network::Bitcoin,
             CoincubeDirectory::new(PathBuf::new()),
-            RemoteBackend::None,
             None,
             None,
         )

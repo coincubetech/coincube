@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use iced::Task;
 
-use coincube_ui::{component::form, widget::Element};
+use coincube_ui::widget::Element;
 
 use bitcoind::BitcoindSettingsState;
 use wallet::{update_aliases, WalletSettingsState};
@@ -25,7 +25,7 @@ use crate::{
         wallet::Wallet,
         Config,
     },
-    daemon::{Daemon, DaemonBackend},
+    daemon::Daemon,
     dir::CoincubeDirectory,
     export::{ImportExportMessage, ImportExportType},
 };
@@ -36,7 +36,6 @@ pub struct SettingsState {
     data_dir: CoincubeDirectory,
     wallet: Arc<Wallet>,
     setting: Option<Box<dyn State>>,
-    daemon_backend: DaemonBackend,
     internal_bitcoind: bool,
     managed_owner: Arc<Mutex<Option<PathBuf>>>,
     config: Arc<Config>,
@@ -46,7 +45,6 @@ impl SettingsState {
     pub fn new(
         data_dir: CoincubeDirectory,
         wallet: Arc<Wallet>,
-        daemon_backend: DaemonBackend,
         internal_bitcoind: bool,
         config: Arc<Config>,
     ) -> Self {
@@ -54,7 +52,6 @@ impl SettingsState {
             data_dir,
             wallet,
             setting: None,
-            daemon_backend,
             internal_bitcoind,
             managed_owner: Arc::new(Mutex::new(None)),
             config,
@@ -90,18 +87,6 @@ impl State for SettingsState {
             tracing::warn!("SettingsState::update called without daemon");
             return Task::none();
         };
-        if self.wallet.chain.is_blake2b()
-            && matches!(
-                &message,
-                Message::View(view::Message::Settings(
-                    view::SettingsMessage::EditRemoteBackendSettings
-                ))
-            )
-        {
-            return Task::done(Message::View(view::Message::ShowError(
-                "Remote daemon backends are unavailable for Bitcoin Blake2b.".into(),
-            )));
-        }
         match &message {
             Message::View(view::Message::Settings(view::SettingsMessage::EditBitcoindSettings)) => {
                 self.setting = Some(
@@ -119,12 +104,6 @@ impl State for SettingsState {
                     .as_mut()
                     .map(|s| s.reload(Some(daemon), Some(wallet)))
                     .unwrap_or_else(Task::none)
-            }
-            Message::View(view::Message::Settings(
-                view::SettingsMessage::EditRemoteBackendSettings,
-            )) => {
-                self.setting = Some(BackendSettingsState::new().into());
-                Task::none()
             }
             Message::View(view::Message::Settings(view::SettingsMessage::ImportExportSection)) => {
                 self.setting = Some(
@@ -182,11 +161,7 @@ impl State for SettingsState {
         if let Some(setting) = &self.setting {
             setting.view(menu, cache)
         } else {
-            view::vault::settings::list(
-                menu,
-                cache,
-                self.daemon_backend == DaemonBackend::RemoteBackend,
-            )
+            view::vault::settings::list(menu, cache)
         }
     }
 
@@ -309,7 +284,6 @@ impl State for ImportExportSettingsState {
                             self.wallet.clone(),
                             None,
                             aliases.into_iter().map(|(fg, ks)| (fg, ks.name)).collect(),
-                            daemon.clone(),
                         ),
                         Message::WalletUpdated,
                     );
@@ -402,105 +376,6 @@ impl State for ImportExportSettingsState {
 
 impl From<ImportExportSettingsState> for Box<dyn State> {
     fn from(s: ImportExportSettingsState) -> Box<dyn State> {
-        Box::new(s)
-    }
-}
-
-#[derive(Default)]
-pub struct BackendSettingsState {
-    email_form: form::Value<String>,
-    processing: bool,
-    success: bool,
-    warning: Option<Error>,
-}
-
-impl BackendSettingsState {
-    pub fn new() -> Self {
-        Self {
-            email_form: form::Value::default(),
-            processing: false,
-            success: false,
-            warning: None,
-        }
-    }
-}
-
-impl State for BackendSettingsState {
-    fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
-        view::vault::settings::remote_backend_section(
-            menu,
-            cache,
-            &self.email_form,
-            self.processing,
-            self.success,
-        )
-    }
-
-    fn update(
-        &mut self,
-        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
-        _cache: &Cache,
-        message: Message,
-    ) -> Task<Message> {
-        let Some(daemon) = daemon else {
-            tracing::warn!("BackendSettingsState::update called without daemon");
-            return Task::none();
-        };
-        match message {
-            Message::View(view::Message::Settings(
-                view::SettingsMessage::RemoteBackendSettings(message),
-            )) => match message {
-                view::RemoteBackendSettingsMessage::SendInvitation => {
-                    if !self.email_form.valid {
-                        return Task::none();
-                    }
-                    let email = self.email_form.value.clone();
-                    self.processing = true;
-                    self.success = false;
-                    self.warning = None;
-                    Task::perform(
-                        async move {
-                            daemon.send_wallet_invitation(&email).await?;
-                            Ok(())
-                        },
-                        Message::Updated,
-                    )
-                }
-                view::RemoteBackendSettingsMessage::EditInvitationEmail(email) => {
-                    if !self.processing {
-                        self.email_form.valid = email_address::EmailAddress::parse_with_options(
-                            &email,
-                            email_address::Options::default().with_required_tld(),
-                        )
-                        .is_ok();
-                        self.email_form.value = email;
-                        self.success = false;
-                    }
-                    Task::none()
-                }
-            },
-            Message::Updated(res) => {
-                self.processing = false;
-                match res {
-                    Ok(()) => {
-                        self.success = true;
-                        Task::none()
-                    }
-                    Err(e) => {
-                        self.success = false;
-                        let err_msg = crate::user_error::report(&e);
-                        self.warning = Some(e);
-                        Task::done(Message::View(view::Message::ShowError(err_msg)))
-                    }
-                }
-            }
-            _ => Task::none(),
-        }
-    }
-}
-
-impl From<BackendSettingsState> for Box<dyn State> {
-    fn from(s: BackendSettingsState) -> Box<dyn State> {
         Box::new(s)
     }
 }
@@ -624,14 +499,8 @@ mod chain_tests {
         };
         let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
         let wallet = Arc::new(Wallet::new(descriptor));
-        let mut settings = SettingsState::new(
-            datadir,
-            wallet,
-            DaemonBackend::EmbeddedCoincubed(None),
-            true,
-            Arc::new(Config::new(false)),
-        )
-        .with_managed_owner(Some(PathBuf::from("old-owner.lock")));
+        let mut settings = SettingsState::new(datadir, wallet, true, Arc::new(Config::new(false)))
+            .with_managed_owner(Some(PathBuf::from("old-owner.lock")));
         let open = BitcoindSettingsState::new(None, &cache, false, true)
             .with_managed_owner(settings.managed_owner.clone());
         settings.set_managed_owner(Some(PathBuf::from("replacement-owner.lock")));
@@ -643,7 +512,7 @@ mod chain_tests {
     }
 
     #[test]
-    fn fork_node_navigation_opens_the_guarded_page_and_remote_backend_stays_closed() {
+    fn fork_node_navigation_opens_the_guarded_page() {
         use crate::chain::ChainId;
         for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
             let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
@@ -666,27 +535,14 @@ mod chain_tests {
             let daemon = Arc::new(crate::daemon::embedded::EmbeddedDaemon::unstarted_for_test(
                 config, None,
             ));
-            let mut state = SettingsState::new(
-                dir.clone(),
-                wallet,
-                DaemonBackend::EmbeddedCoincubed(None),
-                false,
-                Arc::new(Config::new(false)),
-            );
+            let mut state =
+                SettingsState::new(dir.clone(), wallet, false, Arc::new(Config::new(false)));
             let cache = Cache {
                 fiat_chain: chain,
                 network: chain.bitcoin_network(),
                 datadir_path: dir.clone(),
                 ..Cache::default()
             };
-            drop(state.update(
-                Some(daemon.clone()),
-                &cache,
-                Message::View(view::Message::Settings(
-                    view::SettingsMessage::EditRemoteBackendSettings,
-                )),
-            ));
-            assert!(state.setting.is_none());
             drop(state.update(
                 Some(daemon),
                 &cache,

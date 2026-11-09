@@ -9,7 +9,7 @@ use crate::app::message::Message;
 use crate::app::state::State;
 use crate::app::view;
 use crate::app::wallet::Wallet;
-use crate::daemon::{Daemon, DaemonBackend};
+use crate::daemon::Daemon;
 
 #[derive(Default)]
 pub struct AboutSettingsState {
@@ -34,15 +34,7 @@ impl State for AboutSettingsState {
         if let Message::Info(res) = message {
             match res {
                 Ok(info) => {
-                    if let Some(daemon) = daemon {
-                        if daemon.backend() == DaemonBackend::RemoteBackend {
-                            self.daemon_version = None;
-                        } else {
-                            self.daemon_version = Some(info.version)
-                        }
-                    } else {
-                        self.daemon_version = None;
-                    }
+                    self.daemon_version = daemon.map(|_| info.version);
                 }
                 Err(e) => {
                     return Task::done(Message::View(view::Message::ShowError(

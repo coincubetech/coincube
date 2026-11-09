@@ -24,7 +24,7 @@ use coincube_ui::{
     component::{
         button, card, form,
         hw::Account,
-        modal::{self, collapsible_input_button},
+        modal,
         text::{p1_bold, p1_regular},
         tooltip,
     },
@@ -33,7 +33,7 @@ use coincube_ui::{
 };
 
 use crate::{
-    app::{settings::ProviderKey, state::vault::export::VaultExportModal},
+    app::state::vault::export::VaultExportModal,
     export::{ImportExportMessage, ImportExportType},
     hw::{is_compatible_with_tapminiscript, HardwareWallet, HardwareWallets, UnsupportedReason},
     installer::{
@@ -41,11 +41,7 @@ use crate::{
         message::{self, Message},
         Error, PathKind,
     },
-    services::{
-        self,
-        coincube::{classify_cube_key_ownership, Contact, CubeKeyOwnership, CubeKeyRaw},
-        keys::{self, api::KeyKind},
-    },
+    services::coincube::{classify_cube_key_ownership, Contact, CubeKeyOwnership, CubeKeyRaw},
     signer::Signer,
 };
 
@@ -199,8 +195,6 @@ enum Focus {
     EnterXpub,
     LoadXpubFromFile,
     GenerateMasterKey,
-    EnterSafetyNetToken,
-    EnterCosignerToken,
 }
 
 #[derive(Debug, Clone)]
@@ -214,19 +208,13 @@ pub enum SelectKeySourceMessage {
     Xpub(String),
     SelectGenerateMasterKey,
     FetchFromMasterSigner(ChildNumber),
-    SelectEnterSafetyNetToken,
-    SelectEnterCosignerToken,
     SelectBorderWalletSafetyNet,
-    PasteToken,
-    Token(String),
     Previous,
     Next,
     Alias(String),
     LoadKey(Result<Key, Error>),
-    ProviderKey(Result<Key, Error>),
     ImportExport(ImportExportMessage),
     Account(ChildNumber),
-    Collapse(bool),
     Retry,
     None,
     // Keychain key messages
@@ -270,16 +258,13 @@ struct GridCard {
     on_press: Option<SelectKeySourceMessage>,
 }
 
-/// This struct represent metadata about a spending path, including whether it's
-/// a primary path or a timelocked recovery path, keys used
-/// in this path, if safety-net feature is allowed for this path.
+/// This struct represent metadata about a spending path: the slot being
+/// edited and the keys already used in this path.
 pub struct PathData {
     /// Coordinate of the key to edit/insert
     pub coordinates: Vec<(usize, usize)>,
     /// List of keys already used in this path
     pub keys: Vec<Fingerprint>,
-    /// Whether safety-net or cosigner features are enabled for this path
-    pub token_kind: Vec<KeyKind>,
 }
 
 /// One device the hardware poller has surfaced, reduced to what the key
@@ -373,11 +358,7 @@ pub struct SelectKeySource {
     // fields
     form_alias: form::Value<String>,
     form_xpub: form::Value<String>,
-    form_safety_net_token: form::Value<String>,
-    form_cosigner_token: form::Value<String>,
     form_account: Option<ChildNumber>,
-
-    options_collapsed: bool,
 }
 
 impl SelectKeySource {
@@ -452,10 +433,7 @@ impl SelectKeySource {
             import_advisory: None,
             form_alias: Default::default(),
             form_xpub: Default::default(),
-            form_safety_net_token: Default::default(),
-            form_cosigner_token: Default::default(),
             form_account: None,
-            options_collapsed: false,
         }
     }
     fn already_used_keys(
@@ -481,11 +459,6 @@ impl SelectKeySource {
     fn key_unavailable_reason(&self, fg: Fingerprint, source: &KeySource) -> Option<String> {
         if !source.available_for_creation(self.chain) {
             return Some("This key source is not available for Bitcoin Blake2b yet".to_string());
-        }
-        if let KeySource::Token(kind, _) = source {
-            if !self.actual_path.token_kind.contains(kind) {
-                return Some("Token type not allowed in this path".to_string());
-            }
         }
         if self.actual_path.keys.iter().any(|key_fg| key_fg == &fg) {
             return Some("Key already used in this path".to_string());
@@ -689,32 +662,6 @@ impl SelectKeySource {
         }
         Task::none()
     }
-    fn fetch_provider(&mut self, token: String) -> Task<Message> {
-        self.processing = true;
-        let client = services::keys::Client::new();
-        Task::perform(
-            async move { (token.clone(), client.get_key_by_token(token).await) },
-            |(token, res)| {
-                Self::route(SelectKeySourceMessage::ProviderKey(match res {
-                    Err(e) => Err(Error::Services(e)),
-                    Ok(ref key) => Ok(Key {
-                        source: KeySource::Token(
-                            key.kind,
-                            ProviderKey {
-                                uuid: key.uuid.clone(),
-                                token,
-                                provider: key.provider.clone().into(),
-                            },
-                        ),
-                        fingerprint: key.xpub.master_fingerprint(),
-                        name: format!("{} - {}", key.provider.name.clone(), key.kind),
-                        key: key.xpub.clone(),
-                        account: None,
-                    }),
-                }))
-            },
-        )
-    }
     fn on_select_key(&mut self, fingerprint: Fingerprint) -> Task<Message> {
         // Backstop for the "already used sources" rows, which are disabled
         // for the same reason.
@@ -797,71 +744,6 @@ impl SelectKeySource {
             account: Some(account),
         };
         self.selected_key = SelectedKey::New(Box::new(key));
-        Task::none()
-    }
-    fn on_select_enter_safety_net_token(&mut self) -> Task<Message> {
-        self.focus = Focus::EnterSafetyNetToken;
-        Task::none()
-    }
-    fn on_select_enter_cosigner_token(&mut self) -> Task<Message> {
-        self.focus = Focus::EnterCosignerToken;
-        Task::none()
-    }
-    fn on_provider_key(&mut self, key: Result<Key, Error>) -> Task<Message> {
-        self.processing = false;
-        let (warning, valid) = match self.focus {
-            Focus::EnterSafetyNetToken => (
-                &mut self.form_safety_net_token.warning,
-                &mut self.form_safety_net_token.valid,
-            ),
-            Focus::EnterCosignerToken => (
-                &mut self.form_cosigner_token.warning,
-                &mut self.form_cosigner_token.valid,
-            ),
-            _ => return Task::none(),
-        };
-        match key {
-            Ok(k) => {
-                // If it is a provider key that has just been fetched, do some additional sanity checks.
-                if let Some(key_kind) = k.source.provider_key_kind() {
-                    // We don't need to check key's status as redeemed keys are not returned.
-                    *warning = if !check_key_network(&k.key, self.network) {
-                        Some("Fetched key does not have the correct network")
-                    } else if !self.actual_path.token_kind.contains(&key_kind) {
-                        let warn = match key_kind {
-                            KeyKind::SafetyNet => {
-                                "SafetyNet kind of token is not allowed for this path"
-                            }
-                            KeyKind::Cosigner => {
-                                "Cosigner kind of token is not allowed for this path"
-                            }
-                        };
-                        Some(warn)
-                    }
-                    // If two keys have the same fingerprint, they must both have the same provider key kind (which could be `None`).
-                    // Note that this checks all keys regardless of whether they are currently being used in a path.
-                    else if self.keys.iter().any(|(fg, (_, key))| {
-                        *fg == key.fingerprint
-                            && key.source.provider_key_kind() != key.source.provider_key_kind()
-                    }) {
-                        Some("Fetched key has already been added to the wallet.")
-                    } else {
-                        None
-                    };
-                    *valid = warning.is_none();
-                    if *valid {
-                        self.selected_key = SelectedKey::New(Box::new(k.clone()));
-                        if let Some(kind) = k.source.provider_key_kind() {
-                            self.form_alias.value = format!("{:?}", kind);
-                        }
-                        let _ = self.on_next();
-                    }
-                }
-            }
-            Err(e) => {
-                self.error = Some(e.to_string());
-            }
-        }
         Task::none()
     }
     fn on_load_key(&mut self, key: Result<Key, Error>) -> Task<Message> {
@@ -974,67 +856,6 @@ impl SelectKeySource {
             })
         })
     }
-    fn on_update_token(&mut self, token: String) -> Task<Message> {
-        let token = token.trim().to_string();
-        self.selected_key = SelectedKey::None;
-        let value = {
-            let (value, valid, warning) = match self.focus {
-                Focus::EnterSafetyNetToken => (
-                    &mut self.form_safety_net_token.value,
-                    &mut self.form_safety_net_token.valid,
-                    &mut self.form_safety_net_token.warning,
-                ),
-                Focus::EnterCosignerToken => (
-                    &mut self.form_cosigner_token.value,
-                    &mut self.form_cosigner_token.valid,
-                    &mut self.form_cosigner_token.warning,
-                ),
-                _ => {
-                    log::error!(
-                        "SelectKeySource.on_update_token() call with focus on {:?}",
-                        self.focus
-                    );
-                    return Task::none();
-                }
-            };
-            *value = token.clone();
-
-            if keys::token::Token::from_str(&token).is_ok() {
-                // We check if the token has already been fetched and saved regardless of its kind
-                *warning = if self
-                    .keys
-                    .iter()
-                    .any(|(_, (_, k))| k.source.token() == Some(&token))
-                {
-                    Some("Duplicate token")
-                } else {
-                    None
-                };
-                *valid = token.is_empty() || warning.is_none();
-                if !*valid {
-                    return Task::none();
-                }
-            } else {
-                *valid = value.is_empty();
-                *warning = if !*valid {
-                    Some("Invalid token!")
-                } else {
-                    None
-                };
-                return Task::none();
-            }
-            value.clone()
-        };
-        self.fetch_provider(value)
-    }
-    fn on_paste_token(&mut self) -> Task<Message> {
-        clipboard::read().map(|t| {
-            Self::route(match t {
-                Some(token) => SelectKeySourceMessage::Token(token),
-                None => SelectKeySourceMessage::None,
-            })
-        })
-    }
     fn on_update_alias(&mut self, alias: String) -> Task<Message> {
         // We do not allow editing of existing key
         if let SelectedKey::Existing(_) = self.selected_key {
@@ -1127,10 +948,6 @@ impl SelectKeySource {
             // which may not be a file at all.
             self.import_advisory = None;
 
-            self.form_safety_net_token.value = "".to_string();
-            self.form_safety_net_token.valid = true;
-            self.form_safety_net_token.warning = None;
-
             self.form_xpub.value = "".to_string();
             self.form_xpub.valid = true;
             self.form_xpub.warning = None;
@@ -1166,10 +983,6 @@ impl SelectKeySource {
                 }
             }
         }
-        Task::none()
-    }
-    fn on_collapse(&mut self, collapse: bool) -> Task<Message> {
-        self.options_collapsed = collapse;
         Task::none()
     }
     fn on_retry(&mut self) -> Task<Message> {
@@ -1743,33 +1556,10 @@ impl SelectKeySource {
         // parameter because the view dispatcher already resolves it.
         _hws: Vec<DetectedHw>,
     ) -> Element<Message> {
-        // Provider tokens are not offered on Bitcoin Blake2b, so neither
-        // the safety-net-only screen nor the advanced options apply there.
-        let tokens_offered = !self.chain.is_blake2b();
-        let only_safety_net = tokens_offered
-            && self.actual_path.token_kind.contains(&KeyKind::SafetyNet)
-            && self.actual_path.token_kind.len() == 1;
-
         let header = modal::header(
             Some("Select key source".to_string()),
             Some(|| Message::Close),
         );
-
-        // If the path is "safety-net-only" there's nothing to pick
-        // *but* a safety-net token — surface just that widget and
-        // skip the grid entirely (matches the pre-redesign flow).
-        if only_safety_net {
-            let col = Column::new()
-                .spacing(10)
-                .push(header)
-                .push(self.widget_paste_safety_net_token())
-                .align_x(Horizontal::Center)
-                .width(modal::MODAL_WIDTH);
-            return Container::new(col)
-                .padding(15)
-                .style(theme::card::modal)
-                .into();
-        }
 
         let already_used = (!self.keys.is_empty()).then(|| self.view_keys());
 
@@ -1786,14 +1576,7 @@ impl SelectKeySource {
             column = column.push(row);
         }
 
-        let advanced = tokens_offered
-            .then(|| self.view_advanced_options())
-            .flatten();
-
-        let column = column
-            .push(advanced)
-            .align_x(Horizontal::Center)
-            .width(modal::MODAL_WIDTH);
+        let column = column.align_x(Horizontal::Center).width(modal::MODAL_WIDTH);
         Container::new(column)
             .padding(15)
             .style(theme::card::modal)
@@ -2028,37 +1811,6 @@ impl SelectKeySource {
             .style(theme::card::modal)
             .into()
     }
-
-    /// Conditional section rendered below the grid when the current
-    /// descriptor path enables safety-net or cosigner tokens. The rest
-    /// of the old `view_other_options` content moved into the grid.
-    fn view_advanced_options(&self) -> Option<Element<Message>> {
-        if !self.safety_net_enabled() && !self.cosigner_enabled() {
-            return None;
-        }
-
-        let header = modal::optional_section(
-            self.options_collapsed,
-            "Advanced options".into(),
-            || Self::route(SelectKeySourceMessage::Collapse(true)),
-            || Self::route(SelectKeySourceMessage::Collapse(false)),
-        );
-
-        let mut col = Column::new()
-            .push(header)
-            .spacing(modal::V_SPACING)
-            .width(modal::BTN_W);
-
-        if self.options_collapsed {
-            if self.safety_net_enabled() {
-                col = col.push(self.widget_paste_safety_net_token());
-            }
-            if self.cosigner_enabled() {
-                col = col.push(self.widget_paste_cosigner_token());
-            }
-        }
-        Some(col.into())
-    }
     fn details_view(&self) -> Element<Message> {
         let apply = match (
             &self.selected_key,
@@ -2173,12 +1925,6 @@ impl SelectKeySource {
         }
         col.into()
     }
-    fn safety_net_enabled(&self) -> bool {
-        self.actual_path.token_kind.contains(&KeyKind::SafetyNet)
-    }
-    fn cosigner_enabled(&self) -> bool {
-        self.actual_path.token_kind.contains(&KeyKind::Cosigner)
-    }
     fn widget_signing_device(&self, device: &DetectedHw) -> Element<Message> {
         let alias = device.0.clone();
         let fg = device.1;
@@ -2270,7 +2016,6 @@ impl SelectKeySource {
             KeySource::Device(..) => icon::usb_drive_icon(),
             KeySource::MasterSigner => icon::round_key_icon().color(color::RED),
             KeySource::Manual => icon::round_key_icon(),
-            KeySource::Token(..) => icon::hdd_icon(),
             KeySource::BorderWallet { .. } => icon::round_key_icon(),
             KeySource::KeychainKey { .. } => icon::round_key_icon(),
         };
@@ -2288,30 +2033,6 @@ impl SelectKeySource {
             on_press,
         )
     }
-    fn widget_paste_safety_net_token(&self) -> Element<Message> {
-        collapsible_input_button(
-            self.focus == Focus::EnterSafetyNetToken,
-            Some(icon::enter_box_icon()),
-            "Enter a Safety Net token".to_string(),
-            "aaaa-bbbb-cccc".to_string(),
-            &self.form_safety_net_token,
-            Some(|token| Self::route(SelectKeySourceMessage::Token(token))),
-            Some(|| Self::route(SelectKeySourceMessage::PasteToken)),
-            || Self::route(SelectKeySourceMessage::SelectEnterSafetyNetToken),
-        )
-    }
-    fn widget_paste_cosigner_token(&self) -> Element<Message> {
-        collapsible_input_button(
-            self.focus == Focus::EnterCosignerToken,
-            Some(icon::enter_box_icon()),
-            "Enter a Cosigner token".to_string(),
-            "aaaa-bbbb-cccc".to_string(),
-            &self.form_cosigner_token,
-            Some(|token| Self::route(SelectKeySourceMessage::Token(token))),
-            Some(|| Self::route(SelectKeySourceMessage::PasteToken)),
-            || Self::route(SelectKeySourceMessage::SelectEnterCosignerToken),
-        )
-    }
 }
 
 impl super::DescriptorEditModal for SelectKeySource {
@@ -2324,18 +2045,13 @@ impl super::DescriptorEditModal for SelectKeySource {
                 // Hardware devices and Border Wallet are allowed on Bitcoin
                 // Blake2b (HW-1): their messages pass, and a fetched key still
                 // goes through `available_for_creation` in `LoadKey` below.
-                // Keychain and provider-token entry points stay refused
+                // Keychain entry points stay refused
                 // before any work.
                 let refused = match msg {
                     SelectKeySourceMessage::ShowKeychainKeys
                     | SelectKeySourceMessage::FetchCubeKeys
                     | SelectKeySourceMessage::CubeKeysLoaded(_)
-                    | SelectKeySourceMessage::SelectKeychainKey(_)
-                    | SelectKeySourceMessage::SelectEnterSafetyNetToken
-                    | SelectKeySourceMessage::SelectEnterCosignerToken
-                    | SelectKeySourceMessage::PasteToken
-                    | SelectKeySourceMessage::Token(_)
-                    | SelectKeySourceMessage::ProviderKey(_) => true,
+                    | SelectKeySourceMessage::SelectKeychainKey(_) => true,
                     SelectKeySourceMessage::LoadKey(Ok(key)) => {
                         !key.source.available_for_creation(self.chain)
                     }
@@ -2408,12 +2124,6 @@ impl super::DescriptorEditModal for SelectKeySource {
                 SelectKeySourceMessage::FetchFromMasterSigner(account) => {
                     self.on_fetch_from_hotsigner(account)
                 }
-                SelectKeySourceMessage::SelectEnterCosignerToken => {
-                    self.on_select_enter_cosigner_token()
-                }
-                SelectKeySourceMessage::SelectEnterSafetyNetToken => {
-                    self.on_select_enter_safety_net_token()
-                }
                 SelectKeySourceMessage::SelectBorderWalletSafetyNet => {
                     // Emit message to DefineDescriptor to swap modal to BorderWalletWizard
                     Task::done(Message::DefineDescriptor(
@@ -2422,15 +2132,11 @@ impl super::DescriptorEditModal for SelectKeySource {
                         ),
                     ))
                 }
-                SelectKeySourceMessage::PasteToken => self.on_paste_token(),
-                SelectKeySourceMessage::Token(token) => self.on_update_token(token),
                 SelectKeySourceMessage::Next => self.on_next(),
                 SelectKeySourceMessage::Previous => self.on_previous(),
                 SelectKeySourceMessage::Alias(alias) => self.on_update_alias(alias),
                 SelectKeySourceMessage::ImportExport(msg) => self.on_import_message(msg),
                 SelectKeySourceMessage::Account(index) => self.on_account(index),
-                SelectKeySourceMessage::ProviderKey(key) => self.on_provider_key(key),
-                SelectKeySourceMessage::Collapse(collapse) => self.on_collapse(collapse),
                 SelectKeySourceMessage::Retry => self.on_retry(),
                 SelectKeySourceMessage::None => Task::none(),
                 SelectKeySourceMessage::FetchCubeKeys => self.on_fetch_cube_keys(),
@@ -2837,29 +2543,13 @@ mod tests {
         picker
     }
 
-    /// Every Keychain and provider-token message is refused on a Bitcoin
+    /// Every Keychain message is refused on a Bitcoin
     /// Blake2b picker before any work: no task, no fetch, no step change, no
     /// selected key. Hardware devices and Border Wallet are not in this list
     /// (HW-1).
     #[test]
     fn fork_picker_refuses_external_source_events_before_work() {
-        use crate::app::settings::{Provider, ProviderKey};
         let keychain_fg = Fingerprint::from_str("0a0b0c0d").unwrap();
-        let token_key = {
-            let mut key = manual_key(Fingerprint::from_str("0e0f0a0b").unwrap());
-            key.source = KeySource::Token(
-                KeyKind::SafetyNet,
-                ProviderKey {
-                    uuid: "uuid".to_string(),
-                    token: "token".to_string(),
-                    provider: Provider {
-                        uuid: "provider".to_string(),
-                        name: "Provider".to_string(),
-                    },
-                },
-            );
-            key
-        };
         for chain in FORK_CHAINS {
             let mut picker = fork_picker(chain);
             picker
@@ -2874,14 +2564,7 @@ mod tests {
                 SelectKeySourceMessage::FetchCubeKeys,
                 SelectKeySourceMessage::CubeKeysLoaded(Err("synthetic".to_string())),
                 SelectKeySourceMessage::SelectKeychainKey(resolved_key(7, "0a0b0c0d", 1)),
-                SelectKeySourceMessage::SelectEnterSafetyNetToken,
-                SelectKeySourceMessage::SelectEnterCosignerToken,
-                SelectKeySourceMessage::PasteToken,
-                SelectKeySourceMessage::Token("synthetic".to_string()),
-                SelectKeySourceMessage::ProviderKey(Ok(token_key.clone())),
-                SelectKeySourceMessage::ProviderKey(Err(Error::Unexpected("x".to_string()))),
                 SelectKeySourceMessage::LoadKey(Ok(keychain_key(keychain_fg, 1, 7))),
-                SelectKeySourceMessage::LoadKey(Ok(token_key.clone())),
                 SelectKeySourceMessage::SelectKey(keychain_fg),
             ] {
                 picker.error = None;
@@ -3195,7 +2878,6 @@ mod tests {
             PathData {
                 coordinates: vec![],
                 keys: vec![],
-                token_kind: vec![],
             },
             HashMap::new(),
             HashMap::new(),
@@ -3451,28 +3133,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_token_kind_the_path_forbids_outranks_the_reuse_reasons() {
-        let fg = Fingerprint::from_str("8a550171").unwrap();
-        let picker = picker_with_placed_key(vec![(0, 0)], vec![], fg);
-        // `actual_path.token_kind` is empty, so no token kind is allowed here.
-        let token = KeySource::Token(
-            KeyKind::Cosigner,
-            ProviderKey {
-                uuid: "uuid".to_string(),
-                token: "token".to_string(),
-                provider: crate::app::settings::Provider {
-                    uuid: "provider-uuid".to_string(),
-                    name: "Provider".to_string(),
-                },
-            },
-        );
-        assert_eq!(
-            picker.key_unavailable_reason(fg, &token),
-            Some("Token type not allowed in this path".to_string())
-        );
-    }
-
     fn raw_key(id: u64, fingerprint: &str, owner_id: u64) -> CubeKeyRaw {
         CubeKeyRaw {
             xpub_envelope: None,
@@ -3642,18 +3302,12 @@ mod tests {
         picker.focus = Focus::Device(fg);
         picker.form_xpub.value = "stale".to_string();
         picker.form_xpub.valid = false;
-        picker.form_safety_net_token.value = "stale".to_string();
-        picker.form_safety_net_token.valid = false;
         let _ = picker.on_previous();
         assert_eq!(picker.step, Step::HardwareListen);
         assert_eq!(picker.focus, Focus::None);
         assert!(picker.form_xpub.value.is_empty());
         assert!(picker.form_xpub.valid);
-        assert!(picker.form_safety_net_token.value.is_empty());
-        assert!(picker.form_safety_net_token.valid);
 
-        let _ = picker.on_collapse(true);
-        assert!(picker.options_collapsed);
         picker.focus = Focus::GenerateMasterKey;
         picker.form_account = Some(ChildNumber::from_hardened_idx(7).unwrap());
         let _ = picker.on_retry();

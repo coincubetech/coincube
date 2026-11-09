@@ -326,7 +326,6 @@ impl Pane {
                     let (installer, task) = crate::installer::Installer::try_new_for_chain(
                         root.clone(),
                         crate::chain::ChainId::BitcoinBlake2b,
-                        None,
                         crate::installer::UserFlow::ClaimBlake2b {
                             from_cube: Box::new(source),
                         },

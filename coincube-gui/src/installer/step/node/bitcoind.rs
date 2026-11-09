@@ -691,7 +691,7 @@ impl Step for SelectBitcoindTypeStep {
 
     fn skip(&self, ctx: &Context) -> bool {
         // No Vault, no chain to watch — see `Context::installs_vault`.
-        !ctx.installs_vault() || ctx.remote_backend.is_some()
+        !ctx.installs_vault()
     }
 
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
@@ -823,12 +823,7 @@ impl Step for SelectBitcoindTypeStep {
         true
     }
 
-    fn view(
-        &self,
-        _hws: &HardwareWallets,
-        progress: (usize, usize),
-        _email: Option<&str>,
-    ) -> Element<Message> {
+    fn view(&self, _hws: &HardwareWallets, progress: (usize, usize)) -> Element<Message> {
         view::select_bitcoind_type(
             progress,
             self.ui_instance,
@@ -1824,12 +1819,7 @@ impl Step for InternalBitcoindStep {
         false
     }
 
-    fn view(
-        &self,
-        _hws: &HardwareWallets,
-        progress: (usize, usize),
-        _email: Option<&str>,
-    ) -> Element<Message> {
+    fn view(&self, _hws: &HardwareWallets, progress: (usize, usize)) -> Element<Message> {
         if self.wait_for_local_fork
             && matches!(self.started, Some(Ok(())))
             && !self.local_sync_ready
@@ -1842,7 +1832,6 @@ impl Step for InternalBitcoindStep {
             }
             return view::layout(
                 progress,
-                None,
                 "Local node synchronization",
                 content,
                 true,
@@ -1876,10 +1865,7 @@ impl Step for InternalBitcoindStep {
     fn skip(&self, ctx: &Context) -> bool {
         // No Vault, no chain to watch — see `Context::installs_vault`. Checked
         // first so a seed-only install never downloads or starts a node.
-        !ctx.installs_vault()
-            || ctx.bitcoind_is_external
-            || ctx.install_node_alongside_connect
-            || ctx.remote_backend.is_some()
+        !ctx.installs_vault() || ctx.bitcoind_is_external || ctx.install_node_alongside_connect
     }
 }
 
@@ -2049,13 +2035,7 @@ mod tests {
             )),
         ));
         assert!(!step.local_sync_ready);
-        let mut ctx = Context::new_for_chain(
-            step.chain,
-            root,
-            crate::installer::context::RemoteBackend::None,
-            None,
-            None,
-        );
+        let mut ctx = Context::new_for_chain(step.chain, root, None, None);
         assert!(!step.apply(&mut ctx));
     }
 
@@ -2104,7 +2084,6 @@ mod tests {
         let mut ctx = Context::new_for_chain(
             crate::chain::ChainId::BitcoinBlake2bTestnet4,
             root.clone(),
-            crate::installer::context::RemoteBackend::None,
             None,
             None,
         );
@@ -2196,14 +2175,13 @@ mod tests {
 
     #[test]
     fn fork_connect_selection_keeps_auth_chain_and_has_no_bitcoin_fallback() {
-        use crate::{chain::ChainId, installer::context::RemoteBackend};
+        use crate::chain::ChainId;
         for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
             let mut ctx = Context::new_for_chain(
                 chain,
                 CoincubeDirectory::new(
                     std::env::temp_dir().join(format!("btcb2-selection-{}", uuid::Uuid::new_v4())),
                 ),
-                RemoteBackend::None,
                 None,
                 None,
             );
@@ -2249,17 +2227,11 @@ mod tests {
 
     #[test]
     fn bitcoin_connect_and_node_starts_with_connect_without_installer_download() {
-        use crate::{chain::ChainId, installer::context::RemoteBackend};
+        use crate::chain::ChainId;
         let root = CoincubeDirectory::new(
             std::env::temp_dir().join(format!("bitcoin-connect-node-{}", uuid::Uuid::new_v4())),
         );
-        let mut ctx = Context::new_for_chain(
-            ChainId::Bitcoin,
-            root.clone(),
-            RemoteBackend::None,
-            None,
-            None,
-        );
+        let mut ctx = Context::new_for_chain(ChainId::Bitcoin, root.clone(), None, None);
         ctx.use_coincube_connect = true;
         ctx.connect_jwt = Some(zeroize::Zeroizing::new("synthetic-jwt".to_string()));
         let mut choice = SelectBitcoindTypeStep::new();
@@ -2303,13 +2275,12 @@ mod tests {
 
     #[test]
     fn staged_node_handoff_preserves_connect_chain_identity() {
-        use crate::{chain::ChainId, installer::context::RemoteBackend};
+        use crate::chain::ChainId;
         for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
             let dir = CoincubeDirectory::new(
                 std::env::temp_dir().join(format!("btcb2-staged-{}", uuid::Uuid::new_v4())),
             );
-            let mut ctx =
-                Context::new_for_chain(chain, dir.clone(), RemoteBackend::None, None, None);
+            let mut ctx = Context::new_for_chain(chain, dir.clone(), None, None);
             ctx.install_node_alongside_connect = true;
             ctx.connect_jwt = Some(zeroize::Zeroizing::new("synthetic-jwt".to_string()));
             // Only exercise the completed-step handoff; no node is started.
@@ -2329,9 +2300,7 @@ mod tests {
 
     #[test]
     fn blake2b_installer_config_and_cookie_stay_in_the_fork_family() {
-        use crate::{
-            chain::ChainId, installer::context::RemoteBackend, node::bitcoind::NodeChainFamily,
-        };
+        use crate::{chain::ChainId, node::bitcoind::NodeChainFamily};
         for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
             let dir = CoincubeDirectory::new(
                 std::env::temp_dir().join(format!("btcb2-install-config-{}", uuid::Uuid::new_v4())),
@@ -2350,8 +2319,7 @@ mod tests {
             );
             sentinel.to_file(&bitcoin.join("bitcoin.conf")).unwrap();
             let before = std::fs::read(bitcoin.join("bitcoin.conf")).unwrap();
-            let mut ctx =
-                Context::new_for_chain(chain, dir.clone(), RemoteBackend::None, None, None);
+            let mut ctx = Context::new_for_chain(chain, dir.clone(), None, None);
             ctx.node_flavor = NodeFlavor::KnotsBlake2b;
             let mut step = InternalBitcoindStep::new(&dir);
             Step::load_context(&mut step, &ctx);

@@ -3,10 +3,10 @@ use iced::Task;
 use coincube_ui::{component::form, widget::*};
 
 use crate::{
+    app::settings::WALLET_ALIAS_MAXIMUM_LENGTH,
     chain::ChainIdExt,
     hw::HardwareWallets,
     installer::{context::Context, message::Message, step::Step, view},
-    services::connect::client::backend::api::WALLET_ALIAS_MAXIMUM_LENGTH,
 };
 
 #[derive(Default)]
@@ -59,9 +59,8 @@ impl Step for WalletAlias {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
-        view::wallet_alias(progress, email, &self.wallet_alias)
+        view::wallet_alias(progress, &self.wallet_alias)
     }
 
     fn apply(&mut self, ctx: &mut Context) -> bool {
@@ -83,7 +82,7 @@ impl From<WalletAlias> for Box<dyn Step> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+    use crate::{chain::ChainId, dir::CoincubeDirectory};
 
     #[test]
     fn default_alias_uses_chain_and_preserves_explicit_alias() {
@@ -96,7 +95,6 @@ mod tests {
             let mut ctx = Context::new(
                 chain.bitcoin_network(),
                 CoincubeDirectory::new(Default::default()),
-                RemoteBackend::None,
                 None,
                 None,
             );

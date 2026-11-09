@@ -1685,7 +1685,6 @@ impl Home {
                             DeleteCubeMessage::ShowModal(_)
                                 | DeleteCubeMessage::CloseModal
                                 | DeleteCubeMessage::Confirm(_)
-                                | DeleteCubeMessage::DeleteLianaConnect(_)
                                 | DeleteCubeMessage::DeleteConnectBackup(_)
                                 | DeleteCubeMessage::Deleted
                                 | DeleteCubeMessage::DaemonStopped(_)
@@ -8076,7 +8075,6 @@ pub enum DeleteCubeMessage {
     ShowRemoteModal(String), // uuid of remote-only cube
     CloseModal,
     Confirm(String), // Cube ID
-    DeleteLianaConnect(bool),
     DeleteConnectBackup(bool),
     Deleted,
     /// A daemon this Cube left stopping when it was locked has finished, so
@@ -8097,7 +8095,6 @@ struct DeleteCubeModal {
     wallet_settings: Option<WalletSettings>,
     warning: Option<DeleteError>,
     deleted: bool,
-    delete_liana_connect: bool,
     /// Whether to also delete the cube from the Connect API (frees a cube slot).
     delete_connect_backup: bool,
     /// Whether the user is authenticated and the cube is synced (backup exists).
@@ -8510,7 +8507,6 @@ impl DeleteCubeModal {
             datadir_root,
             warning: None,
             deleted: false,
-            delete_liana_connect: false,
             delete_connect_backup: false,
             can_delete_backup,
             internal_bitcoind,
@@ -8602,12 +8598,9 @@ impl DeleteCubeModal {
 
         // Delete vault if it exists
         if let Some(wallet_settings) = &self.wallet_settings {
-            if let Err(e) = Handle::current().block_on(delete_wallet(
-                self.cube.network,
-                &self.network_directory,
-                wallet_settings,
-                self.delete_liana_connect,
-            )) {
+            if let Err(e) =
+                Handle::current().block_on(delete_wallet(&self.network_directory, wallet_settings))
+            {
                 if matches!(e, DeleteError::DaemonStopping) {
                     self.stop_refused = true;
                 } else {
@@ -8726,11 +8719,6 @@ impl DeleteCubeModal {
                     return self.delete();
                 }
             }
-            Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::DeleteLianaConnect(
-                delete,
-            ))) => {
-                self.delete_liana_connect = delete;
-            }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::DeleteConnectBackup(
                 delete,
             ))) => {
@@ -8767,17 +8755,16 @@ impl DeleteCubeModal {
 
         // Determine what's being deleted
         let has_vault = self.wallet_settings.is_some();
-        let has_remote_backend = self
+        let legacy_backend = self
             .wallet_settings
             .as_ref()
-            .and_then(|w| w.remote_backend_auth.as_ref())
-            .is_some();
+            .and_then(|w| w.remote_backend_auth.as_ref());
 
         let help_text_1 = if has_vault {
             format!(
                 "Are you sure you want to delete the Cube \"{}\" and {}?",
                 display_name,
-                if has_remote_backend {
+                if legacy_backend.is_some() {
                     "its associated Vault configuration"
                 } else {
                     "all its associated data (including Vault)"
@@ -8807,6 +8794,12 @@ impl DeleteCubeModal {
             ))
             .push(Row::new().push(text(help_text_1)))
             .push(help_text_2.map(|t| Row::new().push(p1_regular(t).style(theme::text::secondary))))
+            // A legacy Liana Connect Vault still lives on that backend; say so
+            // before the user removes the only copy COINCUBE can show them.
+            .push(legacy_backend.map(|auth| {
+                Row::new()
+                    .push(p1_regular(auth.retired_backend_notice()).style(theme::text::warning))
+            }))
             .push(Row::new())
             .push(Row::new().push(text(help_text_3)));
 
@@ -12487,10 +12480,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Opening Delete used to log in to the legacy Liana Connect backend to
-    /// read a membership role nothing consulted. A backend that did not answer
-    /// left a warning, and that warning disabled Delete, so the Cube could not
-    /// be removed. No runtime is entered: that check blocked on one.
+    /// A Vault on the retired Liana Connect backend is delete-only. Delete
+    /// never contacts that backend, so nothing about it can block removing the
+    /// Cube, and the modal says where the wallet still lives. No runtime is
+    /// entered: an old check blocked on one.
     #[test]
     fn a_legacy_remote_backend_does_not_block_deleting_the_cube() {
         let started = std::time::Instant::now();
@@ -12537,6 +12530,7 @@ mod tests {
                 .is_some(),
             "the legacy backend is still recorded; Delete no longer asks it"
         );
+        let _ = modal.view();
         // The confirm button is enabled exactly when the PIN is ready, there
         // is no warning, and no daemon stop is in progress.
         assert!(!modal.cube.has_pin(&root));
@@ -12562,11 +12556,6 @@ mod tests {
             DeleteCubeMessage::DeleteConnectBackup(true),
         )));
         assert!(delete_modal.delete_connect_backup);
-
-        let _ = delete_modal.update(Message::View(ViewMessage::DeleteCube(
-            DeleteCubeMessage::DeleteLianaConnect(true),
-        )));
-        assert!(delete_modal.delete_liana_connect);
 
         let remote = remote_cube("remote-a", "Remote A", Network::Bitcoin);
         let _ = DeleteRemoteCubeModal {
@@ -12737,7 +12726,7 @@ mod tests {
         }
 
         let mut blocked_local = local();
-        blocked_local.warning = Some(DeleteError::Connect("blocked".into()));
+        blocked_local.warning = Some(DeleteError::Io(std::io::Error::other("blocked")));
         let blocked_view = capture::inspect_full_window(
             "delete-cube-blocked-keyboard",
             blocked_local.view(),

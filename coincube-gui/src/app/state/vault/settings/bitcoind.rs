@@ -3020,7 +3020,6 @@ mod tests {
         let mut settings = crate::app::state::vault::settings::SettingsState::new(
             datadir.clone(),
             wallet,
-            DaemonBackend::EmbeddedCoincubed(None),
             true,
             Arc::new(crate::app::Config::new(false)),
         )

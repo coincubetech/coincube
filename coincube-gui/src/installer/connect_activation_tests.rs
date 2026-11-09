@@ -214,7 +214,6 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
     let (mut installer, _) = Installer::try_new_for_chain(
         root.clone(),
         ChainId::BitcoinBlake2b,
-        None,
         UserFlow::CreateWallet,
         false,
         None,
@@ -360,7 +359,6 @@ async fn feature_refusals_precede_anchor_requests_and_all_fork_filesystem_writes
             let (mut installer, _) = Installer::try_new_for_chain(
                 root,
                 chain,
-                None,
                 UserFlow::CreateWallet,
                 false,
                 None,

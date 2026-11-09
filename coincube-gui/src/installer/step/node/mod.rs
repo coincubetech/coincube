@@ -249,12 +249,7 @@ impl Step for DefineNode {
         self.selected_mut().definition.apply(ctx)
     }
 
-    fn view(
-        &self,
-        _hws: &HardwareWallets,
-        progress: (usize, usize),
-        _email: Option<&str>,
-    ) -> Element<Message> {
+    fn view(&self, _hws: &HardwareWallets, progress: (usize, usize)) -> Element<Message> {
         // TODO: Make input fields read-only while waiting for a ping result.
         view::define_bitcoin_node(
             progress,
@@ -271,7 +266,6 @@ impl Step for DefineNode {
         // No Vault, no chain to watch — see `Context::installs_vault`.
         !ctx.installs_vault()
             || !ctx.bitcoind_is_external
-            || ctx.remote_backend.is_some()
             || ctx.use_coincube_connect
             || ctx.install_node_alongside_connect
     }
@@ -280,7 +274,7 @@ impl Step for DefineNode {
 #[cfg(test)]
 mod chain_tests {
     use super::*;
-    use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+    use crate::{chain::ChainId, dir::CoincubeDirectory};
 
     #[test]
     fn fork_node_selection_never_exposes_electrum_or_a_bitcoin_node() {
@@ -288,7 +282,6 @@ mod chain_tests {
             let ctx = Context::new_for_chain(
                 chain,
                 CoincubeDirectory::new(std::path::PathBuf::new()),
-                RemoteBackend::None,
                 None,
                 None,
             );

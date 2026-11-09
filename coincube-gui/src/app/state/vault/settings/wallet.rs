@@ -12,6 +12,7 @@ use coincube_ui::{
 };
 
 use crate::{
+    app::settings::WALLET_ALIAS_MAXIMUM_LENGTH,
     app::{
         cache::Cache,
         error::Error,
@@ -23,11 +24,10 @@ use crate::{
         wallet::Wallet,
         Config,
     },
-    daemon::{Daemon, DaemonBackend},
+    daemon::Daemon,
     dir::CoincubeDirectory,
     export::{ImportExportMessage, ImportExportType},
     hw::{HardwareWallet, HardwareWalletConfig, HardwareWallets},
-    services::connect::client::backend::api::WALLET_ALIAS_MAXIMUM_LENGTH,
 };
 
 enum Modal {
@@ -247,7 +247,6 @@ impl State for WalletSettingsState {
                             .iter()
                             .map(|(fg, name)| (*fg, name.value.to_owned()))
                             .collect(),
-                        daemon,
                     ),
                     Message::WalletUpdated,
                 )
@@ -309,7 +308,6 @@ impl State for WalletSettingsState {
                         self.wallet.clone(),
                         None,
                         aliases.into_iter().map(|(fg, ks)| (fg, ks.name)).collect(),
-                        daemon,
                     ),
                     Message::WalletUpdated,
                 )
@@ -438,10 +436,10 @@ impl RegisterWalletModal {
         _cache: &Cache,
         message: Message,
     ) -> Task<Message> {
-        let Some(daemon) = daemon else {
+        if daemon.is_none() {
             tracing::warn!("RegisterWalletModal::update called without daemon");
             return Task::none();
-        };
+        }
         match message {
             Message::View(view::Message::Reload) => {
                 self.chosen_hw = None;
@@ -493,7 +491,6 @@ impl RegisterWalletModal {
                             device.clone(),
                             *fingerprint,
                             self.wallet.clone(),
-                            daemon,
                         ),
                         Message::WalletUpdated,
                     )
@@ -511,7 +508,6 @@ async fn register_wallet(
     hw: std::sync::Arc<dyn async_hwi::HWI + Send + Sync>,
     fingerprint: Fingerprint,
     wallet: Arc<Wallet>,
-    daemon: Arc<dyn Daemon + Sync + Send>,
 ) -> Result<Arc<Wallet>, Error> {
     let descriptor = wallet.inheritance_descriptor().ok_or_else(|| {
         Error::Unexpected("This account uses an imported public descriptor.".into())
@@ -529,30 +525,28 @@ async fn register_wallet(
             fingerprint,
         };
 
-        if daemon.backend() != DaemonBackend::RemoteBackend {
-            let network_dir = data_dir.network_directory(wallet.chain);
-            let wallet_id = wallet.id();
-            update_settings_file(&network_dir, |mut settings| {
-                if let Some(wallet_setting) = settings
-                    .wallets
+        let network_dir = data_dir.network_directory(wallet.chain);
+        let wallet_id = wallet.id();
+        update_settings_file(&network_dir, |mut settings| {
+            if let Some(wallet_setting) = settings
+                .wallets
+                .iter_mut()
+                .find(|w| w.wallet_id() == wallet_id)
+            {
+                if let Some(hw_config) = wallet_setting
+                    .hardware_wallets
                     .iter_mut()
-                    .find(|w| w.wallet_id() == wallet_id)
+                    .find(|cfg| cfg.kind == kind && cfg.fingerprint == fingerprint)
                 {
-                    if let Some(hw_config) = wallet_setting
-                        .hardware_wallets
-                        .iter_mut()
-                        .find(|cfg| cfg.kind == kind && cfg.fingerprint == fingerprint)
-                    {
-                        *hw_config = hw_cfg.clone();
-                    } else {
-                        wallet_setting.hardware_wallets.push(hw_cfg.clone())
-                    }
+                    *hw_config = hw_cfg.clone();
+                } else {
+                    wallet_setting.hardware_wallets.push(hw_cfg.clone())
                 }
+            }
 
-                Some(settings)
-            })
-            .await?;
-        }
+            Some(settings)
+        })
+        .await?;
 
         let mut wallet = wallet.as_ref().clone();
         if let Some(hw_config) = wallet
@@ -564,9 +558,6 @@ async fn register_wallet(
         } else {
             wallet.hardware_wallets.push(hw_cfg)
         }
-        daemon
-            .update_wallet_metadata(None, &wallet.keys_aliases, &wallet.hardware_wallets)
-            .await?;
         return Ok(Arc::new(wallet));
     }
 
@@ -578,7 +569,6 @@ pub async fn update_aliases(
     wallet: Arc<Wallet>,
     wallet_alias: Option<String>,
     keys_aliases: Vec<(Fingerprint, String)>,
-    daemon: Arc<dyn Daemon + Sync + Send>,
 ) -> Result<Arc<Wallet>, Error> {
     let mut wallet = wallet.as_ref().clone();
 
@@ -600,47 +590,41 @@ pub async fn update_aliases(
         .await?;
     }
 
-    if daemon.backend() != DaemonBackend::RemoteBackend {
-        let network_dir = data_dir.network_directory(wallet.chain);
-        let wallet_id = wallet.id();
-        update_settings_file(&network_dir, |mut settings| {
-            if let Some(wallet_setting) = settings
-                .wallets
-                .iter_mut()
-                .find(|w| w.wallet_id() == wallet_id)
-            {
-                wallet_setting.keys = keys_aliases
-                    .iter()
-                    .map(|(master_fingerprint, name)| settings::KeySetting {
-                        master_fingerprint: *master_fingerprint,
-                        name: name.clone(),
-                        provider_key: wallet.provider_keys.get(master_fingerprint).cloned(),
-                        is_border_wallet: wallet
-                            .border_wallet_fingerprints
-                            .contains(master_fingerprint),
-                        // Carried through verbatim: this rewrite is about
-                        // aliases, and re-deriving the provenance from nothing
-                        // would silently downgrade every key to unrecorded.
-                        grid_seed_source: wallet
-                            .border_wallet_grid_seed
-                            .get(master_fingerprint)
-                            .copied(),
-                        replay_protected: wallet.replay_marks.get(master_fingerprint).copied(),
-                        keychain_key_id: wallet.keychain_key_ids.get(master_fingerprint).copied(),
-                    })
-                    .collect();
-            }
+    let network_dir = data_dir.network_directory(wallet.chain);
+    let wallet_id = wallet.id();
+    update_settings_file(&network_dir, |mut settings| {
+        if let Some(wallet_setting) = settings
+            .wallets
+            .iter_mut()
+            .find(|w| w.wallet_id() == wallet_id)
+        {
+            wallet_setting.keys = keys_aliases
+                .iter()
+                .map(|(master_fingerprint, name)| settings::KeySetting {
+                    master_fingerprint: *master_fingerprint,
+                    name: name.clone(),
+                    provider_key: wallet.provider_keys.get(master_fingerprint).cloned(),
+                    is_border_wallet: wallet
+                        .border_wallet_fingerprints
+                        .contains(master_fingerprint),
+                    // Carried through verbatim: this rewrite is about
+                    // aliases, and re-deriving the provenance from nothing
+                    // would silently downgrade every key to unrecorded.
+                    grid_seed_source: wallet
+                        .border_wallet_grid_seed
+                        .get(master_fingerprint)
+                        .copied(),
+                    replay_protected: wallet.replay_marks.get(master_fingerprint).copied(),
+                    keychain_key_id: wallet.keychain_key_ids.get(master_fingerprint).copied(),
+                })
+                .collect();
+        }
 
-            Some(settings)
-        })
-        .await?;
-    }
+        Some(settings)
+    })
+    .await?;
 
     wallet.keys_aliases = keys_aliases.into_iter().collect();
-
-    daemon
-        .update_wallet_metadata(wallet_alias, &wallet.keys_aliases, &wallet.hardware_wallets)
-        .await?;
 
     Ok(Arc::new(wallet))
 }
@@ -756,16 +740,12 @@ mod chain_tests {
                 std::fs::create_dir_all(path.path()).unwrap();
                 std::fs::write(path.path().join(settings::SETTINGS_FILE_NAME), &original).unwrap();
             }
-            let daemon = Arc::new(crate::daemon::client::Coincubed::new(
-                crate::utils::mock::Daemon::new(vec![]).run(),
-            ));
             let fingerprint = Fingerprint::from([1, 2, 3, 4]);
             let updated = update_aliases(
                 dir.clone(),
                 wallet,
                 Some("isolated".into()),
                 vec![(fingerprint, "synthetic key".into())],
-                daemon,
             )
             .await
             .unwrap();
@@ -823,15 +803,11 @@ mod chain_tests {
             serde_json::to_vec(&settings).unwrap(),
         )
         .unwrap();
-        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
-            crate::utils::mock::Daemon::new(vec![]).run(),
-        ));
         let updated = update_aliases(
             dir.clone(),
             wallet,
             None,
             vec![(phone, "Renamed phone".into()), (other, "Ledger".into())],
-            daemon,
         )
         .await
         .unwrap();
@@ -867,11 +843,11 @@ mod chain_tests {
             let dir = CoincubeDirectory::new(
                 std::env::temp_dir().join(format!("coincube-hw-register-{}", uuid::Uuid::new_v4())),
             );
-            let mut state =
-                WalletSettingsState::new(dir.clone(), wallet, Arc::new(Config::new(false)));
             let daemon = Arc::new(crate::daemon::client::Coincubed::new(
                 crate::utils::mock::Daemon::new(vec![]).run(),
             ));
+            let mut state =
+                WalletSettingsState::new(dir.clone(), wallet, Arc::new(Config::new(false)));
             let _task = state.update(
                 Some(daemon),
                 &Cache::default(),
@@ -1012,18 +988,9 @@ mod chain_tests {
                 std::fs::write(path.path().join(settings::SETTINGS_FILE_NAME), &original).unwrap();
             }
             let device = Arc::new(RecordingDevice::default());
-            let daemon = Arc::new(crate::daemon::client::Coincubed::new(
-                crate::utils::mock::Daemon::new(vec![]).run(),
-            ));
-            let updated = register_wallet(
-                dir.clone(),
-                device.clone(),
-                fingerprint,
-                wallet.clone(),
-                daemon,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{:?}: {:?}", chain, e));
+            let updated = register_wallet(dir.clone(), device.clone(), fingerprint, wallet.clone())
+                .await
+                .unwrap_or_else(|e| panic!("{:?}: {:?}", chain, e));
 
             assert_eq!(
                 *device.calls.lock().unwrap(),
