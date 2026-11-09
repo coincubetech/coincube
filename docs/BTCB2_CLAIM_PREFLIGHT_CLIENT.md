@@ -36,12 +36,19 @@ failures never become accepted evidence. This contract depends on the separately
 reviewed optional API preflight service; an older API must fail closed.
 
 Freshness requires caller-supplied positive max_age_seconds and an explicit
-max_future_skew_seconds in1..=5. There is no default or silent widening. Values
+max_future_skew_seconds in 1..=5. There is no default or silent widening. Values
 beyond the five-second maximum refuse, as do observations beyond the selected
-past/future bounds. observed_at remains the server assertion, not a receipt-time
-restamp. Keep API/device clocks synchronized. Caller consumption must recheck
-current generation, chain/tip and freshness because delivery can race logout or
-a new block. Mempool contents can change even while the tip remains unchanged.
+past/future bounds. A negative wire `observed_at` is an invalid response and is
+not converted. When `data.served_at` is present, `local_observed_at` (shared
+with the anchor client) re-expresses the stamp on this desktop's clock as
+`sent_at - (served_at - observed_at)`. `sent_at` is the desktop time when the
+request was sent, not when the body arrived, so server-side age and the round
+trip after send both count. Without `served_at` the server stamp is kept and
+that path still needs synchronized clocks. The stored `observed_at` is the
+value freshness sees. It is not a receipt-time restamp, and callers must not
+rewrite it. Caller consumption must recheck current generation, chain/tip and
+freshness because delivery can race logout or a new block. Mempool contents
+can change even while the tip remains unchanged.
 
 The caller increments the shared generation on account/provider/Cube changes or
 cancellation; closure of all senders cancels too. In-flight response futures drop

@@ -32,10 +32,15 @@ transaction and immutable account/provider/generation. `prepare_review` actually
 collects observations, calls node preflight with the exact final transaction and
 Bitcoin tip, then recollects and compares the coherent chain/RDTS view. It
 requires WaitingForConfirmation for step one and Accepted preflight evidence
-with matching chain, txid, wtxid, tip and generation. Source timestamps remain
-server assertions: callers provide positive age/margin and explicit 1–5 second
-preflight future-skew allowance. Existing anchor/collector checks retain their
-strict clock requirement; synchronize API/device clocks rather than restamping.
+with matching chain, txid, wtxid, tip and generation. Preflight stamps are
+translated onto the desktop clock when the response includes `served_at`, as
+described in [BTCB2_CLAIM_PREFLIGHT_CLIENT.md](BTCB2_CLAIM_PREFLIGHT_CLIENT.md).
+Callers still provide positive age/margin and an explicit 1–5 second preflight
+future-skew allowance; that allowance never extends the budget. Anchor
+admission uses the same translation and then allows no future skew. Observation
+collection still refuses a stamp ahead of its reader clock. Do not restamp
+evidence to clear a stale result. An older API that omits `served_at` still
+requires synchronized clocks.
 
 A non-Clone opaque `Review` exposes the transaction, fee, identity and observed
 view for a future confirmation screen. `confirm_and_submit` must be called only

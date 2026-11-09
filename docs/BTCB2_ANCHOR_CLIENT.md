@@ -19,7 +19,27 @@ missing authentication and implicit fallback are refused. Successful evidence
 is cached in memory with a 30-second refresh and daemon-enforced maximum age of
 90 seconds. Refresh failure clears the snapshot. Revocation prevents a late
 response restoring it, and dropping the authority aborts its refresh task.
-The client rejects future timestamps and checked-converts daemon integer fields.
+
+`observed_at` on a returned `NetworkAnchor` is Unix seconds on this desktop's
+clock. When the envelope includes `served_at`, `local_observed_at` shifts the
+wire stamp by the skew between that server time and `sent_at` (this desktop's
+clock when the request was sent), using saturating subtraction:
+
+```text
+sent_at - (served_at - observed_at)
+```
+
+Server-side age and the round trip after send both still count toward the
+90-second maximum. The shift does not extend freshness or add a positive skew
+allowance. A negative wire `observed_at` is an invalid response and is refused
+before conversion. An envelope without `served_at` (an older API) keeps the
+server stamp, so that path still requires synchronized clocks. `trusted` and
+`fresh_anchor` then reject a translated stamp in the future or older than
+`MAX_ANCHOR_AGE` (90 seconds). Height, median time past, and the translated
+stamp are checked-converted into the trusted anchor. A value that does not fit
+the destination integer is `Unavailable` or `Stale`, not clamped into range.
+Do not rewrite stamps locally to clear a stale admission. The stale message
+still tells the operator to check the device and Connect clocks, then retry.
 
 `EmbeddedDaemon::start_authenticated` consumes that context through the explicit
 daemon startup entry. Its retained `config()` is sanitized for persistence;
