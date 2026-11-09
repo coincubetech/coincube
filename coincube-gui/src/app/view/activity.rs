@@ -153,7 +153,7 @@ impl Filters {
         if !self.search.trim().is_empty() {
             // "Label, txid, hash or swap ID": the title carries the label.
             let needle = self.search.trim().to_lowercase();
-            let found = entry.title.to_lowercase().contains(&needle)
+            let found = entry.display_title().to_lowercase().contains(&needle)
                 || entry.id.to_lowercase().contains(&needle)
                 || entry
                     .identifiers
@@ -233,6 +233,8 @@ pub struct Entry {
     /// "payment settled".
     pub status_note: Option<&'static str>,
     pub title: String,
+    /// Vault fallback text is localized when shown, even for a retained row.
+    generated_vault_title: bool,
     /// The amount's figure, grouped by thousands (`4,200`), unsigned.
     pub amount: String,
     /// The amount's unit (`.u`): "SATS", "USDt", a token ticker.
@@ -286,6 +288,14 @@ fn non_empty(value: Option<&str>) -> Option<String> {
 }
 
 impl Entry {
+    fn display_title(&self) -> &str {
+        if self.generated_vault_title {
+            localized_copy(&self.title)
+        } else {
+            &self.title
+        }
+    }
+
     pub fn vault(tx: HistoryTransaction) -> Self {
         let id = format!("vault:onchain:{}", tx.txid);
         let direction = if tx.is_send_to_self() {
@@ -317,12 +327,13 @@ impl Entry {
             .or_else(|| tx.labels.get(&tx.txid.to_string()))
             .filter(|label| !label.is_empty())
             .cloned();
+        let generated_vault_title = label.is_none();
         let title = label.unwrap_or_else(|| {
             match direction {
                 DirectionFilter::Received if tx.time.is_none() => "Incoming Bitcoin",
-                DirectionFilter::Received => localized_copy("Received Bitcoin"),
-                DirectionFilter::Sent => localized_copy("Sent Bitcoin"),
-                _ => localized_copy("Self-transfer"),
+                DirectionFilter::Received => "Received Bitcoin",
+                DirectionFilter::Sent => "Sent Bitcoin",
+                _ => "Self-transfer",
             }
             .into()
         });
@@ -384,6 +395,7 @@ impl Entry {
             identifiers: vec![("Txid", tx.txid.to_string())],
             rail_details: Some(("On-chain details", facts)),
             label_key: Some(label_key),
+            generated_vault_title,
             target: ActivityTarget::Vault(tx),
             signer_status: None,
         }
@@ -426,6 +438,7 @@ impl Entry {
             identifiers: Vec::new(),
             rail_details: None,
             label_key: Some(LabelItem::Txid(txid)),
+            generated_vault_title: false,
             target: ActivityTarget::Psbt(tx),
             signer_status: Some(signer_status),
         }
@@ -612,6 +625,7 @@ impl Entry {
             identifiers,
             rail_details,
             label_key: None,
+            generated_vault_title: false,
             target: ActivityTarget::Spark(payment),
             signer_status: None,
         }
@@ -775,6 +789,7 @@ impl Entry {
             identifiers,
             rail_details: (!facts.is_empty()).then_some((details_title, facts)),
             label_key: None,
+            generated_vault_title: false,
             target: ActivityTarget::Liquid(payment),
             signer_status: None,
         }
@@ -799,6 +814,7 @@ impl Entry {
             identifiers: vec![("Swap address", address)],
             rail_details: None,
             label_key: None,
+            generated_vault_title: false,
             target: ActivityTarget::Refundable(swap),
             signer_status: None,
         }
@@ -823,7 +839,7 @@ fn shown_title(entry: &Entry, masked: bool) -> String {
     if masked && shows_invoice(&entry.title) {
         "Lightning payment".to_owned()
     } else {
-        entry.title.clone()
+        entry.display_title().to_owned()
     }
 }
 
@@ -1342,9 +1358,9 @@ fn header<'a>(
         actions = actions
             .push(words(
                 if count == 1 {
-                    "1 filter active".to_owned()
+                    localized_copy("1 filter active").to_owned()
                 } else {
-                    localized_format!("{count} filters active", "Filtros {count} activos")
+                    localized_format!("{count} filters active", "{count} filtros activos")
                 },
                 13.0,
                 font::MEDIUM,
@@ -3688,6 +3704,16 @@ mod tests {
         assert_eq!(entry.direction, DirectionFilter::Received);
         assert_eq!(entry.title, "Incoming Bitcoin");
         assert_eq!(entry.status_label, "Pending");
+        let mut labelled = pending.clone();
+        labelled
+            .labels
+            .insert(labelled.txid.to_string(), "Incoming Bitcoin".to_owned());
+        let labelled = Entry::vault(labelled);
+        coincube_ui::locale::render_in(coincube_ui::locale::Language::Spanish, || {
+            assert_eq!(shown_title(&entry, false), "Bitcoin entrante");
+            assert_eq!(shown_title(&labelled, false), "Incoming Bitcoin");
+            assert_eq!(labelled.id, entry.id);
+        });
         let mut activity = Activity::new(None, None);
         drop(activity.update(
             None,

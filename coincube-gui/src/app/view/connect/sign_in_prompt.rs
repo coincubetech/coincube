@@ -20,9 +20,8 @@ use iced::{widget::Space, Alignment, Length};
 use crate::app::menu::{Menu, SparkSettingsOption, SparkSubMenu};
 use crate::app::view::Message;
 
-/// Build the prompt. `feature_label` is the noun the user is trying
-/// to use ("a Lightning Address", "an Avatar", "Cube Members") and
-/// appears in the explanatory sentence.
+/// Build the prompt using the action the user wants to take, such as
+/// "claim a Lightning Address".
 pub fn sign_in_prompt<'a>(feature_label: &'a str) -> Element<'a, Message> {
     let card = Container::new(
         Column::new()
@@ -31,8 +30,8 @@ pub fn sign_in_prompt<'a>(feature_label: &'a str) -> Element<'a, Message> {
             .push(
                 text::p2_regular(localized_format!(
                     "Sign in to your Connect account to {}.",
-                    "Inicie sesión en su cuenta Connect a {}.",
-                    feature_label
+                    "Inicia sesión en tu cuenta de Connect para {}.",
+                    localized_copy(feature_label)
                 ))
                 .color(color::GREY_3),
             )
@@ -90,4 +89,28 @@ pub fn claim_ln_address_prompt<'a>() -> Element<'a, Message> {
     .width(Length::Fill);
 
     Column::new().spacing(0).push(card).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+    use coincube_ui::locale::{render_in, Language};
+
+    #[test]
+    fn spanish_connect_sign_in_explains_the_purpose() {
+        let view = render_in(Language::Spanish, || {
+            sign_in_prompt("claim a Lightning Address")
+        });
+        let shown = capture::inspect(
+            "spanish-connect-purpose",
+            view,
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown.contains(
+            "Inicia sesión en tu cuenta de Connect para obtener una dirección Lightning."
+        ));
+    }
 }
