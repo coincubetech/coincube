@@ -587,11 +587,18 @@ impl Installer {
             && (remote_backend.is_some()
                 || !matches!(
                     user_flow,
-                    UserFlow::CreateWallet | UserFlow::ClaimBlake2b { .. }
+                    UserFlow::CreateWallet
+                        | UserFlow::ClaimBlake2b { .. }
+                        | UserFlow::RestoreFromRecoveryKit { .. }
+                        | UserFlow::RecoverOwnCubeWithPhone {
+                            full_cube: true,
+                            ..
+                        }
                 ))
         {
             return Err(Error::Unexpected(
-                "Bitcoin Blake2b supports only a Connect-backed Vault creation or claim flow"
+                "Bitcoin Blake2b supports only a Connect-backed Vault creation, claim or \
+                 Cube restore flow"
                     .to_string(),
             ));
         }
@@ -1326,8 +1333,11 @@ impl Installer {
                     }
                     self.proposal_install_dispatched = true;
                 }
+                // A restored Cube with no Vault is its seed alone.
                 if self.context.bitcoin_config.chain.is_blake2b()
-                    && (self.context.descriptor.is_none() || !self.context.remote_backend.is_none())
+                    && ((self.context.descriptor.is_none()
+                        && self.context.recovered_signer.is_none())
+                        || !self.context.remote_backend.is_none())
                 {
                     return Task::done(Message::Installed(
                         None,

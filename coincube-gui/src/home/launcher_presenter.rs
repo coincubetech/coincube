@@ -876,7 +876,7 @@ fn ghost_copy(cube: &super::RemoteCube) -> (&'static str, tenshu::Tone, &'static
         None => (
             localized_copy("No Recovery Kit in Connect"),
             tenshu::Tone::Warn,
-            localized_copy("Connect has this Cube's registration but not its keys, so it can't be restored from here. Open it on the device that holds it and add a Recovery Kit, or import it with its recovery phrase."),
+            localized_copy("Connect has this Cube's registration but not its keys, so it can't be restored from here. If another device still has this Cube, open it there and add a Recovery Kit, or import it with its recovery phrase."),
         ),
     }
 }

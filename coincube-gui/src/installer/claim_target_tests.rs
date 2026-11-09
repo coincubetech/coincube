@@ -335,10 +335,10 @@ async fn an_unauthenticated_claim_is_refused_before_anything_is_built() {
     assert!(!root_path.exists(), "and nothing on disk");
 }
 
-/// Every other flow stays refused on the fork chain — the gate was widened to
-/// exactly one more flow, not opened.
+/// Every other flow stays refused on the fork chain: beyond creation and
+/// claim, only a whole Cube's restore (Recovery Kit, or phone) is admitted.
 #[tokio::test]
-async fn the_fork_chain_still_refuses_every_flow_but_creation_and_claim() {
+async fn the_fork_chain_refuses_every_flow_but_creation_claim_and_cube_restore() {
     // One process-global session slot: serialise with every other test that
     // opens one, or a sibling's `open` replaces this source's PIN.
     let _guard = crate::app::session::test_guard();
@@ -346,7 +346,6 @@ async fn the_fork_chain_still_refuses_every_flow_but_creation_and_claim() {
     for flow in [
         UserFlow::AddWallet,
         UserFlow::RestoreVaultFromRecoveryKit,
-        UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
         UserFlow::RecoverInheritedVault {
             cube_id: 1,
             full_cube: true,
@@ -369,6 +368,34 @@ async fn the_fork_chain_still_refuses_every_flow_but_creation_and_claim() {
             Some(authenticated_client(&server)),
         );
         assert!(refused.is_err(), "{:?} must stay refused on the fork", flow);
+    }
+    for flow in [
+        UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
+        UserFlow::RecoverOwnCubeWithPhone {
+            cube_id: 1,
+            full_cube: true,
+        },
+    ] {
+        let root = temp_root("restore");
+        let (installer, _) = Installer::try_new_for_chain(
+            root.clone(),
+            ChainId::BitcoinBlake2b,
+            None,
+            flow.clone(),
+            false,
+            None,
+            None,
+            None,
+            false,
+            Some(authenticated_client(&server)),
+        )
+        .unwrap_or_else(|e| panic!("{:?} restores on the fork: {}", flow, e));
+        // A restored Cube is never handed a Breez or Spark client, and
+        // building it touches nothing on disk.
+        assert!(installer.breez_client.is_none());
+        assert!(installer.spark_backend.is_none());
+        assert!(!installer.context.fresh_fork_cube);
+        assert!(!root.path().exists());
     }
 }
 
