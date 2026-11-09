@@ -2512,6 +2512,7 @@ fn opening_content<'a, M: 'a>(
     light: bool,
     alpha: f32,
     quote_width: f32,
+    artwork_size: f32,
 ) -> (Element<'a, M>, Element<'a, M>) {
     use coincube_ui::font;
     let network = face.cube.network;
@@ -2544,6 +2545,11 @@ fn opening_content<'a, M: 'a>(
     let ready = face.stage == super::launcher_opening::Stage::Ready;
     let mut body = Column::new()
         .align_x(Alignment::Center)
+        .push(coincube_ui::illustration::opening_image(
+            artwork_size,
+            alpha,
+        ))
+        .push(Space::new().height(Length::Fixed(16.0)))
         .push(
             Container::new(
                 opening_words(
@@ -2625,37 +2631,46 @@ fn opening_content<'a, M: 'a>(
     (heading.into(), body.into())
 }
 
-/// The loading face laid out 1:1 over the GPU face: the heading 44px from its
-/// top, the quote and stage line centred, `padding: 56px 72px`.
+/// Give the heading its own band. At high zoom the body can scroll
+/// independently if a long quote or a stalled stage needs more height.
+fn opening_details<'a, M: 'a>(
+    heading: Element<'a, M>,
+    body: Element<'a, M>,
+    top: f32,
+    horizontal: f32,
+) -> Element<'a, M> {
+    let content = Container::new(body)
+        .padding([0.0, horizontal])
+        .center_x(Length::Fill);
+    Column::new()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push(Space::new().height(Length::Fixed(top)))
+        .push(Container::new(heading).center_x(Length::Fill))
+        .push(Space::new().height(Length::Fixed(12.0)))
+        .push(
+            Container::new(iced::widget::scrollable(content).height(Length::Shrink))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+        )
+        .into()
+}
+
+fn opening_art_size(height: f32) -> f32 {
+    (height - 430.0).clamp(96.0, 160.0)
+}
+
 fn opening_face_content<'a, M: 'a>(
     face: &OpeningFace<'a, M>,
     light: bool,
     alpha: f32,
     side: f32,
 ) -> Element<'a, M> {
-    let (heading, body) = opening_content(face, light, alpha, 520.0);
+    let (heading, body) = opening_content(face, light, alpha, 520.0, opening_art_size(side));
     let k = side / launcher_scene::OPEN_FACE_SIZE;
-    Stack::new()
+    Container::new(opening_details(heading, body, 44.0 * k, 72.0 * k))
         .width(Length::Fixed(side))
         .height(Length::Fixed(side))
-        .push(
-            Container::new(body)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .padding([56.0 * k, 72.0 * k])
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        )
-        .push(
-            Column::new()
-                .width(Length::Fill)
-                .push(Space::new().height(Length::Fixed(44.0 * k)))
-                .push(
-                    Container::new(heading)
-                        .width(Length::Fill)
-                        .center_x(Length::Fill),
-                ),
-        )
         .into()
 }
 
@@ -2670,6 +2685,11 @@ pub(crate) fn opening_on_floor<'a, M: 'a + 'static>(
 ) -> Element<'a, M> {
     let light = matches!(mode, coincube_ui::theme::palette::ThemeMode::Light);
     responsive(move |size: Size| {
+        // At high zoom there is not enough vertical room for the loading face
+        // above the floor chrome. Use the full-window presentation in that space.
+        if size.height < 620.0 {
+            return opening_full_screen(OpeningFace { ..face }, mode, opening, now);
+        }
         let layout = floor_stage_layout(size);
         let side = layout.open_face();
         let alpha = opening.content(now);
@@ -2710,46 +2730,29 @@ pub(crate) fn opening_full_screen<'a, M: 'a + 'static>(
     let light = matches!(mode, coincube_ui::theme::palette::ThemeMode::Light);
     let glow = opening.glow(launcher_scene::glow(face.cube.network), now);
     let alpha = opening.content(now);
-    let (heading, body) = opening_content(&face, light, alpha, 640.0);
-    let frame = responsive(move |size: Size| {
-        launcher_gpu::stage(launcher_gpu::StageData::frame(
-            size.width,
-            size.height,
-            light,
-            glow,
-        ))
+    let scene = project_opening(&face.cube.name, face.cube.network);
+    let stage = responsive(move |size: Size| {
+        let (heading, body) =
+            opening_content(&face, light, alpha, 640.0, opening_art_size(size.height));
+        let top = (size.height * 0.09).min(64.0);
+        Stack::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .push(launcher_gpu::stage(launcher_gpu::StageData::frame(
+                size.width,
+                size.height,
+                light,
+                glow,
+            )))
+            .push(opening_details(heading, body, top, 48.0))
+            .into()
     })
     .width(Length::Fill)
     .height(Length::Fill);
-    let stage = Stack::new()
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .push(frame)
-        .push(
-            Container::new(body)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .padding([0.0, 48.0])
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        )
-        .push(
-            Column::new()
-                .width(Length::Fill)
-                .push(Space::new().height(Length::Fixed(64.0)))
-                .push(
-                    Container::new(heading)
-                        .width(Length::Fill)
-                        .center_x(Length::Fill),
-                ),
-        );
     Column::new()
         .width(Length::Fill)
         .height(Length::Fill)
-        .push(opening_rail(&project_opening(
-            &face.cube.name,
-            face.cube.network,
-        )))
+        .push(opening_rail(&scene))
         .push(rule::horizontal(1))
         .push(stage)
         .into()
@@ -4636,6 +4639,70 @@ mod tests {
         assert!(mounted.has_focus(launcher_catalog::select_id(&key)));
         assert!(mounted.has_focus(launcher_catalog::open_id(&key)));
         assert!(mounted.has_focus(launcher_catalog::details_open_id(&key)));
+    }
+
+    #[test]
+    fn artwork_picker_live_opening_keeps_status_and_stall_actions() {
+        use super::super::launcher_opening::{Opening, Stage};
+        use coincube_ui::theme::{ArtworkStyle, WorldviewMode};
+        use std::time::{Duration, Instant};
+
+        let cube = crate::app::settings::CubeSettings::new_with_raw_id(
+            "fixture".into(),
+            "Everyday".into(),
+            ChainId::Bitcoin,
+        );
+        let quote = Quote {
+            id: "fixture".into(),
+            text: "Verify the network before you send. An illustration can change with your worldview, while the network and the next action stay the same.".into(),
+            author: "Author".into(),
+            source: "Source".into(),
+            category: "loading".into(),
+            length: "long".into(),
+            contexts: Vec::new(),
+        };
+        let started = Instant::now();
+        let now = started + Duration::from_secs(20);
+        for height in [768, 512] {
+            for floor in [None, Some(floor_context(&cube))] {
+                let opening = Opening::new(floor, false, Stage::Spark, started);
+                for artwork in [ArtworkStyle::Existing, ArtworkStyle::Scene] {
+                    let face = OpeningFace {
+                        cube: &cube,
+                        quote: &quote,
+                        stage: opening.stage(),
+                        stalled: true,
+                        cancel: || (),
+                        without_spark: || (),
+                    };
+                    let theme = theme::Theme::dark()
+                        .with_worldview(WorldviewMode::Suitcoiner)
+                        .with_artwork(artwork);
+                    let (layout, element) = match opening.floor() {
+                        Some(context) => (
+                            "floor",
+                            opening_on_floor(context, face, theme.mode, &opening, now),
+                        ),
+                        None => ("list", opening_full_screen(face, theme.mode, &opening, now)),
+                    };
+                    let mounted = capture::inspect_filled(
+                        &format!("artwork-live-opening-{layout}-{artwork:?}"),
+                        element,
+                        (1024, height),
+                        "dark",
+                        theme,
+                        (1024, height),
+                    );
+                    assert!(mounted.contains("Loading your Spark wallet"));
+                    let action = mounted
+                        .text
+                        .iter()
+                        .find(|(text, _)| text == "Continue without Spark")
+                        .unwrap();
+                    assert!(action.1.y + action.1.height <= height as f32);
+                }
+            }
+        }
     }
 
     #[test]

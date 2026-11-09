@@ -1828,8 +1828,8 @@ impl std::fmt::Display for SettingsError {
 #[allow(unstable_name_collisions)]
 pub mod global {
     use super::preferences::{
-        DevicePreferences, Language, LauncherStyle, MotionPreference, NetworkActivitySource,
-        PreferenceChange, ThemePreference, WorldviewMode, Zoom,
+        ArtworkChoices, DevicePreferences, Language, LauncherStyle, MotionPreference,
+        NetworkActivitySource, PreferenceChange, ThemePreference, WorldviewMode, Zoom,
     };
     use crate::dir::CoincubeDirectory;
     use async_hwi::bitbox::{ConfigError, NoiseConfig, NoiseConfigData};
@@ -1904,6 +1904,8 @@ pub mod global {
         #[serde(default)]
         pub language: Language,
         #[serde(default)]
+        pub artwork: ArtworkChoices,
+        #[serde(default)]
         pub launcher_style: LauncherStyle,
         /// Not, by itself, authority to show amounts: see
         /// `balance_privacy_initialized` and
@@ -1969,6 +1971,7 @@ pub mod global {
                 theme_preference: Some(ThemePreference::System),
                 worldview: WorldviewMode::default(),
                 language: Language::default(),
+                artwork: ArtworkChoices::default(),
                 launcher_style: LauncherStyle::default(),
                 hide_balances: false,
                 // A missing file can coexist with legacy Cubes: never resolved by default.
@@ -1992,6 +1995,7 @@ pub mod global {
                 theme: self.theme_preference.unwrap_or(self.theme_mode.into()),
                 worldview: self.worldview,
                 language: self.language,
+                artwork: self.artwork,
                 launcher_style: self.launcher_style,
                 hide_balances: self.hide_balances,
                 motion: self.motion_preference,
@@ -2012,6 +2016,7 @@ pub mod global {
                 }
                 PreferenceChange::Worldview(mode) => self.worldview = mode,
                 PreferenceChange::Language(language) => self.language = language,
+                PreferenceChange::Artwork(mode, style) => self.artwork.set(mode, style),
                 PreferenceChange::LauncherStyle(style) => self.launcher_style = style,
                 PreferenceChange::HideBalances(hidden) => {
                     self.hide_balances = hidden;
@@ -4112,6 +4117,61 @@ pub mod global {
                     .is_err()
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), input);
+        }
+
+        #[test]
+        fn artwork_defaults_and_saves_are_independent_per_worldview() {
+            use crate::app::settings::preferences::ArtworkStyle::{Existing, Scene};
+
+            let root = TempRoot::new("worldview-artwork");
+            let path = root.global();
+            std::fs::write(
+                &path,
+                r#"{"worldview":"luke","language":"es","artwork":{"future_mode":"scene"}}"#,
+            )
+            .unwrap();
+            let defaults = GlobalSettings::load_preferences(&path).unwrap();
+            assert_eq!(defaults.artwork.get(WorldviewMode::Samurai), Existing);
+            assert_eq!(defaults.artwork.get(WorldviewMode::Suitcoiner), Scene);
+            assert_eq!(defaults.artwork.get(WorldviewMode::Luke), Scene);
+
+            for (mode, style) in [
+                (WorldviewMode::Samurai, Scene),
+                (WorldviewMode::Suitcoiner, Existing),
+            ] {
+                let receipt =
+                    GlobalSettings::save_preference(&path, PreferenceChange::Artwork(mode, style))
+                        .unwrap();
+                assert_eq!(receipt.preferences().worldview, WorldviewMode::Luke);
+                assert_eq!(receipt.preferences().artwork.get(mode), style);
+            }
+            let selected = GlobalSettings::save_preference(
+                &path,
+                PreferenceChange::Worldview(WorldviewMode::Samurai),
+            )
+            .unwrap()
+            .preferences();
+            assert_eq!(selected.artwork.get(WorldviewMode::Samurai), Scene);
+            assert_eq!(selected.artwork.get(WorldviewMode::Suitcoiner), Existing);
+            assert_eq!(selected.artwork.get(WorldviewMode::Luke), Scene);
+            assert_eq!(GlobalSettings::load_preferences(&path).unwrap(), selected);
+            let value = raw(&path);
+            assert_eq!(value["language"], "es");
+            assert_eq!(value["artwork"]["future_mode"], "scene");
+            let changed_language = GlobalSettings::save_preference(
+                &path,
+                PreferenceChange::Language(Language::English),
+            )
+            .unwrap()
+            .preferences();
+            assert_eq!(
+                changed_language,
+                DevicePreferences {
+                    language: Language::English,
+                    ..selected
+                }
+            );
+            assert_eq!(raw(&path)["artwork"]["future_mode"], "scene");
         }
 
         #[test]
