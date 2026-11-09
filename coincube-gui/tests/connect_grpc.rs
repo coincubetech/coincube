@@ -4,7 +4,7 @@
 //! never run on a hermetic PR CI. Enable with:
 //!
 //! ```sh
-//! COINCUBE_API_URL=https://dev-api.example.com \
+//! COINCUBE_API_URL=https://api.example.com \
 //!   COINCUBE_INTEGRATION_TOKEN=<jwt> \
 //!   cargo test -p coincube-gui --features integration-tests --test connect_grpc
 //! ```
