@@ -5542,7 +5542,9 @@ impl Home {
             .into()
         } else {
             let form = self.creation_form(false);
-            if let Some(line) = coincube_ui::worldview_copy::VoiceLine::CreateCube.get() {
+            if restoring {
+                form
+            } else if let Some(line) = coincube_ui::worldview_copy::VoiceLine::CreateCube.get() {
                 Column::new()
                     .spacing(12)
                     .push(p2_regular(line).style(theme::text::secondary))
@@ -10023,8 +10025,10 @@ mod tests {
         )
         .await
         .expect("software renderer");
+        use coincube_ui::{theme::WorldviewMode, worldview_copy};
         let labels = |home: &Home| {
-            let mut element = home.create_journey_view();
+            let mut element =
+                worldview_copy::render_in(WorldviewMode::Suitcoiner, || home.create_journey_view());
             let mut tree = Tree::new(element.as_widget());
             let node = element.as_widget_mut().layout(
                 &mut tree,
@@ -10059,7 +10063,12 @@ mod tests {
             );
         }
         // Neither the legacy sidebar nor Create's network step.
-        for label in ["Cubes", "Light Mode", "Live networks"] {
+        for label in [
+            "Cubes",
+            "Light Mode",
+            "Live networks",
+            "Establish a new position.",
+        ] {
             assert!(
                 !shown.iter().any(|l| l == label),
                 "{:?} shown: {:?}",
@@ -10100,6 +10109,12 @@ mod tests {
         let _ = home.update(Message::View(ViewMessage::ShowCreateCube(false)));
         assert!(!home.restore_hub);
         assert!(!home.showing_import_or_restore());
+
+        let _ = home.update(Message::View(ViewMessage::ShowCreateCube(true)));
+        let shown = labels(&home);
+        assert!(shown
+            .iter()
+            .any(|label| label == "Establish a new position."));
     }
 
     /// Changing the network in the header re-filters Import or restore
