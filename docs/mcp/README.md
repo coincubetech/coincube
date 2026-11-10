@@ -266,11 +266,13 @@ acceptance run.
 
 An additional acceptance test launches the actual STDIO executable using the
 private configuration issued by desktop Settings, reads all four tools from that
-SQLite wallet, and verifies scope denial, locking, revocation and clean EOF. It
-runs explicitly in the pinned platform CI jobs after building the companion binary:
+SQLite wallet, and verifies scope denial, locking, revocation and clean EOF. With
+the adapter-only companion, it also requires all five disabled proposal and
+transaction names to return the protocol error `unknown_tool`. It runs explicitly
+in the pinned platform CI jobs after building the companion binary:
 
 ```sh
-cargo build -p coincube-mcp --features adapter --locked
+cargo build -p coincube-mcp --no-default-features --features adapter --locked
 TENSHU_MCP_TEST_ADAPTER="$PWD/target/debug/tenshu-mcp" BREEZ_API_KEY=DUMMY_BREEZ_API_KEY cargo test -p coincube-gui --lib stdio_client_reads_real_wallet_and_observes_revocation -- --ignored
 ```
 

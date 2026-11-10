@@ -2610,7 +2610,7 @@ mod tests {
             let mut stdin = child.stdin.take().unwrap();
             let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
             /// Send a request and require the next JSON-RPC response to match its ID.
-            async fn response(
+            async fn rpc_response(
                 stdin: &mut tokio::process::ChildStdin,
                 stdout: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
                 request: Value,
@@ -2622,6 +2622,15 @@ mod tests {
                     .await.unwrap().unwrap().unwrap();
                 let value: Value = serde_json::from_str(&line).unwrap();
                 assert_eq!(value["id"], request["id"]);
+                value
+            }
+            /// Require a successful protocol response while retaining tool-level errors.
+            async fn response(
+                stdin: &mut tokio::process::ChildStdin,
+                stdout: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+                request: Value,
+            ) -> Value {
+                let value = rpc_response(stdin, stdout, request).await;
                 assert!(value.get("error").is_none(), "protocol error");
                 value["result"].clone()
             }
@@ -2637,9 +2646,8 @@ mod tests {
             let tools = discovered["tools"].as_array().unwrap();
             let names: std::collections::BTreeSet<_> = tools.iter()
                 .map(|tool| tool["name"].as_str().unwrap()).collect();
-            // CI builds the companion with `--features adapter` only. Optional
-            // Regtest tools remain callable for a denied-access check below,
-            // but are not advertised by this default read-only build.
+            // This acceptance test uses an adapter-only companion. Optional
+            // tools are neither advertised nor dispatched by this build.
             assert_eq!(tools.len(), 5);
             assert_eq!(names, std::collections::BTreeSet::from([
                 "tenshu_get_capabilities", "tenshu_list_wallets",
@@ -2664,25 +2672,33 @@ mod tests {
             let denied = response(&mut stdin, &mut stdout, call(7, "tenshu_get_wallet_summary", json!({"wallet_id":"another-wallet"}))).await;
             assert_eq!(denied["isError"], true);
             assert_eq!(denied["structuredContent"]["error"]["code"], "access_denied");
-            let setup_denied = response(&mut stdin, &mut stdout, call(10, "tenshu_prepare_wallet_creation", json!({
-                "request_id":"read-grant-must-not-prepare",
-                "topology":{
+            let topology = json!({
                     "primary":{"threshold":3,"key_count":5},
                     "recovery":{"quorum":{"threshold":2,"key_count":3},"relative_delay_blocks":144}
-                },
-                "keys":{"primary":vec!["unverified";5],"recovery":vec!["unverified";3]}
-            }))).await;
-            assert_eq!(setup_denied["isError"], true);
-            assert_eq!(setup_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
-            let transaction_denied = response(&mut stdin, &mut stdout, call(11, "tenshu_prepare_transaction", json!({
-                "wallet_id": id, "request_id": "read-grant-must-not-prepare",
-                "recipients": [{"address": "bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202", "amount_sats": 10000}],
-                "fee_rate_sat_vb": 2, "max_fee_sats": 1000
-            }))).await;
-            assert_eq!(transaction_denied["isError"], true);
-            assert_eq!(transaction_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
-            let draft_denied = response(&mut stdin, &mut stdout, call(12, "tenshu_get_prepared_transaction", json!({"wallet_id": id, "draft_id": "foreign"}))).await;
-            assert_eq!(draft_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
+            });
+            for (index, (name, arguments)) in [
+                ("tenshu_prepare_wallet_proposal", json!({
+                    "request_id":"disabled-proposal", "topology":topology
+                })),
+                ("tenshu_prepare_wallet_creation", json!({
+                    "request_id":"disabled-creation", "topology":topology,
+                    "keys":{"primary":vec!["unverified";5],"recovery":vec!["unverified";3]}
+                })),
+                ("tenshu_get_wallet_proposal", json!({"proposal_id":"foreign"})),
+                ("tenshu_prepare_transaction", json!({
+                    "wallet_id":id, "request_id":"disabled-transaction",
+                    "recipients":[{"address":"bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202","amount_sats":10000}],
+                    "fee_rate_sat_vb":2, "max_fee_sats":1000
+                })),
+                ("tenshu_get_prepared_transaction", json!({"wallet_id":id,"draft_id":"foreign"})),
+            ].iter().enumerate() {
+                let unavailable = rpc_response(
+                    &mut stdin, &mut stdout, call(index + 10, name, arguments.clone())
+                ).await;
+                assert_eq!(unavailable["error"]["code"], -32602, "{}", name);
+                assert_eq!(unavailable["error"]["message"], "unknown_tool", "{}", name);
+                assert!(unavailable.get("result").is_none(), "{}", name);
+            }
             super::super::session::close();
             let locked = response(&mut stdin, &mut stdout, call(8, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
             assert_eq!(locked["structuredContent"]["error"]["code"], "access_denied");
