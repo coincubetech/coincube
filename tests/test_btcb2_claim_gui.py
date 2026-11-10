@@ -180,6 +180,7 @@ class Bridge:
                 return harness.blake2b, harness.electrs_blake2b, suffix, network
 
             def do_GET(self):
+                """Serve indexed chain data while retaining unexpected test failures."""
                 try:
                     if self.path == "/api/v1/connect/networks/bitcoin-blake2b/anchor":
                         assert self.headers.get("Authorization") == "Bearer synthetic-regtest-only"
@@ -242,6 +243,7 @@ class Bridge:
                     self.reply(503, {"error": "bridge-refused"})
 
             def do_POST(self):
+                """Proxy transaction submissions while retaining unexpected test failures."""
                 try:
                     node, _, suffix, network = self.route()
                     if network == "mainnet" and owner.policy_node is not None:

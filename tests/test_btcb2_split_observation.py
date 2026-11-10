@@ -274,6 +274,7 @@ class Bridge:
                 )
 
             def do_GET(self):
+                """Serve indexed chain data while retaining unexpected test failures."""
                 try:
                     if self.path == "/api/v1/connect/networks/bitcoin-blake2b/anchor":
                         return self.anchor()
@@ -304,6 +305,7 @@ class Bridge:
                     self.reply(503, {"error": "bridge-refused"})
 
             def do_POST(self):
+                """Proxy transaction submissions while retaining unexpected test failures."""
                 try:
                     node, _, suffix, network = self.route()
                     owner.posts.append((network, suffix))

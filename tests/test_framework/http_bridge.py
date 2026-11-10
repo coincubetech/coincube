@@ -1,5 +1,5 @@
 """HTTP test servers must propagate worker failures to the test thread."""
-import sys
+import traceback
 from http.server import ThreadingHTTPServer
 
 
@@ -21,7 +21,7 @@ class CheckedThreadingHTTPServer(ThreadingHTTPServer):
 
     def handle_error(self, request, client_address):
         # socketserver calls this while the handler exception is active.
-        self.errors.append(repr(sys.exc_info()[1]))
+        self.errors.append(traceback.format_exc())
 
     def assert_no_errors(self):
         assert not self.errors, self.errors

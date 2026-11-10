@@ -13,6 +13,7 @@ from test_btcb2_split_observation import Bridge as SplitBridge
 @pytest.mark.parametrize("bridge_type", [ClaimBridge, SplitBridge])
 @pytest.mark.parametrize("method", ["GET", "POST"])
 def test_bridge_assertion_fails_teardown(bridge_type, method):
+    """Report background assertions with their handler location during teardown."""
     harness = SimpleNamespace(legacy=None, blake2b=None,
                               electrs_legacy=None, electrs_blake2b=None)
     bridge = bridge_type(harness)
@@ -29,10 +30,13 @@ def test_bridge_assertion_fails_teardown(bridge_type, method):
             bridge.close()
     assert not bridge.thread.is_alive()
     assert any("AssertionError" in error for error in bridge.errors)
+    assert any("Traceback (most recent call last)" in error and
+               "in do_" + method in error for error in bridge.errors)
 
 
 @pytest.mark.parametrize("bridge_type", [ClaimBridge, SplitBridge])
 def test_bridge_clean_shutdown(bridge_type):
+    """A bridge with no failed requests closes without manufacturing an error."""
     bridge = bridge_type(SimpleNamespace())
     bridge.close()
     assert not bridge.thread.is_alive()
@@ -40,6 +44,7 @@ def test_bridge_clean_shutdown(bridge_type):
 
 
 def test_stalled_request_does_not_block_teardown():
+    """An incomplete client request cannot prevent joined-handler teardown."""
     import socket
     import threading
     from http.server import BaseHTTPRequestHandler
