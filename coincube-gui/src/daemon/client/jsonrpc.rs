@@ -14,7 +14,7 @@
 //
 //! Client support
 //!
-//! Support for connecting to JSONRPC servers over UNIX socets, sending requests,
+//! Support for connecting to JSONRPC servers over UNIX sockets, sending requests,
 //! and parsing responses
 //!
 
@@ -61,7 +61,7 @@ impl super::Client for JsonRPCClient {
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl JsonRPCClient {
-    /// Creates a new client
+    /// Create a client with a 30-second deadline for each request's socket I/O.
     pub fn new<P: AsRef<Path>>(sockpath: P) -> JsonRPCClient {
         JsonRPCClient {
             sockpath: sockpath.as_ref().to_path_buf(),
@@ -69,12 +69,14 @@ impl JsonRPCClient {
         }
     }
 
-    /// Override the request deadline. `None` restores the finite default.
+    /// Set the total deadline for connecting, writing and reading a response.
+    /// `None` restores the finite 30-second default.
     #[allow(dead_code)]
     pub fn set_timeout(&mut self, timeout: Option<Duration>) {
         self.timeout = timeout.unwrap_or(DEFAULT_RPC_TIMEOUT);
     }
 
+    /// Return `NotSupported`: the Unix socket transport is unavailable on Windows.
     #[cfg(windows)]
     pub async fn send_request<S: Serialize + Debug + Send, D: DeserializeOwned + Debug + Send>(
         &self,
@@ -84,7 +86,11 @@ impl JsonRPCClient {
         Err(Error::NotSupported)
     }
 
-    /// Sends a request to a client
+    /// Send one request and validate the response version and ID.
+    ///
+    /// Socket I/O shares one deadline. Requests are never automatically retried:
+    /// after a timeout or cancellation, the daemon may already have applied a
+    /// mutating request even though its response was not received.
     #[cfg(not(windows))]
     pub async fn send_request<S: Serialize + Debug + Send, D: DeserializeOwned + Debug + Send>(
         &self,

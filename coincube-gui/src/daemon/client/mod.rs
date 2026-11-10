@@ -24,9 +24,11 @@ use coincubed::{
 use super::{model::*, Daemon, DaemonBackend, DaemonError};
 use crate::dir::CoincubeDirectory;
 
+/// Asynchronous transport for typed daemon RPC requests.
 #[async_trait]
 pub trait Client: Send + Sync {
     type Error: Into<DaemonError> + Debug;
+    /// Send one request and decode its result without blocking the executor on I/O.
     async fn request<S: Serialize + Debug + Send, D: DeserializeOwned + Debug + Send>(
         &self,
         method: &str,
