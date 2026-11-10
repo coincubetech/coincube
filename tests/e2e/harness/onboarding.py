@@ -87,8 +87,14 @@ class Onboarding:
     def reveal(self, label, direction="up"):
         from appium.webdriver.common.appiumby import AppiumBy
         for attempt in range(11):
-            if label in self.phone.labels():
-                return
+            # Retain the active-app/auth-prompt check, but ancestor text is not
+            # proof that the actual button is visible and enabled.
+            self.phone.labels()
+            controls = self.phone.matching_controls(label)
+            if len(controls) == 1:
+                return controls[0]
+            if len(controls) > 1:
+                raise Blocked("PHONE_SELECTOR", "The intended setup control is ambiguous; no tap was sent.")
             if attempt == 10:
                 break
             scrolls = self.phone.driver.find_elements(AppiumBy.IOS_PREDICATE,
@@ -143,18 +149,6 @@ class Onboarding:
         if state and state.get("verified"):
             self.phone.restore_navigation()
             return state["pin"]
-        # An interruption after scrolling can leave a known recovery page at
-        # its footer. Return only these unambiguous pages to their heading so
-        # index/field enumeration is identical to the first attempt.
-        if state and len(state.get("words", [])) == 12:
-            if ("Check what you wrote down" not in labels
-                    and labels & {"Confirm and finish setup", "Show me the words again"}):
-                self.reveal("Check what you wrote down", direction="down")
-                labels = self.phone.labels()
-            elif ("Write down these 12 words" not in labels
-                    and "I have written them down" in labels):
-                self.reveal("Write down these 12 words", direction="down")
-                labels = self.phone.labels()
         if {"Home", "Cubes", "Settings"} <= labels:
             # SetupDone can auto-route Home before a restarted process sees
             # it. Only recover a ceremony whose words and challenge-submit
@@ -166,6 +160,20 @@ class Onboarding:
             if not state or not state.get("verified"):
                 raise Blocked("PHONE_MASTER_NOT_OWNED", "This signed-in Keychain already has a master that this run did not provision. It will not replace the master, guess a PIN, or bypass a passkey prompt.")
             return state["pin"]
+        if (state and state.get("recovery_submission_started")
+                and "Go to home" not in labels):
+            raise Blocked("RECOVERY_SUBMISSION_UNCERTAIN", "An earlier recovery submission is unresolved; no answers or confirmation will be replayed.")
+        # An interruption before submission can leave a known recovery page at
+        # its footer. Return only these unambiguous pages to their heading.
+        if state and len(state.get("words", [])) == 12:
+            if ("Check what you wrote down" not in labels
+                    and labels & {"Confirm and finish setup", "Show me the words again"}):
+                self.reveal("Check what you wrote down", direction="down")
+                labels = self.phone.labels()
+            elif ("Write down these 12 words" not in labels
+                    and "I have written them down" in labels):
+                self.reveal("Write down these 12 words", direction="down")
+                labels = self.phone.labels()
         # Only the genuine first-time setup route is eligible. In particular,
         # never click an existing-keys warning, recovery reset, or restore flow.
         if not state:
@@ -194,8 +202,7 @@ class Onboarding:
                 raise Failed("RECOVERY_CHANGED", "Recovery material changed during an interrupted setup.")
             state["words"] = words
             self.save(state)
-            self.reveal("I have written them down")
-            self.phone.click("I have written them down")
+            self.reveal("I have written them down").click()
             labels = self.wait("Check what you wrote down")
         if "Check what you wrote down" in labels:
             if not state.get("words"):
@@ -211,10 +218,12 @@ class Onboarding:
             for field, number in zip(fields, numbers):
                 field.clear()
                 field.send_keys(state["words"][number - 1])
-            self.reveal("Confirm and finish setup")
+            button = self.reveal("Confirm and finish setup")
             state["recovery_submission_started"] = True
+            state["recovery_dispatch_status"] = "dispatch_pending"
             self.save(state)
-            self.phone.click("Confirm and finish setup")
+            self.phone.labels()  # Stop if an OS/auth prompt took foreground.
+            button.click()  # Exactly one dispatch; every click error is uncertain.
             labels = self.wait("Go to home", "Home")
         if "Go to home" in labels or {"Home", "Cubes", "Settings"} <= labels:
             if not self.recovery_submitted(state):

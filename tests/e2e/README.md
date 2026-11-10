@@ -143,7 +143,10 @@ before acting and retains the same encrypted PIN. It never repeats an unlock,
 resets an existing master, or discards a saved phrase/submission. A second such
 restart is blocked. Keychain's normal local-blob and server-key guards must pass
 again before a new recovery phrase appears, and Settings identity is verified
-before Cube creation or funding. Lost broadcast responses reconcile the same transaction ID;
+before Cube creation or funding. Recovery confirmation resolves the exact visible
+button before saving dispatch intent; an uncertain submission never re-enters
+answers or taps again. A completed Home/setup-success screen can reconcile it
+only with the already saved recovery proof. Lost broadcast responses reconcile the same transaction ID;
 retries can send only the previously pinned signed bytes.
 
 Exit **0** means selected stages passed, **1** an assertion failed, **2** a

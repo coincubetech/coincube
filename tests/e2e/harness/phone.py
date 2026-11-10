@@ -200,11 +200,14 @@ class Phone:
         return {value.strip() for n in root.iter() if n.get("visible") == "true"
                 for key in ("label", "name", "value") for value in n.get(key, "").splitlines()}
 
-    def click(self, label):
+    def matching_controls(self, label):
         from appium.webdriver.common.appiumby import AppiumBy
         # Values are JSON-quoted rather than interpolated into predicate syntax.
         predicate = "visible == true AND enabled == true AND (label == %s OR name == %s)" % (json.dumps(label), json.dumps(label))
-        elements = self.driver.find_elements(AppiumBy.IOS_PREDICATE, predicate)
+        return self.driver.find_elements(AppiumBy.IOS_PREDICATE, predicate)
+
+    def click(self, label):
+        elements = self.matching_controls(label)
         if len(elements) != 1:
             raise Blocked("PHONE_SELECTOR", "Expected one visible, enabled Keychain control; the UI needs a selector update.")
         elements[0].click()

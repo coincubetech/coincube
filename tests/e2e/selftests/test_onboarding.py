@@ -121,7 +121,7 @@ def test_initial_setup_persists_pin_and_all_recovery_words_before_using_them(mon
     phone = SimpleNamespace(device_digest='device', labels=lambda: set(view), click=click, click_card=click, driver=source)
     flow = Onboarding(phone, store, 'account', 1)
     flow.fields = lambda: fields
-    flow.reveal = lambda _: None
+    flow.reveal = lambda title: SimpleNamespace(click=lambda: click(title))
     assert flow.setup() == '123456'
     assert ''.join(digits) == '123456123456'
     assert store.value['words'] == WORDS
@@ -340,6 +340,8 @@ def test_reveal_targets_the_scroll_view_instead_of_the_keyboard(monkeypatch):
     gestures = []
     flow = controller(Store())
     flow.phone.labels = lambda: next(views)
+    controls = iter([[], [], [SimpleNamespace(id='confirmation-button')]])
+    flow.phone.matching_controls = lambda _: next(controls)
     flow.phone.driver = SimpleNamespace(
         find_elements=lambda *args: [SimpleNamespace(id='recovery-scroll')],
         execute_script=lambda command, arguments: gestures.append((command, arguments)))
@@ -350,12 +352,78 @@ def test_reveal_targets_the_scroll_view_instead_of_the_keyboard(monkeypatch):
 @pytest.mark.parametrize('count', [0, 2])
 def test_reveal_never_guesses_an_absent_or_ambiguous_scroll_view(count):
     flow = controller(Store())
+    flow.phone.matching_controls = lambda _: []
     flow.phone.driver = SimpleNamespace(
         find_elements=lambda *args: [object()] * count,
         execute_script=lambda *args: pytest.fail('must not send unscoped gesture'))
     with pytest.raises(Blocked) as error:
         flow.reveal('Confirm and finish setup')
     assert error.value.code == 'PHONE_SCROLL'
+
+
+def test_reveal_ignores_ancestor_text_until_the_actual_control_exists(monkeypatch):
+    monkeypatch.setattr('harness.onboarding.time.sleep', lambda _: None)
+    flow = controller(Store(), {'Confirm and finish setup'})
+    button, gestures = object(), []
+    controls = iter([[], [button]])
+    flow.phone.matching_controls = lambda _: next(controls)
+    flow.phone.driver = SimpleNamespace(
+        find_elements=lambda *args: [SimpleNamespace(id='recovery-scroll')],
+        execute_script=lambda command, args: gestures.append(args))
+    assert flow.reveal('Confirm and finish setup') is button
+    assert gestures == [{'direction': 'up', 'elementId': 'recovery-scroll'}]
+
+
+def test_reveal_rejects_ambiguous_controls_without_scrolling_or_tapping():
+    flow = controller(Store(), {'Confirm and finish setup'})
+    flow.phone.matching_controls = lambda _: [object(), object()]
+    with pytest.raises(Blocked) as error:
+        flow.reveal('Confirm and finish setup')
+    assert error.value.code == 'PHONE_SELECTOR'
+
+
+@pytest.mark.parametrize('dispatch_status', [None, 'dispatch_pending'])
+def test_uncertain_recovery_submission_never_refills_or_replays(dispatch_status):
+    state = uncommitted_state() | {'words': WORDS, 'recovery_submission_started': True}
+    if dispatch_status:
+        state['recovery_dispatch_status'] = dispatch_status
+    store = Store(state)
+    flow = controller(store, {'Check what you wrote down', 'Confirm and finish setup'})
+    with pytest.raises(Blocked) as error:
+        flow.setup()
+    assert error.value.code == 'RECOVERY_SUBMISSION_UNCERTAIN'
+    assert store.writes == []
+
+
+def test_lost_recovery_click_response_preserves_intent_and_never_replays():
+    store = Store(uncommitted_state() | {'words': WORDS})
+    flow = controller(store, {'Check what you wrote down'})
+    flow.phone.driver = SimpleNamespace(page_source=xml(['Word 1', 'Word 2', 'Word 3']))
+    flow.fields = lambda: [InputField() for _ in range(3)]
+    clicks = []
+    def click():
+        assert store.value['recovery_submission_started'] is True
+        assert store.value['recovery_dispatch_status'] == 'dispatch_pending'
+        clicks.append(True)
+        raise RuntimeError('Synthetic lost response after dispatch')
+    flow.reveal = lambda _: SimpleNamespace(click=click)
+    with pytest.raises(RuntimeError):
+        flow.setup()
+    with pytest.raises(Blocked) as error:
+        controller(store, {'Check what you wrote down'}).setup()
+    assert error.value.code == 'RECOVERY_SUBMISSION_UNCERTAIN'
+    assert clicks == [True]
+
+
+def test_reveal_preserves_foreground_authentication_guard():
+    flow = controller(Store())
+    def labels():
+        raise Blocked('PHONE_AUTH', 'Synthetic OS prompt')
+    flow.phone.labels = labels
+    flow.phone.matching_controls = lambda _: pytest.fail('must check foreground first')
+    with pytest.raises(Blocked) as error:
+        flow.reveal('Confirm and finish setup')
+    assert error.value.code == 'PHONE_AUTH'
 
 
 @pytest.mark.parametrize('footer,heading', [
