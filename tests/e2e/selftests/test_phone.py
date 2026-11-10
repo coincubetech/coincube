@@ -10,6 +10,8 @@ INTENT = {"outputs": [{"address": "tb1fixture-recipient", "sats": 10000},
                       {"address": "tb1fixture-change", "sats": 989388}]}
 REVIEW = {"Approve transaction", "testnet4", "612 sats", "10000 sats", "989388 sats",
           "tb1fixture-recipient", "tb1fixture-change"}
+HOME = {"Home", "Cubes", "Settings"}
+INCOMING = {"Incoming transaction", "Review the details before approving", "View transaction", "Not now"}
 
 
 def scripted_phone(views):
@@ -18,6 +20,7 @@ def scripted_phone(views):
     phone.labels = lambda: next(screens)
     clicks = []
     phone.click = clicks.append
+    phone.click_line = clicks.append
     phone.refresh = lambda: None
     return phone, clicks
 
@@ -75,7 +78,7 @@ def test_pending_page_restart_is_bounded(monkeypatch):
 
 
 def test_approval_never_selects_an_unrelated_request(tmp_path):
-    phone, clicks = scripted_phone([{"some other request"}])
+    phone, clicks = scripted_phone([HOME, {"some other request"}])
     journal = Journal(tmp_path / "run", {})
     try:
         with pytest.raises(Blocked) as error:
@@ -103,7 +106,7 @@ def test_uncertain_approval_never_retries_pin(tmp_path):
 def test_wrong_phone_summary_never_approves(tmp_path, monkeypatch):
     monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)
     wrong = REVIEW - {"tb1fixture-recipient"}
-    phone, clicks = scripted_phone([{"Testnet4 QA fixture"}] + [wrong] * 8)
+    phone, clicks = scripted_phone([HOME, {"Testnet4 QA fixture"}] + [wrong] * 8)
     journal = Journal(tmp_path / "run", {})
     try:
         with pytest.raises(Failed) as error:
@@ -116,7 +119,7 @@ def test_wrong_phone_summary_never_approves(tmp_path, monkeypatch):
 
 def test_real_banner_and_pin_flow_use_exact_labels(tmp_path, monkeypatch):
     monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)
-    phone, clicks = scripted_phone([{"1 signing request waiting"}, {"Testnet4 QA fixture"}, REVIEW,
+    phone, clicks = scripted_phone([HOME, {"1 signing request waiting"}, {"Testnet4 QA fixture"}, REVIEW,
                                    {"Enter PIN"}, {"Signature Submitted"}])
     pin = tmp_path / "pin"
     pin.write_text("987654")
@@ -249,3 +252,67 @@ def test_persisted_key_detail_with_disabled_back_relaunches_without_reset(monkey
     phone.restore_navigation()
     assert clicks == []
     assert lifecycle == [('terminate', 'io.coincube.keychainApp'), ('activate', 'io.coincube.keychainApp')]
+
+
+def test_incoming_sheet_is_dismissed_before_exact_queue_selection(tmp_path, monkeypatch):
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    phone, clicks = scripted_phone([INCOMING, HOME, INCOMING,
+        {'1 signing request waiting'}, {'Testnet4 QA fixture'}, REVIEW, {'Signature Submitted'}])
+    journal = Journal(tmp_path / 'incoming', {})
+    try:
+        phone.approve('fixture', INTENT, 612, None, journal, timeout=5)
+        assert clicks == ['Not now', 'Home', 'Not now', '1 signing request waiting',
+                          'Testnet4 QA fixture', 'Approve']
+        assert 'View transaction' not in clicks
+    finally:
+        journal.close()
+
+
+def test_not_now_on_unrelated_screen_is_not_dismissed():
+    phone, clicks = scripted_phone([])
+    assert not phone.dismiss_incoming({'Signer store needs repair', 'Not now'})
+    assert clicks == []
+
+
+def line_element(identifier, descendants=(), clicks=None):
+    def find(by, query):
+        assert by == 'xpath' and query == 'descendant::*'
+        return list(descendants)
+    return SimpleNamespace(id=identifier, find_elements=find,
+                           click=lambda: clicks.append(identifier))
+
+
+def test_request_line_selects_only_leaf_and_preserves_complete_line_boundaries():
+    clicks, queries = [], []
+    leaf = line_element('request-card', clicks=clicks)
+    ancestor = line_element('screen', [leaf], clicks)
+    def find(by, predicate):
+        queries.append(predicate)
+        return [ancestor, leaf]
+    phone = Phone(SimpleNamespace(find_elements=find), 37)
+    phone.click_line('Testnet4 QA fixture')
+    assert clicks == ['request-card']
+    query = queries[0]
+    assert 'ENDS WITH' not in query
+    assert 'ENDSWITH "\\nTestnet4 QA fixture"' in query
+    assert 'CONTAINS "\\nTestnet4 QA fixture\\n"' in query
+    assert 'CONTAINS "Testnet4 QA fixture"' not in query
+    assert 'visible == true AND enabled == true' in query
+
+
+@pytest.mark.parametrize('count', [0, 2])
+def test_missing_or_duplicate_request_lines_never_tap(count):
+    clicks = []
+    elements = [line_element(str(i), clicks=clicks) for i in range(count)]
+    phone = Phone(SimpleNamespace(find_elements=lambda *a: elements), 37)
+    with pytest.raises(Blocked) as error:
+        phone.click_line('Testnet4 QA fixture')
+    assert error.value.code == 'PHONE_SELECTOR'
+    assert clicks == []
+
+
+def test_line_selector_cannot_be_used_for_pin_digits():
+    phone = Phone(SimpleNamespace(), 37)
+    with pytest.raises(Failed) as error:
+        phone.click_line('1')
+    assert error.value.code == 'PHONE_LINE'

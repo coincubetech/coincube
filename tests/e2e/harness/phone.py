@@ -241,6 +241,37 @@ class Phone:
     def click_card(self, title, timeout=15, *, container=False):
         self.card_control(title, timeout, container=container).click()
 
+    def click_line(self, line):
+        """Select one leaf control containing a complete merged label line."""
+        from appium.webdriver.common.appiumby import AppiumBy
+        if not line or line.isdigit() or "\n" in line:
+            raise Failed("PHONE_LINE", "A request control requires one complete nonnumeric label line.")
+        terms = []
+        for attribute in ("label", "name"):
+            terms.extend((f'{attribute} == {json.dumps(line)}',
+                          f'{attribute} BEGINSWITH {json.dumps(line + chr(10))}',
+                          f'{attribute} ENDSWITH {json.dumps(chr(10) + line)}',
+                          f'{attribute} CONTAINS {json.dumps(chr(10) + line + chr(10))}'))
+        predicate = ('visible == true AND enabled == true AND '
+                     '(type == "XCUIElementTypeStaticText" OR type == "XCUIElementTypeButton" OR type == "XCUIElementTypeOther") AND ('
+                     + ' OR '.join(terms) + ')')
+        candidates = self.driver.find_elements(AppiumBy.IOS_PREDICATE, predicate)
+        identifiers = {element.id for element in candidates}
+        leaves = [element for element in candidates if not any(child.id in identifiers
+                  for child in element.find_elements(AppiumBy.XPATH, 'descendant::*'))]
+        if len(leaves) != 1:
+            raise Blocked("PHONE_SELECTOR", "The exact request label line must identify one leaf control; no tap was sent.")
+        leaves[0].click()
+
+    def dismiss_incoming(self, labels):
+        if {"Incoming transaction", "Review the details before approving", "View transaction", "Not now"} <= labels:
+            # The app's onDismiss only pops this notification sheet. It does
+            # not reject the session. Select the exact run note from the
+            # authenticated queue instead of assuming this modal is our request.
+            self.click("Not now")
+            return True
+        return False
+
     def restore_navigation(self):
         # noReset preserves the route left by a previous attempt. Only dismiss
         # completed results or navigate back; never approve, reject, retry, or
@@ -248,7 +279,9 @@ class Phone:
         restarted = False
         for _ in range(16):
             labels = self.labels()
-            if {"Create new signer key", "Create Key", "Cancel"} <= labels:
+            if self.dismiss_incoming(labels):
+                pass
+            elif {"Create new signer key", "Create Key", "Cancel"} <= labels:
                 self.click("Cancel")
             elif {"Home", "Cubes", "Settings"} <= labels:
                 return
@@ -311,19 +344,27 @@ class Phone:
                                                "observation_seconds": 3, "home_refresh_proven": False})
 
     def approve(self, request_id, intent, fee_sats, pin_file, journal, timeout, *, pin_provider=None, probe_pin_resume=False):
+        if journal.data["artifacts"].get("approval_started"):
+            raise Blocked("APPROVAL_UNCERTAIN", "An earlier approval attempt must be reconciled before any phone navigation.")
         note = "Testnet4 QA " + request_id
         until = time.monotonic() + timeout
+        self.restore_navigation()
         self.click("Home")
         self.refresh()
         while True:
             labels = self.labels()
+            if self.dismiss_incoming(labels):
+                if time.monotonic() >= until:
+                    raise Blocked("REQUEST_DELIVERY", "Incoming notifications prevented selection of the exact request before the deadline.")
+                time.sleep(.25)
+                continue
             if note in labels:
-                self.click(note)
+                self.click_line(note)
                 break
             # The Home banner opens the authenticated pending list.
             candidates = [v for v in labels if v.endswith("signing request waiting") or v.endswith("signing requests waiting")]
             if len(candidates) == 1:
-                self.click(candidates[0])
+                self.click_line(candidates[0])
             if time.monotonic() >= until:
                 raise Blocked("REQUEST_DELIVERY", "The exact request did not appear in Keychain before the delivery deadline.")
             time.sleep(1)
