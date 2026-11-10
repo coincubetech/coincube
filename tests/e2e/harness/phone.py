@@ -255,7 +255,24 @@ class Phone:
         self.click("Home")
         return {"build": self.build, "network": "testnet4", "cube_visible": True}
 
-    def approve(self, request_id, intent, fee_sats, pin_file, journal, timeout, *, pin_provider=None):
+    def verify_pin_resume(self, journal):
+        # Observe lifecycle survival only. Resume reconnects the stream, but
+        # does not prove Home's FetchPendingSessionsEvent actually ran.
+        journal.artifact("pin_resume_probe", {"status": "started", "trigger": "background_resume"})
+        self.driver.execute_script("mobile: backgroundApp", {"seconds": 1})
+        self.driver.activate_app(BUNDLE)
+        until = time.monotonic() + 3
+        while True:
+            if "Enter PIN" not in self.labels():
+                journal.artifact("pin_resume_probe", {"status": "failed", "trigger": "background_resume"})
+                raise Failed("PIN_CHALLENGE_DISMISSED", "The PIN challenge disappeared across app resume before any credential was entered.")
+            if time.monotonic() >= until:
+                break
+            time.sleep(.25)
+        journal.artifact("pin_resume_probe", {"status": "passed", "trigger": "background_resume",
+                                               "observation_seconds": 3, "home_refresh_proven": False})
+
+    def approve(self, request_id, intent, fee_sats, pin_file, journal, timeout, *, pin_provider=None, probe_pin_resume=False):
         note = "Testnet4 QA " + request_id
         until = time.monotonic() + timeout
         self.click("Home")
@@ -297,6 +314,8 @@ class Phone:
             if "Signature Submitted" in labels or "Transaction approved" in labels:
                 return
             if "Enter PIN" in labels and not pin_entered:
+                if probe_pin_resume:
+                    self.verify_pin_resume(journal)
                 if not pin_file and pin_provider is None:
                     raise Blocked("SIGNER_PIN", "This fixture needs its existing disposable signing PIN file for unattended approval.")
                 pin = pin_provider() if pin_provider else private_read(pin_file).decode().strip()

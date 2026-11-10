@@ -30,7 +30,7 @@ def forbid_external_io(monkeypatch):
 
 @pytest.fixture
 def config(tmp_path):
-    return {"version": 2, "profile_dir": str(tmp_path / "desktop"),
+    return {"version": 2, "account_email": "qa@example.invalid", "profile_dir": str(tmp_path / "desktop"),
             "connect_rest": provision.REST, "connect_grpc": provision.GRPC,
             "ios": {"minimum_build": 35}, "amount_sats": 10000, "fee_sats": 612}
 
@@ -353,3 +353,39 @@ def test_funding_preserves_native_minimum_change(runner, funded, accepted):
             runner.stage_funding()
         assert caught.value.code == 'FUNDING_PENDING'
         assert 'funding_outpoint' not in runner.artifacts
+
+
+def test_account_credential_binding_survives_new_desktop_registration(config, tmp_path):
+    from harness.state import atomic_write
+    config['phone_state_dir'] = str(tmp_path / 'phone-state')
+    account_ids, desktop_ids, credential_paths = [], [], []
+    for ordinal in range(2):
+        candidate = provision.FreshRunner(config, tmp_path / f'fresh-{ordinal}')
+        candidate.profile.mkdir(mode=0o700)
+        (candidate.profile / 'testnet4').mkdir(mode=0o700)
+        account = {'email': config['account_email'], 'device_id': f'device-{ordinal}'}
+        atomic_write(candidate.profile / 'testnet4/connect.json', json.dumps({'accounts': [account], 'active_email': account['email']}).encode())
+        candidate.provision = SimpleNamespace(binary='/synthetic/native', call=lambda *a, **k: dict(account, user_id=42))
+        candidate.phone = SimpleNamespace(device_digest='same-phone', labels=lambda: {'Use a PIN'})
+        try:
+            candidate.stage_authentication()
+            account_ids.append(candidate.artifacts['account_identity'])
+            desktop_ids.append(candidate.artifacts['desktop_identity'])
+            credential_paths.append(candidate.onboarding.store.locator)
+        finally:
+            candidate.close()
+    assert account_ids[0] == account_ids[1]
+    assert desktop_ids[0] != desktop_ids[1]
+    assert credential_paths[0] == credential_paths[1]
+
+
+@pytest.mark.parametrize('code,category', [('desktop_session_unavailable', Blocked),
+    ('desktop_session_incomplete', Blocked), ('device_registration_uncertain', Blocked),
+    ('connect_account_mismatch', Failed), ('transport_invalid', Failed)])
+def test_native_bootstrap_distinguishes_prerequisites_from_assertions(tmp_path, monkeypatch, code, category):
+    monkeypatch.setattr(provision.subprocess, 'run', lambda *a, **k: SimpleNamespace(
+        returncode=2, stdout=json.dumps({'ok': False, 'code': code}).encode()))
+    native = provision.Provision('/synthetic/native', tmp_path, tmp_path, 'run')
+    with pytest.raises(category) as error:
+        native.call('bootstrap_auth')
+    assert type(error.value) is category

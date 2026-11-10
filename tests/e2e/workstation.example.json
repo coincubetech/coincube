@@ -1,5 +1,7 @@
 {
   "version": 2,
+  "account_email": "qa@example.invalid",
+  "desktop_session_namespace": "development",
   "profile_dir": "/absolute/path/to/signed-in-tenshu-profile",
   "connect_rest": "https://api.coincube.io",
   "connect_grpc": "https://grpc.coincube.io:443",

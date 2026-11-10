@@ -28,6 +28,9 @@ fn main() {
 
 #[cfg(feature = "integration-tests")]
 mod run {
+    mod bootstrap {
+        include!("testnet4_provision/bootstrap.rs");
+    }
     use super::secret_store;
     use coincube_core::{
         bip39,
@@ -109,6 +112,8 @@ mod run {
         secret_name: Option<String>,
         secret_value: Option<Value>,
         expected_previous_sha256: Option<String>,
+        expected_email: Option<String>,
+        session_namespace: Option<String>,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -262,7 +267,13 @@ mod run {
         check(
             matches!(
                 input.action.as_str(),
-                "cube" | "vault" | "prepare_spend" | "finalize" | "secret_get" | "secret_put"
+                "cube"
+                    | "vault"
+                    | "prepare_spend"
+                    | "finalize"
+                    | "secret_get"
+                    | "secret_put"
+                    | "bootstrap_auth"
             ),
             "invalid_action",
         )?;
@@ -861,7 +872,7 @@ mod run {
                 ),
             ]);
             ctx.keychain_keys_recorded = true;
-            installer::install_local_wallet(
+            installer::integration::install_testnet4_wallet_resumable(
                 ctx,
                 wallet_id.clone(),
                 Arc::new(Mutex::new(Signer::new(master))),
@@ -1177,6 +1188,9 @@ mod run {
                 json!({"ok":true,"network":"testnet4","stored":true,"sha256":revision,"service":locator.service,"account":locator.account}),
             );
         }
+        if input.action == "bootstrap_auth" {
+            return bootstrap::bootstrap(&input, &bootstrap::Production).await;
+        }
         let (secrets, mut state) = load_or_create(&input, &secret_store::Keychain)?;
         match input.action.as_str() {
             "cube" => cube(&input, &secrets, &mut state).await,
@@ -1246,6 +1260,8 @@ mod run {
                 secret_name: None,
                 secret_value: None,
                 expected_previous_sha256: None,
+                expected_email: None,
+                session_namespace: None,
             }
         }
         #[test]
@@ -1438,6 +1454,93 @@ mod run {
                 finalize(&request, &secrets, &state),
                 Err("transaction_intent_mismatch")
             ));
+        }
+        #[test]
+        fn crash_after_encrypted_seed_write_is_resumable_only_for_exact_seed() {
+            use coincube_core::{seed_crypt, signer::MnemonicFileName};
+            let dir = Temp::new();
+            let request = input(&dir);
+            let store = secret_store::tests::Memory::default();
+            let (secrets, state) = load_or_create(&request, &store).unwrap();
+            let secp = secp256k1::Secp256k1::new();
+            let phone = MasterSigner::generate(NETWORK).unwrap();
+            let path = DerivationPath::from_str("m/48'/1'/0'/2'").unwrap();
+            let phone_key = format!(
+                "[{}{}]{}/<0;1>/*",
+                phone.fingerprint(&secp),
+                origin_suffix(&path),
+                phone.xpub_at(&path, &secp)
+            );
+            let descriptor = descriptor(&secrets, &phone_key).unwrap();
+            let wallet_id = WalletId::generate(&descriptor);
+            let root = CoincubeDirectory::new(request.profile_dir.clone());
+            let mut ctx = Context::new(NETWORK, root.clone(), RemoteBackend::None, None, None);
+            ctx.cube_id = Some(state.cube_uuid.clone());
+            ctx.cube_pin = Some(Zeroizing::new(secrets.cube_pin.clone()));
+            ctx.descriptor = Some(descriptor);
+            let signer = Signer::new(master(&secrets).unwrap());
+            let device_secret = Zeroizing::new(rand::random::<[u8; 32]>());
+            let verify = |ctx: &Context| {
+                installer::integration::verify_existing_testnet4_seed(
+                    ctx,
+                    &wallet_id,
+                    &signer,
+                    &device_secret,
+                )
+            };
+            assert!(!verify(&ctx).unwrap());
+            // Exact crashpoint: the encrypted descriptor seed landed, but the
+            // install has not yet appended WalletSettings to settings.json.
+            signer
+                .store_encrypted_for_chain(
+                    &root,
+                    NETWORK.into(),
+                    &wallet_id.descriptor_checksum,
+                    wallet_id.timestamp.unwrap(),
+                    &secrets.cube_pin,
+                    &state.cube_uuid,
+                    Some(&device_secret),
+                )
+                .unwrap();
+            assert!(Settings::from_file(&root.network_directory(NETWORK)).is_err());
+            let seed_path = MasterSigner::mnemonics_folder_for_chain(root.path(), NETWORK.into())
+                .join(
+                    MnemonicFileName {
+                        fingerprint: signer.fingerprint(),
+                        descriptor_info: Some((
+                            wallet_id.descriptor_checksum.clone(),
+                            wallet_id.timestamp.unwrap(),
+                        )),
+                    }
+                    .to_string(),
+                );
+            let original = fs::read(&seed_path).unwrap();
+            // This true result is the resumable installer branch that skips
+            // create_new and proceeds to the original settings write.
+            assert!(verify(&ctx).unwrap());
+            assert_eq!(fs::read(&seed_path).unwrap(), original);
+            let mut wrong_chain = ctx.clone();
+            wrong_chain.set_bitcoin_network(Network::Bitcoin).unwrap();
+            assert!(verify(&wrong_chain).is_err());
+            let mut wrong_pin = ctx.clone();
+            wrong_pin.cube_pin = Some(Zeroizing::new("not-the-pin".into()));
+            assert!(verify(&wrong_pin).is_err());
+            let impostor = MasterSigner::generate(NETWORK).unwrap();
+            let wrong_bytes = seed_crypt::encrypt(
+                impostor.words().join(" ").as_bytes(),
+                &secrets.cube_pin,
+                &state.cube_uuid,
+                Some(&device_secret),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            fs::write(&seed_path, &wrong_bytes).unwrap();
+            assert!(verify(&ctx).is_err());
+            assert_eq!(fs::read(&seed_path).unwrap(), wrong_bytes);
         }
         #[test]
         #[ignore = "requires the signed macOS device-secret runner; no API or phone used"]

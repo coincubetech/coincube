@@ -19,18 +19,22 @@ from .runner import Runner
 from .secrets import SecretStore
 from .state import Blocked, Failed, Journal, atomic_write, digest, private_read
 
-STAGES = ("environment", "phone_setup", "cube_creation", "phone_key", "vault_creation",
+STAGES = ("environment", "authentication", "phone_setup", "cube_creation", "phone_key", "vault_creation",
           "funding", "prepare", "connect", "phone", "request", "sign", "collect", "broadcast", "verify")
 FAUCET = "https://cypherfaucet.com/api/v1/claim"
 
 
 def validate_config(config):
-    required = {"version", "profile_dir", "connect_rest", "connect_grpc", "ios", "amount_sats", "fee_sats"}
-    optional = {"native_binary", "signing_binary", "phone_state_dir"}
+    required = {"version", "account_email", "profile_dir", "connect_rest", "connect_grpc", "ios", "amount_sats", "fee_sats"}
+    optional = {"native_binary", "signing_binary", "phone_state_dir", "desktop_session_namespace"}
     if not required <= set(config) or set(config) - required - optional or config["version"] != 2:
         raise Failed("CONFIG_SCHEMA", "Fresh-run configuration must use schema version 2 without vault or PSBT fixtures.")
     if config["connect_rest"] != REST or config["connect_grpc"] != GRPC:
         raise Failed("CONNECT_ENVIRONMENT", "Fresh acceptance requires production Connect endpoints.")
+    if not isinstance(config["account_email"], str) or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", config["account_email"]):
+        raise Failed("CONNECT_ACCOUNT", "Specify the exact signed-in disposable QA account email.")
+    if config.get("desktop_session_namespace", "development") not in ("development", "production"):
+        raise Failed("CONNECT_SESSION_NAMESPACE", "Desktop session namespace must identify the development or production app.")
     for field in ("profile_dir", "native_binary", "signing_binary", "phone_state_dir"):
         if field in config and (not isinstance(config[field], str) or not Path(config[field]).is_absolute()):
             raise Failed("ABSOLUTE_PATH", "Workstation paths must be absolute.")
@@ -91,7 +95,8 @@ class Provision:
                            "connect_request_refused", "cube_limit_reached", "run_busy", "run_lock_unavailable",
                            "provision_timeout", "runtime_unavailable", "private_file_unavailable",
                            "keychain_unavailable", "secret_busy", "secret_lock_unavailable",
-                           "secret_profile_unavailable", "macos_keychain_required"}
+                           "secret_profile_unavailable", "macos_keychain_required",
+                           "desktop_session_unavailable", "desktop_session_incomplete", "device_registration_uncertain"}
             error = Blocked if code in unavailable else Failed
             raise error("PROVISION_" + code.upper(), "Native provisioning failed: " + code)
         if reply.get("network") != "testnet4":
@@ -184,17 +189,6 @@ class FreshRunner(Runner):
 
     def stage_environment(self):
         self.core.chain()
-        copy_auth(self.config["profile_dir"], self.profile)
-        cache = json.loads(private_read(self.profile / "testnet4/connect.json"))
-        candidates = [a for a in cache["accounts"] if a["email"] == cache.get("active_email")]
-        if not candidates and not cache.get("active_email") and len(cache["accounts"]) == 1:
-            candidates = cache["accounts"]
-        if len(candidates) != 1 or not candidates[0].get("device_id"):
-            raise Blocked("CONNECT_ACCOUNT", "One explicitly active, registered desktop Connect account is required.")
-        self.account = candidates[0]
-        if self.account["tokens"]["expires_at"] <= time.time():
-            raise Blocked("CONNECT_AUTH_EXPIRED", "The existing desktop session expired; no account or transport key was replaced.")
-        self.pin_artifact("account_identity", digest({k: self.account[k] for k in ("email", "device_id")}))
         repo = Path(__file__).resolve().parents[3]
         binary = self.config.get("native_binary")
         signing = self.config.get("signing_binary")
@@ -208,17 +202,38 @@ class FreshRunner(Runner):
             if result.returncode:
                 raise Blocked("NATIVE_BUILD", "The native helper build or code-sign verification failed.")
             binary = str(repo / "tests/e2e/.local/Provision.app/Contents/MacOS/testnet4_provision")
-            signing = str(repo / "target/debug/examples/testnet4_connect")
+            signing = str(repo / "tests/e2e/.local/testnet4_connect")
         self.signing_binary = signing
+        self.profile.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not (self.profile / "testnet4/connect.json").exists():
+            source = Path(self.config["profile_dir"]) / "testnet4"
+            if (source / "connect.json").exists() or (source / "connect_transport_key").exists():
+                copy_auth(self.config["profile_dir"], self.profile)
         self.provision = Provision(binary, self.profile, self.journal.directory, self.run_id)
         self.phone = self.stack.enter_context(attach(self.config["ios"]))
+
+    def stage_authentication(self):
+        registered = self.provision.call("bootstrap_auth", expected_email=self.config["account_email"],
+                                         session_namespace=self.config.get("desktop_session_namespace", "development"))
+        cache = json.loads(private_read(self.profile / "testnet4/connect.json"))
+        candidates = [a for a in cache["accounts"] if a["email"] == cache.get("active_email")]
+        if len(candidates) != 1 or not candidates[0].get("device_id"):
+            raise Failed("CONNECT_ACCOUNT", "Bootstrap must produce one active, registered desktop Connect account.")
+        self.account = candidates[0]
+        if (self.account["email"].casefold() != self.config["account_email"].casefold()
+                or registered["email"].casefold() != self.account["email"].casefold()
+                or registered["device_id"] != self.account["device_id"]):
+            raise Failed("CONNECT_ACCOUNT", "Bootstrap account or device differs from the expected QA identity.")
+        self.pin_artifact("account_identity", digest({"email": self.account["email"].casefold(), "user_id": registered["user_id"]}))
+        self.pin_artifact("desktop_identity", digest(self.account["device_id"]))
+        repo = Path(__file__).resolve().parents[3]
         phone_dir = Path(self.config.get("phone_state_dir", str(repo / "tests/e2e/.local/phone"))) / self.artifacts["account_identity"]
         # This long-lived, account-bound credential record is generated by the
         # first successful onboarding, never supplied as a vault fixture.
         self.phone_journal = Journal(phone_dir, {"account": self.artifacts["account_identity"], "device": self.phone.device_digest})
         self.stack.callback(self.phone_journal.close)
         secret_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "coincube-phone/" + self.artifacts["account_identity"] + "/" + self.phone.device_digest))
-        store = SecretStore(Provision(binary, phone_dir, phone_dir, secret_id), phone_dir / "phone-secrets.keychain.json")
+        store = SecretStore(Provision(self.provision.binary, phone_dir, phone_dir, secret_id), phone_dir / "phone-secrets.keychain.json")
         self.onboarding = Onboarding(self.phone, store, self.artifacts["account_identity"], self.deadline)
         labels = self.phone.labels()
         if {"Home", "Cubes", "Settings"} <= labels:
@@ -360,7 +375,7 @@ class FreshRunner(Runner):
             return
         self.phone.approve(self.request_id, self.intent, self.artifacts["fee_sats"],
                            None, self.journal, self.deadline,
-                           pin_provider=lambda: self.onboarding.pin_attempt("sign:" + self.request_id))
+                           pin_provider=lambda: self.onboarding.pin_attempt("sign:" + self.request_id), probe_pin_resume=True)
 
     def stage_collect(self):
         super().stage_collect()

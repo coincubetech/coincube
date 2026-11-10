@@ -15,8 +15,10 @@ browser automation is involved in reruns.
 ## Fresh flow
 
 1. Verify both public explorers' Testnet4 genesis and production Connect
-   endpoints. Copy only the signed-in desktop account and its registered
-   transport key into the private run profile; preserve the original profile.
+   endpoints. Verify the configured QA account against the normal desktop
+   Keychain session, then register the run profile through the production
+   device-registration client. Persist its transport key before registration.
+   Existing private auth caches can also be copied without changing their source.
 2. Attach to the wired phone and verify the account. For a fresh signed-in QA
    keychain, select **Use a PIN**, generate and save its PIN, capture all twelve
    indexed recovery words, complete the real recovery challenge, and select
@@ -37,7 +39,9 @@ browser automation is involved in reruns.
    PSBT, and add the Master signature. Pin its exact inputs, outputs and fee.
 8. Create/recover one encrypted Connect request with a stable request ID. Verify
    the network, destinations, amounts and fee shown on the phone before using
-   the generated PIN to approve it.
+   the generated PIN to approve it. Before entering the PIN, background/resume
+   the app and record three seconds of challenge survival. This is lifecycle
+   evidence; it does not claim to prove a Home-refresh event occurred.
 9. Collect and verify the phone signature using production native crypto.
    Finalize against the saved spend intent, persist the signed bytes, and send
    exactly that transaction to the Testnet4 Esplora broadcast endpoint.
@@ -64,9 +68,14 @@ it, subsequent fresh-vault runs reuse its encrypted credentials automatically.
 
 Store nonsecret workstation settings in private, gitignored
 `tests/e2e/.local/workstation.json`, using `workstation.example.json` as its
-schema. `profile_dir` names the signed-in desktop profile, not a prepared Cube
-or vault. The suite copies authentication into each run. Both endpoint values
-are pinned to production. `ios.minimum_build` must identify the installed
+schema. `account_email` is the exact disposable QA account; native bootstrap
+refuses any different authenticated user before registering a device.
+`profile_dir` names the normal signed-in desktop profile, not a prepared Cube
+or vault. A legacy cache is optional: when absent, the suite reads the normal
+desktop session from macOS Keychain and performs supported device registration.
+`desktop_session_namespace` is `development` for a debug Tenshu build and
+`production` for the release app; this selects only its existing Keychain
+namespace. Both API endpoint values always remain pinned to production. `ios.minimum_build` must identify the installed
 reviewed Keychain build; the example uses 36, which includes the delivery and
 PIN-refresh fixes. `ios.xctestrun` can identify an already-signed WebDriverAgent
 runner so the suite starts it automatically when needed.

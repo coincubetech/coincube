@@ -135,3 +135,30 @@ def test_key_creation_success_returns_home_without_retrying_creation(monkeypatch
     phone, clicks = scripted_phone([{'Signer key created', 'Back to home'}, {'Home', 'Cubes', 'Settings'}])
     phone.restore_navigation()
     assert clicks == ['Back to home']
+
+
+@pytest.mark.parametrize('survives', [True, False])
+def test_pin_resume_probe_records_only_observed_lifecycle_survival(tmp_path, monkeypatch, survives):
+    ticks = iter([0, 0, 4])
+    monkeypatch.setattr('harness.phone.time.monotonic', lambda: next(ticks))
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    phone, clicks = scripted_phone([{'Enter PIN'} if survives else {'Approve transaction'}] * 2)
+    lifecycle = []
+    phone.driver.execute_script = lambda *args: lifecycle.append(args)
+    phone.driver.activate_app = lambda bundle: lifecycle.append(('activate', bundle))
+    journal = Journal(tmp_path / 'probe', {})
+    try:
+        if survives:
+            phone.verify_pin_resume(journal)
+            result = journal.data['artifacts']['pin_resume_probe']
+            assert result['status'] == 'passed'
+            assert result['home_refresh_proven'] is False
+        else:
+            with pytest.raises(Failed) as error:
+                phone.verify_pin_resume(journal)
+            assert error.value.code == 'PIN_CHALLENGE_DISMISSED'
+        assert clicks == []
+        assert lifecycle[0] == ('mobile: backgroundApp', {'seconds': 1})
+        assert lifecycle[1] == ('activate', 'io.coincube.keychainApp')
+    finally:
+        journal.close()

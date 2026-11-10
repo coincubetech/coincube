@@ -23,7 +23,7 @@ clean = not subprocess.check_output(["git", "status", "--porcelain"], cwd=repo).
 bundle = local / "Provision.app"
 executable = bundle / "Contents/MacOS/testnet4_provision"
 stamp = local / "native-build.json"
-signing = repo / "target/debug/examples/testnet4_connect"
+signing = local / "testnet4_connect"
 if clean and stamp.exists() and executable.exists() and signing.exists():
     try:
         saved = json.loads(stamp.read_text())
@@ -45,6 +45,9 @@ try:
                            stdout=log, stderr=log, timeout=1500)
         run(["cargo", "build", "--locked", "-p", "coincube-gui", "--features", "integration-tests",
              "--example", "testnet4_connect", "--example", "testnet4_provision"])
+        # Keep the runtime helper independent of later Cargo test/build jobs
+        # which may rebuild examples with different feature selections.
+        shutil.copy2(repo / "target/debug/examples/testnet4_connect", signing)
         run([release / "check-profile-authorises-cert.sh", release / "embedded.provisionprofile", "--identity", identity])
         executable.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with (bundle / "Contents/Info.plist").open("wb") as stream:
