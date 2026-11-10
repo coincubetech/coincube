@@ -2403,6 +2403,7 @@ pub enum HomeMessage {
     SparkBalanceUpdated {
         btc: Amount,
         usdb_balance: Option<coincube_spark_protocol::UsdbBalanceSnapshot>,
+        identity_pubkey: String,
     },
     /// Open the wallet-picker popup on the amount screen, editing the named side.
     OpenWalletPicker(PickerSide),
@@ -2413,15 +2414,17 @@ pub enum HomeMessage {
     SelectWalletInPicker(WalletKind),
     /// Choose a source or destination directly from the Transfer form.
     SelectTransferWallet(PickerSide, WalletKind),
-    /// The To list's "Another Cube…" row (Vault source only).
+    /// The To list's "Another Cube…" row (Spark or Vault source).
     SelectAnotherCube,
     /// Wallets page → Amount, or → Other Cube for "Another Cube…".
     ContinueFromWallets,
     /// Other Cube page: choose a row of the local catalog by Cube id.
     SelectOtherCube(String),
+    SelectOtherCubeWallet(WalletKind),
     /// Other Cube page → Unlock.
     ContinueWithCube,
-    OtherCubePinEdited(String),
+    /// The chosen Cube's 4-digit PIN fields.
+    OtherCubePin(crate::pin_input::Message),
     /// Check the entered PIN against the chosen Cube.
     UnlockOtherCube,
     /// Start the chosen Cube's passkey ceremony (macOS).
@@ -2431,10 +2434,11 @@ pub enum HomeMessage {
     OtherCubePinChecked(crate::app::transfer_destination_loader::PinCheck),
     OtherCubeBackendBound(crate::app::transfer_destination_loader::BackendReply),
     OtherCubeAddress(crate::app::transfer_destination_loader::AddressReply),
+    OtherCubeSparkAddress(crate::app::transfer_destination_loader::SparkAddressReply),
     /// Unlock page → Amount, once every check passed.
     ContinueFromUnlock,
-    /// Switch the transfer amount between sats and BTC.
-    SetTransferUnit(crate::app::settings::unit::BitcoinDisplayUnit),
+    /// Amount page: send the source wallet's whole balance, fees included.
+    TransferMax,
     /// Done page: close the dialog and open Activity.
     OpenTransferActivity,
     /// Done page: start another transfer.
@@ -2481,7 +2485,8 @@ pub enum HomeMessage {
         generation: u64,
         direction: TransferDirection,
         feerate_vb: u64,
-        result: Result<Amount, String>,
+        /// The fee and what the destination receives.
+        result: Result<(Amount, Amount), String>,
     },
     /// Destination fetch result bound to the request and direction that started it.
     TransferDestinationReady {
@@ -2519,14 +2524,21 @@ pub enum HomeMessage {
         /// the Fees row on the Transfer confirm screen.
         fee_sat: u64,
     },
-    /// Broadcast a previously-prepared Spark send (SparkToVault, SparkToLiquid).
+    /// Broadcast a previously-prepared Spark send.
     /// Calls `spark.send_payment(handle)` and transitions the pending transfer
     /// to `PendingDeposit` on success.
     ConfirmSparkSend,
+    /// Broadcast result for the preparation that the user confirmed.
+    SparkTransferFinished {
+        generation: u64,
+        direction: TransferDirection,
+        amount_sat: u64,
+        result: Result<(), TransferError>,
+    },
     /// A transfer's broadcast step has completed — advance to the Pending
     /// Deposit success screen and mark the destination wallet's pending
     /// indicator. Fired from:
-    ///   - `spark.send_payment` success (SparkToVault, SparkToLiquid)
+    ///   - `spark.send_payment` success
     ///   - `breez.pay_onchain` success (LiquidToSpark — the LiquidToVault path
     ///     still uses the richer `LiquidToVaultSubmitted` for swap persistence)
     ///   - Vault PSBT broadcast success routed here for VaultToSpark

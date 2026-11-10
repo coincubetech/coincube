@@ -37,6 +37,9 @@ struct Cli {
     /// `COINCUBE_SPARK_STORAGE_DIR`.
     #[arg(long)]
     smoke_test: bool,
+    /// Serve only the address lookups needed by a temporary destination unlock.
+    #[arg(long, conflicts_with = "smoke_test")]
+    receive_only: bool,
 }
 
 #[tokio::main]
@@ -55,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     if cli.smoke_test {
         smoke_test::run().await
     } else {
-        server::run().await
+        server::run(cli.receive_only).await
     }
 }
 
@@ -83,6 +86,7 @@ mod smoke_test {
             mnemonic,
             None, // passphrase
             storage_dir,
+            false,
         )
         .await?;
 

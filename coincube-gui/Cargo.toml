@@ -17,6 +17,7 @@ name = "coincube"
 path = "src/main.rs"
 
 [dependencies]
+tempfile = "3.27"
 # Official SDK source at ba5e510a; manifest-only reqwest adjustment avoids the
 # existing Breez iOS build-dependency pin conflict. Drop the adaptation when
 # upstream relaxes that pin or provides compatible HTTP/TLS configuration.

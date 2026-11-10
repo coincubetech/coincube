@@ -692,6 +692,7 @@ impl From<&TransferError> for UserError {
                 "Nothing was sent and your balances are unchanged."
             }
             TransferFailurePoint::WhileSending => "Your funds were not moved.",
+            TransferFailurePoint::OutcomeUnknown => "Your transfer may have been sent.",
         };
         let and_then = |next: &str| format!("{reassurance} {next}");
 
@@ -764,6 +765,12 @@ impl From<&TransferError> for UserError {
                 )),
                 CC_XFER_BROADCAST,
                 true,
+            ),
+            TransferError::BroadcastOutcomeUnknown { .. } => (
+                "Transfer status unknown".to_string(),
+                and_then("Check Activity in the sending Cube before starting another transfer."),
+                CC_XFER_BROADCAST,
+                false,
             ),
         };
 
@@ -1140,6 +1147,9 @@ mod tests {
             T::DestinationRejected {
                 detail: "detail".into(),
             },
+            T::BroadcastOutcomeUnknown {
+                detail: "detail".into(),
+            },
         ];
         for w in wallets {
             all.push(T::WalletUnavailable(w));
@@ -1211,12 +1221,14 @@ mod tests {
                     e,
                     u.guidance
                 ),
-                TransferFailurePoint::WhileSending => assert!(
-                    !u.guidance.contains("Nothing was sent"),
-                    "{:?} was submitted — it must not claim nothing was sent: {:?}",
-                    e,
-                    u.guidance
-                ),
+                TransferFailurePoint::WhileSending | TransferFailurePoint::OutcomeUnknown => {
+                    assert!(
+                        !u.guidance.contains("Nothing was sent"),
+                        "{:?} was submitted — it must not claim nothing was sent: {:?}",
+                        e,
+                        u.guidance
+                    )
+                }
             }
         }
     }
@@ -1234,6 +1246,7 @@ mod tests {
             T::PreparationExpired,
             T::InvalidFeerate,
             T::DestinationRejected { detail: "x".into() },
+            T::BroadcastOutcomeUnknown { detail: "x".into() },
         ] {
             let u: UserError = (&e).into();
             assert!(!u.retryable, "{:?} should not offer a retry", e);

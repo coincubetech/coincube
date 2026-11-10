@@ -8550,6 +8550,7 @@ mod opening_tests {
         let balance = || HomeMessage::SparkBalanceUpdated {
             btc: coincube_core::miniscript::bitcoin::Amount::from_sat(1_000),
             usdb_balance: None,
+            identity_pubkey: "spark-identity".into(),
         };
         drop(tab.update(home(HomeMessage::SparkSyncedObserved)));
         drop(tab.update(home(balance())));

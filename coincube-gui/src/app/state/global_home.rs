@@ -1,4 +1,4 @@
-/// Minimum amount (in sats) for any direction of the Transfer flow.
+/// Minimum amount (in sats) for transfers that settle on-chain.
 ///
 /// Composed with Breez's protocol minimums for swap-involving legs (see
 /// `effective_min_sats` in this module for the per-direction rule). Spark and
@@ -30,6 +30,31 @@ fn cache_vault_pending_receive_sats(cache: &Cache) -> u64 {
         .filter(|coin| coin.spend_info.is_none() && !crate::daemon::model::coin_is_owned(coin))
         .fold(Amount::ZERO, |acc, coin| acc + coin.amount)
         .to_sat()
+}
+
+/// The Vault coins a Max transfer sweeps, and their total: every unspent coin
+/// the wallet owns, as the Vault spend screen's MAX selects them.
+fn vault_sweep_coins(cache: &Cache) -> (Vec<OutPoint>, Amount) {
+    cache
+        .coins()
+        .iter()
+        .filter(|coin| coin.spend_info.is_none() && crate::daemon::model::coin_is_owned(coin))
+        .fold(
+            (Vec::new(), Amount::ZERO),
+            |(mut outpoints, total), coin| {
+                outpoints.push(coin.outpoint);
+                (outpoints, total + coin.amount)
+            },
+        )
+}
+
+/// What `psbt` pays to `script`.
+fn paid_to(psbt: &Psbt, script: &ScriptBuf) -> Amount {
+    psbt.unsigned_tx
+        .output
+        .iter()
+        .filter(|output| output.script_pubkey == *script)
+        .fold(Amount::ZERO, |total, output| total + output.value)
 }
 
 /// Construct a `form::Value<String>` at the default Transfer feerate. Used on
@@ -84,7 +109,9 @@ use breez_sdk_liquid::model::{
     PayOnchainRequest, PaymentDetails, PaymentType, PreparePayOnchainRequest,
     PreparePayOnchainResponse,
 };
-use coincube_core::miniscript::bitcoin::{bip32::ChildNumber, Address, Amount};
+use coincube_core::miniscript::bitcoin::{
+    bip32::ChildNumber, Address, Amount, OutPoint, Psbt, ScriptBuf,
+};
 
 use crate::app::wallets::{DomainPaymentDetails, DomainPaymentStatus};
 use coincube_ui::component::amount::BitcoinDisplayUnit;
@@ -94,17 +121,17 @@ use iced::{Subscription, Task};
 
 use super::vault::psbt::SignModal;
 use super::{Cache, Menu, State};
+use crate::app::breez_spark::SparkClientError;
 use crate::app::state::vault::label::LabelsEdited;
 use crate::app::state::vault::receive::ShowQrCodeModal;
 use crate::app::transfer_destination::{Source, WalletIdentity};
 use crate::app::transfer_destination_loader::{
-    other_cubes, CubeChoice, DestinationAddress, Refusal as ScopeRefusal, ScopedDestination,
+    other_cubes, CubeChoice, OtherReceiveAddress, Refusal as ScopeRefusal, ScopedDestination,
 };
 use crate::app::view::global_home::{
     GlobalViewConfig, HomeView, OtherCubeView, PendingTransfer, PickerSide, TransferDirection,
     TransferError, TransferPage, TransferStage, UnlockPhase, WalletKind, UNLOCK_CHECKS,
 };
-use zeroize::Zeroizing;
 
 /// Which per-wallet balances the Total Balance aggregate is still waiting on.
 #[derive(Clone, Copy, Debug)]
@@ -155,21 +182,14 @@ fn total_balance_pending(r: BalanceReadiness) -> bool {
     spark_pending || liquid_pending || usdt_pending || r.vault_pending
 }
 
-/// The (from, to) pair the Transfer flow opens on, given which wallets this
-/// cube actually has. `None` when fewer than two exist — the view's
-/// `transfer_available` already hides the button in that case, so this is a
-/// backstop rather than a reachable state.
-///
-/// Preference order Liquid → Vault → Spark: the historical default was
-/// Liquid→Vault, and taking the first two available preserves that wherever
-/// Liquid is usable while never defaulting a side to a wallet the picker
-/// won't list (Liquid is gated by the sunset flag and has no backend off
-/// mainnet; Spark is mainnet/regtest only).
-pub(crate) fn default_transfer_pair(
+/// Prefer an available local pair in Liquid, Vault, Spark order. A mainnet
+/// Cube with only Spark or Vault starts with Another Cube selected.
+pub(crate) fn default_transfer_direction(
     has_liquid: bool,
     has_vault: bool,
     has_spark: bool,
-) -> Option<(WalletKind, WalletKind)> {
+    chain: crate::chain::ChainId,
+) -> Option<TransferDirection> {
     let available: Vec<WalletKind> = [
         has_liquid.then_some(WalletKind::Liquid),
         has_vault.then_some(WalletKind::Vault),
@@ -179,7 +199,11 @@ pub(crate) fn default_transfer_pair(
     .flatten()
     .copied()
     .collect();
-    Some((*available.first()?, *available.get(1)?))
+    match available.as_slice() {
+        [from, to, ..] => TransferDirection::try_from_pair(*from, *to),
+        [from] => TransferDirection::to_other_cube(*from, chain),
+        _ => None,
+    }
 }
 
 /// Returns `(effective_min_sat, max_sat_opt)` for a given direction.
@@ -209,7 +233,10 @@ pub(crate) fn effective_transfer_min_sat(
         // swap limits apply.
         TransferDirection::VaultToSpark
         | TransferDirection::SparkToVault
+        | TransferDirection::SparkToOtherCube
+        | TransferDirection::VaultToOtherSpark
         | TransferDirection::VaultToOtherCube => Some(MIN_TRANSFER_SATS),
+        TransferDirection::SparkToOtherSpark => Some(1),
     }
 }
 
@@ -247,15 +274,6 @@ fn with_transfer_dialog<'a>(
     }
 }
 
-fn transfer_denomination(
-    unit: BitcoinDisplayUnit,
-) -> coincube_core::miniscript::bitcoin::Denomination {
-    match unit {
-        BitcoinDisplayUnit::BTC => coincube_core::miniscript::bitcoin::Denomination::Bitcoin,
-        BitcoinDisplayUnit::Sats => coincube_core::miniscript::bitcoin::Denomination::Satoshi,
-    }
-}
-
 pub(crate) fn effective_transfer_max_sat(
     direction: TransferDirection,
     onchain_send_limit: Option<(u64, u64)>,
@@ -271,6 +289,9 @@ pub(crate) fn effective_transfer_max_sat(
         // Pure on-chain: cap is the source balance — the caller enforces it.
         TransferDirection::VaultToSpark
         | TransferDirection::SparkToVault
+        | TransferDirection::SparkToOtherCube
+        | TransferDirection::SparkToOtherSpark
+        | TransferDirection::VaultToOtherSpark
         | TransferDirection::VaultToOtherCube => None,
     }
 }
@@ -328,6 +349,7 @@ pub struct GlobalHome {
     /// Spark signer or the bridge subprocess failed to spawn — the
     /// Home page simply hides the Spark card in that case.
     spark_backend: Option<Arc<SparkBackend>>,
+    spark_identity: Option<String>,
     liquid_balance: Amount,
     liquid_balance_loaded: bool,
     /// Set when a balance fetch failed, so the row can say so instead of
@@ -426,17 +448,20 @@ pub struct GlobalHome {
     /// Unit the transfer amount is entered in, seeded from the Cube's
     /// display unit when the dialog opens.
     transfer_unit: BitcoinDisplayUnit,
+    /// Max was chosen for this source wallet: the transfer drains it and the
+    /// fee comes out of the amount. Inert once the source changes.
+    transfer_max: Option<WalletKind>,
     /// "Another Cube…": the local catalog read when that route opens.
     other_cubes: Vec<CubeChoice>,
     other_cube_selected: Option<String>,
     /// The chosen Cube, unlocked in place for this transfer only. Dropping
     /// it revokes the unlock and stops any daemon it started.
     other_scope: Option<ScopedDestination>,
-    other_pin: Zeroizing<String>,
+    other_pin: crate::pin_input::PinInput,
     other_phase: UnlockPhase,
     other_error: Option<String>,
     /// The other Vault's receive address, re-derived from its descriptor.
-    other_address: Option<DestinationAddress>,
+    other_address: Option<OtherReceiveAddress>,
     other_locked_again: bool,
     pending_vault_incoming: Option<PendingTransfer>,
     pending_vault_incoming_swap_id: Option<String>,
@@ -596,6 +621,7 @@ impl GlobalHome {
             usdt_balance_loaded: false,
             breez_client: breez_client.into(),
             spark_backend,
+            spark_identity: None,
             _legacy_balance_masked: balance_masked,
             overview_total_hidden: false,
             overview_wallets_hidden: false,
@@ -626,10 +652,11 @@ impl GlobalHome {
             transfer_feerate_loading: None,
             transfer_page: TransferPage::Wallets,
             transfer_unit: BitcoinDisplayUnit::Sats,
+            transfer_max: None,
             other_cubes: Vec::new(),
             other_cube_selected: None,
             other_scope: None,
-            other_pin: Zeroizing::new(String::new()),
+            other_pin: crate::pin_input::PinInput::new(),
             other_phase: UnlockPhase::default(),
             other_error: None,
             other_address: None,
@@ -687,6 +714,7 @@ impl GlobalHome {
             usdt_balance_loaded: false,
             breez_client: breez_client.into(),
             spark_backend,
+            spark_identity: None,
             _legacy_balance_masked: balance_masked,
             overview_total_hidden: false,
             overview_wallets_hidden: false,
@@ -717,10 +745,11 @@ impl GlobalHome {
             transfer_feerate_loading: None,
             transfer_page: TransferPage::Wallets,
             transfer_unit: BitcoinDisplayUnit::Sats,
+            transfer_max: None,
             other_cubes: Vec::new(),
             other_cube_selected: None,
             other_scope: None,
-            other_pin: Zeroizing::new(String::new()),
+            other_pin: crate::pin_input::PinInput::new(),
             other_phase: UnlockPhase::default(),
             other_error: None,
             other_address: None,
@@ -879,14 +908,7 @@ impl GlobalHome {
             entered_amount: &self.entered_amount,
             receive_address: self.receive_address_info.as_ref().map(|info| &info.address),
             destination_ready: self.destination_is_ready(),
-            transfer_action_ready: self.destination_is_ready()
-                && self
-                    .transfer_direction
-                    .is_some_and(|direction| match direction.from_kind() {
-                        WalletKind::Vault => true,
-                        WalletKind::Liquid => self.prepare_onchain_send_response.is_some(),
-                        WalletKind::Spark => self.spark_send_handle.is_some(),
-                    }),
+            transfer_action_ready: self.transfer_action_ready(),
             receive_index: self.receive_address_info.as_ref().map(|info| &info.index),
             labels: self
                 .receive_address_info
@@ -925,12 +947,17 @@ impl GlobalHome {
             ),
             transfer_page: self.transfer_page,
             transfer_unit: self.transfer_unit,
+            transfer_max: self.sends_max(),
             other_cube: OtherCubeView {
                 choices: &self.other_cubes,
                 selected: self.other_cube_selected.as_deref(),
-                pin: &self.other_pin,
+                pin: Some(&self.other_pin),
                 phase: self.other_phase,
                 error: self.other_error.as_deref(),
+                spark_address: match self.other_address.as_ref() {
+                    Some(OtherReceiveAddress::Spark(address)) => Some(address),
+                    _ => None,
+                },
                 unlocked: self.other_scope.is_some() && self.other_address.is_some(),
                 locked_again: self.other_locked_again,
             },
@@ -1053,7 +1080,11 @@ impl State for GlobalHome {
                         use crate::app::menu::SparkSubMenu;
                         crate::app::state::redirect(Menu::Spark(SparkSubMenu::Receive))
                     }
-                    HomeMessage::SparkBalanceUpdated { btc, usdb_balance } => {
+                    HomeMessage::SparkBalanceUpdated {
+                        btc,
+                        usdb_balance,
+                        identity_pubkey,
+                    } => {
                         self.spark_balance_loading = false;
                         // The in-flight fetch was issued before
                         // `Synced` arrived — its value reflects the
@@ -1065,6 +1096,7 @@ impl State for GlobalHome {
                             return self.load_spark_balance().unwrap_or_else(Task::none);
                         }
                         self.spark_btc_balance = btc;
+                        self.spark_identity = Some(identity_pubkey);
                         self.spark_usdb_balance = usdb_balance.clone();
                         self.spark_balance_error = false;
                         // Fold any Stable Balance (USDB) holding into the shown
@@ -1108,31 +1140,26 @@ impl State for GlobalHome {
                         // required only by the LiquidToVault / SparkToVault
                         // branches of step 1 → 2, which unwrap inline.
                         if self.current_view.step == 0 {
-                            // Default both sides to wallets this cube actually
-                            // has — Liquid is no longer unconditional, so
-                            // defaulting the source to it would open the flow
-                            // on a wallet the picker doesn't even list.
                             let has_liquid = crate::app::features::liquid_wallet_usable(
                                 cache.network,
                                 cache.liquid_gate,
                             );
-                            // `transfer_available` in the view already gates the
-                            // button on two wallets existing; if we got here
-                            // anyway, bail rather than advancing the step machine.
-                            let Some((default_from, default_to)) = default_transfer_pair(
+                            let Some(direction) = default_transfer_direction(
                                 has_liquid,
                                 cache.has_vault,
                                 self.spark_backend.is_some(),
+                                cache.chain(),
                             ) else {
                                 return Task::none();
                             };
-                            self.transfer_from = Some(default_from);
-                            self.transfer_to = Some(default_to);
-                            self.transfer_direction =
-                                TransferDirection::try_from_pair(default_from, default_to);
+                            self.transfer_from = Some(direction.from_kind());
+                            self.transfer_to =
+                                (!direction.is_other_cube()).then(|| direction.to_kind());
+                            self.transfer_direction = Some(direction);
                             self.invalidate_transfer_destination();
                             self.wallet_picker = None;
                             self.entered_amount = form::Value::default();
+                            self.transfer_max = None;
                             // Fresh flow: reset the Vault-sourced feerate
                             // picker so a value (or stuck loading flag)
                             // from a prior transfer doesn't leak in.
@@ -1194,8 +1221,17 @@ impl State for GlobalHome {
                             let generation = self.invalidate_transfer_destination();
                             // Another Cube: its Vault's address was fetched and
                             // re-derived from its descriptor during Unlock.
-                            if direction.is_other_cube() {
-                                let Some(address) = self.other_address.clone() else {
+                            if direction.is_other_cube()
+                                && direction.from_kind() == WalletKind::Vault
+                            {
+                                if direction == TransferDirection::VaultToOtherSpark {
+                                    if let Err(refusal) = self.other_receive_address(cache) {
+                                        return self.restart_other_cube_unlock(refusal);
+                                    }
+                                }
+                                let Some(OtherReceiveAddress::Bitcoin(address)) =
+                                    self.other_address.clone()
+                                else {
                                     return Task::none();
                                 };
                                 self.current_view.next();
@@ -1253,21 +1289,30 @@ impl State for GlobalHome {
                                     let Some(breez_client) = self.breez_client.clone() else {
                                         return Task::none();
                                     };
+                                    let pay_amount = if self.sends_max() {
+                                        breez_sdk_liquid::model::PayAmount::Drain
+                                    } else {
+                                        breez_sdk_liquid::model::PayAmount::Bitcoin {
+                                            receiver_amount_sat: amount.to_sat(),
+                                        }
+                                    };
                                     tasks.push(Task::perform(
                                         async move {
                                             breez_client
                                                 .prepare_pay_onchain(&PreparePayOnchainRequest {
                                                     fee_rate_sat_per_vbyte: None,
-                                                    amount: breez_sdk_liquid::model::PayAmount::Bitcoin { receiver_amount_sat: amount.to_sat() },
+                                                    amount: pay_amount,
                                                 })
                                                 .await
                                         },
                                         move |result| match result {
-                                            Ok(response) => Message::View(view::Message::Home(HomeMessage::PrepareOnChainResponseReceived {
-                                                generation,
-                                                direction,
-                                                response,
-                                            })),
+                                            Ok(response) => Message::View(view::Message::Home(
+                                                HomeMessage::PrepareOnChainResponseReceived {
+                                                    generation,
+                                                    direction,
+                                                    response,
+                                                },
+                                            )),
                                             Err(error) => Message::View(view::Message::Home(
                                                 HomeMessage::TransferDestinationFailed {
                                                     generation,
@@ -1412,21 +1457,30 @@ impl State for GlobalHome {
                                     let Some(breez_client) = self.breez_client.clone() else {
                                         return Task::none();
                                     };
+                                    let pay_amount = if self.sends_max() {
+                                        breez_sdk_liquid::model::PayAmount::Drain
+                                    } else {
+                                        breez_sdk_liquid::model::PayAmount::Bitcoin {
+                                            receiver_amount_sat: amount.to_sat(),
+                                        }
+                                    };
                                     tasks.push(Task::perform(
                                         async move {
                                             breez_client
                                                 .prepare_pay_onchain(&PreparePayOnchainRequest {
                                                     fee_rate_sat_per_vbyte: None,
-                                                    amount: breez_sdk_liquid::model::PayAmount::Bitcoin { receiver_amount_sat: amount.to_sat() },
+                                                    amount: pay_amount,
                                                 })
                                                 .await
                                         },
                                         move |result| match result {
-                                            Ok(response) => Message::View(view::Message::Home(HomeMessage::PrepareOnChainResponseReceived {
-                                                generation,
-                                                direction,
-                                                response,
-                                            })),
+                                            Ok(response) => Message::View(view::Message::Home(
+                                                HomeMessage::PrepareOnChainResponseReceived {
+                                                    generation,
+                                                    direction,
+                                                    response,
+                                                },
+                                            )),
                                             Err(error) => Message::View(view::Message::Home(
                                                 HomeMessage::TransferDestinationFailed {
                                                     generation,
@@ -1468,6 +1522,7 @@ impl State for GlobalHome {
                                     return Task::none();
                                 };
                                 let amount_sat = amount.to_sat();
+                                let fees_included = self.sends_max();
                                 tasks.push(Task::perform(
                                     async move {
                                         let addr_res = breez_client
@@ -1478,12 +1533,21 @@ impl State for GlobalHome {
                                                 detail: e.to_string(),
                                             })?;
                                         let destination = addr_res.destination;
-                                        let prep = spark
-                                            .prepare_send(destination.clone(), Some(amount_sat))
-                                            .await
-                                            .map_err(|e| TransferError::FeeEstimateFailed {
-                                                detail: e.to_string(),
-                                            })?;
+                                        let prep = if fees_included {
+                                            spark
+                                                .prepare_send_fees_included(
+                                                    destination.clone(),
+                                                    amount_sat,
+                                                )
+                                                .await
+                                        } else {
+                                            spark
+                                                .prepare_send(destination.clone(), Some(amount_sat))
+                                                .await
+                                        }
+                                        .map_err(|e| TransferError::FeeEstimateFailed {
+                                            detail: e.to_string(),
+                                        })?;
                                         Ok::<_, TransferError>((
                                             destination,
                                             prep.handle,
@@ -1512,8 +1576,10 @@ impl State for GlobalHome {
                                     },
                                 ));
                             } else if matches!(
-                                self.transfer_direction,
-                                Some(TransferDirection::SparkToVault)
+                                direction,
+                                TransferDirection::SparkToVault
+                                    | TransferDirection::SparkToOtherCube
+                                    | TransferDirection::SparkToOtherSpark
                             ) {
                                 // SparkToVault: fetch a fresh Vault address, then
                                 // ask Spark to `prepare_send` to it — that call
@@ -1536,31 +1602,78 @@ impl State for GlobalHome {
                                         )),
                                     )));
                                 };
-                                let Some(daemon_clone) = daemon.clone() else {
-                                    return Task::done(Message::View(view::Message::Home(
-                                        HomeMessage::Error(TransferError::WalletUnavailable(
-                                            WalletKind::Vault,
-                                        )),
-                                    )));
+                                let other_address = if direction.is_other_cube() {
+                                    self.validate_entered_amount(cache);
+                                    if !self.entered_amount.valid {
+                                        return Task::none();
+                                    }
+                                    match self.other_receive_address(cache) {
+                                        Ok(OtherReceiveAddress::Bitcoin(address)) => {
+                                            Some(address.address.to_string())
+                                        }
+                                        Ok(OtherReceiveAddress::Spark(address)) => {
+                                            Some(address.clone())
+                                        }
+                                        Err(refusal) => {
+                                            return self.restart_other_cube_unlock(refusal)
+                                        }
+                                    }
+                                } else {
+                                    None
                                 };
+                                let daemon = daemon.clone();
                                 self.current_view.next();
                                 let amount_sat = amount.to_sat();
+                                let fees_included = self.sends_max();
                                 tasks.push(Task::perform(
                                     async move {
-                                        let addr_res = daemon_clone
-                                            .get_new_address()
-                                            .await
-                                            .map_err(|e| TransferError::NoDepositAddress {
-                                                to: WalletKind::Vault,
-                                                detail: e.to_string(),
-                                            })?;
-                                        let addr_str = addr_res.address.to_string();
-                                        let prep = spark
-                                            .prepare_send(addr_str.clone(), Some(amount_sat))
-                                            .await
-                                            .map_err(|e| TransferError::FeeEstimateFailed {
-                                                detail: e.to_string(),
-                                            })?;
+                                        let addr_str = match other_address {
+                                            Some(address) => address,
+                                            None => daemon
+                                                .ok_or(TransferError::WalletUnavailable(
+                                                    WalletKind::Vault,
+                                                ))?
+                                                .get_new_address()
+                                                .await
+                                                .map_err(|e| TransferError::NoDepositAddress {
+                                                    to: WalletKind::Vault,
+                                                    detail: e.to_string(),
+                                                })?
+                                                .address
+                                                .to_string(),
+                                        };
+                                        let prep = if fees_included {
+                                            spark
+                                                .prepare_send_fees_included(
+                                                    addr_str.clone(),
+                                                    amount_sat,
+                                                )
+                                                .await
+                                        } else {
+                                            spark
+                                                .prepare_send(addr_str.clone(), Some(amount_sat))
+                                                .await
+                                        }
+                                        .map_err(|e| TransferError::FeeEstimateFailed {
+                                            detail: e.to_string(),
+                                        })?;
+                                        let method =
+                                            if direction == TransferDirection::SparkToOtherSpark {
+                                                "SparkAddress"
+                                            } else {
+                                                "BitcoinAddress"
+                                            };
+                                        if direction.is_other_cube()
+                                            && (prep.method != method
+                                                || prep.amount_sat != amount_sat)
+                                        {
+                                            return Err(TransferError::DestinationRejected {
+                                                detail: coincube_ui::locale::copy(
+                                                    "Spark quoted a different rail or amount",
+                                                )
+                                                .into(),
+                                            });
+                                        }
                                         Ok::<_, TransferError>((
                                             addr_str,
                                             prep.handle,
@@ -1591,7 +1704,6 @@ impl State for GlobalHome {
                             }
                             return Task::batch(tasks);
                         }
-                        self.current_view.next();
                         Task::none()
                     }
                     HomeMessage::PreviousStep
@@ -1616,6 +1728,13 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::PreviousStep => {
+                        if self.is_sending
+                            && self
+                                .transfer_direction
+                                .is_some_and(|direction| direction.is_other_cube())
+                        {
+                            return Task::none();
+                        }
                         // Any prepared/signed artifact from the confirm screen
                         // is bound to the amount + destination that were in
                         // effect when it was built. Stepping back allows the
@@ -1633,6 +1752,10 @@ impl State for GlobalHome {
                         // handler into advancing the step machine.
                         self.is_sending = false;
                         self.current_view.previous();
+                        // Back on Amount, Max shows the whole balance again.
+                        if let Some(source) = self.transfer_max.filter(|_| self.sends_max()) {
+                            self.set_entered_amount(self.max_transfer_amount(source, cache));
+                        }
                         Task::none()
                     }
                     HomeMessage::SparkPrepareSendReady {
@@ -1643,6 +1766,21 @@ impl State for GlobalHome {
                         fee_sat,
                     } => {
                         if !self.destination_response_is_current(generation, direction) {
+                            return Task::none();
+                        }
+                        if direction == TransferDirection::SparkToOtherSpark {
+                            match self.other_receive_address(cache) {
+                                Ok(OtherReceiveAddress::Spark(address))
+                                    if *address == destination => {}
+                                Ok(_) => {
+                                    return self
+                                        .restart_other_cube_unlock(ScopeRefusal::IdentityChanged)
+                                }
+                                Err(refusal) => return self.restart_other_cube_unlock(refusal),
+                            }
+                            self.destination_ready = Some((generation, direction));
+                            self.spark_send_handle = Some(prepare_handle);
+                            self.show_max_after_fee(fee_sat);
                             return Task::none();
                         }
                         // Parse the destination as a checked Bitcoin address — if
@@ -1676,24 +1814,48 @@ impl State for GlobalHome {
                                 )));
                             }
                         };
+                        let index = if direction.is_other_cube() {
+                            match self.other_receive_address(cache) {
+                                Ok(OtherReceiveAddress::Bitcoin(address))
+                                    if address.address == checked =>
+                                {
+                                    address.index
+                                }
+                                Ok(_) => {
+                                    return self
+                                        .restart_other_cube_unlock(ScopeRefusal::IdentityChanged)
+                                }
+                                Err(refusal) => return self.restart_other_cube_unlock(refusal),
+                            }
+                        } else {
+                            ChildNumber::Normal { index: 0 }
+                        };
                         self.receive_address_info = Some(ReceiveAddressInfo {
                             address: checked,
-                            index: ChildNumber::Normal { index: 0 },
+                            index,
                             labels: HashMap::new(),
                         });
                         self.destination_ready = Some((generation, direction));
                         self.spark_send_handle = Some(prepare_handle);
-                        self.spark_send_fee_sat = Some(fee_sat);
+                        self.show_max_after_fee(fee_sat);
                         Task::none()
                     }
                     HomeMessage::ConfirmSparkSend => {
-                        if !self.destination_is_ready() {
+                        let Some(direction) = self.transfer_direction else {
+                            return Task::none();
+                        };
+                        if self.is_sending || !self.destination_is_ready() {
                             return Task::none();
                         }
-                        if self.transfer_direction == Some(TransferDirection::SparkToVault)
+                        if direction == TransferDirection::SparkToVault
                             && !self.legacy_vault_available(cache)
                         {
                             return Task::none();
+                        }
+                        if direction.is_other_cube() {
+                            if let Err(refusal) = self.check_other_review_address(cache) {
+                                return self.restart_other_cube_unlock(refusal);
+                            }
                         }
                         // Spark-sourced confirm: broadcast the prepared send. The
                         // destination address + prepare handle were populated at
@@ -1720,9 +1882,6 @@ impl State for GlobalHome {
                                 HomeMessage::Error(TransferError::PreparationExpired),
                             )));
                         };
-                        let Some(direction) = self.transfer_direction else {
-                            return Task::none();
-                        };
                         let Ok(transfer_amount) = Amount::from_str_in(
                             &self.entered_amount.value,
                             if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
@@ -1734,26 +1893,73 @@ impl State for GlobalHome {
                             return Task::none();
                         };
                         self.is_sending = true;
-                        let amount_sats = transfer_amount.to_sat();
-                        let to_kind = direction.to_kind();
+                        let generation = self.transfer_request_generation;
                         Task::perform(
                             async move { spark.send_payment(handle, None).await },
-                            move |result| match result {
-                                Ok(_response) => Message::View(view::Message::Home(
-                                    HomeMessage::TransferBroadcast {
-                                        amount_sat: amount_sats,
-                                        destination_kind: to_kind,
-                                        swap_id: None,
-                                    },
-                                )),
-                                Err(error) => Message::View(view::Message::Home(
-                                    HomeMessage::Error(TransferError::BroadcastFailed {
+                            move |result| {
+                                let result = result.map(|_| ()).map_err(|error| match error {
+                                    SparkClientError::OutcomeUnknown { .. }
+                                    | SparkClientError::Protocol(_) => {
+                                        TransferError::BroadcastOutcomeUnknown {
+                                            detail: error.to_string(),
+                                        }
+                                    }
+                                    _ => TransferError::BroadcastFailed {
                                         from: WalletKind::Spark,
                                         detail: error.to_string(),
-                                    }),
-                                )),
+                                    },
+                                });
+                                Message::View(view::Message::Home(
+                                    HomeMessage::SparkTransferFinished {
+                                        generation,
+                                        direction,
+                                        amount_sat: transfer_amount.to_sat(),
+                                        result,
+                                    },
+                                ))
                             },
                         )
+                    }
+                    HomeMessage::SparkTransferFinished {
+                        generation,
+                        direction,
+                        amount_sat,
+                        result,
+                    } => {
+                        if !self.destination_response_is_current(generation, direction) {
+                            return Task::none();
+                        }
+                        let message = match result {
+                            Ok(()) => HomeMessage::TransferBroadcast {
+                                amount_sat,
+                                destination_kind: direction.to_kind(),
+                                swap_id: None,
+                            },
+                            Err(error) => {
+                                if direction.is_other_cube()
+                                    && matches!(
+                                        error,
+                                        TransferError::BroadcastOutcomeUnknown { .. }
+                                    )
+                                {
+                                    let reset = self.update(
+                                        None,
+                                        cache,
+                                        Message::View(view::Message::Home(HomeMessage::BackToHome)),
+                                    );
+                                    let show_error = self.update(
+                                        None,
+                                        cache,
+                                        Message::View(view::Message::Home(HomeMessage::Error(
+                                            error,
+                                        ))),
+                                    );
+                                    return Task::batch([reset, show_error]);
+                                }
+                                HomeMessage::Error(error)
+                            }
+                        };
+                        self.update(daemon, cache, Message::View(view::Message::Home(message)))
                     }
                     HomeMessage::TransferBroadcast {
                         amount_sat,
@@ -1976,17 +2182,25 @@ impl State for GlobalHome {
                             let old_pair = (self.transfer_from, self.transfer_to);
                             match side {
                                 PickerSide::From => {
-                                    if self.transfer_to == Some(kind) {
+                                    if self.transfer_to == Some(kind)
+                                        || (self.transfer_to.is_none()
+                                            && TransferDirection::to_other_cube(
+                                                kind,
+                                                cache.chain(),
+                                            )
+                                            .is_none())
+                                    {
                                         self.transfer_to = self.transfer_from;
                                     }
                                     self.transfer_from = Some(kind);
                                 }
                                 PickerSide::To => self.transfer_to = Some(kind),
                             }
-                            if let (Some(from), Some(to)) = (self.transfer_from, self.transfer_to) {
-                                self.transfer_direction =
-                                    TransferDirection::try_from_pair(from, to);
-                            }
+                            self.transfer_direction =
+                                self.transfer_from.and_then(|from| match self.transfer_to {
+                                    Some(to) => TransferDirection::try_from_pair(from, to),
+                                    None => TransferDirection::to_other_cube(from, cache.chain()),
+                                });
                             if old_pair != (self.transfer_from, self.transfer_to) {
                                 self.invalidate_transfer_destination();
                             }
@@ -2003,14 +2217,24 @@ impl State for GlobalHome {
                     HomeMessage::SelectAnotherCube => {
                         if self.current_view.step != 1
                             || self.transfer_page != TransferPage::Wallets
-                            || self.transfer_from != Some(WalletKind::Vault)
-                            || !self.legacy_vault_available(cache)
                         {
                             return Task::none();
                         }
-                        if self.transfer_direction != Some(TransferDirection::VaultToOtherCube) {
+                        let Some(direction) = self
+                            .transfer_from
+                            .and_then(|from| TransferDirection::to_other_cube(from, cache.chain()))
+                        else {
+                            return Task::none();
+                        };
+                        if self.transfer_source_wallet(direction, cache).is_none() {
+                            return Task::none();
+                        }
+                        if !self
+                            .transfer_direction
+                            .is_some_and(|direction| direction.is_other_cube())
+                        {
                             self.transfer_to = None;
-                            self.transfer_direction = Some(TransferDirection::VaultToOtherCube);
+                            self.transfer_direction = Some(direction);
                             self.invalidate_transfer_destination();
                             self.validate_entered_amount(cache);
                         }
@@ -2031,26 +2255,34 @@ impl State for GlobalHome {
                             };
                             self.reset_other_cube();
                             self.other_cubes = other_cubes(&cache.datadir_path, &source);
-                            self.other_cube_selected = self
+                            let selected = self
                                 .other_cubes
                                 .iter()
                                 .find(|choice| choice.refusal.is_none())
                                 .map(|choice| choice.cube_id.clone());
                             self.transfer_page = TransferPage::OtherCube;
+                            if let Some(id) = selected {
+                                self.select_other_cube(id, cache);
+                            }
                         } else {
                             self.transfer_page = TransferPage::Amount;
                         }
                         Task::none()
                     }
                     HomeMessage::SelectOtherCube(cube_id) => {
+                        if self.transfer_page == TransferPage::OtherCube {
+                            self.select_other_cube(cube_id, cache);
+                        }
+                        Task::none()
+                    }
+                    HomeMessage::SelectOtherCubeWallet(kind) => {
                         if self.transfer_page == TransferPage::OtherCube
-                            && self
-                                .other_cubes
-                                .iter()
-                                .any(|choice| choice.cube_id == cube_id && choice.refusal.is_none())
+                            && self.other_cubes.iter().any(|choice| {
+                                Some(choice.cube_id.as_str()) == self.other_cube_selected.as_deref()
+                                    && choice.can_receive(kind)
+                            })
                         {
-                            self.other_cube_selected = Some(cube_id);
-                            self.other_error = None;
+                            self.select_other_wallet(kind, cache);
                         }
                         Task::none()
                     }
@@ -2061,16 +2293,26 @@ impl State for GlobalHome {
                         let Some(source) = self.transfer_source(cache) else {
                             return Task::none();
                         };
+                        let Some(kind) =
+                            self.transfer_direction.map(|direction| direction.to_kind())
+                        else {
+                            return Task::none();
+                        };
                         let Some((cube_id, wallet_id)) = self
                             .other_cube_selected
                             .as_ref()
                             .and_then(|id| {
                                 self.other_cubes.iter().find(|choice| {
-                                    &choice.cube_id == id && choice.refusal.is_none()
+                                    &choice.cube_id == id && choice.can_receive(kind)
                                 })
                             })
-                            .and_then(|choice| {
-                                Some((choice.cube_id.clone(), choice.vault_wallet_id.clone()?))
+                            .map(|choice| {
+                                let wallet = if kind == WalletKind::Vault {
+                                    choice.vault_wallet_id.clone()
+                                } else {
+                                    None
+                                };
+                                (choice.cube_id.clone(), wallet)
                             })
                         else {
                             return Task::none();
@@ -2085,31 +2327,41 @@ impl State for GlobalHome {
                             Ok(scope) => {
                                 self.other_scope = Some(scope);
                                 self.transfer_page = TransferPage::Unlock;
+                                return iced::widget::operation::focus(
+                                    crate::pin_input::first_digit_id(),
+                                );
                             }
                             Err(refusal) => self.other_error = Some(refusal.reason()),
                         }
                         Task::none()
                     }
-                    HomeMessage::OtherCubePinEdited(pin) => {
-                        if self.transfer_page == TransferPage::Unlock
-                            && self.other_phase == (UnlockPhase::Credential { busy: false })
+                    HomeMessage::OtherCubePin(message) => {
+                        if self.transfer_page != TransferPage::Unlock
+                            || self.other_phase != (UnlockPhase::Credential { busy: false })
                         {
-                            self.other_pin = Zeroizing::new(pin);
+                            return Task::none();
                         }
-                        Task::none()
+                        if matches!(message, crate::pin_input::Message::Submit) {
+                            return Task::done(Message::View(view::Message::Home(
+                                HomeMessage::UnlockOtherCube,
+                            )));
+                        }
+                        self.other_pin.update(message).map(|message| {
+                            Message::View(view::Message::Home(HomeMessage::OtherCubePin(message)))
+                        })
                     }
                     HomeMessage::UnlockOtherCube => {
                         if self.transfer_page != TransferPage::Unlock
                             || self.other_phase != (UnlockPhase::Credential { busy: false })
-                            || self.other_pin.is_empty()
+                            || !self.other_pin.is_complete()
                         {
                             return Task::none();
                         }
                         let Some(source) = self.transfer_source(cache) else {
                             return Task::none();
                         };
-                        let pin =
-                            std::mem::replace(&mut self.other_pin, Zeroizing::new(String::new()));
+                        let pin = self.other_pin.value();
+                        self.other_pin.clear();
                         let Some(scope) = self.other_scope.as_mut() else {
                             return Task::none();
                         };
@@ -2247,10 +2499,31 @@ impl State for GlobalHome {
                         };
                         match scope.accept_address(&source, reply) {
                             Ok(address) => {
+                                self.other_address = Some(OtherReceiveAddress::Bitcoin(address));
+                                self.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+                                self.other_error = None;
+                            }
+                            Err(refusal) => self.other_error = Some(refusal.reason()),
+                        }
+                        Task::none()
+                    }
+                    HomeMessage::OtherCubeSparkAddress(reply) => {
+                        if self.other_phase != UnlockPhase::Checks(1) {
+                            return Task::none();
+                        }
+                        let Some(source) = self.transfer_source(cache) else {
+                            return Task::none();
+                        };
+                        let Some(scope) = self.other_scope.as_ref() else {
+                            return Task::none();
+                        };
+                        match scope.accept_spark_address(&source, reply) {
+                            Ok(address) => {
                                 self.other_address = Some(address);
                                 self.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
                                 self.other_error = None;
                             }
+                            Err(ScopeRefusal::Stale) => {}
                             Err(refusal) => self.other_error = Some(refusal.reason()),
                         }
                         Task::none()
@@ -2261,23 +2534,6 @@ impl State for GlobalHome {
                             && self.other_address.is_some()
                         {
                             self.transfer_page = TransferPage::Amount;
-                        }
-                        Task::none()
-                    }
-                    HomeMessage::SetTransferUnit(unit) => {
-                        if unit != self.transfer_unit {
-                            let old = transfer_denomination(self.transfer_unit);
-                            if let Ok(amount) = Amount::from_str_in(&self.entered_amount.value, old)
-                            {
-                                self.entered_amount.value = match unit {
-                                    BitcoinDisplayUnit::Sats => amount.to_sat().to_string(),
-                                    BitcoinDisplayUnit::BTC => amount.to_string_in(
-                                        coincube_core::miniscript::bitcoin::Denomination::Bitcoin,
-                                    ),
-                                };
-                            }
-                            self.transfer_unit = unit;
-                            self.validate_entered_amount(cache);
                         }
                         Task::none()
                     }
@@ -2308,7 +2564,29 @@ impl State for GlobalHome {
                         Task::batch([reset, open])
                     }
                     HomeMessage::AmountEdited(amount) => {
+                        if self
+                            .transfer_direction
+                            .is_some_and(|direction| direction.is_other_cube())
+                            && (self.current_view.step != 1
+                                || self.transfer_page != TransferPage::Amount)
+                        {
+                            return Task::none();
+                        }
                         self.entered_amount.value = amount;
+                        self.transfer_max = None;
+                        self.validate_entered_amount(cache);
+                        Task::none()
+                    }
+                    HomeMessage::TransferMax => {
+                        if self.current_view.step != 1 || self.transfer_page != TransferPage::Amount
+                        {
+                            return Task::none();
+                        }
+                        let Some(source) = self.transfer_direction.map(|d| d.from_kind()) else {
+                            return Task::none();
+                        };
+                        self.set_entered_amount(self.max_transfer_amount(source, cache));
+                        self.transfer_max = Some(source);
                         self.validate_entered_amount(cache);
                         Task::none()
                     }
@@ -2329,8 +2607,14 @@ impl State for GlobalHome {
                                 transfer_direction,
                                 TransferDirection::VaultToLiquid
                                     | TransferDirection::VaultToSpark
+                                    | TransferDirection::VaultToOtherSpark
                                     | TransferDirection::VaultToOtherCube
                             ) {
+                                if transfer_direction == TransferDirection::VaultToOtherSpark {
+                                    if let Err(refusal) = self.check_other_review_address(cache) {
+                                        return self.restart_other_cube_unlock(refusal);
+                                    }
+                                }
                                 if let Some(address_info) = self.receive_address_info.clone() {
                                     if let Some(daemon) = daemon {
                                         let denomination = if matches!(
@@ -2353,6 +2637,12 @@ impl State for GlobalHome {
                                                 amount_sat,
                                             );
 
+                                            // Max sweeps every owned coin to the
+                                            // destination, as the preview priced it.
+                                            let sweep = self
+                                                .sends_max()
+                                                .then(|| vault_sweep_coins(cache).0);
+                                            let script = address_info.address.script_pubkey();
                                             let daemon_clone = daemon.clone();
                                             let wallet = self.wallet.clone();
                                             let cache_clone =
@@ -2388,15 +2678,32 @@ impl State for GlobalHome {
                                             self.transfer_signed = false;
                                             return Task::perform(
                                                 async move {
-                                                    let psbt = match daemon_clone
-                                                        .create_spend_tx(
-                                                            &[],
-                                                            &destinations,
-                                                            feerate_vb,
-                                                            None,
-                                                        )
-                                                        .await
-                                                    {
+                                                    let built = match &sweep {
+                                                        Some(coins) => {
+                                                            daemon_clone
+                                                                .create_spend_tx(
+                                                                    coins,
+                                                                    &HashMap::new(),
+                                                                    feerate_vb,
+                                                                    destinations
+                                                                        .keys()
+                                                                        .next()
+                                                                        .cloned(),
+                                                                )
+                                                                .await
+                                                        }
+                                                        None => {
+                                                            daemon_clone
+                                                                .create_spend_tx(
+                                                                    &[],
+                                                                    &destinations,
+                                                                    feerate_vb,
+                                                                    None,
+                                                                )
+                                                                .await
+                                                        }
+                                                    };
+                                                    let psbt = match built {
                                                         Ok(CreateSpendResult::Success {
                                                             psbt,
                                                             ..
@@ -2415,6 +2722,13 @@ impl State for GlobalHome {
                                                             ));
                                                         }
                                                     };
+
+                                                    if sweep.is_some()
+                                                        && paid_to(&psbt, &script).to_sat()
+                                                            != amount_sat
+                                                    {
+                                                        return Err(coincube_ui::locale::copy("The Vault balance changed. Go back and choose Max again.").to_string());
+                                                    }
 
                                                     daemon_clone
                                                         .update_spend_tx(&psbt)
@@ -2559,8 +2873,14 @@ impl State for GlobalHome {
                                 transfer_direction,
                                 TransferDirection::VaultToLiquid
                                     | TransferDirection::VaultToSpark
+                                    | TransferDirection::VaultToOtherSpark
                                     | TransferDirection::VaultToOtherCube
                             ) {
+                                if transfer_direction == TransferDirection::VaultToOtherSpark {
+                                    if let Err(refusal) = self.check_other_review_address(cache) {
+                                        return self.restart_other_cube_unlock(refusal);
+                                    }
+                                }
                                 // Post-sign broadcast path for both Vault-sourced
                                 // directions. The PSBT was built earlier in the same
                                 // shared `SignVaultToLiquidTx` handler against the
@@ -3007,6 +3327,10 @@ impl State for GlobalHome {
                         if !self.destination_response_is_current(generation, direction) {
                             return Task::none();
                         }
+                        // A drain prepares the whole balance; show what arrives.
+                        if self.sends_max() {
+                            self.set_entered_amount(Amount::from_sat(response.receiver_amount_sat));
+                        }
                         self.prepare_onchain_send_response = Some(response);
                         Task::none()
                     }
@@ -3128,6 +3452,7 @@ impl State for GlobalHome {
                         self.transfer_to = None;
                         self.wallet_picker = None;
                         self.entered_amount = form::Value::default();
+                        self.transfer_max = None;
                         self.invalidate_transfer_destination();
                         self.onchain_send_limit = None;
                         self.onchain_receive_limit = None;
@@ -3495,8 +3820,12 @@ impl State for GlobalHome {
                             return Task::none();
                         }
                         match result {
-                            Ok(fees) => {
+                            Ok((fees, received)) => {
                                 self.spend_tx_fees = Some(fees);
+                                // A sweep's output is the balance less this fee.
+                                if self.sends_max() {
+                                    self.set_entered_amount(received);
+                                }
                             }
                             Err(e) => {
                                 // Quiet failure: the user sees blank Fees/Total,
@@ -3684,15 +4013,107 @@ impl State for GlobalHome {
 }
 
 impl GlobalHome {
-    /// This Cube's Vault as the source of a transfer to another Cube.
+    fn transfer_source_wallet(
+        &self,
+        direction: TransferDirection,
+        cache: &Cache,
+    ) -> Option<WalletIdentity> {
+        if !direction.is_other_cube() {
+            return None;
+        }
+        match direction.from_kind() {
+            WalletKind::Vault if self.legacy_vault_available(cache) => {
+                Some(WalletIdentity::Vault(self.wallet.as_ref()?.id()))
+            }
+            WalletKind::Spark if self.spark_backend.is_some() => self
+                .spark_identity
+                .as_ref()
+                .filter(|key| !key.is_empty())
+                .map(|key| WalletIdentity::Spark(key.clone())),
+            _ => None,
+        }
+    }
+
+    /// Bind the destination unlock to this Cube, wallet and app session.
     fn transfer_source(&self, cache: &Cache) -> Option<Source> {
-        let wallet = self.wallet.as_ref()?;
+        let wallet = self.transfer_source_wallet(self.transfer_direction?, cache)?;
         Some(Source {
             cube_id: self.cube_id.clone(),
             chain: cache.chain(),
-            wallet: WalletIdentity::Vault(wallet.id()),
+            wallet,
             app: cache.app_generation,
         })
+    }
+
+    fn other_receive_address(&self, cache: &Cache) -> Result<&OtherReceiveAddress, ScopeRefusal> {
+        let source = self.transfer_source(cache).ok_or(ScopeRefusal::Stale)?;
+        let scope = self.other_scope.as_ref().ok_or(ScopeRefusal::Stale)?;
+        let receives_spark = self
+            .transfer_direction
+            .is_some_and(|direction| direction.to_kind() == WalletKind::Spark);
+        if scope.receives_spark() != receives_spark {
+            return Err(ScopeRefusal::IdentityChanged);
+        }
+        scope.current(&source)?;
+        self.other_address.as_ref().ok_or(ScopeRefusal::Stale)
+    }
+
+    fn check_other_review_address(&self, cache: &Cache) -> Result<(), ScopeRefusal> {
+        match self.other_receive_address(cache)? {
+            OtherReceiveAddress::Bitcoin(address)
+                if self
+                    .receive_address_info
+                    .as_ref()
+                    .is_some_and(|info| info.address == address.address) =>
+            {
+                Ok(())
+            }
+            OtherReceiveAddress::Spark(_)
+                if self.transfer_direction == Some(TransferDirection::SparkToOtherSpark) =>
+            {
+                Ok(())
+            }
+            _ => Err(ScopeRefusal::IdentityChanged),
+        }
+    }
+
+    fn select_other_cube(&mut self, id: String, cache: &Cache) {
+        let Some(choice) = self.other_cubes.iter().find(|choice| choice.cube_id == id) else {
+            return;
+        };
+        let preferred = self
+            .transfer_direction
+            .map_or(WalletKind::Vault, |direction| direction.to_kind());
+        let Some(wallet) = [preferred, WalletKind::Vault, WalletKind::Spark]
+            .iter()
+            .copied()
+            .find(|&wallet| choice.can_receive(wallet))
+        else {
+            return;
+        };
+        self.other_cube_selected = Some(id);
+        self.other_error = None;
+        self.select_other_wallet(wallet, cache);
+    }
+
+    fn select_other_wallet(&mut self, wallet: WalletKind, cache: &Cache) {
+        let Some(direction) = self
+            .transfer_from
+            .and_then(|from| TransferDirection::to_other_wallet(from, wallet, cache.chain()))
+        else {
+            return;
+        };
+        self.transfer_direction = Some(direction);
+        self.invalidate_transfer_destination();
+        self.validate_entered_amount(cache);
+    }
+
+    fn restart_other_cube_unlock(&mut self, refusal: ScopeRefusal) -> Task<Message> {
+        self.reset_other_cube();
+        self.invalidate_transfer_destination();
+        self.current_view.step = 1;
+        self.transfer_page = TransferPage::Wallets;
+        Task::done(Message::View(view::Message::ShowError(refusal.reason())))
     }
 
     /// Locks the other Cube again: drops its scoped unlock (and any daemon
@@ -3701,7 +4122,7 @@ impl GlobalHome {
         if let Some(mut scope) = self.other_scope.take() {
             scope.revoke();
         }
-        self.other_pin = Zeroizing::new(String::new());
+        self.other_pin.clear();
         self.other_phase = UnlockPhase::default();
         self.other_error = None;
         self.other_address = None;
@@ -3721,7 +4142,7 @@ impl GlobalHome {
         self.other_locked_again = was_open;
     }
 
-    /// The other Cube's credential was checked: on success, bind its Vault.
+    /// The other Cube's credential was checked. Open only its selected receiving wallet.
     fn after_other_credential(
         &mut self,
         source: &Source,
@@ -3734,9 +4155,22 @@ impl GlobalHome {
         }
         self.other_phase = UnlockPhase::Checks(1);
         self.other_error = None;
-        let Some(scope) = self.other_scope.as_ref() else {
+        let Some(scope) = self.other_scope.as_mut() else {
             return Task::none();
         };
+        if scope.receives_spark() {
+            return match scope.request_spark_address(source) {
+                Ok(request) => Task::perform(request.run(), |reply| {
+                    Message::View(view::Message::Home(HomeMessage::OtherCubeSparkAddress(
+                        reply,
+                    )))
+                }),
+                Err(refusal) => {
+                    self.other_error = Some(refusal.reason());
+                    Task::none()
+                }
+            };
+        }
         match scope.request_backend(source) {
             Ok(request) => Task::perform(request.run_reply(), |reply| {
                 Message::View(view::Message::Home(HomeMessage::OtherCubeBackendBound(
@@ -3748,6 +4182,66 @@ impl GlobalHome {
                 Task::none()
             }
         }
+    }
+
+    /// The destination is current and the direction's prepared response or
+    /// handle is in, so Review can confirm.
+    fn transfer_action_ready(&self) -> bool {
+        self.destination_is_ready()
+            && self
+                .transfer_direction
+                .is_some_and(|direction| match direction.from_kind() {
+                    // Max shows what arrives only once the sweep is priced.
+                    WalletKind::Vault => !self.sends_max() || self.spend_tx_fees.is_some(),
+                    WalletKind::Liquid => self.prepare_onchain_send_response.is_some(),
+                    WalletKind::Spark => self.spark_send_handle.is_some(),
+                })
+    }
+
+    /// Max is on for the current source wallet.
+    fn sends_max(&self) -> bool {
+        self.transfer_max.is_some()
+            && self.transfer_max == self.transfer_direction.map(|d| d.from_kind())
+    }
+
+    /// What Max fills in for `source`, before fees.
+    fn max_transfer_amount(&self, source: WalletKind, cache: &Cache) -> Amount {
+        match source {
+            WalletKind::Liquid => self.liquid_balance,
+            WalletKind::Spark => self.spark_balance,
+            WalletKind::Vault => vault_sweep_coins(cache).1,
+        }
+    }
+
+    /// Writes `amount` into the amount field in the transfer's unit.
+    fn set_entered_amount(&mut self, amount: Amount) {
+        self.entered_amount.value = match self.transfer_unit {
+            BitcoinDisplayUnit::Sats => amount.to_sat().to_string(),
+            BitcoinDisplayUnit::BTC => {
+                amount.to_string_in(coincube_core::miniscript::bitcoin::Denomination::Bitcoin)
+            }
+        };
+    }
+
+    /// Stores Spark's quoted fee. With Max the prepared amount is the whole
+    /// balance with the fee inside it, so the field shows what arrives; the
+    /// fee is taken off once per preparation.
+    fn show_max_after_fee(&mut self, fee_sat: u64) {
+        if self.sends_max() && self.spark_send_fee_sat.is_none() {
+            let denomination = if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
+                coincube_core::miniscript::bitcoin::Denomination::Bitcoin
+            } else {
+                coincube_core::miniscript::bitcoin::Denomination::Satoshi
+            };
+            if let Ok(total) = Amount::from_str_in(&self.entered_amount.value, denomination) {
+                self.set_entered_amount(
+                    total
+                        .checked_sub(Amount::from_sat(fee_sat))
+                        .unwrap_or(Amount::ZERO),
+                );
+            }
+        }
+        self.spark_send_fee_sat = Some(fee_sat);
     }
 
     fn invalidate_transfer_destination(&mut self) -> u64 {
@@ -3781,7 +4275,9 @@ impl GlobalHome {
 
     fn destination_is_ready(&self) -> bool {
         self.current_view.step == 2
-            && self.receive_address_info.is_some()
+            && (self.receive_address_info.is_some()
+                || (self.transfer_direction == Some(TransferDirection::SparkToOtherSpark)
+                    && matches!(self.other_address, Some(OtherReceiveAddress::Spark(_)))))
             && self.destination_ready
                 == self
                     .transfer_direction
@@ -3798,7 +4294,7 @@ impl GlobalHome {
 
     fn direction_uses_vault(direction: TransferDirection) -> bool {
         let (from, to) = direction.pair();
-        from == WalletKind::Vault || to == WalletKind::Vault
+        from == WalletKind::Vault || (to == WalletKind::Vault && !direction.is_other_cube())
     }
 
     /// Re-parse `entered_amount.value` against the current `transfer_direction`
@@ -3954,6 +4450,7 @@ impl GlobalHome {
             direction,
             TransferDirection::VaultToLiquid
                 | TransferDirection::VaultToSpark
+                | TransferDirection::VaultToOtherSpark
                 | TransferDirection::VaultToOtherCube
         ) {
             return Task::none();
@@ -3977,36 +4474,48 @@ impl GlobalHome {
         if feerate_vb == 0 {
             return Task::none();
         }
-        let denomination = if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
-            coincube_core::miniscript::bitcoin::Denomination::Bitcoin
+        let destination = address_info.address.as_unchecked().clone();
+        let script = address_info.address.script_pubkey();
+        // Max sweeps every owned coin with the destination as the change
+        // address, so it gets the balance less the fee. Otherwise this PSBT
+        // only answers `fee()`: a fresh change address (`None`) would make the
+        // daemon reserve a change index durably on every valid keystroke of
+        // the feerate field; the wallet's fixed preview address sizes the
+        // change output identically and reserves nothing. The real transfer in
+        // `SignVaultToLiquidTx` still passes `None`.
+        let (outpoints, destinations, change) = if self.sends_max() {
+            (vault_sweep_coins(cache).0, HashMap::new(), destination)
         } else {
-            coincube_core::miniscript::bitcoin::Denomination::Satoshi
-        };
-        let Ok(amount) = Amount::from_str_in(&self.entered_amount.value, denomination) else {
-            return Task::none();
-        };
-        if !self.entered_amount.valid {
-            return Task::none();
-        }
-        let amount_sat = amount.to_sat();
-        let mut destinations = HashMap::new();
-        destinations.insert(address_info.address.as_unchecked().clone(), amount_sat);
-        // This PSBT only ever answers `fee()`. A fresh change address (`None`)
-        // would make the daemon reserve a change index durably on every valid
-        // keystroke of the feerate field; the wallet's fixed preview address
-        // sizes the change output identically and reserves nothing. The real
-        // transfer in `SignVaultToLiquidTx` still passes `None`.
-        let Some(preview_change) = self.wallet.as_ref().map(|w| w.preview_change_address()) else {
-            return Task::none();
+            let denomination = if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
+                coincube_core::miniscript::bitcoin::Denomination::Bitcoin
+            } else {
+                coincube_core::miniscript::bitcoin::Denomination::Satoshi
+            };
+            let Ok(amount) = Amount::from_str_in(&self.entered_amount.value, denomination) else {
+                return Task::none();
+            };
+            if !self.entered_amount.valid {
+                return Task::none();
+            }
+            let Some(preview_change) = self.wallet.as_ref().map(|w| w.preview_change_address())
+            else {
+                return Task::none();
+            };
+            (
+                Vec::new(),
+                HashMap::from([(destination, amount.to_sat())]),
+                preview_change,
+            )
         };
         Task::perform(
             async move {
                 match daemon
-                    .create_spend_tx(&[], &destinations, feerate_vb, Some(preview_change))
+                    .create_spend_tx(&outpoints, &destinations, feerate_vb, Some(change))
                     .await
                 {
                     Ok(CreateSpendResult::Success { psbt, .. }) => {
-                        psbt.fee().map_err(|e| e.to_string())
+                        let fee = psbt.fee().map_err(|e| e.to_string())?;
+                        Ok((fee, paid_to(&psbt, &script)))
                     }
                     Ok(CreateSpendResult::InsufficientFunds { missing }) => {
                         Err(format!("Insufficient funds: {missing} sats missing"))
@@ -4044,6 +4553,7 @@ impl GlobalHome {
                 Ok(info) => Message::View(view::Message::Home(HomeMessage::SparkBalanceUpdated {
                     btc: Amount::from_sat(info.balance_sats),
                     usdb_balance: crate::app::breez_spark::assets::usdb_holding(&info),
+                    identity_pubkey: info.identity_pubkey,
                 })),
                 Err(e) => {
                     tracing::warn!("Home: spark get_info failed: {}", e);
@@ -4445,6 +4955,7 @@ impl GlobalHome {
             HomeMessage::SparkBalanceUpdated {
                 btc: Amount::from_sat(10_000),
                 usdb_balance: None,
+                identity_pubkey: "spark-identity".into(),
             },
         );
         let presync = snapshot("presync-nonzero", &home, true);
@@ -4461,6 +4972,7 @@ impl GlobalHome {
             HomeMessage::SparkBalanceUpdated {
                 btc: Amount::from_sat(12_000),
                 usdb_balance: None,
+                identity_pubkey: "spark-identity".into(),
             },
         );
         let trusted = snapshot("trusted-postsync", &home, true);
@@ -4597,6 +5109,7 @@ mod tests {
             HomeMessage::SparkBalanceUpdated {
                 btc: Amount::from_sat(10_000),
                 usdb_balance: Some(stale.clone()),
+                identity_pubkey: "spark-identity".into(),
             },
         );
         assert_eq!(
@@ -4628,6 +5141,7 @@ mod tests {
             HomeMessage::SparkBalanceUpdated {
                 btc: Amount::from_sat(12_000),
                 usdb_balance: Some(fresh.clone()),
+                identity_pubkey: "spark-identity".into(),
             },
         );
         assert!(home.spark_balance_loaded);
@@ -4671,6 +5185,7 @@ mod tests {
             HomeMessage::SparkBalanceUpdated {
                 btc: Amount::from_sat(1_000),
                 usdb_balance: None,
+                identity_pubkey: "spark-identity".into(),
             },
         );
         assert!(home.spark_settled());
@@ -4959,32 +5474,31 @@ mod tests {
     }
 
     #[test]
-    fn transfer_defaults_never_open_on_an_absent_wallet() {
-        use WalletKind::{Liquid, Spark, Vault};
-        // Liquid present: the historical Liquid→Vault (or Liquid→Spark) default.
+    fn transfer_defaults_to_an_available_wallet_or_another_cube() {
+        use crate::chain::ChainId;
+        use TransferDirection::{
+            LiquidToSpark, LiquidToVault, SparkToOtherCube, VaultToOtherCube, VaultToSpark,
+        };
+
+        for (liquid, vault, spark, direction) in [
+            (true, true, true, Some(LiquidToVault)),
+            (true, false, true, Some(LiquidToSpark)),
+            (true, true, false, Some(LiquidToVault)),
+            (false, true, true, Some(VaultToSpark)),
+            (false, true, false, Some(VaultToOtherCube)),
+            (false, false, true, Some(SparkToOtherCube)),
+            (true, false, false, None),
+            (false, false, false, None),
+        ] {
+            assert_eq!(
+                default_transfer_direction(liquid, vault, spark, ChainId::Bitcoin),
+                direction
+            );
+        }
         assert_eq!(
-            default_transfer_pair(true, true, true),
-            Some((Liquid, Vault))
+            default_transfer_direction(false, false, true, ChainId::Regtest),
+            None
         );
-        assert_eq!(
-            default_transfer_pair(true, false, true),
-            Some((Liquid, Spark))
-        );
-        assert_eq!(
-            default_transfer_pair(true, true, false),
-            Some((Liquid, Vault))
-        );
-        // Liquid gated off or unbacked (testnet/regtest cube): the flow opens
-        // on the two wallets that do exist, never on Liquid.
-        assert_eq!(
-            default_transfer_pair(false, true, true),
-            Some((Vault, Spark))
-        );
-        // Fewer than two wallets — the Transfer button is hidden; bail.
-        assert_eq!(default_transfer_pair(false, true, false), None);
-        assert_eq!(default_transfer_pair(false, false, true), None);
-        assert_eq!(default_transfer_pair(true, false, false), None);
-        assert_eq!(default_transfer_pair(false, false, false), None);
     }
 
     fn address() -> Address {
@@ -5156,6 +5670,7 @@ mod tests {
         for direction in [
             TransferDirection::VaultToSpark,
             TransferDirection::SparkToVault,
+            TransferDirection::SparkToOtherCube,
         ] {
             assert_eq!(
                 effective_transfer_min_sat(direction, None, None),
@@ -5608,7 +6123,7 @@ mod tests {
                     generation: old_generation,
                     direction: TransferDirection::VaultToLiquid,
                     feerate_vb: 2,
-                    result: Ok(Amount::from_sat(500)),
+                    result: Ok((Amount::from_sat(500), Amount::from_sat(100_000))),
                 })),
             ));
             assert!(home.spend_tx_fees.is_none());
@@ -5924,11 +6439,415 @@ mod tests {
             drain(home.update(None, cache, Message::View(view::Message::Home(message))));
         }
 
-        fn checked_other_address() -> DestinationAddress {
-            DestinationAddress {
-                address: Address::from_str(MAINNET_ADDR).unwrap().assume_checked(),
-                index: ChildNumber::from(3),
+        fn checked_other_address() -> OtherReceiveAddress {
+            OtherReceiveAddress::Bitcoin(
+                crate::app::transfer_destination_loader::DestinationAddress {
+                    address: Address::from_str(MAINNET_ADDR).unwrap().assume_checked(),
+                    index: ChildNumber::from(3),
+                },
+            )
+        }
+
+        fn receiving_cube_catalog(with_vault: bool) -> (tempfile::TempDir, CoincubeDirectory) {
+            use crate::app::settings::{
+                CubeSettings, Settings, WalletSettings, SETTINGS_FILE_NAME,
+            };
+            use crate::chain::ChainId;
+
+            let directory = tempfile::tempdir().unwrap();
+            let root = CoincubeDirectory::new(directory.path().to_owned());
+            let bitcoin = root.network_directory(ChainId::Bitcoin);
+            std::fs::create_dir_all(bitcoin.path()).unwrap();
+            let mut destination = CubeSettings::new_with_raw_id(
+                "destination".into(),
+                "Archive".into(),
+                ChainId::Bitcoin,
+            );
+            let wallet = WalletSettings {
+                name: "Archive Vault".into(),
+                alias: None,
+                descriptor_checksum: "destination".into(),
+                pinned_at: Some(1),
+                keys: vec![],
+                hardware_wallets: vec![],
+                remote_backend_auth: None,
+                start_internal_bitcoind: None,
+                pending_rescan: None,
+                keychain_keys_recorded: false,
+            };
+            if with_vault {
+                destination.vault_wallet_id = Some(wallet.wallet_id());
+                destination.vault_fingerprint = Some("archive-vault".into());
             }
+            destination.master_signer_fingerprint = Some("12345678".parse().unwrap());
+            std::fs::write(
+                bitcoin.path().join(SETTINGS_FILE_NAME),
+                serde_json::to_vec(&Settings {
+                    cubes: vec![destination],
+                    wallets: with_vault.then_some(wallet).into_iter().collect(),
+                    ..Settings::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+            (directory, root)
+        }
+
+        #[test]
+        fn spark_only_cube_prepares_and_sends_to_another_cubes_vault() {
+            spark_only_cube_sends_to_another_cube(WalletKind::Vault);
+        }
+
+        #[test]
+        fn spark_only_cube_prepares_and_sends_to_another_cubes_spark() {
+            spark_only_cube_sends_to_another_cube(WalletKind::Spark);
+        }
+
+        fn spark_only_cube_sends_to_another_cube(wallet: WalletKind) {
+            use crate::app::breez_spark::SparkClient;
+            use crate::chain::ChainId;
+            use coincube_spark_protocol::{Method, OkPayload, PrepareSendOk, SendPaymentOk};
+            use iced_runtime::futures::futures::StreamExt;
+
+            let (_directory, root) = receiving_cube_catalog(true);
+            let (client, mut requests) = SparkClient::mock_transport();
+            let client = Arc::new(client);
+            let cache = Cache {
+                datadir_path: root.clone(),
+                ..Cache::default()
+            };
+            let mut home = GlobalHome::new_without_wallet(
+                None,
+                Some(Arc::new(SparkBackend::new(client.clone()))),
+                root.clone(),
+                ChainId::Bitcoin,
+                "source".into(),
+                false,
+            );
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::SparkBalanceUpdated {
+                    btc: Amount::from_sat(200_000),
+                    usdb_balance: None,
+                    identity_pubkey: "source-spark".into(),
+                },
+            );
+            send(&mut home, &cache, HomeMessage::NextStep);
+            assert_eq!(
+                home.transfer_direction,
+                Some(TransferDirection::SparkToOtherCube)
+            );
+            assert_eq!(home.transfer_to, None);
+            send(&mut home, &cache, HomeMessage::ContinueFromWallets);
+            assert_eq!(home.other_cube_selected.as_deref(), Some("destination"));
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::SelectOtherCubeWallet(wallet),
+            );
+            assert_eq!(
+                home.transfer_direction,
+                TransferDirection::to_other_wallet(WalletKind::Spark, wallet, ChainId::Bitcoin)
+            );
+            send(&mut home, &cache, HomeMessage::ContinueWithCube);
+            assert_eq!(home.transfer_page, TransferPage::Unlock);
+            assert!(home.other_scope.is_some());
+
+            // The restricted loader's PIN, daemon, and descriptor checks are
+            // tested separately. Start here with its verified address result.
+            let (address, method, artifact) = if wallet == WalletKind::Spark {
+                (
+                    "sp1test-address",
+                    "SparkAddress",
+                    OtherReceiveAddress::Spark("sp1test-address".into()),
+                )
+            } else {
+                (MAINNET_ADDR, "BitcoinAddress", checked_other_address())
+            };
+            home.other_address = Some(artifact);
+            home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+            send(&mut home, &cache, HomeMessage::ContinueFromUnlock);
+            home.transfer_unit = BitcoinDisplayUnit::Sats;
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::AmountEdited("100000".into()),
+            );
+
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let mut run_with_reply = |task, reply| {
+                let mut stream =
+                    iced_runtime::task::into_stream(task).expect("a Spark request task");
+                rt.block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        let (action, request) = tokio::join!(stream.next(), async {
+                            let request = requests.recv().await.unwrap();
+                            client.mock_reply(request.id, Some(reply)).await;
+                            request
+                        });
+                        let Some(iced_runtime::Action::Output(message)) = action else {
+                            panic!("missing Spark transfer result");
+                        };
+                        (message, request.method)
+                    })
+                    .await
+                    .expect("the task should call the Spark bridge")
+                })
+            };
+            let prepare = home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::NextStep)),
+            );
+            let (message, request) = run_with_reply(
+                prepare,
+                OkPayload::PrepareSend(PrepareSendOk {
+                    handle: "prepared-for-archive".into(),
+                    amount_sat: 100_000,
+                    fee_sat: 800,
+                    method: method.into(),
+                    cross_chain: None,
+                    has_token_leg: Some(false),
+                }),
+            );
+            assert!(
+                matches!(request, Method::PrepareSend(params) if params.input == address && params.amount_sat == Some(100_000))
+            );
+            drain(home.update(None, &cache, message));
+            assert!(home.destination_is_ready());
+            assert_eq!(home.spark_send_fee_sat, Some(800));
+            if wallet == WalletKind::Spark {
+                assert!(home.receive_address_info.is_none());
+            } else {
+                assert_eq!(
+                    home.receive_address_info.as_ref().unwrap().index,
+                    ChildNumber::from(3)
+                );
+            }
+            send(&mut home, &cache, HomeMessage::NextStep);
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::AmountEdited("125000".into()),
+            );
+            assert_eq!(home.current_view.step, 2, "only a send advances Review");
+            assert_eq!(home.entered_amount.value, "100000");
+
+            let confirm = home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::ConfirmSparkSend)),
+            );
+            let (message, method) = run_with_reply(
+                confirm,
+                OkPayload::SendPayment(SendPaymentOk {
+                    payment_id: "archive-payment".into(),
+                    amount_sat: 100_000,
+                    fee_sat: 800,
+                }),
+            );
+            assert!(
+                matches!(method, Method::SendPayment(params) if params.prepare_handle == "prepared-for-archive")
+            );
+            drain(home.update(None, &cache, message));
+            assert_eq!(home.current_view.step, 3);
+            assert!(home.other_scope.is_none() && home.other_address.is_none());
+            assert!(home.other_locked_again);
+            assert_eq!(home.pending_vault_receive_sats, 0);
+            assert!(home.pending_spark_incoming.is_none());
+        }
+
+        #[test]
+        fn other_cube_pin_takes_four_digits_and_clears_on_leaving_unlock() {
+            use crate::pin_input::Message as Pin;
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.current_view.step = 1;
+            home.transfer_direction = Some(TransferDirection::VaultToOtherCube);
+            home.transfer_page = TransferPage::Unlock;
+
+            for (i, digit) in ["1", "2", "3"].iter().enumerate() {
+                send(
+                    &mut home,
+                    &cache,
+                    HomeMessage::OtherCubePin(Pin::DigitChanged(i, digit.to_string())),
+                );
+            }
+            assert!(!home.other_pin.is_complete());
+            // Enter on three digits checks nothing.
+            send(&mut home, &cache, HomeMessage::OtherCubePin(Pin::Submit));
+            assert_eq!(home.other_phase, UnlockPhase::Credential { busy: false });
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::OtherCubePin(Pin::DigitChanged(3, "4".into())),
+            );
+            assert_eq!(home.other_pin.value().as_str(), "1234");
+
+            send(&mut home, &cache, HomeMessage::PreviousStep);
+            assert_eq!(home.transfer_page, TransferPage::OtherCube);
+            assert!(home.other_pin.value().is_empty());
+        }
+
+        #[test]
+        fn vault_only_transfer_uses_the_other_cubes_spark_deposit_address() {
+            let (_directory, root) = receiving_cube_catalog(false);
+            let (mut home, _) = home_on_transfer_screen();
+            let cache = Cache {
+                datadir_path: root,
+                has_vault: true,
+                ..Cache::default()
+            };
+            send(&mut home, &cache, HomeMessage::BackToHome);
+            send(&mut home, &cache, HomeMessage::NextStep);
+            assert_eq!(
+                home.transfer_direction,
+                Some(TransferDirection::VaultToOtherCube)
+            );
+            send(&mut home, &cache, HomeMessage::ContinueFromWallets);
+            assert_eq!(
+                home.transfer_direction,
+                Some(TransferDirection::VaultToOtherSpark)
+            );
+            send(&mut home, &cache, HomeMessage::ContinueWithCube);
+            assert!(home.other_scope.is_some());
+
+            home.other_address = Some(checked_other_address());
+            home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+            send(&mut home, &cache, HomeMessage::ContinueFromUnlock);
+            let task = home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::NextStep)),
+            );
+            for message in collect(task) {
+                drain(home.update(None, &cache, message));
+            }
+            assert!(home.destination_is_ready());
+            assert_eq!(
+                home.receive_address_info
+                    .as_ref()
+                    .unwrap()
+                    .address
+                    .to_string(),
+                MAINNET_ADDR
+            );
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::TransferBroadcast {
+                    amount_sat: 100_000,
+                    destination_kind: WalletKind::Spark,
+                    swap_id: None,
+                },
+            );
+            assert_eq!(home.current_view.step, 3);
+            assert!(home.other_locked_again);
+            assert!(home.pending_spark_incoming.is_none());
+        }
+
+        #[test]
+        fn max_drains_spark_and_shows_what_arrives() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.current_view.step = 1;
+            home.transfer_page = TransferPage::Amount;
+            home.transfer_direction = Some(TransferDirection::SparkToLiquid);
+            home.transfer_unit = BitcoinDisplayUnit::Sats;
+            home.spark_balance = Amount::from_sat(50_000);
+
+            send(&mut home, &cache, HomeMessage::TransferMax);
+            assert!(home.sends_max());
+            assert_eq!(home.entered_amount.value, "50000");
+
+            // Spark's fee is inside the amount; it comes off once.
+            let generation = home.invalidate_transfer_destination();
+            home.current_view.step = 2;
+            for _ in 0..2 {
+                send(
+                    &mut home,
+                    &cache,
+                    HomeMessage::SparkPrepareSendReady {
+                        generation,
+                        direction: TransferDirection::SparkToLiquid,
+                        destination: MAINNET_ADDR.to_string(),
+                        prepare_handle: "max".to_string(),
+                        fee_sat: 1_200,
+                    },
+                );
+            }
+            assert_eq!(home.entered_amount.value, "48800");
+
+            // Back on Amount the whole balance shows again; typing ends Max.
+            send(&mut home, &cache, HomeMessage::PreviousStep);
+            assert_eq!(home.current_view.step, 1);
+            assert_eq!(home.entered_amount.value, "50000");
+            send(&mut home, &cache, HomeMessage::AmountEdited("1000".into()));
+            assert!(!home.sends_max());
+        }
+
+        #[test]
+        fn max_drains_liquid_to_the_quoted_receiver_amount() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.current_view.step = 1;
+            home.transfer_page = TransferPage::Amount;
+            home.transfer_direction = Some(TransferDirection::LiquidToSpark);
+            home.transfer_unit = BitcoinDisplayUnit::Sats;
+            home.liquid_balance = Amount::from_sat(60_000);
+
+            send(&mut home, &cache, HomeMessage::TransferMax);
+            assert_eq!(home.entered_amount.value, "60000");
+            let generation = home.invalidate_transfer_destination();
+            home.current_view.step = 2;
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::PrepareOnChainResponseReceived {
+                    generation,
+                    direction: TransferDirection::LiquidToSpark,
+                    response: PreparePayOnchainResponse {
+                        receiver_amount_sat: 58_500,
+                        claim_fees_sat: 100,
+                        total_fees_sat: 1_500,
+                    },
+                },
+            );
+            assert_eq!(home.entered_amount.value, "58500");
+        }
+
+        #[test]
+        fn max_vault_sweep_waits_for_its_price_and_shows_what_arrives() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.transfer_unit = BitcoinDisplayUnit::Sats;
+            home.transfer_max = Some(WalletKind::Vault);
+            assert!(!home.transfer_action_ready(), "no price, no confirm");
+
+            let feerate_vb = home.transfer_feerate.value.trim().parse().unwrap();
+            let generation = home.transfer_request_generation;
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::TransferPsbtPreviewReady {
+                    generation,
+                    direction: TransferDirection::VaultToLiquid,
+                    feerate_vb,
+                    result: Ok((Amount::from_sat(500), Amount::from_sat(99_500))),
+                },
+            );
+            assert_eq!(home.spend_tx_fees, Some(Amount::from_sat(500)));
+            assert_eq!(home.entered_amount.value, "99500");
+            assert!(home.transfer_action_ready());
+
+            // Max taken for another source does nothing here.
+            home.transfer_max = Some(WalletKind::Spark);
+            assert!(!home.sends_max());
         }
 
         #[test]
@@ -5989,7 +6908,7 @@ mod tests {
             assert_eq!(home.current_view.step, 1);
             assert_eq!(home.transfer_request_generation, generation);
 
-            // Only the Vault can be the source of a cross-Cube transfer.
+            // Liquid cannot send to another Cube from this dialog.
             home.transfer_from = Some(WalletKind::Liquid);
             home.transfer_to = Some(WalletKind::Vault);
             home.transfer_direction = Some(TransferDirection::LiquidToVault);
@@ -6035,25 +6954,6 @@ mod tests {
             assert_eq!(home.current_view.step, 3);
             assert_eq!(home.pending_vault_receive_sats, 0);
             assert!(home.other_address.is_none(), "the other Cube locked again");
-        }
-
-        #[test]
-        fn transfer_unit_switch_converts_the_entered_amount() {
-            let (mut home, _wallet) = home_on_transfer_screen();
-            let cache = transfer_cache();
-            home.transfer_unit = BitcoinDisplayUnit::Sats;
-            send(
-                &mut home,
-                &cache,
-                HomeMessage::SetTransferUnit(BitcoinDisplayUnit::BTC),
-            );
-            assert_eq!(home.entered_amount.value, "0.001");
-            send(
-                &mut home,
-                &cache,
-                HomeMessage::SetTransferUnit(BitcoinDisplayUnit::Sats),
-            );
-            assert_eq!(home.entered_amount.value, "100000");
         }
 
         #[test]

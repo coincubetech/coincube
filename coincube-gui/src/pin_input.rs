@@ -49,6 +49,14 @@ impl std::fmt::Debug for Message {
     }
 }
 
+// Hand-written for the same reason as `Message`: never print the digits.
+impl std::fmt::Debug for PinInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let entered = self.digits.iter().filter(|d| !d.is_empty()).count();
+        write!(f, "PinInput({}/4, <redacted>)", entered)
+    }
+}
+
 impl PinInput {
     pub fn new() -> Self {
         Self {

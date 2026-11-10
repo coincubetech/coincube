@@ -34,7 +34,7 @@ use breez_sdk_spark::{
 use coincube_spark_protocol::{
     AmountAdjustment, AssetAmount, AutoConvertState, CheckLightningAddressAvailableOk,
     ClaimDepositOk, ConversionQuote, DepositInfo, ErrorKind, Event as ProtocolEvent, Frame,
-    GetConversionLimitsParams, GetInfoOk, GetLightningAddressOk, GetUserSettingsOk,
+    GetConversionLimitsParams, GetInfoOk, GetInfoParams, GetLightningAddressOk, GetUserSettingsOk,
     LightningAddressInfo as ProtocolLightningAddressInfo, ListPaymentsOk, ListUnclaimedDepositsOk,
     Method, OkPayload, ParseInputKind, ParseInputOk, PaymentDetailSummary, PaymentSummary,
     PrepareLnurlPayFromParams, PrepareSendFromOk, PrepareSendFromParams, PrepareSendOk,
@@ -64,7 +64,7 @@ const PREPARE_TTL: Duration = Duration::from_secs(300);
 const PREPARE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Run the stdin/stdout server until EOF on stdin or a `shutdown` RPC.
-pub async fn run() -> anyhow::Result<()> {
+pub async fn run(receive_only: bool) -> anyhow::Result<()> {
     // Single writer task: serializes all stdout writes so responses and
     // events never interleave mid-line. We talk to it over an unbounded
     // channel so request handlers never block on IO.
@@ -72,7 +72,10 @@ pub async fn run() -> anyhow::Result<()> {
     // `ServerState` holds a clone of the same sender so the event
     // listener registered in `handle_init` can push `Frame::Event`s
     // onto the same stdout stream the response handlers use.
-    let state = Arc::new(ServerState::new(tx.clone()));
+    let state = Arc::new(ServerState {
+        receive_only,
+        ..ServerState::new(tx.clone())
+    });
 
     // Phase 4f: background sweep that evicts pending-prepare entries
     // older than `PREPARE_TTL`. Uses a Weak reference so the sweep
@@ -165,6 +168,7 @@ pub async fn run() -> anyhow::Result<()> {
 }
 
 struct ServerState {
+    receive_only: bool,
     /// `None` until `init` succeeds, then `Some` for the process lifetime.
     sdk: RwLock<Option<SdkHandle>>,
     /// Guards the init path so two concurrent `init` requests can't
@@ -217,6 +221,7 @@ struct ServerState {
 impl ServerState {
     fn new(event_tx: tokio::sync::mpsc::UnboundedSender<Frame>) -> Self {
         Self {
+            receive_only: false,
             sdk: RwLock::new(None),
             init_lock: Mutex::new(()),
             pending_prepares: Mutex::new(HashMap::new()),
@@ -260,6 +265,25 @@ async fn legacy_stable_balance_on(storage_dir: &str, sdk: &SdkHandle) -> bool {
 
 async fn handle_request(request: Request, state: Arc<ServerState>) -> Response {
     let id = request.id;
+    if state.receive_only
+        && !matches!(
+            &request.method,
+            Method::Init(_)
+                | Method::GetInfo(GetInfoParams {
+                    ensure_synced: None | Some(false)
+                })
+                | Method::ReceiveSpark
+                | Method::ReceiveOnchain(coincube_spark_protocol::ReceiveOnchainParams {
+                    new_address: None | Some(false),
+                })
+        )
+    {
+        return Response::err(
+            id,
+            ErrorKind::BadRequest,
+            "method unavailable in receive-only mode",
+        );
+    }
     match request.method {
         Method::Init(params) => handle_init(id, params, state).await,
         Method::GetInfo(params) => handle_get_info(id, params, state).await,
@@ -337,9 +361,14 @@ async fn handle_init(
         params.mnemonic,
         params.mnemonic_passphrase,
         params.storage_dir,
+        state.receive_only,
     )
     .await
     {
+        Ok(handle) if state.receive_only => {
+            *state.sdk.write().await = Some(handle);
+            Response::ok(id, OkPayload::Init {})
+        }
         Ok(handle) => {
             // Auto-convert's state is in place, and its worker running,
             // before the listener can report a receive. A Cube with no
@@ -1266,7 +1295,16 @@ async fn handle_prepare_send(
     params: coincube_spark_protocol::PrepareSendParams,
     state: Arc<ServerState>,
 ) -> Response {
-    match prepare_send(id, params.input, params.amount_sat, None, &state).await {
+    match prepare_send(
+        id,
+        params.input,
+        params.amount_sat,
+        None,
+        params.fees_included,
+        &state,
+    )
+    .await
+    {
         Ok((prepare, _)) => Response::ok(id, OkPayload::PrepareSend(prepare)),
         Err(response) => response,
     }
@@ -1299,7 +1337,16 @@ async fn handle_prepare_send_from(
             return prepare_usdb_invoice(id, params.input, &sdk, &state).await;
         }
     }
-    match prepare_send(id, params.input, params.amount_sat, Some(pay_from), &state).await {
+    match prepare_send(
+        id,
+        params.input,
+        params.amount_sat,
+        Some(pay_from),
+        false,
+        &state,
+    )
+    .await
+    {
         Ok((prepare, conversion)) => Response::ok(
             id,
             OkPayload::PrepareSendFrom(PrepareSendFromOk {
@@ -1493,6 +1540,7 @@ async fn prepare_send(
     input: String,
     amount_sat: Option<u64>,
     pay_from_param: Option<WalletAsset>,
+    fees_included: bool,
     state: &ServerState,
 ) -> Result<(PrepareSendOk, Option<Box<ConversionQuote>>), Response> {
     let pay_from = pay_from_param.unwrap_or(WalletAsset::Bitcoin);
@@ -1513,27 +1561,35 @@ async fn prepare_send(
     // The cross-chain path uses the other variant — see `prepare_cross_chain`.
     let amount = amount_sat.map(|a| a as u128);
     let speed = selected_onchain_speed();
-    let prepared = prepare_funded(
-        pay_from,
-        amount_sat,
-        |conversion_options| {
-            sdk.sdk.prepare_send_payment(PrepareSendPaymentRequest {
-                payment_request: PaymentRequest::Input {
-                    input: input.clone(),
-                },
-                amount,
-                token_identifier: None,
-                conversion_options,
-                fee_policy: None,
-            })
-        },
-        |needed| usdb_shortfall_conversion(&sdk, needed),
-        |p: &PrepareSendPaymentResponse| {
-            clamp_u128_to_u64(p.amount).saturating_add(fee_and_method(&p.payment_method, &speed).0)
-        },
-        |p: &PrepareSendPaymentResponse| p.conversion_estimate.is_some(),
-    )
-    .await;
+    let prepare = |conversion_options| {
+        sdk.sdk.prepare_send_payment(PrepareSendPaymentRequest {
+            payment_request: PaymentRequest::Input {
+                input: input.clone(),
+            },
+            amount,
+            token_identifier: None,
+            conversion_options,
+            fee_policy: fees_included.then_some(breez_sdk_spark::FeePolicy::FeesIncluded),
+        })
+    };
+    // A fees-included send drains the bitcoin balance it names; it never tops
+    // itself up from USDB, so it skips the shortfall fallback.
+    let prepared = if fees_included {
+        prepare(None).await.map_err(PrepareError::Sdk)
+    } else {
+        prepare_funded(
+            pay_from,
+            amount_sat,
+            prepare,
+            |needed| usdb_shortfall_conversion(&sdk, needed),
+            |p: &PrepareSendPaymentResponse| {
+                clamp_u128_to_u64(p.amount)
+                    .saturating_add(fee_and_method(&p.payment_method, &speed).0)
+            },
+            |p: &PrepareSendPaymentResponse| p.conversion_estimate.is_some(),
+        )
+        .await
+    };
 
     match prepared {
         Ok(prepare) => {
@@ -4637,6 +4693,32 @@ mod p0_stub_tests {
 mod auto_convert_handler_tests {
     use super::*;
     use coincube_spark_protocol::{AutoConvertBreaker, ResponseResult};
+
+    #[tokio::test]
+    async fn receive_only_bridge_refuses_spends_sync_and_address_rotation() {
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(ServerState {
+            receive_only: true,
+            ..ServerState::new(tx)
+        });
+        for method in [
+            Method::SendPayment(coincube_spark_protocol::SendPaymentParams {
+                prepare_handle: "test".into(),
+                idempotency_key: None,
+            }),
+            Method::GetInfo(GetInfoParams {
+                ensure_synced: Some(true),
+            }),
+            Method::ReceiveOnchain(coincube_spark_protocol::ReceiveOnchainParams {
+                new_address: Some(true),
+            }),
+        ] {
+            let response = handle_request(Request { id: 1, method }, state.clone()).await;
+            assert!(
+                matches!(response.result, ResponseResult::Err(error) if error.kind == ErrorKind::BadRequest)
+            );
+        }
+    }
 
     /// A fresh directory for one test's state file, removed on drop.
     struct TempDir(std::path::PathBuf);

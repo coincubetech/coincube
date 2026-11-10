@@ -627,9 +627,10 @@ impl Default for UnlockPhase {
 pub struct OtherCubeView<'a> {
     pub choices: &'a [CubeChoice],
     pub selected: Option<&'a str>,
-    pub pin: &'a str,
+    pub pin: Option<&'a crate::pin_input::PinInput>,
     pub phase: UnlockPhase,
     pub error: Option<&'a str>,
+    pub spark_address: Option<&'a str>,
     /// The destination Cube is unlocked for this transfer.
     pub unlocked: bool,
     /// The transfer was sent and the destination Cube locked again.
@@ -666,6 +667,7 @@ struct TransferCtx<'a> {
     vault_balance: Amount,
     fiat_converter: Option<FiatAmountConverter>,
     unit: BitcoinDisplayUnit,
+    max: bool,
     balance_masked: bool,
     other: OtherCubeView<'a>,
 }
@@ -1247,7 +1249,7 @@ fn transfer_wallet_section<'a>(
 fn wallets_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
     let source = ctx.direction.from_kind();
     let source_empty = ctx.balance(source) == Amount::ZERO;
-    let another_enabled = ctx.has_vault && source == WalletKind::Vault;
+    let another_enabled = TransferDirection::to_other_cube(source, ctx.chain).is_some();
     let another = option_row(
         landing_control_id(ctx.cube_id, "another-cube", "transfer-to"),
         cube_outline_icon()
@@ -1262,7 +1264,7 @@ fn wallets_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
             muted(if another_enabled {
                 localized_copy("Unlocks for this transfer only")
             } else {
-                localized_copy("From the Vault only, for now")
+                localized_copy("From Spark or Vault on Bitcoin mainnet")
             })
             .into(),
         ),
@@ -1324,29 +1326,18 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
     let mut rows = Column::new().spacing(2);
     for choice in ctx.other.choices {
         let selected = ctx.other.selected == Some(choice.cube_id.as_str());
-        let tag = (choice.chain != ctx.chain).then(|| {
-            Container::new(text(network_name(choice.chain)).size(12))
-                .padding([0, 6])
-                .style(|t: &theme::Theme| iced::widget::container::Style {
-                    border: iced::Border {
-                        color: t.colors.shell.muted,
-                        width: 1.0,
-                        radius: 4.0.into(),
-                    },
-                    ..Default::default()
-                })
-        });
         let sub =
             Column::new()
                 .spacing(2)
                 .push(muted(format!(
                     "{} · {}",
                     network_name(choice.chain),
-                    if choice.has_vault {
-                        "Vault"
-                    } else {
-                        "No Vault"
-                    }
+                    localized_copy(match (choice.has_vault, choice.has_spark) {
+                        (true, true) => "Spark and Vault",
+                        (true, false) => "Vault",
+                        (false, true) => "Spark",
+                        (false, false) => "No receiving wallet",
+                    })
                 )))
                 .push_maybe(choice.refusal.map(|reason| {
                     status_line(x_circle_icon(), StatusTone::Muted, reason.to_string())
@@ -1354,12 +1345,7 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
         rows = rows.push(option_row(
             landing_control_id(ctx.cube_id, &choice.cube_id, "transfer-cube"),
             network_coin(choice.chain, ctx.light),
-            Row::new()
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .push(text(choice.name.clone()).size(P1_SIZE).bold())
-                .push_maybe(tag)
-                .into(),
+            text(choice.name.clone()).size(P1_SIZE).bold().into(),
             Some(sub.into()),
             Some(
                 Row::new()
@@ -1380,6 +1366,23 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
         rows = rows.push(muted(localized_copy("No other Cubes on this device.")));
     }
     let selected = ctx.other.choice().filter(|choice| choice.refusal.is_none());
+    let wallets = selected.map(|choice| {
+        let mut rows = Column::new().spacing(2);
+        for kind in [WalletKind::Spark, WalletKind::Vault] {
+            if choice.can_receive(kind) {
+                rows = rows.push(option_row(
+                    landing_control_id(ctx.cube_id, kind.label(), "other-cube-wallet"),
+                    wallet_kind_icon::<Message>(kind, 18.0),
+                    text(kind.label()).size(P1_SIZE).bold().into(),
+                    None,
+                    None,
+                    kind == ctx.direction.to_kind(),
+                    Some(Message::Home(HomeMessage::SelectOtherCubeWallet(kind))),
+                ));
+            }
+        }
+        group(Some(localized_copy("Receiving wallet").into()), rows)
+    });
     let continue_label = selected.map_or("Continue".to_string(), |choice| {
         format!("Continue with {}", choice.name)
     });
@@ -1399,6 +1402,7 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                 )),
             ))
             .push(group(Some("Other Cubes".into()), rows))
+            .push_maybe(wallets)
             .push_maybe(ctx.other.error.map(|error| {
                 status_line(
                     exclamation_circle_icon(),
@@ -1468,7 +1472,9 @@ fn check_row<'a>(label: String, state: std::cmp::Ordering) -> Element<'a, Messag
 /// Unlock: the other Cube's own PIN or passkey, then its checks.
 fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
     let name = ctx.other.name();
+    let wallet = ctx.direction.to_wallet();
     let passkey = ctx.other.choice().is_some_and(|choice| choice.passkey);
+    let pin_complete = ctx.other.pin.is_some_and(|pin| pin.is_complete());
     let error = ctx.other.error.map(|error| {
         status_line(
             exclamation_circle_icon(),
@@ -1490,8 +1496,7 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                     None,
                     CopyText::Unlock.get(),
                     busy,
-                    (!ctx.other.pin.is_empty() && !busy)
-                        .then_some(Message::Home(HomeMessage::UnlockOtherCube)),
+                    (pin_complete && !busy).then_some(Message::Home(HomeMessage::UnlockOtherCube)),
                 )
                 .width(Length::Fixed(120.0))
                 .into()
@@ -1502,22 +1507,10 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                     Column::new()
                         .spacing(6)
                         .push(text(format!("{name} PIN")).bold())
-                        .push(
-                            Container::new(
-                                iced::widget::text_input("", ctx.other.pin)
-                                    .secure(true)
-                                    .size(18)
-                                    .padding(10)
-                                    .on_input_maybe((!busy).then_some(|pin| {
-                                        Message::Home(HomeMessage::OtherCubePinEdited(pin))
-                                    }))
-                                    .on_submit_maybe(
-                                        (!busy && !ctx.other.pin.is_empty())
-                                            .then_some(Message::Home(HomeMessage::UnlockOtherCube)),
-                                    ),
-                            )
-                            .width(Length::Fixed(240.0)),
-                        )
+                        .push_maybe(ctx.other.pin.map(|pin| {
+                            pin.face_view()
+                                .map(|message| Message::Home(HomeMessage::OtherCubePin(message)))
+                        }))
                         .push(muted(localized_format!(
                             "Not {}'s PIN.",
                             "No la PIN de {}.",
@@ -1553,9 +1546,15 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                 ))
                 .push(check_row(
                     if done > 1 {
-                        format!("{name}'s Vault checked")
+                        localized_format!(
+                            "{name}'s {wallet} checked",
+                            "{wallet} de {name} comprobado"
+                        )
                     } else {
-                        format!("Checking {name}'s Vault…")
+                        localized_format!(
+                            "Checking {name}'s {wallet}…",
+                            "Comprobando {wallet} de {name}…"
+                        )
                     },
                     state(1),
                 ))
@@ -1604,50 +1603,13 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                     .align_y(Alignment::Center)
                     .push(network_coin(ctx.chain, ctx.light))
                     .push(muted(format!(
-                        "{name} · {} · Vault",
+                        "{name} · {} · {wallet}",
                         network_name(ctx.chain)
                     ))),
             )
             .push(iced::widget::rule::horizontal(1))
             .push(body),
     )
-}
-
-/// The SATS/BTC switch beside the amount (P-Transfer's `.seg`).
-fn unit_switch<'a>(unit: BitcoinDisplayUnit) -> Element<'a, Message> {
-    let segment = |label: &'static str, value: BitcoinDisplayUnit| {
-        let on = value == unit;
-        Button::new(text(label).size(13).bold())
-            .padding([8, 12])
-            .style(move |t: &theme::Theme, status| {
-                let mut style = theme::button::transparent(t, status);
-                if on {
-                    style.background = Some(iced::Background::Color(t.colors.shell.selected));
-                    style.text_color = t.colors.shell.ink;
-                } else {
-                    style.text_color = t.colors.shell.muted;
-                }
-                style.border.radius = 6.0.into();
-                style
-            })
-            .on_press_maybe((!on).then_some(Message::Home(HomeMessage::SetTransferUnit(value))))
-    };
-    Container::new(
-        Row::new()
-            .spacing(2)
-            .push(segment("SATS", BitcoinDisplayUnit::Sats))
-            .push(segment("BTC", BitcoinDisplayUnit::BTC)),
-    )
-    .padding(2)
-    .style(|t: &theme::Theme| iced::widget::container::Style {
-        border: iced::Border {
-            color: t.colors.shell.line,
-            width: 1.0,
-            radius: 8.0.into(),
-        },
-        ..Default::default()
-    })
-    .into()
 }
 
 fn parse_amount(value: &form::Value<String>, unit: BitcoinDisplayUnit) -> Option<Amount> {
@@ -1667,7 +1629,10 @@ fn fiat_estimate(amount: Amount, fiat_converter: Option<FiatAmountConverter>) ->
     })
 }
 
-/// Amount: the destination, then the amount with unit switch, fiat estimate
+/// Under the amount while Max is on.
+const MAX_NOTE: &str = "Sends the whole balance. Fees come out of this amount.";
+
+/// Amount: the destination, then the amount in the wallet's display unit, fiat estimate
 /// and the rails' limits; Prepare fetches the destination and the quote.
 fn amount_page<'a>(
     ctx: &TransferCtx<'a>,
@@ -1705,9 +1670,9 @@ fn amount_page<'a>(
         group(
             Some(format!("Wallet in {}", ctx.other.name())),
             option_row(
-                landing_control_id(ctx.cube_id, "other-cube-vault", "transfer-dest"),
-                wallet_kind_icon::<Message>(WalletKind::Vault, 18.0),
-                text("Vault").size(P1_SIZE).bold().into(),
+                landing_control_id(ctx.cube_id, "other-cube-wallet", "transfer-dest"),
+                wallet_kind_icon::<Message>(direction.to_kind(), 18.0),
+                text(direction.to_wallet()).size(P1_SIZE).bold().into(),
                 None,
                 None,
                 true,
@@ -1760,8 +1725,17 @@ fn amount_page<'a>(
                             .spacing(10)
                             .align_y(Alignment::Center)
                             .push(Container::new(input).width(Length::Fixed(260.0)))
-                            .push(unit_switch(ctx.unit)),
+                            .push(muted(unit_label(ctx.unit)))
+                            .push(
+                                button::secondary(None, localized_copy("Max"))
+                                    .padding([8, 14])
+                                    .on_press_maybe(
+                                        (!ctx.max && ctx.balance(source) > Amount::ZERO)
+                                            .then_some(Message::Home(HomeMessage::TransferMax)),
+                                    ),
+                            ),
                     )
+                    .push_maybe(ctx.max.then(|| muted(localized_copy(MAX_NOTE))))
                     .push_maybe(estimate.map(muted))
                     .push(muted(limits)),
             )
@@ -1791,7 +1765,10 @@ fn route_text(direction: TransferDirection) -> &'static str {
         }
         TransferDirection::VaultToSpark
         | TransferDirection::SparkToVault
-        | TransferDirection::VaultToOtherCube => "Bitcoin on-chain",
+        | TransferDirection::VaultToOtherCube
+        | TransferDirection::SparkToOtherCube
+        | TransferDirection::VaultToOtherSpark => "Bitcoin on-chain",
+        TransferDirection::SparkToOtherSpark => "Spark",
     }
 }
 
@@ -1931,12 +1908,14 @@ fn review_page<'a>(
         }
         TransferDirection::VaultToLiquid
         | TransferDirection::VaultToSpark
+        | TransferDirection::VaultToOtherSpark
         | TransferDirection::VaultToOtherCube => vault_fees,
         // Spark-sourced: `spark.prepare_send` quoted a `fee_sat` at step
         // 1→2 and the state layer stashed it on `spark_send_fee_sat`.
-        TransferDirection::SparkToLiquid | TransferDirection::SparkToVault => {
-            spark_send_fee_sat.map(Amount::from_sat)
-        }
+        TransferDirection::SparkToLiquid
+        | TransferDirection::SparkToVault
+        | TransferDirection::SparkToOtherSpark
+        | TransferDirection::SparkToOtherCube => spark_send_fee_sat.map(Amount::from_sat),
     };
     let with_fiat = |value: Amount| -> String {
         let bitcoin = bitcoin_text(value, unit, ctx.balance_masked);
@@ -1946,7 +1925,12 @@ fn review_page<'a>(
         }
     };
     let receiving = if direction.is_other_cube() {
-        format!("Vault · {} · {}", ctx.other.name(), network_name(ctx.chain))
+        format!(
+            "{} · {} · {}",
+            direction.to_wallet(),
+            ctx.other.name(),
+            network_name(ctx.chain)
+        )
     } else {
         format!("{} · {}", direction.to_wallet(), ctx.cube_name)
     };
@@ -1956,7 +1940,7 @@ fn review_page<'a>(
             text(format!("{} · {}", direction.from_wallet(), ctx.cube_name)),
             false,
         ),
-        dl_row("Receiving wallet", text(receiving), false),
+        dl_row(localized_copy("Receiving wallet"), text(receiving), false),
         dl_row("Route", text(route_text(direction)), false),
         dl_row(
             CopyText::BitcoinNetwork.get(),
@@ -1987,16 +1971,24 @@ fn review_page<'a>(
         ));
     }
 
-    let destination: Element<'a, Message> = match receive_address {
-        Some(addr) => receiving_address(
-            ctx.cube_id,
-            addr,
-            labels,
-            labels_editing,
-            address_expanded,
-            !direction.is_other_cube(),
-        ),
-        None => muted(localized_copy("Getting the receiving address…")).into(),
+    let destination: Element<'a, Message> = if let Some(address) = ctx
+        .other
+        .spark_address
+        .filter(|_| direction == TransferDirection::SparkToOtherSpark && destination_ready)
+    {
+        group(Some(localized_copy("Spark address").into()), text(address))
+    } else {
+        match receive_address {
+            Some(addr) => receiving_address(
+                ctx.cube_id,
+                addr,
+                labels,
+                labels_editing,
+                address_expanded,
+                !direction.is_other_cube(),
+            ),
+            None => muted(localized_copy("Getting the receiving address…")).into(),
+        }
     };
 
     // §Design section 9: Vault-sourced transfers build a standard on-chain
@@ -2028,6 +2020,7 @@ fn review_page<'a>(
         // signer path handles Liquid, Spark and another Cube's Vault.
         TransferDirection::VaultToLiquid
         | TransferDirection::VaultToSpark
+        | TransferDirection::VaultToOtherSpark
         | TransferDirection::VaultToOtherCube => {
             if is_tx_signed {
                 button::primary_loading(
@@ -2057,14 +2050,15 @@ fn review_page<'a>(
         // Spark-sourced: the prepare handle was fetched at step 1→2. Confirm
         // calls `spark.send_payment(handle)` synchronously from the UI's
         // perspective; stage flips to PendingDeposit on success.
-        TransferDirection::SparkToLiquid | TransferDirection::SparkToVault => {
-            button::primary_loading(
-                None,
-                coincube_ui::locale::copy("Confirm transfer"),
-                is_sending,
-                transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmSparkSend)),
-            )
-        }
+        TransferDirection::SparkToLiquid
+        | TransferDirection::SparkToVault
+        | TransferDirection::SparkToOtherSpark
+        | TransferDirection::SparkToOtherCube => button::primary_loading(
+            None,
+            coincube_ui::locale::copy("Confirm transfer"),
+            is_sending,
+            transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmSparkSend)),
+        ),
     };
 
     transfer_dialog(
@@ -2102,30 +2096,26 @@ fn review_page<'a>(
     )
 }
 
-/// Done: the transfer was sent and is pending at its destination.
-///
-/// Every transfer direction settles via an on-chain hop, so no destination is
-/// instant — the broadcast landing is the most the user can know synchronously.
-/// The home-page pending indicator on the destination wallet picks up from here
-/// and clears asynchronously once the destination's confirmation requirements
-/// are met.
+/// Done: the sender has submitted the payment. On-chain deposits can still
+/// be awaiting confirmations or a Spark claim.
 fn done_page<'a>(ctx: &TransferCtx<'a>, amount: &'a form::Value<String>) -> Element<'a, Message> {
     let direction = ctx.direction;
     let to = if direction.is_other_cube() {
-        format!("Vault · {}", ctx.other.name())
+        format!("{} · {}", direction.to_wallet(), ctx.other.name())
     } else {
         format!("{} · {}", direction.to_wallet(), ctx.cube_name)
+    };
+    let status = if direction == TransferDirection::SparkToOtherSpark {
+        status_line(check_circle_icon(), StatusTone::Good, "Sent".into())
+    } else {
+        status_line(clock_icon(), StatusTone::Warn, "Pending".into())
     };
     let mut rows = vec![dl_row(
         "Status",
         Row::new()
             .spacing(4)
             .align_y(Alignment::Center)
-            .push(status_line(
-                clock_icon(),
-                StatusTone::Warn,
-                "Pending".into(),
-            ))
+            .push(status)
             .push(muted("· you can leave this page")),
         false,
     )];
@@ -2156,6 +2146,15 @@ fn done_page<'a>(ctx: &TransferCtx<'a>, amount: &'a form::Value<String>) -> Elem
                     .push(text(localized_copy("Transfer sent")).size(18).bold()),
             )
             .push(description_list(rows))
+            .push_maybe(
+                (direction == TransferDirection::VaultToOtherSpark).then(|| {
+                    muted(localized_format!(
+                    "Spark credits the deposit after it is claimed. Open {} to check its status.",
+                    "Spark acredita el depósito después de reclamarlo. Abre {} para ver su estado.",
+                    ctx.other.name()
+                ))
+                }),
+            )
             .push(
                 Row::new()
                     .spacing(10)
@@ -2252,6 +2251,8 @@ pub enum TransferError {
     /// The send was submitted and refused. The `from` wallet is the one whose
     /// funds were being moved.
     BroadcastFailed { from: WalletKind, detail: String },
+    /// The sending wallet did not confirm the outcome after submission.
+    BroadcastOutcomeUnknown { detail: String },
 }
 
 /// How far a transfer got before it failed — the only thing a person moving
@@ -2268,12 +2269,15 @@ pub enum TransferFailurePoint {
     /// were not moved, but we stop short of the same flat reassurance: the
     /// request did reach a backend.
     WhileSending,
+    /// The transfer may have been submitted and its outcome is unknown.
+    OutcomeUnknown,
 }
 
 impl TransferError {
     pub fn failure_point(&self) -> TransferFailurePoint {
         match self {
             Self::BroadcastFailed { .. } => TransferFailurePoint::WhileSending,
+            Self::BroadcastOutcomeUnknown { .. } => TransferFailurePoint::OutcomeUnknown,
             Self::WalletUnavailable(_)
             | Self::NoDepositAddress { .. }
             | Self::FeeEstimateFailed { .. }
@@ -2299,6 +2303,9 @@ impl TransferError {
             Self::BroadcastFailed { from, detail } => {
                 format!("broadcast from {}: {}", from.label(), detail)
             }
+            Self::BroadcastOutcomeUnknown { detail } => {
+                format!("broadcast outcome unknown: {detail}")
+            }
         }
     }
 }
@@ -2312,10 +2319,9 @@ pub enum PickerSide {
 
 /// An ordered (from, to) pair of wallets the user can transfer between.
 ///
-/// Exhaustive over the six legal directed pairs of the three wallets. Using an explicit
+/// Exhaustive over the legal directed pairs and cross-Cube routes. Using an explicit
 /// enum over a `struct { from: WalletKind, to: WalletKind }` gives compiler-driven
-/// exhaustiveness in match arms and rules out the illegal `from == to` state at compile
-/// time.
+/// exhaustiveness in match arms and keeps same-Cube and cross-Cube routes distinct.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferDirection {
     LiquidToVault,
@@ -2328,6 +2334,10 @@ pub enum TransferDirection {
     /// unlocked in place for this transfer only. Never built from a wallet
     /// pair: the To list's "Another Cube…" row selects it.
     VaultToOtherCube,
+    /// This Cube's Spark wallet to another local Bitcoin mainnet Cube's Vault.
+    SparkToOtherCube,
+    VaultToOtherSpark,
+    SparkToOtherSpark,
 }
 
 impl TransferDirection {
@@ -2337,14 +2347,43 @@ impl TransferDirection {
             Self::VaultToLiquid => (WalletKind::Vault, WalletKind::Liquid),
             Self::LiquidToSpark => (WalletKind::Liquid, WalletKind::Spark),
             Self::SparkToLiquid => (WalletKind::Spark, WalletKind::Liquid),
-            Self::VaultToSpark => (WalletKind::Vault, WalletKind::Spark),
-            Self::SparkToVault => (WalletKind::Spark, WalletKind::Vault),
+            Self::VaultToSpark | Self::VaultToOtherSpark => (WalletKind::Vault, WalletKind::Spark),
+            Self::SparkToVault | Self::SparkToOtherCube => (WalletKind::Spark, WalletKind::Vault),
             Self::VaultToOtherCube => (WalletKind::Vault, WalletKind::Vault),
+            Self::SparkToOtherSpark => (WalletKind::Spark, WalletKind::Spark),
         }
     }
 
     pub fn is_other_cube(&self) -> bool {
-        matches!(self, Self::VaultToOtherCube)
+        matches!(
+            self,
+            Self::VaultToOtherCube
+                | Self::SparkToOtherCube
+                | Self::VaultToOtherSpark
+                | Self::SparkToOtherSpark
+        )
+    }
+
+    pub fn to_other_cube(from: WalletKind, chain: ChainId) -> Option<Self> {
+        Self::to_other_wallet(from, WalletKind::Vault, chain)
+    }
+
+    pub fn to_other_wallet(from: WalletKind, to: WalletKind, chain: ChainId) -> Option<Self> {
+        match (from, to, chain) {
+            (WalletKind::Vault, WalletKind::Vault, ChainId::Bitcoin) => {
+                Some(Self::VaultToOtherCube)
+            }
+            (WalletKind::Spark, WalletKind::Vault, ChainId::Bitcoin) => {
+                Some(Self::SparkToOtherCube)
+            }
+            (WalletKind::Vault, WalletKind::Spark, ChainId::Bitcoin) => {
+                Some(Self::VaultToOtherSpark)
+            }
+            (WalletKind::Spark, WalletKind::Spark, ChainId::Bitcoin) => {
+                Some(Self::SparkToOtherSpark)
+            }
+            _ => None,
+        }
     }
 
     pub fn from_kind(&self) -> WalletKind {
@@ -2504,6 +2543,8 @@ pub struct GlobalViewConfig<'a> {
     pub transfer_page: TransferPage,
     /// The unit the transfer amount is entered and shown in.
     pub transfer_unit: BitcoinDisplayUnit,
+    /// Max is on: the transfer sends the source's whole balance, fees included.
+    pub transfer_max: bool,
     pub other_cube: OtherCubeView<'a>,
 }
 
@@ -2600,6 +2641,7 @@ pub fn global_home_view<'a>(
         light_theme,
         transfer_page,
         transfer_unit,
+        transfer_max,
         other_cube,
     } = config;
 
@@ -2634,6 +2676,7 @@ pub fn global_home_view<'a>(
             vault_balance,
             fiat_converter,
             unit: transfer_unit,
+            max: transfer_max,
             balance_masked,
             other: other_cube,
         };
@@ -3418,7 +3461,13 @@ pub fn overview_page<'a>(
 /// Transfer pre-load would surface a misleading zero / stale cap for
 /// whichever wallet hasn't finished syncing.
 pub fn transfer_head_action<'a>(config: &GlobalViewConfig<'_>) -> Option<Element<'a, Message>> {
-    transfer_available(config.has_liquid, config.has_vault, config.has_spark).then(|| {
+    crate::app::state::default_transfer_direction(
+        config.has_liquid,
+        config.has_vault,
+        config.has_spark,
+        config.chain,
+    )
+    .map(|_| {
         coincube_ui::component::tenshu::transfer_action(
             landing_control_id(config.cube_id, "Hub", "transfer"),
             Message::FocusAction,
@@ -3434,13 +3483,6 @@ pub fn transfer_head_action<'a>(config: &GlobalViewConfig<'_>) -> Option<Element
     })
 }
 
-/// Gate for the Overview's Transfer action: a transfer needs two wallets to
-/// move funds between, so at least two of the three must be present.
-///
-/// This used to be `has_vault || has_spark`, on the assumption that Liquid was
-/// present on every cube and so only a *second* wallet was in question. The
-/// Liquid sunset gate breaks that assumption — a new cube can now have Spark
-/// alone, which has nothing to transfer with — so the count is now explicit.
 /// Aggregate failure may end loading for display while an installed Spark
 /// wallet still has no authoritative funds for the transfer picker or cap.
 pub(crate) fn transfer_balance_ready(
@@ -3449,14 +3491,6 @@ pub(crate) fn transfer_balance_ready(
     spark_balance_loaded: bool,
 ) -> bool {
     !total_balance_loading && (!has_spark || spark_balance_loaded)
-}
-
-fn transfer_available(has_liquid: bool, has_vault: bool, has_spark: bool) -> bool {
-    [has_liquid, has_vault, has_spark]
-        .iter()
-        .filter(|present| **present)
-        .count()
-        >= 2
 }
 
 #[cfg(test)]
@@ -3651,6 +3685,7 @@ mod tests {
                 light_theme: false,
                 transfer_page: TransferPage::Wallets,
                 transfer_unit: BitcoinDisplayUnit::Sats,
+                transfer_max: false,
                 other_cube: OtherCubeView::default(),
             }
         }
@@ -5116,8 +5151,9 @@ mod tests {
             name: name.to_string(),
             chain,
             has_vault: true,
+            has_spark: false,
             passkey: false,
-            vault_wallet_id: None,
+            vault_wallet_id: Some(crate::app::settings::WalletId::new(name.into(), Some(1))),
             refusal,
         }
     }
@@ -5175,8 +5211,7 @@ mod tests {
         ] {
             assert!(wallets.contains(label), "wallets: {}", label);
         }
-        // Another Cube needs the Vault as source.
-        assert!(wallets.contains("From the Vault only, for now"));
+        assert!(wallets.contains("Unlocks for this transfer only"));
         assert!(!wallets.contains("◉") && !wallets.contains("Amount in sats"));
 
         let mut amount = fixture.config(1, Some(TransferDirection::SparkToVault), None);
@@ -5187,13 +5222,16 @@ mod tests {
             "From Spark · Available 250,000 SATS",
             "· this Cube",
             "SATS",
-            "BTC",
             "Minimum",
             "Prepare",
             "Back",
         ] {
             assert!(amount.contains(label), "amount: {}", label);
         }
+        assert!(
+            !amount.contains("BTC"),
+            "the unit follows the wallet setting"
+        );
 
         let review = inspect_dialog(
             "transfer-review",
@@ -5244,8 +5282,8 @@ mod tests {
             cube_choice("Archive", ChainId::Bitcoin, None),
             cube_choice(
                 "Lab",
-                ChainId::Testnet4,
-                Some("Different network: can’t receive this transfer"),
+                ChainId::Bitcoin,
+                Some("No Vault to receive this transfer"),
             ),
         ];
         let other = |page, step| {
@@ -5262,7 +5300,7 @@ mod tests {
             "Bitcoin mainnet Cubes only.",
             "Archive",
             "Lab",
-            "Different network: can’t receive this transfer",
+            "No Vault to receive this transfer",
             "Locked",
             "Locked Cubes show no balances.",
             "Continue with Archive",
@@ -5316,23 +5354,51 @@ mod tests {
         assert!(done.contains("Vault · Archive"));
     }
 
-    /// Transfer needs two wallets to move funds between: any one wallet alone
-    /// has nothing to transfer with, any two will do.
     #[test]
-    fn transfer_available_needs_two_wallets() {
-        // (liquid, vault, spark)
-        assert!(!transfer_available(false, false, false), "no wallets");
-        assert!(!transfer_available(true, false, false), "liquid alone");
-        assert!(!transfer_available(false, true, false), "vault alone");
-        assert!(
-            !transfer_available(false, false, true),
-            "spark alone — the new post-sunset default cube, and the case the \
-             old `has_vault || has_spark` gate got wrong"
-        );
+    fn spark_only_mainnet_cube_can_open_cross_cube_transfer() {
+        let fixture = ViewFixture::new();
+        let mut config = fixture.config(1, Some(TransferDirection::SparkToOtherCube), None);
+        config.has_liquid = false;
+        config.has_vault = false;
+        assert!(transfer_head_action(&config).is_some());
+        config.chain = ChainId::Regtest;
+        assert!(transfer_head_action(&config).is_none());
+        config.chain = ChainId::Bitcoin;
 
-        assert!(transfer_available(true, true, false));
-        assert!(transfer_available(true, false, true));
-        assert!(transfer_available(false, true, true));
-        assert!(transfer_available(true, true, true));
+        let wallets = inspect_dialog("spark-only-transfer-wallets", config);
+        assert!(wallets.contains("Another Cube…"));
+        assert!(wallets.contains("Unlocks for this transfer only"));
+    }
+
+    #[test]
+    fn cross_cube_spark_review_shows_the_destination_and_payment_method() {
+        let fixture = ViewFixture::new();
+        let mut choice = cube_choice("Archive", ChainId::Bitcoin, None);
+        choice.has_spark = true;
+        let choices = [choice];
+        for direction in [
+            TransferDirection::SparkToOtherSpark,
+            TransferDirection::VaultToOtherSpark,
+        ] {
+            let mut config = fixture.config(2, Some(direction), None);
+            config.other_cube.choices = &choices;
+            config.other_cube.selected = Some("Archive-id");
+            config.other_cube.unlocked = true;
+            let native = direction == TransferDirection::SparkToOtherSpark;
+            if native {
+                config.other_cube.spark_address = Some("sp1test-address");
+                config.receive_address = None;
+            }
+            let review = inspect_dialog("cross-cube-spark-review", config);
+            assert!(review.contains("Spark · Archive · Bitcoin mainnet"));
+            if native {
+                assert!(review.contains("sp1test-address"));
+                assert!(review.contains("Confirm transfer"));
+                assert!(!review.contains("Sign transaction"));
+            } else {
+                assert!(review.contains("Bitcoin on-chain"));
+                assert!(review.contains("Sign transaction"));
+            }
+        }
     }
 }

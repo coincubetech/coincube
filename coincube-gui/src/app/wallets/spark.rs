@@ -74,6 +74,18 @@ impl SparkBackend {
         self.client.prepare_send(input, amount_sat).await
     }
 
+    /// Prepare a send that spends exactly `amount_sat`, fee included: the
+    /// whole balance drains it.
+    pub async fn prepare_send_fees_included(
+        &self,
+        input: String,
+        amount_sat: u64,
+    ) -> Result<PrepareSendOk, SparkClientError> {
+        self.client
+            .prepare_send_fees_included(input, amount_sat)
+            .await
+    }
+
     /// Phase 4e: prepare an LNURL-pay / Lightning-address send.
     /// Returns the same shape as `prepare_send` so the Send panel
     /// state machine doesn't need a parallel branch.
