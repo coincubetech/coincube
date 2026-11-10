@@ -1577,43 +1577,6 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
     )
 }
 
-/// The SATS/BTC switch beside the amount (P-Transfer's `.seg`).
-fn unit_switch<'a>(unit: BitcoinDisplayUnit) -> Element<'a, Message> {
-    let segment = |label: &'static str, value: BitcoinDisplayUnit| {
-        let on = value == unit;
-        Button::new(text(label).size(13).bold())
-            .padding([8, 12])
-            .style(move |t: &theme::Theme, status| {
-                let mut style = theme::button::transparent(t, status);
-                if on {
-                    style.background = Some(iced::Background::Color(t.colors.shell.selected));
-                    style.text_color = t.colors.shell.ink;
-                } else {
-                    style.text_color = t.colors.shell.muted;
-                }
-                style.border.radius = 6.0.into();
-                style
-            })
-            .on_press_maybe((!on).then_some(Message::Home(HomeMessage::SetTransferUnit(value))))
-    };
-    Container::new(
-        Row::new()
-            .spacing(2)
-            .push(segment("SATS", BitcoinDisplayUnit::Sats))
-            .push(segment("BTC", BitcoinDisplayUnit::BTC)),
-    )
-    .padding(2)
-    .style(|t: &theme::Theme| iced::widget::container::Style {
-        border: iced::Border {
-            color: t.colors.shell.line,
-            width: 1.0,
-            radius: 8.0.into(),
-        },
-        ..Default::default()
-    })
-    .into()
-}
-
 fn parse_amount(value: &form::Value<String>, unit: BitcoinDisplayUnit) -> Option<Amount> {
     let denomination = match unit {
         BitcoinDisplayUnit::BTC => Denomination::Bitcoin,
@@ -1631,7 +1594,7 @@ fn fiat_estimate(amount: Amount, fiat_converter: Option<FiatAmountConverter>) ->
     })
 }
 
-/// Amount: the destination, then the amount with unit switch, fiat estimate
+/// Amount: the destination, then the amount in the wallet's display unit, fiat estimate
 /// and the rails' limits; Prepare fetches the destination and the quote.
 fn amount_page<'a>(
     ctx: &TransferCtx<'a>,
@@ -1723,7 +1686,7 @@ fn amount_page<'a>(
                             .spacing(10)
                             .align_y(Alignment::Center)
                             .push(Container::new(input).width(Length::Fixed(260.0)))
-                            .push(unit_switch(ctx.unit)),
+                            .push(muted(unit_label(ctx.unit))),
                     )
                     .push_maybe(estimate.map(muted))
                     .push(muted(limits)),
@@ -5154,13 +5117,16 @@ mod tests {
             "From Spark · Available 250,000 SATS",
             "· this Cube",
             "SATS",
-            "BTC",
             "Minimum",
             "Prepare",
             "Back",
         ] {
             assert!(amount.contains(label), "amount: {}", label);
         }
+        assert!(
+            !amount.contains("BTC"),
+            "the unit follows the wallet setting"
+        );
 
         let review = inspect_dialog(
             "transfer-review",

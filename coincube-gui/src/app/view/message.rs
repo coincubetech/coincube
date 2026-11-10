@@ -2437,8 +2437,6 @@ pub enum HomeMessage {
     OtherCubeSparkAddress(crate::app::transfer_destination_loader::SparkAddressReply),
     /// Unlock page → Amount, once every check passed.
     ContinueFromUnlock,
-    /// Switch the transfer amount between sats and BTC.
-    SetTransferUnit(crate::app::settings::unit::BitcoinDisplayUnit),
     /// Done page: close the dialog and open Activity.
     OpenTransferActivity,
     /// Done page: start another transfer.

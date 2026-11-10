@@ -247,15 +247,6 @@ fn with_transfer_dialog<'a>(
     }
 }
 
-fn transfer_denomination(
-    unit: BitcoinDisplayUnit,
-) -> coincube_core::miniscript::bitcoin::Denomination {
-    match unit {
-        BitcoinDisplayUnit::BTC => coincube_core::miniscript::bitcoin::Denomination::Bitcoin,
-        BitcoinDisplayUnit::Sats => coincube_core::miniscript::bitcoin::Denomination::Satoshi,
-    }
-}
-
 pub(crate) fn effective_transfer_max_sat(
     direction: TransferDirection,
     onchain_send_limit: Option<(u64, u64)>,
@@ -2468,23 +2459,6 @@ impl State for GlobalHome {
                             && self.other_address.is_some()
                         {
                             self.transfer_page = TransferPage::Amount;
-                        }
-                        Task::none()
-                    }
-                    HomeMessage::SetTransferUnit(unit) => {
-                        if unit != self.transfer_unit {
-                            let old = transfer_denomination(self.transfer_unit);
-                            if let Ok(amount) = Amount::from_str_in(&self.entered_amount.value, old)
-                            {
-                                self.entered_amount.value = match unit {
-                                    BitcoinDisplayUnit::Sats => amount.to_sat().to_string(),
-                                    BitcoinDisplayUnit::BTC => amount.to_string_in(
-                                        coincube_core::miniscript::bitcoin::Denomination::Bitcoin,
-                                    ),
-                                };
-                            }
-                            self.transfer_unit = unit;
-                            self.validate_entered_amount(cache);
                         }
                         Task::none()
                     }
@@ -6395,11 +6369,7 @@ mod tests {
             home.other_address = Some(artifact);
             home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
             send(&mut home, &cache, HomeMessage::ContinueFromUnlock);
-            send(
-                &mut home,
-                &cache,
-                HomeMessage::SetTransferUnit(BitcoinDisplayUnit::Sats),
-            );
+            home.transfer_unit = BitcoinDisplayUnit::Sats;
             send(
                 &mut home,
                 &cache,
@@ -6685,25 +6655,6 @@ mod tests {
             assert_eq!(home.current_view.step, 3);
             assert_eq!(home.pending_vault_receive_sats, 0);
             assert!(home.other_address.is_none(), "the other Cube locked again");
-        }
-
-        #[test]
-        fn transfer_unit_switch_converts_the_entered_amount() {
-            let (mut home, _wallet) = home_on_transfer_screen();
-            let cache = transfer_cache();
-            home.transfer_unit = BitcoinDisplayUnit::Sats;
-            send(
-                &mut home,
-                &cache,
-                HomeMessage::SetTransferUnit(BitcoinDisplayUnit::BTC),
-            );
-            assert_eq!(home.entered_amount.value, "0.001");
-            send(
-                &mut home,
-                &cache,
-                HomeMessage::SetTransferUnit(BitcoinDisplayUnit::Sats),
-            );
-            assert_eq!(home.entered_amount.value, "100000");
         }
 
         #[test]
