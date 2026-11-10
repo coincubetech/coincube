@@ -258,6 +258,13 @@ class Phone:
                 self.click("Back to home")
             elif "Go to home" in labels:
                 self.click("Go to home")
+            elif {"Signer key", "Back"} <= labels and not self.matching_controls("Back") and not restarted:
+                # Key details exposes its decorative Back child as disabled
+                # through XCTest. This persisted route has no pending ceremony;
+                # relaunch without reset instead of guessing a parent tap.
+                self.driver.terminate_app(BUNDLE)
+                self.driver.activate_app(BUNDLE)
+                restarted = True
             elif "Back" in labels:
                 self.click("Back")
             elif "Pending Requests" in labels and not restarted:

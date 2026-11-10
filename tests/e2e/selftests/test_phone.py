@@ -237,3 +237,15 @@ def test_gesture_card_uses_only_explicit_container_and_exact_title_line():
     assert 'type == "XCUIElementTypeOther"' in queries[0]
     assert 'BEGINSWITH "QA synthetic cube\\n"' in queries[0]
     assert 'CONTAINS' not in queries[0]
+
+
+def test_persisted_key_detail_with_disabled_back_relaunches_without_reset(monkeypatch):
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    phone, clicks = scripted_phone([{'Signer key', 'Back'}, {'Home', 'Cubes', 'Settings'}])
+    phone.matching_controls = lambda label: []
+    lifecycle = []
+    phone.driver.terminate_app = lambda bundle: lifecycle.append(('terminate', bundle))
+    phone.driver.activate_app = lambda bundle: lifecycle.append(('activate', bundle))
+    phone.restore_navigation()
+    assert clicks == []
+    assert lifecycle == [('terminate', 'io.coincube.keychainApp'), ('activate', 'io.coincube.keychainApp')]
