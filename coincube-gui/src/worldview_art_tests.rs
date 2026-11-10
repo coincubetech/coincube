@@ -66,6 +66,9 @@ fn worldview_art_fits_existing_views() {
             assert!(history.contains("Your Spark wallet is ready"));
 
             let theme = theme.with_worldview(mode);
+            use coincube_ui::worldview_copy::{self, VoiceLine};
+            let sent_line = VoiceLine::PaymentSent.for_mode(mode);
+            let received_line = VoiceLine::PaymentReceived.for_mode(mode);
             for (screen, view, heading) in [
                 (
                     "sent",
@@ -75,20 +78,23 @@ fn worldview_art_fits_existing_views() {
                         &sent_quote,
                         &sent_image,
                         "sent",
+                        sent_line,
                         (),
                     ),
                     "Transaction complete!",
                 ),
                 (
                     "received",
-                    received_celebration_page(
-                        "spark-receive",
-                        "50,000 sats",
-                        &received_quote,
-                        &received_image,
-                        "received",
-                        (),
-                    ),
+                    worldview_copy::render_in(mode, || {
+                        received_celebration_page(
+                            "spark-receive",
+                            "50,000 sats",
+                            &received_quote,
+                            &received_image,
+                            "received",
+                            (),
+                        )
+                    }),
                     "Payment received!",
                 ),
                 ("restored", done_art(appearance == "light"), ""),
@@ -135,6 +141,13 @@ fn worldview_art_fits_existing_views() {
                 );
                 if !heading.is_empty() {
                     assert!(rendered.contains(heading));
+                }
+                if let Some(line) = match screen {
+                    "sent" => sent_line,
+                    "received" => received_line,
+                    _ => None,
+                } {
+                    assert!(rendered.contains(line));
                 }
             }
         }

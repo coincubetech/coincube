@@ -7,3 +7,4 @@ pub mod image;
 pub mod locale;
 pub mod theme;
 pub mod widget;
+pub mod worldview_copy;

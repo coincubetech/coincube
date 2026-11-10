@@ -1588,6 +1588,10 @@ impl GUI {
                 .then_some("The device settings could not be loaded."),
             save_error: matches!(notice, PreferencesNotice::SaveFailed)
                 .then_some("Please try again."),
+            worldview_changed: self
+                .preferences_sheet
+                .as_ref()
+                .and_then(|sheet| sheet.worldview_changed),
             diagnostics: preferences_view::Diagnostics::default(),
             about: preferences_view::About::default(),
             max_zoom: self.zoom.screen_width.map(Zoom::largest_for_screen),
@@ -2036,6 +2040,14 @@ impl GUI {
             }
             self.zoom.pending = Some(zoom);
             return self.save_pending_zoom();
+        }
+        if matches!(
+            change,
+            crate::app::settings::preferences::PreferenceChange::Worldview(_)
+        ) {
+            if let Some(sheet) = &mut self.preferences_sheet {
+                sheet.worldview_changed = None;
+            }
         }
         match self.preferences.begin_save(change) {
             Ok(request) => {
@@ -3304,6 +3316,7 @@ impl GUI {
                 self.preferences_sheet = Some(PreferencesSheet {
                     origin,
                     page: PreferencesPageState::default(),
+                    worldview_changed: None,
                 });
                 self.connect_sheet = None;
                 self.publish_preferences_sheet();
@@ -3785,6 +3798,19 @@ impl GUI {
                     if before.map(|prefs| prefs.theme) != after.map(|prefs| prefs.theme) {
                         self.publish_appearance();
                     }
+                    if let (
+                        Operation::Save(
+                            crate::app::settings::preferences::PreferenceChange::Worldview(mode),
+                        ),
+                        Some(sheet),
+                    ) = (request.operation, &mut self.preferences_sheet)
+                    {
+                        if before.is_some_and(|prefs| prefs.worldview != mode)
+                            && after.is_some_and(|prefs| prefs.worldview == mode)
+                        {
+                            sheet.worldview_changed = Some(mode);
+                        }
+                    }
                     if launcher_presentation_changed(before, after) {
                         self.refresh_all_launcher_modes();
                     }
@@ -4036,7 +4062,9 @@ impl GUI {
             .accepted()
             .map(|accepted| accepted.preferences.language)
             .unwrap_or_default();
-        coincube_ui::locale::render_in(language, || self.localized_screen())
+        coincube_ui::locale::render_in(language, || {
+            coincube_ui::worldview_copy::render_in(self.worldview(), || self.localized_screen())
+        })
     }
 
     fn localized_screen(&self) -> Element<Message> {
@@ -4142,6 +4170,7 @@ pub struct OverlayOrigin {
 struct PreferencesSheet {
     origin: OverlayOrigin,
     page: PreferencesPageState,
+    worldview_changed: Option<coincube_ui::theme::WorldviewMode>,
 }
 
 struct ConnectSheet {
@@ -5295,6 +5324,52 @@ mod app_preferences_sheet_tests {
         assert_eq!(gui.zoom.min_size_for, Some(Zoom::from(125)));
         drop(gui);
         std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn worldview_voice_notice_follows_only_a_changed_accepted_save() {
+        use coincube_ui::theme::WorldviewMode;
+
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let directory =
+            std::env::temp_dir().join(format!("tenshu-worldview-voice-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let root = CoincubeDirectory::new(directory.clone());
+        let mut gui = launcher_gui(&root);
+        let pane = gui.focus.unwrap();
+        let tab = gui.panes.get(pane).unwrap().tabs[0].id;
+        drop(gui.update(Message::Pane(
+            pane,
+            pane::Message::tab(
+                tab,
+                tab::Message::OpenAppPreferences(tab::PreferencesSource::Home),
+            ),
+        )));
+        assert_eq!(gui.preferences_view_model().worldview_changed, None);
+
+        let change = PreferenceChange::Worldview(WorldviewMode::Luke);
+        let failed = gui.preferences.begin_save(change).unwrap();
+        drop(gui.update(Message::Preferences(failed, Err("disk full".into()))));
+        assert_eq!(gui.preferences_view_model().worldview_changed, None);
+        assert_eq!(gui.worldview(), WorldviewMode::Samurai);
+
+        let request = gui.preferences.begin_save(change).unwrap();
+        let receipt = GlobalSettings::save_preference(&request.root, change).unwrap();
+        drop(gui.update(Message::Preferences(request, Ok(receipt))));
+        assert_eq!(
+            gui.preferences_view_model().worldview_changed,
+            Some(WorldviewMode::Luke)
+        );
+        assert_eq!(gui.worldview(), WorldviewMode::Luke);
+        drop(gui.close_preferences_sheet());
+        assert_eq!(gui.preferences_view_model().worldview_changed, None);
+        drop(gui);
+        std::fs::remove_dir_all(directory).ok();
     }
 
     #[test]

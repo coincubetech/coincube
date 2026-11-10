@@ -161,7 +161,7 @@ use coincube_core::miniscript::bitcoin::{self, Network};
 use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     component::network_banner,
-    widget::{Column, Element},
+    widget::{Column, ColumnExt, Element},
 };
 use coincubed::config::EsploraConfig;
 use coincubed::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth, Config};
@@ -1579,6 +1579,13 @@ impl Installer {
             .width(Length::Fill)
             .max_width(960)
             .push(h2(CREATE_VAULT_TITLE))
+            .push_maybe(
+                coincube_ui::worldview_copy::VoiceLine::CreateVault
+                    .get()
+                    .map(|line| {
+                        coincube_ui::component::text::p2_regular(line).style(theme::text::secondary)
+                    }),
+            )
             .push(restore_frame::stepper(&steps, active))
             .push(content);
         Container::new(iced::widget::scrollable(

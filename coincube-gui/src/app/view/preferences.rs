@@ -68,6 +68,13 @@ fn worldview_row<'a>(selected: WorldviewMode, enabled: bool) -> Element<'a, Mess
         WorldviewMode::Luke => CopyText::NoSpamShallPass.get(),
     };
 
+    use coincube_ui::worldview_copy::VoiceLine;
+    let profile = VoiceLine::Profile.for_mode(selected).unwrap_or_default();
+    let note = match VoiceLine::Consensus.for_mode(selected) {
+        Some(consensus) => format!("{tagline}\n{profile}\n{consensus}"),
+        None => format!("{tagline}\n{profile}"),
+    };
+
     setting_row(
         CopyText::BitcoinWorldview.get(),
         segmented(
@@ -99,7 +106,7 @@ fn worldview_row<'a>(selected: WorldviewMode, enabled: bool) -> Element<'a, Mess
     .tag(CopyText::ThisDevice.get())
     .trailing_tag()
     .description(CopyText::WorldviewDescription.get())
-    .note(tagline, Tone::Muted)
+    .note(note, Tone::Muted)
     .into()
 }
 
@@ -242,6 +249,7 @@ pub struct ViewModel<'a> {
     pub loading: bool,
     pub load_error: Option<&'a str>,
     pub save_error: Option<&'a str>,
+    pub worldview_changed: Option<WorldviewMode>,
     pub diagnostics: Diagnostics<'a>,
     pub about: About<'a>,
     /// The largest zoom this window's screen holds; None until it is known.
@@ -424,6 +432,15 @@ fn section_content<'a>(
                 .to_string(),
             Tone::Muted,
         );
+    }
+    if page.section == Section::Appearance {
+        if let Some(line) = model
+            .worldview_changed
+            .filter(|mode| model.saved.is_some_and(|saved| saved.worldview == *mode))
+            .and_then(|mode| coincube_ui::worldview_copy::VoiceLine::ModeChanged.for_mode(mode))
+        {
+            notice(line.to_owned(), Tone::Muted);
+        }
     }
     let idle = !model.saving && !model.loading;
     let Some(saved) = model.saved else {
@@ -1589,6 +1606,50 @@ mod tests {
                 vec![Message::Change(PreferenceChange::Language(
                     Language::Spanish
                 ))]
+            );
+        }
+    }
+
+    #[test]
+    fn worldview_voice_profiles_and_applied_mode_notice_render_in_appearance() {
+        use crate::app::view::shared::landing::capture;
+
+        let page = PreferencesPageState {
+            section: Section::Appearance,
+            ..Default::default()
+        };
+        for (mode, consensus, notice) in [
+            (
+                WorldviewMode::Suitcoiner,
+                "Consensus by market capitalization.",
+                "Institutional wisdom activated.",
+            ),
+            (
+                WorldviewMode::Luke,
+                "Consensus is not a popularity contest.",
+                "You have rejected the establishment.",
+            ),
+        ] {
+            let model = ViewModel {
+                saved: Some(DevicePreferences {
+                    worldview: mode,
+                    ..Default::default()
+                }),
+                worldview_changed: Some(mode),
+                ..Default::default()
+            };
+            let shown = capture::inspect_filled(
+                "worldview-voice-appearance",
+                view(&page, model),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+                (1024, 768),
+            );
+            assert!(shown.contains(consensus));
+            assert!(shown.contains(notice));
+            assert!(
+                shown.contains("Your wallets, networks, and security settings remain unchanged.")
             );
         }
     }

@@ -22,7 +22,7 @@ use coincube_ui::{
         text::{p2_regular, text},
     },
     theme,
-    widget::{Column, Container, Element, Row},
+    widget::{Column, ColumnExt, Container, Element, Row},
 };
 use coincubed::{
     config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth, Config, ConfigError},
@@ -1210,6 +1210,11 @@ pub(crate) fn view_with_retry<'a>(
                 )))
                 .push(crate::loading::loading_indicator(None))
                 .push(text(CopyText::ScanningTheBlockchain.get()).style(theme::text::secondary))
+                .push_maybe(
+                    coincube_ui::worldview_copy::VoiceLine::Syncing
+                        .get()
+                        .map(|line| p2_regular(line).style(theme::text::secondary)),
+                )
                 .push(p2_regular(CopyText::InitialEsploraScan.get()).style(theme::text::secondary)),
         ),
         Step::Connecting => cover(
@@ -1249,6 +1254,11 @@ pub(crate) fn view_with_retry<'a>(
                         CopyText::SyncingBlockchain.get()
                     })
                     .style(theme::text::secondary),
+                )
+                .push_maybe(
+                    coincube_ui::worldview_copy::VoiceLine::Syncing
+                        .get()
+                        .map(|line| p2_regular(line).style(theme::text::secondary)),
                 )
                 .push(p2_regular(bitcoind_logs).style(theme::text::secondary)),
         ),
@@ -2330,6 +2340,29 @@ mod tests {
             text("body"),
         );
         let _ = cover::<ViewMessage, _>(None, text("body"));
+    }
+
+    #[test]
+    fn worldview_voice_sits_alongside_fallback_scan_guidance() {
+        use crate::app::view::shared::landing::capture;
+        use coincube_ui::{theme::WorldviewMode, worldview_copy};
+
+        let mut quote_provider = QuoteProvider::new();
+        let quote = quote_provider.select("loading");
+        let image = quote_display::image_handle_for_context("loading");
+        let step = Step::FullScan { progress: 0.5 };
+        let rendered =
+            worldview_copy::render_in(WorldviewMode::Luke, || view(&step, &quote, &image));
+        let shown = capture::inspect(
+            "worldview-voice-fallback-scan",
+            rendered,
+            (1024, 768),
+            "dark",
+            theme::Theme::dark().with_worldview(WorldviewMode::Luke),
+        );
+        assert!(shown.contains(CopyText::ScanningTheBlockchain.get()));
+        assert!(shown.contains("Consulting the ancient rules…"));
+        assert!(shown.contains(CopyText::InitialEsploraScan.get()));
     }
 
     #[test]
