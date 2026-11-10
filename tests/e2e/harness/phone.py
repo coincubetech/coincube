@@ -210,11 +210,20 @@ class Phone:
         predicate = "visible == true AND enabled == true AND (label == %s OR name == %s)" % (json.dumps(label), json.dumps(label))
         return self.driver.find_elements(AppiumBy.IOS_PREDICATE, predicate)
 
-    def click(self, label):
-        elements = self.matching_controls(label)
-        if len(elements) != 1:
-            raise Blocked("PHONE_SELECTOR", "Expected one visible, enabled Keychain control; the UI needs a selector update.")
-        elements[0].click()
+    def click(self, label, timeout=15):
+        # Flutter may publish the next screen's heading before its action is
+        # enabled. Wait only for absence; never choose among duplicates or
+        # retry a dispatched click whose response may have been lost.
+        until = time.monotonic() + timeout
+        while True:
+            self.labels()  # Preserve foreground/auth/capacity guards while waiting.
+            elements = self.matching_controls(label)
+            if len(elements) == 1:
+                elements[0].click()
+                return
+            if len(elements) > 1 or time.monotonic() >= until:
+                raise Blocked("PHONE_SELECTOR", "Expected one visible, enabled Keychain control; the UI needs a selector update.")
+            time.sleep(.25)
 
     def refresh(self):
         self.driver.execute_script("mobile: swipe", {"direction": "down"})

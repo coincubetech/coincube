@@ -227,6 +227,59 @@ def test_setup_card_never_retries_an_uncertain_click(monkeypatch):
     assert clicks == [True]
 
 
+def test_exact_action_waits_for_enabled_control_after_success_heading(monkeypatch):
+    waits, clicks, labels = [], [], []
+    results = iter([[], [], [SimpleNamespace(click=lambda: clicks.append('back'))]])
+    phone = Phone(SimpleNamespace(), 38)
+    phone.labels = lambda: labels.append('guard') or {'Signer key created'}
+    phone.matching_controls = lambda label: next(results) if label == 'Back to home' else pytest.fail('wrong label')
+    monkeypatch.setattr('harness.phone.time.sleep', waits.append)
+    phone.click('Back to home')
+    assert waits == [.25, .25] and clicks == ['back'] and len(labels) == 3
+
+
+@pytest.mark.parametrize('count', [0, 2])
+def test_exact_action_missing_or_ambiguous_never_dispatches(monkeypatch, count):
+    phone = Phone(SimpleNamespace(), 38)
+    phone.labels = lambda: HOME
+    phone.matching_controls = lambda _: [object()] * count
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: pytest.fail('must not wait'))
+    with pytest.raises(Blocked) as error:
+        phone.click('Back to home', timeout=0 if count == 0 else 15)
+    assert error.value.code == 'PHONE_SELECTOR'
+
+
+def test_exact_action_never_retries_lost_click_response(monkeypatch):
+    calls = []
+    def dispatch():
+        calls.append('click')
+        raise RuntimeError('Synthetic lost click response')
+    phone = Phone(SimpleNamespace(), 38)
+    phone.labels = lambda: HOME
+    phone.matching_controls = lambda _: [SimpleNamespace(click=dispatch)]
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: pytest.fail('must not retry'))
+    with pytest.raises(RuntimeError):
+        phone.click('Back to home')
+    assert calls == ['click']
+
+
+def test_exact_action_rechecks_foreground_before_waited_click(monkeypatch):
+    phone = Phone(SimpleNamespace(), 38)
+    guards = []
+    def guard():
+        guards.append(True)
+        if len(guards) == 2:
+            raise Blocked('PHONE_AUTH', 'Synthetic foreground auth transition')
+        return HOME
+    phone.labels = guard
+    queries = []
+    phone.matching_controls = lambda _: queries.append(True) or []
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    with pytest.raises(Blocked) as error:
+        phone.click('Back to home')
+    assert error.value.code == 'PHONE_AUTH' and queries == [True]
+
+
 def test_gesture_card_uses_only_explicit_container_and_exact_title_line():
     queries, clicks = [], []
     def find(by, predicate):
