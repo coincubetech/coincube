@@ -944,19 +944,40 @@ class FreshRunner(Runner):
         self.stage_phone()
         return True
 
+    def continue_request_discovery(self):
+        if "request_discovery_restart" in self.artifacts:
+            self.validate_discovery_restart()  # An incomplete attempt always blocks before navigation.
+        try:
+            if not self.require_pending_discovery():
+                return False
+            return self.restart_request_discovery()
+        except Blocked as error:
+            result = getattr(self, "last_collection", {})
+            if (not isinstance(error, Failed) and error.code == "REQUEST_DISCOVERY_ADVANCED"
+                    and result.get("ready") is False and type(result.get("status")) is int
+                    and result["status"] in (2, 3) and type(result.get("submitted_signature_count")) is int
+                    and result["submitted_signature_count"] == 0):
+                # Delivery/view acknowledgement needs no process recovery. This
+                # also handles advancement during the final pre-restart guard.
+                # Preserve the restart allowance and perform ordinary exact review.
+                return True
+            raise
+
     def stage_sign(self):
         if self.artifacts.get("already_broadcast") or self.collect_once():
             return
         if not self.artifacts.get("approval_started"):
-            if "request_discovery_timeout" in self.artifacts and not self.restart_request_discovery():
+            archived_timeout = "request_discovery_timeout" in self.artifacts
+            if archived_timeout and not self.continue_request_discovery():
                 return
             try:
                 self.approve_phone()
             except Blocked as error:
-                if isinstance(error, Failed) or error.code != "REQUEST_DELIVERY" or "request_discovery_restart" in self.artifacts:
+                if (isinstance(error, Failed) or error.code != "REQUEST_DELIVERY" or archived_timeout
+                        or "request_discovery_restart" in self.artifacts):
                     raise
                 self.archive_discovery_timeout({"status": "blocked", "code": error.code, "at": int(time.time())})
-                if self.restart_request_discovery():
+                if self.continue_request_discovery():
                     self.approve_phone()  # A second timeout propagates; there is no second restart.
             return
         if self.upgrade_approval():

@@ -159,6 +159,10 @@ restart and requires `NOT_RUNNING` followed by a different foreground process.
 An uncertain response blocks all further navigation on resume; it never repeats
 the restart. A completed receipt permits ordinary account/network checks and full
 transaction review. A second delivery timeout stops without another restart.
+If the exact session advances to DELIVERED or VIEWED with zero submissions,
+the runner proceeds to ordinary exact-request review without restarting or
+consuming the restart allowance. Approved, terminal, unknown, or nonzero-submission
+states cannot use this path; a verified signature proceeds to collection.
 No request, approval, or PIN marker is reset or replaced. This is a bounded
 discovery repair, not evidence that the underlying delivery cause is resolved.
 

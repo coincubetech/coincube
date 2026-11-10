@@ -1431,3 +1431,65 @@ def test_authentication_archives_original_timeout_before_any_phone_navigation(ru
     runner.journal.outcome('sign', 'blocked', 'OTHER')
     runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
     assert runner.artifacts['request_discovery_timeout']['outcome'] == before
+
+
+@pytest.mark.parametrize('status', [2, 3])
+def test_archived_delivery_timeout_advances_to_ordinary_review_without_restart(runner, status):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    original = deepcopy(runner.artifacts['request_discovery_timeout'])
+    runner.native_call = lambda *a, **k: {'ready': False, 'status': status, 'submitted_signature_count': 0}
+    runner.stage_sign()
+    assert calls == ['ordinary-review']
+    assert 'request_discovery_restart' not in runner.artifacts
+    assert runner.artifacts['request_discovery_timeout'] == original
+    assert 'approval_started' not in runner.artifacts
+
+
+@pytest.mark.parametrize('status', [2, 3])
+def test_delivery_advancement_at_restart_guard_uses_ordinary_review_without_terminate(runner, status):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    replies = iter([{'ready': False, 'status': 1, 'submitted_signature_count': 0},
+                    {'ready': False, 'status': 1, 'submitted_signature_count': 0},
+                    {'ready': False, 'status': status, 'submitted_signature_count': 0}])
+    runner.native_call = lambda *a, **k: next(replies)
+    runner.stage_sign()
+    assert calls == ['ordinary-review']
+    assert 'request_discovery_restart' not in runner.artifacts
+
+
+@pytest.mark.parametrize('status,count', [(0, 0), (4, 0), (5, 0), (6, 0), (7, 0), (99, 0), (2, 1), (3, 1), (3, None), (2, False)])
+def test_archived_timeout_never_reviews_approved_terminal_unknown_or_submitted_state(runner, status, count):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    runner.native_call = lambda *a, **k: {'ready': False, 'status': status, 'submitted_signature_count': count}
+    with pytest.raises(Blocked) as error: runner.stage_sign()
+    assert error.value.code == 'REQUEST_DISCOVERY_ADVANCED'
+    assert calls == [] and 'request_discovery_restart' not in runner.artifacts
+
+
+def test_completed_discovery_receipt_also_uses_delivered_queue_without_second_restart(runner):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    runner.restart_request_discovery()
+    receipt = deepcopy(runner.artifacts['request_discovery_restart'])
+    calls.clear()
+    runner.native_call = lambda *a, **k: {'ready': False, 'status': 2, 'submitted_signature_count': 0}
+    runner.stage_sign()
+    assert calls == ['ordinary-review']
+    assert runner.artifacts['request_discovery_restart'] == receipt
+
+
+def test_advanced_session_review_timeout_stops_without_a_second_discovery_pass(runner):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    runner.native_call = lambda *a, **k: {'ready': False, 'status': 2, 'submitted_signature_count': 0}
+    def absent():
+        calls.append('ordinary-review')
+        raise Blocked('REQUEST_DELIVERY', 'Synthetic queue absence')
+    runner.approve_phone = absent
+    with pytest.raises(Blocked) as error: runner.stage_sign()
+    assert error.value.code == 'REQUEST_DELIVERY'
+    assert calls == ['ordinary-review']
+    assert 'request_discovery_restart' not in runner.artifacts
