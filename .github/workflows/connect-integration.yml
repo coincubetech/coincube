@@ -1,7 +1,7 @@
 name: Connect Integration Tests
 
-# Targets the Connect API (production, test account): stream lifecycle, RegisterDevice idempotency,
-# and ResolveSigners against fixture vaults. Gated behind the
+# Targets the Connect API (production, test account): stream lifecycle,
+# RegisterDevice idempotency, and ResolveSigners against fixture vaults. Gated behind the
 # `integration-tests` Cargo feature so the standard PR CI matrix stays
 # hermetic. Runs nightly + on manual dispatch.
 #
