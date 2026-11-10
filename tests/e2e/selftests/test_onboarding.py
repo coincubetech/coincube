@@ -135,6 +135,61 @@ def test_interrupted_pin_setup_does_not_repeat_partial_keypad_entry():
     assert error.value.code == 'SETUP_PIN_UNCERTAIN'
 
 
+CHOOSER = {'Set up your keychain', 'Use a PIN', 'Use a passkey', 'I have a recovery phrase'}
+
+
+def uncommitted_state():
+    return {'identity': 'account:device', 'pin': '123456', 'verified': False,
+            'entered_Create a PIN': True, 'entered_Confirm your PIN': True}
+
+
+def test_fresh_chooser_archives_uncommitted_generation_before_any_ui_action():
+    store = Store(uncommitted_state())
+    flow = controller(store, CHOOSER)
+    flow.phone.build = 37
+    def click_card(title):
+        assert title == 'Use a PIN'
+        assert store.value['pin'] == '123456'
+        assert 'entered_Create a PIN' not in store.value
+        old = store.value['abandoned_setup_generations'][0]
+        assert old['entered_Create a PIN'] is True
+        assert old['entered_Confirm your PIN'] is True
+        assert old['observed_build'] == 37
+        raise Blocked('TEST_INTERRUPTION', 'Simulated interruption after durable archive.')
+    flow.phone.click_card = click_card
+    with pytest.raises(Blocked) as error:
+        flow.setup()
+    assert error.value.code == 'TEST_INTERRUPTION'
+    # Restarting before the first new entry does not append another generation.
+    resumed = controller(store, CHOOSER)
+    resumed.resume_uncommitted_setup(store.load(), CHOOSER)
+    assert len(store.writes) == 1
+
+
+@pytest.mark.parametrize('change', [
+    {'entered_Confirm your PIN': False}, {'words': WORDS},
+    {'recovery_submission_started': True}, {'pending_attempt': 'sign:run'},
+    {'verified': True}, {'abandoned_setup_generations': [{'retained': True}]},
+])
+def test_chooser_cannot_restart_partial_committed_or_repeated_setup(change):
+    state = uncommitted_state() | change
+    store = Store(state)
+    flow = controller(store, CHOOSER)
+    with pytest.raises(Blocked) as error:
+        flow.resume_uncommitted_setup(store.load(), CHOOSER)
+    assert error.value.code == 'SETUP_PIN_UNCERTAIN'
+    assert store.writes == []
+
+
+def test_uncommitted_generation_requires_the_complete_fresh_chooser():
+    store = Store(uncommitted_state())
+    flow = controller(store, {'Use a PIN'})
+    with pytest.raises(Blocked) as error:
+        flow.setup()
+    assert error.value.code == 'SETUP_PIN_UNCERTAIN'
+    assert store.writes == []
+
+
 def test_encrypted_secret_store_uses_cas_and_verifies_readback():
     record = {'value': None, 'sha256': None}
     calls = []

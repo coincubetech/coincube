@@ -76,8 +76,11 @@ desktop session from macOS Keychain and performs supported device registration.
 `desktop_session_namespace` is `development` for a debug Tenshu build and
 `production` for the release app; this selects only its existing Keychain
 namespace. Both API endpoint values always remain pinned to production. `ios.minimum_build` must identify the installed
-reviewed Keychain build; the example uses 36, which includes the delivery and
-PIN-refresh fixes. `ios.xctestrun` can identify an already-signed WebDriverAgent
+reviewed Keychain build. Fresh onboarding also requires accessibility forwarding
+through Keychain's screenshot-protection wrapper: build 36 hides the recovery
+controls from XCTest, and cannot complete this flow. Build 37 is the candidate
+for that fix; its number alone is not source or acceptance evidence.
+`ios.xctestrun` can identify an already-signed WebDriverAgent
 runner so the suite starts it automatically when needed.
 
 Install Appium 3.9.0 and XCUITest 12.22.8, plus Python 3.11+, Xcode and the pinned
@@ -128,7 +131,14 @@ A PIN attempt is recorded before entry and blocks further attempts across
 process restarts and different run directories until the exact key/signature
 is verified through Connect. A delayed signature is polled without reopening
 approval. Interrupted initial PIN entry fails closed if partial input cannot
-be determined. Lost broadcast responses reconcile the same transaction ID;
+be determined. One completed PIN setup whose recovery words were never captured
+and whose challenge was never submitted may restart at the full fresh-setup
+chooser after an app restart. The runner archives the previous entry markers
+before acting and retains the same encrypted PIN. It never repeats an unlock,
+resets an existing master, or discards a saved phrase/submission. A second such
+restart is blocked. Keychain's normal local-blob and server-key guards must pass
+again before a new recovery phrase appears, and Settings identity is verified
+before Cube creation or funding. Lost broadcast responses reconcile the same transaction ID;
 retries can send only the previously pinned signed bytes.
 
 Exit **0** means selected stages passed, **1** an assertion failed, **2** a

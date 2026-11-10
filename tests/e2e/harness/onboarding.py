@@ -85,6 +85,36 @@ class Onboarding:
             time.sleep(.3)
         raise Blocked("PHONE_CONTROL", "The expected setup control is not visible after bounded scrolling.")
 
+    def resume_uncommitted_setup(self, state, labels):
+        """Archive one lost, uncommitted generation; never retry an unlock.
+
+        Keychain's ConfirmInitialPin generates only RAM state. Its first blob,
+        PIN and entropy writes occur after ConfirmRecoveryPhraseBackedUp.
+        A cold launch can therefore return to the fresh chooser without a
+        master. Do not apply that reasoning to a partial keypad, saved phrase,
+        submitted challenge, existing master or an unresolved unlock attempt.
+        """
+        markers = ("entered_Create a PIN", "entered_Confirm your PIN")
+        if not any(state.get(key) for key in markers):
+            return
+        chooser = {"Set up your keychain", "Use a PIN", "Use a passkey", "I have a recovery phrase"}
+        history = state.get("abandoned_setup_generations", [])
+        if (not chooser <= labels or not all(state.get(key) is True for key in markers)
+                or state.get("words") or state.get("recovery_submission_started")
+                or state.get("verified") or state.get("pending_attempt") or history):
+            raise Blocked("SETUP_PIN_UNCERTAIN", "Only one completed, uncommitted PIN setup may restart from the genuine fresh chooser.")
+        state["abandoned_setup_generations"] = [{
+            "reason": "fresh_chooser_before_recovery_submission",
+            "observed_build": self.phone.build,
+            "recorded_at": int(time.time()),
+            **{key: state[key] for key in markers},
+        }]
+        for key in markers:
+            state.pop(key)
+        # Same encrypted PIN, same account/device binding. Save the history
+        # before any UI action; an interruption cannot erase the prior attempt.
+        self.save(state)
+
     def setup(self):
         labels = self.phone.labels()
         state = self.store.load()
@@ -114,6 +144,7 @@ class Onboarding:
             state = {"identity": self.identity, "pin": f"{secrets.randbelow(1_000_000):06d}", "verified": False}
             self.save(state)
         if "Use a PIN" in labels:
+            self.resume_uncommitted_setup(state, labels)
             self.phone.click_card("Use a PIN")
             labels = self.wait("Create a PIN")
         for title, next_title in (("Create a PIN", "Confirm your PIN"), ("Confirm your PIN", "Write down these 12 words")):
