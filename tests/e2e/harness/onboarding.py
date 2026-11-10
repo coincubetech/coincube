@@ -51,10 +51,10 @@ class Onboarding:
             'visible == true AND enabled == true AND (type == "XCUIElementTypeTextField" OR type == "XCUIElementTypeSecureTextField")')
         # iOS screenshot protection wraps Flutter in a secure text field. Its
         # forwarded AX children are editable; the container itself is not.
-        # Exclude only secure ancestors, never choose the first remaining field.
+        # The same wrapper becomes a plain TextField when protection is off.
+        # Exclude input ancestors of either type, never choose the first match.
         return [field for field in candidates
-                if field.get_attribute("type") != "XCUIElementTypeSecureTextField"
-                or not field.find_elements(AppiumBy.XPATH,
+                if not field.find_elements(AppiumBy.XPATH,
                     'descendant::XCUIElementTypeTextField | descendant::XCUIElementTypeSecureTextField')]
 
     def fill_one(self, value):

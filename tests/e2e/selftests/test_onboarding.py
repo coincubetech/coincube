@@ -220,9 +220,10 @@ def field_controller(candidates):
     return flow
 
 
-def test_protection_wrapper_is_excluded_from_three_recovery_fields():
+@pytest.mark.parametrize('kind', ['XCUIElementTypeSecureTextField', 'XCUIElementTypeTextField'])
+def test_protection_wrapper_is_excluded_from_three_recovery_fields(kind):
     children = [InputField() for _ in range(3)]
-    wrapper = InputField('XCUIElementTypeSecureTextField', children)
+    wrapper = InputField(kind, children)
     assert field_controller([wrapper, *children]).fields() == children
     assert wrapper.actions == []
 
@@ -233,6 +234,14 @@ def test_protection_wrapper_never_receives_pin_but_real_secure_leaf_does():
     field_controller([wrapper, leaf]).fill_one('123456')
     assert wrapper.actions == []
     assert leaf.actions == ['click', 'clear', ('input', '123456')]
+
+
+def test_unprotected_wrapper_never_receives_signer_name():
+    leaf = InputField()
+    wrapper = InputField('XCUIElementTypeTextField', [leaf])
+    field_controller([wrapper, leaf]).fill_one('QA synthetic signer')
+    assert wrapper.actions == []
+    assert leaf.actions == ['click', 'clear', ('input', 'QA synthetic signer')]
 
 
 def test_hidden_or_disabled_descendant_does_not_make_wrapper_editable():
