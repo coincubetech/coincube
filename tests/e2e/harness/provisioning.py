@@ -1,5 +1,6 @@
 """Fresh production-Connect/Testnet4 scenario. No vault or PSBT input fixture."""
 from contextlib import ExitStack
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -306,6 +307,143 @@ class FreshRunner(Runner):
             raise Failed("PHONE_VALIDATION_CHANGED", "Saved phone account, device or network validation does not match this run.")
         self.journal.artifact("phone_validation_reused", {"purpose": pending, "validation": validation})
         self.deferred_phone_purpose = pending
+        if pending == sign_purpose:
+            self.archive_approval_attempt(state)
+
+    def approval_binding(self):
+        names = ("account_identity", "desktop_identity", "request_id", "session_id", "intent",
+                 "psbt_sha256", "descriptor_id", "target_key_id", "target_fingerprint", "cube_id", "cube_uuid", "vault_id", "fee_sats")
+        if any(not self.artifacts.get(name) for name in names):
+            raise Blocked("APPROVAL_EVIDENCE", "The signing attempt lacks complete immutable run evidence.")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.artifacts["psbt_sha256"]):
+            raise Failed("APPROVAL_EVIDENCE", "The saved prepared transaction hash is invalid.")
+        return deepcopy({**{name: self.artifacts[name] for name in names}, "run_id": self.run_id,
+                         "journal_binding": self.journal.data["binding"], "device": self.phone.device_digest})
+
+    def untouched_signing_pin(self, state):
+        return (isinstance(state, dict) and state.get("identity") == self.onboarding.identity
+                and state.get("verified") is True and "pending_attempt" not in state
+                and "pin_resume_probe" not in self.artifacts and "pin_dispatch_started" not in self.artifacts)
+
+    def validate_approval_context(self, context):
+        binding = self.approval_binding()
+        if (not isinstance(context, dict) or context.get("binding") != binding
+                or context.get("request_id") != binding["request_id"]
+                or context.get("session_id") != binding["session_id"]
+                or context.get("intent_sha256") != digest(binding["intent"])
+                or context.get("fee_sats") != binding["fee_sats"]
+                or context.get("device") != self.phone.device_digest
+                or type(context.get("build")) is not int or context["build"] < 38
+                or not isinstance(context.get("process"), dict)
+                or type(context["process"].get("pid")) is not int or context["process"]["pid"] <= 0
+                or context["process"].get("bundle_id") != "io.coincube.keychainApp"):
+            raise Failed("APPROVAL_CHANGED", "The saved approval context does not match this run and device.")
+        return binding
+
+    def archive_approval_attempt(self, state):
+        """Save original evidence before rerun stage outcomes overwrite it."""
+        existing = self.artifacts.get("approval_original_attempt")
+        if existing is not None:
+            if not isinstance(existing, dict) or existing.get("binding") != self.approval_binding():
+                raise Failed("APPROVAL_CHANGED", "The archived signing attempt no longer matches this run.")
+            return
+        if not self.untouched_signing_pin(state):
+            return  # Collection remains possible; PIN replay never is.
+        context = self.artifacts.get("approval_context")
+        if context is not None:
+            binding = self.validate_approval_context(context)
+            original = {"origin": "approval-context", "binding": binding, "build": context["build"],
+                        "context": deepcopy(context)}
+        else:
+            phone = self.artifacts.get("phone", {})
+            before = self.journal.data["stages"].get("phone", {})
+            after = self.journal.data["stages"].get("sign", {})
+            if (not isinstance(phone, dict) or type(phone.get("build")) is not int or phone["build"] <= 0
+                    or phone.get("network") != "testnet4" or phone.get("cube_visible") is not True
+                    or before.get("status") != "passed" or after.get("status") != "blocked"
+                    or after.get("code") != "PHONE_AUTH"
+                    or type(before.get("at")) is not int or type(after.get("at")) is not int
+                    or not 0 < before["at"] <= after["at"]):
+                return
+            try:
+                binding = self.approval_binding()
+            except Blocked:
+                return
+            original = {"origin": "legacy-stage-evidence", "binding": binding, "build": phone["build"],
+                        "phone": deepcopy(phone), "phone_stage": deepcopy(before), "sign_stage": deepcopy(after)}
+        self.pin_artifact("approval_original_attempt", original)
+
+    def collect_once(self):
+        result = self.native_call("collect", session_id=self.artifacts["session_id"],
+                                  output_psbt_file=str(self.journal.directory / "signed.psbt"))
+        self.last_collection = result
+        if result["ready"]:
+            self.journal.artifact("signature_count_min", result["signature_count_min"])
+        return result["ready"]
+
+    def require_viewed_unsubmitted(self):
+        binding = self.approval_binding()
+        pinned = self.artifacts.get("approval_binding")
+        original = self.artifacts.get("approval_original_attempt")
+        if ((pinned is not None and pinned != binding)
+                or (original is not None and original.get("binding") != binding)):
+            raise Failed("APPROVAL_CHANGED", "The reviewed transaction binding changed before approval or PIN entry.")
+        if self.collect_once():
+            return False
+        result = self.last_collection
+        if (result.get("ready") is not False or type(result.get("status")) is not int
+                or result["status"] != 3 or type(result.get("submitted_signature_count")) is not int
+                or result["submitted_signature_count"] != 0):
+            raise Blocked("APPROVAL_REMOTE_STATE", "Only an exact viewed session with zero submitted signatures may continue its first PIN attempt.")
+        return True
+
+    def upgrade_approval(self):
+        original = self.artifacts.get("approval_original_attempt")
+        if original is None:
+            return False
+        binding = self.approval_binding()
+        if original.get("binding") != binding:
+            raise Failed("APPROVAL_CHANGED", "The archived signing attempt changed.")
+        state = self.onboarding.store.load()
+        if not self.untouched_signing_pin(state):
+            return False
+        build = self.phone.build
+        if type(build) is not int or build < 38 or type(original.get("build")) is not int or build <= original["build"]:
+            return False
+        receipt = self.artifacts.get("approval_upgrade_recovery")
+        if receipt is None:
+            receipt = {"original_attempt": deepcopy(original), "binding": binding, "original_build": original["build"],
+                       "current_build": build, "phase": "planned"}
+            self.journal.artifact("approval_upgrade_recovery", receipt)
+        if (not isinstance(receipt, dict) or receipt.get("original_attempt") != original
+                or receipt.get("binding") != binding or receipt.get("current_build") != build
+                or receipt.get("original_build") != original["build"]):
+            raise Failed("APPROVAL_CHANGED", "The saved upgrade recovery no longer matches this attempt.")
+        if receipt.get("phase") == "approval_dispatched":
+            return False
+        if receipt.get("phase") not in ("planned", "process_stopped", "ready_for_review"):
+            raise Failed("APPROVAL_RECOVERY_PHASE", "The recovery checkpoint has an invalid phase.")
+        if not self.require_viewed_unsubmitted():
+            return False
+        self.phone.restart_for_upgrade(self.journal, receipt)
+        if receipt.get("phase") != "ready_for_review":
+            raise Blocked("APPROVAL_PROCESS_BOUNDARY", "The old signing process was not conclusively stopped and replaced.")
+        if not self.require_viewed_unsubmitted():
+            return False
+        self.deferred_phone_purpose = None
+        self.stage_phone_setup()
+        self.stage_phone()
+        self.approve_phone(reapproval=True)
+        return True
+
+    def approve_phone(self, *, reapproval=False):
+        binding = self.approval_binding()
+        self.pin_artifact("approval_binding", binding)
+        self.phone.approve(self.request_id, self.intent, self.artifacts["fee_sats"],
+                           None, self.journal, self.deadline, session_id=self.artifacts["session_id"],
+                           pin_provider=lambda: self.onboarding.pin_attempt("sign:" + self.request_id),
+                           probe_pin_resume=True, before_approve=self.require_viewed_unsubmitted,
+                           before_pin=self.require_viewed_unsubmitted, reapproval=reapproval)
 
     def finish_deferred_phone_attempt(self, purpose):
         if self.deferred_phone_purpose != purpose:
@@ -492,11 +630,20 @@ class FreshRunner(Runner):
         self.journal.artifact("phone", self.phone.check_fixture(self.artifacts["cube_name"], self.deadline))
 
     def stage_sign(self):
-        if self.artifacts.get("already_broadcast") or self.collect_once() or self.artifacts.get("approval_started"):
+        if self.artifacts.get("already_broadcast") or self.collect_once():
             return
-        self.phone.approve(self.request_id, self.intent, self.artifacts["fee_sats"],
-                           None, self.journal, self.deadline,
-                           pin_provider=lambda: self.onboarding.pin_attempt("sign:" + self.request_id), probe_pin_resume=True)
+        if not self.artifacts.get("approval_started"):
+            self.approve_phone()
+            return
+        if self.upgrade_approval():
+            return
+        context = self.artifacts.get("approval_context")
+        if context is not None and self.untouched_signing_pin(self.onboarding.store.load()):
+            self.validate_approval_context(context)
+            self.phone.resume_first_pin(self.request_id, self.artifacts["session_id"], self.intent,
+                self.artifacts["fee_sats"], self.journal, self.deadline,
+                pin_provider=lambda: self.onboarding.pin_attempt("sign:" + self.request_id),
+                before_pin=self.require_viewed_unsubmitted)
 
     def stage_collect(self):
         super().stage_collect()

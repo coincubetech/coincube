@@ -651,3 +651,251 @@ def test_sealed_key_resume_preserves_original_public_export(runner):
     with pytest.raises(Failed) as error:
         runner.stage_phone_key()
     assert error.value.code == 'KEY_CHANGED'
+
+
+def signing_recovery(runner, *, modern=False):
+    state, purpose = pending_phone(runner, "sign", marker=False)
+    runner.intent = deepcopy(runner.artifacts["intent"])
+    runner.phone.build = 38
+    runner.artifacts.update(desktop_identity="synthetic-desktop", psbt_sha256="c" * 64,
+                            descriptor_id="deadbeef", target_fingerprint="aabbccdd", cube_uuid="synthetic-cube", fee_sats=612)
+    runner.onboarding.store = SimpleNamespace(load=lambda: deepcopy(state))
+    runner.journal.artifact("phone", {"build": 37, "network": "testnet4", "cube_visible": True})
+    runner.journal.data["stages"].update(phone={"status": "passed", "code": "", "at": 10},
+                                        sign={"status": "blocked", "code": "PHONE_AUTH", "at": 11})
+    if modern:
+        runner.phone.build = 39
+        runner.journal.artifact("approval_context", {"binding": runner.approval_binding(),
+            "request_id": runner.request_id, "session_id": runner.artifacts["session_id"],
+            "intent_sha256": provision.digest(runner.intent), "fee_sats": 612,
+            "device": runner.phone.device_digest, "build": 38,
+            "process": {"pid": 123, "bundle_id": "io.coincube.keychainApp"}})
+    calls = []
+    runner.native_call = lambda *a, **k: {"ready": False, "status": 3, "submitted_signature_count": 0}
+    def restart(journal, receipt):
+        calls.append("restart")
+        receipt["phase"] = "ready_for_review"
+        journal.artifact("approval_upgrade_recovery", receipt)
+    def approve(*args, **kwargs):
+        calls.append("approve")
+        assert kwargs["reapproval"] is True
+        assert kwargs["session_id"] == runner.artifacts["session_id"]
+        assert kwargs["before_approve"]() is True
+        assert kwargs["before_pin"]() is True
+        receipt = runner.artifacts["approval_upgrade_recovery"]
+        receipt["phase"] = "approval_dispatched"
+        runner.journal.artifact("approval_upgrade_recovery", receipt)
+    runner.phone.restart_for_upgrade = restart
+    runner.phone.approve = approve
+    runner.stage_phone_setup = lambda: calls.append("account-network")
+    runner.stage_phone = lambda: calls.append("cube-review")
+    return state, calls
+
+
+@pytest.mark.parametrize("modern", [False, True])
+def test_upgrade_archives_original_evidence_before_stage_overwrite_and_rechecks(runner, modern):
+    state, calls = signing_recovery(runner, modern=modern)
+    runner.defer_pending_phone_attempt(state)
+    original = deepcopy(runner.artifacts["approval_original_attempt"])
+    assert original["origin"] == ("approval-context" if modern else "legacy-stage-evidence")
+    if not modern:
+        assert "process" not in original and "context" not in original
+        assert original["sign_stage"]["code"] == "PHONE_AUTH"
+    runner.journal.outcome("phone", "passed")
+    runner.journal.outcome("sign", "passed")
+    runner.defer_pending_phone_attempt(state)
+    assert runner.artifacts["approval_original_attempt"] == original
+    runner.stage_sign()
+    assert calls == ["restart", "account-network", "cube-review", "approve"]
+    assert runner.artifacts["approval_started"] is True
+    assert runner.artifacts["approval_upgrade_recovery"]["original_attempt"] == original
+    calls.clear()
+    if modern:
+        # Phone now owns current-context validation, including the exact PID.
+        runner.phone.resume_first_pin = lambda *a, **k: calls.append("resume-only")
+    runner.stage_sign()
+    assert calls == (["resume-only"] if modern else [])
+
+
+@pytest.mark.parametrize("field", ["pending_attempt", "pin_resume_probe", "pin_dispatch_started"])
+def test_signing_pin_evidence_never_allows_upgrade_generation(runner, field):
+    state, calls = signing_recovery(runner)
+    if field == "pending_attempt":
+        state[field] = "sign:" + runner.request_id
+    else:
+        runner.journal.artifact(field, {"status": "started"})
+    runner.defer_pending_phone_attempt(state)
+    assert "approval_original_attempt" not in runner.artifacts
+    runner.stage_sign()
+    assert calls == []
+    assert "approval_upgrade_recovery" not in runner.artifacts
+
+
+@pytest.mark.parametrize("change", ["build-missing", "phone-not-passed", "sign-not-blocked", "not-auth", "reversed", "missing-time", "missing-hash"])
+def test_legacy_adoption_requires_conclusive_ordered_original_evidence(runner, change):
+    state, calls = signing_recovery(runner)
+    stages = runner.journal.data["stages"]
+    if change == "build-missing": runner.artifacts["phone"].pop("build")
+    if change == "phone-not-passed": stages["phone"]["status"] = "blocked"
+    if change == "sign-not-blocked": stages["sign"]["status"] = "passed"
+    if change == "not-auth": stages["sign"]["code"] = "SIGNING_TIMEOUT"
+    if change == "reversed": stages["phone"]["at"] = 12
+    if change == "missing-time": stages["sign"].pop("at")
+    if change == "missing-hash": runner.artifacts.pop("psbt_sha256")
+    runner.defer_pending_phone_attempt(state)
+    assert "approval_original_attempt" not in runner.artifacts
+    runner.stage_sign()
+    assert calls == []
+
+
+@pytest.mark.parametrize("build", [36, 37, True])
+def test_upgrade_requires_strictly_newer_integer_build(runner, build):
+    state, calls = signing_recovery(runner)
+    runner.defer_pending_phone_attempt(state)
+    runner.phone.build = build
+    runner.stage_sign()
+    assert calls == []
+    assert "approval_upgrade_recovery" not in runner.artifacts
+
+
+@pytest.mark.parametrize("field", ["account_identity", "desktop_identity", "request_id", "session_id", "intent", "psbt_sha256",
+                                   "descriptor_id", "target_key_id", "target_fingerprint", "vault_id", "fee_sats"])
+def test_original_approval_binding_cannot_change(runner, field):
+    state, calls = signing_recovery(runner)
+    runner.defer_pending_phone_attempt(state)
+    runner.artifacts[field] = "d" * 64 if field == "psbt_sha256" else "changed"
+    with pytest.raises(Failed) as caught:
+        runner.upgrade_approval()
+    assert caught.value.code == "APPROVAL_CHANGED"
+    assert calls == []
+
+
+@pytest.mark.parametrize("status,count", [(1, 0), (2, 0), (4, 0), (5, 0), (6, 0), (3, 1), (3, None), (3, False), (True, 0)])
+def test_upgrade_refuses_anything_except_exact_viewed_and_zero_submitted(runner, status, count):
+    state, calls = signing_recovery(runner)
+    runner.defer_pending_phone_attempt(state)
+    runner.native_call = lambda *a, **k: {"ready": False, "status": status, "submitted_signature_count": count}
+    with pytest.raises(Blocked) as caught:
+        runner.stage_sign()
+    assert caught.value.code == "APPROVAL_REMOTE_STATE"
+    assert calls == []
+
+
+def test_signature_arriving_after_process_stop_prevents_another_review(runner):
+    state, calls = signing_recovery(runner)
+    runner.defer_pending_phone_attempt(state)
+    responses = iter([{"ready": False, "status": 3, "submitted_signature_count": 0},
+                      {"ready": False, "status": 3, "submitted_signature_count": 0},
+                      {"ready": True, "status": 6, "submitted_signature_count": 1, "signature_count_min": 2}])
+    runner.native_call = lambda *a, **k: next(responses)
+    runner.stage_sign()
+    assert calls == ["restart"]
+    assert runner.artifacts["signature_count_min"] == 2
+    assert runner.deferred_phone_purpose == "sign:" + runner.request_id
+
+
+def test_partial_process_boundary_resumes_same_receipt_without_second_generation(runner):
+    state, calls = signing_recovery(runner)
+    runner.defer_pending_phone_attempt(state)
+    def interrupted(journal, receipt):
+        receipt["phase"] = "process_stopped"
+        journal.artifact("approval_upgrade_recovery", receipt)
+        raise Blocked("SYNTHETIC_INTERRUPTION", "Synthetic interruption")
+    normal = runner.phone.restart_for_upgrade
+    runner.phone.restart_for_upgrade = interrupted
+    with pytest.raises(Blocked): runner.stage_sign()
+    original = deepcopy(runner.artifacts["approval_upgrade_recovery"]["original_attempt"])
+    runner.phone.restart_for_upgrade = normal
+    runner.stage_sign()
+    assert runner.artifacts["approval_upgrade_recovery"]["original_attempt"] == original
+    assert calls == ["restart", "account-network", "cube-review", "approve"]
+
+
+def test_existing_pin_continuation_never_navigates_or_approves_again(runner):
+    state, calls = signing_recovery(runner, modern=True)
+    runner.phone.build = 38
+    runner.defer_pending_phone_attempt(state)
+    def resume(*args, **kwargs):
+        calls.append("resume-first-pin")
+        assert args[:2] == (runner.request_id, runner.artifacts["session_id"])
+        assert kwargs["before_pin"]() is True
+    runner.phone.resume_first_pin = resume
+    runner.stage_sign()
+    assert calls == ["resume-first-pin"]
+    assert runner.artifacts["approval_started"] is True
+
+
+def test_first_approval_keeps_review_and_remote_callbacks_mandatory(runner):
+    state, calls = signing_recovery(runner)
+    runner.artifacts.pop("approval_started")
+    def approve(*args, **kwargs):
+        assert kwargs["reapproval"] is False
+        assert kwargs["session_id"] == runner.artifacts["session_id"]
+        assert kwargs["before_approve"]() and kwargs["before_pin"]()
+        calls.append("first-review")
+    runner.phone.approve = approve
+    runner.stage_sign()
+    assert calls == ["first-review"]
+    assert runner.artifacts["approval_binding"] == runner.approval_binding()
+
+
+@pytest.mark.parametrize("field,value", [("binding", {}), ("request_id", "other"), ("session_id", "other"),
+    ("intent_sha256", "bad"), ("fee_sats", 613), ("device", "other"), ("build", 37),
+    ("process", {"pid": 0, "bundle_id": "io.coincube.keychainApp"}),
+    ("process", {"pid": 123, "bundle_id": "other.app"})])
+def test_modern_context_must_authenticate_every_recorded_identity(runner, field, value):
+    state, calls = signing_recovery(runner, modern=True)
+    runner.artifacts["approval_context"][field] = value
+    with pytest.raises(Failed) as caught:
+        runner.defer_pending_phone_attempt(state)
+    assert caught.value.code == "APPROVAL_CHANGED"
+    assert calls == []
+    assert "approval_original_attempt" not in runner.artifacts
+
+
+@pytest.mark.parametrize("field,value", [("identity", "foreign"), ("verified", False),
+                                        ("pending_attempt", "sign:uncertain")])
+def test_credential_changes_after_archive_never_allow_recovery(runner, field, value):
+    state, calls = signing_recovery(runner)
+    runner.defer_pending_phone_attempt(state)
+    state[field] = value
+    runner.stage_sign()
+    assert calls == []
+    assert "approval_upgrade_recovery" not in runner.artifacts
+
+
+@pytest.mark.parametrize("field,value", [("phase", "unknown"), ("current_build", 39), ("original_build", 36), ("binding", {}), ("original_attempt", {})])
+def test_saved_recovery_is_not_replaceable(runner, field, value):
+    state, calls = signing_recovery(runner)
+    runner.defer_pending_phone_attempt(state)
+    original = runner.artifacts["approval_original_attempt"]
+    receipt = {"original_attempt": deepcopy(original), "binding": runner.approval_binding(),
+               "original_build": 37, "current_build": 38, "phase": "planned"}
+    receipt[field] = value
+    runner.journal.artifact("approval_upgrade_recovery", receipt)
+    with pytest.raises(Failed): runner.stage_sign()
+    assert calls == []
+    assert runner.artifacts["approval_upgrade_recovery"] == receipt
+
+
+def test_account_check_failure_after_restart_cannot_dispatch_approval(runner):
+    state, calls = signing_recovery(runner)
+    runner.defer_pending_phone_attempt(state)
+    def mismatch():
+        raise Failed("PHONE_ACCOUNT", "Synthetic mismatch")
+    runner.stage_phone_setup = mismatch
+    with pytest.raises(Failed) as caught: runner.stage_sign()
+    assert caught.value.code == "PHONE_ACCOUNT"
+    assert calls == ["restart"]
+    assert runner.artifacts["approval_started"] is True
+    assert runner.artifacts["approval_upgrade_recovery"]["phase"] == "ready_for_review"
+
+
+def test_status_callback_rejects_binding_change_before_native_call(runner):
+    state, calls = signing_recovery(runner)
+    runner.defer_pending_phone_attempt(state)
+    runner.artifacts["cube_uuid"] = "other-cube"
+    runner.native_call = lambda *a, **k: pytest.fail("Binding mismatch must precede remote action")
+    with pytest.raises(Failed) as caught: runner.require_viewed_unsubmitted()
+    assert caught.value.code == "APPROVAL_CHANGED"
+    assert calls == []

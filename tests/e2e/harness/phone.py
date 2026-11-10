@@ -1,5 +1,6 @@
 """Appium/XCUITest over a USB-only WDA tunnel. No screenshots or raw UI logs."""
 from contextlib import contextmanager
+from copy import deepcopy
 import json
 import hashlib
 import fcntl
@@ -326,7 +327,105 @@ class Phone:
         self.click("Home")
         return {"build": self.build, "network": "testnet4", "cube_visible": True}
 
-    def verify_pin_resume(self, journal):
+    def process_identity(self):
+        info = self.driver.execute_script("mobile: activeAppInfo")
+        pid = info.get("pid")
+        if info.get("bundleId") != BUNDLE or type(pid) is not int or pid <= 0:
+            raise Blocked("PHONE_PROCESS", "The foreground Keychain process cannot be verified.")
+        return {"pid": pid, "bundle_id": BUNDLE}
+
+    def restart_for_upgrade(self, journal, receipt):
+        if (self.build < 38 or self.build <= receipt["original_build"]
+                or receipt["current_build"] != self.build
+                or receipt["phase"] not in {"planned", "process_stopped", "ready_for_review"}):
+            raise Blocked("APPROVAL_RECOVERY", "The signing upgrade recovery boundary is invalid.")
+        # Repeat termination if interrupted before review. This is not another
+        # approval generation; dispatch permanently consumes the receipt.
+        self.driver.terminate_app(BUNDLE)
+        if int(self.driver.query_app_state(BUNDLE)) != 1:  # NOT_RUNNING
+            raise Blocked("PHONE_PROCESS", "Keychain termination was not verified; no approval may follow.")
+        receipt["phase"] = "process_stopped"
+        journal.artifact("approval_upgrade_recovery", deepcopy(receipt))
+        self.driver.activate_app(BUNDLE)
+        until = time.monotonic() + 15
+        while int(self.driver.query_app_state(BUNDLE)) != 4:  # RUNNING_IN_FOREGROUND
+            if time.monotonic() >= until:
+                raise Blocked("PHONE_PROCESS", "Keychain did not return to the foreground after the verified stop.")
+            time.sleep(.25)
+        receipt["current_process"] = self.process_identity()
+        receipt["phase"] = "ready_for_review"
+        journal.artifact("approval_upgrade_recovery", deepcopy(receipt))
+
+    @staticmethod
+    def intent_digest(intent):
+        return hashlib.sha256(json.dumps(intent, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def approval_context(self, request_id, session_id, intent, fee_sats, journal):
+        binding = journal.data["artifacts"].get("approval_binding")
+        if not session_id or not isinstance(binding, dict) or not binding or self.build < 38:
+            raise Blocked("SIGNING_SEMANTICS", "Fresh signing requires build 38 session-bound PIN accessibility and saved approval bindings.")
+        return {"binding": deepcopy(binding), "request_id": request_id, "session_id": session_id,
+                "intent_sha256": self.intent_digest(intent), "fee_sats": fee_sats,
+                "build": self.build, "device": self.device_digest, "process": self.process_identity()}
+
+    @staticmethod
+    def reject_pin_error(labels):
+        if any(any(term in value.casefold() for term in
+                   ("incorrect pin", "attempts remaining", "too many attempts", "locked out")) for value in labels):
+            raise Failed("PIN_REJECTED", "Keychain rejected the configured signing PIN. It will not be retried.")
+
+    def require_empty_pin(self, session_id):
+        labels = self.labels()
+        self.reject_pin_error(labels)
+        sessions = {v for v in labels if v.startswith("signing-pin-session:")}
+        entries = {v for v in labels if v.startswith("signing-pin-entry:")}
+        if ("Enter PIN" not in labels or sessions != {"signing-pin-session:" + session_id}
+                or entries != {"signing-pin-entry:empty"}
+                or any(len(self.matching_controls(str(digit))) != 1 for digit in range(10))):
+            raise Blocked("PIN_SESSION", "The empty PIN challenge is not uniquely bound to the saved signing session.")
+
+    def enter_first_pin(self, request_id, session_id, intent, fee_sats, journal, pin_provider, before_pin):
+        artifacts = journal.data["artifacts"]
+        if "pin_resume_probe" in artifacts or "pin_dispatch_started" in artifacts:
+            raise Blocked("PIN_ATTEMPT_UNCERTAIN", "A prior PIN lifecycle or input attempt cannot be replayed.")
+        expected = self.approval_context(request_id, session_id, intent, fee_sats, journal)
+        if artifacts.get("approval_context") != expected:
+            raise Blocked("PIN_PROCESS", "The pending PIN challenge does not have the original process and transaction bindings.")
+        self.require_empty_pin(session_id)
+        if not before_pin():
+            return False
+        self.verify_pin_resume(journal, session_id=session_id)
+        if self.approval_context(request_id, session_id, intent, fee_sats, journal) != expected:
+            raise Blocked("PIN_PROCESS", "The Keychain process changed across the PIN lifecycle probe.")
+        self.require_empty_pin(session_id)
+        if not before_pin():
+            return False
+        journal.artifact("pin_dispatch_started", {"context": deepcopy(expected)})
+        # The provider persists the encrypted credential's pending-purpose
+        # marker before returning the PIN. Any later exception is unretryable.
+        pin = pin_provider()
+        if len(pin) != 6 or not pin.isascii() or not pin.isdigit():
+            raise Blocked("SIGNER_PIN", "The private signing PIN must contain six digits.")
+        for digit in pin:
+            self.click(digit)
+        return True
+
+    def wait_signed(self, timeout):
+        until = time.monotonic() + timeout
+        while time.monotonic() < until:
+            labels = self.labels()
+            self.reject_pin_error(labels)
+            if "Signature Submitted" in labels or "Transaction approved" in labels:
+                return
+            time.sleep(1)
+        raise Blocked("SIGNING_TIMEOUT", "Keychain approval did not complete within the signing deadline.")
+
+    def resume_first_pin(self, request_id, session_id, intent, fee_sats, journal, timeout, *, pin_provider, before_pin):
+        # No route restoration, navigation, or Approve dispatch on this path.
+        if self.enter_first_pin(request_id, session_id, intent, fee_sats, journal, pin_provider, before_pin):
+            self.wait_signed(timeout)
+
+    def verify_pin_resume(self, journal, *, session_id=None):
         # Observe lifecycle survival only. Resume reconnects the stream, but
         # does not prove Home's FetchPendingSessionsEvent actually ran.
         journal.artifact("pin_resume_probe", {"status": "started", "trigger": "background_resume"})
@@ -337,14 +436,28 @@ class Phone:
             if "Enter PIN" not in self.labels():
                 journal.artifact("pin_resume_probe", {"status": "failed", "trigger": "background_resume"})
                 raise Failed("PIN_CHALLENGE_DISMISSED", "The PIN challenge disappeared across app resume before any credential was entered.")
+            if session_id:
+                self.require_empty_pin(session_id)
             if time.monotonic() >= until:
                 break
             time.sleep(.25)
         journal.artifact("pin_resume_probe", {"status": "passed", "trigger": "background_resume",
                                                "observation_seconds": 3, "home_refresh_proven": False})
 
-    def approve(self, request_id, intent, fee_sats, pin_file, journal, timeout, *, pin_provider=None, probe_pin_resume=False):
-        if journal.data["artifacts"].get("approval_started"):
+    def approve(self, request_id, intent, fee_sats, pin_file, journal, timeout, *, pin_provider=None, probe_pin_resume=False,
+                session_id=None, before_approve=None, before_pin=None, reapproval=False):
+        artifacts = journal.data["artifacts"]
+        receipt = artifacts.get("approval_upgrade_recovery", {})
+        if reapproval and (not session_id or receipt.get("phase") != "ready_for_review"
+                           or receipt.get("binding") != artifacts.get("approval_binding")
+                           or receipt.get("current_build") != self.build
+                           or self.build <= receipt.get("original_build", self.build)
+                           or receipt.get("current_process") != self.process_identity()
+                           or "pin_resume_probe" in artifacts or "pin_dispatch_started" in artifacts):
+            raise Blocked("APPROVAL_RECOVERY", "The one-time approval recovery receipt is not valid for this process.")
+        if session_id and (not callable(before_approve) or not callable(before_pin) or not callable(pin_provider)):
+            raise Blocked("APPROVAL_BINDING", "Session-bound signing requires remote-state and private-credential guards.")
+        if artifacts.get("approval_started") and not reapproval:
             raise Blocked("APPROVAL_UNCERTAIN", "An earlier approval attempt must be reconciled before any phone navigation.")
         note = "Testnet4 QA " + request_id
         until = time.monotonic() + timeout
@@ -382,8 +495,18 @@ class Phone:
             raise Failed("PHONE_REVIEW", "The phone did not display the expected network, destinations, amounts and fee.")
         # One attempted PIN entry per run, including across crashes. Never
         # guess or retry a credential: repeated failures can wipe a signer.
-        if journal.data["artifacts"].get("approval_started"):
+        if artifacts.get("approval_started") and not reapproval:
             raise Blocked("APPROVAL_UNCERTAIN", "An earlier approval attempt has an uncertain outcome; reconcile the session before trying again.")
+        if session_id:
+            if not before_approve():
+                return
+            context = self.approval_context(request_id, session_id, intent, fee_sats, journal)
+            if reapproval:
+                if context["process"] != receipt["current_process"]:
+                    raise Blocked("APPROVAL_RECOVERY", "Keychain restarted during the recovered transaction review.")
+                receipt["phase"] = "approval_dispatched"
+                journal.artifact("approval_upgrade_recovery", deepcopy(receipt))
+            journal.artifact("approval_context", context)
         journal.artifact("approval_started", True)
         self.click("Approve")
         until = time.monotonic() + timeout
@@ -392,7 +515,13 @@ class Phone:
             labels = self.labels()
             if "Signature Submitted" in labels or "Transaction approved" in labels:
                 return
+            self.reject_pin_error(labels)
             if "Enter PIN" in labels and not pin_entered:
+                if session_id:
+                    if not self.enter_first_pin(request_id, session_id, intent, fee_sats, journal, pin_provider, before_pin):
+                        return
+                    pin_entered = True
+                    continue
                 if probe_pin_resume:
                     self.verify_pin_resume(journal)
                 if not pin_file and pin_provider is None:

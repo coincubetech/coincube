@@ -316,3 +316,180 @@ def test_line_selector_cannot_be_used_for_pin_digits():
     with pytest.raises(Failed) as error:
         phone.click_line('1')
     assert error.value.code == 'PHONE_LINE'
+
+
+def bound_phone():
+    calls = []
+    driver = SimpleNamespace(execute_script=lambda *args: {'bundleId': 'io.coincube.keychainApp', 'pid': 123},
+        terminate_app=lambda bundle: calls.append('terminate'), activate_app=lambda bundle: calls.append('activate'))
+    phone = Phone(driver, 38)
+    phone.device_digest = 'synthetic-device'
+    phone.matching_controls = lambda label: [object()]
+    phone.labels = lambda: {'Enter PIN', 'signing-pin-session:session', 'signing-pin-entry:empty'}
+    phone.click = calls.append
+    return phone, calls
+
+
+def bound_journal(tmp_path, phone):
+    journal = Journal(tmp_path / 'bound', {})
+    journal.artifact('approval_binding', {'session_id': 'session', 'request_id': 'request'})
+    journal.artifact('approval_started', True)
+    journal.artifact('approval_context', phone.approval_context('request', 'session', INTENT, 612, journal))
+    return journal
+
+
+@pytest.mark.parametrize('labels', [
+    {'Enter PIN'},
+    {'Enter PIN', 'signing-pin-session:other', 'signing-pin-entry:empty'},
+    {'Enter PIN', 'signing-pin-session:session', 'signing-pin-entry:nonempty'},
+    {'Enter PIN', 'signing-pin-session:session', 'signing-pin-entry:empty', 'Incorrect PIN'},
+])
+def test_bound_pin_never_enters_generic_wrong_nonempty_or_error_challenge(tmp_path, labels):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    phone.labels = lambda: labels
+    try:
+        with pytest.raises((Blocked, Failed)):
+            phone.resume_first_pin('request', 'session', INTENT, 612, journal, 0,
+                pin_provider=lambda: pytest.fail('credential must not be requested'), before_pin=lambda: True)
+        assert calls == []
+        assert 'pin_dispatch_started' not in journal.data['artifacts']
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize('changed', ['pid', 'device', 'build', 'intent', 'session', 'fee'])
+def test_bound_pin_refuses_changed_approval_context(tmp_path, changed):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    intent, session, fee = INTENT, 'session', 612
+    if changed == 'pid':
+        phone.driver.execute_script = lambda *a: {'bundleId': 'io.coincube.keychainApp', 'pid': 456}
+    elif changed == 'device':
+        phone.device_digest = 'other'
+    elif changed == 'build':
+        phone.build = 39
+    elif changed == 'intent':
+        intent = {'outputs': []}
+    elif changed == 'session':
+        session = 'other'
+    else:
+        fee = 613
+    try:
+        with pytest.raises(Blocked):
+            phone.resume_first_pin('request', session, intent, fee, journal, 0,
+                pin_provider=lambda: pytest.fail('credential must not be requested'), before_pin=lambda: True)
+        assert calls == []
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize('marker', ['pin_resume_probe', 'pin_dispatch_started'])
+def test_bound_pin_never_replays_durable_attempt_marker(tmp_path, marker):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    journal.artifact(marker, {'status': 'started'})
+    try:
+        with pytest.raises(Blocked) as error:
+            phone.resume_first_pin('request', 'session', INTENT, 612, journal, 0,
+                pin_provider=lambda: pytest.fail('must not retry'), before_pin=lambda: True)
+        assert error.value.code == 'PIN_ATTEMPT_UNCERTAIN'
+        assert calls == []
+    finally:
+        journal.close()
+
+
+def test_signature_arrival_before_pin_prevents_dispatch(tmp_path):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    try:
+        phone.resume_first_pin('request', 'session', INTENT, 612, journal, 0,
+            pin_provider=lambda: pytest.fail('already signed'), before_pin=lambda: False)
+        assert calls == []
+        assert 'pin_resume_probe' not in journal.data['artifacts']
+    finally:
+        journal.close()
+
+
+def test_pin_input_records_intent_before_provider_and_never_retries_lost_click(tmp_path):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    phone.verify_pin_resume = lambda journal, **kw: journal.artifact('pin_resume_probe', {'status': 'passed'})
+    checks = []
+    def provider():
+        assert journal.data['artifacts']['pin_dispatch_started']['context'] == journal.data['artifacts']['approval_context']
+        calls.append('provider')
+        return '987654'
+    def click(digit):
+        calls.append(digit)
+        raise RuntimeError('Synthetic lost input response')
+    phone.click = click
+    try:
+        with pytest.raises(RuntimeError):
+            phone.resume_first_pin('request', 'session', INTENT, 612, journal, 0,
+                pin_provider=provider, before_pin=lambda: checks.append(True) or True)
+        assert checks == [True, True]
+        assert calls == ['provider', '9']
+        with pytest.raises(Blocked):
+            phone.resume_first_pin('request', 'session', INTENT, 612, journal, 0,
+                pin_provider=provider, before_pin=lambda: True)
+        assert calls == ['provider', '9']
+        assert '987654' not in journal.path.read_text()
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize('stopped', [True, False])
+def test_upgrade_boundary_requires_verified_stop_before_activation(tmp_path, stopped):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    receipt = {'original_build': 37, 'current_build': 38, 'phase': 'planned'}
+    states = iter([1 if stopped else 4, 4])
+    phone.driver.query_app_state = lambda bundle: next(states)
+    def activate(bundle):
+        assert journal.data['artifacts']['approval_upgrade_recovery']['phase'] == 'process_stopped'
+        calls.append('activate')
+    phone.driver.activate_app = activate
+    try:
+        if stopped:
+            phone.restart_for_upgrade(journal, receipt)
+            assert receipt['phase'] == 'ready_for_review'
+            assert receipt['current_process']['pid'] == 123
+            assert calls == ['terminate', 'activate']
+        else:
+            with pytest.raises(Blocked):
+                phone.restart_for_upgrade(journal, receipt)
+            assert calls == ['terminate']
+    finally:
+        journal.close()
+
+
+def test_upgrade_approval_dispatch_consumes_receipt_before_uncertain_click(tmp_path):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    context = journal.data['artifacts']['approval_context']
+    receipt = {'original_build': 37, 'current_build': 38, 'phase': 'ready_for_review',
+               'binding': context['binding'], 'current_process': context['process']}
+    journal.artifact('approval_upgrade_recovery', receipt)
+    phone.restore_navigation = lambda: None
+    phone.refresh = lambda: None
+    views = iter([{'Testnet4 QA request'}, REVIEW])
+    phone.labels = lambda: next(views)
+    phone.click_line = calls.append
+    def click(label):
+        calls.append(label)
+        if label == 'Approve':
+            assert journal.data['artifacts']['approval_started'] is True
+            assert journal.data['artifacts']['approval_upgrade_recovery']['phase'] == 'approval_dispatched'
+            raise RuntimeError('Synthetic lost approval response')
+    phone.click = click
+    try:
+        with pytest.raises(RuntimeError):
+            phone.approve('request', INTENT, 612, None, journal, 10, session_id='session',
+                before_approve=lambda: True, before_pin=lambda: True, pin_provider=lambda: '987654', reapproval=True)
+        with pytest.raises(Blocked):
+            phone.approve('request', INTENT, 612, None, journal, 10, session_id='session',
+                before_approve=lambda: True, before_pin=lambda: True, pin_provider=lambda: '987654', reapproval=True)
+        assert calls.count('Approve') == 1
+    finally:
+        journal.close()

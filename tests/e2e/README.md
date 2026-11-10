@@ -87,7 +87,9 @@ namespace. Both API endpoint values always remain pinned to production. `ios.min
 reviewed Keychain build. Fresh onboarding also requires accessibility forwarding
 through Keychain's screenshot-protection wrapper: build 36 hides the recovery
 controls from XCTest, and cannot complete this flow. The example selects build
-37, which includes that fix; its number alone is not source or acceptance evidence.
+38, which also routes PIN-backed signer entropy through real PIN verification and
+exposes non-spoken signing-session/empty-entry accessibility identifiers. A build
+number alone is not source or acceptance evidence.
 `ios.xctestrun` can identify an already-signed WebDriverAgent
 runner so the suite starts it automatically when needed.
 
@@ -138,8 +140,24 @@ Testnet4 ([official API](https://www.cypherfaucet.com/api),
 A PIN attempt is recorded before entry and blocks further attempts across
 process restarts and different run directories until the exact key/signature
 is verified through Connect. A delayed signature is polled without reopening
-approval. Interrupted initial PIN entry fails closed if partial input cannot
-be determined. One completed PIN setup whose recovery words were never captured
+approval. Before any first signing PIN, the runner checks the exact session's
+empty-entry accessibility identifiers, the foreground process, and production
+Connect's validated VIEWED status with zero submitted signatures. It records a
+background/resume probe and durable dispatch intent before requesting the
+protected credential. An interrupted probe or input is never retried.
+
+An approval interrupted before any PIN/probe may resume in the same process only
+with the saved build, device, session and immutable transaction context. One
+reviewed app upgrade may instead create a fresh UI review of that same request:
+the runner archives the original attempt, requires a strictly newer build,
+verifies termination (`NOT_RUNNING`), rechecks Connect, and repeats all account,
+network, Cube and transaction checks. The original approval marker is never
+cleared; a separate durable recovery receipt permits at most one new Approve
+dispatch. Legacy build-37 evidence is eligible only when its saved phone check
+precedes a recorded `PHONE_AUTH` block and no PIN attempt exists. Existing
+signatures always switch to collection. Neither path creates another spend or
+changes the saved transaction. Interrupted initial PIN entry fails closed if
+partial input cannot be determined. One completed PIN setup whose recovery words were never captured
 and whose challenge was never submitted may restart at the full fresh-setup
 chooser after an app restart. The runner archives the previous entry markers
 before acting and retains the same encrypted PIN. It never repeats an unlock,
