@@ -1,3 +1,4 @@
+use coincube_ui::locale::Text as CopyText;
 use std::convert::From;
 use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind, Seek, SeekFrom};
@@ -21,7 +22,7 @@ use coincube_ui::{
         text::{p2_regular, text},
     },
     theme,
-    widget::{Column, Container, Element, Row},
+    widget::{Column, ColumnExt, Container, Element, Row},
 };
 use coincubed::{
     config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth, Config, ConfigError},
@@ -1194,7 +1195,7 @@ pub(crate) fn view_with_retry<'a>(
                     image_handle,
                 )))
                 .push(crate::loading::loading_indicator(None))
-                .push(text("Starting daemon...").style(theme::text::secondary)),
+                .push(text(CopyText::StartingDaemon.get()).style(theme::text::secondary)),
         ),
         Step::FullScan { .. } => cover(
             None,
@@ -1208,14 +1209,13 @@ pub(crate) fn view_with_retry<'a>(
                     image_handle,
                 )))
                 .push(crate::loading::loading_indicator(None))
-                .push(text("Scanning the blockchain...").style(theme::text::secondary))
-                .push(
-                    p2_regular(
-                        "Performing an initial scan of the Bitcoin blockchain via Esplora. \
-                        This typically takes 1–2 minutes on the first run.",
-                    )
-                    .style(theme::text::secondary),
-                ),
+                .push(text(CopyText::ScanningTheBlockchain.get()).style(theme::text::secondary))
+                .push_maybe(
+                    coincube_ui::worldview_copy::VoiceLine::Syncing
+                        .get()
+                        .map(|line| p2_regular(line).style(theme::text::secondary)),
+                )
+                .push(p2_regular(CopyText::InitialEsploraScan.get()).style(theme::text::secondary)),
         ),
         Step::Connecting => cover(
             None,
@@ -1229,7 +1229,7 @@ pub(crate) fn view_with_retry<'a>(
                     image_handle,
                 )))
                 .push(crate::loading::loading_indicator(None))
-                .push(text("Connecting to daemon...").style(theme::text::secondary)),
+                .push(text(CopyText::ConnectingToDaemon.get()).style(theme::text::secondary)),
         ),
         Step::Syncing {
             progress,
@@ -1249,29 +1249,34 @@ pub(crate) fn view_with_retry<'a>(
                 .push(crate::loading::loading_indicator(None))
                 .push(
                     text(if *progress > 0.98 {
-                        "Almost there..."
+                        CopyText::AlmostThere.get()
                     } else {
-                        "Syncing blockchain..."
+                        CopyText::SyncingBlockchain.get()
                     })
                     .style(theme::text::secondary),
+                )
+                .push_maybe(
+                    coincube_ui::worldview_copy::VoiceLine::Syncing
+                        .get()
+                        .map(|line| p2_regular(line).style(theme::text::secondary)),
                 )
                 .push(p2_regular(bitcoind_logs).style(theme::text::secondary)),
         ),
         Step::Error(error) => {
             let headline = match error.as_ref() {
                 Error::Daemon(DaemonError::Start(StartupError::Bitcoind(_))) => {
-                    "Tenshu failed to start, please check if bitcoind is running"
+                    CopyText::TenshuFailedToStartPleaseCheckIfBitcoindIs.get()
                 }
                 Error::Daemon(DaemonError::Start(StartupError::Esplora(_))) => {
-                    "Tenshu failed to start: the Esplora chain backend is unreachable"
+                    CopyText::StartupEsploraUnreachable.get()
                 }
                 Error::Daemon(DaemonError::Start(StartupError::Electrum(_))) => {
-                    "Tenshu failed to start: the Electrum chain backend is unreachable"
+                    CopyText::StartupElectrumUnreachable.get()
                 }
-                _ => "Tenshu failed to start",
+                _ => CopyText::TenshuFailedToStart.get(),
             };
             cover(
-                Some(("Error while starting Tenshu", error)),
+                Some((CopyText::ErrorWhileStartingTenshu.get(), error)),
                 Column::new()
                     .spacing(20)
                     .width(Length::Fill)
@@ -1284,13 +1289,13 @@ pub(crate) fn view_with_retry<'a>(
                     .push(text(headline))
                     .push({
                         let actions = Row::new().spacing(10).push(
-                            button::secondary(None, "Back")
+                            button::secondary(None, CopyText::Back.get())
                                 .width(Length::Fixed(200.0))
                                 .on_press(ViewMessage::SwitchNetwork),
                         );
                         if allow_retry {
                             actions.push(
-                                button::secondary(None, "Retry")
+                                button::secondary(None, CopyText::Retry.get())
                                     .width(Length::Fixed(200.0))
                                     .on_press(ViewMessage::Retry),
                             )
@@ -2335,6 +2340,29 @@ mod tests {
             text("body"),
         );
         let _ = cover::<ViewMessage, _>(None, text("body"));
+    }
+
+    #[test]
+    fn worldview_voice_sits_alongside_fallback_scan_guidance() {
+        use crate::app::view::shared::landing::capture;
+        use coincube_ui::{theme::WorldviewMode, worldview_copy};
+
+        let mut quote_provider = QuoteProvider::new();
+        let quote = quote_provider.select("loading");
+        let image = quote_display::image_handle_for_context("loading");
+        let step = Step::FullScan { progress: 0.5 };
+        let rendered =
+            worldview_copy::render_in(WorldviewMode::Luke, || view(&step, &quote, &image));
+        let shown = capture::inspect(
+            "worldview-voice-fallback-scan",
+            rendered,
+            (1024, 768),
+            "dark",
+            theme::Theme::dark().with_worldview(WorldviewMode::Luke),
+        );
+        assert!(shown.contains(CopyText::ScanningTheBlockchain.get()));
+        assert!(shown.contains("Consulting the ancient rules…"));
+        assert!(shown.contains(CopyText::InitialEsploraScan.get()));
     }
 
     #[test]

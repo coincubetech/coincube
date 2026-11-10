@@ -1,3 +1,4 @@
+use coincube_ui::locale::{copy as localized_copy, notice as localized_notice};
 use iced::widget::Space;
 use iced::{Length, Task};
 
@@ -592,23 +593,25 @@ impl PinEntry {
             .push(Space::new().height(Length::Fixed(6.0)))
             .push(face::face_words(
                 if self.loading {
-                    "Checking your PIN…"
+                    localized_copy("Checking your PIN…")
                 } else {
-                    "Enter this Cube's PIN."
+                    localized_copy("Enter this Cube's PIN.")
                 },
                 12.0,
                 coincube_ui::font::REGULAR,
                 true,
             ));
         if let Some(error) = &self.error {
-            fields = fields
-                .push(Space::new().height(Length::Fixed(6.0)))
-                .push(p1_regular(error).size(12).style(theme::text::error));
+            fields = fields.push(Space::new().height(Length::Fixed(6.0))).push(
+                p1_regular(localized_notice(error.clone()))
+                    .size(12)
+                    .style(theme::text::error),
+            );
         }
         let unlock = iced::widget::button(face::face_button_label(if self.loading {
-            "Unlocking…"
+            localized_copy("Unlocking…")
         } else {
-            "Unlock"
+            localized_copy("Unlock")
         }))
         .height(Length::Fixed(36.0))
         .padding([0.0, 16.0])
@@ -617,7 +620,7 @@ impl PinEntry {
         let fields = fields
             .push(Space::new().height(Length::Fixed(20.0)))
             .push(unlock);
-        let cancel = iced::widget::button(face::face_link_label("Cancel"))
+        let cancel = iced::widget::button(face::face_link_label(localized_copy("Cancel")))
             .padding([2.0, 4.0])
             .style(face::face_link_style)
             .on_press_maybe((!self.loading).then_some(Message::Back));
@@ -645,6 +648,37 @@ mod fork_handoff_tests {
             None,
         )
     }
+    #[test]
+    fn spanish_pin_unlock_renders_wrong_pin_and_lockout() {
+        use crate::app::view::shared::landing::capture;
+        use coincube_ui::locale::{render_in, Language};
+
+        let mut pin = entry(crate::chain::ChainId::Bitcoin);
+        for (error, expected) in [
+            (
+                "Incorrect PIN. Please try again.".to_owned(),
+                "PIN incorrecto. Inténtalo de nuevo.",
+            ),
+            (
+                unlock::throttle::lockout_message(std::time::Duration::from_secs(30)),
+                "Demasiados intentos con un PIN incorrecto. Inténtalo de nuevo en 30 s.",
+            ),
+        ] {
+            pin.error = Some(error);
+            let view = render_in(Language::Spanish, || pin.unlock_controls());
+            let shown = capture::inspect(
+                "pin-error-es",
+                view,
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(shown.contains("Ingresa el PIN de este Cube."));
+            assert!(shown.contains("Desbloquear"));
+            assert!(shown.contains(expected));
+        }
+    }
+
     #[test]
     fn the_unlock_face_stays_up_while_the_pin_is_checked() {
         let mut pin = entry(crate::chain::ChainId::Bitcoin);

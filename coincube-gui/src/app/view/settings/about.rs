@@ -2,6 +2,8 @@
 //! action to copy them. Device ID, account and stream status live in
 //! Connections.
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::widget::Space;
 use iced::{Alignment, Length};
 
@@ -32,7 +34,10 @@ fn versions(coincubed_version: Option<&str>) -> Vec<(&'static str, String)> {
         ("Interface", format!("coincube-gui {}", crate::VERSION)),
     ];
     if let Some(version) = coincubed_version {
-        versions.push(("Wallet service", format!("coincubed {version}")));
+        versions.push((
+            "Wallet service",
+            localized_format!("coincubed {version}", "acuñado {version}"),
+        ));
     }
     versions
 }
@@ -50,11 +55,11 @@ pub fn version_details(coincubed_version: Option<&str>) -> String {
 pub fn about_content<'a>(coincubed_version: Option<&'a str>) -> Element<'a, Message> {
     let head = Row::new()
         .align_y(Alignment::Center)
-        .push(page::heading("Version"))
+        .push(page::heading(localized_copy("Version")))
         .push(Space::new().width(Length::Fill))
         .push(page::button(
             COPY_VERSIONS_ID,
-            "Copy version details",
+            localized_copy("Copy version details"),
             Some(Message::Clipboard(version_details(coincubed_version))),
         ));
     let rows = versions(coincubed_version)
@@ -63,13 +68,13 @@ pub fn about_content<'a>(coincubed_version: Option<&'a str>) -> Element<'a, Mess
     let moved = Row::new()
         .spacing(8)
         .align_y(Alignment::Center)
-        .push(page::muted(
+        .push(page::muted(localized_copy(
             "Device ID, account and stream status now live in Connections, beside the other \
              health checks.",
-        ))
+        )))
         .push(page::link(
             OPEN_CONNECTIONS_ID,
-            "Open Connections",
+            localized_copy("Open Connections"),
             Message::Menu(Menu::Cube(CubeSubMenu::Settings(
                 CubeSettingsOption::Connections,
             ))),

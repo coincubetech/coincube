@@ -3324,8 +3324,9 @@ impl ConnectAccountPanel {
             DuressContactsMessage::ShowAddForm => {
                 let dc = &mut self.duress_contacts;
                 if dc.at_cap() {
-                    dc.error = Some(format!(
+                    dc.error = Some(coincube_ui::localized_format!(
                         "You can configure up to {} emergency contacts.",
+                        "Puedes configurar hasta {} contactos de emergencia.",
                         MAX_DURESS_ALERT_CONTACTS
                     ));
                     return iced::Task::none();
@@ -3437,8 +3438,9 @@ impl ConnectAccountPanel {
                 // Cap is only enforced on create — an edit of an existing
                 // contact is always allowed even at the cap.
                 if editing_id.is_none() && dc.at_cap() {
-                    dc.error = Some(format!(
+                    dc.error = Some(coincube_ui::localized_format!(
                         "You can configure up to {} emergency contacts.",
+                        "Puedes configurar hasta {} contactos de emergencia.",
                         MAX_DURESS_ALERT_CONTACTS
                     ));
                     return iced::Task::none();

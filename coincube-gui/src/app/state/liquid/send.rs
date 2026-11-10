@@ -854,8 +854,9 @@ impl State for LiquidSend {
                     let description = if let Some(input_type) = &self.input_type {
                         match input_type {
                             InputType::BitcoinAddress { address } => {
-                                format!(
+                                coincube_ui::localized_format!(
                                     "Sending money to {}",
+                                    "Enviando dinero a {}",
                                     display_abbreviated(address.address.clone())
                                 )
                             }
@@ -883,8 +884,9 @@ impl State for LiquidSend {
                                 {
                                     description.to_string()
                                 } else {
-                                    format!(
+                                    coincube_ui::localized_format!(
                                         "Sending money to {}",
+                                        "Enviando dinero a {}",
                                         display_abbreviated(invoice.bolt11.clone())
                                     )
                                 }
@@ -911,12 +913,17 @@ impl State for LiquidSend {
                                 }
 
                                 if let Some(bip353_address) = bip353_address {
-                                    format!("Sending money to {}", bip353_address.clone())
+                                    coincube_ui::localized_format!(
+                                        "Sending money to {}",
+                                        "Enviando dinero a {}",
+                                        bip353_address.clone()
+                                    )
                                 } else if let Some(description) = offer.description.clone() {
                                     description
                                 } else {
-                                    format!(
+                                    coincube_ui::localized_format!(
                                         "Sending money to {}",
+                                        "Enviando dinero a {}",
                                         display_abbreviated(offer.offer.clone())
                                     )
                                 }
@@ -985,12 +992,13 @@ impl State for LiquidSend {
                                         self.amount_input.warning = None;
                                     }
                                 }
-                                format!(
+                                coincube_ui::localized_format!(
                                     "Sending money to {}",
+                                    "Enviando dinero a {}",
                                     display_abbreviated(address.address.clone())
                                 )
                             }
-                            _ => String::from("Send Payment"),
+                            _ => coincube_ui::localized_format!("Send Payment", "Enviar pago"),
                         }
                     } else {
                         String::from("")
@@ -1068,7 +1076,7 @@ impl State for LiquidSend {
                                         ..
                                     } if is_usdt_payment => {
                                         let fallback = if description.is_empty() {
-                                            "USDt Transfer"
+                                            coincube_ui::locale::copy("USDt Transfer")
                                         } else {
                                             description.as_str()
                                         };
@@ -1606,8 +1614,9 @@ impl State for LiquidSend {
                                         match kind.asset_id(network) {
                                             Some(id) => Some(id.to_string()),
                                             None => {
-                                                self.error = Some(format!(
+                                                self.error = Some(coincube_ui::localized_format!(
                                                     "{} not available on this network",
+                                                    "{} no está disponible en esta red",
                                                     kind.ticker()
                                                 ));
                                                 return Task::none();
@@ -1682,8 +1691,9 @@ impl State for LiquidSend {
                                 let from_asset_id = match from_kind.asset_id(network) {
                                     Some(id) => id.to_string(),
                                     None => {
-                                        self.error = Some(format!(
+                                        self.error = Some(coincube_ui::localized_format!(
                                             "{} not available on this network",
+                                            "{} no está disponible en esta red",
                                             from_kind.ticker()
                                         ));
                                         return Task::none();
@@ -2199,7 +2209,11 @@ impl State for LiquidSend {
                             }
                         }
                         Err(e) => {
-                            self.error = Some(format!("Failed to estimate max: {}", e));
+                            self.error = Some(coincube_ui::localized_format!(
+                                "Failed to estimate max: {}",
+                                "No se pudo estimar el máximo: {}",
+                                e
+                            ));
                         }
                     }
                 }

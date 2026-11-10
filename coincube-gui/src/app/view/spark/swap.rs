@@ -7,6 +7,8 @@
 use coincube_spark_protocol::{
     AssetAmount, ConversionQuote, PrepareSwapOk, SwapStatus, WalletAsset,
 };
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     component::tenshu::{steps, ActionButton, ActionKind},
     component::text::*,
@@ -204,29 +206,35 @@ pub fn swap_page<'a>(
 /// completed swap is headed "Swapped".
 fn swapped_copy(status: &SwapStatus) -> (&'static str, &'static str) {
     match status {
-        SwapStatus::Completed => ("The swap is complete.", "Swapped"),
+        SwapStatus::Completed => (
+            localized_copy("The swap is complete."),
+            localized_copy("Swapped"),
+        ),
         SwapStatus::Pending => (
-            "The swap is settling. It shows as complete in Activity once it lands.",
-            "Swap settling",
+            localized_copy("The swap is settling. It shows as complete in Activity once it lands."),
+            localized_copy("Swap settling"),
         ),
         SwapStatus::Failed => (
-            "The swap didn't go through. Nothing was swapped.",
-            "Swap didn't go through",
+            localized_copy("The swap didn't go through. Nothing was swapped."),
+            localized_copy("Swap didn't go through"),
         ),
         SwapStatus::RefundNeeded => (
-            "The swap didn't go through. Your funds are being refunded.",
-            "Swap being refunded",
+            localized_copy("The swap didn't go through. Your funds are being refunded."),
+            localized_copy("Swap being refunded"),
         ),
         SwapStatus::Refunded => (
-            "The swap didn't go through. Your funds were refunded.",
-            "Swap refunded",
+            localized_copy("The swap didn't go through. Your funds were refunded."),
+            localized_copy("Swap refunded"),
         ),
     }
 }
 
 pub fn swap_body<'a>(cache: &'a Cache, swap: &'a SparkSwap) -> Element<'a, Message> {
     if !swap_available(cache.network) {
-        return p1_regular("Swap needs Bitcoin mainnet: USDB exists only there.").into();
+        return p1_regular(localized_copy(
+            "Swap needs Bitcoin mainnet: USDB exists only there.",
+        ))
+        .into();
     }
     let price = crate::app::state::spark::reference_btc_usd_price(cache);
     let decimals = swap.usdb_decimals_for_view();
@@ -234,21 +242,25 @@ pub fn swap_body<'a>(cache: &'a Cache, swap: &'a SparkSwap) -> Element<'a, Messa
         SwapPhase::Details { .. } | SwapPhase::Quoting => {
             details_card(swap, price, decimals, cache.balance_amounts_masked())
         }
-        SwapPhase::Review(ok) => review_card(ok, price, decimals, false),
-        SwapPhase::Swapping(ok) => review_card(ok, price, decimals, true),
+        SwapPhase::Review(ok) => review_card(ok, cache.chain(), price, decimals, false),
+        SwapPhase::Swapping(ok) => review_card(ok, cache.chain(), price, decimals, true),
         SwapPhase::Swapped(ok) => {
             let (body, heading) = swapped_copy(&ok.status);
             result_card(body, heading, true)
         }
         SwapPhase::Refused(_) => result_card(
-            "The swap didn't start, so nothing was swapped. Get a new estimate to try again.",
-            "Swap didn't start",
+            coincube_ui::locale::copy(
+                "The swap didn't start, so nothing was swapped. Get a new estimate to try again.",
+            ),
+            coincube_ui::locale::copy("Swap didn't start"),
             true,
         ),
         SwapPhase::Unknown(_) => result_card(
-            "We couldn't confirm the swap, and it may still go through. Check Activity before \
+            coincube_ui::locale::copy(
+                "We couldn't confirm the swap, and it may still go through. Check Activity before \
              you swap again.",
-            "Swap not confirmed",
+            ),
+            coincube_ui::locale::copy("Swap not confirmed"),
             false,
         ),
     };
@@ -312,7 +324,7 @@ pub fn auto_convert_line<'a>(
         .push(
             coincube_ui::widget::action::Action::new(
                 Id::new(WALLET_SETTINGS_ID),
-                p2_regular("Change in Wallet settings"),
+                p2_regular(localized_copy("Change in Wallet settings")),
                 Message::FocusAction,
             )
             .padding([4, 0])
@@ -402,14 +414,18 @@ fn details_card<'a>(
         .push(p2_regular(unit).style(theme::text::secondary))
         .push(action(
             MAX_ID,
-            "Max",
+            coincube_ui::locale::copy("Max"),
             ActionKind::Secondary,
             (!quoting).then(|| swap_message(SparkSwapMessage::Max)),
         ));
 
-    let minimum = swap
-        .minimum()
-        .map(|min| format!("Minimum {}", format_asset(min.asset, min.amount, decimals)));
+    let minimum = swap.minimum().map(|min| {
+        coincube_ui::localized_format!(
+            "Minimum {}",
+            "Mínimo {}",
+            format_asset(min.asset, min.amount, decimals)
+        )
+    });
     let shown_error = match swap.phase() {
         SwapPhase::Details { error: Some(error) } => Some(error.clone()),
         // Say what's wrong only once there is something typed (or Max).
@@ -440,17 +456,20 @@ fn details_card<'a>(
     let figures = Column::new()
         .spacing(8)
         .push(kv(
-            "You get about",
+            localized_copy("You get about"),
             estimate.unwrap_or_else(|| "—".to_owned()),
         ))
         .push(kv(
-            "Indicative rate",
+            localized_copy("Indicative rate"),
             price.map_or_else(
                 || "Waiting for a price".to_owned(),
                 |price| format!("1 BTC ≈ ${}", dollars(price)),
             ),
         ))
-        .push(kv("Conversion fee", "Shown with the estimate".to_owned()));
+        .push(kv(
+            localized_copy("Conversion fee"),
+            "Shown with the estimate".to_owned(),
+        ));
 
     let can_quote = !quoting && swap.form_error().is_none();
     let footer = Row::new()
@@ -458,8 +477,10 @@ fn details_card<'a>(
         .align_y(Alignment::Center)
         .push(
             Container::new(
-                p2_regular("Get estimate asks for the rate and fee. Nothing is swapped yet.")
-                    .style(theme::text::secondary),
+                p2_regular(localized_copy(
+                    "Get estimate asks for the rate and fee. Nothing is swapped yet.",
+                ))
+                .style(theme::text::secondary),
             )
             .width(Length::Fill),
         )
@@ -475,17 +496,19 @@ fn details_card<'a>(
         ));
 
     Column::new()
-        .push(section(h4_bold("Swap details")))
+        .push(section(h4_bold(localized_copy("Swap details"))))
         .push(iced::widget::rule::horizontal(1))
         .push(section(pair))
         .push(iced::widget::rule::horizontal(1))
         .push(section(
             Column::new()
                 .spacing(8)
-                .push(p2_bold("Amount to swap"))
+                .push(p2_bold(localized_copy("Amount to swap")))
                 .push(amount_row)
                 .push_maybe(minimum.map(|line| p2_regular(line).style(theme::text::secondary)))
-                .push_maybe(shown_error.map(|error| p2_regular(error).style(theme::text::warning))),
+                .push_maybe(shown_error.map(|error| {
+                    p2_regular(coincube_ui::locale::notice(error)).style(theme::text::warning)
+                })),
         ))
         .push(iced::widget::rule::horizontal(1))
         .push(section(figures))
@@ -496,6 +519,7 @@ fn details_card<'a>(
 
 fn review_card<'a>(
     ok: &'a PrepareSwapOk,
+    chain: crate::chain::ChainId,
     price: Option<f64>,
     decimals: u32,
     swapping: bool,
@@ -529,23 +553,26 @@ fn review_card<'a>(
     };
     let figures = Column::new()
         .spacing(10)
-        .push(line("You swap", quote.amount_in))
-        .push(line("You get about", quote.amount_out))
+        .push(line(localized_copy("You swap"), quote.amount_in))
+        .push(line(localized_copy("You get about"), quote.amount_out))
         .push(kv(
-            "Estimated rate",
+            localized_copy("Estimated rate"),
             estimated_rate(ok, decimals).map_or_else(
                 || "—".to_owned(),
                 |rate| format!("1 BTC ≈ ${}", dollars(rate)),
             ),
         ))
-        .push(kv("Conversion fee", fee_line(ok, decimals)))
-        .push(kv("Max price change", price_change(quote.max_slippage_bps)));
+        .push(kv(localized_copy("Conversion fee"), fee_line(ok, decimals)))
+        .push(kv(
+            localized_copy("Max price change"),
+            price_change(quote.max_slippage_bps),
+        ));
     let actions = Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
         .push(action(
             EDIT_ID,
-            "Edit amount",
+            coincube_ui::locale::copy("Edit amount"),
             ActionKind::Secondary,
             (!swapping).then(|| swap_message(SparkSwapMessage::EditAmount)),
         ))
@@ -557,7 +584,12 @@ fn review_card<'a>(
             (!swapping).then(|| swap_message(SparkSwapMessage::Confirm)),
         ));
     Column::new()
-        .push(section(h4_bold("Review")))
+        .push(section(
+            Column::new()
+                .spacing(6)
+                .push(h4_bold(CopyText::Review.get()))
+                .push(p2_regular(crate::chain::canonical_network_name(chain))),
+        ))
         .push(iced::widget::rule::horizontal(1))
         .push(section(figures))
         .push(iced::widget::rule::horizontal(1))
@@ -574,7 +606,7 @@ fn result_card<'a>(line: &'static str, title: &'static str, again: bool) -> Elem
         .spacing(12)
         .push(action(
             ACTIVITY_ID,
-            "See in Activity",
+            coincube_ui::locale::copy("See in Activity"),
             ActionKind::Secondary,
             Some(Message::Menu(Menu::Spark(SparkSubMenu::Transactions(None)))),
         ))
@@ -636,7 +668,7 @@ fn after_swap<'a>(
     };
     Column::new()
         .spacing(10)
-        .push(p2_regular("After the swap, estimated").style(theme::text::secondary))
+        .push(p2_regular(localized_copy("After the swap, estimated")).style(theme::text::secondary))
         .push(row(WalletAsset::Bitcoin))
         .push(row(WalletAsset::Usdb))
         .into()

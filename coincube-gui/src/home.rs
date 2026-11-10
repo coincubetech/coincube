@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::{
     advanced::widget::Id,
     alignment::Horizontal,
@@ -399,8 +401,9 @@ pub(crate) fn ghost_import_identity(
     )
     .public_key_hex();
     if !derived.eq_ignore_ascii_case(registered) {
-        return Err(format!(
+        return Err(coincube_ui::localized_format!(
             "This recovery phrase doesn't belong to {}. Check the words, or create a new Cube from them.",
+            "Esta frase de recuperación no pertenece a {}. Revisa las palabras o crea un Cube nuevo con ellas.",
             catalog_display_name(&ghost.name)
         ));
     }
@@ -839,8 +842,9 @@ impl Home {
         if listed && ghost.account == self.connect_account_id() {
             Ok(())
         } else {
-            Err(format!(
+            Err(coincube_ui::localized_format!(
                 "Connect no longer lists {} for this account. Cancel, then pick it again from the Launcher.",
+                "Connect ya no muestra {} en esta cuenta. Cancela y vuelve a elegirlo desde el Launcher.",
                 catalog_display_name(&ghost.name)
             ))
         }
@@ -1044,23 +1048,39 @@ impl Home {
         let limit = self.cube_limit();
         let tier = self.account_tier.display_name();
         let Some(local) = local else {
-            return format!(
+            return localized_format!(
                 "{name}: {remote} Cubes registered in Connect, of {limit} on the \
-                 {tier} plan; this device's Cubes there could not be counted."
+                 {tier} plan; this device's Cubes there could not be counted.",
+                "{name}: {remote} Cubes registrados en Connect, de {limit} en el plan \
+                 {tier}; no se pudieron contar los Cubes de este dispositivo en esa red."
             );
         };
-        let mut summary = format!(
+        let mut summary = localized_format!(
             "{name}: {}/{limit} Cubes on the {tier} plan",
+            "{name}: {}/{limit} Cubes en el plan {tier}",
             local + remote
         );
         if remote > 0 {
-            summary.push_str(&format!(
+            summary.push_str(&localized_format!(
                 ", {} of them registered in Connect but not on this device",
+                ", {} de ellos registrados en Connect pero no en este dispositivo",
                 remote
             ));
         }
         summary.push('.');
         summary
+    }
+
+    /// The Create Cube refusal at the limit, stored from `update()` in the
+    /// window's language.
+    fn cube_limit_error(&self) -> String {
+        localized_format!(
+            "Cube limit reached. {} Upgrade your Connect account \
+             or delete a Cube on this network to create more.",
+            "Alcanzaste el límite de Cubes. {} Mejora tu plan de Connect \
+             o elimina un Cube de esta red para crear más.",
+            self.cube_limit_summary(self.network),
+        )
     }
 
     /// The server's reason for refusing this Cube's registration, as user copy —
@@ -1079,17 +1099,17 @@ impl Home {
         // `responses.ErrCubeLimitReached` / "Cube limit reached for this
         // network" in the API's cube handler — change both together.
         if reason.contains("Cube limit reached") {
-            return Some(format!(
+            return Some(localized_format!(
                 "Out of Cube slots — this Cube is saved on this device only.\n\n\
                  {} Upgrade your Connect account, or delete a Cube on this \
                  network you no longer need, and this one will sync \
-                 automatically.",
+                 automatically.", "Alcanzaste el límite de Cubes. Este Cube se guardó solo en este dispositivo.\n\n{} Mejora tu plan de Connect o elimina un Cube de esta red que ya no necesites. Este Cube se sincronizará automáticamente.",
                 self.cube_limit_summary(cube.network),
             ));
         }
-        Some(format!(
+        Some(localized_format!(
             "Connect refused to register this Cube, so it is saved on this \
-             device only.\n\n{reason}"
+             device only.\n\n{reason}", "Connect rechazó el registro de este Cube. Solo se guardó en este dispositivo.\n\n{reason}"
         ))
     }
 
@@ -2035,11 +2055,7 @@ impl Home {
                 let cube_count = self.total_cube_count();
                 let limit = self.cube_limit();
                 if cube_count >= limit {
-                    self.error = Some(format!(
-                        "Cube limit reached. {} Upgrade your Connect account \
-                         or delete a Cube on this network to create more.",
-                        self.cube_limit_summary(self.network),
-                    ));
+                    self.error = Some(self.cube_limit_error());
                     return Task::none();
                 }
 
@@ -2093,8 +2109,11 @@ impl Home {
                             }
                             Err(e) => {
                                 self.creating_cube = false;
-                                self.error =
-                                    Some(format!("Failed to start passkey ceremony: {}", e));
+                                self.error = Some(coincube_ui::localized_format!(
+                                    "Failed to start passkey ceremony: {}",
+                                    "No se pudo iniciar la verificación con llave de acceso: {}",
+                                    e
+                                ));
                                 Task::none()
                             }
                         }
@@ -2148,8 +2167,11 @@ impl Home {
                         }
                         Err(e) => {
                             self.creating_cube = false;
-                            self.error =
-                                Some(format!("Failed to generate master seed signer: {}", e));
+                            self.error = Some(coincube_ui::localized_format!(
+                                "Failed to generate master seed signer: {}",
+                                "No se pudo generar el firmante de la frase maestra: {}",
+                                e
+                            ));
                             Task::none()
                         }
                     }
@@ -2443,7 +2465,11 @@ impl Home {
                         } else {
                             self.scrub_creation_seed();
                         }
-                        self.error = Some(format!("Failed to create Cube: {}", e));
+                        self.error = Some(coincube_ui::localized_format!(
+                            "Failed to create Cube: {}",
+                            "No se pudo crear el Cube: {}",
+                            e
+                        ));
                         Task::none()
                     }
                 }
@@ -3053,7 +3079,10 @@ impl Home {
                         ])
                     }
                     Err(e) => {
-                        self.settings_error = Some(format!("Couldn't save developer mode: {e}"));
+                        self.settings_error = Some(coincube_ui::localized_format!(
+                            "Couldn't save developer mode: {e}",
+                            "No se pudo guardar el modo de desarrollador: {e}"
+                        ));
                         Task::none()
                     }
                 }
@@ -3074,8 +3103,10 @@ impl Home {
                         ])
                     }
                     Err(e) => {
-                        self.settings_error =
-                            Some(format!("Couldn't save Bitcoin Blake2b beta: {e}"));
+                        self.settings_error = Some(coincube_ui::localized_format!(
+                            "Couldn't save Bitcoin Blake2b beta: {e}",
+                            "No se pudo guardar la beta de Bitcoin Blake2b: {e}"
+                        ));
                         Task::none()
                     }
                 }
@@ -3282,9 +3313,11 @@ impl Home {
                         // settings.json; trusting it would open the wrong
                         // chain's config, seed folder and provider.
                         if cube.network != source {
-                            self.error = Some(format!(
+                            self.error = Some(coincube_ui::localized_format!(
                                 "This Cube's settings say it lives on {}, but it was found in \
                                  the {} folder. Tenshu won't open it until the two agree.",
+                                "Los ajustes de este Cube indican que está en {}, pero se encontró \
+                                 en la carpeta {}. Tenshu no lo abrirá hasta que coincidan.",
                                 cube.network.label(),
                                 source.label(),
                             ));
@@ -3309,8 +3342,9 @@ impl Home {
                         let cfg = match app::Config::from_file(&path) {
                             Ok(cfg) => cfg,
                             Err(e) => {
-                                self.error = Some(format!(
+                                self.error = Some(coincube_ui::localized_format!(
                                     "Couldn't read the {} folder's configuration ({}): {}",
+                                    "No se pudo leer la configuración de la carpeta {} ({}): {}",
                                     source.label(),
                                     path.display(),
                                     e
@@ -4631,7 +4665,11 @@ impl Home {
                     Ok(signer) => signer,
                     Err(e) => {
                         self.creating_cube = false;
-                        self.error = Some(format!("Failed to derive master signer: {}", e));
+                        self.error = Some(coincube_ui::localized_format!(
+                            "Failed to derive master signer: {}",
+                            "No se pudo derivar el firmante maestro: {}",
+                            e
+                        ));
                         return Task::none();
                     }
                 };
@@ -5350,13 +5388,21 @@ impl Home {
         }
     }
 
+    #[cfg(test)]
     pub fn view(&self) -> Element<Message> {
+        self.view_with_worldview(Default::default())
+    }
+
+    pub(crate) fn view_with_worldview(
+        &self,
+        worldview: crate::app::settings::preferences::WorldviewMode,
+    ) -> Element<Message> {
         // The Launcher and Create journey own their chrome and body scrolling.
         // Other Home sections keep the legacy frame.
         let layout: Element<Message> = if self.showing_create_journey() {
-            self.create_journey_view()
+            self.create_journey_view_with_worldview(worldview)
         } else if launcher_catalog::catalog_visible(self) {
-            launcher_catalog::launcher_view(self).map(Message::View)
+            launcher_catalog::launcher_view_with_worldview(self, worldview).map(Message::View)
         } else {
             self.legacy_frame()
         };
@@ -5366,7 +5412,7 @@ impl Home {
         // If passkey ceremony webview is active, overlay it on top
         let layout = if let Some(ceremony) = &self.passkey_ceremony {
             if let Some(active) = &ceremony.active_webview {
-                let cancel_btn = button::secondary(None, "Cancel")
+                let cancel_btn = button::secondary(None, localized_copy("Cancel"))
                     .on_press(Message::CancelPasskeyCeremony)
                     .width(Length::Fixed(150.0));
 
@@ -5374,10 +5420,12 @@ impl Home {
                     Column::new()
                         .spacing(15)
                         .align_x(Alignment::Center)
-                        .push(h4_bold("Passkey Registration"))
+                        .push(h4_bold(localized_copy("Passkey Registration")))
                         .push(
-                            p1_regular("Complete the passkey setup in the window below.")
-                                .style(theme::text::secondary),
+                            p1_regular(localized_copy(
+                                "Complete the passkey setup in the window below.",
+                            ))
+                            .style(theme::text::secondary),
                         )
                         .push(active.view(Length::Fixed(500.0), Length::Fixed(400.0)))
                         .push(cancel_btn)
@@ -5399,7 +5447,7 @@ impl Home {
         // Native macOS passkey ceremony status modal
         #[cfg(target_os = "macos")]
         let layout = if self.native_passkey_ceremony.is_some() {
-            let cancel_btn = button::secondary(None, "Cancel")
+            let cancel_btn = button::secondary(None, localized_copy("Cancel"))
                 .on_press(Message::CancelPasskeyCeremony)
                 .width(Length::Fixed(150.0));
 
@@ -5407,12 +5455,12 @@ impl Home {
                 Column::new()
                     .spacing(20)
                     .align_x(Alignment::Center)
-                    .push(h4_bold("Passkey Registration"))
+                    .push(h4_bold(localized_copy("Passkey Registration")))
                     .push(
-                        p1_regular(
+                        p1_regular(localized_copy(
                             "Authenticate with Touch ID to create your passkey.\n\
                              Look for the system prompt.",
-                        )
+                        ))
                         .style(theme::text::secondary),
                     )
                     .push(cancel_btn)
@@ -5466,15 +5514,18 @@ impl Home {
                         Row::new()
                             .spacing(10)
                             .push(
-                                button::secondary(Some(icon::cross_icon()), "Cancel")
-                                    .on_press(Message::View(ViewMessage::RenameCubeCancel))
-                                    .width(Length::Fill),
+                                button::secondary(
+                                    Some(icon::cross_icon()),
+                                    localized_copy("Cancel"),
+                                )
+                                .on_press(Message::View(ViewMessage::RenameCubeCancel))
+                                .width(Length::Fill),
                             )
                             .push(if name_input.trim().is_empty() {
-                                button::primary(Some(icon::check_icon()), "Save")
+                                button::primary(Some(icon::check_icon()), localized_copy("Save"))
                                     .width(Length::Fill)
                             } else {
-                                button::primary(Some(icon::check_icon()), "Save")
+                                button::primary(Some(icon::check_icon()), localized_copy("Save"))
                                     .on_press(Message::View(ViewMessage::RenameCubeConfirm))
                                     .width(Length::Fill)
                             }),
@@ -5498,15 +5549,23 @@ impl Home {
         }
     }
 
+    #[cfg(test)]
+    fn create_journey_view(&self) -> Element<Message> {
+        self.create_journey_view_with_worldview(Default::default())
+    }
+
     /// Create-only presentation around the existing network, Cube and backup
     /// state machines. The controls below dispatch their original messages;
     /// the journey does not hold a second copy of any wallet material.
-    fn create_journey_view(&self) -> Element<Message> {
+    fn create_journey_view_with_worldview(
+        &self,
+        worldview: crate::app::settings::preferences::WorldviewMode,
+    ) -> Element<Message> {
         // Presented like Connect and App preferences: a sheet over the
         // inert, dimmed Launcher, its top bar left in view. The backdrop
         // drops the dock, which the sheet would otherwise half cover.
         crate::gui::compose_overlay(
-            launcher_catalog::launcher_backdrop(self).map(Message::View),
+            launcher_catalog::launcher_backdrop(self, worldview).map(Message::View),
             self.create_journey_frame().map(Message::View),
             true,
         )
@@ -5557,9 +5616,9 @@ impl Home {
             create_journey_focus,
         );
         let title = if restoring {
-            "Import or restore"
+            localized_copy("Import or restore")
         } else {
-            "Create Cube"
+            localized_copy("Create Cube")
         };
         let header = restore_frame::sheet_header(
             title,
@@ -5587,7 +5646,11 @@ impl Home {
             Container::new(
                 Column::new()
                     .spacing(24)
-                    .push(self.error.as_ref().map(|e| card::simple(text(e))))
+                    .push(
+                        self.error
+                            .as_ref()
+                            .map(|e| card::simple(text(coincube_ui::locale::notice(e.clone())))),
+                    )
                     .push(creation_backup_view(
                         step,
                         self.creation_backup_words.as_ref().map(|w| w.as_slice()),
@@ -5604,7 +5667,18 @@ impl Home {
             .max_width(760)
             .into()
         } else {
-            self.creation_form(false)
+            let form = self.creation_form(false);
+            if restoring {
+                form
+            } else if let Some(line) = coincube_ui::worldview_copy::VoiceLine::CreateCube.get() {
+                Column::new()
+                    .spacing(12)
+                    .push(p2_regular(line).style(theme::text::secondary))
+                    .push(form)
+                    .into()
+            } else {
+                form
+            }
         };
         let body: Element<ViewMessage> =
             // Every step's column is centred in the sheet, so a narrow form
@@ -5688,20 +5762,26 @@ impl Home {
             let available = self.chain_availability(chain).is_available();
             let selected = chain == self.network;
             let subtitle = if chain.is_blake2b() && !available {
-                "Bitcoin Blake2b availability could not be verified. Vault creation is disabled."
+                localized_copy("Bitcoin Blake2b availability could not be verified. Vault creation is disabled.")
             } else {
                 match chain {
                     ChainId::Bitcoin => "Spark · Vault",
                     ChainId::Regtest => "Spark · Vault",
                     ChainId::BitcoinBlake2b => {
-                        "Vault only. Spark isn't available on Bitcoin Blake2b."
+                        localized_copy("Vault only. Spark isn't available on Bitcoin Blake2b.")
                     }
-                    ChainId::BitcoinBlake2bTestnet4 => {
-                        "Vault only. Spark isn't available on Bitcoin Blake2b Testnet4."
+                    ChainId::BitcoinBlake2bTestnet4 => localized_copy(
+                        "Vault only. Spark isn't available on Bitcoin Blake2b Testnet4.",
+                    ),
+                    ChainId::Testnet => {
+                        localized_copy("Vault only. Spark isn't available on Testnet.")
                     }
-                    ChainId::Testnet => "Vault only. Spark isn't available on Testnet.",
-                    ChainId::Testnet4 => "Vault only. Spark isn't available on Testnet4.",
-                    ChainId::Signet => "Vault only. Spark isn't available on Signet.",
+                    ChainId::Testnet4 => {
+                        localized_copy("Vault only. Spark isn't available on Testnet4.")
+                    }
+                    ChainId::Signet => {
+                        localized_copy("Vault only. Spark isn't available on Signet.")
+                    }
                 }
             };
             let id = create_network_row_id(chain);
@@ -5796,16 +5876,18 @@ impl Home {
                         .spacing(12)
                         .align_y(Alignment::Center)
                         .push(
-                            p2_regular("Test networks appear when Developer mode is on.")
-                                .size(12)
-                                .style(theme::text::secondary)
-                                .width(Length::Fill),
+                            p2_regular(localized_copy(
+                                "Test networks appear when Developer mode is on.",
+                            ))
+                            .size(12)
+                            .style(theme::text::secondary)
+                            .width(Length::Fill),
                         )
                         .push(
                             button::secondary_action(
                                 "tenshu.create:app-preferences",
                                 None,
-                                "App preferences",
+                                coincube_ui::locale::copy("App preferences"),
                                 create_journey_focus,
                             )
                             .width(Length::Shrink)
@@ -5952,7 +6034,7 @@ impl Home {
             button::secondary_action(
                 RESTORE_SIGN_IN_ID,
                 Some(icon::person_icon()),
-                "Sign in to Connect",
+                coincube_ui::locale::copy("Sign in to Connect"),
                 create_journey_focus,
             )
             .width(Length::Shrink)
@@ -5991,9 +6073,14 @@ impl Home {
                 )
                 .push(tag)
                 .push(
-                    button::secondary_action(start_id, None, "Start", create_journey_focus)
-                        .width(Length::Shrink)
-                        .on_press_maybe(start),
+                    button::secondary_action(
+                        start_id,
+                        None,
+                        coincube_ui::locale::copy("Start"),
+                        create_journey_focus,
+                    )
+                    .width(Length::Shrink)
+                    .on_press_maybe(start),
                 )
                 .into()
         };
@@ -6046,7 +6133,7 @@ impl Home {
                     .push(
                         FocusableAction::new(
                             Id::new(RESTORE_SWITCH_TO_BITCOIN_ID),
-                            p2_regular("Switch to Bitcoin").size(12),
+                            p2_regular(localized_copy("Switch to Bitcoin")).size(12),
                             create_journey_focus,
                         )
                         .padding(0)
@@ -6112,17 +6199,21 @@ impl Home {
             .push(
                 Column::new()
                     .spacing(4)
-                    .push(h4_bold("Choose what to bring in"))
+                    .push(h4_bold(localized_copy("Choose what to bring in")))
                     .push(
-                        p2_regular(format!("Into a new Cube on {}.", self.network.label()))
-                            .style(theme::text::secondary),
+                        p2_regular(localized_format!(
+                            "Into a new Cube on {}.",
+                            "En un nuevo Cube en {}.",
+                            self.network.label()
+                        ))
+                        .style(theme::text::secondary),
                     ),
             )
             .push(paths.push(rule()));
         if projection.at_limit() {
             content = content.push(
-                p2_regular(format!(
-                    "{}: {} of {} Cubes on the {} plan. Upgrade, or delete a Cube on this network, to bring one in.",
+                p2_regular(localized_format!(
+                    "{}: {} of {} Cubes on the {} plan. Upgrade, or delete a Cube on this network, to bring one in.", "{}: {} de {} Cubes en el plan {}. Actualizar, o eliminar un Cube en esta red, para traer uno en.",
                     launcher_chrome::network_name(self.network),
                     projection.total_count,
                     projection.cube_limit,
@@ -6139,11 +6230,11 @@ impl Home {
                         .align_y(Alignment::Start)
                         .push(icon::tooltip_icon().style(theme::text::secondary))
                         .push(
-                            p2_regular(
+                            p2_regular(localized_copy(
                                 "Recovery Kit and phone recovery restore Cubes saved on your \
                                  Connect account, so they open after you sign in. Use Sign in \
                                  to Connect next to either one. Wallet import needs no account.",
-                            )
+                            ))
                             .style(theme::text::secondary),
                         ),
                 )
@@ -6164,10 +6255,11 @@ impl Home {
         let content = Column::new()
             .spacing(16)
             .max_width(760)
-            .push(h4_bold("Which Cube?"))
+            .push(h4_bold(localized_copy("Which Cube?")))
             .push(
-                p2_regular(format!(
+                p2_regular(localized_format!(
                     "Cubes on your Connect account · {}",
+                    "Cubes en tu cuenta de Connect · {}",
                     self.network.label()
                 ))
                 .style(theme::text::secondary),
@@ -6175,14 +6267,16 @@ impl Home {
         if !self.connect_account.is_authenticated() {
             return content
                 .push(
-                    p2_regular("Sign in to Connect to see the Cubes your phone can recover.")
-                        .style(theme::text::secondary),
+                    p2_regular(localized_copy(
+                        "Sign in to Connect to see the Cubes your phone can recover.",
+                    ))
+                    .style(theme::text::secondary),
                 )
                 .push(
                     button::secondary_action(
                         RESTORE_SIGN_IN_ID,
                         Some(icon::person_icon()),
-                        "Sign in to Connect",
+                        coincube_ui::locale::copy("Sign in to Connect"),
                         create_journey_focus,
                     )
                     .width(Length::Shrink)
@@ -6217,8 +6311,9 @@ impl Home {
         let mut column = content;
         if shown.is_empty() {
             column = column.push(
-                p2_regular(format!(
+                p2_regular(localized_format!(
                     "No Cube on your Connect account can be recovered with a phone on {}.",
+                    "Ningún Cube de tu cuenta de Connect se puede recuperar con un teléfono en {}.",
                     self.network.label()
                 ))
                 .style(theme::text::secondary),
@@ -6249,7 +6344,7 @@ impl Home {
                             button::secondary_action(
                                 Id::from(format!("tenshu.restore:phone:{}", cube.uuid)),
                                 None,
-                                "Recover",
+                                coincube_ui::locale::copy("Recover"),
                                 create_journey_focus,
                             )
                             .width(Length::Shrink)
@@ -6271,15 +6366,22 @@ impl Home {
                     .spacing(8)
                     .align_y(Alignment::Center)
                     .push(
-                        p2_regular(format!("{others} more on other networks"))
-                            .style(theme::text::secondary),
+                        p2_regular(localized_format!(
+                            "{others} more on other networks",
+                            "{others} más en otras redes"
+                        ))
+                        .style(theme::text::secondary),
                     )
                     .push(p2_regular("·").style(theme::text::secondary))
                     .push(
                         FocusableAction::new(
                             Id::new(RESTORE_ALL_NETWORKS_ID),
                             p2_regular(if self.restore_all_networks {
-                                format!("Show {} only", self.network.label())
+                                localized_format!(
+                                    "Show {} only",
+                                    "Mostrar solo {}",
+                                    self.network.label()
+                                )
                             } else {
                                 "Show all networks".to_string()
                             }),
@@ -6307,8 +6409,11 @@ impl Home {
             return Container::new(
                 Column::new()
                     .spacing(8)
-                    .push(h4_bold("Checking for Cubes"))
-                    .push(p2_regular("Loading local Cube settings…").style(theme::text::secondary)),
+                    .push(h4_bold(localized_copy("Checking for Cubes")))
+                    .push(
+                        p2_regular(localized_copy("Loading local Cube settings…"))
+                            .style(theme::text::secondary),
+                    ),
             )
             .width(Length::Fill)
             .height(Length::Fill)
@@ -6324,7 +6429,7 @@ impl Home {
                 .push(h3(self.network.label()))
                 .push(text(reason.to_string()))
                 .push(
-                    button::secondary(None, "Back to Bitcoin")
+                    button::secondary(None, localized_copy("Back to Bitcoin"))
                         .on_press(Message::View(ViewMessage::SelectNetwork(ChainId::Bitcoin))),
                 )
                 .into()
@@ -6336,7 +6441,7 @@ impl Home {
                     Row::new()
                         .push(if self.showing_create_form() && self.can_leave_create_journey() {
                             Some(
-                                button::secondary(Some(icon::previous_icon()), "Back to Cube list")
+                                button::secondary(Some(icon::previous_icon()), localized_copy("Back to Cube list"))
                                     .on_press_maybe(if self.creating_cube {
                                         None
                                     } else {
@@ -6371,7 +6476,7 @@ impl Home {
                                 if matches!(self.state, State::Cubes { .. } | State::NoCube { .. })
                                     && !self.showing_create_form()
                                 {
-                                    Some(text("Your Cubes").size(24).bold())
+                                    Some(text(localized_copy("Your Cubes")).size(24).bold())
                                 } else {
                                     None
                                 },
@@ -6380,7 +6485,9 @@ impl Home {
                                 // Only show error at top if not in create cube
                                 // form — the form renders `self.error` itself.
                                 if !self.showing_create_form() {
-                                    self.error.as_ref().map(|e| card::simple(text(e)))
+                                    self.error.as_ref().map(|e| {
+                                        card::simple(text(coincube_ui::locale::notice(e.clone())))
+                                    })
                                 } else {
                                     None
                                 }
@@ -6454,9 +6561,9 @@ impl Home {
                                         if at_limit && !remote_for_net.is_empty() {
                                             col = col.push(
                                                 Container::new(
-                                                    p1_regular(format!(
+                                                    p1_regular(localized_format!(
                                                         "Cube limit reached. {} \
-                                                         Upgrade your Connect account or delete a remote Cube to create one here.",
+                                                         Upgrade your Connect account or delete a remote Cube to create one here.", "Alcanzaste el límite de Cubes. {} Mejora tu plan de Connect o elimina un Cube remoto para crear uno aquí.",
                                                         self.cube_limit_summary(self.network),
                                                     ))
                                                     .style(theme::text::secondary),
@@ -6556,7 +6663,7 @@ fn advisory_notice_modal(
                                 .width(Length::Fill),
                         )
                         .push(
-                            button::primary(Some(icon::check_icon()), "Got it")
+                            button::primary(Some(icon::check_icon()), localized_copy("Got it"))
                                 .on_press(Message::View(ViewMessage::DismissAdvisoryNotice))
                                 .width(Length::Fill),
                         ),
@@ -6609,16 +6716,17 @@ fn global_settings_view(home: &Home) -> Element<Message> {
     let mut content = Column::new()
         .spacing(24)
         .max_width(700)
-        .push(h3("Global Settings"))
+        .push(h3(localized_copy("Global Settings")))
         .push(
-            p1_regular(
+            p1_regular(localized_copy(
                 "Preferences apply to all Cubes on this device. Changes are saved automatically.",
-            )
+            ))
             .style(theme::text::secondary),
         )
         .push(card::simple(settings));
     if let Some(error) = &home.settings_error {
-        content = content.push(p1_regular(error).style(theme::text::error));
+        content = content
+            .push(p1_regular(coincube_ui::locale::notice(error.clone())).style(theme::text::error));
     }
     content.into()
 }
@@ -6881,7 +6989,7 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
             Container::new(
                 FocusableAction::new(
                     LEGACY_CONNECT_SIGN_IN_ID,
-                    Container::new(p1_bold("Sign In"))
+                    Container::new(p1_bold(localized_copy("Sign In")))
                         .center_x(Length::Fill)
                         .padding(5),
                     legacy_connect_focus,
@@ -7000,17 +7108,17 @@ fn create_cube_form<'a>(
         .width(Length::Fill)
         .max_width(if importing_bitcoin { 500.0 } else { 640.0 })
         .push(h4_bold(if importing_bitcoin {
-            "Create a Cube for your Bitcoin wallet"
+            localized_copy("Create a Cube for your Bitcoin wallet")
         } else {
-            "Create a new Cube"
+            localized_copy("Create a new Cube")
         }))
         .push(
             p1_regular(if importing_bitcoin {
-                "Create and back up your Cube first, then import the public descriptors for your existing Bitcoin wallet. Your original wallet signers remain necessary to spend."
+                localized_copy("Create and back up your Cube first, then import the public descriptors for your existing Bitcoin wallet. Your original wallet signers remain necessary to spend.")
             } else if spark_available {
-                "A Cube is an account. It holds a Spark wallet and a Vault."
+                localized_copy("A Cube is an account. It holds a Spark wallet and a Vault.")
             } else {
-                "A Cube is an account. On this network it holds a Vault."
+                localized_copy("A Cube is an account. On this network it holds a Vault.")
             })
             .style(theme::text::secondary),
         );
@@ -7030,7 +7138,7 @@ fn create_cube_form<'a>(
                 Row::new()
                     .spacing(20)
                     .align_y(Alignment::Center)
-                    .push(text("Unlock method:").bold())
+                    .push(text(localized_copy("Unlock method:")).bold())
                     .push(Space::new().width(Length::Fill))
                     .push(text("Passkey"))
                     .push(
@@ -7046,10 +7154,14 @@ fn create_cube_form<'a>(
     }
     column = column.push(
         Container::new(
-            form::Form::new("Cube Name", cube_name, ViewMessage::CubeNameEdited)
-                .warning("Please enter a name")
-                .size(20)
-                .padding(10),
+            form::Form::new(
+                coincube_ui::locale::copy("Cube Name"),
+                cube_name,
+                ViewMessage::CubeNameEdited,
+            )
+            .warning(localized_copy("Please enter a name"))
+            .size(20)
+            .padding(10),
         )
         .width(Length::Fill),
     );
@@ -7100,7 +7212,10 @@ fn create_cube_form<'a>(
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(icon::cross_icon().style(theme::text::error))
-                .push(p2_regular("Doesn't match the PIN you entered.").style(theme::text::error))
+                .push(
+                    p2_regular(localized_copy("Doesn't match the PIN you entered."))
+                        .style(theme::text::error),
+                )
                 .into(),
             CreatePinMatch::Match => Row::new()
                 .spacing(8)
@@ -7117,7 +7232,9 @@ fn create_cube_form<'a>(
 
     // Show error above the button
     if let Some(err) = error {
-        column = column.push(p1_regular(err).style(theme::text::error));
+        column = column.push(
+            p1_regular(coincube_ui::locale::notice(err.to_owned())).style(theme::text::error),
+        );
     }
 
     // The Create journey keeps its submit action in a fixed footer so PIN
@@ -7130,7 +7247,7 @@ fn create_cube_form<'a>(
                     Row::new()
                         .spacing(5)
                         .align_y(Alignment::Center)
-                        .push(text("Creating"))
+                        .push(text(localized_copy("Creating")))
                         .push(
                             Container::new(spinner::typing_text_carousel(
                                 "...",
@@ -7148,7 +7265,7 @@ fn create_cube_form<'a>(
             .height(Length::Fixed(44.0))
             .style(theme::button::primary)
         } else {
-            button::primary(None, "Create Cube")
+            button::primary(None, localized_copy("Create Cube"))
                 .width(Length::Fixed(200.0))
                 .on_press_maybe(
                     create_cube_can_submit(
@@ -7169,13 +7286,13 @@ fn create_cube_form<'a>(
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(
-                    p2_regular("Already have a wallet or a Recovery Kit?")
+                    p2_regular(localized_copy("Already have a wallet or a Recovery Kit?"))
                         .style(theme::text::secondary),
                 )
                 .push(
                     FocusableAction::new(
                         Id::new(CREATE_IMPORT_OR_RESTORE_ID),
-                        p2_regular("Import or restore instead"),
+                        p2_regular(localized_copy("Import or restore instead")),
                         create_journey_focus,
                     )
                     .padding(0)
@@ -7318,14 +7435,18 @@ fn creation_backup_view<'a>(
                 .width(Length::Fill)
                 .align_x(Alignment::Center)
                 .spacing(20)
-                .push(text("Saving your Recovery Kit…").size(24).bold())
+                .push(
+                    text(localized_copy("Saving your Recovery Kit…"))
+                        .size(24)
+                        .bold(),
+                )
                 .push(
                     Container::new(
-                        p1_regular(
+                        p1_regular(localized_copy(
                             "Encrypting this Cube's master seed with your recovery password \
                              and saving it to COINCUBE Connect. You'll come back to Backup \
                              when it's done.",
-                        )
+                        ))
                         .style(theme::text::secondary)
                         .align_x(iced::alignment::Horizontal::Center),
                     )
@@ -7373,15 +7494,16 @@ fn creation_choice_view(
 ) -> Element<'static, ViewMessage> {
     use crate::app::view::settings::page;
 
-    let seed_row = page::row("Seed phrase").description("12 words, written down offline.");
+    let seed_row = page::row(localized_copy("Seed phrase"))
+        .description(localized_copy("12 words, written down offline."));
     let seed_row = if hub.seed_confirmed {
-        seed_row.accessory(page::status(page::Status::Ok, "Confirmed"))
+        seed_row.accessory(page::status(page::Status::Ok, localized_copy("Confirmed")))
     } else {
         seed_row.control(
             button::secondary_action(
                 CREATE_BACKUP_SEED_ID,
                 None,
-                "Write it down",
+                coincube_ui::locale::copy("Write it down"),
                 create_journey_focus,
             )
             .width(Length::Shrink)
@@ -7391,19 +7513,23 @@ fn creation_choice_view(
         )
     };
 
-    let kit_row = page::row("Recovery Kit");
+    let kit_row = page::row(localized_copy("Recovery Kit"));
     let kit_row = if hub.kit_saved {
         kit_row
-            .description("Encrypted copy kept with your Connect account.")
-            .accessory(page::status(page::Status::Ok, "Backed up"))
+            .description(localized_copy(
+                "Encrypted copy kept with your Connect account.",
+            ))
+            .accessory(page::status(page::Status::Ok, localized_copy("Backed up")))
     } else if kit_available {
         kit_row
-            .description("Master seed, encrypted with a recovery password only you know.")
+            .description(localized_copy(
+                "Master seed, encrypted with a recovery password only you know.",
+            ))
             .control(
                 button::secondary_action(
                     CREATE_BACKUP_KIT_ID,
                     None,
-                    "Create Recovery Kit",
+                    coincube_ui::locale::copy("Create Recovery Kit"),
                     create_journey_focus,
                 )
                 .width(Length::Shrink)
@@ -7411,11 +7537,14 @@ fn creation_choice_view(
             )
     } else {
         kit_row
-            .description(
+            .description(localized_copy(
                 "Kept with your Connect account. Signing in also syncs this Cube to your \
                  other devices and the Keychain app.",
-            )
-            .accessory(page::status(page::Status::Unknown, "Sign in required"))
+            ))
+            .accessory(page::status(
+                page::Status::Unknown,
+                localized_copy("Sign in required"),
+            ))
             .control(
                 // Opens the Connect sign-in sheet over this one. Its Close
                 // returns focus to this row: to Sign in, or to Create Recovery
@@ -7423,7 +7552,7 @@ fn creation_choice_view(
                 button::secondary_action(
                     CREATE_BACKUP_SIGN_IN_ID,
                     None,
-                    "Sign in",
+                    coincube_ui::locale::copy("Sign in"),
                     create_journey_focus,
                 )
                 .width(Length::Shrink)
@@ -7437,14 +7566,18 @@ fn creation_choice_view(
         .width(Length::Fill)
         .max_width(640)
         .spacing(20)
-        .push(h4_bold("Back up this Cube"))
+        .push(h4_bold(localized_copy("Back up this Cube")))
         .push(
             p1_regular(if is_passkey {
-                "Set up one or both. Either one restores this Cube on another computer, \
-                 even without your passkey."
+                localized_copy(
+                    "Set up one or both. Either one restores this Cube on another computer, \
+                 even without your passkey.",
+                )
             } else {
-                "Set up one or both. Either one restores this Cube on another computer, \
-                 even without your PIN."
+                localized_copy(
+                    "Set up one or both. Either one restores this Cube on another computer, \
+                 even without your PIN.",
+                )
             })
             .style(theme::text::secondary),
         )
@@ -7465,7 +7598,7 @@ fn creation_choice_footer(saving: bool, hub: CreationBackupHub) -> Element<'stat
             button::secondary_action(
                 CREATE_BACKUP_CANCEL_ID,
                 None,
-                "Cancel",
+                coincube_ui::locale::copy("Cancel"),
                 create_journey_focus,
             )
             .width(Length::Shrink)
@@ -7477,7 +7610,7 @@ fn creation_choice_footer(saving: bool, hub: CreationBackupHub) -> Element<'stat
             button::secondary_action(
                 CREATE_BACKUP_LATER_ID,
                 None,
-                "I'll do this later",
+                coincube_ui::locale::copy("I'll do this later"),
                 create_journey_focus,
             )
             .width(Length::Shrink)
@@ -7513,7 +7646,11 @@ fn creation_backup_bypass_view(
             .width(Length::Fill)
             .align_x(Alignment::Center)
             .spacing(20)
-            .push(text("Create this Cube without a backup?").size(24).bold())
+            .push(
+                text(localized_copy("Create this Cube without a backup?"))
+                    .size(24)
+                    .bold(),
+            )
             .push(
                 Container::new(
                     p1_regular(creation_gate::not_a_backup_copy(is_passkey))
@@ -7536,19 +7673,25 @@ fn creation_backup_bypass_view(
                 Row::new()
                     .spacing(20)
                     .push(
-                        button::secondary(Some(icon::previous_icon()), "Back up now")
-                            .on_press(ViewMessage::CreationBackupChoiceRequested)
-                            .width(Length::Fixed(240.0)),
+                        button::secondary(
+                            Some(icon::previous_icon()),
+                            localized_copy("Back up now"),
+                        )
+                        .on_press(ViewMessage::CreationBackupChoiceRequested)
+                        .width(Length::Fixed(240.0)),
                     )
                     .push(
-                        button::primary(None, "Create without a backup")
+                        button::primary(None, localized_copy("Create without a backup"))
                             .on_press_maybe(
                                 acknowledged.then_some(ViewMessage::CreationBackupBypassConfirmed),
                             )
                             .width(Length::Fixed(240.0)),
                     ),
             )
-            .push(button::transparent(None, "Cancel").on_press(ViewMessage::CancelCreationBackup)),
+            .push(
+                button::transparent(None, localized_copy("Cancel"))
+                    .on_press(ViewMessage::CancelCreationBackup),
+            ),
     )
     .width(Length::Fill)
     .into()
@@ -7681,7 +7824,7 @@ fn recovery_input_view(
         .align_y(Alignment::Center)
         .push(Space::new().width(Length::Fill))
         .push(
-            button::secondary(None, "Cancel")
+            button::secondary(None, localized_copy("Cancel"))
                 .width(Length::Fixed(145.0))
                 .on_press_maybe((!creating).then_some(ViewMessage::CancelRecovery)),
         )
@@ -7726,8 +7869,10 @@ fn recovery_input_view(
                 .push(Space::new().width(Length::Fill))
                 .push(
                     Container::new(
-                        p1_regular("Enter your 12-word recovery phrase to restore your Cube.")
-                            .align_x(iced::alignment::Horizontal::Center),
+                        p1_regular(localized_copy(
+                            "Enter your 12-word recovery phrase to restore your Cube.",
+                        ))
+                        .align_x(iced::alignment::Horizontal::Center),
                     )
                     .width(Length::Fixed(700.0))
                     .align_x(iced::alignment::Horizontal::Center),
@@ -8233,12 +8378,10 @@ impl DeleteRemoteCubeModal {
             .is_some()
     }
 
-    /// Connect holds a way to restore this Cube, whether or not this build
-    /// can use it (a Recovery Kit with no Master Seed, say): deleting it takes
-    /// that backup.
+    /// Delete removes recorded backup material even when this build can't
+    /// restore the whole Cube from it.
     fn holds_backup(&self) -> bool {
-        let (password, phone) = launcher_catalog::remote_recovery(&self.cube);
-        password || phone
+        self.cube.has_recovery_kit || self.cube.phone_recoverable
     }
 
     /// A Cube with a backup in Connect is confirmed by typing its name as the
@@ -8254,11 +8397,13 @@ impl DeleteRemoteCubeModal {
         let network = ChainId::from_api_str(&self.cube.network)
             .map(|chain| chain.label())
             .unwrap_or("Unknown network");
-        let backup = match launcher_catalog::remote_recovery(&self.cube) {
+        let backup = localized_copy(match launcher_catalog::remote_recovery(&self.cube) {
             (true, _) => "Recovery Kit in Connect",
             (false, true) => "Phone recovery in Connect",
+            (false, false) if self.cube.has_recovery_kit => "Recovery Kit has no Master Seed",
+            (false, false) if self.cube.phone_recoverable => "Phone recovery in Connect",
             (false, false) => "No Recovery Kit in Connect",
-        };
+        });
 
         let header = Row::new()
             .spacing(16)
@@ -8338,15 +8483,15 @@ impl DeleteRemoteCubeModal {
                             Column::new()
                                 .width(Length::Fill)
                                 .spacing(2)
-                                .push(p1_bold("Is Connect its only backup?"))
-                                .push(p2_regular(if restorable {
+                                .push(p1_bold(localized_copy("Is Connect its only backup?")))
+                                .push(p2_regular(localized_copy(if restorable {
                                     "Without its recovery phrase or another device, any funds \
                                      in this Cube will be lost. Restore it first if you\u{2019}re \
                                      not sure."
                                 } else {
                                     "Without its recovery phrase or another device, any funds \
                                      in this Cube will be lost."
-                                })),
+                                }))),
                         )
                         .push(restore_btn),
                 )
@@ -8357,10 +8502,10 @@ impl DeleteRemoteCubeModal {
         }
 
         col = col.push(Space::new().height(12.0)).push(
-            p2_regular(
+            p2_regular(localized_copy(
                 "On another device too? Delete it there, or it registers again \
                  and takes the slot back.",
-            )
+            ))
             .style(theme::text::secondary),
         );
 
@@ -8376,7 +8521,11 @@ impl DeleteRemoteCubeModal {
             }
             col = col
                 .push(Space::new().height(20.0))
-                .push(p1_medium(format!("Type {} to confirm", display_name)))
+                .push(p1_medium(localized_format!(
+                    "Type {} to confirm",
+                    "Tipo {} para confirmar",
+                    display_name
+                )))
                 .push(Space::new().height(8.0))
                 .push(input);
         }
@@ -8417,13 +8566,17 @@ impl DeleteRemoteCubeModal {
             ))
         }));
 
-        let cancel_btn =
-            button::secondary_action(DELETE_REMOTE_CANCEL_ID, None, "Cancel", delete_modal_focus)
-                .width(Length::Fixed(120.0))
-                .on_press_maybe(
-                    (!self.deleting)
-                        .then_some(ViewMessage::DeleteCube(DeleteCubeMessage::CloseRemoteModal)),
-                );
+        let cancel_btn = button::secondary_action(
+            DELETE_REMOTE_CANCEL_ID,
+            None,
+            coincube_ui::locale::copy("Cancel"),
+            delete_modal_focus,
+        )
+        .width(Length::Fixed(120.0))
+        .on_press_maybe(
+            (!self.deleting)
+                .then_some(ViewMessage::DeleteCube(DeleteCubeMessage::CloseRemoteModal)),
+        );
 
         col = col.push(Space::new().height(24.0)).push(
             Row::new()
@@ -8459,29 +8612,42 @@ impl RecoveryMethodModal {
             .spacing(15)
             .padding(20)
             .width(Length::Fixed(460.0))
-            .push(h4_bold(format!("Recover \"{}\"", display_name)).width(Length::Fill))
             .push(
-                p1_regular(
+                h4_bold(localized_format!(
+                    "Recover \"{}\"",
+                    "Recuperar \"{}\"",
+                    display_name
+                ))
+                .width(Length::Fill),
+            )
+            .push(
+                p1_regular(localized_copy(
                     "This Cube has two backups. Choose how to recover it — \
                      both restore the same wallet.",
-                )
+                ))
                 .style(theme::text::secondary),
             )
             .push(
-                button::secondary(Some(icon::key_icon()), "Recover with password")
-                    .width(Length::Fill)
-                    .on_press(ViewMessage::RestoreFromRecoveryKit(self.cube.uuid.clone())),
+                button::secondary(
+                    Some(icon::key_icon()),
+                    localized_copy("Recover with password"),
+                )
+                .width(Length::Fill)
+                .on_press(ViewMessage::RestoreFromRecoveryKit(self.cube.uuid.clone())),
             )
             .push(
-                button::secondary(Some(icon::phone_icon()), "Recover with phone")
-                    .width(Length::Fill)
-                    .on_press(ViewMessage::RestoreWithPhone {
-                        cube_id: self.cube.id,
-                        full_cube: self.cube.phone_full_cube,
-                    }),
+                button::secondary(
+                    Some(icon::phone_icon()),
+                    localized_copy("Recover with phone"),
+                )
+                .width(Length::Fill)
+                .on_press(ViewMessage::RestoreWithPhone {
+                    cube_id: self.cube.id,
+                    full_cube: self.cube.phone_full_cube,
+                }),
             )
             .push(
-                button::secondary(Some(icon::cross_icon()), "Cancel")
+                button::secondary(Some(icon::cross_icon()), localized_copy("Cancel"))
                     .width(Length::Fill)
                     .on_press(ViewMessage::CloseRecoveryMethodPicker),
             );
@@ -8742,7 +8908,7 @@ impl DeleteCubeModal {
         let mut confirm_button = button::secondary_action(
             DELETE_LOCAL_CONFIRM_ID,
             None,
-            "Delete Cube",
+            coincube_ui::locale::copy("Delete Cube"),
             delete_modal_focus,
         )
         .width(Length::Fixed(200.0))
@@ -8788,9 +8954,13 @@ impl DeleteCubeModal {
         let mut col = Column::new()
             .spacing(10)
             .push(Container::new(
-                h4_bold(format!("Delete Cube \"{}\"", display_name))
-                    .style(delete_modal_danger_text)
-                    .width(Length::Fill),
+                h4_bold(localized_format!(
+                    "Delete Cube \"{}\"",
+                    "Borrar Cube \"{}\"",
+                    display_name
+                ))
+                .style(delete_modal_danger_text)
+                .width(Length::Fill),
             ))
             .push(Row::new().push(text(help_text_1)))
             .push(help_text_2.map(|t| Row::new().push(p1_regular(t).style(theme::text::secondary))))
@@ -8807,17 +8977,19 @@ impl DeleteCubeModal {
         if self.can_delete_backup {
             col = col.push(Space::new().height(Length::Fixed(5.0))).push(
                 CheckBox::new(self.delete_connect_backup)
-                    .label("Also delete Connect backup (frees a Cube slot)")
+                    .label(localized_copy(
+                        "Also delete Connect backup (frees a Cube slot)",
+                    ))
                     .on_toggle(|checked| {
                         ViewMessage::DeleteCube(DeleteCubeMessage::DeleteConnectBackup(checked))
                     }),
             );
             if self.delete_connect_backup {
                 col = col.push(
-                    p1_regular(
+                    p1_regular(localized_copy(
                         "The Connect backup will be permanently deleted. \
                          This frees a Cube slot on your account.",
-                    )
+                    ))
                     .style(theme::text::warning),
                 );
             }
@@ -8827,7 +8999,10 @@ impl DeleteCubeModal {
         if self.cube.has_pin(&self.datadir_root) {
             col = col
                 .push(Space::new().height(Length::Fixed(5.0)))
-                .push(p1_regular("Enter your PIN to confirm:").style(theme::text::secondary))
+                .push(
+                    p1_regular(localized_copy("Enter your PIN to confirm:"))
+                        .style(theme::text::secondary),
+                )
                 .push(
                     Container::new(
                         self.pin_input
@@ -8838,8 +9013,11 @@ impl DeleteCubeModal {
                 );
             if let Some(err) = &self.pin_error {
                 col = col.push(
-                    Container::new(p1_regular(err).style(theme::text::error))
-                        .center_x(Length::Fill),
+                    Container::new(
+                        p1_regular(coincube_ui::locale::notice(err.to_owned()))
+                            .style(theme::text::error),
+                    )
+                    .center_x(Length::Fill),
                 );
             }
         }
@@ -8855,8 +9033,10 @@ impl DeleteCubeModal {
         if self.waiting_for_stop {
             col = col.push(
                 Container::new(
-                    p1_regular("Finishing locking this Cube before deleting it…")
-                        .style(theme::text::secondary),
+                    p1_regular(localized_copy(
+                        "Finishing locking this Cube before deleting it…",
+                    ))
+                    .style(theme::text::secondary),
                 )
                 .center_x(Length::Fill),
             );
@@ -8876,7 +9056,7 @@ impl DeleteCubeModal {
                             button::secondary_action(
                                 DELETE_LOCAL_CANCEL_ID,
                                 None,
-                                "Cancel",
+                                coincube_ui::locale::copy("Cancel"),
                                 delete_modal_focus,
                             )
                             .width(Length::Fixed(120.0))
@@ -8887,7 +9067,10 @@ impl DeleteCubeModal {
                     Row::new()
                         .spacing(10)
                         .push(icon::square_check_icon().style(theme::text::success))
-                        .push(text("Cube successfully deleted").style(theme::text::success))
+                        .push(
+                            text(localized_copy("Cube successfully deleted"))
+                                .style(theme::text::success),
+                        )
                 })
                 .align_x(Horizontal::Center)
                 .width(Length::Fill),
@@ -9973,8 +10156,10 @@ mod tests {
         )
         .await
         .expect("software renderer");
+        use coincube_ui::{theme::WorldviewMode, worldview_copy};
         let labels = |home: &Home| {
-            let mut element = home.create_journey_view();
+            let mut element =
+                worldview_copy::render_in(WorldviewMode::Suitcoiner, || home.create_journey_view());
             let mut tree = Tree::new(element.as_widget());
             let node = element.as_widget_mut().layout(
                 &mut tree,
@@ -10009,7 +10194,12 @@ mod tests {
             );
         }
         // Neither the legacy sidebar nor Create's network step.
-        for label in ["Cubes", "Light Mode", "Live networks"] {
+        for label in [
+            "Cubes",
+            "Light Mode",
+            "Live networks",
+            "Establish a new position.",
+        ] {
             assert!(
                 !shown.iter().any(|l| l == label),
                 "{:?} shown: {:?}",
@@ -10050,6 +10240,12 @@ mod tests {
         let _ = home.update(Message::View(ViewMessage::ShowCreateCube(false)));
         assert!(!home.restore_hub);
         assert!(!home.showing_import_or_restore());
+
+        let _ = home.update(Message::View(ViewMessage::ShowCreateCube(true)));
+        let shown = labels(&home);
+        assert!(shown
+            .iter()
+            .any(|label| label == "Establish a new position."));
     }
 
     /// Changing the network in the header re-filters Import or restore
@@ -11017,7 +11213,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_delete_asks_for_the_name_only_when_connect_could_restore_it() {
+    fn remote_delete_requires_the_name_when_connect_holds_any_backup() {
         let restorable = remote_cube("remote-a", "Remote A", Network::Bitcoin);
         let mut bare = remote_cube("remote-b", "Remote B", Network::Bitcoin);
         bare.has_recovery_kit = false;
@@ -11033,6 +11229,15 @@ mod tests {
         assert!(!modal(restorable.clone(), "Remote").name_confirmed());
         assert!(modal(restorable.clone(), " Remote A ").name_confirmed());
         assert!(modal(bare, "").name_confirmed());
+
+        let mut descriptor_only = remote_cube("remote-c", "Remote C", Network::Bitcoin);
+        descriptor_only.network = settings::network_to_api_string(ChainId::BitcoinBlake2b);
+        descriptor_only.has_encrypted_seed = false;
+        let guarded = modal(descriptor_only.clone(), "");
+        assert!(guarded.holds_backup());
+        assert!(!guarded.restorable());
+        assert!(!guarded.name_confirmed());
+        assert!(modal(descriptor_only, "Remote C").name_confirmed());
 
         // Restore instead closes the delete and hands over to the restore.
         let mut home = home();

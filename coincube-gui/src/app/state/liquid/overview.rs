@@ -313,7 +313,14 @@ impl State for LiquidOverview {
                                     .is_some_and(|id| self.swap_tx_ids.contains(id));
                                 let (desc, usdt_display) = if is_usdt {
                                     (
-                                        if is_swap { "Swap" } else { "USDt Transfer" }.to_owned(),
+                                        if is_swap {
+                                            coincube_ui::localized_format!("Swap", "Intercambio")
+                                        } else {
+                                            coincube_ui::localized_format!(
+                                                "USDt Transfer",
+                                                "Transferencia de USDt"
+                                            )
+                                        },
                                         Some(format!(
                                             "{} USDt",
                                             crate::app::breez_liquid::assets::format_usdt_display(
@@ -322,7 +329,7 @@ impl State for LiquidOverview {
                                         )),
                                     )
                                 } else if is_swap {
-                                    ("Swap".to_owned(), None)
+                                    (coincube_ui::localized_format!("Swap", "Intercambio"), None)
                                 } else {
                                     (payment.details.description().to_owned(), None)
                                 };

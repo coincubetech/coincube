@@ -7,6 +7,7 @@
 //! form (for example `lnbc50u1p…synthetic…7xk`) and copy the full value in
 //! the owner's `on_copy` handler.
 
+use crate::locale::copy as localized_copy;
 use std::borrow::Cow;
 
 use iced::advanced::text::Shaping;
@@ -117,10 +118,14 @@ impl<'a, M: Clone + 'static> From<CopyField<'a, M>> for Element<'a, M> {
         let button = Action::new(
             id,
             Container::new(
-                iced::widget::text(if copied { "Copied" } else { "Copy" })
-                    .shaping(Shaping::Advanced)
-                    .font(font::MEDIUM)
-                    .size(type_size::CHIP),
+                iced::widget::text(if copied {
+                    localized_copy("Copied")
+                } else {
+                    localized_copy("Copy")
+                })
+                .shaping(Shaping::Advanced)
+                .font(font::MEDIUM)
+                .size(type_size::CHIP),
             )
             .height(Length::Fill)
             .align_y(alignment::Vertical::Center),

@@ -11,6 +11,8 @@
 //! address, as does the Stable Balance control (Balances & conversion).
 
 use coincube_core::miniscript::bitcoin::Amount;
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 
 use crate::app::wallets::DomainPaymentStatus;
 use coincube_ui::component::tenshu::{
@@ -275,13 +277,13 @@ pub fn lightning_share_panel<'a>(
             .width(Length::Fill)
             .align_x(Alignment::Center)
             .into(),
-        None => p2_regular("QR unavailable · copy the address instead.")
+        None => p2_regular(localized_copy("QR unavailable · copy the address instead."))
             .style(theme::text::secondary)
             .into(),
     };
     let change = ActionButton::new(
         landing_control_id(cube_id, "Spark", "ln-change"),
-        "Change address",
+        localized_copy("Change address"),
         ActionKind::Quiet,
         SparkOverviewMessage::FocusAction,
     )
@@ -291,12 +293,12 @@ pub fn lightning_share_panel<'a>(
         .push(
             Column::new()
                 .spacing(4)
-                .push(h4_bold("Get paid over Lightning"))
+                .push(h4_bold(localized_copy("Get paid over Lightning")))
                 .push(
-                    text(
+                    text(localized_copy(
                         "Anyone with a Lightning wallet can send you bitcoin at this \
                          address, even while Tenshu is closed.",
-                    )
+                    ))
                     .size(P2_SIZE)
                     .style(theme::text::secondary),
                 ),
@@ -310,7 +312,7 @@ pub fn lightning_share_panel<'a>(
         .push({
             let copy = ActionButton::new(
                 landing_control_id(cube_id, "Spark", "ln-copy"),
-                "Copy address",
+                localized_copy("Copy address"),
                 ActionKind::Primary,
                 SparkOverviewMessage::FocusAction,
             )
@@ -326,7 +328,7 @@ pub fn lightning_share_panel<'a>(
                 actions = actions.push(
                     ActionButton::new(
                         landing_control_id(cube_id, "Spark", "ln-save-qr"),
-                        "Save QR image",
+                        localized_copy("Save QR image"),
                         ActionKind::Secondary,
                         SparkOverviewMessage::FocusAction,
                     )
@@ -343,7 +345,7 @@ pub fn lightning_share_panel<'a>(
             Row::new()
                 .align_y(Alignment::Center)
                 .push(
-                    text("Want a different name?")
+                    text(localized_copy("Want a different name?"))
                         .size(P2_SIZE)
                         .style(theme::text::secondary)
                         .width(Length::Fill),
@@ -382,18 +384,20 @@ impl<'a> SparkOverviewView<'a> {
         match &self.status {
             SparkStatus::Unavailable => Column::new()
                 .spacing(20)
-                .push(p1_regular(
+                .push(p1_regular(localized_copy(
                     "Spark is not configured for this cube yet. Set up a Spark \
                      signer and restart the app to connect the bridge.",
-                ))
+                )))
                 .into(),
             SparkStatus::Loading => Column::new()
                 .spacing(20)
-                .push(p1_regular("Connecting to the Spark bridge…"))
+                .push(p1_regular(localized_copy(
+                    "Connecting to the Spark bridge…",
+                )))
                 .into(),
             SparkStatus::Error(err) => Column::new()
                 .spacing(20)
-                .push(p1_regular("Spark bridge error"))
+                .push(p1_regular(localized_copy("Spark bridge error")))
                 .push(p2_regular(err.clone()))
                 .into(),
             SparkStatus::Connected(snapshot) => connected_view(
@@ -467,13 +471,15 @@ fn connected_view<'a>(
             Row::new()
                 .spacing(8)
                 .align_y(Alignment::Center)
-                .push(h4_bold("Total balance")),
+                .push(h4_bold(localized_copy("Total balance"))),
         )
         .push(if mask_amounts {
             amount_cell::<SparkOverviewMessage>(AmountCell::masked(), AmountTier::Card)
         } else if has_unvalued_usdb {
             amount_cell::<SparkOverviewMessage>(
-                AmountCell::unavailable("Combined BTC and USDB valuation needs a BTC/USD quote"),
+                AmountCell::unavailable(coincube_ui::locale::copy(
+                    "Combined BTC and USDB valuation needs a BTC/USD quote",
+                )),
                 AmountTier::Card,
             )
         } else {
@@ -624,8 +630,9 @@ fn connected_view<'a>(
     content = content.push(balance_section);
     if let Some(error) = last_error {
         content = content.push(
-            text(format!(
-                "Last known balance · Spark refresh failed: {error}"
+            text(localized_format!(
+                "Last known balance · Spark refresh failed: {error}",
+                "Último saldo conocido · Spark refrescante falló: {error}"
             ))
             .size(P2_SIZE)
             .style(theme::text::warning),

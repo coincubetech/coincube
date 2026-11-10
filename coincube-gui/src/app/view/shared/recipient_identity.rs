@@ -1,5 +1,6 @@
 //! Compact, neutral identity attribution, adjacent to the reviewed recipient.
 use crate::{app::view::Message, services::branta::RecipientIdentity};
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     component::{card as cards, text::*},
     theme::{self, palette::ThemeMode},
@@ -33,7 +34,7 @@ pub fn card<'a>(
     );
     let mut content = Column::new()
         .spacing(8)
-        .push(p2_regular("Recipient identified"))
+        .push(p2_regular(localized_copy("Recipient identified")))
         .push(heading);
     if let Some(description) = identity.description.as_deref() {
         content = content.push(
@@ -44,7 +45,7 @@ pub fn card<'a>(
     }
     cards::simple(
         content.push(
-            button(p2_regular("View with Branta"))
+            button(p2_regular(localized_copy("View with Branta")))
                 .style(theme::button::secondary)
                 .on_press(on_open),
         ),

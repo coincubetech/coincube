@@ -33,6 +33,46 @@ impl From<ThemeMode> for ThemePreference {
     }
 }
 
+pub use coincube_ui::locale::Language;
+pub use coincube_ui::theme::{ArtworkStyle, WorldviewMode};
+
+/// Save one choice per worldview using stable, named fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArtworkChoices {
+    samurai: ArtworkStyle,
+    suitcoiner: ArtworkStyle,
+    luke: ArtworkStyle,
+}
+
+impl Default for ArtworkChoices {
+    fn default() -> Self {
+        Self {
+            samurai: ArtworkStyle::default_for(WorldviewMode::Samurai),
+            suitcoiner: ArtworkStyle::default_for(WorldviewMode::Suitcoiner),
+            luke: ArtworkStyle::default_for(WorldviewMode::Luke),
+        }
+    }
+}
+
+impl ArtworkChoices {
+    pub fn get(self, mode: WorldviewMode) -> ArtworkStyle {
+        match mode {
+            WorldviewMode::Samurai => self.samurai,
+            WorldviewMode::Suitcoiner => self.suitcoiner,
+            WorldviewMode::Luke => self.luke,
+        }
+    }
+
+    pub(super) fn set(&mut self, mode: WorldviewMode, style: ArtworkStyle) {
+        match mode {
+            WorldviewMode::Samurai => self.samurai = style,
+            WorldviewMode::Suitcoiner => self.suitcoiner = style,
+            WorldviewMode::Luke => self.luke = style,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LauncherStyle {
@@ -171,6 +211,9 @@ impl From<Zoom> for u16 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DevicePreferences {
     pub theme: ThemePreference,
+    pub worldview: WorldviewMode,
+    pub language: Language,
+    pub artwork: ArtworkChoices,
     pub launcher_style: LauncherStyle,
     pub hide_balances: bool,
     pub motion: MotionPreference,
@@ -186,6 +229,9 @@ impl Default for DevicePreferences {
     fn default() -> Self {
         Self {
             theme: ThemePreference::System,
+            worldview: WorldviewMode::default(),
+            language: Language::default(),
+            artwork: ArtworkChoices::default(),
             launcher_style: LauncherStyle::Cubes,
             hide_balances: false,
             motion: MotionPreference::FollowSystem,
@@ -233,6 +279,9 @@ impl DevicePreferences {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferenceChange {
     Theme(ThemePreference),
+    Worldview(WorldviewMode),
+    Language(Language),
+    Artwork(WorldviewMode, ArtworkStyle),
     LauncherStyle(LauncherStyle),
     HideBalances(bool),
     Motion(MotionPreference),

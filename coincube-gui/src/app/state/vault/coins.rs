@@ -169,7 +169,7 @@ impl CoinsPanel {
                 .or_else(|| self.coins.labels.get(&coin.outpoint.txid.to_string()))
                 .filter(|label| !label.is_empty())
                 .cloned()
-                .unwrap_or_else(|| "No label".to_string())
+                .unwrap_or_else(|| coincube_ui::locale::copy("No label").to_string())
         };
         let mut inputs: Vec<InputRow> = self
             .both_chain_coins(cache)

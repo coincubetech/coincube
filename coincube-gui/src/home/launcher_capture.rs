@@ -610,6 +610,7 @@ fn launcher_capture_opening() {
             let face = launcher_presenter::OpeningFace {
                 cube: &cube,
                 quote: &quote,
+                outgoing: None,
                 stage,
                 stalled: opening.stalled(now),
                 cancel: || (),

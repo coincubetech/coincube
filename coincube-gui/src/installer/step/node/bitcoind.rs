@@ -1615,7 +1615,10 @@ impl Step for InternalBitcoindStep {
                     }
                     Err(e) => {
                         // Refuse to install a binary we can't verify.
-                        let msg = format!("Failed to fetch release SHA256SUMS manifest: {e}");
+                        let msg = coincube_ui::localized_format!(
+                            "Failed to fetch release SHA256SUMS manifest: {e}",
+                            "No se pudo obtener el manifiesto SHA256SUMS de la versión: {e}"
+                        );
                         self.install_state = Some(InstallState::Errored(
                             InstallBitcoindError::MissingSignature,
                         ));
@@ -1825,10 +1828,12 @@ impl Step for InternalBitcoindStep {
             && !self.local_sync_ready
         {
             let mut content = iced::widget::Column::new().spacing(20)
-                .push(coincube_ui::component::text::text("Syncing your local Bitcoin Blake2b node").bold())
-                .push(coincube_ui::component::text::text("Keep Tenshu open while the node syncs. This can take several hours. The Vault will be created after your node verifies the active Blake2b chain."));
+                .push(coincube_ui::component::text::text(coincube_ui::locale::copy("Syncing your local Bitcoin Blake2b node")).bold())
+                .push(coincube_ui::component::text::text(coincube_ui::locale::copy("Keep Tenshu open while the node syncs. This can take several hours. The Vault will be created after your node verifies the active Blake2b chain.")));
             if let Some(error) = &self.local_sync_error {
-                content = content.push(coincube_ui::component::text::text(error));
+                content = content.push(coincube_ui::component::text::text(
+                    coincube_ui::locale::notice(error.clone()),
+                ));
             }
             return view::layout(
                 progress,

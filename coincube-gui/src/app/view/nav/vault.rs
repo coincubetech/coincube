@@ -4,6 +4,7 @@ use coincube_ui::icon::{
     claim_icon, coins_outline_icon, home_icon, receipt_icon, receive_icon, recovery_icon,
     send_icon, settings_icon,
 };
+use coincube_ui::locale::copy as localized_copy;
 
 /// Secondary-rail items for the Vault wallet section.
 pub fn items(ctx: &NavContext) -> Vec<SubItem> {
@@ -91,10 +92,10 @@ pub fn tools(ctx: &NavContext) -> Vec<(&'static str, Menu)> {
         .into_iter()
         .filter_map(|item| {
             let label = match &item.route {
-                Menu::Vault(VaultSubMenu::Coins(_)) => "Coin control",
-                Menu::Vault(VaultSubMenu::PSBTs(_)) => "PSBT proposals",
-                Menu::Vault(VaultSubMenu::Recovery) => "Recovery path",
-                Menu::Vault(VaultSubMenu::SplitCoins) => "Split coins",
+                Menu::Vault(VaultSubMenu::Coins(_)) => localized_copy("Coin control"),
+                Menu::Vault(VaultSubMenu::PSBTs(_)) => localized_copy("PSBT proposals"),
+                Menu::Vault(VaultSubMenu::Recovery) => localized_copy("Recovery path"),
+                Menu::Vault(VaultSubMenu::SplitCoins) => localized_copy("Split coins"),
                 _ => return None,
             };
             Some((label, item.route))

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use coincube_ui::locale::copy as localized_copy;
 use iced::Subscription;
 
 use coincube_core::{
@@ -671,7 +672,7 @@ impl PsbtState {
         }
         let Some(review) = self.current_review(cache) else {
             return (!self.bitcoin_signatures_complete()).then(||
-                "This transaction needs valid signatures for every input before it can be broadcast.".to_string()
+                localized_copy("This transaction needs valid signatures for every input before it can be broadcast.").to_string()
             );
         };
         Some(replay::not_ready_reason(
@@ -1400,8 +1401,10 @@ impl PsbtState {
 
     pub fn view<'a>(&'a self, cache: &'a Cache) -> Element<'a, view::Message> {
         let Some(policy) = self.desc_policy.as_ref() else {
-            return iced::widget::text("Use the imported wallet signing screen for this PSBT.")
-                .into();
+            return iced::widget::text(localized_copy(
+                "Use the imported wallet signing screen for this PSBT.",
+            ))
+            .into();
         };
         let content = view::vault::psbt::psbt_view(
             self.action_scope,
@@ -1621,6 +1624,7 @@ impl Modal for BroadcastModal {
         modal::Modal::new(
             content,
             view::vault::psbt::broadcast_action_with_identity_review(
+                self.wallet.chain,
                 &self.conflicting_txids,
                 self.broadcast,
                 self.broadcasting,
@@ -1955,8 +1959,9 @@ impl BorderWalletReconstructionState {
                     }
                     ReconStep::Grid => {
                         if !self.pattern.is_complete() {
-                            self.error = Some(format!(
+                            self.error = Some(coincube_ui::localized_format!(
                                 "Please select exactly {} cells. Currently selected: {}",
+                                "Selecciona exactamente {} celdas. Seleccionadas: {}",
                                 PATTERN_LENGTH,
                                 self.pattern.len()
                             ));
@@ -2705,7 +2710,11 @@ impl SignModal {
         };
         let mut notices = Vec::new();
         if let Some(err) = k.error() {
-            notices.push(format!("Couldn't start Keychain signing: {}", err));
+            notices.push(coincube_ui::localized_format!(
+                "Couldn't start Keychain signing: {}",
+                "No se pudo iniciar la firma con Keychain: {}",
+                coincube_ui::locale::notice(err.to_string())
+            ));
         }
         if let Some(banner) = k.stream_health_banner() {
             notices.push(banner);
@@ -3087,7 +3096,13 @@ impl Modal for SignModal {
                     .or_else(|| self.error.as_ref().map(crate::user_error::report));
                 modal::Modal::new(
                     content,
-                    view::vault::psbt::sign_action(self.action_scope, paths, notices, error),
+                    view::vault::psbt::sign_action(
+                        self.wallet.chain,
+                        self.action_scope,
+                        paths,
+                        notices,
+                        error,
+                    ),
                 )
                 .on_blur(Some(view::Message::Spend(view::SpendTxMessage::Cancel)))
                 .into()
@@ -4908,7 +4923,20 @@ mod tests {
                     !state.broadcast_ready(&Cache::default()),
                     "cached validity must be invalidated"
                 );
-                assert!(state.not_ready_reason(&Cache::default()).is_some());
+                let english = state.not_ready_reason(&Cache::default()).unwrap();
+                // Handling a message runs in the window's language, so the
+                // toast is composed in Spanish for a Spanish window.
+                let spanish =
+                    coincube_ui::locale::render_in(coincube_ui::locale::Language::Spanish, || {
+                        state.not_ready_reason(&Cache::default())
+                    })
+                    .unwrap();
+                assert_ne!(spanish, english);
+                assert!(
+                    coincube_ui::locale::english_leaks([spanish.as_str()]).is_empty(),
+                    "{}",
+                    spanish
+                );
                 let rendered = labels(&state);
                 assert!(
                     rendered.iter().any(|s| s == "Sign"),

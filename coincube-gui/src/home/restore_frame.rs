@@ -3,6 +3,7 @@
 //! wallet's Source, Review, Scan and Done steps. Both draw the same header,
 //! path list and stepper, so the user sees one flow across the hand-off.
 
+use coincube_ui::locale::copy as localized_copy;
 use iced::{widget::Space, Alignment, Length};
 
 use iced::advanced::widget::Id;
@@ -196,7 +197,7 @@ fn chip_row<'a, M: 'a>(chain: ChainId, light: bool) -> Row<'a, M> {
         .spacing(8)
         .align_y(Alignment::Center)
         .push(coin(chain, light, 16.0))
-        .push(p2_regular(chain.label()))
+        .push(p2_regular(crate::chain::canonical_network_name(chain)))
         .push_maybe(network_tag(chain))
 }
 
@@ -219,7 +220,9 @@ fn close_content<'a, M: 'a>() -> Element<'a, M> {
                     .size(14)
                     .style(theme::tenshu::text::ink),
             )
-            .push(coincube_ui::component::tenshu::text::label("Close"))
+            .push(coincube_ui::component::tenshu::text::label(localized_copy(
+                "Close",
+            )))
             .spacing(6)
             .align_y(Alignment::Center),
     )
@@ -478,9 +481,13 @@ pub(crate) fn done_art<'a, M: 'a>(light: bool) -> Element<'a, M> {
     const SCALE: f32 = WIDTH / 320.0;
     let radius = 122.0 * SCALE;
     let (cx, cy) = (165.0 * SCALE, 140.0 * SCALE);
-    let art = iced::widget::image(coincube_ui::image::kage_cube_sealed())
-        .width(Length::Fixed(WIDTH))
-        .height(Length::Fixed(HEIGHT));
+    let art = coincube_ui::illustration::image(
+        Some(coincube_ui::illustration::Slot::Restored),
+        coincube_ui::image::kage_cube_sealed(),
+        Length::Fixed(WIDTH),
+        Length::Fixed(HEIGHT),
+        iced::ContentFit::Contain,
+    );
     let mut stack = iced::widget::Stack::new()
         .width(Length::Fixed(WIDTH))
         .height(Length::Fixed(HEIGHT));
@@ -495,13 +502,20 @@ pub(crate) fn done_art<'a, M: 'a>(light: bool) -> Element<'a, M> {
                             Container::new(Space::new())
                                 .width(Length::Fixed(radius * 2.0))
                                 .height(Length::Fixed(radius * 2.0))
-                                .style(move |_: &theme::Theme| iced::widget::container::Style {
-                                    background: Some(iced::Background::Color(iced::Color::WHITE)),
-                                    border: iced::Border {
-                                        radius: radius.into(),
+                                .style(move |theme: &theme::Theme| {
+                                    if theme.worldview() != theme::WorldviewMode::Samurai {
+                                        return iced::widget::container::Style::default();
+                                    }
+                                    iced::widget::container::Style {
+                                        background: Some(iced::Background::Color(
+                                            iced::Color::WHITE,
+                                        )),
+                                        border: iced::Border {
+                                            radius: radius.into(),
+                                            ..Default::default()
+                                        },
                                         ..Default::default()
-                                    },
-                                    ..Default::default()
+                                    }
                                 }),
                         ),
                 ),

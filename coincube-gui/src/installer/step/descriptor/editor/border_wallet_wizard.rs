@@ -26,6 +26,8 @@ use iced::{
 use rand::{rngs::OsRng, seq::SliceRandom};
 use zeroize::{Zeroize, Zeroizing};
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::{
     component::{
         button, form,
@@ -212,8 +214,9 @@ impl BorderWalletWizard {
             }
             WizardStep::Grid => {
                 if !self.pattern.is_complete() {
-                    self.error = Some(format!(
+                    self.error = Some(localized_format!(
                         "Please select exactly {} cells. Currently selected: {}",
+                        "Selecciona exactamente {} celdas. Seleccionadas: {}",
                         PATTERN_LENGTH,
                         self.pattern.len()
                     ));
@@ -234,13 +237,21 @@ impl BorderWalletWizard {
                                     self.step = WizardStep::Checksum;
                                 }
                                 Err(e) => {
-                                    self.error = Some(format!("Key derivation failed: {:?}", e));
+                                    self.error = Some(localized_format!(
+                                        "Key derivation failed: {:?}",
+                                        "No se pudo derivar la clave: {:?}",
+                                        e
+                                    ));
                                 }
                             }
                             // `mnemonic` is dropped here — no full mnemonic retained.
                         }
                         Err(e) => {
-                            self.error = Some(format!("Mnemonic construction failed: {:?}", e));
+                            self.error = Some(localized_format!(
+                                "Mnemonic construction failed: {:?}",
+                                "No se pudo construir la frase: {:?}",
+                                e
+                            ));
                         }
                     }
                 }
@@ -326,7 +337,11 @@ impl BorderWalletWizard {
             }
             Err(e) => {
                 self.phrase_source = GridSeedSource::Independent;
-                self.error = Some(format!("Failed to generate recovery phrase: {}", e));
+                self.error = Some(localized_format!(
+                    "Failed to generate recovery phrase: {}",
+                    "No se pudo generar la frase de recuperación: {}",
+                    e
+                ));
             }
         }
         Task::none()
@@ -403,7 +418,7 @@ impl BorderWalletWizard {
         label: &'static str,
         message: Option<BorderWalletWizardMessage>,
     ) -> Action<'a, Message> {
-        button::primary_action(id, None, label, Message::FocusAction)
+        button::primary_action(id, None, localized_copy(label), Message::FocusAction)
             .width(Length::Shrink)
             .height(Length::Fixed(FOOTER_ACTION_HEIGHT))
             .padding([0, 16])
@@ -415,7 +430,7 @@ impl BorderWalletWizard {
         label: &'static str,
         message: Option<BorderWalletWizardMessage>,
     ) -> Action<'a, Message> {
-        button::secondary_action(id, None, label, Message::FocusAction)
+        button::secondary_action(id, None, localized_copy(label), Message::FocusAction)
             .on_press_maybe(message.map(Message::BorderWalletWizard))
     }
 
@@ -432,7 +447,9 @@ impl BorderWalletWizard {
                             .size(14)
                             .style(theme::tenshu::text::ink),
                     )
-                    .push(coincube_ui::component::tenshu::text::label("Back")),
+                    .push(coincube_ui::component::tenshu::text::label(localized_copy(
+                        "Back",
+                    ))),
             )
             .center_y(Length::Fill),
             Message::FocusAction,
@@ -493,7 +510,7 @@ impl BorderWalletWizard {
             WizardStep::Confirm => 3,
         };
         Some(
-            Container::new(restore_frame::stepper(&STAGES, current))
+            Container::new(restore_frame::stepper(&STAGES.map(localized_copy), current))
                 .padding([14, 24])
                 .width(Length::Fill)
                 .into(),
@@ -517,7 +534,7 @@ impl BorderWalletWizard {
             Row::new()
                 .align_y(Vertical::Center)
                 .push(
-                    iced::widget::text(title)
+                    iced::widget::text(localized_copy(title))
                         .size(20)
                         .font(coincube_ui::font::SEMIBOLD),
                 )
@@ -570,36 +587,40 @@ impl BorderWalletWizard {
     }
 
     fn error_line(&self) -> Option<Element<Message>> {
-        self.error
-            .as_ref()
-            .map(|e| p1_regular(e.as_str()).style(theme::text::error).into())
+        self.error.as_ref().map(|e| {
+            p1_regular(coincube_ui::locale::notice(e.clone()))
+                .style(theme::text::error)
+                .into()
+        })
     }
 
     fn view_intro(&self) -> Element<Message> {
         let body = Column::new()
             .spacing(8)
-            .push(p1_bold("What is a Border Wallet?"))
-            .push(p1_regular(
+            .push(p1_bold(localized_copy("What is a Border Wallet?")))
+            .push(p1_regular(localized_copy(
                 "A Border Wallet key is derived from a visual pattern \
                  you select on a word grid. The key is never stored \u{2014} it exists only \
                  while you are using it.",
-            ))
-            .push(p1_regular("To create one, you will:"))
-            .push(p1_regular(
+            )))
+            .push(p1_regular(localized_copy("To create one, you will:")))
+            .push(p1_regular(localized_copy(
                 "1. Generate or enter a 12-word recovery phrase (the Entropy Grid seed)",
-            ))
-            .push(p1_regular(
+            )))
+            .push(p1_regular(localized_copy(
                 "2. Select 11 cells from the word grid (your Pattern)",
-            ))
-            .push(p1_regular(
+            )))
+            .push(p1_regular(localized_copy(
                 "3. Review the automatically calculated checksum word",
-            ))
-            .push(p1_regular("4. Review and confirm the derived key"))
-            .push(p1_regular(
+            )))
+            .push(p1_regular(localized_copy(
+                "4. Review and confirm the derived key",
+            )))
+            .push(p1_regular(localized_copy(
                 "To reconstruct this key, you need your recovery phrase and exact pattern. \
                  Keep your recovery phrase safe and make sure you can reproduce your \
                  pattern in the same order. The checksum word is calculated automatically.",
-            ));
+            )));
 
         // Intro is the first step of the wizard, so "Back" returns the user
         // to the Select-key-source picker for this slot (via
@@ -642,21 +663,22 @@ impl BorderWalletWizard {
             for i in chunk_start..std::cmp::min(chunk_start + 3, 12) {
                 let label = format!("{}.", i + 1);
                 let idx = i;
-                let input = TextInput::new(&format!("Word {}", i + 1), &self.phrase_words[i].value)
-                    .on_input(move |s| {
-                        Message::BorderWalletWizard(BorderWalletWizardMessage::PhraseWordEdited(
-                            idx, s,
-                        ))
-                    })
-                    .style(|theme: &theme::Theme, status| {
-                        let mut style = theme::text_input::primary(theme, status);
-                        if matches!(status, iced::widget::text_input::Status::Focused { .. }) {
-                            style.border.color = theme.colors.shell.focus;
-                            style.border.width = 2.0;
-                        }
-                        style
-                    })
-                    .width(Length::Fill);
+                let input = TextInput::new(
+                    &localized_format!("Word {}", "Palabra {}", i + 1),
+                    &self.phrase_words[i].value,
+                )
+                .on_input(move |s| {
+                    Message::BorderWalletWizard(BorderWalletWizardMessage::PhraseWordEdited(idx, s))
+                })
+                .style(|theme: &theme::Theme, status| {
+                    let mut style = theme::text_input::primary(theme, status);
+                    if matches!(status, iced::widget::text_input::Status::Focused { .. }) {
+                        style.border.color = theme.colors.shell.focus;
+                        style.border.width = 2.0;
+                    }
+                    style
+                })
+                .width(Length::Fill);
                 row_widget = row_widget.push(
                     Row::new()
                         .push(text(label).width(25))
@@ -670,9 +692,9 @@ impl BorderWalletWizard {
 
         let body = Column::new()
             .spacing(12)
-            .push(p1_regular(
+            .push(p1_regular(localized_copy(
                 "Enter or generate the 12-word recovery phrase that will seed the word grid.",
-            ))
+            )))
             .push(generate_btn)
             .push(word_rows)
             .push(self.error_line());
@@ -694,8 +716,9 @@ impl BorderWalletWizard {
     }
 
     fn view_grid(&self) -> Element<Message> {
-        let status = p1_bold(format!(
+        let status = p1_bold(localized_format!(
             "Selected: {} / {} cells",
+            "Seleccionadas: {} / {} celdas",
             self.pattern.len(),
             PATTERN_LENGTH
         ));
@@ -787,15 +810,13 @@ impl BorderWalletWizard {
                 )
                 .into()
         } else {
-            p1_regular("No grid available").into()
+            p1_regular(localized_copy("No grid available")).into()
         };
 
         let body = Column::new()
             .spacing(12)
             .height(Length::Fill)
-            .push(p1_regular(
-                "Select 11 cells from the grid in order. This pattern is your key \u{2014} remember it exactly.",
-            ))
+            .push(p1_regular(localized_copy("Select 11 cells from the grid in order. This pattern is your key \u{2014} remember it exactly.")))
             .push(
                 Row::new()
                     .spacing(10)
@@ -803,8 +824,9 @@ impl BorderWalletWizard {
                     .push(status)
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        text(format!(
+                        text(localized_format!(
                             "{} rows × {} columns · first four letters shown",
+                            "{} filas × {} columnas · se muestran las cuatro primeras letras",
                             WordGrid::ROWS,
                             WordGrid::COLS
                         ))
@@ -839,27 +861,37 @@ impl BorderWalletWizard {
         let enrollment_display = if let Some(enrollment) = &self.enrollment {
             Column::new()
                 .spacing(4)
-                .push(p1_bold("Derived Key Info"))
-                .push(p1_regular(format!(
+                .push(p1_bold(localized_copy("Derived Key Info")))
+                .push(p1_regular(localized_format!(
                     "Fingerprint: {}",
+                    "Huella digital: {}",
                     enrollment.fingerprint
                 )))
-                .push(p1_regular(format!(
+                .push(p1_regular(localized_format!(
                     "Derivation Path: {}",
+                    "Ruta de derivación: {}",
                     enrollment.derivation_path
                 )))
-                .push(p1_regular(format!("Network: {:?}", enrollment.network)))
+                .push(p1_regular(localized_format!(
+                    "Network: {:?}",
+                    "Red: {:?}",
+                    enrollment.network
+                )))
         } else {
-            Column::new().push(p1_regular("No enrollment data"))
+            Column::new().push(p1_regular(localized_copy("No enrollment data")))
         };
 
         let body = Column::new()
             .spacing(12)
-            .push(p1_bold(format!("Checksum word: \"{}\"", checksum_word)))
-            .push(p1_regular(
+            .push(p1_bold(localized_format!(
+                "Checksum word: \"{}\"",
+                "Palabra de control: \"{}\"",
+                checksum_word
+            )))
+            .push(p1_regular(localized_copy(
                 "This word is generated automatically. You can keep it as an optional \
                  reference to help check your pattern.",
-            ))
+            )))
             .push(enrollment_display);
 
         self.sheet(
@@ -887,25 +919,31 @@ impl BorderWalletWizard {
 
         let body = Column::new()
             .spacing(8)
-            .push(p1_bold("Important \u{2014} Read carefully"))
-            .push(p1_regular(
+            .push(p1_bold(localized_copy("Important \u{2014} Read carefully")))
+            .push(p1_regular(localized_copy(
                 "After confirming, the mnemonic and private keys will be permanently \
                  erased from memory. Only the public key (xpub) and fingerprint will \
                  be stored in the wallet descriptor.",
-            ))
-            .push(p1_regular(
+            )))
+            .push(p1_regular(localized_copy(
                 "To reconstruct this key in the future, you need:",
-            ))
-            .push(p1_regular(
+            )))
+            .push(p1_regular(localized_copy(
                 "1. The recovery phrase (12 words that seed the grid)",
-            ))
-            .push(p1_regular("2. Your exact pattern (the 11 cells in order)"))
-            .push(p1_regular(
+            )))
+            .push(p1_regular(localized_copy(
+                "2. Your exact pattern (the 11 cells in order)",
+            )))
+            .push(p1_regular(localized_copy(
                 "Keep your recovery phrase safe and make sure you can reproduce your \
                  pattern in the same order. Both are required to recover your key. \
                  The checksum word is recalculated automatically; you don't need to memorize it.",
-            ))
-            .push(p1_bold(format!("Key fingerprint: {}", fingerprint)));
+            )))
+            .push(p1_bold(localized_format!(
+                "Key fingerprint: {}",
+                "Huella digital de la clave: {}",
+                fingerprint
+            )));
 
         self.sheet(
             "Confirm",

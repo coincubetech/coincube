@@ -507,9 +507,11 @@ pub(crate) fn stage_restore(
                 .descriptor
                 .parse::<CoincubeDescriptor>()
                 .map_err(|e| {
-                    format!(
+                    coincube_ui::localized_format!(
                         "Recovery Kit descriptor failed to parse: {}. Kit may be from a newer \
                          client version.",
+                        "No se pudo leer el descriptor del Kit de recuperación: {}. Es posible \
+                         que el kit venga de una versión más reciente de la aplicación.",
                         e
                     )
                 })?,
@@ -520,8 +522,13 @@ pub(crate) fn stage_restore(
     // Derive the seed signer (Full only). DescriptorOnly ignores any seed half.
     let signer = if matches!(scope, RestoreScope::Full) {
         let seed_blob = seed.ok_or_else(|| "Seed blob missing from decrypted kit.".to_string())?;
-        let master = MasterSigner::from_str(network, &seed_blob.mnemonic.phrase)
-            .map_err(|e| format!("Restored mnemonic failed to derive a signer: {}", e))?;
+        let master = MasterSigner::from_str(network, &seed_blob.mnemonic.phrase).map_err(|e| {
+            coincube_ui::localized_format!(
+                "Restored mnemonic failed to derive a signer: {}",
+                "No se pudo obtener un firmante de la frase restaurada: {}",
+                e
+            )
+        })?;
         Some(Signer::new(master))
     } else {
         None
@@ -616,26 +623,32 @@ fn phase_after_cubes_loaded(scope: RestoreScope, cubes: Vec<RestoreCubeCandidate
                 cubes: vec![c],
             }
         } else {
-            let (needed, hint) = match scope {
-                RestoreScope::Full => (
-                    "a Master Seed Phrase",
-                    "the kit was backed up without the seed half (passkey Cubes can't \
-                     include it), and Full restore needs it",
+            let message = match scope {
+                RestoreScope::Full => coincube_ui::localized_format!(
+                    "\"{}\" doesn't have a Master Seed Phrase backed up on Connect — the kit \
+                     was backed up without the seed half (passkey Cubes can't include it), \
+                     and Full restore needs it. Finish the backup from a device where the \
+                     Cube is already installed, then return here to restore.",
+                    "\"{}\" no tiene una frase de recuperación maestra guardada en Connect: \
+                     el kit se guardó sin la frase (los Cubes con llave de acceso no pueden \
+                     incluirla) y la restauración completa la necesita. Termina la copia \
+                     desde un dispositivo donde el Cube ya esté instalado y vuelve aquí \
+                     para restaurarlo.",
+                    c.name,
                 ),
-                RestoreScope::DescriptorOnly => (
-                    "a Wallet Descriptor",
-                    "the kit was backed up seed-only (the Cube had no Vault at backup \
-                     time)",
+                RestoreScope::DescriptorOnly => coincube_ui::localized_format!(
+                    "\"{}\" doesn't have a Wallet Descriptor backed up on Connect — the kit \
+                     was backed up seed-only (the Cube had no Vault at backup time). Finish \
+                     the backup from a device where the Cube is already installed, then \
+                     return here to restore.",
+                    "\"{}\" no tiene un descriptor de cartera guardado en Connect: el kit \
+                     se guardó solo con la frase (el Cube no tenía Vault cuando se hizo la \
+                     copia). Termina la copia desde un dispositivo donde el Cube ya esté \
+                     instalado y vuelve aquí para restaurarlo.",
+                    c.name,
                 ),
             };
-            Phase::Error {
-                message: format!(
-                    "\"{}\" doesn't have {} backed up on Connect — {}. Finish the \
-                     backup from a device where the Cube is already installed, then \
-                     return here to restore.",
-                    c.name, needed, hint,
-                ),
-            }
+            Phase::Error { message }
         }
     } else {
         Phase::CubePicker {
@@ -786,7 +799,11 @@ impl Step for RecoveryKitRestoreStep {
                     }
                     Err(e) => {
                         self.set_phase(Phase::Error {
-                            message: format!("Couldn't load cubes: {}", e),
+                            message: coincube_ui::localized_format!(
+                                "Couldn't load cubes: {}",
+                                "No se pudieron cargar los Cubes: {}",
+                                e
+                            ),
                         });
                     }
                 }
@@ -919,11 +936,20 @@ impl Step for RecoveryKitRestoreStep {
                             let message = match &e {
                                 RestoreError::TrustedDeviceDelay {
                                     available_at: Some(at),
-                                } => format!(
+                                } => coincube_ui::localized_format!(
                                     "Recovery kit download is delayed on new devices. \
                                      Available at {}.",
-                                    at.with_timezone(&chrono::Local)
-                                        .format("%b %d, %Y %H:%M %Z")
+                                    "La descarga del Kit de recuperación se retrasa en \
+                                     dispositivos nuevos. Disponible el {}.",
+                                    {
+                                        let local = at.with_timezone(&chrono::Local);
+                                        local
+                                            .format(&coincube_ui::locale::date_pattern(
+                                                "%b %d, %Y %H:%M %Z",
+                                                &local,
+                                            ))
+                                            .to_string()
+                                    }
                                 ),
                                 // DURESS_LOCKED and a timeless delay use the
                                 // typed Display message.

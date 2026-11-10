@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use std::path::PathBuf;
 
 use coincube_core::miniscript::bitcoin;
@@ -48,7 +49,7 @@ impl NetworkKind {
     pub fn label(self) -> &'static str {
         match self {
             NetworkKind::Mainnet => "Mainnet",
-            NetworkKind::Test => "Test",
+            NetworkKind::Test => localized_copy("Test"),
         }
     }
 }

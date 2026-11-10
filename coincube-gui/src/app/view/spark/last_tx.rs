@@ -3,6 +3,7 @@
 //! Transactions pages so users see a consistent list across the wallet.
 
 use coincube_ui::component::text::Text;
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     color,
     component::{
@@ -34,13 +35,17 @@ pub fn last_transactions_section<'a, M: 'a + Clone + 'static>(
     on_select: impl Fn(usize) -> M + 'a,
     on_history: M,
 ) -> Element<'a, M> {
-    let mut content = Column::new().spacing(10).push(h4_bold("Last transactions"));
+    let mut content = Column::new()
+        .spacing(10)
+        .push(h4_bold(localized_copy("Last transactions")));
 
     if recent.is_empty() {
         content = content.push(empty_placeholder(
             receipt_icon().size(80),
-            "No transactions yet",
-            "Your transaction history will appear here once you send or receive coins.",
+            localized_copy("No transactions yet"),
+            localized_copy(
+                "Your transaction history will appear here once you send or receive coins.",
+            ),
         ));
         return content.into();
     }
@@ -91,7 +96,7 @@ pub fn last_transactions_section<'a, M: 'a + Clone + 'static>(
                             .style(move |_| iced::widget::text::Style { color: Some(fg) }),
                     )
                     .push(
-                        text("Pending")
+                        text(localized_copy("Pending"))
                             .bold()
                             .size(14)
                             .style(move |_| iced::widget::text::Style { color: Some(fg) }),
@@ -120,7 +125,7 @@ pub fn last_transactions_section<'a, M: 'a + Clone + 'static>(
                 color: Some(color::ORANGE),
             });
 
-        let label = text("View All Transactions")
+        let label = text(localized_copy("View All Transactions"))
             .size(15)
             .style(|_theme: &theme::Theme| iced::widget::text::Style {
                 color: Some(color::ORANGE),

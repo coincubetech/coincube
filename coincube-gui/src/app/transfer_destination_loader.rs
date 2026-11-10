@@ -45,18 +45,32 @@ impl Refusal {
     /// What the Unlock page says about a refusal. Duress never reaches it.
     pub(crate) fn reason(self) -> String {
         match self {
-            Self::Stale => "This step expired. Start the unlock again.".into(),
-            Self::Unsupported => "This Cube can't receive a cross-Cube transfer.".into(),
-            Self::SameWallet => "That Cube holds the same Vault as this one.".into(),
-            Self::IdentityChanged => "The other Cube changed. Choose it again.".into(),
-            Self::BackendUnavailable => "The other Cube's Vault isn't available.".into(),
-            Self::StillStopping => {
-                "The other Cube is still finishing locking. Try again in a moment.".into()
+            Self::Stale => {
+                coincube_ui::locale::copy("This step expired. Start the unlock again.").into()
             }
-            Self::WrongCredential => "That PIN or passkey didn't unlock it.".into(),
-            Self::Duress => "The other Cube can't be used.".into(),
-            Self::Locked(remaining) => format!(
+            Self::Unsupported => {
+                coincube_ui::locale::copy("This Cube can't receive a cross-Cube transfer.").into()
+            }
+            Self::SameWallet => {
+                coincube_ui::locale::copy("That Cube holds the same Vault as this one.").into()
+            }
+            Self::IdentityChanged => {
+                coincube_ui::locale::copy("The other Cube changed. Choose it again.").into()
+            }
+            Self::BackendUnavailable => {
+                coincube_ui::locale::copy("The other Cube's Vault isn't available.").into()
+            }
+            Self::StillStopping => coincube_ui::locale::copy(
+                "The other Cube is still finishing locking. Try again in a moment.",
+            )
+            .into(),
+            Self::WrongCredential => {
+                coincube_ui::locale::copy("That PIN or passkey didn't unlock it.").into()
+            }
+            Self::Duress => coincube_ui::locale::copy("The other Cube can't be used.").into(),
+            Self::Locked(remaining) => coincube_ui::localized_format!(
                 "Too many attempts. Try again in {} s.",
+                "Demasiados intentos. Inténtalo de nuevo en {} s.",
                 remaining.as_secs().max(1)
             ),
         }
@@ -126,15 +140,21 @@ pub(crate) fn other_cubes(root: &CoincubeDirectory, source: &Source) -> Vec<Cube
                     .shares_vault_descriptor(&WalletIdentity::Vault(id.clone()))
             });
             let refusal = if cube.network != source.chain {
-                Some("Different network: can’t receive this transfer")
+                Some(coincube_ui::locale::copy(
+                    "Different network: can’t receive this transfer",
+                ))
             } else if !has_vault {
-                Some("No Vault to receive this transfer")
+                Some(coincube_ui::locale::copy(
+                    "No Vault to receive this transfer",
+                ))
             } else if shares_source {
-                Some("Same Vault as the source")
+                Some(coincube_ui::locale::copy("Same Vault as the source"))
             } else if cube.master_signer_fingerprint.is_none()
                 || cube.vault_fingerprint.as_deref().is_none_or(str::is_empty)
             {
-                Some("Not ready for a cross-Cube transfer")
+                Some(coincube_ui::locale::copy(
+                    "Not ready for a cross-Cube transfer",
+                ))
             } else {
                 None
             };

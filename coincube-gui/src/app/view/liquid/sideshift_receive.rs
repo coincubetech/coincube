@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::{
     color,
     component::{button, text::*},
@@ -51,11 +53,14 @@ pub fn sideshift_receive_view<'a>(
 // ---------------------------------------------------------------------------
 
 fn network_picker_view() -> Element<'static, SideshiftReceiveMessage> {
-    let title = Column::new().spacing(4).push(h3("Receive USDt")).push(
-        text("Choose the network you are receiving from.")
-            .size(P1_SIZE)
-            .style(theme::text::secondary),
-    );
+    let title = Column::new()
+        .spacing(4)
+        .push(h3(localized_copy("Receive USDt")))
+        .push(
+            text(localized_copy("Choose the network you are receiving from."))
+                .size(P1_SIZE)
+                .style(theme::text::secondary),
+        );
 
     let mut network_list = Column::new().spacing(8);
 
@@ -111,16 +116,21 @@ fn external_setup_view<'a>(
     loading: bool,
     error: Option<&'a str>,
 ) -> Element<'a, SideshiftReceiveMessage> {
-    let back_btn = button::secondary(Some(previous_icon()), "Back")
+    let back_btn = button::secondary(Some(previous_icon()), localized_copy("Back"))
         .width(Length::Fixed(150.0))
         .on_press(SideshiftReceiveMessage::Back);
 
     let title = Column::new()
         .spacing(4)
-        .push(h3(format!("Receive {}", network.display_name())))
+        .push(h3(localized_format!(
+            "Receive {}",
+            "Recibir {}",
+            network.display_name()
+        )))
         .push(
-            text(format!(
+            text(localized_format!(
                 "{} USDt will be swapped and delivered as Liquid USDt.",
+                "{} USDt será intercambiado y entregado como USDt Liquid.",
                 network.standard_label()
             ))
             .size(P1_SIZE)
@@ -129,11 +139,17 @@ fn external_setup_view<'a>(
 
     let amount_section = Column::new()
         .spacing(6)
-        .push(text("Amount (optional)").size(P2_SIZE).bold())
         .push(
-            text("Enter an amount for a fixed rate, or leave blank for variable rate.")
+            text(localized_copy("Amount (optional)"))
                 .size(P2_SIZE)
-                .style(theme::text::secondary),
+                .bold(),
+        )
+        .push(
+            text(localized_copy(
+                "Enter an amount for a fixed rate, or leave blank for variable rate.",
+            ))
+            .size(P2_SIZE)
+            .style(theme::text::secondary),
         )
         .push(
             TextInput::new("e.g. 100.00", amount_input)
@@ -148,8 +164,8 @@ fn external_setup_view<'a>(
         .push(
             Container::new(
                 text(match shift_type {
-                    SideshiftShiftType::Fixed => "Fixed Rate",
-                    SideshiftShiftType::Variable => "Variable Rate",
+                    SideshiftShiftType::Fixed => localized_copy("Fixed Rate"),
+                    SideshiftShiftType::Variable => localized_copy("Variable Rate"),
                 })
                 .size(P2_SIZE)
                 .color(match shift_type {
@@ -162,19 +178,19 @@ fn external_setup_view<'a>(
         )
         .push(
             text(match shift_type {
-                SideshiftShiftType::Fixed => "Rate locked until expiry",
-                SideshiftShiftType::Variable => "Rate determined at settlement",
+                SideshiftShiftType::Fixed => localized_copy("Rate locked until expiry"),
+                SideshiftShiftType::Variable => localized_copy("Rate determined at settlement"),
             })
             .size(P2_SIZE)
             .style(theme::text::secondary),
         );
 
     let generate_btn = if loading {
-        button::primary(None, "Generating…")
+        button::primary(None, localized_copy("Generating…"))
             .width(Length::Fill)
             .style(theme::button::primary)
     } else {
-        button::primary(None, "Generate Deposit Address")
+        button::primary(None, localized_copy("Generate Deposit Address"))
             .on_press(SideshiftReceiveMessage::Generate)
             .width(Length::Fill)
     };
@@ -187,9 +203,13 @@ fn external_setup_view<'a>(
 
     if let Some(err) = error {
         inner = inner.push(
-            Container::new(text(err).size(P2_SIZE).color(color::RED))
-                .padding([8, 12])
-                .style(theme::card::error),
+            Container::new(
+                text(coincube_ui::locale::notice(err.to_string()))
+                    .size(P2_SIZE)
+                    .color(color::RED),
+            )
+            .padding([8, 12])
+            .style(theme::card::error),
         );
     }
 
@@ -210,10 +230,10 @@ fn external_setup_view<'a>(
 
 fn loading_view(phase: &ReceivePhase) -> Element<'static, SideshiftReceiveMessage> {
     let label = match phase {
-        ReceivePhase::FetchingAffiliate => "Connecting to SideShift…",
-        ReceivePhase::FetchingQuote => "Fetching quote…",
-        ReceivePhase::CreatingShift => "Creating deposit address…",
-        _ => "Loading…",
+        ReceivePhase::FetchingAffiliate => localized_copy("Connecting to SideShift…"),
+        ReceivePhase::FetchingQuote => localized_copy("Fetching quote…"),
+        ReceivePhase::CreatingShift => localized_copy("Creating deposit address…"),
+        _ => localized_copy("Loading…"),
     };
 
     Container::new(
@@ -250,14 +270,15 @@ fn active_shift_view<'a>(
         .push(usdt_network_logo(network.network_slug(), 48.0))
         .push(h3(network.display_name()))
         .push(
-            text("USDt sent here is swapped to Liquid USDt.")
+            text(localized_copy("USDt sent here is swapped to Liquid USDt."))
                 .size(P1_SIZE)
                 .style(theme::text::secondary),
         );
 
     let warning_badge = Container::new(
-        text(format!(
+        text(localized_format!(
             "Only send {} USDt ({})",
+            "Sólo enviar {} USDt ({})",
             network.network_name(),
             network.standard_label()
         ))
@@ -332,7 +353,11 @@ fn active_shift_view<'a>(
                 .spacing(5)
                 .align_y(Alignment::Center)
                 .push(previous_icon().style(theme::text::secondary))
-                .push(text("Done").size(P1_SIZE).style(theme::text::secondary)),
+                .push(
+                    text(localized_copy("Done"))
+                        .size(P1_SIZE)
+                        .style(theme::text::secondary),
+                ),
         )
         .on_press(SideshiftReceiveMessage::Reset)
         .style(theme::button::transparent)
@@ -369,7 +394,8 @@ fn active_shift_view<'a>(
 // ---------------------------------------------------------------------------
 
 fn error_view(error: Option<&str>) -> Element<SideshiftReceiveMessage> {
-    let msg = error.unwrap_or("An unknown error occurred.");
+    let msg =
+        coincube_ui::locale::notice(error.unwrap_or("An unknown error occurred.").to_string());
 
     Container::new(
         Column::new()
@@ -381,7 +407,7 @@ fn error_view(error: Option<&str>) -> Element<SideshiftReceiveMessage> {
                     .width(Length::Fill),
             )
             .push(
-                button::primary(None, "Try Again")
+                button::primary(None, localized_copy("Try Again"))
                     .on_press(SideshiftReceiveMessage::Reset)
                     .width(Length::Fill),
             )
@@ -399,32 +425,38 @@ fn info_card(
     let mut rows = Column::new().spacing(8);
 
     if let Some(min) = &shift.deposit_min {
-        rows = rows.push(info_row("Min deposit", min));
+        rows = rows.push(info_row(localized_copy("Min deposit"), min));
     }
     if let Some(max) = &shift.deposit_max {
-        rows = rows.push(info_row("Max deposit", max));
+        rows = rows.push(info_row(localized_copy("Max deposit"), max));
     }
     if !amount_input.is_empty() {
         if let Some(dep) = &shift.deposit_amount {
-            rows = rows.push(info_row("You send", dep));
+            rows = rows.push(info_row(localized_copy("You send"), dep));
         }
         if let Some(settle) = &shift.settle_amount {
-            rows = rows.push(info_row("You receive", settle));
+            rows = rows.push(info_row(localized_copy("You receive"), settle));
         }
     }
     if let Some(rate) = &shift.rate {
-        rows = rows.push(info_row("Rate", rate));
+        rows = rows.push(info_row(localized_copy("Rate"), rate));
     }
     if let Some(fee) = &shift.network_fee_usd {
-        rows = rows.push(info_row("Network fee", &format!("${}", fee)));
+        rows = rows.push(info_row(
+            localized_copy("Network fee"),
+            &format!("${}", fee),
+        ));
     }
     if let Some(aff) = &shift.affiliate_fee_percent {
-        rows = rows.push(info_row("Service fee", &format!("{}%", aff)));
+        rows = rows.push(info_row(
+            localized_copy("Service fee"),
+            &format!("{}%", aff),
+        ));
     }
     if let Some(exp) = &shift.expires_at {
-        rows = rows.push(info_row("Expires", exp));
+        rows = rows.push(info_row(localized_copy("Expires"), exp));
     }
-    rows = rows.push(info_row("Swap ID", &shift.id));
+    rows = rows.push(info_row(localized_copy("Swap ID"), &shift.id));
 
     Container::new(rows)
         .padding([12, 16])

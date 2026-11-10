@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     component::{card, text::*},
     theme,
@@ -32,18 +33,18 @@ pub enum TradeStatus {
 impl TradeStatus {
     pub fn label(&self) -> &'static str {
         match self {
-            TradeStatus::Pending => "Pending",
-            TradeStatus::Active => "Active",
-            TradeStatus::WaitingPayment => "Locking Escrow",
-            TradeStatus::WaitingBuyerInvoice => "Waiting Invoice",
+            TradeStatus::Pending => localized_copy("Pending"),
+            TradeStatus::Active => localized_copy("Active"),
+            TradeStatus::WaitingPayment => localized_copy("Locking Escrow"),
+            TradeStatus::WaitingBuyerInvoice => localized_copy("Waiting Invoice"),
             TradeStatus::FiatSent => "Fiat Sent",
-            TradeStatus::SettledHoldInvoice => "Paying Sats",
-            TradeStatus::PaymentFailed => "Payment Failed",
-            TradeStatus::Success => "Success",
-            TradeStatus::Canceled => "Canceled",
-            TradeStatus::CooperativelyCanceled => "Canceling",
-            TradeStatus::Dispute => "Dispute",
-            TradeStatus::Expired => "Expired",
+            TradeStatus::SettledHoldInvoice => localized_copy("Paying Sats"),
+            TradeStatus::PaymentFailed => localized_copy("Payment Failed"),
+            TradeStatus::Success => localized_copy("Success"),
+            TradeStatus::Canceled => localized_copy("Canceled"),
+            TradeStatus::CooperativelyCanceled => localized_copy("Canceling"),
+            TradeStatus::Dispute => localized_copy("Dispute"),
+            TradeStatus::Expired => localized_copy("Expired"),
         }
     }
 
@@ -64,8 +65,8 @@ pub enum TradeRole {
 impl TradeRole {
     pub fn label(&self) -> &'static str {
         match self {
-            TradeRole::Creator => "Created by You",
-            TradeRole::Taker => "Taken by You",
+            TradeRole::Creator => localized_copy("Created by You"),
+            TradeRole::Taker => localized_copy("Taken by You"),
         }
     }
 }

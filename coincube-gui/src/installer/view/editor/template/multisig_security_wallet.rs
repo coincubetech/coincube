@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::{Alignment, Length};
 
 use coincube_ui::{
@@ -163,7 +165,7 @@ pub fn multisig_security_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapse_icon()),
                     )
                     .style(theme::button::transparent)
@@ -173,7 +175,7 @@ pub fn multisig_security_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapsed_icon()),
                     )
                     .style(theme::button::transparent)
@@ -196,7 +198,11 @@ pub fn multisig_security_template<'a>(
                                 defined_key(
                                     &key.name,
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     if use_taproot && !key.source.is_compatible_taproot() {
                                         Some("This device does not support Taproot")
                                     } else {
@@ -207,7 +213,11 @@ pub fn multisig_security_template<'a>(
                             } else {
                                 undefined_key(
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     !primary_path.keys[0..i].iter().any(|k| k.is_none()),
                                     true,
                                 )
@@ -245,7 +255,11 @@ pub fn multisig_security_template<'a>(
                                     uneditable_defined_key(
                                         &key.name,
                                         color::GREEN,
-                                        format!("Primary key #{}", j + 1),
+                                        localized_format!(
+                                            "Primary key #{}",
+                                            "Clave principal #{}",
+                                            j + 1
+                                        ),
                                         if use_taproot && !key.source.is_compatible_taproot() {
                                             Some("This device does not support Taproot")
                                         } else {
@@ -269,7 +283,11 @@ pub fn multisig_security_template<'a>(
                                 undefined_key(
                                     if j < 2 { color::GREEN } else { color::ORANGE },
                                     if j < 2 {
-                                        format!("Primary key #{}", j + 1)
+                                        localized_format!(
+                                            "Primary key #{}",
+                                            "Clave principal #{}",
+                                            j + 1
+                                        )
                                     } else {
                                         "Recovery key".to_string()
                                     },
@@ -306,12 +324,12 @@ pub fn multisig_security_template<'a>(
             .spacing(12)
             .align_y(Alignment::Center)
             .push(
-                button::secondary(None, "Clear All")
+                button::secondary(None, localized_copy("Clear All"))
                     .width(Length::Shrink)
                     .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
             )
             .push(
-                button::secondary(None, "Customize")
+                button::secondary(None, localized_copy("Customize"))
                     .width(Length::Shrink)
                     .on_press(Message::DefineDescriptor(
                         message::DefineDescriptor::ChangeTemplate(
@@ -320,7 +338,7 @@ pub fn multisig_security_template<'a>(
                     )),
             )
             .push(
-                button::primary(None, "Continue")
+                button::primary(None, localized_copy("Continue"))
                     .width(Length::Shrink)
                     .on_press_maybe(if valid { Some(Message::Next) } else { None }),
             )
@@ -395,7 +413,7 @@ pub fn multisig_inheritance_recovery_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapse_icon()),
                     )
                     .style(theme::button::transparent)
@@ -405,7 +423,7 @@ pub fn multisig_inheritance_recovery_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapsed_icon()),
                     )
                     .style(theme::button::transparent)
@@ -428,7 +446,11 @@ pub fn multisig_inheritance_recovery_template<'a>(
                                 defined_key(
                                     &key.name,
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     if use_taproot && !key.source.is_compatible_taproot() {
                                         Some("This device does not support Taproot")
                                     } else {
@@ -439,7 +461,11 @@ pub fn multisig_inheritance_recovery_template<'a>(
                             } else {
                                 undefined_key(
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     !primary_path.keys[0..i].iter().any(|k| k.is_none()),
                                     true,
                                 )
@@ -476,7 +502,11 @@ pub fn multisig_inheritance_recovery_template<'a>(
                                 defined_key(
                                     &key.name,
                                     color::BLUE,
-                                    format!("Inheritance key #{}", j + 1),
+                                    localized_format!(
+                                        "Inheritance key #{}",
+                                        "Clave de herencia #{}",
+                                        j + 1
+                                    ),
                                     if use_taproot && !key.source.is_compatible_taproot() {
                                         Some("This device does not support Taproot")
                                     } else {
@@ -487,7 +517,11 @@ pub fn multisig_inheritance_recovery_template<'a>(
                             } else {
                                 undefined_key(
                                     color::BLUE,
-                                    format!("Inheritance key #{}", j + 1),
+                                    localized_format!(
+                                        "Inheritance key #{}",
+                                        "Clave de herencia #{}",
+                                        j + 1
+                                    ),
                                     !(primary_path.keys.iter().any(|k| k.is_none())
                                         || inheritance_path.keys[0..j].iter().any(|k| k.is_none())),
                                     true,
@@ -517,12 +551,12 @@ pub fn multisig_inheritance_recovery_template<'a>(
             .spacing(12)
             .align_y(Alignment::Center)
             .push(
-                button::secondary(None, "Clear All")
+                button::secondary(None, localized_copy("Clear All"))
                     .width(Length::Shrink)
                     .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
             )
             .push(
-                button::secondary(None, "Customize")
+                button::secondary(None, localized_copy("Customize"))
                     .width(Length::Shrink)
                     .on_press(Message::DefineDescriptor(
                         message::DefineDescriptor::ChangeTemplate(
@@ -531,7 +565,7 @@ pub fn multisig_inheritance_recovery_template<'a>(
                     )),
             )
             .push(
-                button::primary(None, "Continue")
+                button::primary(None, localized_copy("Continue"))
                     .width(Length::Shrink)
                     .on_press_maybe(if valid { Some(Message::Next) } else { None }),
             )
@@ -564,7 +598,7 @@ pub fn expanding_multisig_inheritance_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapse_icon()),
                     )
                     .style(theme::button::transparent)
@@ -574,7 +608,7 @@ pub fn expanding_multisig_inheritance_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapsed_icon()),
                     )
                     .style(theme::button::transparent)
@@ -597,7 +631,11 @@ pub fn expanding_multisig_inheritance_template<'a>(
                                 defined_key(
                                     &key.name,
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     if use_taproot && !key.source.is_compatible_taproot() {
                                         Some("This device does not support Taproot")
                                     } else {
@@ -608,7 +646,11 @@ pub fn expanding_multisig_inheritance_template<'a>(
                             } else {
                                 undefined_key(
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     !primary_path.keys[0..i].iter().any(|k| k.is_none()),
                                     true,
                                 )
@@ -648,7 +690,11 @@ pub fn expanding_multisig_inheritance_template<'a>(
                                     uneditable_defined_key(
                                         &key.name,
                                         color::GREEN,
-                                        format!("Primary key #{}", j + 1),
+                                        localized_format!(
+                                            "Primary key #{}",
+                                            "Clave principal #{}",
+                                            j + 1
+                                        ),
                                         if use_taproot && !key.source.is_compatible_taproot() {
                                             Some("This device does not support Taproot")
                                         } else {
@@ -659,7 +705,11 @@ pub fn expanding_multisig_inheritance_template<'a>(
                                     defined_key(
                                         &key.name,
                                         color::BLUE,
-                                        format!("Inheritance key #{}", j - 2),
+                                        localized_format!(
+                                            "Inheritance key #{}",
+                                            "Clave de herencia #{}",
+                                            j - 2
+                                        ),
                                         if use_taproot && !key.source.is_compatible_taproot() {
                                             Some("This device does not support Taproot")
                                         } else {
@@ -672,9 +722,17 @@ pub fn expanding_multisig_inheritance_template<'a>(
                                 undefined_key(
                                     if j < 3 { color::GREEN } else { color::BLUE },
                                     if j < 3 {
-                                        format!("Primary key #{}", j + 1)
+                                        localized_format!(
+                                            "Primary key #{}",
+                                            "Clave principal #{}",
+                                            j + 1
+                                        )
                                     } else {
-                                        format!("Inheritance key #{}", j - 2)
+                                        localized_format!(
+                                            "Inheritance key #{}",
+                                            "Clave de herencia #{}",
+                                            j - 2
+                                        )
                                     },
                                     !(primary_path.keys.iter().any(|k| k.is_none())
                                         || inheritance_path.keys[0..j].iter().any(|k| k.is_none())),
@@ -709,12 +767,12 @@ pub fn expanding_multisig_inheritance_template<'a>(
             .spacing(12)
             .align_y(Alignment::Center)
             .push(
-                button::secondary(None, "Clear All")
+                button::secondary(None, localized_copy("Clear All"))
                     .width(Length::Shrink)
                     .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
             )
             .push(
-                button::secondary(None, "Customize")
+                button::secondary(None, localized_copy("Customize"))
                     .width(Length::Shrink)
                     .on_press(Message::DefineDescriptor(
                         message::DefineDescriptor::ChangeTemplate(
@@ -723,7 +781,7 @@ pub fn expanding_multisig_inheritance_template<'a>(
                     )),
             )
             .push(
-                button::primary(None, "Continue")
+                button::primary(None, localized_copy("Continue"))
                     .width(Length::Shrink)
                     .on_press_maybe(if valid { Some(Message::Next) } else { None }),
             )

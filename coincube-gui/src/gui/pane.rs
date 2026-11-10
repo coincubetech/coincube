@@ -880,10 +880,13 @@ impl Pane {
         menu.map(Message::View)
     }
 
-    pub fn view(&self) -> Element<Message> {
+    pub(crate) fn view(
+        &self,
+        worldview: crate::app::settings::preferences::WorldviewMode,
+    ) -> Element<Message> {
         Container::new(if let Some(t) = self.tabs.get(self.focused_tab) {
             let id = t.id;
-            t.view().map(move |msg| Message::tab(id, msg))
+            t.view(worldview).map(move |msg| Message::tab(id, msg))
         } else {
             Row::new().into()
         })

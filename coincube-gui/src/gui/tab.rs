@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use iced::{Subscription, Task};
@@ -917,8 +918,8 @@ impl std::fmt::Debug for AuthChange {
 /// The opening on the Cube, from a verified unlock to the App.
 struct CubeOpening {
     scene: home::launcher_opening::Opening,
-    /// The unlock screen's quote, kept for the whole opening.
-    quote: coincube_ui::component::quote_display::Quote,
+    /// Starts with the unlock screen's quote, then cycles through others.
+    quotes: home::launcher_opening::QuoteCycle,
     /// The unlock's wallet loads, aborted by Cancel before the Loader exists.
     loads: Vec<iced::task::Handle>,
     /// The user chose to go on while Spark was still loading.
@@ -1147,9 +1148,9 @@ impl Tab {
         match &self.state {
             State::Installer(_) => "Installer",
             State::Loader(_) => "Loading...",
-            State::Home(_) => "Home",
-            State::PinEntry(_) => "Enter PIN",
-            State::PasskeyUnlock(_) => "Unlock with passkey",
+            State::Home(_) => localized_copy("Home"),
+            State::PinEntry(_) => localized_copy("Enter PIN"),
+            State::PasskeyUnlock(_) => localized_copy("Unlock with passkey"),
             State::App(a) => a.title(),
             State::DuressActive(_) => "COINCUBE",
         }
@@ -4755,7 +4756,8 @@ impl Tab {
         {
             Subscription::batch([base, iced::window::frames().map(Message::UnlockMotionTick)])
         } else if let (true, Some(opening)) = (foreground, self.opening.as_ref()) {
-            let clock = if opening.scene.needs_frames(Instant::now()) {
+            let now = Instant::now();
+            let clock = if opening.scene.needs_frames(now) || opening.quotes.needs_frames(now) {
                 iced::window::frames()
             } else if opening.scene.breathes() {
                 iced::time::every(std::time::Duration::from_millis(50))
@@ -4769,9 +4771,12 @@ impl Tab {
         }
     }
 
-    pub fn view(&self) -> Element<Message> {
+    pub(crate) fn view(
+        &self,
+        worldview: crate::app::settings::preferences::WorldviewMode,
+    ) -> Element<Message> {
         let Some(opening) = self.opening.as_ref() else {
-            return self.state_view();
+            return self.state_view(worldview);
         };
         let now = Instant::now();
         let (cube, app) = match &self.state {
@@ -4781,14 +4786,15 @@ impl Tab {
                 (&loader.cube_settings, false)
             }
             State::App(app) => (app.cube_settings(), opening.scene.shows_app(now)),
-            _ => return self.state_view(),
+            _ => return self.state_view(worldview),
         };
         let base = if app {
-            self.state_view()
+            self.state_view(worldview)
         } else {
             let face = home::launcher_presenter::OpeningFace {
                 cube,
-                quote: &opening.quote,
+                quote: opening.quotes.current(),
+                outgoing: opening.quotes.outgoing(now),
                 stage: opening.scene.stage(),
                 stalled: opening.scene.stalled(now),
                 cancel: || Message::CancelOpening,
@@ -4821,7 +4827,10 @@ impl Tab {
         }
     }
 
-    fn state_view(&self) -> Element<Message> {
+    fn state_view(
+        &self,
+        worldview: crate::app::settings::preferences::WorldviewMode,
+    ) -> Element<Message> {
         match &self.state {
             State::Installer(v) => v.view().map(Message::Install),
             State::App(v) if v.cube_settings().network.is_blake2b() => {
@@ -4836,7 +4845,7 @@ impl Tab {
                     Message::AppAsync(generation, Box::new(Message::Run(message)))
                 })
             }
-            State::Home(v) => v.view().map(Message::Launch),
+            State::Home(v) => v.view_with_worldview(worldview).map(Message::Launch),
             State::Loader(v) => v.view().map(Message::Load),
             State::PinEntry(v) => {
                 let progress = self
@@ -4970,7 +4979,7 @@ impl Tab {
                         stage,
                         now,
                     ),
-                    quote,
+                    quotes: home::launcher_opening::QuoteCycle::new(quote, reduced, now),
                     loads: Vec::new(),
                     without_spark: false,
                 });
@@ -5004,6 +5013,7 @@ impl Tab {
                     // stall wait from when it leaves.
                     None => opening.scene.hold(now),
                 }
+                opening.quotes.advance(now);
                 if !matches!(self.state, State::PinEntry(_) | State::PasskeyUnlock(_)) {
                     // The Loader or App owns its work now; Cancel uses its routes.
                     opening.loads.clear();
@@ -8449,15 +8459,19 @@ mod opening_tests {
         let mut tab = Tab::new(1, State::Loader(loader_at_connecting(&root)));
         tab.opening = Some(super::CubeOpening {
             scene: Opening::new(None, false, Stage::Connecting, t0),
-            quote: coincube_ui::component::quote_display::Quote {
-                id: "test".into(),
-                text: "A quote.".into(),
-                author: "Someone".into(),
-                source: "Somewhere".into(),
-                category: String::new(),
-                length: String::new(),
-                contexts: Vec::new(),
-            },
+            quotes: home::launcher_opening::QuoteCycle::new(
+                coincube_ui::component::quote_display::Quote {
+                    id: "test".into(),
+                    text: "A quote.".into(),
+                    author: "Someone".into(),
+                    source: "Somewhere".into(),
+                    category: String::new(),
+                    length: String::new(),
+                    contexts: Vec::new(),
+                },
+                false,
+                t0,
+            ),
             loads: Vec::new(),
             without_spark: false,
         });
@@ -8510,15 +8524,19 @@ mod opening_tests {
         let t0 = Instant::now() - Duration::from_secs(10);
         tab.opening = Some(super::CubeOpening {
             scene: Opening::new(Some(floor()), false, Stage::AlmostThere, t0),
-            quote: coincube_ui::component::quote_display::Quote {
-                id: "test".into(),
-                text: "A quote.".into(),
-                author: "Someone".into(),
-                source: "Somewhere".into(),
-                category: String::new(),
-                length: String::new(),
-                contexts: Vec::new(),
-            },
+            quotes: home::launcher_opening::QuoteCycle::new(
+                coincube_ui::component::quote_display::Quote {
+                    id: "test".into(),
+                    text: "A quote.".into(),
+                    author: "Someone".into(),
+                    source: "Somewhere".into(),
+                    category: String::new(),
+                    length: String::new(),
+                    contexts: Vec::new(),
+                },
+                false,
+                t0,
+            ),
             loads: Vec::new(),
             without_spark: false,
         });

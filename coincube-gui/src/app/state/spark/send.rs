@@ -738,9 +738,11 @@ impl SparkSend {
         let amount_sat = match parse_amount_to_sats(&self.amount_input, bitcoin_unit) {
             Ok(n) if n > 0 => n,
             _ => {
-                self.phase = SparkSendPhase::Error(format!(
+                self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
                     "Enter the amount to send, in {}. Cross-chain sends are funded from your \
                      Bitcoin balance and converted when they're paid.",
+                    "Ingresa el importe que quieres enviar, en {}. Los envíos entre cadenas se \
+                     financian con tu saldo de Bitcoin y se convierten al pagarse.",
                     amount_unit_word(bitcoin_unit),
                 ));
                 return Task::none();
@@ -989,6 +991,7 @@ impl State for SparkSend {
                 quote_countdown: self.quote_countdown.clone(),
                 receive_target: self.receive_target,
                 network: cache.network,
+                chain: cache.chain(),
                 theme_mode: cache.theme_mode,
             }
             .render(),
@@ -1234,9 +1237,10 @@ impl State for SparkSend {
                 let pay_from = self.pay_from;
                 if pay_from == WalletAsset::Usdb {
                     if let Err(reason) = self.usdb_covers(cache) {
-                        self.phase = SparkSendPhase::Error(format!(
+                        self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
                             "{} Pay from bitcoin instead, or lower the amount.",
-                            reason
+                            "{} Paga con bitcoin o reduce el importe.",
+                            coincube_ui::locale::copy(reason)
                         ));
                         return Task::none();
                     }
@@ -1331,9 +1335,11 @@ impl State for SparkSend {
                     // The picked target is a stablecoin, but the pasted string
                     // isn't a recognised cross-chain address. Say so rather than
                     // firing funds somewhere unrecoverable.
-                    self.phase = SparkSendPhase::Error(format!(
+                    self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
                         "That doesn't look like a {} address. Paste the recipient's {} address \
                          on Ethereum, Tron, or Solana.",
+                        "Eso no parece una dirección de {}. Pega la dirección de {} del \
+                         destinatario en Ethereum, Tron o Solana.",
                         self.receive_target.label(),
                         self.receive_target.label(),
                     ));
@@ -1347,8 +1353,9 @@ impl State for SparkSend {
                     routes.retain(|r| r.asset.eq_ignore_ascii_case(symbol));
                 }
                 if routes.is_empty() {
-                    self.phase = SparkSendPhase::Error(format!(
+                    self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
                         "No route can currently send {} to this {} address.",
+                        "Ahora mismo ninguna ruta puede enviar {} a esta dirección de {}.",
                         self.receive_target.label(),
                         address.family,
                     ));
@@ -1874,14 +1881,18 @@ fn usdb_conversion_hint(
     let balance = Amount::from_sat(btc_balance_sats).to_formatted_string_with_unit(unit);
     if amount <= btc_balance_sats {
         // Only the fee spills over: the amount itself is a plain bitcoin send.
-        return Some(format!(
+        return Some(coincube_ui::localized_format!(
             "Your bitcoin balance is {balance} {unit_label}, which covers the amount but not \
-             the fee; the fee is converted from your {usdb} at the time of sending."
+             the fee; the fee is converted from your {usdb} at the time of sending.",
+            "Tu saldo de bitcoin es {balance} {unit_label}, que cubre el importe pero no la \
+             comisión; la comisión se convierte desde tus {usdb} al momento del envío."
         ));
     }
-    Some(format!(
+    Some(coincube_ui::localized_format!(
         "Your bitcoin balance is {balance} {unit_label}; the rest is converted from your {usdb} \
-         at the time of sending."
+         at the time of sending.",
+        "Tu saldo de bitcoin es {balance} {unit_label}; el resto se convierte desde tus {usdb} \
+         al momento del envío."
     ))
 }
 

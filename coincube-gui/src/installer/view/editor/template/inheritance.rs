@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::{Alignment, Length};
 
 use coincube_ui::{
@@ -106,7 +108,7 @@ pub fn two_of_three_inheritance_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapse_icon()),
                     )
                     .style(theme::button::transparent)
@@ -116,7 +118,7 @@ pub fn two_of_three_inheritance_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapsed_icon()),
                     )
                     .style(theme::button::transparent)
@@ -139,7 +141,11 @@ pub fn two_of_three_inheritance_template<'a>(
                                 defined_key(
                                     &key.name,
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     if use_taproot && !key.source.is_compatible_taproot() {
                                         Some("This device does not support Taproot")
                                     } else {
@@ -150,7 +156,11 @@ pub fn two_of_three_inheritance_template<'a>(
                             } else {
                                 undefined_key(
                                     color::GREEN,
-                                    format!("Primary key #{}", i + 1),
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
                                     !primary_path.keys[0..i].iter().any(|k| k.is_none()),
                                     true,
                                 )
@@ -227,12 +237,12 @@ pub fn two_of_three_inheritance_template<'a>(
             .spacing(12)
             .align_y(Alignment::Center)
             .push(
-                button::secondary(None, "Clear All")
+                button::secondary(None, localized_copy("Clear All"))
                     .width(Length::Shrink)
                     .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
             )
             .push(
-                button::secondary(None, "Customize")
+                button::secondary(None, localized_copy("Customize"))
                     .width(Length::Shrink)
                     .on_press(Message::DefineDescriptor(
                         message::DefineDescriptor::ChangeTemplate(
@@ -241,7 +251,7 @@ pub fn two_of_three_inheritance_template<'a>(
                     )),
             )
             .push(
-                button::primary(None, "Continue")
+                button::primary(None, localized_copy("Continue"))
                     .width(Length::Shrink)
                     .on_press_maybe(if valid { Some(Message::Next) } else { None }),
             )
@@ -274,7 +284,7 @@ pub fn inheritance_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapse_icon()),
                     )
                     .style(theme::button::transparent)
@@ -284,7 +294,7 @@ pub fn inheritance_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapsed_icon()),
                     )
                     .style(theme::button::transparent)
@@ -352,12 +362,12 @@ pub fn inheritance_template<'a>(
             .spacing(12)
             .align_y(Alignment::Center)
             .push(
-                button::secondary(None, "Clear All")
+                button::secondary(None, localized_copy("Clear All"))
                     .width(Length::Shrink)
                     .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
             )
             .push(
-                button::secondary(None, "Customize")
+                button::secondary(None, localized_copy("Customize"))
                     .width(Length::Shrink)
                     .on_press(Message::DefineDescriptor(
                         message::DefineDescriptor::ChangeTemplate(
@@ -366,7 +376,7 @@ pub fn inheritance_template<'a>(
                     )),
             )
             .push(
-                button::primary(None, "Continue")
+                button::primary(None, localized_copy("Continue"))
                     .width(Length::Shrink)
                     .on_press_maybe(if valid { Some(Message::Next) } else { None }),
             )

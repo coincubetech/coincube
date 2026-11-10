@@ -1,3 +1,4 @@
+use coincube_ui::localized_format;
 use std::collections::HashSet;
 
 use coincube_ui::{component::text::*, icon, theme, widget::*};
@@ -184,16 +185,20 @@ pub fn order_filter_sidebar<'a>(
     };
 
     let description = match (state.min_rating > 0.0, state.min_days_active > 0) {
-        (true, true) => format!(
+        (true, true) => localized_format!(
             "Showing traders with {:.1}+ star ratings and at least {} days active.",
-            state.min_rating, state.min_days_active
+            "Se muestran operadores con al menos {:.1} estrellas y {} días de actividad.",
+            state.min_rating,
+            state.min_days_active
         ),
-        (true, false) => format!(
+        (true, false) => localized_format!(
             "Showing traders with {:.1}+ star ratings.",
+            "Se muestran operadores con al menos {:.1} estrellas.",
             state.min_rating
         ),
-        (false, true) => format!(
+        (false, true) => localized_format!(
             "Showing traders with at least {} days active.",
+            "Se muestran operadores con al menos {} días de actividad.",
             state.min_days_active
         ),
         (false, false) => "Showing all traders regardless of reputation.".to_string(),

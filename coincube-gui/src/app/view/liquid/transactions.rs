@@ -1,6 +1,9 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use std::collections::HashMap;
 
 use coincube_core::miniscript::bitcoin::Amount;
+use coincube_ui::locale::Text as CopyText;
 use iced::widget::image;
 
 use crate::app::wallets::{
@@ -51,7 +54,7 @@ fn payment_status_text(
     refundable_swap_addresses: &[String],
 ) -> Element<'static, Message> {
     let (label, style) = payment_detail_status(payment, refundable_swap_addresses);
-    text(label).style(style).into()
+    text(localized_copy(label)).style(style).into()
 }
 
 fn payment_detail_status(
@@ -70,7 +73,7 @@ fn payment_detail_status(
             _ => theme::text::secondary,
         };
         let label = if status == BtcSwapReceiveStatus::Completed {
-            "Confirmed"
+            CopyText::Confirmed.get()
         } else {
             status.label()
         };
@@ -78,7 +81,7 @@ fn payment_detail_status(
     }
 
     match payment.status {
-        DomainPaymentStatus::Complete => ("Confirmed", theme::text::success),
+        DomainPaymentStatus::Complete => (CopyText::Confirmed.get(), theme::text::success),
         DomainPaymentStatus::Pending => ("Pending", theme::text::secondary),
         DomainPaymentStatus::Created => ("Created", theme::text::secondary),
         DomainPaymentStatus::Failed => ("Failed", theme::text::destructive),
@@ -98,7 +101,7 @@ fn payment_detail_status(
 fn usdt_description(payment: &DomainPayment) -> String {
     let desc = payment.details.description();
     if desc.is_empty() {
-        "USDt Transfer".to_owned()
+        localized_copy("USDt Transfer").to_owned()
     } else {
         desc.to_owned()
     }
@@ -127,9 +130,9 @@ fn usdt_amount_str(payment: &DomainPayment, usdt_id: &str) -> Option<String> {
 // the fee was paid in USDt; it may also mean no fee or unavailable fee data.
 fn usdt_fee_caption(fees_sat: u64) -> &'static str {
     if fees_sat == 0 {
-        "No L-BTC fee reported"
+        localized_copy("No L-BTC fee reported")
     } else {
-        "Fees (L-BTC)"
+        localized_copy("Fees (L-BTC)")
     }
 }
 
@@ -159,7 +162,11 @@ pub fn liquid_transactions_view<'a>(
     // The source state still owns selection, server filtering and paging.
     let filter_row = segmented(
         [
-            segment("liquid-transactions-filter-all", AssetFilter::All, "All"),
+            segment(
+                "liquid-transactions-filter-all",
+                AssetFilter::All,
+                localized_copy("All"),
+            ),
             segment(
                 "liquid-transactions-filter-lbtc",
                 AssetFilter::LbtcOnly,
@@ -180,11 +187,11 @@ pub fn liquid_transactions_view<'a>(
         Row::new()
             .spacing(12)
             .align_y(Alignment::Center)
-            .push(Container::new(h3("Transactions").bold()))
+            .push(Container::new(h3(localized_copy("Transactions")).bold()))
             .push(Space::new().width(Length::Fill))
             .push(filter_row)
             .push(
-                button::secondary(Some(icon::backup_icon()), "Export")
+                button::secondary(Some(icon::backup_icon()), localized_copy("Export"))
                     .on_press(ImportExportMessage::Open.into()),
             ),
     );
@@ -199,7 +206,9 @@ pub fn liquid_transactions_view<'a>(
             Container::new(
                 Column::new()
                     .spacing(8)
-                    .push(Container::new(h4_bold("Refundable Transactions")))
+                    .push(Container::new(h4_bold(localized_copy(
+                        "Refundable Transactions",
+                    ))))
                     .push(refundables.iter().enumerate().fold(
                         Column::new().spacing(0),
                         |col, (i, refundable)| {
@@ -232,8 +241,9 @@ pub fn liquid_transactions_view<'a>(
     // empty response just means we've paged past the end — keep the list
     // shell and pagination controls visible so the user can Prev back.
     if loading && payments.is_empty() && current_page == 0 && !show_refundables {
-        content =
-            content.push(p1_regular("Loading Liquid transactions…").style(theme::text::secondary));
+        content = content.push(
+            p1_regular(CopyText::LoadingLiquidTransactions.get()).style(theme::text::secondary),
+        );
     } else if payments.is_empty() && current_page == 0 && !show_refundables {
         // Empty state with Kage quote
         content = content.push(
@@ -242,37 +252,43 @@ pub fn liquid_transactions_view<'a>(
                 .width(Length::Fill)
                 .align_x(Alignment::Center)
                 .push(Space::new().height(Length::Fixed(40.0)))
-                .push(quote_display::display(
-                    &QuoteDisplayProps::new("empty-wallet", empty_state_quote, empty_state_image_handle),
-                ))
+                .push(quote_display::display(&QuoteDisplayProps::new(
+                    "empty-wallet",
+                    empty_state_quote,
+                    empty_state_image_handle,
+                )))
                 .push(Space::new().height(Length::Fixed(10.0)))
                 .push(
                     text(match asset_filter {
-                        AssetFilter::All => "Your Liquid wallet is ready. Once you send or receive\nfunds, they'll show up here.",
-                        AssetFilter::LbtcOnly => "No L-BTC transactions on this page.",
-                        AssetFilter::UsdtOnly => "No USDt transactions on this page.",
+                        AssetFilter::All => CopyText::LiquidHistoryEmpty.get(),
+                        AssetFilter::LbtcOnly => CopyText::NoLBtcTransactionsOnThisPage.get(),
+                        AssetFilter::UsdtOnly => CopyText::NoUsdtTransactionsOnThisPage.get(),
                     })
-                        .size(16)
-                        .style(theme::text::secondary)
-                        .wrapping(iced::widget::text::Wrapping::Word)
-                        .align_x(iced::alignment::Horizontal::Center),
+                    .size(16)
+                    .style(theme::text::secondary)
+                    .wrapping(iced::widget::text::Wrapping::Word)
+                    .align_x(iced::alignment::Horizontal::Center),
                 )
-                .push_maybe(matches!(asset_filter, AssetFilter::All).then(||
+                .push_maybe(matches!(asset_filter, AssetFilter::All).then(|| {
                     Row::new()
                         .spacing(15)
                         .push(
-                            button::primary(None, "Send sats")
-                                .on_press(Message::Menu(Menu::Liquid(crate::app::menu::LiquidSubMenu::Send)))
+                            button::primary(None, localized_copy("Send"))
+                                .on_press(Message::Menu(Menu::Liquid(
+                                    crate::app::menu::LiquidSubMenu::Send,
+                                )))
                                 .padding(15)
                                 .width(Length::Fixed(150.0)),
                         )
                         .push(
-                            button::transparent_border(None, "Receive sats")
-                                .on_press(Message::Menu(Menu::Liquid(crate::app::menu::LiquidSubMenu::Receive)))
+                            button::transparent_border(None, localized_copy("Receive"))
+                                .on_press(Message::Menu(Menu::Liquid(
+                                    crate::app::menu::LiquidSubMenu::Receive,
+                                )))
                                 .padding(15)
                                 .width(Length::Fixed(150.0)),
-                        ),
-                )),
+                        )
+                })),
         );
     } else if !payments.is_empty() || current_page > 0 {
         // The dashboard already wraps the whole panel in a page-level
@@ -400,8 +416,9 @@ fn transaction_row<'a>(
 
     if let Some(fiat_amount) = fiat_converter.filter(|_| !mask_amounts).map(|converter| {
         let fiat = converter.convert(btc_amount);
-        format!(
+        localized_format!(
             "{} {} · current rate",
+            "{} {} · tasa actual",
             fiat.to_formatted_string(),
             fiat.currency()
         )
@@ -431,7 +448,9 @@ fn payment_list_status(
     if matches!(payment.details, DomainPaymentDetails::OnChainBitcoin { .. }) {
         let status = classify_payment(payment, refundable_swap_addresses);
         return match status {
-            BtcSwapReceiveStatus::Completed => Some(("Confirmed", theme::text::success)),
+            BtcSwapReceiveStatus::Completed => {
+                Some((CopyText::Confirmed.get(), theme::text::success))
+            }
             BtcSwapReceiveStatus::Refunded => Some(("Refunded", theme::text::success)),
             BtcSwapReceiveStatus::Failed | BtcSwapReceiveStatus::Refundable => {
                 Some((status.label(), theme::text::error))
@@ -440,7 +459,7 @@ fn payment_list_status(
         };
     }
     match payment.status {
-        DomainPaymentStatus::Complete => Some(("Confirmed", theme::text::success)),
+        DomainPaymentStatus::Complete => Some((CopyText::Confirmed.get(), theme::text::success)),
         DomainPaymentStatus::Pending => Some(("Pending", theme::text::warning)),
         DomainPaymentStatus::Created => Some(("Created", theme::text::secondary)),
         DomainPaymentStatus::Failed => Some(("Failed", theme::text::error)),
@@ -453,18 +472,23 @@ fn payment_list_status(
     }
 }
 
-fn status_badge(label: impl Into<String>, style: StatusTextStyle) -> Element<'static, Message> {
-    Container::new(text(label.into()).size(CAPTION_SIZE).bold().style(style))
-        .padding([2, 8])
-        .style(|theme: &theme::Theme| iced::widget::container::Style {
-            border: iced::Border {
-                color: theme.colors.rule,
-                width: 1.0,
-                radius: 10.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
+fn status_badge(label: &'static str, style: StatusTextStyle) -> Element<'static, Message> {
+    Container::new(
+        text(localized_copy(label))
+            .size(CAPTION_SIZE)
+            .bold()
+            .style(style),
+    )
+    .padding([2, 8])
+    .style(|theme: &theme::Theme| iced::widget::container::Style {
+        border: iced::Border {
+            color: theme.colors.rule,
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 fn refundable_row<'a>(
@@ -496,8 +520,9 @@ fn refundable_row<'a>(
     if let Some(converter) = fiat_converter.filter(|_| !mask_amounts) {
         let fiat = converter.convert(btc_amount);
         amount_column = amount_column.push(
-            p2_regular(format!(
+            p2_regular(localized_format!(
                 "{} {} · current rate",
+                "{} {} · tasa actual",
                 fiat.to_formatted_string(),
                 fiat.currency()
             ))
@@ -512,7 +537,7 @@ fn refundable_row<'a>(
             Column::new()
                 .spacing(4)
                 .width(Length::Fill)
-                .push(p1_regular("Refundable Swap"))
+                .push(p1_regular(localized_copy("Refundable Swap")))
                 .push(
                     Row::new()
                         .spacing(8)
@@ -559,9 +584,9 @@ pub fn transaction_detail_view<'a>(
     };
 
     let title = if is_receive {
-        "Incoming payment"
+        localized_copy("Incoming payment")
     } else {
-        "Outgoing payment"
+        localized_copy("Outgoing payment")
     };
 
     // Helper: combo icon for detail view based on payment type
@@ -633,7 +658,7 @@ pub fn transaction_detail_view<'a>(
                             .push(
                                 Column::new()
                                     .width(Length::FillPortion(1))
-                                    .push(text("Date").bold()),
+                                    .push(text(localized_copy("Date")).bold()),
                             )
                             .push(
                                 Column::new()
@@ -647,7 +672,7 @@ pub fn transaction_detail_view<'a>(
                             .push(
                                 Column::new()
                                     .width(Length::FillPortion(1))
-                                    .push(text("Status").bold()),
+                                    .push(text(localized_copy("Status")).bold()),
                             )
                             .push(
                                 Column::new()
@@ -661,7 +686,7 @@ pub fn transaction_detail_view<'a>(
                             .push(
                                 Column::new()
                                     .width(Length::FillPortion(1))
-                                    .push(text("Asset Amount").bold()),
+                                    .push(text(localized_copy("Asset Amount")).bold()),
                             )
                             .push(Column::new().width(Length::FillPortion(2)).push(text(
                                 if mask_amounts {
@@ -706,9 +731,9 @@ pub fn transaction_detail_view<'a>(
         .spacing(20)
         .push(detail_back_button())
         .push(if is_receive {
-            Container::new(h3("Incoming payment")).width(Length::Fill)
+            Container::new(h3(localized_copy("Incoming payment"))).width(Length::Fill)
         } else {
-            Container::new(h3("Outgoing payment")).width(Length::Fill)
+            Container::new(h3(localized_copy("Outgoing payment"))).width(Length::Fill)
         })
         .push({
             let (a, n) = make_detail_icon(false, &payment.details);
@@ -744,8 +769,9 @@ pub fn transaction_detail_view<'a>(
                             if is_receive { btc_amount } else { total_amount };
                         let fiat = converter.convert(amount_for_conversion);
                         Row::new().align_y(Alignment::Center).push(
-                            text(format!(
+                            text(localized_format!(
                                 "≈ {} {} · current rate",
+                                "♥ {} {} · tasa actual",
                                 fiat.to_formatted_string(),
                                 fiat.currency()
                             ))
@@ -762,7 +788,7 @@ pub fn transaction_detail_view<'a>(
                         .push(
                             Column::new()
                                 .width(Length::FillPortion(1))
-                                .push(text("Date").bold()),
+                                .push(text(localized_copy("Date")).bold()),
                         )
                         .push(
                             Column::new()
@@ -776,7 +802,7 @@ pub fn transaction_detail_view<'a>(
                         .push(
                             Column::new()
                                 .width(Length::FillPortion(1))
-                                .push(text("Status").bold()),
+                                .push(text(localized_copy("Status")).bold()),
                         )
                         .push(
                             Column::new()
@@ -790,7 +816,7 @@ pub fn transaction_detail_view<'a>(
                         .push(
                             Column::new()
                                 .width(Length::FillPortion(1))
-                                .push(text("Amount").bold()),
+                                .push(text(localized_copy("Amount")).bold()),
                         )
                         .push(Column::new().width(Length::FillPortion(2)).push(text(
                             if mask_amounts {
@@ -806,7 +832,7 @@ pub fn transaction_detail_view<'a>(
                         .push(
                             Column::new()
                                 .width(Length::FillPortion(1))
-                                .push(text("Fees").bold()),
+                                .push(text(localized_copy("Fees")).bold()),
                         )
                         .push(Column::new().width(Length::FillPortion(2)).push(text(
                             if mask_amounts {
@@ -901,6 +927,7 @@ fn refund_can_submit(
 
 #[allow(clippy::too_many_arguments)]
 pub fn refundable_detail_view<'a>(
+    chain: crate::chain::ChainId,
     refundable: &'a DomainRefundableSwap,
     fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
@@ -945,7 +972,7 @@ pub fn refundable_detail_view<'a>(
                 .spacing(12)
                 .align_y(Alignment::Center)
                 .push(icon::warning_icon().style(theme::text::warning))
-                .push(h3("Refundable Swap")),
+                .push(h3(localized_copy("Refundable Swap"))),
         )
         .push(
             Column::new()
@@ -973,7 +1000,7 @@ pub fn refundable_detail_view<'a>(
                         .push(
                             Column::new()
                                 .width(Length::FillPortion(1))
-                                .push(text("Date").bold()),
+                                .push(text(localized_copy("Date")).bold()),
                         )
                         .push(
                             Column::new()
@@ -987,7 +1014,7 @@ pub fn refundable_detail_view<'a>(
                         .push(
                             Column::new()
                                 .width(Length::FillPortion(1))
-                                .push(text("Swap Address").bold()),
+                                .push(text(localized_copy("Swap Address")).bold()),
                         )
                         .push(
                             Column::new()
@@ -1034,7 +1061,7 @@ pub fn refundable_detail_view<'a>(
                         .push(
                             Column::new()
                                 .width(Length::FillPortion(1))
-                                .push(text("Amount").bold()),
+                                .push(text(localized_copy("Amount")).bold()),
                         )
                         .push(Column::new().width(Length::FillPortion(2)).push(text(
                             if mask_amounts {
@@ -1050,15 +1077,21 @@ pub fn refundable_detail_view<'a>(
         .push_maybe((in_flight.is_none() || refunding).then(|| {
             Column::new()
                 .spacing(15)
-                .push(Container::new(h4_bold("Refund Details")).width(Length::Fill))
-                .push(p1_regular(format!(
+                .push(Container::new(h4_bold(localized_copy("Refund Details"))).width(Length::Fill))
+                .push(p2_regular(CopyText::DestinationNetwork.get().replacen(
+                    "{network}",
+                    crate::chain::canonical_network_name(chain),
+                    1,
+                )))
+                .push(p1_regular(localized_format!(
                     "Refund amount: {}",
+                    "Cantidad de reembolso: {}",
                     btc_amount.to_formatted_string_with_unit(bitcoin_unit)
                 )))
                 .push(
                     Column::new()
                         .spacing(10)
-                        .push(text("Bitcoin Address").size(P2_SIZE).bold())
+                        .push(text(localized_copy("Bitcoin Address")).size(P2_SIZE).bold())
                         .push(
                             Row::new()
                                 .spacing(8)
@@ -1066,42 +1099,60 @@ pub fn refundable_detail_view<'a>(
                                 .push(
                                     if refunding {
                                         form::Form::new_disabled(
-                                            "Enter Bitcoin address for refund",
+                                            coincube_ui::locale::copy(
+                                                "Enter Bitcoin address for refund",
+                                            ),
                                             refund_address,
                                         )
                                     } else {
                                         form::Form::new(
-                                            "Enter Bitcoin address for refund",
+                                            coincube_ui::locale::copy(
+                                                "Enter Bitcoin address for refund",
+                                            ),
                                             refund_address,
                                             Message::RefundAddressEdited,
                                         )
                                     }
+                                    .maybe_warning(if refunding {
+                                        None
+                                    } else {
+                                        refund_address.warning.map(coincube_ui::locale::copy)
+                                    })
                                     .size(14)
                                     .padding(12),
                                 )
                                 .push_maybe(has_vault.then(|| {
-                                    button::transparent_border(None, "Use Vault address")
-                                        .on_press_maybe(
-                                            (!refunding)
-                                                .then_some(Message::GenerateVaultRefundAddress),
-                                        )
-                                        .padding([6, 14])
+                                    button::transparent_border(
+                                        None,
+                                        localized_copy("Use Vault address"),
+                                    )
+                                    .on_press_maybe(
+                                        (!refunding).then_some(Message::GenerateVaultRefundAddress),
+                                    )
+                                    .padding([6, 14])
                                 })),
                         ),
                 )
                 .push(
                     Column::new()
                         .spacing(10)
-                        .push(text("Fee Rate (sat/vB)").size(P2_SIZE).bold())
+                        .push(
+                            text(localized_copy("Fee Rate (sat/vB)"))
+                                .size(P2_SIZE)
+                                .bold(),
+                        )
                         .push(
                             Row::new()
                                 .spacing(10)
                                 .push(
                                     if refunding {
-                                        form::Form::new_disabled("Enter fee rate", refund_feerate)
+                                        form::Form::new_disabled(
+                                            coincube_ui::locale::copy("Enter fee rate"),
+                                            refund_feerate,
+                                        )
                                     } else {
                                         form::Form::new_amount_sats(
-                                            "Enter fee rate",
+                                            coincube_ui::locale::copy("Enter fee rate"),
                                             refund_feerate,
                                             Message::RefundFeerateEdited,
                                         )
@@ -1124,14 +1175,15 @@ pub fn refundable_detail_view<'a>(
                         .width(Length::Shrink),
                     ),
                 )
-                .push_maybe(
-                    (pending_fee_priority.is_some() && !refunding)
-                        .then(|| p2_regular("Fetching fee rate…").style(theme::text::secondary)),
-                )
+                .push_maybe((pending_fee_priority.is_some() && !refunding).then(|| {
+                    p2_regular(localized_copy("Fetching fee rate…")).style(theme::text::secondary)
+                }))
                 .push_maybe(
                     (!can_refund && !refunding && pending_fee_priority.is_none()).then(|| {
-                        p2_regular("Enter a valid Bitcoin address and fee rate to enable Refund.")
-                            .style(theme::text::secondary)
+                        p2_regular(localized_copy(
+                            "Enter a valid Bitcoin address and fee rate to enable Refund.",
+                        ))
+                        .style(theme::text::secondary)
                     }),
                 )
         }))
@@ -1139,12 +1191,16 @@ pub fn refundable_detail_view<'a>(
 }
 
 fn refund_back_button() -> Element<'static, Message> {
-    Action::new(REFUND_BACK_ACTION_ID, text("‹ Back"), Message::FocusAction)
-        .width(Length::Shrink)
-        .padding(5)
-        .on_press(Message::Close)
-        .style(theme::button::link)
-        .into()
+    Action::new(
+        REFUND_BACK_ACTION_ID,
+        text(localized_copy("‹ Back")),
+        Message::FocusAction,
+    )
+    .width(Length::Shrink)
+    .padding(5)
+    .on_press(Message::Close)
+    .style(theme::button::link)
+    .into()
 }
 
 fn detail_back_button() -> Element<'static, Message> {
@@ -1413,6 +1469,7 @@ mod tests {
         macro_rules! detail {
             ($fee:expr, $refunding:expr, $in_flight:expr, $mask_amounts:expr) => {
                 refundable_detail_view(
+                    crate::chain::ChainId::Bitcoin,
                     &refund,
                     None,
                     BitcoinDisplayUnit::Sats,

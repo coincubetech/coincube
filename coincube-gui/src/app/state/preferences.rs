@@ -5,6 +5,7 @@
 //! when it owns an in-flight save. Hide masks immediately in this session;
 //! only a successful explicit Show can clear that mask.
 
+use coincube_ui::locale::Text as CopyText;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -114,14 +115,14 @@ impl Section {
         Self::About,
     ];
 
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Appearance => "Appearance",
-            Self::Launcher => "Launcher",
-            Self::BalancesAndMotion => "Balances & motion",
-            Self::Developer => "Developer",
-            Self::Diagnostics => "Diagnostics",
-            Self::About => "About",
+            Self::Appearance => CopyText::Appearance.get(),
+            Self::Launcher => CopyText::Launcher.get(),
+            Self::BalancesAndMotion => CopyText::BalancesMotion.get(),
+            Self::Developer => CopyText::Developer.get(),
+            Self::Diagnostics => CopyText::Diagnostics.get(),
+            Self::About => CopyText::About.get(),
         }
     }
 

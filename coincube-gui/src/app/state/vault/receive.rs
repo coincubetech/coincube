@@ -45,7 +45,7 @@ fn vault_display_name(wallet: &Wallet) -> &str {
         .alias
         .as_deref()
         .filter(|alias| !alias.trim().is_empty())
-        .unwrap_or("Unnamed Vault")
+        .unwrap_or_else(|| coincube_ui::locale::copy("Unnamed Vault"))
 }
 
 fn zero_balance_known(status: &SyncStatus, rescan_pending: bool) -> bool {
@@ -120,7 +120,7 @@ fn balance_label(
             unit.label()
         )
     } else {
-        "Check balance on Vault Overview".to_string()
+        coincube_ui::locale::copy("Check balance on Vault Overview").to_string()
     }
 }
 
@@ -573,6 +573,7 @@ pub struct VerifyAddressModal {
     warning: Option<Error>,
     chosen_hws: HashSet<Fingerprint>,
     hws: HardwareWallets,
+    chain: crate::chain::ChainId,
     address: Address,
     derivation_index: ChildNumber,
 }
@@ -588,6 +589,7 @@ impl VerifyAddressModal {
         Self {
             warning: None,
             chosen_hws: HashSet::new(),
+            chain: wallet.chain,
             hws: HardwareWallets::new(data_dir, network).with_wallet(wallet),
             address,
             derivation_index,
@@ -598,6 +600,7 @@ impl VerifyAddressModal {
 impl VerifyAddressModal {
     pub fn view(&self) -> Element<'_, view::Message> {
         view::vault::receive::verify_address_modal(
+            self.chain,
             &self.hws.list,
             &self.chosen_hws,
             &self.address,
