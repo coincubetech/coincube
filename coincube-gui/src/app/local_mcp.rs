@@ -17,6 +17,13 @@ use std::time::Duration;
 mod health_tests;
 mod pairings;
 mod presentation;
+#[cfg(all(
+    test,
+    any(unix, windows),
+    feature = "mcp-proposals",
+    feature = "mcp-transactions"
+))]
+mod stdio_acceptance_tests;
 #[cfg(feature = "mcp-transactions")]
 pub(crate) mod transactions;
 
@@ -1723,13 +1730,29 @@ mod tests {
         Arc<Wallet>,
         Arc<dyn Daemon + Send + Sync>,
     ) {
+        fixture_on_chain(crate::chain::ChainId::Bitcoin)
+    }
+
+    pub(super) fn fixture_on_chain(
+        chain: crate::chain::ChainId,
+    ) -> (
+        std::path::PathBuf,
+        Arc<Wallet>,
+        Arc<dyn Daemon + Send + Sync>,
+    ) {
         // Existing public-only test keys. No seed, xprv, production wallet or signing.
         let owner = DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4zLqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*").unwrap();
         let recovery = DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8UutBsBbgKHzaD5HkTkifK/<0;1>/*").unwrap();
+        let encode = |mut key: DescriptorPublicKey| {
+            if let DescriptorPublicKey::MultiXPub(ref mut account) = key {
+                account.xkey.network = chain.bitcoin_network().into();
+            }
+            key
+        };
         let descriptor = CoincubeDescriptor::new(
             CoincubePolicy::new_legacy(
-                PathInfo::Single(owner),
-                [(144, PathInfo::Single(recovery))]
+                PathInfo::Single(encode(owner)),
+                [(144, PathInfo::Single(encode(recovery)))]
                     .iter()
                     .cloned()
                     .collect(),
@@ -1738,10 +1761,15 @@ mod tests {
         );
         let root = std::env::temp_dir().join(format!("mcp-wallet-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let (config, handle) = coincubed::mcp_test_fixture::wallet(&root, descriptor.clone());
+        let (config, handle) =
+            coincubed::mcp_test_fixture::wallet_on_chain(&root, descriptor.clone(), chain);
         let daemon =
             Arc::new(crate::daemon::embedded::EmbeddedDaemon::from_regtest_handle(config, handle));
-        (root, Arc::new(Wallet::new(descriptor)), daemon)
+        (
+            root,
+            Arc::new(Wallet::new(descriptor).with_chain(chain)),
+            daemon,
+        )
     }
     /// Build a typed request using an opaque grant-scoped wallet identifier.
     fn input(id: &str) -> wire::WalletInput {

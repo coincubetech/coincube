@@ -1,6 +1,9 @@
 #![cfg(any(unix, windows))]
 use coincube_mcp::{ipc::*, proposal::*, *};
 use std::{sync::Arc, time::Duration};
+#[cfg(all(feature = "adapter", feature = "native-proposals"))]
+#[path = "support/stdio.rs"]
+mod stdio;
 
 fn input() -> PrepareInput {
     PrepareInput {
@@ -309,64 +312,34 @@ async fn sdk_proposals_are_state_changing_strict_and_do_not_upgrade_read_access(
 #[cfg(all(feature = "adapter", feature = "native-proposals"))]
 #[tokio::test]
 async fn actual_stdio_proposal_is_not_a_wallet_and_cannot_approve_itself() {
-    use serde_json::{Value, json};
-    use std::process::Stdio;
-    use tokio::{
-        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-        process::Command,
-    };
+    use serde_json::json;
     let server = server(Arc::new(Store::for_chain(Chain::Regtest)));
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tenshu-mcp"))
-        .env("TENSHU_MCP_SOCKET", &server.socket)
-        .env("TENSHU_MCP_CREDENTIAL", server.grant.credential())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-    async fn exchange(
-        stdin: &mut tokio::process::ChildStdin,
-        lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
-        id: u32,
-        method: &str,
-        params: Value,
-    ) -> Value {
-        let mut bytes =
-            serde_json::to_vec(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
-                .unwrap();
-        bytes.push(b'\n');
-        stdin.write_all(&bytes).await.unwrap();
-        let response = tokio::time::timeout(Duration::from_secs(3), lines.next_line())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let value: Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(value["id"], id);
-        value
-    }
-    let initialized = exchange(&mut stdin, &mut lines, 1, "initialize", json!({
-        "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"proposal-fixture","version":"1"}
-    })).await;
-    assert_eq!(initialized["result"]["serverInfo"]["name"], "tenshu-mcp");
-    stdin
-        .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
-        .await
-        .unwrap();
-    let prepared = exchange(
-        &mut stdin,
-        &mut lines,
-        2,
-        "tools/call",
-        json!({
-            "name":"tenshu_prepare_wallet_proposal", "arguments":input()
-        }),
+    let mut client = stdio::Client::start(
+        std::ffi::OsStr::new(env!("CARGO_BIN_EXE_tenshu-mcp")),
+        &[
+            (
+                "TENSHU_MCP_SOCKET".into(),
+                server.socket.to_str().unwrap().into(),
+            ),
+            (
+                "TENSHU_MCP_CREDENTIAL".into(),
+                server.grant.credential().into(),
+            ),
+        ],
     )
     .await;
-    let draft = &prepared["result"]["structuredContent"];
+    let discovered = client.request("tools/list", json!({})).await;
+    assert!(
+        discovered["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "tenshu_prepare_wallet_proposal")
+    );
+    let prepared = client
+        .call("tenshu_prepare_wallet_proposal", json!(input()))
+        .await;
+    let draft = &prepared["structuredContent"];
     assert_eq!(draft["state"], "needs_keys");
     assert_eq!(draft["descriptor_validated"], false);
     assert_eq!(
@@ -374,86 +347,38 @@ async fn actual_stdio_proposal_is_not_a_wallet_and_cannot_approve_itself() {
         json!({"threshold":3,"key_count":5})
     );
     assert!(!prepared.to_string().contains(server.grant.credential()));
-    let retried = exchange(
-        &mut stdin,
-        &mut lines,
-        3,
-        "tools/call",
-        json!({
-            "name":"tenshu_prepare_wallet_proposal", "arguments":input()
-        }),
-    )
-    .await;
-    assert_eq!(retried["result"]["structuredContent"], *draft);
-    let status = exchange(
-        &mut stdin,
-        &mut lines,
-        4,
-        "tools/call",
-        json!({
-            "name":"tenshu_get_wallet_proposal", "arguments":{"proposal_id":draft["proposal_id"]}
-        }),
-    )
-    .await;
-    assert_eq!(status["result"]["structuredContent"], *draft);
-    let denied = exchange(
-        &mut stdin,
-        &mut lines,
-        5,
-        "tools/call",
-        json!({
-            "name":"tenshu_list_wallets", "arguments":{}
-        }),
-    )
-    .await;
     assert_eq!(
-        denied["result"]["structuredContent"],
+        client
+            .call("tenshu_prepare_wallet_proposal", json!(input()))
+            .await["structuredContent"],
+        *draft
+    );
+    assert_eq!(
+        client
+            .call(
+                "tenshu_get_wallet_proposal",
+                json!({"proposal_id":draft["proposal_id"]})
+            )
+            .await["structuredContent"],
+        *draft
+    );
+    assert_eq!(
+        client.call("tenshu_list_wallets", json!({})).await["structuredContent"],
         json!({"error":{"code":"access_denied"}})
     );
-    let unavailable = exchange(
-        &mut stdin,
-        &mut lines,
-        6,
-        "tools/call",
-        json!({
-            "name":"tenshu_create_wallet", "arguments":{"proposal_id":draft["proposal_id"]}
-        }),
-    )
-    .await;
+    let unavailable = client.request("tools/call", json!({"name":"tenshu_create_wallet", "arguments":{"proposal_id":draft["proposal_id"]}})).await;
     assert_eq!(unavailable["error"]["code"], -32602);
     server.grant.revoke();
-    let revoked = exchange(
-        &mut stdin,
-        &mut lines,
-        7,
-        "tools/call",
-        json!({
-            "name":"tenshu_get_wallet_proposal", "arguments":{"proposal_id":draft["proposal_id"]}
-        }),
-    )
-    .await;
     assert_eq!(
-        revoked["result"]["structuredContent"],
+        client
+            .call(
+                "tenshu_get_wallet_proposal",
+                json!({"proposal_id":draft["proposal_id"]})
+            )
+            .await["structuredContent"],
         json!({"error":{"code":"access_denied"}})
     );
-    drop(stdin);
-    assert!(
-        tokio::time::timeout(Duration::from_secs(3), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .success()
-    );
-    assert!(lines.next_line().await.unwrap().is_none());
-    let mut stderr = Vec::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_end(&mut stderr)
-        .await
-        .unwrap();
-    assert!(stderr.is_empty());
+    client.close().await;
 }
 
 #[test]
