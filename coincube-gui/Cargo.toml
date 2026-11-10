@@ -18,11 +18,13 @@ path = "src/main.rs"
 
 [dependencies]
 tempfile = "3.27"
-# Official SDK source at ba5e510a; manifest-only reqwest adjustment avoids the
-# existing Breez iOS build-dependency pin conflict. Drop the adaptation when
+# Official SDK 4.0.0 source at 6292bbd0; manifest-only reqwest adjustment avoids
+# the existing Breez iOS build-dependency pin conflict. Drop the adaptation when
 # upstream relaxes that pin or provides compatible HTTP/TLS configuration.
 # See vendor/branta/TENSHU_PROVENANCE.md and its enforced source hashes.
-branta = { path = "../vendor/branta", version = "=3.2.1", default-features = false }
+branta = { path = "../vendor/branta", version = "=4.0.0", default-features = false }
+# Decodes BIP21 query values in the Branta request pre-filter, matching the SDK.
+percent-encoding = "2.3"
 async-trait = "0.1"
 async-hwi = "0.0.32"
 # Build-only adaptation of the mirrored SDK 0.12.2 revision 94e1e184.

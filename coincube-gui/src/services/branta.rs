@@ -1,9 +1,9 @@
 //! Send-only recipient identification. No wallet state or payment amounts cross this boundary.
-//! SDK errors and unrecognised requests are silent; only authenticated `Tampered` blocks a send.
+//! SDK errors, `unknown` and `incomplete` are silent; only a `tampered` verdict blocks a send.
 use async_trait::async_trait;
 use branta::{
-    BrantaClientOptions, BrantaError, BrantaServerBaseUrl, BrantaService, DestinationType,
-    PrivacyMode,
+    BrantaApiOptions, BrantaEnvironment, BrantaError, BrantaService, DestinationType,
+    VerifyResult, VerifyStatus,
 };
 use coincube_core::miniscript::bitcoin::{Address, Network};
 use iced::{
@@ -64,12 +64,27 @@ pub fn set_enabled(enabled: bool) {
 pub fn enabled() -> bool {
     privacy().state.borrow().enabled
 }
-pub fn endpoint(network: Network) -> BrantaServerBaseUrl {
+/// Always explicit: the SDK silently falls back to staging when no environment is set.
+pub fn environment(network: Network) -> BrantaEnvironment {
     if network == Network::Bitcoin {
-        BrantaServerBaseUrl::Production
+        BrantaEnvironment::Production
     } else {
-        BrantaServerBaseUrl::Staging
+        BrantaEnvironment::Staging
     }
+}
+/// Send-only: no API key, HMAC secret or integration-metrics token is ever configured.
+fn service_options(network: Network) -> BrantaApiOptions {
+    BrantaApiOptions::new(environment(network))
+}
+/// Same prefixes the SDK classifies as BOLT11.
+fn is_bolt11(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.starts_with("lnbc") || lower.starts_with("lntb") || lower.starts_with("lnbcrt")
+}
+fn percent_decode(value: &str) -> String {
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 /// Sensitive input deliberately has no derived Debug or serialization implementation.
@@ -99,11 +114,7 @@ impl LookupRequest {
             raw
         };
         // Restrict to the route Tenshu will actually prepare. No URI alternate destinations.
-        if dest.contains(['?', '#', '&', ':']) || !dest.to_ascii_lowercase().starts_with("ln") {
-            return None;
-        }
-        let parser = branta::QrParser::new(raw);
-        if parser.destination_type() != Some(DestinationType::Bolt11) {
+        if dest.contains(['?', '#', '&', ':']) || !is_bolt11(dest) {
             return None;
         }
         Some(Self {
@@ -122,45 +133,38 @@ impl LookupRequest {
         {
             return None;
         }
-        let parser = branta::QrParser::new(raw);
-        if !parser.is_on_chain_zk()
-            || parser.destination_type() != Some(DestinationType::BitcoinAddress)
-        {
-            return None;
-        }
+        // Same split as the SDK's parser: path address, then the query.
+        let (path, query) = raw[8..].split_once('?')?;
         let parsed: Address<coincube_core::miniscript::bitcoin::address::NetworkUnchecked> =
-            parser.destination()?.parse().ok()?;
+            path.parse().ok()?;
         if parsed.assume_checked().script_pubkey() != address.script_pubkey() {
             return None;
         }
         // Reject ambiguous parameters before the SDK's last-key-wins parser sees them.
         let mut keys = std::collections::HashSet::new();
-        for pair in raw.split_once('?')?.1.split('&') {
-            let key = pair.split('=').next()?.to_ascii_lowercase();
-            if key.contains('%') || !keys.insert(key) {
+        let (mut id, mut secret) = (None, None);
+        for pair in query.split('&') {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            let key = key.to_ascii_lowercase();
+            if key.contains('%') || !keys.insert(key.clone()) {
                 return None;
             }
+            match key.as_str() {
+                "branta_id" => id = Some(percent_decode(value)),
+                "branta_secret" => secret = Some(percent_decode(value)),
+                _ => (),
+            }
         }
-        if parser.on_chain_encryption_secret.as_ref()?.is_empty() {
+        if secret?.is_empty() {
             return None;
         }
         // The SDK sends branta_id as supplied. Ensure this is an encrypted
         // envelope, not a plaintext address placed in the ID field.
         use base64::Engine;
         let envelope = base64::engine::general_purpose::STANDARD
-            .decode(parser.on_chain_encryption_text.as_ref()?)
+            .decode(id?)
             .ok()?;
         if envelope.len() < 28 {
-            return None;
-        }
-        // Upstream only normalizes mainnet bech32 during its typed tamper check.
-        // An uppercase testnet URI cannot be compared reliably by this version.
-        let original = parser.destination()?;
-        if !original.to_ascii_lowercase().starts_with("bc1")
-            && (original.to_ascii_lowercase().starts_with("tb1")
-                || original.to_ascii_lowercase().starts_with("bcrt1"))
-            && original != original.to_ascii_lowercase()
-        {
             return None;
         }
         Some(Self {
@@ -212,7 +216,7 @@ pub trait LookupBackend: Send + Sync {
         &self,
         network: Network,
         request: &LookupRequest,
-    ) -> Result<branta::PaymentsResult, BrantaError>;
+    ) -> Result<VerifyResult, BrantaError>;
     async fn logo(&self, network: Network, url: &str) -> Option<Handle>;
 }
 struct OfficialBackend;
@@ -222,16 +226,12 @@ impl LookupBackend for OfficialBackend {
         &self,
         network: Network,
         request: &LookupRequest,
-    ) -> Result<branta::PaymentsResult, BrantaError> {
-        let service = BrantaService::new(BrantaClientOptions {
-            base_url: endpoint(network),
-            privacy: PrivacyMode::Strict,
-            default_api_key: None,
-            hmac_secret: None,
-        });
-        // Complete original request is processed locally by the SDK. Strict mode transmits
-        // only its ZK lookup value; no receive-side APIs or credentials are configured.
-        service.get_payments_by_qr_code(&request.raw, None).await
+    ) -> Result<VerifyResult, BrantaError> {
+        // The complete original request is processed locally by the SDK. It transmits only
+        // the branta_id or a derived lookup token; plain addresses make no request at all.
+        BrantaService::new(service_options(network))
+            .verify(&request.raw, None)
+            .await
     }
     async fn logo(&self, network: Network, url: &str) -> Option<Handle> {
         fetch_logo(network, url).await
@@ -356,9 +356,15 @@ impl LookupTicket {
                 .await
             {
                 Ok(Ok(r)) => r,
-                Ok(Err(BrantaError::Tampered)) => return (LookupResult::Tampered, Vec::new()),
                 _ => return (LookupResult::Silent, Vec::new()),
             };
+        match response.status {
+            VerifyStatus::Tampered => return (LookupResult::Tampered, Vec::new()),
+            VerifyStatus::Match => (),
+            VerifyStatus::Unknown | VerifyStatus::Incomplete => {
+                return (LookupResult::Silent, Vec::new())
+            }
+        }
         if !self.is_current() || !same_origin(self.network, &response.verify_url) {
             return (LookupResult::Silent, Vec::new());
         }
@@ -369,8 +375,7 @@ impl LookupTicket {
             .into_iter()
             .filter(|p| {
                 p.destinations.iter().any(|d| {
-                    d.is_zk
-                        && !d.is_encrypted
+                    !d.is_encrypted
                         && d.r#type == Some(request.kind)
                         && destination_matches(&d.value, &request.destination, request.kind)
                 })
@@ -488,7 +493,7 @@ fn same_origin(network: Network, value: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(value) else {
         return false;
     };
-    let base = reqwest::Url::parse(endpoint(network).url()).expect("fixed HTTPS endpoint");
+    let base = reqwest::Url::parse(environment(network).url()).expect("fixed HTTPS endpoint");
     url.scheme() == "https"
         && url.origin() == base.origin()
         && url.username().is_empty()
@@ -638,24 +643,30 @@ mod tests {
             &self,
             _: Network,
             request: &LookupRequest,
-        ) -> Result<branta::PaymentsResult, BrantaError> {
+        ) -> Result<VerifyResult, BrantaError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            let verdict = |status| VerifyResult {
+                status,
+                payments: Vec::new(),
+                verify_url: "https://guardrail.branta.pro/v2/verify/example".into(),
+            };
             match self.mode {
-                1 => return Err(BrantaError::Tampered),
-                2 => return Err(BrantaError::RequestFailed { status: 503 }),
+                1 => return Ok(verdict(VerifyStatus::Tampered)),
+                2 => return Ok(verdict(VerifyStatus::Incomplete)),
                 3 => tokio::time::sleep(Duration::from_secs(10)).await,
-                4 => return Ok(branta::PaymentsResult::default()),
+                4 => return Ok(verdict(VerifyStatus::Unknown)),
+                11 => return Err(BrantaError::RequestFailed { status: 503 }),
                 _ => (),
             }
             let mut dest = branta::Destination::new(&request.destination, Some(request.kind));
-            dest.is_zk = true;
             if self.mode == 5 {
                 dest.is_encrypted = true;
             }
             if self.mode == 6 {
                 dest.value = "lnbc-other".into();
             }
-            Ok(branta::PaymentsResult {
+            Ok(VerifyResult {
+                status: VerifyStatus::Match,
                 payments: vec![branta::Payment {
                     platform: Some("Merchant".into()),
                     description: Some("An order".into()),
@@ -702,14 +713,14 @@ mod tests {
     }
     #[test]
     fn endpoints_and_unsupported_inputs() {
-        assert_eq!(endpoint(Network::Bitcoin), BrantaServerBaseUrl::Production);
+        assert_eq!(environment(Network::Bitcoin), BrantaEnvironment::Production);
         for n in [
             Network::Testnet,
             Network::Testnet4,
             Network::Signet,
             Network::Regtest,
         ] {
-            assert_eq!(endpoint(n), BrantaServerBaseUrl::Staging);
+            assert_eq!(environment(n), BrantaEnvironment::Staging);
         }
         for raw in [
             "lno1offer",
@@ -847,7 +858,7 @@ mod tests {
     }
     #[tokio::test]
     async fn ordinary_errors_empty_unbound_and_timeout_are_silent_only_tampered_blocks() {
-        for mode in [2, 3, 4, 5, 6] {
+        for mode in [2, 3, 4, 5, 6, 11] {
             let (t, _) = fake_ticket(mode);
             assert!(matches!(t.lookup(request()).await, LookupResult::Silent));
         }
@@ -950,99 +961,56 @@ mod tests {
 #[cfg(test)]
 mod sdk_contract_tests {
     use super::*;
-    struct Client {
-        payment: branta::Payment,
-        lookups: Arc<Mutex<Vec<String>>>,
-    }
-    #[async_trait]
-    impl branta::BrantaClientTrait for Client {
-        async fn get_payments<'a>(
-            &'a self,
-            value: &'a str,
-            _: Option<&'a BrantaClientOptions>,
-        ) -> Result<Vec<branta::Payment>, BrantaError> {
-            self.lookups.lock().unwrap().push(value.to_string());
-            Ok(vec![self.payment.clone()])
-        }
-        async fn post_payment<'a>(
-            &'a self,
-            _: branta::Payment,
-            _: Option<&'a BrantaClientOptions>,
-        ) -> Result<Option<branta::Payment>, BrantaError> {
-            panic!("send-only")
-        }
-        async fn is_api_key_valid<'a>(
-            &'a self,
-            _: Option<&'a BrantaClientOptions>,
-        ) -> Result<bool, BrantaError> {
-            panic!("no API keys")
-        }
-    }
-    fn service(
-        value: &str,
-        secret: &str,
-        kind: DestinationType,
-    ) -> (BrantaService, Arc<Mutex<Vec<String>>>) {
-        let lookups = Arc::new(Mutex::new(Vec::new()));
-        let mut destination = branta::Destination::new(
-            branta::v2::encrypt(value, secret, true).unwrap(),
-            Some(kind),
-        );
-        destination.is_zk = true;
-        let client = Client {
-            payment: branta::Payment {
-                platform: Some("Fixture".into()),
-                destinations: vec![destination],
-                ..Default::default()
-            },
-            lookups: lookups.clone(),
-        };
-        (
-            BrantaService::with_deps(
-                BrantaClientOptions {
-                    base_url: BrantaServerBaseUrl::Staging,
-                    privacy: PrivacyMode::Strict,
-                    default_api_key: None,
-                    hmac_secret: None,
-                },
-                Box::new(client),
-                Box::new(branta::v2::AesEncryptionService),
-                Box::new(branta::GuidSecretGenerator),
-            ),
-            lookups,
-        )
-    }
+    use base64::Engine;
     const ADDRESS: &str = "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg";
-    #[tokio::test]
-    async fn official_sdk_distinguishes_authenticated_swap_from_wrong_secret() {
-        let (sdk, _) = service(ADDRESS, "key", DestinationType::BitcoinAddress);
-        let changed = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
-        let uri = format!("bitcoin:{changed}?branta_id=opaque&branta_secret=key");
-        assert!(matches!(
-            sdk.get_payments_by_qr_code(&uri, None).await,
-            Err(BrantaError::Tampered)
-        ));
-        let wrong_key = uri.replace("branta_secret=key", "branta_secret=wrong");
-        let result = sdk.get_payments_by_qr_code(&wrong_key, None).await.unwrap();
-        assert!(result.payments[0].destinations[0].is_encrypted);
+    const OTHER: &str = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh";
+    /// Base64 with `+`, `/` and `=` padding, long enough to pass the envelope check.
+    fn envelope() -> String {
+        base64::engine::general_purpose::STANDARD.encode([0xfb, 0xff].repeat(16))
+    }
+    /// The SDK's HTTP client cannot be injected from outside the crate in 4.0.0. These run the
+    /// real `verify` on paths that must finish before any request. The local environment means
+    /// a regression fails fast instead of reaching a real Branta server.
+    fn offline_sdk() -> BrantaService {
+        BrantaService::new(BrantaApiOptions::new(BrantaEnvironment::Localhost))
+    }
+    #[test]
+    fn backend_options_are_send_only_and_explicit() {
+        for network in [
+            Network::Bitcoin,
+            Network::Testnet,
+            Network::Testnet4,
+            Network::Signet,
+            Network::Regtest,
+        ] {
+            let options = service_options(network);
+            assert_eq!(options.environment, Some(environment(network)));
+            assert!(options.api_key.is_none());
+            assert!(options.hmac_secret.is_none());
+        }
     }
     #[tokio::test]
-    async fn official_strict_bolt11_never_sends_plaintext_to_http_seam() {
-        let invoice = "lnbc1fixture";
-        let key = branta::extensions::to_normalized_hash(invoice);
-        let (sdk, lookups) = service(invoice, &key, DestinationType::Bolt11);
-        let result = sdk.get_payments_by_qr_code(invoice, None).await.unwrap();
-        assert_eq!(result.payments[0].destinations[0].value, invoice);
-        assert!(!result.payments[0].destinations[0].is_encrypted);
-        assert_ne!(lookups.lock().unwrap()[0], invoice);
-        let count = lookups.lock().unwrap().len();
-        assert!(sdk
-            .get_payments_by_qr_code(ADDRESS, None)
-            .await
-            .unwrap()
-            .payments
-            .is_empty());
-        assert_eq!(lookups.lock().unwrap().len(), count);
+    async fn official_sdk_flags_conflicting_on_chain_addresses_before_lookup() {
+        let uri = format!(
+            "bitcoin:{ADDRESS}?bc={OTHER}&branta_id={}&branta_secret=key",
+            envelope()
+        );
+        let result = offline_sdk().verify(&uri, None).await.unwrap();
+        assert_eq!(result.status, VerifyStatus::Tampered);
+    }
+    #[tokio::test]
+    async fn official_sdk_never_looks_up_plain_or_unbindable_destinations() {
+        for input in [
+            ADDRESS.to_string(),
+            format!(
+                "bitcoin:{ADDRESS}?lno=lno1offer&branta_id={}&branta_secret=key",
+                envelope()
+            ),
+        ] {
+            let result = offline_sdk().verify(&input, None).await.unwrap();
+            assert_eq!(result.status, VerifyStatus::Unknown);
+            assert!(result.payments.is_empty());
+        }
     }
     #[test]
     fn request_preserves_original_bip21_and_rejects_ambiguous_or_plain_id() {
@@ -1051,14 +1019,41 @@ mod sdk_contract_tests {
             .unwrap()
             .require_network(Network::Bitcoin)
             .unwrap();
-        let encrypted = branta::v2::encrypt(ADDRESS, "key", true).unwrap();
+        let encrypted = envelope();
         let raw = format!("bitcoin:{ADDRESS}?amount=0.001&branta_id={encrypted}&branta_secret=key");
         let request = LookupRequest::bitcoin(&raw, &address).unwrap();
         assert_eq!(request.raw, raw);
         assert!(!format!("{request:?}").contains("key"));
+        let encoded = encrypted
+            .replace('+', "%2B")
+            .replace('/', "%2F")
+            .replace('=', "%3D");
+        assert!(LookupRequest::bitcoin(&raw.replace(&encrypted, &encoded), &address).is_some());
+        // 4.0.0 compares bech32 case-insensitively on every network, so uppercase QR addresses
+        // no longer need the 3.2.1-era rejection.
+        let upper = format!(
+            "bitcoin:{}?branta_id={encrypted}&branta_secret=key",
+            ADDRESS.to_uppercase()
+        );
+        assert!(LookupRequest::bitcoin(&upper, &address).is_some());
         assert!(LookupRequest::bitcoin(&format!("{raw}&branta_id=duplicate"), &address).is_none());
         assert!(LookupRequest::bitcoin(
             &format!("bitcoin:{ADDRESS}?branta_id={ADDRESS}&branta_secret=key"),
+            &address
+        )
+        .is_none());
+        assert!(LookupRequest::bitcoin(
+            &format!("bitcoin:{ADDRESS}?branta_id={encrypted}"),
+            &address
+        )
+        .is_none());
+        assert!(LookupRequest::bitcoin(
+            &format!("bitcoin:{ADDRESS}?branta_id={encrypted}&branta_secret="),
+            &address
+        )
+        .is_none());
+        assert!(LookupRequest::bitcoin(
+            &format!("bitcoin:{OTHER}?branta_id={encrypted}&branta_secret=key"),
             &address
         )
         .is_none());
@@ -1072,26 +1067,46 @@ mod sdk_contract_tests {
 #[cfg(test)]
 mod vendor_integrity {
     #[test]
-    fn vendored_sdk_matches_reviewed_source_and_manifest_adjustment() {
+    fn vendored_sdk_matches_reviewed_source_and_documented_adapters() {
         use sha2::{Digest, Sha256};
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/branta");
+        let sha = |path: &str| hex::encode(Sha256::digest(std::fs::read(root.join(path)).unwrap()));
         let hashes: serde_json::Value =
             serde_json::from_slice(&std::fs::read(root.join("UPSTREAM_SHA256.json")).unwrap())
                 .unwrap();
-        assert_eq!(hashes["commit"], "ba5e510a3189f32d11cb57e10267284b7109cb39");
-        for (path, expected) in hashes["files"].as_object().unwrap() {
-            let actual = hex::encode(Sha256::digest(std::fs::read(root.join(path)).unwrap()));
+        assert_eq!(hashes["commit"], "6292bbd0c6a720e5c9273a4f4e8b827097db6e5e");
+        let files = hashes["files"].as_object().unwrap();
+        let patched = hashes["patched_files"].as_object().unwrap();
+        for (path, expected) in files {
+            assert_eq!(sha(path), expected.as_str().unwrap(), "unreviewed SDK change: {path}");
+        }
+        for (path, adapter) in patched {
+            assert!(!files.contains_key(path), "{path} listed as both upstream and patched");
             assert_eq!(
-                actual,
-                expected.as_str().unwrap(),
-                "unreviewed SDK change: {path}"
+                sha(path),
+                adapter["patched_sha256"].as_str().unwrap(),
+                "unreviewed SDK patch: {path}"
             );
         }
-        let manifest = hex::encode(Sha256::digest(
-            std::fs::read(root.join("Cargo.toml")).unwrap(),
-        ));
+        // Every compiled source file is pinned, so a new unreviewed file cannot slip in.
+        let mut pending = vec![root.join("src")];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let relative = path.strip_prefix(&root).unwrap().to_str().unwrap();
+                let relative = relative.replace('\\', "/");
+                assert!(
+                    files.contains_key(&relative) || patched.contains_key(&relative),
+                    "unpinned SDK file: {relative}"
+                );
+            }
+        }
         assert_eq!(
-            manifest,
+            sha("Cargo.toml"),
             hashes["adapted_manifest_sha256"].as_str().unwrap()
         );
     }
