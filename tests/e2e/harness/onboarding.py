@@ -84,13 +84,26 @@ class Onboarding:
             state.pop("pending_attempt")
             self.save(state)
 
-    def reveal(self, label):
-        for _ in range(10):
+    def reveal(self, label, direction="up"):
+        from appium.webdriver.common.appiumby import AppiumBy
+        for attempt in range(11):
             if label in self.phone.labels():
                 return
-            self.phone.driver.execute_script("mobile: swipe", {"direction": "up"})
+            if attempt == 10:
+                break
+            scrolls = self.phone.driver.find_elements(AppiumBy.IOS_PREDICATE,
+                'visible == true AND enabled == true AND type == "XCUIElementTypeScrollView"')
+            if len(scrolls) != 1:
+                raise Blocked("PHONE_SCROLL", "Expected one visible setup scroll view; no unscoped gesture was sent.")
+            self.phone.driver.execute_script("mobile: swipe", {"direction": direction, "elementId": scrolls[0].id})
             time.sleep(.3)
         raise Blocked("PHONE_CONTROL", "The expected setup control is not visible after bounded scrolling.")
+
+    @staticmethod
+    def recovery_submitted(state):
+        return bool(state and state.get("recovery_submission_started")
+                    and len(state.get("words", [])) == 12
+                    and state.get("entered_Create a PIN") and state.get("entered_Confirm your PIN"))
 
     def resume_uncommitted_setup(self, state, labels):
         """Archive one lost, uncommitted generation; never retry an unlock.
@@ -130,13 +143,23 @@ class Onboarding:
         if state and state.get("verified"):
             self.phone.restore_navigation()
             return state["pin"]
+        # An interruption after scrolling can leave a known recovery page at
+        # its footer. Return only these unambiguous pages to their heading so
+        # index/field enumeration is identical to the first attempt.
+        if state and len(state.get("words", [])) == 12:
+            if ("Check what you wrote down" not in labels
+                    and labels & {"Confirm and finish setup", "Show me the words again"}):
+                self.reveal("Check what you wrote down", direction="down")
+                labels = self.phone.labels()
+            elif ("Write down these 12 words" not in labels
+                    and "I have written them down" in labels):
+                self.reveal("Write down these 12 words", direction="down")
+                labels = self.phone.labels()
         if {"Home", "Cubes", "Settings"} <= labels:
             # SetupDone can auto-route Home before a restarted process sees
             # it. Only recover a ceremony whose words and challenge-submit
             # intent were already durably saved by this account/device.
-            if (state and state.get("recovery_submission_started")
-                    and len(state.get("words", [])) == 12
-                    and state.get("entered_Create a PIN") and state.get("entered_Confirm your PIN")):
+            if self.recovery_submitted(state):
                 state["verified"] = True
                 self.save(state)
                 return state["pin"]
@@ -192,12 +215,15 @@ class Onboarding:
             state["recovery_submission_started"] = True
             self.save(state)
             self.phone.click("Confirm and finish setup")
-            labels = self.wait("Go to home")
-        if "Go to home" in labels:
+            labels = self.wait("Go to home", "Home")
+        if "Go to home" in labels or {"Home", "Cubes", "Settings"} <= labels:
+            if not self.recovery_submitted(state):
+                raise Blocked("RECOVERY_UNVERIFIED", "Setup completion requires the saved phrase, both PIN entries and recovery submission intent.")
             state["verified"] = True
             self.save(state)
-            self.phone.click("Go to home")
-            self.wait("Home")
+            if "Go to home" in labels:
+                self.phone.click("Go to home")
+                self.wait("Home")
             return state["pin"]
         raise Blocked("PHONE_SETUP_STATE", "Keychain setup did not reach its verified recovery completion state.")
 

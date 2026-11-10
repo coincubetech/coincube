@@ -12,6 +12,11 @@ vault. Pytest sequences the work and produces JUnit results. Appium/XCUITest
 controls Keychain over USB. No model, camera, iPhone Mirroring, screenshots or
 browser automation is involved in reruns.
 
+Desktop provisioning exercises Tenshu's production Home, installer, storage and
+Connect code through a native test adapter. It does not drive desktop widgets or
+assert the balance shown in Tenshu's window; those visual acceptance checks
+remain separate. The Keychain steps operate the actual iPhone interface.
+
 ## Fresh flow
 
 1. Verify both public explorers' Testnet4 genesis and production Connect

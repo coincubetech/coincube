@@ -84,7 +84,8 @@ def test_pending_pin_attempt_survives_new_controller_and_new_run():
     assert resumed.pin_attempt('sign:run-one') == '123456'
 
 
-def test_initial_setup_persists_pin_and_all_recovery_words_before_using_them(monkeypatch):
+@pytest.mark.parametrize('auto_home', [False, True])
+def test_initial_setup_persists_pin_and_all_recovery_words_before_using_them(monkeypatch, auto_home):
     monkeypatch.setattr('harness.onboarding.secrets.randbelow', lambda _: 123456)
     store = Store()
     view = ['Use a PIN']
@@ -111,7 +112,7 @@ def test_initial_setup_persists_pin_and_all_recovery_words_before_using_them(mon
             source.page_source = xml(['Word 2', 'Word 7', 'Word 11'])
         elif label == 'Confirm and finish setup':
             assert [f.text for f in fields] == [WORDS[1], WORDS[6], WORDS[10]]
-            view[0] = 'Go to home'
+            view[:] = ['Home', 'Cubes', 'Settings'] if auto_home else ['Go to home']
         elif label == 'Go to home':
             assert store.value['verified'] is True
             view[0] = 'Home'
@@ -323,6 +324,55 @@ def test_home_without_saved_recovery_submission_cannot_adopt_master():
     with pytest.raises(Blocked) as error:
         flow.setup()
     assert error.value.code == 'PHONE_MASTER_NOT_OWNED'
+
+
+def test_success_screen_without_saved_submission_cannot_verify_setup():
+    store = Store(uncommitted_state() | {'words': WORDS})
+    with pytest.raises(Blocked) as error:
+        controller(store, {'Go to home'}).setup()
+    assert error.value.code == 'RECOVERY_UNVERIFIED'
+    assert store.writes == []
+
+
+def test_reveal_targets_the_scroll_view_instead_of_the_keyboard(monkeypatch):
+    monkeypatch.setattr('harness.onboarding.time.sleep', lambda _: None)
+    views = iter([set(), set(), {'Confirm and finish setup'}])
+    gestures = []
+    flow = controller(Store())
+    flow.phone.labels = lambda: next(views)
+    flow.phone.driver = SimpleNamespace(
+        find_elements=lambda *args: [SimpleNamespace(id='recovery-scroll')],
+        execute_script=lambda command, arguments: gestures.append((command, arguments)))
+    flow.reveal('Confirm and finish setup')
+    assert gestures == [('mobile: swipe', {'direction': 'up', 'elementId': 'recovery-scroll'})] * 2
+
+
+@pytest.mark.parametrize('count', [0, 2])
+def test_reveal_never_guesses_an_absent_or_ambiguous_scroll_view(count):
+    flow = controller(Store())
+    flow.phone.driver = SimpleNamespace(
+        find_elements=lambda *args: [object()] * count,
+        execute_script=lambda *args: pytest.fail('must not send unscoped gesture'))
+    with pytest.raises(Blocked) as error:
+        flow.reveal('Confirm and finish setup')
+    assert error.value.code == 'PHONE_SCROLL'
+
+
+@pytest.mark.parametrize('footer,heading', [
+    ('Confirm and finish setup', 'Check what you wrote down'),
+    ('I have written them down', 'Write down these 12 words'),
+])
+def test_saved_recovery_page_resumes_from_its_footer_without_resetting_credentials(footer, heading):
+    store = Store(uncommitted_state() | {'words': WORDS})
+    flow = controller(store, {footer})
+    def reveal(label, direction):
+        assert (label, direction) == (heading, 'down')
+        raise Blocked('TEST_STOP', 'Stop after identifying the safe resume gesture.')
+    flow.reveal = reveal
+    with pytest.raises(Blocked) as error:
+        flow.setup()
+    assert error.value.code == 'TEST_STOP'
+    assert store.writes == []
 
 
 def test_missing_keychain_item_with_saved_locator_cannot_regenerate_pin(tmp_path):
