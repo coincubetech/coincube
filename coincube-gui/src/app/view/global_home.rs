@@ -1332,12 +1332,12 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                 .push(muted(format!(
                     "{} · {}",
                     network_name(choice.chain),
-                    match (choice.has_vault, choice.has_spark) {
+                    localized_copy(match (choice.has_vault, choice.has_spark) {
                         (true, true) => "Spark and Vault",
                         (true, false) => "Vault",
                         (false, true) => "Spark",
                         (false, false) => "No receiving wallet",
-                    }
+                    })
                 )))
                 .push_maybe(choice.refusal.map(|reason| {
                     status_line(x_circle_icon(), StatusTone::Muted, reason.to_string())
@@ -1381,7 +1381,7 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                 ));
             }
         }
-        group(Some("Receiving wallet".into()), rows)
+        group(Some(localized_copy("Receiving wallet").into()), rows)
     });
     let continue_label = selected.map_or("Continue".to_string(), |choice| {
         format!("Continue with {}", choice.name)
@@ -1546,9 +1546,15 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                 ))
                 .push(check_row(
                     if done > 1 {
-                        format!("{name}'s {wallet} checked")
+                        localized_format!(
+                            "{name}'s {wallet} checked",
+                            "{wallet} de {name} comprobado"
+                        )
                     } else {
-                        format!("Checking {name}'s {wallet}…")
+                        localized_format!(
+                            "Checking {name}'s {wallet}…",
+                            "Comprobando {wallet} de {name}…"
+                        )
                     },
                     state(1),
                 ))
@@ -1721,7 +1727,7 @@ fn amount_page<'a>(
                             .push(Container::new(input).width(Length::Fixed(260.0)))
                             .push(muted(unit_label(ctx.unit)))
                             .push(
-                                button::secondary(None, "Max")
+                                button::secondary(None, localized_copy("Max"))
                                     .padding([8, 14])
                                     .on_press_maybe(
                                         (!ctx.max && ctx.balance(source) > Amount::ZERO)
@@ -1729,7 +1735,7 @@ fn amount_page<'a>(
                                     ),
                             ),
                     )
-                    .push_maybe(ctx.max.then(|| muted(MAX_NOTE)))
+                    .push_maybe(ctx.max.then(|| muted(localized_copy(MAX_NOTE))))
                     .push_maybe(estimate.map(muted))
                     .push(muted(limits)),
             )
@@ -1934,7 +1940,7 @@ fn review_page<'a>(
             text(format!("{} · {}", direction.from_wallet(), ctx.cube_name)),
             false,
         ),
-        dl_row("Receiving wallet", text(receiving), false),
+        dl_row(localized_copy("Receiving wallet"), text(receiving), false),
         dl_row("Route", text(route_text(direction)), false),
         dl_row(
             CopyText::BitcoinNetwork.get(),
@@ -2140,9 +2146,15 @@ fn done_page<'a>(ctx: &TransferCtx<'a>, amount: &'a form::Value<String>) -> Elem
                     .push(text(localized_copy("Transfer sent")).size(18).bold()),
             )
             .push(description_list(rows))
-            .push_maybe((direction == TransferDirection::VaultToOtherSpark).then(|| {
-                muted(format!("Spark credits the deposit after it is claimed. Open {} to check its status.", ctx.other.name()))
-            }))
+            .push_maybe(
+                (direction == TransferDirection::VaultToOtherSpark).then(|| {
+                    muted(localized_format!(
+                    "Spark credits the deposit after it is claimed. Open {} to check its status.",
+                    "Spark acredita el depósito después de reclamarlo. Abre {} para ver su estado.",
+                    ctx.other.name()
+                ))
+                }),
+            )
             .push(
                 Row::new()
                     .spacing(10)

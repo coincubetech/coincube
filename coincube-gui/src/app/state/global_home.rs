@@ -1668,8 +1668,10 @@ impl State for GlobalHome {
                                                 || prep.amount_sat != amount_sat)
                                         {
                                             return Err(TransferError::DestinationRejected {
-                                                detail: "Spark quoted a different rail or amount"
-                                                    .into(),
+                                                detail: coincube_ui::locale::copy(
+                                                    "Spark quoted a different rail or amount",
+                                                )
+                                                .into(),
                                             });
                                         }
                                         Ok::<_, TransferError>((
@@ -2725,7 +2727,7 @@ impl State for GlobalHome {
                                                         && paid_to(&psbt, &script).to_sat()
                                                             != amount_sat
                                                     {
-                                                        return Err("The Vault balance changed. Go back and choose Max again.".to_string());
+                                                        return Err(coincube_ui::locale::copy("The Vault balance changed. Go back and choose Max again.").to_string());
                                                     }
 
                                                     daemon_clone
