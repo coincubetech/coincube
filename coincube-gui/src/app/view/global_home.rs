@@ -616,7 +616,7 @@ impl Default for UnlockPhase {
 pub struct OtherCubeView<'a> {
     pub choices: &'a [CubeChoice],
     pub selected: Option<&'a str>,
-    pub pin: &'a str,
+    pub pin: Option<&'a crate::pin_input::PinInput>,
     pub phase: UnlockPhase,
     pub error: Option<&'a str>,
     pub spark_address: Option<&'a str>,
@@ -1449,6 +1449,7 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
     let name = ctx.other.name();
     let wallet = ctx.direction.to_wallet();
     let passkey = ctx.other.choice().is_some_and(|choice| choice.passkey);
+    let pin_complete = ctx.other.pin.is_some_and(|pin| pin.is_complete());
     let error = ctx.other.error.map(|error| {
         status_line(
             exclamation_circle_icon(),
@@ -1470,8 +1471,7 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                     None,
                     "Unlock",
                     busy,
-                    (!ctx.other.pin.is_empty() && !busy)
-                        .then_some(Message::Home(HomeMessage::UnlockOtherCube)),
+                    (pin_complete && !busy).then_some(Message::Home(HomeMessage::UnlockOtherCube)),
                 )
                 .width(Length::Fixed(120.0))
                 .into()
@@ -1482,22 +1482,10 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                     Column::new()
                         .spacing(6)
                         .push(text(format!("{name} PIN")).bold())
-                        .push(
-                            Container::new(
-                                iced::widget::text_input("", ctx.other.pin)
-                                    .secure(true)
-                                    .size(18)
-                                    .padding(10)
-                                    .on_input_maybe((!busy).then_some(|pin| {
-                                        Message::Home(HomeMessage::OtherCubePinEdited(pin))
-                                    }))
-                                    .on_submit_maybe(
-                                        (!busy && !ctx.other.pin.is_empty())
-                                            .then_some(Message::Home(HomeMessage::UnlockOtherCube)),
-                                    ),
-                            )
-                            .width(Length::Fixed(240.0)),
-                        )
+                        .push_maybe(ctx.other.pin.map(|pin| {
+                            pin.face_view()
+                                .map(|message| Message::Home(HomeMessage::OtherCubePin(message)))
+                        }))
                         .push(muted(format!("Not {}'s PIN.", ctx.cube_name)))
                 }))
                 .push_maybe(error)

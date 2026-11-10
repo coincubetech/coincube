@@ -105,7 +105,6 @@ use crate::app::view::global_home::{
     GlobalViewConfig, HomeView, OtherCubeView, PendingTransfer, PickerSide, TransferDirection,
     TransferError, TransferPage, TransferStage, UnlockPhase, WalletKind, UNLOCK_CHECKS,
 };
-use zeroize::Zeroizing;
 
 /// Which per-wallet balances the Total Balance aggregate is still waiting on.
 #[derive(Clone, Copy, Debug)]
@@ -437,7 +436,7 @@ pub struct GlobalHome {
     /// The chosen Cube, unlocked in place for this transfer only. Dropping
     /// it revokes the unlock and stops any daemon it started.
     other_scope: Option<ScopedDestination>,
-    other_pin: Zeroizing<String>,
+    other_pin: crate::pin_input::PinInput,
     other_phase: UnlockPhase,
     other_error: Option<String>,
     /// The other Vault's receive address, re-derived from its descriptor.
@@ -635,7 +634,7 @@ impl GlobalHome {
             other_cubes: Vec::new(),
             other_cube_selected: None,
             other_scope: None,
-            other_pin: Zeroizing::new(String::new()),
+            other_pin: crate::pin_input::PinInput::new(),
             other_phase: UnlockPhase::default(),
             other_error: None,
             other_address: None,
@@ -727,7 +726,7 @@ impl GlobalHome {
             other_cubes: Vec::new(),
             other_cube_selected: None,
             other_scope: None,
-            other_pin: Zeroizing::new(String::new()),
+            other_pin: crate::pin_input::PinInput::new(),
             other_phase: UnlockPhase::default(),
             other_error: None,
             other_address: None,
@@ -935,7 +934,7 @@ impl GlobalHome {
             other_cube: OtherCubeView {
                 choices: &self.other_cubes,
                 selected: self.other_cube_selected.as_deref(),
-                pin: &self.other_pin,
+                pin: Some(&self.other_pin),
                 phase: self.other_phase,
                 error: self.other_error.as_deref(),
                 spark_address: match self.other_address.as_ref() {
@@ -2266,31 +2265,41 @@ impl State for GlobalHome {
                             Ok(scope) => {
                                 self.other_scope = Some(scope);
                                 self.transfer_page = TransferPage::Unlock;
+                                return iced::widget::operation::focus(
+                                    crate::pin_input::first_digit_id(),
+                                );
                             }
                             Err(refusal) => self.other_error = Some(refusal.reason()),
                         }
                         Task::none()
                     }
-                    HomeMessage::OtherCubePinEdited(pin) => {
-                        if self.transfer_page == TransferPage::Unlock
-                            && self.other_phase == (UnlockPhase::Credential { busy: false })
+                    HomeMessage::OtherCubePin(message) => {
+                        if self.transfer_page != TransferPage::Unlock
+                            || self.other_phase != (UnlockPhase::Credential { busy: false })
                         {
-                            self.other_pin = Zeroizing::new(pin);
+                            return Task::none();
                         }
-                        Task::none()
+                        if matches!(message, crate::pin_input::Message::Submit) {
+                            return Task::done(Message::View(view::Message::Home(
+                                HomeMessage::UnlockOtherCube,
+                            )));
+                        }
+                        self.other_pin.update(message).map(|message| {
+                            Message::View(view::Message::Home(HomeMessage::OtherCubePin(message)))
+                        })
                     }
                     HomeMessage::UnlockOtherCube => {
                         if self.transfer_page != TransferPage::Unlock
                             || self.other_phase != (UnlockPhase::Credential { busy: false })
-                            || self.other_pin.is_empty()
+                            || !self.other_pin.is_complete()
                         {
                             return Task::none();
                         }
                         let Some(source) = self.transfer_source(cache) else {
                             return Task::none();
                         };
-                        let pin =
-                            std::mem::replace(&mut self.other_pin, Zeroizing::new(String::new()));
+                        let pin = self.other_pin.value();
+                        self.other_pin.clear();
                         let Some(scope) = self.other_scope.as_mut() else {
                             return Task::none();
                         };
@@ -4011,7 +4020,7 @@ impl GlobalHome {
         if let Some(mut scope) = self.other_scope.take() {
             scope.revoke();
         }
-        self.other_pin = Zeroizing::new(String::new());
+        self.other_pin.clear();
         self.other_phase = UnlockPhase::default();
         self.other_error = None;
         self.other_address = None;
@@ -6481,6 +6490,38 @@ mod tests {
             assert!(home.other_locked_again);
             assert_eq!(home.pending_vault_receive_sats, 0);
             assert!(home.pending_spark_incoming.is_none());
+        }
+
+        #[test]
+        fn other_cube_pin_takes_four_digits_and_clears_on_leaving_unlock() {
+            use crate::pin_input::Message as Pin;
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.current_view.step = 1;
+            home.transfer_direction = Some(TransferDirection::VaultToOtherCube);
+            home.transfer_page = TransferPage::Unlock;
+
+            for (i, digit) in ["1", "2", "3"].iter().enumerate() {
+                send(
+                    &mut home,
+                    &cache,
+                    HomeMessage::OtherCubePin(Pin::DigitChanged(i, digit.to_string())),
+                );
+            }
+            assert!(!home.other_pin.is_complete());
+            // Enter on three digits checks nothing.
+            send(&mut home, &cache, HomeMessage::OtherCubePin(Pin::Submit));
+            assert_eq!(home.other_phase, UnlockPhase::Credential { busy: false });
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::OtherCubePin(Pin::DigitChanged(3, "4".into())),
+            );
+            assert_eq!(home.other_pin.value().as_str(), "1234");
+
+            send(&mut home, &cache, HomeMessage::PreviousStep);
+            assert_eq!(home.transfer_page, TransferPage::OtherCube);
+            assert!(home.other_pin.value().is_empty());
         }
 
         #[test]

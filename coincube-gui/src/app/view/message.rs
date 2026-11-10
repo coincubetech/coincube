@@ -2423,7 +2423,8 @@ pub enum HomeMessage {
     SelectOtherCubeWallet(WalletKind),
     /// Other Cube page → Unlock.
     ContinueWithCube,
-    OtherCubePinEdited(String),
+    /// The chosen Cube's 4-digit PIN fields.
+    OtherCubePin(crate::pin_input::Message),
     /// Check the entered PIN against the chosen Cube.
     UnlockOtherCube,
     /// Start the chosen Cube's passkey ceremony (macOS).
