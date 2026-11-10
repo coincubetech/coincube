@@ -7,10 +7,17 @@ class CheckedThreadingHTTPServer(ThreadingHTTPServer):
     # server_close joins handlers before teardown checks their errors. A daemon
     # handler could otherwise append its failure after the test already passed.
     daemon_threads = False
+    request_timeout = 5
 
     def __init__(self, address, handler, errors):
         self.errors = errors
         super().__init__(address, handler)
+
+    def get_request(self):
+        request, address = super().get_request()
+        # Joining handlers must not wait forever for a client that stops sending.
+        request.settimeout(self.request_timeout)
+        return request, address
 
     def handle_error(self, request, client_address):
         # socketserver calls this while the handler exception is active.
