@@ -1727,7 +1727,7 @@ fn amount_page<'a>(
                             .push(Container::new(input).width(Length::Fixed(260.0)))
                             .push(muted(unit_label(ctx.unit)))
                             .push(
-                                button::secondary(None, localized_copy("Max"))
+                                button::secondary_compact(None, localized_copy("Max"))
                                     .padding([8, 14])
                                     .on_press_maybe(
                                         (!ctx.max && ctx.balance(source) > Amount::ZERO)
