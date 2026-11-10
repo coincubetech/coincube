@@ -523,6 +523,21 @@ mod run {
             .map_err(|_| "invalid_border_backup")
     }
 
+    // This endpoint uses check_success rather than the typed recovery-kit
+    // NotFound variant. Only an actual 404 permits first-time vault creation.
+    fn vault_is_absent(error: &CoincubeError) -> bool {
+        matches!(
+            error,
+            CoincubeError::NotFound
+                | CoincubeError::Unsuccessful(
+                    coincube_gui::services::http::NotSuccessResponseInfo {
+                        status_code: 404,
+                        ..
+                    }
+                )
+        )
+    }
+
     fn rest_error(error: CoincubeError) -> &'static str {
         if error.is_auth_error() {
             "connect_auth_required"
@@ -898,7 +913,7 @@ mod run {
         .map_err(|_| "cube_settings_write_failed")?;
         let remote = match client.get_connect_vault(cube_id).await {
             Ok(vault) => vault,
-            Err(error) if error.is_not_found() => {
+            Err(error) if vault_is_absent(&error) => {
                 installer::integration::create_connect_vault(
                     Some(client.clone()),
                     Some(state.cube_uuid.clone()),
@@ -1222,6 +1237,23 @@ mod run {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn vault_creation_requires_a_real_not_found_response() {
+            use coincube_gui::services::http::NotSuccessResponseInfo;
+            assert!(vault_is_absent(&CoincubeError::NotFound));
+            for status_code in [400, 401, 403, 404, 409, 429, 500, 502, 503] {
+                let error = CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+                    status_code,
+                    text: "vault not found".into(),
+                });
+                assert_eq!(vault_is_absent(&error), status_code == 404);
+            }
+            assert!(!vault_is_absent(&CoincubeError::Api("404".into())));
+            assert!(!vault_is_absent(&CoincubeError::RateLimited {
+                retry_after: Duration::from_secs(60),
+            }));
+        }
+
         struct Temp(PathBuf);
         impl Temp {
             fn new() -> Self {

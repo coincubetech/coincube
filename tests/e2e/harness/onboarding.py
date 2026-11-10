@@ -58,12 +58,21 @@ class Onboarding:
                     'descendant::XCUIElementTypeTextField | descendant::XCUIElementTypeSecureTextField')]
 
     def fill_one(self, value):
-        fields = self.fields()
+        try:
+            fields = self.fields()
+        except Exception:
+            raise Blocked("PHONE_INPUT_QUERY", "Keychain input discovery failed; no input was sent.") from None
         if len(fields) != 1:
             raise Blocked("PHONE_FIELD", "Expected exactly one visible Keychain input field.")
-        fields[0].click()
-        fields[0].clear()
-        fields[0].send_keys(value)
+        for code, operation in (("FOCUS", fields[0].click), ("CLEAR", fields[0].clear)):
+            try:
+                operation()
+            except Exception:
+                raise Blocked("PHONE_INPUT_" + code, "Keychain input preparation failed; no value was sent.") from None
+        try:
+            fields[0].send_keys(value)
+        except Exception:
+            raise Blocked("PHONE_INPUT_DISPATCH", "Keychain input delivery is uncertain; no automatic replay is permitted.") from None
 
     def save(self, state):
         self.store.save(state)

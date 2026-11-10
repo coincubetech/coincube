@@ -244,6 +244,30 @@ def test_unprotected_wrapper_never_receives_signer_name():
     assert leaf.actions == ['click', 'clear', ('input', 'QA synthetic signer')]
 
 
+@pytest.mark.parametrize('operation,code,preceding', [
+    ('find_elements', 'PHONE_INPUT_QUERY', []),
+    ('click', 'PHONE_INPUT_FOCUS', []),
+    ('clear', 'PHONE_INPUT_CLEAR', ['click']),
+    ('send_keys', 'PHONE_INPUT_DISPATCH', ['click', 'clear']),
+])
+def test_input_failures_report_only_operation_without_replay(operation, code, preceding):
+    leaf = InputField('XCUIElementTypeSecureTextField')
+    flow = field_controller([leaf])
+    calls = []
+
+    def fail(*args):
+        calls.append(operation)
+        raise RuntimeError('synthetic-private-input-and-device-data')
+
+    setattr(flow.phone.driver if operation == 'find_elements' else leaf, operation, fail)
+    with pytest.raises(Blocked) as error:
+        flow.fill_one('synthetic-private-input')
+    assert error.value.code == code
+    assert 'synthetic-private' not in str(error.value)
+    assert leaf.actions == preceding
+    assert calls == [operation]
+
+
 def test_hidden_or_disabled_descendant_does_not_make_wrapper_editable():
     # Only the wrapper passed the top-level visible+enabled filter; its hidden
     # input still identifies it as a container and must exclude it.
