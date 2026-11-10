@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Bootstrap the pinned Python environment once, then execute the pytest suite."""
+import hashlib
+import os
+from pathlib import Path
+import subprocess
+import sys
+import shutil
+
+root = Path(__file__).resolve().parent
+venv = root / ".venv"
+python = venv / "bin/python"
+requirements = root / "requirements.lock"
+stamp = venv / "requirements.sha256"
+digest = hashlib.sha256(requirements.read_bytes()).hexdigest()
+
+if sys.version_info < (3, 11):
+    for candidate in ("python3.13", "python3.12", "python3.11"):
+        executable = shutil.which(candidate)
+        if executable:
+            os.execv(executable, [executable, str(Path(__file__).resolve()), *sys.argv[1:]])
+    raise SystemExit("Python 3.11 or newer is required.")
+if not python.exists():
+    subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+if not stamp.exists() or stamp.read_text() != digest:
+    subprocess.run([str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)], check=True)
+    stamp.write_text(digest)
+
+args = sys.argv[1:]
+if args == ["--self-test"]:
+    target = root / "selftests"
+    args = []
+else:
+    target = root / "test_acceptance.py"
+    if "--qa-config" not in args or "--qa-run-dir" not in args:
+        raise SystemExit("Usage: tests/e2e/run --qa-config /private/config.json --qa-run-dir /private/run [--qa-preflight] [--qa-confirm]\n       tests/e2e/run --self-test")
+    directory = Path(args[args.index("--qa-run-dir") + 1]).absolute()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if directory.is_symlink() or directory.stat().st_mode & 0o077:
+        raise SystemExit("The run directory must be private (mode 700) and not a symlink.")
+    args += ["--junitxml=" + str(directory / "results.xml")]
+os.umask(0o077)
+os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+os.execv(str(python), [str(python), "-m", "pytest", str(target), "-q", "-r", "s", "--tb=short",
+                      "-o", "junit_family=xunit1", "-o", "log_cli=false", "-o", "log_level=CRITICAL", *args])
