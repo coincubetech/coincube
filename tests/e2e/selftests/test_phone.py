@@ -493,3 +493,23 @@ def test_upgrade_approval_dispatch_consumes_receipt_before_uncertain_click(tmp_p
         assert calls.count('Approve') == 1
     finally:
         journal.close()
+
+
+@pytest.mark.parametrize('visible', ['true', 'false'])
+def test_account_signer_limit_is_a_prompt_prerequisite_block_without_mutation(visible):
+    calls = []
+    driver = SimpleNamespace(
+        execute_script=lambda command: {'bundleId': 'io.coincube.keychainApp'},
+        page_source=f'<root><node visible="{visible}" label="Key limit reached"/></root>',
+        find_elements=lambda *a: pytest.fail('must not select controls'),
+        activate_app=lambda *a: pytest.fail('must not restart'),
+    )
+    phone = Phone(driver, 38)
+    phone.click = calls.append
+    if visible == 'true':
+        with pytest.raises(Blocked) as error:
+            phone.restore_navigation()
+        assert error.value.code == 'SIGNER_LIMIT'
+    else:
+        assert phone.labels() == set()
+    assert calls == []

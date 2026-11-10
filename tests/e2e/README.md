@@ -90,6 +90,9 @@ controls from XCTest, and cannot complete this flow. The example selects build
 38, which also routes PIN-backed signer entropy through real PIN verification and
 exposes non-spoken signing-session/empty-entry accessibility identifiers. A build
 number alone is not source or acceptance evidence.
+The QA account must have capacity for a new signer key. The exact **Key limit
+reached** screen produces `SIGNER_LIMIT` immediately; the runner never changes a
+plan, deletes existing keys, or reuses an existing signer as a fresh fixture.
 `ios.xctestrun` can identify an already-signed WebDriverAgent
 runner so the suite starts it automatically when needed.
 

@@ -198,8 +198,11 @@ class Phone:
         if self.driver.execute_script("mobile: activeAppInfo").get("bundleId") != BUNDLE:
             raise Blocked("PHONE_AUTH", "Keychain yielded to an OS authentication prompt; unattended signing cannot proceed.")
         root = ElementTree.fromstring(self.driver.page_source)
-        return {value.strip() for n in root.iter() if n.get("visible") == "true"
-                for key in ("label", "name", "value") for value in n.get(key, "").splitlines()}
+        labels = {value.strip() for n in root.iter() if n.get("visible") == "true"
+                  for key in ("label", "name", "value") for value in n.get(key, "").splitlines()}
+        if "Key limit reached" in labels:
+            raise Blocked("SIGNER_LIMIT", "The QA account has reached Keychain's signer-key limit; creation requires available account capacity.")
+        return labels
 
     def matching_controls(self, label):
         from appium.webdriver.common.appiumby import AppiumBy
