@@ -151,6 +151,35 @@ fn mempool_entry_from_graph(
     Ok(entry)
 }
 
+/// Continue the ancestor walk only through unconfirmed transactions.
+fn unconfirmed_ancestor_txids(
+    txids: &HashSet<bitcoin::Txid>,
+    graph: &TxGraph<ConfirmationHeightAnchor>,
+    local_chain: &LocalChain,
+) -> HashSet<bitcoin::Txid> {
+    txids
+        .iter()
+        .filter_map(|anc_txid| {
+            if let Some(ChainPosition::Unconfirmed(_)) =
+                graph.get_chain_position(local_chain, local_chain.tip().block_id(), *anc_txid)
+            {
+                let anc_tx = graph.get_tx(*anc_txid).expect("we must have it");
+                Some(
+                    anc_tx
+                        .input
+                        .clone()
+                        .iter()
+                        .map(|txin| txin.previous_output.txid)
+                        .collect::<HashSet<_>>(),
+                )
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect()
+}
+
 /// An explicitly pinned tip is an error, rather than a request to restart the walk.
 fn ensure_expected_tip(
     expected_tip: Option<&CheckPoint>,
@@ -415,29 +444,7 @@ impl Client {
             let _ = graph.apply_update(sync_result.graph_update);
 
             // Add ancestors of any unconfirmed txs.
-            anc_txids = anc_txids
-                .iter()
-                .filter_map(|anc_txid| {
-                    if let Some(ChainPosition::Unconfirmed(_)) = graph.get_chain_position(
-                        &local_chain,
-                        local_chain.tip().block_id(),
-                        *anc_txid,
-                    ) {
-                        let anc_tx = graph.get_tx(*anc_txid).expect("we must have it");
-                        Some(
-                            anc_tx
-                                .input
-                                .clone()
-                                .iter()
-                                .map(|txin| txin.previous_output.txid)
-                                .collect::<HashSet<_>>(),
-                        )
-                    } else {
-                        None
-                    }
-                })
-                .flatten()
-                .collect();
+            anc_txids = unconfirmed_ancestor_txids(&anc_txids, &graph, &local_chain);
         }
         let entries = txs
             .into_iter()
