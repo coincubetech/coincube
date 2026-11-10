@@ -502,7 +502,7 @@ def test_attach_uses_phone_flow_and_persists_intent_before_cube_selection():
         actions.append('cube-selected')
     def find(title, **kw):
         assert not journal.data['artifacts'].get('phone_key_attachment_started')
-        assert title == 'QA synthetic cube' and kw == {'container': True}
+        assert title == 'QA synthetic cube' and kw == {}
         return SimpleNamespace(click=select)
     flow.phone.card_control = find
     flow.attach_key('QA synthetic key', 'QA synthetic cube', journal)

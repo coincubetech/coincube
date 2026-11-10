@@ -283,6 +283,6 @@ class Onboarding:
         self.wait("Pick a cube on the testnet4 network.")
         # The selection dispatches both binding and public-key resealing.
         # An uncertain response is reconciled remotely, never tapped again.
-        control = self.phone.card_control(cube_name, container=True)
+        control = self.phone.card_control(cube_name)
         journal.artifact("phone_key_attachment_started", True)
         control.click()
