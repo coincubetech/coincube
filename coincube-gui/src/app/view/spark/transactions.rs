@@ -210,11 +210,7 @@ fn transaction_row<'a>(
 
     // Outgoing amount includes fees so the headline figure matches what
     // actually left the wallet. Incoming shows the net credit.
-    let display_amount = if tx.is_incoming {
-        tx.amount
-    } else {
-        tx.amount + tx.fees_sat
-    };
+    let display_amount = tx.display_amount();
 
     let mut item = TransactionListItem::new(direction, &display_amount, bitcoin_unit)
         .with_label(tx.description.clone())
@@ -292,11 +288,7 @@ pub fn transaction_detail_view<'a>(
     // because the payment is denominated in token base units, not
     // sats. For those we keep the precomputed `tx.fiat_amount` (the
     // dollar value of the token leg) and skip the converter entirely.
-    let total_amount = if is_incoming {
-        tx.amount
-    } else {
-        tx.amount + tx.fees_sat
-    };
+    let total_amount = tx.display_amount();
     let total_fiat = if tx.token_display.is_some() {
         tx.fiat_amount
     } else {

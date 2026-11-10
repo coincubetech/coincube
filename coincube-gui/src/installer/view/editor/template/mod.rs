@@ -19,6 +19,34 @@ use crate::installer::{
     view::{layout, layout_with_actions},
 };
 
+/// Shared controls for configured policies; custom policies omit Customize.
+fn template_actions(valid: bool, allow_customization: bool) -> Element<'static, Message> {
+    use crate::installer::message::DefineDescriptor;
+    use coincube_ui::component::button;
+
+    let mut actions = Row::new().spacing(12).align_y(Alignment::Center).push(
+        button::secondary(None, localized_copy("Clear All"))
+            .width(Length::Shrink)
+            .on_press(Message::DefineDescriptor(DefineDescriptor::Reset)),
+    );
+    if allow_customization {
+        actions = actions.push(
+            button::secondary(None, localized_copy("Customize"))
+                .width(Length::Shrink)
+                .on_press(Message::DefineDescriptor(DefineDescriptor::ChangeTemplate(
+                    DescriptorTemplate::Custom,
+                ))),
+        );
+    }
+    actions
+        .push(
+            button::primary(None, localized_copy("Continue"))
+                .width(Length::Shrink)
+                .on_press_maybe(valid.then_some(Message::Next)),
+        )
+        .into()
+}
+
 /// Selecting a policy advances to its introduction in the existing installer
 /// step. Keep the card action on that real selection message.
 fn template_card(
@@ -176,6 +204,51 @@ mod tests {
         },
         keyboard, mouse, Event, Rectangle, Size,
     };
+
+    #[test]
+    fn shared_actions_preserve_messages_and_continue_validity() {
+        use crate::app::view::shared::landing::capture;
+        use crate::installer::message::DefineDescriptor;
+        for allow_customization in [false, true] {
+            for valid in [false, true] {
+                let click = |label| {
+                    capture::click_text(
+                        template_actions(valid, allow_customization),
+                        label,
+                        0,
+                        (1000, 700),
+                    )
+                };
+                assert!(matches!(
+                    click("Clear All").as_slice(),
+                    [Message::DefineDescriptor(DefineDescriptor::Reset)]
+                ));
+                let next = click("Continue");
+                if valid {
+                    assert!(matches!(next.as_slice(), [Message::Next]));
+                } else {
+                    assert!(next.is_empty());
+                }
+                if allow_customization {
+                    assert!(matches!(
+                        click("Customize").as_slice(),
+                        [Message::DefineDescriptor(DefineDescriptor::ChangeTemplate(
+                            DescriptorTemplate::Custom
+                        ))]
+                    ));
+                } else {
+                    let probe = inspect(
+                        "custom-actions",
+                        template_actions(valid, false),
+                        (1000, 700),
+                        "dark",
+                        theme::Theme::dark(),
+                    );
+                    assert!(!probe.labels.iter().any(|(label, _)| label == "Customize"));
+                }
+            }
+        }
+    }
 
     #[derive(Default)]
     struct Probe {

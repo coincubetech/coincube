@@ -106,6 +106,18 @@ pub struct SparkRecentTransaction {
     pub token_display: Option<String>,
 }
 
+impl SparkRecentTransaction {
+    /// BTC headline amount: incoming net credit, or outgoing debit including fees.
+    /// Token rows render `token_display` instead and are excluded from BTC totals.
+    pub fn display_amount(&self) -> Amount {
+        if self.is_incoming {
+            self.amount
+        } else {
+            self.amount + self.fees_sat
+        }
+    }
+}
+
 /// View wrapper for the Spark Overview panel.
 pub struct SparkOverviewView<'a> {
     pub status: SparkStatus,
@@ -654,7 +666,7 @@ fn pending_btc_sats(recent: &[SparkRecentTransaction]) -> (u64, u64) {
                 && t.token_display.is_none()
                 && matches!(t.status, DomainPaymentStatus::Pending)
         })
-        .map(|t| row_display_amount(t).to_sat())
+        .map(|t| t.display_amount().to_sat())
         .sum();
     let pending_incoming_sats = recent
         .iter()
@@ -663,18 +675,10 @@ fn pending_btc_sats(recent: &[SparkRecentTransaction]) -> (u64, u64) {
                 && t.token_display.is_none()
                 && matches!(t.status, DomainPaymentStatus::Pending)
         })
-        .map(|t| row_display_amount(t).to_sat())
+        .map(|t| t.display_amount().to_sat())
         .sum();
 
     (pending_outgoing_sats, pending_incoming_sats)
-}
-
-fn row_display_amount(tx: &SparkRecentTransaction) -> Amount {
-    if tx.is_incoming {
-        tx.amount
-    } else {
-        tx.amount + tx.fees_sat
-    }
 }
 
 #[cfg(test)]
@@ -1293,28 +1297,23 @@ mod tests {
     }
 
     #[test]
-    fn row_display_amount_adds_fees_only_for_outgoing_rows() {
+    fn display_amount_adds_fees_only_for_outgoing_rows() {
         assert_eq!(
-            row_display_amount(&tx(
-                "incoming",
-                true,
-                DomainPaymentStatus::Pending,
-                100,
-                9,
-                None
-            ))
-            .to_sat(),
+            tx("incoming", true, DomainPaymentStatus::Pending, 100, 9, None)
+                .display_amount()
+                .to_sat(),
             100
         );
         assert_eq!(
-            row_display_amount(&tx(
+            tx(
                 "outgoing",
                 false,
                 DomainPaymentStatus::Pending,
                 100,
                 9,
                 None
-            ))
+            )
+            .display_amount()
             .to_sat(),
             109
         );

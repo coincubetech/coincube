@@ -253,19 +253,6 @@ pub fn custom_template<'a>(
             .spacing(20),
         true,
         Some(Message::Previous),
-        Row::new()
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push(
-                button::secondary(None, localized_copy("Clear All"))
-                    .width(Length::Shrink)
-                    .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
-            )
-            .push(
-                button::primary(None, localized_copy("Continue"))
-                    .width(Length::Shrink)
-                    .on_press_maybe(if valid { Some(Message::Next) } else { None }),
-            )
-            .into(),
+        super::template_actions(valid, false),
     )
 }

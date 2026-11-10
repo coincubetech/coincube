@@ -5,7 +5,7 @@ use iced::{Alignment, Length};
 use coincube_ui::{
     color,
     component::{
-        button, collapse,
+        collapse,
         text::{text, Text},
     },
     icon, theme,
@@ -320,29 +320,7 @@ pub fn multisig_security_template<'a>(
             .spacing(20),
         true,
         Some(Message::Previous),
-        Row::new()
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push(
-                button::secondary(None, localized_copy("Clear All"))
-                    .width(Length::Shrink)
-                    .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
-            )
-            .push(
-                button::secondary(None, localized_copy("Customize"))
-                    .width(Length::Shrink)
-                    .on_press(Message::DefineDescriptor(
-                        message::DefineDescriptor::ChangeTemplate(
-                            context::DescriptorTemplate::Custom,
-                        ),
-                    )),
-            )
-            .push(
-                button::primary(None, localized_copy("Continue"))
-                    .width(Length::Shrink)
-                    .on_press_maybe(if valid { Some(Message::Next) } else { None }),
-            )
-            .into(),
+        super::template_actions(valid, true),
     )
 }
 
@@ -547,29 +525,7 @@ pub fn multisig_inheritance_recovery_template<'a>(
             .spacing(20),
         true,
         Some(Message::Previous),
-        Row::new()
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push(
-                button::secondary(None, localized_copy("Clear All"))
-                    .width(Length::Shrink)
-                    .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
-            )
-            .push(
-                button::secondary(None, localized_copy("Customize"))
-                    .width(Length::Shrink)
-                    .on_press(Message::DefineDescriptor(
-                        message::DefineDescriptor::ChangeTemplate(
-                            context::DescriptorTemplate::Custom,
-                        ),
-                    )),
-            )
-            .push(
-                button::primary(None, localized_copy("Continue"))
-                    .width(Length::Shrink)
-                    .on_press_maybe(if valid { Some(Message::Next) } else { None }),
-            )
-            .into(),
+        super::template_actions(valid, true),
     )
 }
 
@@ -763,28 +719,6 @@ pub fn expanding_multisig_inheritance_template<'a>(
             .spacing(20),
         true,
         Some(Message::Previous),
-        Row::new()
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push(
-                button::secondary(None, localized_copy("Clear All"))
-                    .width(Length::Shrink)
-                    .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
-            )
-            .push(
-                button::secondary(None, localized_copy("Customize"))
-                    .width(Length::Shrink)
-                    .on_press(Message::DefineDescriptor(
-                        message::DefineDescriptor::ChangeTemplate(
-                            context::DescriptorTemplate::Custom,
-                        ),
-                    )),
-            )
-            .push(
-                button::primary(None, localized_copy("Continue"))
-                    .width(Length::Shrink)
-                    .on_press_maybe(if valid { Some(Message::Next) } else { None }),
-            )
-            .into(),
+        super::template_actions(valid, true),
     )
 }
