@@ -18,6 +18,9 @@ use crate::options::BrantaApiOptions;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Tenshu patch: upper bound on a payment-lookup response body (see TENSHU_PROVENANCE.md).
+pub(crate) const MAX_LOOKUP_RESPONSE_BYTES: usize = 256 * 1024;
+
 /// Matches .NET's `Uri.EscapeDataString`: percent-encode everything except unreserved characters
 /// (`ALPHA / DIGIT / "-" / "." / "_" / "~"`). Crucially this encodes `+`, `/`, and `=`, which
 /// routinely appear in base64 ciphertext lookup values -- `application/x-www-form-urlencoded`
@@ -65,7 +68,12 @@ pub struct BrantaClient {
 impl BrantaClient {
     pub fn new(default_options: BrantaApiOptions) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // Tenshu patch: never follow redirects, so a redirect target cannot receive the
+            // lookup token. Same panic-on-TLS-init-failure behavior as `reqwest::Client::new()`.
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("HTTP client"),
             default_options,
             integration_metrics_token: None,
             #[cfg(test)]
@@ -205,7 +213,7 @@ impl BrantaClientTrait for BrantaClient {
         {
             request = request.header("X-Branta-Integration-Token", token);
         }
-        let response = match request.send().await {
+        let mut response = match request.send().await {
             Ok(response) => response,
             Err(_) => return Err(BrantaError::Incomplete),
         };
@@ -217,10 +225,26 @@ impl BrantaClientTrait for BrantaClient {
             return Err(BrantaError::Incomplete);
         }
 
-        let bytes = match response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(_) => return Err(BrantaError::Incomplete),
-        };
+        // Tenshu patch: read at most MAX_LOOKUP_RESPONSE_BYTES; anything larger is incomplete.
+        if response
+            .content_length()
+            .is_some_and(|len| len > MAX_LOOKUP_RESPONSE_BYTES as u64)
+        {
+            return Err(BrantaError::Incomplete);
+        }
+        let mut bytes = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if bytes.len() + chunk.len() > MAX_LOOKUP_RESPONSE_BYTES {
+                        return Err(BrantaError::Incomplete);
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(_) => return Err(BrantaError::Incomplete),
+            }
+        }
         if bytes.is_empty() {
             return Ok(Vec::new());
         }
@@ -332,6 +356,60 @@ mod tests {
         let client = client_for(&server);
         let err = client.get_payments("value", None).await.unwrap_err();
         assert!(matches!(err, BrantaError::Incomplete));
+    }
+
+    #[tokio::test]
+    async fn get_payments_does_not_follow_redirects() {
+        // Tenshu patch test.
+        let server = MockServer::start().await;
+        let target = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/v2/payments/value", target.uri())),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Vec::<Payment>::new()))
+            .expect(0)
+            .mount(&target)
+            .await;
+
+        let client = client_for(&server);
+        let err = client.get_payments("value", None).await.unwrap_err();
+        assert!(matches!(err, BrantaError::Incomplete));
+    }
+
+    #[tokio::test]
+    async fn get_payments_rejects_oversized_body() {
+        // Tenshu patch test.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(vec![b' '; MAX_LOOKUP_RESPONSE_BYTES + 1]),
+            )
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let err = client.get_payments("value", None).await.unwrap_err();
+        assert!(matches!(err, BrantaError::Incomplete));
+    }
+
+    #[tokio::test]
+    async fn get_payments_accepts_body_at_the_cap() {
+        // Tenshu patch test: JSON `[]` padded with whitespace to exactly the cap.
+        let server = MockServer::start().await;
+        let mut body = b"[]".to_vec();
+        body.resize(MAX_LOOKUP_RESPONSE_BYTES, b' ');
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        assert!(client.get_payments("value", None).await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -16,13 +16,18 @@
     "src/models.rs": "844d8739a75921655f44c5df0c125e6444bd269b9a9ea2557ebb65bf687cfa6e",
     "src/options.rs": "aa80995df67d9219faa7fae3d22e5b91f4f720dd39f0c87c559ae0a2750c9063",
     "src/v2/builder.rs": "76ce2fc2342f3cdaf3b33454d2b85ea6f4c92c06142bbae2c0eb01ac681184c2",
-    "src/v2/client.rs": "b4a16f8d2bbad4bffcb5f08ce17bc240a7c52348ee6e8a1c0af71f8db8a83d7b",
     "src/v2/encryption.rs": "98ec6a05ad8af54526daa383bbb47f865d7da1b4a0e15da5ca0772033df365b8",
     "src/v2/mod.rs": "ddfae72960fc6a618cec448b6691f213e9388d492543f9803b4c5ee3c00cb286",
     "src/v2/parser.rs": "dcf7014bc180914f5963e2b32a1068252c68cf188fcb331eced48048c655af76",
     "src/v2/secret_generator.rs": "026426541079991168475b703bf89408276df972338302e9c3c52e9d63f0fa06",
     "src/v2/service.rs": "19a26c2dbacc7be2525d8cdf9da5fcf928dc07c851b0096938608e83a8ccc915"
   },
-  "patched_files": {},
+  "patched_files": {
+    "src/v2/client.rs": {
+      "upstream_sha256": "b4a16f8d2bbad4bffcb5f08ce17bc240a7c52348ee6e8a1c0af71f8db8a83d7b",
+      "patched_sha256": "91b9c499f266050b3f7797a54b13fc711ae7a477d50c1d391ef09f5cae29916e",
+      "patch": "Tenshu hardening: no redirects, 256 KiB lookup body cap, three offline tests; diff in TENSHU_PROVENANCE.md"
+    }
+  },
   "adapted_manifest_sha256": "1c693a2fad8146ecd396908a09fc7c7fcf3ed200201f6bf72bb72404f4f9d551"
 }

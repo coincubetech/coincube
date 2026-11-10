@@ -6,7 +6,8 @@ Tree: 93d1941261080250c6f39a3ded0b7deac52e23d3
 Published crate checksum: 7a8a135dbf6e1966c9debb9d619edd56d4eb27ebf57bed896c21d36ac7ed4b74.
 
 The vendored files are the published 4.0.0 crate's CHANGELOG.md, LICENSE, README.md,
-examples/ and src/. Every one is byte-identical to that crate; SHA-256 hashes are
+examples/ and src/. Every one is byte-identical to that crate except
+`src/v2/client.rs` (see "Source patch" below); SHA-256 hashes are
 recorded in UPSTREAM_SHA256.json and enforced by coincube-gui's `vendor_integrity`
 test, which also fails on any unpinned file under src/. The crate's tests/,
 Cargo.lock and CI files are not vendored. Do not format or edit these source files
@@ -38,10 +39,64 @@ than the newer upstream platform trust store. Corporate/private installed roots
 will not be accepted; such lookups remain silent and non-blocking. Roots update
 with dependencies. The logo client uses the same reqwest feature configuration.
 
-The upstream lookup client permits redirects and unbounded response bodies. The
-wrapper bounds wall time but does not change those source semantics, so redirect
-targets could receive the encrypted lookup token. Logos have independent
-no-redirect, same-origin, response-size and image-decode limits.
+## Source patch: `src/v2/client.rs`
+
+This is the only source file Tenshu changes. Upstream's lookup client follows redirects
+and reads unbounded response bodies, so a redirect target could receive the
+encrypted lookup token. 4.0.0 keeps its HTTP client private, so this cannot be
+configured from outside the crate. The patch:
+
+- builds the client with `reqwest::redirect::Policy::none()`, so a 3xx falls through
+  the existing non-success branch as `BrantaError::Incomplete`;
+- reads lookup bodies chunk by chunk up to `MAX_LOOKUP_RESPONSE_BYTES` (256 KiB),
+  rejecting a larger declared `Content-Length` before reading; an oversized body is
+  `BrantaError::Incomplete`;
+- adds three offline wiremock tests (redirect not followed, oversized body
+  rejected, body exactly at the cap accepted), each marked "Tenshu patch test".
+
+`post_payment` and `is_api_key_valid` are untouched; Tenshu never calls them.
+UPSTREAM_SHA256.json records both the upstream hash (`b4a16f8d…`) and the patched
+hash of this file under `patched_files`, and `vendor_integrity` enforces the patched
+hash. The production hunks:
+
+```diff
++pub(crate) const MAX_LOOKUP_RESPONSE_BYTES: usize = 256 * 1024;
+ ...
+-            http: reqwest::Client::new(),
++            http: reqwest::Client::builder()
++                .redirect(reqwest::redirect::Policy::none())
++                .build()
++                .expect("HTTP client"),
+ ...
+-        let bytes = match response.bytes().await {
+-            Ok(bytes) => bytes,
+-            Err(_) => return Err(BrantaError::Incomplete),
+-        };
++        if response
++            .content_length()
++            .is_some_and(|len| len > MAX_LOOKUP_RESPONSE_BYTES as u64)
++        {
++            return Err(BrantaError::Incomplete);
++        }
++        let mut bytes = Vec::new();
++        loop {
++            match response.chunk().await {
++                Ok(Some(chunk)) => {
++                    if bytes.len() + chunk.len() > MAX_LOOKUP_RESPONSE_BYTES {
++                        return Err(BrantaError::Incomplete);
++                    }
++                    bytes.extend_from_slice(&chunk);
++                }
++                Ok(None) => break,
++                Err(_) => return Err(BrantaError::Incomplete),
++            }
++        }
+```
+
+To upgrade the SDK, re-apply this patch to the new `client.rs` and re-review it, or
+drop it if upstream adds equivalent configuration. Offering it upstream is a
+tracked follow-up. Logos keep their own independent no-redirect, same-origin,
+response-size and image-decode limits in the wrapper.
 
 ## Testing limits
 
@@ -51,4 +106,6 @@ wrapper's tests cover the status mapping through its own `LookupBackend` seam an
 run the real `verify` only on paths that finish before any request: conflicting
 on-chain addresses (`tampered`), and plain or unbindable destinations (`unknown`).
 Decrypt-and-bind behavior relies on upstream's own unit suite (`src/v2/service.rs`,
-`src/v2/client.rs`), which runs offline against local mock servers.
+`src/v2/client.rs`), which runs offline against local mock servers:
+`cargo test --manifest-path vendor/branta/Cargo.toml --lib`. Delete the
+`vendor/branta/Cargo.lock` that run creates; it is not vendored.
