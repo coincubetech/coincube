@@ -53,6 +53,8 @@ pub struct SparkReceiveView<'a> {
     pub claiming: Option<&'a (String, u32)>,
     /// Phase 4f: transient error from the most recent claim attempt.
     pub claim_error: Option<&'a str>,
+    /// The most recent claim was deferred (SDK 0.28.0+): why it waits.
+    pub claim_notice: Option<&'a str>,
     /// Live on-chain confirmation count per pending deposit, keyed by
     /// `(txid, vout)`. Sourced from a public Esplora and refreshed on a
     /// 30s tick; missing keys render the SDK's plain fallback text.
@@ -288,6 +290,7 @@ impl<'a> SparkReceiveView<'a> {
                 self.pending_deposits,
                 self.claiming,
                 self.claim_error,
+                self.claim_notice,
                 self.pending_deposit_confirmations,
                 self.network,
                 self.mask_amounts,
@@ -572,6 +575,7 @@ fn pending_deposits_card<'a>(
     deposits: &'a [DepositInfo],
     claiming: Option<&'a (String, u32)>,
     claim_error: Option<&'a str>,
+    claim_notice: Option<&'a str>,
     confirmations: &'a HashMap<(String, u32), u32>,
     network: Network,
     mask_amounts: bool,
@@ -592,6 +596,9 @@ fn pending_deposits_card<'a>(
             "Fallo de la reclamación: {}",
             err
         )));
+    }
+    if let Some(notice) = claim_notice {
+        card = card.push(p2_regular(notice));
     }
 
     for deposit in deposits {
@@ -1497,6 +1504,7 @@ mod tests {
                         pending_deposits: &deposits,
                         claiming: None,
                         claim_error: None,
+                        claim_notice: None,
                         pending_deposit_confirmations: &confirmations,
                         network: Network::Bitcoin,
                         cube_name: "Everyday",
@@ -1614,6 +1622,7 @@ mod tests {
                     &deposits,
                     None,
                     None,
+                    None,
                     &confirmations,
                     Network::Bitcoin,
                     cache.balance_amounts_masked(),
@@ -1672,6 +1681,7 @@ mod tests {
                     pending_deposits: &deposits,
                     claiming: None,
                     claim_error: None,
+                    claim_notice: None,
                     pending_deposit_confirmations: &confirmations,
                     network: Network::Bitcoin,
                     cube_name: "Everyday",

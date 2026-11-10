@@ -56,6 +56,9 @@ pub struct SparkSettings {
     confirm_off: bool,
     /// Connections shows the bridge's technical details.
     technical_details_open: bool,
+    /// Sats awaiting on-chain recovery, from the last `get_info` (SDK
+    /// 0.28.0+). Shown under Connections; nothing here recovers them.
+    recoverable_funds_sats: u64,
 }
 
 impl SparkSettings {
@@ -74,6 +77,7 @@ impl SparkSettings {
             auto_convert: None,
             confirm_off: false,
             technical_details_open: false,
+            recoverable_funds_sats: 0,
         }
     }
 
@@ -139,6 +143,7 @@ impl State for SparkSettings {
             stable_balance_saving: self.stable_balance_saving,
             auto_convert: self.auto_convert.clone(),
             swap_available: crate::app::state::spark::swap::swap_available(cache.network),
+            recoverable_funds_sats: self.recoverable_funds_sats,
         };
         let content = if matches!(
             menu,
@@ -191,8 +196,10 @@ impl State for SparkSettings {
                 async move { backend.get_info().await }
             },
             |result| match result {
-                Ok(_) => Message::View(crate::app::view::Message::SparkSettings(
-                    crate::app::view::SparkSettingsMessage::BridgeReachable,
+                Ok(info) => Message::View(crate::app::view::Message::SparkSettings(
+                    crate::app::view::SparkSettingsMessage::BridgeReachable {
+                        recoverable_funds_sats: info.recoverable_funds_sats,
+                    },
                 )),
                 Err(e) => Message::View(crate::app::view::Message::SparkSettings(
                     crate::app::view::SparkSettingsMessage::BridgeError(e.to_string()),
@@ -229,8 +236,11 @@ impl State for SparkSettings {
     ) -> Task<Message> {
         if let Message::View(crate::app::view::Message::SparkSettings(msg)) = message {
             match msg {
-                crate::app::view::SparkSettingsMessage::BridgeReachable => {
+                crate::app::view::SparkSettingsMessage::BridgeReachable {
+                    recoverable_funds_sats,
+                } => {
                     self.status = SparkSettingsStatus::Connected;
+                    self.recoverable_funds_sats = recoverable_funds_sats;
                 }
                 crate::app::view::SparkSettingsMessage::BridgeError(err) => {
                     self.status = SparkSettingsStatus::Error(err);
@@ -433,8 +443,14 @@ mod tests {
     fn bridge_status_messages_update_status_card_state() {
         let mut panel = SparkSettings::new(None);
 
-        update(&mut panel, SparkSettingsMessage::BridgeReachable);
+        update(
+            &mut panel,
+            SparkSettingsMessage::BridgeReachable {
+                recoverable_funds_sats: 330,
+            },
+        );
         assert!(matches!(panel.status, SparkSettingsStatus::Connected));
+        assert_eq!(panel.recoverable_funds_sats, 330);
 
         update(
             &mut panel,

@@ -275,8 +275,9 @@ pub enum SparkTransactionsMessage {
 pub enum SparkSettingsMessage {
     /// Bridge `get_info` reload succeeded — the subprocess is
     /// reachable and the SDK is past init. Drives the "Bridge
-    /// status" card on the Settings page.
-    BridgeReachable,
+    /// status" card on the Settings page. `recoverable_funds_sats` is
+    /// `get_info`'s figure for funds awaiting on-chain recovery.
+    BridgeReachable { recoverable_funds_sats: u64 },
     /// Bridge `get_info` reload failed. Carries the error string
     /// for the diagnostic card.
     BridgeError(String),

@@ -3177,8 +3177,19 @@ impl State for GlobalHome {
                                         // asynchronously and only `PaymentSucceeded`
                                         // knows what actually landed. Keep it unknown
                                         // rather than showing the pre-fee deposit.
+                                        // A deferral (SDK 0.28.0+) claimed nothing:
+                                        // logged like a failure, and the indicator
+                                        // stays pending until the SDK's own claim
+                                        // fires `DepositsChanged`.
                                         result: match result {
-                                            Ok(ok) => Ok(ok.amount_sat),
+                                            Ok(ok) => match &ok.deferred {
+                                                Some(deferral) => Err(
+                                                    crate::app::state::spark::receive::claim_deferral_notice(
+                                                        deferral,
+                                                    ),
+                                                ),
+                                                None => Ok(ok.amount_sat),
+                                            },
                                             Err(e) => Err(e.to_string()),
                                         },
                                     },

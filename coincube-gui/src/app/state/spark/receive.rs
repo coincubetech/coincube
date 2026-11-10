@@ -124,6 +124,10 @@ pub struct SparkReceive {
     /// Phase 4f: surface a transient claim error to the user. Cleared
     /// on the next reload or successful claim.
     pub claim_error: Option<String>,
+    /// The most recent claim was deferred (SDK 0.28.0+): nothing claimed
+    /// yet, and the SDK keeps trying on its own. A neutral note, not an
+    /// error. Cleared like [`Self::claim_error`].
+    pub claim_notice: Option<String>,
     /// Live on-chain confirmation count per pending deposit, fetched
     /// from a public Esplora ([`esplora::fetch_confirmations`]). The
     /// SDK only tells us `is_mature: bool`, so we query Esplora
@@ -169,6 +173,7 @@ impl SparkReceive {
             pending_deposits: Vec::new(),
             claiming: None,
             claim_error: None,
+            claim_notice: None,
             pending_deposit_confirmations: HashMap::new(),
             displayed_invoice: None,
             received_amount_display: String::new(),
@@ -270,6 +275,7 @@ impl State for SparkReceive {
                 pending_deposits: &self.pending_deposits,
                 claiming: self.claiming.as_ref(),
                 claim_error: self.claim_error.as_deref(),
+                claim_notice: self.claim_notice.as_deref(),
                 pending_deposit_confirmations: &self.pending_deposit_confirmations,
                 network: cache.network,
                 cube_name: &cache.cube_name,
@@ -675,6 +681,11 @@ impl State for SparkReceive {
             SparkReceiveMessage::PendingDepositsLoaded(deposits) => {
                 self.pending_deposits = deposits;
                 self.claim_error = None;
+                // A deferral note stands until the SDK claims the deposit on
+                // its own, which empties the list.
+                if self.pending_deposits.is_empty() {
+                    self.claim_notice = None;
+                }
                 // Drop confirmation entries for deposits that left
                 // the list (claimed or refunded), then kick off a
                 // fresh Esplora fetch for any immature deposit still
@@ -731,6 +742,7 @@ impl State for SparkReceive {
                 };
                 self.claiming = Some((txid.clone(), vout));
                 self.claim_error = None;
+                self.claim_notice = None;
                 Task::perform(
                     async move { backend.claim_deposit(txid, vout).await },
                     |result| match result {
@@ -748,6 +760,13 @@ impl State for SparkReceive {
             SparkReceiveMessage::ClaimDepositSucceeded(ok) => {
                 self.claiming = None;
                 self.claim_error = None;
+                if let Some(deferral) = &ok.deferred {
+                    // Nothing changed: no splash, no refetch (a reload would
+                    // not show anything new), and the row stays pending.
+                    self.claim_notice = Some(claim_deferral_notice(deferral));
+                    return Task::none();
+                }
+                self.claim_notice = None;
                 let mut tasks = vec![
                     // Drop the claimed row from the pending-deposits list.
                     fetch_deposits_task(self.backend.clone()),
@@ -772,6 +791,7 @@ impl State for SparkReceive {
             }
             SparkReceiveMessage::ClaimDepositFailed(err) => {
                 self.claiming = None;
+                self.claim_notice = None;
                 self.claim_error = Some(err);
                 Task::none()
             }
@@ -938,6 +958,37 @@ fn fetch_deposits_task(backend: Option<Arc<SparkBackend>>) -> Task<Message> {
             )),
         },
     )
+}
+
+/// What a deferred claim (SDK 0.28.0+) means for the user, under the Pending
+/// deposits card. Nothing went wrong, so it says why it waits and that it
+/// will be claimed without them.
+pub(crate) fn claim_deferral_notice(deferral: &coincube_spark_protocol::ClaimDeferral) -> String {
+    use coincube_spark_protocol::ClaimDeferral;
+    match deferral {
+        ClaimDeferral::MaxFeeExceeded {
+            required_fee_sats,
+            max_fee_sats,
+        } => coincube_ui::localized_format!(
+            "Not claimed yet: claiming now would cost {} sats, more than the {}-sat limit. \
+             It will be claimed automatically once the deposit matures.",
+            "Aún no reclamado: reclamarlo ahora costaría {} sats, más que el límite de {} sats. \
+             Se reclamará automáticamente cuando el depósito madure.",
+            required_fee_sats,
+            max_fee_sats
+        ),
+        ClaimDeferral::NoEarlyClaimAvailable => coincube_ui::localized_format!(
+            "Not claimed yet: it needs more confirmations. It will be claimed automatically.",
+            "Aún no reclamado: necesita más confirmaciones. Se reclamará automáticamente."
+        ),
+        ClaimDeferral::ProviderDeclined { message } => coincube_ui::localized_format!(
+            "Not claimed yet: the claim service declined ({}). It will be claimed automatically \
+             once the deposit matures.",
+            "Aún no reclamado: el servicio de reclamación lo rechazó ({}). Se reclamará \
+             automáticamente cuando el depósito madure.",
+            message
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1456,10 +1507,44 @@ mod tests {
             SparkReceiveMessage::ClaimDepositSucceeded(coincube_spark_protocol::ClaimDepositOk {
                 payment_id: Some("payment".to_string()),
                 amount_sat: Some(5_000),
+                deferred: None,
             }),
         );
         assert!(panel.claiming.is_none());
         assert!(panel.claim_error.is_none());
+        assert!(panel.claim_notice.is_none());
+    }
+
+    /// 0.28.0: a deferred claim leaves a neutral note, not an error, and
+    /// keeps it across a reload until the deposit leaves the list.
+    #[test]
+    fn a_deferred_claim_leaves_a_note_until_the_deposit_is_claimed() {
+        let mut panel = SparkReceive::new(None);
+        panel.claiming = Some(("tx".to_string(), 0));
+        update(
+            &mut panel,
+            SparkReceiveMessage::ClaimDepositSucceeded(coincube_spark_protocol::ClaimDepositOk {
+                payment_id: None,
+                amount_sat: None,
+                deferred: Some(coincube_spark_protocol::ClaimDeferral::NoEarlyClaimAvailable),
+            }),
+        );
+        assert!(panel.claiming.is_none());
+        assert!(panel.claim_error.is_none());
+        let note = panel.claim_notice.clone().expect("deferral note");
+        assert!(note.contains("claimed automatically"), "{}", note);
+
+        update(
+            &mut panel,
+            SparkReceiveMessage::PendingDepositsLoaded(vec![deposit("tx", 0, true)]),
+        );
+        assert_eq!(panel.claim_notice.as_deref(), Some(note.as_str()));
+
+        update(
+            &mut panel,
+            SparkReceiveMessage::PendingDepositsLoaded(vec![]),
+        );
+        assert!(panel.claim_notice.is_none());
     }
 
     #[test]
