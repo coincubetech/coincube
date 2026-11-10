@@ -921,3 +921,259 @@ def test_pending_key_capacity_refusal_is_read_only_and_preserves_attempt(runner)
     assert runner.journal.data == before
     assert state["pending_attempt"] == purpose
     assert runner.deferred_phone_purpose == purpose
+
+
+def key_generation_case(runner, tmp_path, monkeypatch):
+    from harness.state import atomic_write
+    state, purpose = pending_phone(runner)
+    state.pop("pin", None)  # Synthetic recovery never needs a credential value.
+    runner.phone.build = 38
+    runner.artifacts.update(cube_uuid="synthetic-cube-uuid", baseline_key_ids=["1"])
+    runner.journal.data["stages"]["phone_key"] = {"status": "blocked", "code": "SIGNER_LIMIT", "at": 30}
+    runner.account = {"tokens": {"access_token": "synthetic-token"}}
+    runner.account_user_id = 42
+    store = SimpleNamespace(sha256="synthetic-revision", load=lambda: deepcopy(state))
+    runner.onboarding.store = store
+    prior = tmp_path / "prior"
+    prior.mkdir(mode=0o700)
+    context = {"device": runner.phone.device_digest, "build": 38, "process": {"pid": 1}}
+    checkpoint = {"version": 1, "binding": runner.journal.data["binding"], "artifacts": {
+        "account_identity": runner.artifacts["account_identity"], "approval_context": context,
+        "pin_resume_probe": {"status": "passed"}, "pin_dispatch_started": {"context": context},
+        "signature_count_min": 2, "intent": {"txid": TXID}, "broadcast_txid": TXID,
+        "target_key_id": "1", "target_fingerprint": "aabbccdd"},
+        "stages": {name: {"status": "passed", "at": at} for at, name in enumerate(("collect", "broadcast", "verify"), 10)}}
+    import uuid
+    old_artifacts = checkpoint["artifacts"]
+    old_run_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "synthetic-prior-run"))
+    old_artifacts.update(desktop_identity="synthetic-prior-desktop", request_id=str(uuid.uuid5(uuid.UUID(old_run_id), TXID)),
+        session_id="synthetic-prior-session", psbt_sha256="d" * 64, descriptor_id="deadbeef", cube_id=10,
+        cube_uuid="synthetic-prior-cube", vault_id=11, fee_sats=612)
+    names = ("account_identity", "desktop_identity", "request_id", "session_id", "intent", "psbt_sha256",
+             "descriptor_id", "target_key_id", "target_fingerprint", "cube_id", "cube_uuid", "vault_id", "fee_sats")
+    old_binding = {**{name: deepcopy(old_artifacts[name]) for name in names}, "run_id": old_run_id,
+                   "journal_binding": checkpoint["binding"], "device": runner.phone.device_digest}
+    old_artifacts["approval_binding"] = old_binding
+    context.update(binding=old_binding, request_id=old_artifacts["request_id"], session_id=old_artifacts["session_id"],
+                   intent_sha256=provision.digest(old_artifacts["intent"]), fee_sats=612)
+    atomic_write(prior / "checkpoint.json", json.dumps(checkpoint).encode())
+    runner.key_generation_authorization = "synthetic-explicit-user-authorization"
+    runner.key_recovery_prior_run = str(prior)
+    current = [{"id": 1, "name": "prior-successful-signer", "network": "testnet4", "status": "active",
+                "fingerprint": "aabbccdd", "keychainId": 8, "cubeId": 10}]
+    plan = {"success": True, "data": {"plan": "pro", "status": "active", "renewalAt": None, "planProvenance": None, "entitlements": {"personalKeyLimit": 3}}}
+    active = {"id": 8, "userId": 42, "network": "testnet4", "noOfKeys": 1, "keyLimit": 21}
+    def http(url, **kwargs):
+        assert kwargs["headers"]["Authorization"] == "Bearer synthetic-token"
+        if url.endswith("/connect/plan"): return json.dumps(plan).encode()
+        if url.endswith("/keychains/active"): return json.dumps({"data": active}).encode()
+        raise AssertionError("Unexpected recovery API endpoint")
+    monkeypatch.setattr(provision, "http", http)
+    runner.keys = lambda: deepcopy(current)
+    runner.phone.observe_key_limit = lambda: {"build": 38, "code": "SIGNER_LIMIT",
+        "process": {"pid": 9, "bundle_id": "io.coincube.keychainApp"}, "observation": "visible_capacity_modal"}
+    calls = []
+    def restart(journal, receipt):
+        calls.append("stop-old-process")
+        receipt.update(phase="ready_for_reconciliation", current_process={"pid": 10, "bundle_id": "io.coincube.keychainApp"})
+        journal.artifact("key_generation_recovery", deepcopy(receipt))
+    def reserve(receipt):
+        calls.append("reserve")
+        binding = receipt["binding"]
+        state["quarantined_attempts"] = [{"recovery_id": receipt["recovery_id"], "purpose": purpose,
+            "disposition": "outcome_unresolved", "binding_sha256": provision.digest(binding),
+            "authorization": binding["authorization"]}]
+        state.pop("pending_attempt", None)
+        state["key_generation_reservation"] = {"recovery_id": receipt["recovery_id"],
+            "binding_sha256": provision.digest(binding), "purpose": binding["new_purpose"], "status": "reserved"}
+        return "reserved"
+    def create(label, journal, receipt, *, before_create, before_pin):
+        calls.append("create-replacement")
+        before_create()
+        receipt.update(phase="creation_dispatched", creation_started=True)
+        journal.artifact("key_generation_recovery", deepcopy(receipt))
+        before_pin()
+        receipt["pin_entered"] = True
+        state["key_generation_reservation"]["status"] = "consumed"
+        state["pending_attempt"] = receipt["binding"]["new_purpose"]
+        journal.artifact("key_generation_recovery", deepcopy(receipt))
+        current.append(dict(phone_key(runner), id=12, name=label, keychainId=8))
+    def reconcile(purpose):
+        assert state["pending_attempt"] == purpose
+        state.pop("pending_attempt")
+        state["key_generation_reservation"]["status"] = "completed"
+        calls.append("reconciled")
+    runner.phone.restart_for_key_generation = restart
+    runner.phone.labels = lambda: set()
+    runner.onboarding.reserve_key_generation = reserve
+    runner.onboarding.create_recovery_key = create
+    runner.onboarding.reconcile_pin = reconcile
+    runner.stage_phone_setup = lambda: calls.append("account-network")
+    return state, checkpoint, current, plan, active, calls
+
+
+def test_authorized_key_generation_preserves_old_history_and_creates_distinct_key(runner, tmp_path, monkeypatch):
+    state, _, _, _, _, calls = key_generation_case(runner, tmp_path, monkeypatch)
+    original_stage = deepcopy(runner.journal.data["stages"]["phone_key"])
+    runner.prepare_key_generation_recovery(state)
+    receipt = runner.artifacts["key_generation_recovery"]
+    binding = deepcopy(receipt["binding"])
+    assert binding["original_stage"] == original_stage
+    assert binding["new_key_label"] != binding["original_key_label"]
+    assert binding["new_purpose"] != binding["original_purpose"]
+    assert binding["original_credential_revision"] == "synthetic-revision"
+    runner.defer_pending_phone_attempt(state)
+    runner.journal.outcome("phone_key", "passed")
+    runner.stage_phone_key()
+    assert calls == ["stop-old-process", "account-network", "reserve", "create-replacement", "reconciled"]
+    assert runner.artifacts["phone_key_creation_started"] is True
+    assert runner.artifacts["phone_key_pin_entered"] is True
+    assert runner.artifacts["key_generation_recovery"]["binding"] == binding
+    assert runner.artifacts["key_generation_recovery"]["phase"] == "completed"
+    assert state["quarantined_attempts"][0]["purpose"] == binding["original_purpose"]
+    assert state["quarantined_attempts"][0]["disposition"] == "outcome_unresolved"
+    assert state["key_generation_reservation"]["status"] == "completed"
+    assert runner.phone_key_label() == binding["new_key_label"]
+
+
+@pytest.mark.parametrize("part", ["config", "account", "device", "build", "probe", "dispatch", "quorum", "txid", "verify", "ordering", "too-recent", "context-request", "context-session", "context-intent", "context-binding"])
+def test_key_recovery_refuses_unproven_prior_success(runner, tmp_path, monkeypatch, part):
+    from harness.state import atomic_write
+    state, prior, _, _, _, calls = key_generation_case(runner, tmp_path, monkeypatch)
+    artifacts = prior["artifacts"]
+    if part == "config": prior["binding"] = "other"
+    if part == "account": artifacts["account_identity"] = "other"
+    if part == "device": artifacts["approval_context"]["device"] = "other"
+    if part == "build": artifacts["approval_context"]["build"] = 37
+    if part == "probe": artifacts["pin_resume_probe"]["status"] = "failed"
+    if part == "dispatch": artifacts["pin_dispatch_started"] = {}
+    if part == "quorum": artifacts["signature_count_min"] = 1
+    if part == "txid": artifacts["broadcast_txid"] = "c" * 64
+    if part == "verify": prior["stages"]["verify"]["status"] = "blocked"
+    if part == "ordering": prior["stages"]["verify"]["at"] = 1
+    if part == "too-recent": prior["stages"]["verify"]["at"] = 30
+    if part == "context-request": artifacts["approval_context"]["request_id"] = "other"
+    if part == "context-session": artifacts["approval_context"]["session_id"] = "other"
+    if part == "context-intent": artifacts["approval_context"]["intent_sha256"] = "other"
+    if part == "context-binding": artifacts["approval_context"]["binding"]["cube_uuid"] = "other"
+    atomic_write(tmp_path / "prior/checkpoint.json", json.dumps(prior).encode())
+    with pytest.raises(Failed) as error: runner.prepare_key_generation_recovery(state)
+    assert error.value.code == "KEY_RECOVERY_PRIOR"
+    assert "key_generation_recovery" not in runner.artifacts
+    assert calls == []
+
+
+@pytest.mark.parametrize("part", ["pending", "credential", "verified", "creation", "pin", "baseline", "stage", "target", "cube"])
+def test_key_recovery_requires_exact_failed_original_attempt(runner, tmp_path, monkeypatch, part):
+    state, _, _, _, _, calls = key_generation_case(runner, tmp_path, monkeypatch)
+    if part == "pending": state["pending_attempt"] = "key:foreign"
+    if part == "credential": state["identity"] = "other"
+    if part == "verified": state["verified"] = False
+    if part == "creation": runner.artifacts.pop("phone_key_creation_started")
+    if part == "pin": runner.artifacts.pop("phone_key_pin_entered")
+    if part == "baseline": runner.artifacts.pop("baseline_key_ids")
+    if part == "stage": runner.journal.data["stages"]["phone_key"]["code"] = "KEY_REGISTRATION"
+    if part == "target": runner.artifacts["target_key_id"] = "12"
+    if part == "cube": runner.artifacts.pop("cube_uuid")
+    with pytest.raises(Failed) as error: runner.prepare_key_generation_recovery(state)
+    assert error.value.code == "KEY_RECOVERY_EVIDENCE"
+    assert calls == []
+
+
+@pytest.mark.parametrize("part", ["limit", "inactive", "keychain-full", "foreign-owner", "foreign-chain", "prior-fingerprint", "old-appeared", "new-appeared", "renewal", "campaign", "missing-renewal", "not-pro"])
+def test_key_generation_guard_checks_live_capacity_identity_and_name_absence(runner, tmp_path, monkeypatch, part):
+    state, _, current, plan, active, calls = key_generation_case(runner, tmp_path, monkeypatch)
+    runner.prepare_key_generation_recovery(state)
+    receipt = runner.artifacts["key_generation_recovery"]
+    if part == "limit": plan["data"]["entitlements"]["personalKeyLimit"] = 1
+    if part == "inactive": plan["data"]["status"] = "inactive"
+    if part == "renewal": plan["data"]["renewalAt"] = "2000-01-01T00:00:00Z"
+    if part == "campaign": plan["data"]["planProvenance"] = "campaign"
+    if part == "missing-renewal": plan["data"].pop("renewalAt")
+    if part == "not-pro": plan["data"]["plan"] = "free"
+    if part == "keychain-full": active["noOfKeys"] = active["keyLimit"]
+    if part == "foreign-owner": active["userId"] = 43
+    if part == "foreign-chain": active["network"] = "bitcoin"
+    if part == "prior-fingerprint": current[0]["fingerprint"] = "deadbeef"
+    if part == "old-appeared": current.append(dict(current[0], id=2, name=receipt["binding"]["original_key_label"]))
+    if part == "new-appeared": current.append(dict(current[0], id=2, name=receipt["binding"]["new_key_label"]))
+    with pytest.raises(Blocked): runner.recover_key_generation(receipt)
+    assert calls == []
+    assert state["pending_attempt"] == receipt["binding"]["original_purpose"]
+
+
+def test_recovery_after_reservation_crash_keeps_global_credential_nonidle(runner, tmp_path, monkeypatch):
+    state, _, _, _, _, calls = key_generation_case(runner, tmp_path, monkeypatch)
+    runner.prepare_key_generation_recovery(state)
+    receipt = runner.artifacts["key_generation_recovery"]
+    runner.onboarding.reserve_key_generation(receipt)  # Simulate CAS completed before receipt-phase save.
+    receipt["phase"] = "ready_for_reconciliation"
+    runner.journal.artifact("key_generation_recovery", receipt)
+    runner.key_generation_authorization = runner.key_recovery_prior_run = None
+    runner.prepare_key_generation_recovery(deepcopy(state))
+    runner.defer_pending_phone_attempt(deepcopy(state))
+    assert runner.deferred_phone_purpose == receipt["binding"]["new_purpose"]
+    assert state["key_generation_reservation"]["status"] == "reserved"
+    assert "pending_attempt" not in state
+    assert state["quarantined_attempts"][0]["disposition"] == "outcome_unresolved"
+
+
+def test_pending_replacement_never_recreates_or_navigates(runner, tmp_path, monkeypatch):
+    state, _, _, _, _, calls = key_generation_case(runner, tmp_path, monkeypatch)
+    runner.prepare_key_generation_recovery(state)
+    receipt = runner.artifacts["key_generation_recovery"]
+    runner.onboarding.reserve_key_generation(receipt)
+    receipt.update(phase="creation_dispatched", creation_started=True, pin_entered=True)
+    state["key_generation_reservation"]["status"] = "consumed"
+    state["pending_attempt"] = receipt["binding"]["new_purpose"]
+    runner.defer_pending_phone_attempt(state)
+    calls.clear()
+    with pytest.raises(Blocked) as error: runner.stage_phone_key()
+    assert error.value.code == "KEY_REGISTRATION"
+    assert calls == []
+    assert state["pending_attempt"] == receipt["binding"]["new_purpose"]
+
+
+def test_old_generation_appearing_is_never_adopted(runner, tmp_path, monkeypatch):
+    state, _, current, _, _, calls = key_generation_case(runner, tmp_path, monkeypatch)
+    runner.prepare_key_generation_recovery(state)
+    current.append(dict(phone_key(runner), name="QA " + runner.run_id))
+    with pytest.raises(Blocked) as error: runner.stage_phone_key()
+    assert error.value.code == "KEY_RECOVERY_OLD_APPEARED"
+    assert calls == []
+    assert "target_key_id" not in runner.artifacts
+
+
+def test_ordinary_run_has_no_implicit_generation_authorization(runner):
+    state, _ = pending_phone(runner)
+    runner.prepare_key_generation_recovery(state)
+    assert "key_generation_recovery" not in runner.artifacts
+
+
+@pytest.mark.parametrize("authorization,prior", [("grant", None), (None, "/tmp/prior"), ("grant", "relative")])
+def test_recovery_options_must_be_explicit_and_paired(config, tmp_path, authorization, prior):
+    with pytest.raises(Failed) as error:
+        provision.FreshRunner(config, tmp_path / "unused", authorize_key_generation=authorization, key_recovery_prior_run=prior)
+    assert error.value.code == "KEY_RECOVERY_OPTIONS"
+    assert not (tmp_path / "unused").exists()
+
+
+def test_reserved_credential_without_pending_marker_blocks_other_run_before_ui(runner):
+    state, _ = pending_phone(runner)
+    state.pop("pending_attempt")
+    state["key_generation_reservation"] = {"recovery_id": "foreign", "status": "reserved"}
+    with pytest.raises(Blocked) as error: runner.defer_pending_phone_attempt(state)
+    assert error.value.code == "KEY_RECOVERY_FOREIGN"
+    assert "phone_validation_reused" not in runner.artifacts
+
+
+@pytest.mark.parametrize("change", ["binding", "baseline", "authorization"])
+def test_recovery_resume_rejects_metadata_drift_before_any_ui(runner, tmp_path, monkeypatch, change):
+    state, _, _, _, _, calls = key_generation_case(runner, tmp_path, monkeypatch)
+    runner.prepare_key_generation_recovery(state)
+    if change == "binding": runner.artifacts["key_generation_recovery"]["binding"]["new_purpose"] = "changed"
+    if change == "baseline": runner.artifacts["baseline_key_ids"] = []
+    if change == "authorization": runner.key_generation_authorization = "another-grant"
+    with pytest.raises(Failed) as error: runner.prepare_key_generation_recovery(state)
+    assert error.value.code == "KEY_RECOVERY_CHANGED"
+    assert calls == []

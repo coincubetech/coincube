@@ -17,6 +17,8 @@ def pytest_addoption(parser):
     group.addoption("--qa-run-dir", help="Persistent private checkpoints (mode 700).")
     group.addoption("--qa-preflight", action="store_true", help="Stop after read-only environment/phone checks and the disposable Cube test.")
     group.addoption("--qa-deadline", type=int, default=90, help="Bounded delivery/propagation wait in seconds.")
+    group.addoption("--qa-authorize-key-generation", help="Explicit authorization reference for one quarantined signer-key replacement generation.")
+    group.addoption("--qa-key-recovery-prior-run", help="Absolute private completed-run directory proving prior PIN signing on this device.")
     group.addoption("--qa-confirm", action="store_true", help="Require a mined confirmation instead of mempool acceptance.")
 
 
@@ -40,8 +42,12 @@ def acceptance(request):
     try:
         config = json.loads(private_read(path))
         if config.get("version") == 2:
-            runner = FreshRunner(validate_config(config), directory, deadline=deadline, confirm=request.config.getoption("--qa-confirm"))
+            runner = FreshRunner(validate_config(config), directory, deadline=deadline, confirm=request.config.getoption("--qa-confirm"),
+                                 authorize_key_generation=request.config.getoption("--qa-authorize-key-generation"),
+                                 key_recovery_prior_run=request.config.getoption("--qa-key-recovery-prior-run"))
         else:
+            if request.config.getoption("--qa-authorize-key-generation") or request.config.getoption("--qa-key-recovery-prior-run"):
+                raise Failed("KEY_RECOVERY_OPTIONS", "Key-generation recovery is restricted to the fresh version-2 scenario.")
             runner = Runner(load_config(path), directory, deadline=deadline, confirm=request.config.getoption("--qa-confirm"))
     except Failed as error:
         pytest.fail(error.code + ": " + str(error), pytrace=False)

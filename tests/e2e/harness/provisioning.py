@@ -166,8 +166,16 @@ def faucet_claim(address, journal):
 class FreshRunner(Runner):
     stages = STAGES
 
-    def __init__(self, config, directory, *, deadline=90, confirm=False):
+    def __init__(self, config, directory, *, deadline=90, confirm=False, authorize_key_generation=None, key_recovery_prior_run=None):
         self.config = validate_config(config)
+        if bool(authorize_key_generation) != bool(key_recovery_prior_run):
+            raise Failed("KEY_RECOVERY_OPTIONS", "Key-generation authorization and prior completed-run path must be supplied together.")
+        if authorize_key_generation is not None and (not isinstance(authorize_key_generation, str)
+                or not authorize_key_generation.strip() or len(authorize_key_generation) > 512
+                or not Path(key_recovery_prior_run).is_absolute()):
+            raise Failed("KEY_RECOVERY_OPTIONS", "Use a bounded authorization reference and an absolute private prior-run path.")
+        self.key_generation_authorization = authorize_key_generation
+        self.key_recovery_prior_run = key_recovery_prior_run
         self.deadline, self.confirm = deadline, confirm
         self.journal = Journal(directory, config)
         self.stack = ExitStack()
@@ -222,6 +230,7 @@ class FreshRunner(Runner):
         if len(candidates) != 1 or not candidates[0].get("device_id"):
             raise Failed("CONNECT_ACCOUNT", "Bootstrap must produce one active, registered desktop Connect account.")
         self.account = candidates[0]
+        self.account_user_id = registered["user_id"]
         if (self.account["email"].casefold() != self.config["account_email"].casefold()
                 or registered["email"].casefold() != self.account["email"].casefold()
                 or registered["device_id"] != self.account["device_id"]):
@@ -237,7 +246,9 @@ class FreshRunner(Runner):
         secret_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "coincube-phone/" + self.artifacts["account_identity"] + "/" + self.phone.device_digest))
         store = SecretStore(Provision(self.provision.binary, phone_dir, phone_dir, secret_id), phone_dir / "phone-secrets.keychain.json")
         self.onboarding = Onboarding(self.phone, store, self.artifacts["account_identity"], self.deadline)
-        self.defer_pending_phone_attempt(store.load())
+        state = store.load()
+        self.prepare_key_generation_recovery(state)
+        self.defer_pending_phone_attempt(state)
         if self.deferred_phone_purpose:
             return
         labels = self.phone.labels()
@@ -246,6 +257,177 @@ class FreshRunner(Runner):
             if self.account["email"].casefold() not in {v.casefold() for v in self.phone.labels()}:
                 raise Failed("PHONE_ACCOUNT", "Keychain and the desktop must be signed into the same QA account.")
             self.phone.click("Home")
+
+    def phone_key_label(self):
+        recovery = self.artifacts.get("key_generation_recovery")
+        return recovery["binding"]["new_key_label"] if recovery else "QA " + self.run_id
+
+    def key_recovery_identity(self):
+        return {"run_id": self.run_id, "config_binding": self.journal.data["binding"],
+                "account_identity": self.artifacts["account_identity"], "device": self.phone.device_digest,
+                "identity": self.onboarding.identity, "cube_id": self.artifacts.get("cube_id"),
+                "cube_uuid": self.artifacts.get("cube_uuid")}
+
+    def prior_key_recovery_proof(self):
+        path = Path(self.key_recovery_prior_run)
+        if path.is_symlink() or not path.is_dir() or path.resolve() == self.journal.directory.resolve():
+            raise Failed("KEY_RECOVERY_PRIOR", "Recovery requires a separate existing private completed run.")
+        info = path.stat()
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise Failed("KEY_RECOVERY_PRIOR", "The prior run directory must be private and owned by this user.")
+        raw = private_read(path / "checkpoint.json")
+        try:
+            prior = json.loads(raw)
+            artifacts, stages = prior["artifacts"], prior["stages"]
+            context = artifacts["approval_context"]
+            txid = artifacts["intent"]["txid"]
+            binding = context["binding"]
+            names = ("account_identity", "desktop_identity", "request_id", "session_id", "intent", "psbt_sha256",
+                     "descriptor_id", "target_key_id", "target_fingerprint", "cube_id", "cube_uuid", "vault_id", "fee_sats")
+            if (any(binding[name] != artifacts[name] for name in names)
+                    or binding["journal_binding"] != prior["binding"]
+                    or binding["device"] != context["device"]
+                    or artifacts["request_id"] != str(uuid.uuid5(uuid.UUID(binding["run_id"]), txid))
+                    or context["request_id"] != artifacts["request_id"] or context["session_id"] != artifacts["session_id"]
+                    or context["intent_sha256"] != digest(artifacts["intent"]) or context["fee_sats"] != artifacts["fee_sats"]
+                    or context != artifacts["pin_dispatch_started"]["context"]
+                    or artifacts["approval_binding"] != binding
+                    or stages["verify"]["at"] >= self.journal.data["stages"]["phone_key"]["at"]):
+                raise ValueError()
+            if (prior.get("version") != 1 or prior.get("binding") != self.journal.data["binding"]
+                    or artifacts["account_identity"] != self.artifacts["account_identity"]
+                    or context["device"] != self.phone.device_digest or context["build"] != 38
+                    or artifacts["pin_resume_probe"]["status"] != "passed"
+                    or artifacts["pin_dispatch_started"]["context"] != context
+                    or type(artifacts["signature_count_min"]) is not int or artifacts["signature_count_min"] < 2
+                    or not re.fullmatch(r"[0-9a-f]{64}", txid) or artifacts["broadcast_txid"] != txid
+                    or any(stages[name]["status"] != "passed" for name in ("collect", "broadcast", "verify"))
+                    or not 0 < stages["collect"]["at"] <= stages["broadcast"]["at"] <= stages["verify"]["at"]
+                    or not artifacts["target_key_id"] or not artifacts["target_fingerprint"]):
+                raise ValueError()
+        except (ValueError, TypeError, KeyError):
+            raise Failed("KEY_RECOVERY_PRIOR", "The prior run does not prove successful same-account/device PIN signing and broadcast.") from None
+        return {"source_path_digest": digest(str(path.resolve())), "checkpoint_sha256": hashlib.sha256(raw).hexdigest(),
+                "config_binding": prior["binding"], "account_identity": artifacts["account_identity"],
+                "device": context["device"], "build": 38, "approval_context_digest": digest(context),
+                "target_key_id": str(artifacts["target_key_id"]), "target_fingerprint": artifacts["target_fingerprint"],
+                "txid": txid, "signature_count_min": artifacts["signature_count_min"],
+                "stages": {name: deepcopy(stages[name]) for name in ("collect", "broadcast", "verify")}}
+
+    def prepare_key_generation_recovery(self, state):
+        receipt = self.artifacts.get("key_generation_recovery")
+        if receipt is not None:
+            binding = receipt.get("binding", {}) if isinstance(receipt, dict) else {}
+            if (receipt.get("binding_sha256") != digest(binding)
+                    or binding.get("baseline_key_ids") != self.artifacts.get("baseline_key_ids")
+                    or any(binding.get(k) != v for k, v in self.key_recovery_identity().items())
+                    or receipt.get("recovery_id") != str(uuid.uuid5(uuid.UUID(self.run_id), "authorized-key-generation:1"))
+                    or binding.get("new_key_label") != "QA " + receipt["recovery_id"]
+                    or binding.get("new_purpose") != "key:" + binding["new_key_label"]
+                    or binding.get("original_key_label") != "QA " + self.run_id
+                    or binding.get("original_purpose") != "key:QA " + self.run_id
+                    or receipt.get("phase") not in ("planned", "process_stopped", "ready_for_reconciliation", "reserved", "creation_dispatched", "completed")
+                    or type(receipt.get("creation_started")) is not bool or type(receipt.get("pin_entered")) is not bool):
+                raise Failed("KEY_RECOVERY_CHANGED", "The key-generation recovery receipt differs from this run.")
+            if self.key_generation_authorization is not None and (
+                    binding.get("authorization") != self.key_generation_authorization
+                    or binding["prior_proof"]["source_path_digest"] != digest(str(Path(self.key_recovery_prior_run).resolve()))):
+                raise Failed("KEY_RECOVERY_CHANGED", "The one-time recovery authorization or source run changed.")
+            return
+        if self.key_generation_authorization is None:
+            return
+        original = "key:QA " + self.run_id
+        previous = self.journal.data["stages"].get("phone_key", {})
+        baseline = self.artifacts.get("baseline_key_ids")
+        if (not state or state.get("identity") != self.onboarding.identity or state.get("verified") is not True
+                or state.get("pending_attempt") != original or state.get("key_generation_reservation")
+                or self.artifacts.get("phone_key_creation_started") is not True or self.artifacts.get("phone_key_pin_entered") is not True
+                or self.artifacts.get("target_key_id") or not self.artifacts.get("cube_id") or not self.artifacts.get("cube_uuid")
+                or not isinstance(baseline, list) or any(not isinstance(v, str) for v in baseline)
+                or previous.get("status") != "blocked" or previous.get("code") != "SIGNER_LIMIT"
+                or type(previous.get("at")) is not int or previous["at"] <= 0):
+            raise Failed("KEY_RECOVERY_EVIDENCE", "Only this run's exact unresolved capacity-refused key attempt can receive one authorized replacement.")
+        prior = self.prior_key_recovery_proof()
+        observed = self.phone.observe_key_limit()
+        if observed.get("build") != 38 or observed.get("code") != "SIGNER_LIMIT" or observed.get("observation") != "visible_capacity_modal":
+            raise Failed("KEY_RECOVERY_EVIDENCE", "The current build-38 capacity refusal must be observed without dismissing it.")
+        recovery_id = str(uuid.uuid5(uuid.UUID(self.run_id), "authorized-key-generation:1"))
+        binding = {**self.key_recovery_identity(), "authorization": self.key_generation_authorization,
+                   "original_purpose": original, "original_key_label": "QA " + self.run_id,
+                   "new_key_label": "QA " + recovery_id, "new_purpose": "key:QA " + recovery_id,
+                   "original_credential_revision": self.onboarding.store.sha256, "baseline_key_ids": deepcopy(baseline),
+                   "prior_proof": prior, "original_stage": deepcopy(previous), "observation": deepcopy(observed),
+                   "build": 38, "reset_behavior_source": "8ce9aa9298dcb7e7993a951f6fdaa568e527ba8a",
+                   "eligibility_basis": "explicit_operator_authorization_and_source_backed_operational_inference",
+                   "old_attempt_outcome": "unresolved", "pin_counter_measured": False}
+        if not isinstance(binding["original_credential_revision"], str) or not binding["original_credential_revision"]:
+            raise Failed("KEY_RECOVERY_EVIDENCE", "The original encrypted credential revision is required.")
+        receipt = {"recovery_id": recovery_id, "binding": binding, "phase": "planned", "creation_started": False, "pin_entered": False}
+        self.require_key_generation_capacity(receipt)
+        receipt["binding_sha256"] = digest(binding)
+        self.pin_artifact("key_generation_recovery", receipt)
+
+    def require_key_generation_capacity(self, receipt=None):
+        initial = receipt is not None and "key_generation_recovery" not in self.artifacts
+        receipt = receipt or self.artifacts["key_generation_recovery"]
+        binding = receipt["binding"]
+        if not initial and (receipt.get("binding_sha256") != digest(binding)
+                or binding.get("baseline_key_ids") != self.artifacts.get("baseline_key_ids")):
+            raise Failed("KEY_RECOVERY_CHANGED", "The immutable recovery binding or original baseline changed.")
+        if any(binding.get(k) != v for k, v in self.key_recovery_identity().items()):
+            raise Failed("KEY_RECOVERY_CHANGED", "Recovery account, device or Cube identity changed.")
+        headers = {"Authorization": "Bearer " + self.account["tokens"]["access_token"]}
+        plan = json.loads(http(REST + "/api/v1/connect/plan", headers=headers))
+        active = json.loads(http(REST + "/api/v1/keychains/active", headers=headers))["data"]
+        keys = self.keys()
+        if any(key.get("name") in (binding["original_key_label"], binding["new_key_label"]) for key in keys):
+            raise Blocked("KEY_RECOVERY_REMOTE_APPEARED", "An old or replacement key appeared; no new creation or PIN input is allowed.")
+        prior = binding["prior_proof"]
+        matches = [key for key in keys if str(key["id"]) == prior["target_key_id"]]
+        if (type(active.get("id")) is not int or active["id"] <= 0
+                or len(matches) != 1 or matches[0].get("fingerprint") != prior["target_fingerprint"]
+                or matches[0].get("network") != "testnet4" or matches[0].get("status") != "active"
+                or matches[0].get("keychainId") != active.get("id")
+                or active.get("userId") != self.account_user_id or active.get("network") != "testnet4"):
+            raise Failed("KEY_RECOVERY_KEYCHAIN", "The verified previous signer and active Keychain must remain bound to this account.")
+        network_keys = [key for key in keys if key.get("network") == "testnet4"]
+        if any(key.get("keychainId") != active["id"] for key in network_keys):
+            raise Failed("KEY_RECOVERY_KEYCHAIN", "A Testnet4 key belongs to another Keychain; recovery will not guess.")
+        limit = plan.get("data", {}).get("entitlements", {}).get("personalKeyLimit")
+        if (plan.get("success") is not True or plan.get("data", {}).get("status") != "active"
+                or plan.get("data", {}).get("plan") != "pro"
+                or "renewalAt" not in plan.get("data", {}) or plan["data"]["renewalAt"] is not None
+                or "planProvenance" not in plan.get("data", {}) or plan["data"]["planProvenance"] is not None
+                or type(limit) is not int or limit <= len(network_keys)
+                or type(active.get("noOfKeys")) is not int or type(active.get("keyLimit")) is not int
+                or active["noOfKeys"] < 0 or active["noOfKeys"] >= active["keyLimit"]):
+            raise Blocked("KEY_RECOVERY_CAPACITY", "Authenticated production plan and Keychain must both have available signer capacity.")
+        expected = binding.get("keychain_id")
+        if expected is not None and expected != active["id"]:
+            raise Failed("KEY_RECOVERY_KEYCHAIN", "The recovery's active Keychain identity changed.")
+        if expected is None:
+            if not initial:
+                raise Failed("KEY_RECOVERY_KEYCHAIN", "The recovery has no pinned active Keychain.")
+            binding["keychain_id"] = active["id"]  # Initial receipt only; pinned before any boundary.
+        return {"keychain_id": active["id"], "personal_key_limit": limit, "network_key_count": len(network_keys)}
+
+    def recover_key_generation(self, receipt):
+        if receipt["creation_started"]:
+            return  # Remote reconciliation is the only permissible continuation.
+        self.require_key_generation_capacity()
+        self.phone.restart_for_key_generation(self.journal, receipt)
+        if receipt.get("phase") != "ready_for_reconciliation":
+            raise Blocked("KEY_RECOVERY_PROCESS", "The original key-creation process was not conclusively stopped.")
+        self.require_key_generation_capacity()
+        self.deferred_phone_purpose = None
+        self.stage_phone_setup()
+        self.require_key_generation_capacity()
+        if self.onboarding.reserve_key_generation(receipt) != "reserved":
+            raise Blocked("KEY_RECOVERY_RESERVATION", "The replacement reservation was already consumed; creation cannot repeat.")
+        receipt["phase"] = "reserved"
+        self.journal.artifact("key_generation_recovery", deepcopy(receipt))
+        self.onboarding.create_recovery_key(self.phone_key_label(), self.journal, receipt,
+            before_create=self.require_key_generation_capacity, before_pin=self.require_key_generation_capacity)
 
     def phone_validation_identity(self):
         return {"account": self.artifacts["account_identity"],
@@ -259,7 +441,27 @@ class FreshRunner(Runner):
         pending = state.get("pending_attempt") if state else None
         if state and "pending_attempt" in state and (not isinstance(pending, str) or not pending):
             raise Failed("PHONE_PENDING_INTENT", "The saved PIN purpose is malformed; no phone navigation is allowed.")
-        key_purpose = "key:QA " + self.run_id
+        recovery = self.artifacts.get("key_generation_recovery")
+        original_key_purpose = "key:QA " + self.run_id
+        reservation = state.get("key_generation_reservation") if state else None
+        if reservation is not None and (not isinstance(reservation, dict)
+                or (reservation.get("status") != "completed" and recovery is None)):
+            raise Blocked("KEY_RECOVERY_FOREIGN", "An active encrypted key-generation reservation belongs to another run; no phone navigation is allowed.")
+        key_purpose = "key:" + self.phone_key_label()
+        if recovery and state and state.get("key_generation_reservation"):
+            reservation = state["key_generation_reservation"]
+            if (not isinstance(reservation, dict) or reservation.get("recovery_id") != recovery["recovery_id"]
+                    or reservation.get("binding_sha256") != digest(recovery["binding"])
+                    or reservation.get("purpose") != key_purpose
+                    or reservation.get("status") not in ("reserved", "consumed", "completed")):
+                raise Failed("KEY_RECOVERY_RESERVATION", "The encrypted key-generation reservation differs from this run.")
+            if (reservation["status"] == "consumed" and (
+                    pending != key_purpose or not recovery["creation_started"] or not recovery["pin_entered"])):
+                raise Failed("KEY_RECOVERY_RESERVATION", "A consumed replacement reservation requires its exact durable input markers.")
+            if reservation["status"] == "reserved" and pending is not None:
+                raise Failed("KEY_RECOVERY_RESERVATION", "An unused replacement reservation cannot have a dispatched PIN attempt.")
+            if reservation["status"] != "completed" and pending is None:
+                pending = key_purpose
         request = self.artifacts.get("request_id")
         sign_purpose = "sign:" + request if isinstance(request, str) else None
         # Approval is recorded before opening the PIN screen. Its interruption
@@ -273,13 +475,17 @@ class FreshRunner(Runner):
                 return
         if not state or state.get("verified") is not True:
             raise Blocked("PHONE_PENDING_IDENTITY", "An unresolved phone attempt requires a verified account/device credential record.")
-        if pending == key_purpose:
+        if pending == key_purpose or (recovery and pending == original_key_purpose):
             baseline = self.artifacts.get("baseline_key_ids")
             if (self.artifacts.get("phone_key_creation_started") is not True
                     or self.artifacts.get("phone_key_pin_entered") is not True
                     or not isinstance(baseline, list) or any(not isinstance(v, str) for v in baseline)
                     or not self.artifacts.get("cube_id")):
                 raise Failed("PHONE_PENDING_INTENT", "The pending key attempt lacks this run's durable creation evidence.")
+            if recovery and pending == key_purpose:
+                reservation = state.get("key_generation_reservation", {})
+                if reservation.get("recovery_id") != recovery["recovery_id"]:
+                    raise Failed("KEY_RECOVERY_RESERVATION", "The replacement key lacks its encrypted reservation.")
         elif sign_purpose is not None and pending == sign_purpose:
             intent = self.artifacts.get("intent")
             txid = intent.get("txid") if isinstance(intent, dict) else None
@@ -485,27 +691,47 @@ class FreshRunner(Runner):
         return json.loads(raw)["data"]["keys"]
 
     def stage_phone_key(self):
-        label = "QA " + self.run_id
+        label = self.phone_key_label()
+        recovery = self.artifacts.get("key_generation_recovery")
         keys = self.keys()
+        if recovery and any(key.get("name") == recovery["binding"]["original_key_label"] for key in keys):
+            raise Blocked("KEY_RECOVERY_OLD_APPEARED", "The quarantined old key appeared; it must not be adopted or replaced.")
         matches = [k for k in keys if k["name"] == label and k["network"] == "testnet4"]
-        if matches and (not self.artifacts.get("phone_key_creation_started") or "baseline_key_ids" not in self.artifacts):
+        started = recovery["creation_started"] if recovery else self.artifacts.get("phone_key_creation_started")
+        if matches and (not started or "baseline_key_ids" not in self.artifacts):
             raise Failed("KEY_NOT_FRESH", "A matching key predates this run's recorded creation attempt.")
-        if not matches and not self.artifacts.get("phone_key_creation_started"):
+        if not matches and recovery and not started:
+            self.recover_key_generation(recovery)
+        elif not matches and not started:
             self.pin_artifact("baseline_key_ids", sorted(str(k["id"]) for k in keys))
             self.onboarding.create_key(label, self.pin, self.journal)
         until = time.monotonic() + self.deadline
         while not matches:
-            matches = [k for k in self.keys() if k["name"] == label and k["network"] == "testnet4"]
+            keys = self.keys()
+            if recovery and any(key.get("name") == recovery["binding"]["original_key_label"] for key in keys):
+                raise Blocked("KEY_RECOVERY_OLD_APPEARED", "The quarantined old key appeared; no generation can be adopted.")
+            matches = [k for k in keys if k["name"] == label and k["network"] == "testnet4"]
             if not matches:
                 # Observe a surviving refusal without navigating, dismissing
                 # the pending ceremony, or replaying its credential attempt.
                 self.phone.labels()
-            if time.monotonic() >= until:
+            if not matches and time.monotonic() >= until:
                 raise Blocked("KEY_REGISTRATION", "The exact generated phone key has not appeared in Connect; no duplicate key was created.")
             if not matches:
                 time.sleep(2)
         if len(matches) != 1:
             raise Failed("KEY_AMBIGUOUS", "The run-specific phone key label must identify exactly one key.")
+        if recovery:
+            state = self.onboarding.store.load()
+            reservation = state.get("key_generation_reservation", {}) if state else {}
+            if (not recovery["creation_started"] or not recovery["pin_entered"]
+                    or not state or state.get("identity") != self.onboarding.identity or state.get("verified") is not True
+                    or reservation.get("recovery_id") != recovery["recovery_id"]
+                    or reservation.get("binding_sha256") != digest(recovery["binding"])
+                    or reservation.get("purpose") != recovery["binding"]["new_purpose"]
+                    or reservation.get("status") not in ("consumed", "completed")
+                    or (reservation["status"] == "consumed" and state.get("pending_attempt") != recovery["binding"]["new_purpose"])):
+                raise Failed("KEY_RECOVERY_RESERVATION", "The replacement key lacks its exact consumed or completed credential reservation.")
         key = matches[0]
         if str(key["id"]) in self.artifacts.get("baseline_key_ids", []):
             raise Failed("KEY_NOT_FRESH", "The purported new phone key existed before this run.")
@@ -526,6 +752,9 @@ class FreshRunner(Runner):
         self.pin_artifact("target_key_id", str(key["id"]))
         self.pin_artifact("target_fingerprint", key["fingerprint"])
         self.onboarding.reconcile_pin("key:" + label)
+        if recovery:
+            recovery["phase"] = "completed"
+            self.journal.artifact("key_generation_recovery", deepcopy(recovery))
         if saved is None:
             atomic_write(key_path, json.dumps(dict(identity, xpub=public_key)).encode())
         self.finish_deferred_phone_attempt("key:" + label)
@@ -538,7 +767,7 @@ class FreshRunner(Runner):
             if len(matches) != 1:
                 raise Failed("KEY_ATTACHMENT_IDENTITY", "The exact created signer key must remain uniquely available.")
             key = matches[0]
-            if (key.get("name") != "QA " + self.run_id or key.get("network") != "testnet4"
+            if (key.get("name") != self.phone_key_label() or key.get("network") != "testnet4"
                     or key.get("fingerprint") != self.artifacts["target_fingerprint"]
                     or key.get("status") != "active" or key.get("cubeId") not in (None, 0, cube)):
                 raise Failed("KEY_ATTACHMENT_IDENTITY", "The created signer key changed identity, eligibility or Cube binding.")
@@ -554,7 +783,7 @@ class FreshRunner(Runner):
             elif not self.artifacts.get("phone_key_attachment_started"):
                 if self.deferred_phone_purpose:
                     raise Blocked("KEY_ATTACHMENT_PENDING", "An unresolved signing attempt forbids attachment navigation.")
-                self.onboarding.attach_key("QA " + self.run_id, self.artifacts["cube_name"], self.journal)
+                self.onboarding.attach_key(self.phone_key_label(), self.artifacts["cube_name"], self.journal)
             if time.monotonic() >= until:
                 raise Blocked("KEY_ATTACHMENT_PENDING", "Keychain binding and its encrypted public-key envelope are not both visible; no attachment was replayed.")
             time.sleep(1)

@@ -337,6 +337,41 @@ class Phone:
             raise Blocked("PHONE_PROCESS", "The foreground Keychain process cannot be verified.")
         return {"pid": pid, "bundle_id": BUNDLE}
 
+    def observe_key_limit(self):
+        before = self.process_identity()
+        if self.build != 38:
+            raise Blocked("KEY_RECOVERY_BUILD", "This recovery observation requires the reviewed Keychain build 38.")
+        try:
+            self.labels()
+        except Blocked as error:
+            if error.code != "SIGNER_LIMIT":
+                raise
+        else:
+            raise Blocked("KEY_RECOVERY_SCREEN", "The expected capacity-refusal screen is not visible.")
+        if self.process_identity() != before:
+            raise Blocked("KEY_GENERATION_PROCESS", "Keychain restarted during the refusal observation.")
+        return {"build": self.build, "code": "SIGNER_LIMIT", "process": before,
+                "observation": "visible_capacity_modal"}
+
+    def restart_for_key_generation(self, journal, receipt):
+        if (self.build != 38 or receipt.get("creation_started") or receipt.get("pin_entered")
+                or receipt.get("phase") not in {"planned", "process_stopped", "ready_for_reconciliation", "reserved"}):
+            raise Blocked("KEY_GENERATION_UNCERTAIN", "The one-time key generation process boundary cannot be replayed after dispatch.")
+        self.driver.terminate_app(BUNDLE)
+        if int(self.driver.query_app_state(BUNDLE)) != 1:
+            raise Blocked("PHONE_PROCESS", "The old Keychain process did not conclusively stop.")
+        receipt["phase"] = "process_stopped"
+        journal.artifact("key_generation_recovery", deepcopy(receipt))
+        self.driver.activate_app(BUNDLE)
+        until = time.monotonic() + 15
+        while int(self.driver.query_app_state(BUNDLE)) != 4:
+            if time.monotonic() >= until:
+                raise Blocked("PHONE_PROCESS", "Keychain did not return to the foreground after the verified stop.")
+            time.sleep(.25)
+        receipt["current_process"] = self.process_identity()
+        receipt["phase"] = "ready_for_reconciliation"
+        journal.artifact("key_generation_recovery", deepcopy(receipt))
+
     def restart_for_upgrade(self, journal, receipt):
         if (self.build < 38 or self.build <= receipt["original_build"]
                 or receipt["current_build"] != self.build

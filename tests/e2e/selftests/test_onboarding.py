@@ -509,3 +509,156 @@ def test_attach_uses_phone_flow_and_persists_intent_before_cube_selection():
     assert actions == ['home-navigation', 'Home', ('QA synthetic key', {'container': True}),
                        ('wait', 'Signer key'), 'Attach to Cube',
                        ('wait', 'Pick a cube on the testnet4 network.'), 'cube-selected']
+
+
+class RevisionStore(Store):
+    def __init__(self, value):
+        super().__init__(value)
+        self.sha256 = 'original-revision'
+
+    def save(self, value):
+        super().save(value)
+        self.sha256 = 'revision-' + str(len(self.writes))
+
+
+def key_recovery():
+    store = RevisionStore({'identity': 'account:device', 'verified': True,
+        'pin': '123456', 'words': WORDS, 'pending_attempt': 'key:old'})
+    flow = controller(store)
+    receipt = {'recovery_id': 'generation-1', 'phase': 'ready_for_reconciliation',
+        'creation_started': False, 'pin_entered': False,
+        'binding': {'identity': 'account:device', 'original_purpose': 'key:old',
+            'new_purpose': 'key:new', 'original_credential_revision': 'original-revision',
+            'original_key_label': 'old', 'new_key_label': 'new', 'authorization': 'explicit-user-reference'}}
+    return flow, store, receipt
+
+
+def test_quarantine_cas_preserves_history_and_never_makes_credential_globally_idle():
+    flow, store, receipt = key_recovery()
+    assert flow.reserve_key_generation(receipt) == 'reserved'
+    assert len(store.writes) == 1
+    state = store.value
+    assert 'pending_attempt' not in state
+    assert state['pin'] == '123456' and state['words'] == WORDS
+    assert state['quarantined_attempts'][0]['purpose'] == 'key:old'
+    assert state['quarantined_attempts'][0]['disposition'] == 'outcome_unresolved'
+    assert state['key_generation_reservation']['status'] == 'reserved'
+    with pytest.raises(Blocked) as error:
+        flow.pin_attempt('key:unrelated')
+    assert error.value.code == 'KEY_GENERATION_RESERVED'
+    assert flow.reserve_key_generation(receipt) == 'reserved'
+    assert len(store.writes) == 1
+
+
+@pytest.mark.parametrize('mutation', ['revision', 'purpose', 'identity', 'phase', 'authorization', 'same-purpose', 'history'])
+def test_quarantine_requires_original_revision_identity_authorization_and_boundary(mutation):
+    flow, store, receipt = key_recovery()
+    if mutation == 'revision': store.sha256 = 'different'
+    if mutation == 'purpose': store.value['pending_attempt'] = 'key:foreign'
+    if mutation == 'identity': store.value['identity'] = 'other:device'
+    if mutation == 'phase': receipt['phase'] = 'planned'
+    if mutation == 'authorization': receipt['binding']['authorization'] = ''
+    if mutation == 'same-purpose': receipt['binding']['new_purpose'] = 'key:old'
+    if mutation == 'history': store.value['quarantined_attempts'] = [{'old': True}]
+    before = deepcopy(store.value)
+    with pytest.raises((Blocked, Failed)):
+        flow.reserve_key_generation(receipt)
+    assert store.value == before and store.writes == []
+
+
+def test_reservation_consumption_is_once_only_and_idempotent_recovery_never_clears_new_pending():
+    flow, store, receipt = key_recovery()
+    flow.reserve_key_generation(receipt)
+    receipt.update(phase='creation_dispatched', creation_started=True, pin_entered=True)
+    assert flow.reserved_key_pin(receipt) == '123456'
+    assert store.value['pending_attempt'] == 'key:new'
+    assert store.value['key_generation_reservation']['status'] == 'consumed'
+    assert flow.reserve_key_generation(receipt) == 'consumed'
+    assert len(store.writes) == 2
+    with pytest.raises(Blocked):
+        flow.reserved_key_pin(receipt)
+    flow.reconcile_pin('key:old')
+    assert store.value['pending_attempt'] == 'key:new'
+    flow.reconcile_pin('key:new')
+    assert 'pending_attempt' not in store.value
+    assert store.value['key_generation_reservation']['status'] == 'completed'
+    assert store.value['quarantined_attempts'][0]['disposition'] == 'outcome_unresolved'
+    assert flow.reserve_key_generation(receipt) == 'completed'
+    assert flow.pin_attempt('sign:verified-new-run') == '123456'
+    assert store.value['quarantined_attempts'][0]['purpose'] == 'key:old'
+
+
+@pytest.mark.parametrize('field', ['purpose', 'authorization', 'original_credential_revision', 'disposition', 'binding_sha256'])
+def test_changed_quarantine_history_cannot_be_reused(field):
+    flow, store, receipt = key_recovery()
+    flow.reserve_key_generation(receipt)
+    store.value['quarantined_attempts'][0][field] = 'changed'
+    with pytest.raises(Failed):
+        flow.reserve_key_generation(receipt)
+    assert len(store.writes) == 1
+
+
+def recovery_creation_phone(flow, receipt, *, pin_value='6-digit PIN', name='new', lose_input=False):
+    from harness.phone import Phone, BUNDLE
+    process = {'pid': 7, 'bundle_id': BUNDLE}
+    receipt.update(phase='reserved', current_process=process)
+    calls = []
+    phone = SimpleNamespace(process_identity=lambda: process, restore_navigation=lambda: calls.append('restore'),
+        click=calls.append, labels=lambda: {'Add signer key', 'Enter your PIN'}, reject_pin_error=Phone.reject_pin_error)
+    flow.phone = phone
+    flow.wait = lambda *choices: {choices[0]}
+    flow.fill_one = lambda value: calls.append(('name', value))
+    def dispatch(value):
+        assert flow.store.value['pending_attempt'] == 'key:new'
+        assert flow.store.value['key_generation_reservation']['status'] == 'consumed'
+        calls.append('pin-dispatch')
+        if lose_input:
+            raise RuntimeError('Synthetic lost input response')
+    name_field = SimpleNamespace(get_attribute=lambda _: name)
+    pin_field = SimpleNamespace(get_attribute=lambda _: pin_value, click=lambda: calls.append('focus'), send_keys=dispatch)
+    fields = iter([[name_field], [pin_field]])
+    flow.fields = lambda: next(fields)
+    return calls
+
+
+@pytest.mark.parametrize('case', ['name', 'nonempty', 'lost-input', 'success'])
+def test_new_generation_requires_exact_name_empty_prompt_and_durable_single_input(tmp_path, case):
+    from harness.state import Journal
+    flow, store, receipt = key_recovery()
+    flow.reserve_key_generation(receipt)
+    calls = recovery_creation_phone(flow, receipt, name='wrong' if case == 'name' else 'new',
+        pin_value='•••' if case == 'nonempty' else '6-digit PIN', lose_input=case == 'lost-input')
+    journal = Journal(tmp_path / case, {})
+    try:
+        action = lambda: flow.create_recovery_key('new', journal, receipt,
+            before_create=lambda: calls.append('guard-create'), before_pin=lambda: calls.append('guard-pin'))
+        if case == 'success':
+            action()
+        else:
+            with pytest.raises(Blocked):
+                action()
+        if case in {'name', 'nonempty'}:
+            assert 'pin-dispatch' not in calls
+            assert store.value['key_generation_reservation']['status'] == 'reserved'
+        else:
+            assert calls.count('pin-dispatch') == 1
+            assert receipt['pin_entered'] is True
+            assert store.value['pending_attempt'] == 'key:new'
+            with pytest.raises(Blocked):
+                action()
+            assert calls.count('pin-dispatch') == 1
+        assert '123456' not in journal.path.read_text()
+    finally:
+        journal.close()
+
+
+
+def test_quarantine_history_must_still_match_at_first_input():
+    flow, store, receipt = key_recovery()
+    flow.reserve_key_generation(receipt)
+    receipt.update(phase='creation_dispatched', creation_started=True, pin_entered=True)
+    store.value['quarantined_attempts'] = []
+    with pytest.raises(Blocked):
+        flow.reserved_key_pin(receipt)
+    assert store.value['key_generation_reservation']['status'] == 'reserved'
+    assert 'pending_attempt' not in store.value

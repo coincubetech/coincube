@@ -173,6 +173,37 @@ answers or taps again. A completed Home/setup-success screen can reconcile it
 only with the already saved recovery proof. Lost broadcast responses reconcile the same transaction ID;
 retries can send only the previously pinned signed bytes.
 
+A separately authorized replacement generation is available for the narrowly
+reviewed build-38 capacity-blocked case. It requires an explicit authorization
+reference and the private checkpoint of an earlier same-account/device run that
+proved saved-PIN signing and broadcast:
+
+```sh
+tests/e2e/run --qa-fresh --qa-run-dir /private/qa/interrupted-run \
+  --qa-authorize-key-generation EXPLICIT-AUTHORIZATION-REFERENCE \
+  --qa-key-recovery-prior-run /private/qa/completed-run
+```
+
+This is not a retry of the old input. The operator must authorize one new attempt
+and establish that the same controlled device/account/master had no intervening
+PIN or master-change operations. The build-38 source resets the failure counter
+before reaching the observed capacity screen; the runner records this and the
+prior successful PIN signing as operational evidence, not a measured counter or
+a definitive outcome for the old key. Production capacity must actually be
+available. The prior checkpoint supplies recovery evidence only; it supplies no
+Cube, vault, signer, PSBT or funding fixture for the new generation.
+
+The runner archives the old pending purpose as **unresolved**, verifies a stopped
+app process and live account/network/Keychain identity, then uses one encrypted
+compare-and-swap to reserve a distinct key name for this run. The reservation
+blocks every unrelated credential use until it is consumed by the newly reached,
+empty PIN prompt. A second CAS records that new pending purpose before input.
+Crashes reconcile the same reservation; they cannot clear a newer attempt or
+create another allowance. An old key appearing, changed identity, nonempty field,
+lockout/error, or uncertain input stops the run. Successful new registration
+retains the old unresolved history. Repeat the ordinary command without the two
+recovery options after the authorization has been checkpointed.
+
 Exit **0** means selected stages passed, **1** an assertion failed, **2** a
 selected live run was blocked. Preflight success is only preflight success.
 `checkpoint.json` records stage outcomes, and `results.xml` is sanitized JUnit.

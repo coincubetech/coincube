@@ -513,3 +513,36 @@ def test_account_signer_limit_is_a_prompt_prerequisite_block_without_mutation(vi
     else:
         assert phone.labels() == set()
     assert calls == []
+
+
+def test_capacity_observation_records_current_process_without_claiming_old_outcome():
+    phone, calls = bound_phone()
+    phone.driver.page_source = '<root><node visible="true" label="Key limit reached"/></root>'
+    del phone.labels
+    observation = phone.observe_key_limit()
+    assert observation == {'build': 38, 'code': 'SIGNER_LIMIT', 'process': {'pid': 123, 'bundle_id': 'io.coincube.keychainApp'},
+                           'observation': 'visible_capacity_modal'}
+    assert calls == []
+    phone.build = 39
+    with pytest.raises(Blocked):
+        phone.observe_key_limit()
+
+
+def test_new_generation_boundary_cannot_repeat_after_creation_dispatch(tmp_path):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    receipt = {'phase': 'planned', 'creation_started': False, 'pin_entered': False}
+    states = iter([1, 4])
+    phone.driver.query_app_state = lambda _: next(states)
+    try:
+        phone.restart_for_key_generation(journal, receipt)
+        assert receipt['phase'] == 'ready_for_reconciliation'
+        assert receipt['current_process']['pid'] == 123
+        assert calls == ['terminate', 'activate']
+        receipt['phase'] = 'creation_dispatched'
+        receipt['creation_started'] = True
+        with pytest.raises(Blocked):
+            phone.restart_for_key_generation(journal, receipt)
+        assert calls == ['terminate', 'activate']
+    finally:
+        journal.close()
