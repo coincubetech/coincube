@@ -21,6 +21,7 @@ use iced::{
     Background, Length,
 };
 
+#[cfg(test)]
 use coincube_core::miniscript::bitcoin::Amount;
 use coincube_ui::component::empty_placeholder;
 
@@ -64,7 +65,7 @@ pub fn last_transactions_section<'a, M: 'a + Clone + 'static>(
             SparkPaymentMethod::StableBalance => asset_network_logo("btc", "spark", 40.0),
         };
 
-        let display_amount = row_display_amount(tx);
+        let display_amount = tx.display_amount();
 
         let mut item = TransactionListItem::new(direction, &display_amount, bitcoin_unit)
             .with_custom_icon(tx_icon)
@@ -173,14 +174,6 @@ pub fn last_transactions_section<'a, M: 'a + Clone + 'static>(
         .into()
 }
 
-fn row_display_amount(tx: &SparkRecentTransaction) -> Amount {
-    if tx.is_incoming {
-        tx.amount
-    } else {
-        tx.amount + tx.fees_sat
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,12 +197,12 @@ mod tests {
 
     #[test]
     fn row_display_amount_keeps_incoming_net_amount() {
-        assert_eq!(row_display_amount(&tx(true, 5_000, 21)).to_sat(), 5_000);
+        assert_eq!(tx(true, 5_000, 21).display_amount().to_sat(), 5_000);
     }
 
     #[test]
     fn row_display_amount_adds_outgoing_fees() {
-        assert_eq!(row_display_amount(&tx(false, 5_000, 21)).to_sat(), 5_021);
+        assert_eq!(tx(false, 5_000, 21).display_amount().to_sat(), 5_021);
     }
 
     #[test]
