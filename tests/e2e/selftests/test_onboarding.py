@@ -117,7 +117,7 @@ def test_initial_setup_persists_pin_and_all_recovery_words_before_using_them(mon
             view[0] = 'Home'
         else:
             pytest.fail('Unexpected click')
-    phone = SimpleNamespace(device_digest='device', labels=lambda: set(view), click=click, driver=source)
+    phone = SimpleNamespace(device_digest='device', labels=lambda: set(view), click=click, click_card=click, driver=source)
     flow = Onboarding(phone, store, 'account', 1)
     flow.fields = lambda: fields
     flow.reveal = lambda _: None

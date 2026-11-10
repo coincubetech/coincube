@@ -162,3 +162,29 @@ def test_pin_resume_probe_records_only_observed_lifecycle_survival(tmp_path, mon
         assert lifecycle[1] == ('activate', 'io.coincube.keychainApp')
     finally:
         journal.close()
+
+
+def test_merged_setup_card_matches_only_complete_title_line():
+    from appium.webdriver.common.appiumby import AppiumBy
+    clicked, predicates = [], []
+    def find(by, predicate):
+        assert by == AppiumBy.IOS_PREDICATE
+        predicates.append(predicate)
+        return [SimpleNamespace(click=lambda: clicked.append(True))]
+    phone = Phone(SimpleNamespace(find_elements=find), 36)
+    phone.click_card('Use a PIN')
+    assert clicked == [True]
+    assert 'BEGINSWITH "Use a PIN\\n"' in predicates[0]
+    assert 'CONTAINS' not in predicates[0]
+    assert 'visible == true AND enabled == true' in predicates[0]
+    assert 'XCUIElementTypeStaticText' in predicates[0]
+    with pytest.raises(Failed):
+        phone.click_card('1')
+    assert len(predicates) == 1
+
+
+def test_merged_card_selector_refuses_ambiguous_ancestors():
+    phone = Phone(SimpleNamespace(find_elements=lambda *args: [object(), object()]), 36)
+    with pytest.raises(Blocked) as error:
+        phone.click_card('Use a PIN')
+    assert error.value.code == 'PHONE_SELECTOR'

@@ -114,7 +114,7 @@ class Onboarding:
             state = {"identity": self.identity, "pin": f"{secrets.randbelow(1_000_000):06d}", "verified": False}
             self.save(state)
         if "Use a PIN" in labels:
-            self.phone.click("Use a PIN")
+            self.phone.click_card("Use a PIN")
             labels = self.wait("Create a PIN")
         for title, next_title in (("Create a PIN", "Confirm your PIN"), ("Confirm your PIN", "Write down these 12 words")):
             if title in labels:
