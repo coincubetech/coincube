@@ -564,6 +564,49 @@ mod tests {
             .is_ok());
     }
     #[tokio::test]
+    async fn a_slow_connect_clock_still_admits_a_just_served_anchor() {
+        // Connect is two hours behind this desktop and served the anchor at
+        // the same moment it observed it. Without translation the stamp is
+        // outside the 90 s admission window. With it, the anchor is current.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let served = now - 7_200;
+        let mut response = body(ChainId::BitcoinBlake2b);
+        response["data"]["anchor"]["observed_at"] = json!(served);
+        response["data"]["served_at"] = json!(served);
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET);
+                then.status(200).json_body(response);
+            })
+            .await;
+        let anchor = client(&server)
+            .network_anchor(ChainId::BitcoinBlake2b)
+            .await
+            .unwrap()
+            .anchor
+            .unwrap();
+        assert!((now - 2..=now + 2).contains(&anchor.observed_at));
+        assert!(anchor
+            .trusted(ChainId::BitcoinBlake2b, SystemTime::now())
+            .is_ok());
+    }
+    #[test]
+    fn a_missing_served_at_keeps_the_server_stamp() {
+        // An older API does not get a desktop stamp invented for it. A stamp
+        // two hours behind the send time stays two hours behind.
+        let sent_at = 10_000;
+        let observed_at = sent_at - 7_200;
+        assert_eq!(local_observed_at(observed_at, None, sent_at), observed_at);
+        assert_eq!(
+            local_observed_at(observed_at, Some(observed_at), sent_at),
+            sent_at
+        );
+    }
+    #[tokio::test]
     async fn both_chains_use_authenticated_dedicated_anchor_and_preserve_inactive_rdts() {
         for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
             let server = MockServer::start_async().await;
