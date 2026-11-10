@@ -626,6 +626,53 @@ async fn stdio_companion(binary: &std::ffi::OsStr) {
         "fixture-wallet"
     );
     assert!(!response.contains(server.grant.credential()));
+    // Feature-disabled names are unknown even when called directly over STDIO.
+    for (index, (name, enabled)) in [
+        (
+            "tenshu_prepare_wallet_proposal",
+            cfg!(feature = "native-proposals"),
+        ),
+        (
+            "tenshu_get_wallet_proposal",
+            cfg!(feature = "native-proposals"),
+        ),
+        (
+            "tenshu_prepare_wallet_creation",
+            cfg!(feature = "native-proposals"),
+        ),
+        (
+            "tenshu_prepare_transaction",
+            cfg!(feature = "native-transactions"),
+        ),
+        (
+            "tenshu_get_prepared_transaction",
+            cfg!(feature = "native-transactions"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if enabled {
+            continue;
+        }
+        let id = index + 4;
+        let mut request = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc":"2.0", "id":id, "method":"tools/call",
+            "params":{"name":name,"arguments":{}}
+        }))
+        .unwrap();
+        request.push(b'\n');
+        stdin.write_all(&request).await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(3), stdout.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["id"], id);
+        assert_eq!(value["error"]["code"], -32602);
+        assert_eq!(value["error"]["message"], "unknown_tool");
+    }
     drop(stdin);
     assert!(
         tokio::time::timeout(Duration::from_secs(3), child.wait())
