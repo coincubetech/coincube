@@ -108,6 +108,7 @@ impl JsonRPCClient {
             // socket open. Decode as soon as a complete object arrives; neither
             // EOF nor a newline can be required as a response delimiter.
             let mut bytes = Vec::new();
+            let mut frame = JsonObjectFrame::default();
             let mut chunk = [0u8; 8192];
             loop {
                 let count = stream.read(&mut chunk).await?;
@@ -119,10 +120,8 @@ impl JsonRPCClient {
                     };
                 }
                 bytes.extend_from_slice(&chunk[..count]);
-                match serde_json::from_slice(&bytes) {
-                    Ok(response) => return Ok(response),
-                    Err(error) if error.is_eof() => continue,
-                    Err(error) => return Err(Error::Json(error)),
+                if frame.push(&chunk[..count]) {
+                    return serde_json::from_slice(&bytes).map_err(Error::from);
                 }
             }
         })
@@ -148,6 +147,58 @@ impl JsonRPCClient {
         debug!("Received from coincubed: method={}", method);
 
         Ok(response)
+    }
+}
+
+// Scan each byte once to find the end of the response object. This is framing,
+// not validation: serde still validates the complete JSON and its typed result.
+// Re-parsing every incomplete prefix makes large transaction lists quadratic.
+#[cfg(not(windows))]
+#[derive(Default)]
+struct JsonObjectFrame {
+    started: bool,
+    depth: usize,
+    in_string: bool,
+    escaped: bool,
+}
+
+#[cfg(not(windows))]
+impl JsonObjectFrame {
+    fn push(&mut self, bytes: &[u8]) -> bool {
+        for &byte in bytes {
+            if !self.started {
+                if byte.is_ascii_whitespace() {
+                    continue;
+                }
+                self.started = true;
+                // Responses must be objects; let serde reject other input.
+                if byte != b'{' {
+                    return true;
+                }
+            }
+            if self.in_string {
+                if self.escaped {
+                    self.escaped = false;
+                } else if byte == b'\\' {
+                    self.escaped = true;
+                } else if byte == b'"' {
+                    self.in_string = false;
+                }
+            } else {
+                match byte {
+                    b'"' => self.in_string = true,
+                    b'{' | b'[' => self.depth += 1,
+                    b'}' | b']' => {
+                        self.depth -= 1;
+                        if self.depth == 0 {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        false
     }
 }
 
@@ -354,7 +405,7 @@ mod transport_tests {
         tokio::pin!(request);
         // On a single-thread runtime this timer cannot fire if the RPC blocks.
         tokio::select! {
-            result = &mut request => panic!("request completed before heartbeat: {result:?}"),
+            result = &mut request => panic!("request completed before heartbeat: {:?}", result),
             _ = tokio::time::sleep(Duration::from_millis(10)) => {}
         }
         assert!(matches!(request.await, Err(Error::Io(e)) if e.kind() == io::ErrorKind::TimedOut));
@@ -418,6 +469,47 @@ mod transport_tests {
         .unwrap()
         .unwrap();
         assert!(result.is_empty());
+        let _ = release.send(());
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn large_fragmented_result_is_deserialized_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DECODES: AtomicUsize = AtomicUsize::new(0);
+        #[derive(Debug)]
+        struct Counted(serde_json::Value);
+        impl<'de> serde::Deserialize<'de> for Counted {
+            fn deserialize<T: serde::Deserializer<'de>>(de: T) -> Result<Self, T::Error> {
+                DECODES.fetch_add(1, Ordering::SeqCst);
+                serde_json::Value::deserialize(de).map(Self)
+            }
+        }
+        let (_file, listener, client) = listener();
+        // Braces, brackets, quotes and backslashes inside strings must not
+        // terminate the frame, even when escapes straddle read boundaries.
+        let value = serde_json::json!(["{}[]\"\\".repeat(700_000)]);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "id": std::process::id(), "jsonrpc": "2.0", "result": value,
+        }))
+        .unwrap();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            stream.read_line(&mut String::new()).await.unwrap();
+            for part in body.chunks(8191) {
+                stream.get_mut().write_all(part).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+            let _ = released.await;
+        });
+        let result = client
+            .request::<(), Counted>("listtransactions", None)
+            .await
+            .unwrap();
+        assert_eq!(result.0, value);
+        assert_eq!(DECODES.load(Ordering::SeqCst), 1);
         let _ = release.send(());
         peer.await.unwrap();
     }
