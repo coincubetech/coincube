@@ -2472,6 +2472,9 @@ pub(crate) fn unlock_turn_with_floor_controls<'a, M: 'a + 'static>(
 pub(crate) struct OpeningFace<'a, M> {
     pub cube: &'a crate::app::settings::CubeSettings,
     pub quote: &'a Quote,
+    /// The previous quote while it crossfades into `quote`, and the
+    /// crossfade's progress from 0 to 1.
+    pub outgoing: Option<(&'a Quote, f32)>,
     pub stage: super::launcher_opening::Stage,
     pub stalled: bool,
     pub cancel: fn() -> M,
@@ -2507,6 +2510,62 @@ fn opening_words<'a>(
                 .scale_alpha(alpha),
             ),
         })
+}
+
+/// A loading quote and its attribution.
+fn opening_quote<'a, M: 'a>(quote: &Quote, alpha: f32, quote_width: f32) -> Column<'a, M> {
+    use coincube_ui::font;
+    Column::new()
+        .align_x(Alignment::Center)
+        .push(
+            Container::new(
+                opening_words(
+                    quote.localized_text().to_owned(),
+                    22.0,
+                    font::REGULAR,
+                    Tone::Ink,
+                    alpha,
+                )
+                .line_height(1.5)
+                .align_x(iced::alignment::Horizontal::Center),
+            )
+            .max_width(quote_width),
+        )
+        .push(Space::new().height(Length::Fixed(12.0)))
+        .push(
+            opening_words(
+                format!("— {}, {}", quote.author, quote.source),
+                13.0,
+                font::REGULAR,
+                Tone::Muted,
+                alpha,
+            )
+            .align_x(iced::alignment::Horizontal::Center),
+        )
+}
+
+/// The current quote, crossfading from the last one while `outgoing` is set.
+fn opening_quotes<'a, M: 'a>(
+    face: &OpeningFace<'a, M>,
+    alpha: f32,
+    quote_width: f32,
+) -> Element<'a, M> {
+    let Some((last, t)) = face.outgoing else {
+        return opening_quote(face.quote, alpha, quote_width).into();
+    };
+    let incoming = opening_quote(face.quote, alpha * t, quote_width);
+    let outgoing = opening_quote(last, alpha * (1.0 - t), quote_width);
+    // The longer quote sizes the stack, and the shorter is centred over it,
+    // so neither is cut off mid-fade.
+    let (base, over) = if last.localized_text().len() > face.quote.localized_text().len() {
+        (outgoing, incoming)
+    } else {
+        (incoming, outgoing)
+    };
+    Stack::new()
+        .push(base)
+        .push(Container::new(over).center(Length::Fill))
+        .into()
 }
 
 /// `.lhead`, `.lquote`, `.lstage` and `.lslow`: the loading face's content.
@@ -2553,31 +2612,7 @@ fn opening_content<'a, M: 'a>(
             alpha,
         ))
         .push(Space::new().height(Length::Fixed(16.0)))
-        .push(
-            Container::new(
-                opening_words(
-                    face.quote.localized_text().to_owned(),
-                    22.0,
-                    font::REGULAR,
-                    Tone::Ink,
-                    alpha,
-                )
-                .line_height(1.5)
-                .align_x(iced::alignment::Horizontal::Center),
-            )
-            .max_width(quote_width),
-        )
-        .push(Space::new().height(Length::Fixed(12.0)))
-        .push(
-            opening_words(
-                format!("— {}, {}", face.quote.author, face.quote.source),
-                13.0,
-                font::REGULAR,
-                Tone::Muted,
-                alpha,
-            )
-            .align_x(iced::alignment::Horizontal::Center),
-        )
+        .push(opening_quotes(face, alpha, quote_width))
         .push(Space::new().height(Length::Fixed(40.0)))
         .push(
             opening_words(
@@ -2874,6 +2909,7 @@ mod tests {
                     OpeningFace {
                         cube: &cube,
                         quote: &quote,
+                        outgoing: None,
                         stage: Stage::Syncing,
                         stalled,
                         cancel: || (),
@@ -2918,6 +2954,7 @@ mod tests {
                 OpeningFace {
                     cube: &cube,
                     quote: &quote,
+                    outgoing: None,
                     stage: Stage::Connecting,
                     stalled: false,
                     cancel: || (),
@@ -4673,6 +4710,7 @@ mod tests {
                     let face = OpeningFace {
                         cube: &cube,
                         quote: &quote,
+                        outgoing: None,
                         stage: opening.stage(),
                         stalled: true,
                         cancel: || (),

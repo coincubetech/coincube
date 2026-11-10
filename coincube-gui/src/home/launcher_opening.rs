@@ -15,6 +15,7 @@
 //! This is presentation only. The loader's own `Step` decides the stage, and
 //! nothing here starts, stops or retries a load.
 
+use coincube_ui::component::quote_display::{Quote, QuoteProvider};
 use coincube_ui::locale::Text as CopyText;
 use std::time::{Duration, Instant};
 
@@ -387,6 +388,67 @@ impl Opening {
     }
 }
 
+/// How long each loading quote stays before the next one replaces it.
+const QUOTE_HOLD: Duration = Duration::from_secs(8);
+/// The outgoing quote fades out while the next one fades in over this long.
+const QUOTE_FADE: Duration = Duration::from_millis(1200);
+
+/// The loading face's quotes: a new one every [`QUOTE_HOLD`], crossfading
+/// from the last. Under reduced motion they swap without the fade.
+#[derive(Debug, Clone)]
+pub(crate) struct QuoteCycle {
+    current: Quote,
+    outgoing: Option<Quote>,
+    since: Instant,
+    provider: QuoteProvider,
+    reduced: bool,
+}
+
+impl QuoteCycle {
+    pub fn new(first: Quote, reduced: bool, now: Instant) -> Self {
+        let mut provider = QuoteProvider::new();
+        provider.remember(&first);
+        Self {
+            current: first,
+            outgoing: None,
+            since: now,
+            provider,
+            reduced,
+        }
+    }
+
+    /// Move on to the next quote once the current one has had its time.
+    pub fn advance(&mut self, now: Instant) {
+        if now.saturating_duration_since(self.since) < QUOTE_HOLD {
+            return;
+        }
+        let next = self.provider.select("loading");
+        let last = std::mem::replace(&mut self.current, next);
+        self.outgoing = (!self.reduced).then_some(last);
+        self.since = now;
+    }
+
+    pub fn current(&self) -> &Quote {
+        &self.current
+    }
+
+    /// The quote fading out and how far the crossfade has gone (0 to 1),
+    /// while one is under way.
+    pub fn outgoing(&self, now: Instant) -> Option<(&Quote, f32)> {
+        let t = now.saturating_duration_since(self.since).as_secs_f32() / QUOTE_FADE.as_secs_f32();
+        let t = t.clamp(0.0, 1.0);
+        self.outgoing
+            .as_ref()
+            .filter(|_| t < 1.0)
+            .map(|quote| (quote, t * t * (3.0 - 2.0 * t)))
+    }
+
+    /// Whether a crossfade is under way and needs every frame.
+    pub fn needs_frames(&self, now: Instant) -> bool {
+        self.outgoing(now).is_some()
+    }
+}
+
 /// Linear (or `ease`d per segment) interpolation of CSS keyframes at `t`.
 fn keyframes(keys: &[(f32, f32)], t: f32, ease: Option<(f32, f32, f32, f32)>) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -425,6 +487,42 @@ mod tests {
 
     fn ms(value: u64) -> Duration {
         Duration::from_millis(value)
+    }
+
+    #[test]
+    fn loading_quotes_change_every_eight_seconds_with_a_crossfade() {
+        use coincube_ui::component::quote_display::random_quote;
+        let t0 = Instant::now();
+        let first = random_quote("loading");
+        let mut quotes = QuoteCycle::new(first.clone(), false, t0);
+        quotes.advance(t0 + ms(7_900));
+        assert_eq!(quotes.current().id, first.id);
+        assert!(quotes.outgoing(t0 + ms(7_900)).is_none());
+
+        let t8 = t0 + QUOTE_HOLD;
+        quotes.advance(t8);
+        assert_ne!(
+            quotes.current().id,
+            first.id,
+            "never the same quote twice in a row"
+        );
+        let (outgoing, t) = quotes.outgoing(t8 + ms(600)).expect("crossfading");
+        assert_eq!(outgoing.id, first.id);
+        assert!(t > 0.0 && t < 1.0);
+        assert!(quotes.needs_frames(t8 + ms(600)));
+        assert!(quotes.outgoing(t8 + QUOTE_FADE).is_none());
+        assert!(!quotes.needs_frames(t8 + QUOTE_FADE));
+    }
+
+    #[test]
+    fn reduced_motion_swaps_loading_quotes_without_a_fade() {
+        use coincube_ui::component::quote_display::random_quote;
+        let t0 = Instant::now();
+        let first = random_quote("loading");
+        let mut quotes = QuoteCycle::new(first.clone(), true, t0);
+        quotes.advance(t0 + QUOTE_HOLD);
+        assert_ne!(quotes.current().id, first.id);
+        assert!(quotes.outgoing(t0 + QUOTE_HOLD).is_none());
     }
 
     #[test]

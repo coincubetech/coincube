@@ -240,13 +240,17 @@ impl QuoteProvider {
             .copied()
             .unwrap_or_else(|| ALL_QUOTES.first().expect("quotes must not be empty"));
 
-        // Track recency
-        self.recent_ids.push_back(chosen.id.clone());
+        self.remember(chosen);
+        chosen.clone()
+    }
+
+    /// Count a quote picked elsewhere (e.g. by [`random_quote`]) as shown,
+    /// so the next selection does not repeat it.
+    pub fn remember(&mut self, quote: &Quote) {
+        self.recent_ids.push_back(quote.id.clone());
         if self.recent_ids.len() > RECENCY_WINDOW {
             self.recent_ids.pop_front();
         }
-
-        chosen.clone()
     }
 }
 
