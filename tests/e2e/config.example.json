@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "run_id": "testnet4-acceptance-001",
+  "connect_rest": "https://api.coincube.io",
+  "connect_grpc": "https://grpc.coincube.io:443",
+  "native_binary": "/absolute/checkout/target/debug/examples/testnet4_connect",
+  "fixture": {
+    "profile_dir": "/private/qa/tenshu-profile",
+    "psbt_file": "/private/qa/local-signed.psbt",
+    "descriptor_file": "/private/qa/vault.descriptor",
+    "expected_txid": "REPLACE_WITH_UNSIGNED_TRANSACTION_ID",
+    "cube_id": 0,
+    "vault_id": "REPLACE_WITH_TESTNET4_VAULT_ID",
+    "target_key_id": "REPLACE_WITH_SIGNER_KEY_ID",
+    "target_fingerprint": "REPLACE_WITH_FINGERPRINT"
+  },
+  "intent": {
+    "txid": "REPLACE_WITH_UNSIGNED_TRANSACTION_ID",
+    "inputs": ["REPLACE_WITH_FUNDING_TXID:1"],
+    "outputs": [
+      {"address": "REPLACE_WITH_TESTNET4_RECIPIENT", "sats": 10000},
+      {"address": "REPLACE_WITH_VERIFIED_CHANGE", "sats": 989388}
+    ],
+    "maximum_fee_sats": 1000
+  },
+  "core": {"url": "http://127.0.0.1:48332", "cookie_file": "/private/bitcoin/testnet4/.cookie"},
+  "ios": {"minimum_build": 35, "cube_label": "E2E-Testnet4", "pin_file": "/private/qa/keychain-signing.pin"},
+  "cube_creation": true
+}

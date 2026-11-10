@@ -2932,6 +2932,15 @@ pub(crate) fn merge_signatures_pub(
     merge_signatures_for_chain(chain, psbt, signed_psbt)
 }
 
+/// Reuse the application's signature-only merge in the opt-in integration runner.
+#[cfg(feature = "integration-tests")]
+pub fn merge_testnet4_integration_signatures(
+    psbt: &mut Psbt,
+    signed_psbt: &Psbt,
+) -> Result<(), UnifiedFinalizeError> {
+    merge_signatures_for_chain(ChainId::from(Network::Testnet4), psbt, signed_psbt)
+}
+
 /// Sign with the Vault's hot key, keyed on the chain: `SIGHASH_ALL` into
 /// `partial_sigs` on the Bitcoin family (unchanged), unified signatures into
 /// the proprietary records on Bitcoin Blake2b.
