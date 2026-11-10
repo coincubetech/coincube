@@ -349,9 +349,11 @@ class Onboarding:
 
     def attach_key(self, name, cube_name, journal):
         """Use Keychain's attach-and-reseal flow; no credential is required."""
+        if journal.data["artifacts"].get("phone_key_attachment_started"):
+            raise Blocked("KEY_ATTACHMENT_PENDING", "The previous attachment selection must be reconciled remotely; it will not be repeated.")
         self.phone.restore_navigation()
         self.phone.click("Home")
-        self.phone.click_card(name, container=True)
+        self.phone.home_key_card(name, timeout=self.deadline).click()
         self.wait("Signer key")
         control = self.reveal("Attach to Cube")
         control.click()
@@ -359,6 +361,8 @@ class Onboarding:
         # The selection dispatches both binding and public-key resealing.
         # An uncertain response is reconciled remotely, never tapped again.
         control = self.phone.card_control(cube_name)
+        if journal.data["artifacts"].get("phone_key_attachment_started"):
+            raise Blocked("KEY_ATTACHMENT_PENDING", "The attachment was already dispatched; no second Cube selection is allowed.")
         journal.artifact("phone_key_attachment_started", True)
         control.click()
 

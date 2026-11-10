@@ -546,3 +546,97 @@ def test_new_generation_boundary_cannot_repeat_after_creation_dispatch(tmp_path)
         assert calls == ['terminate', 'activate']
     finally:
         journal.close()
+
+
+def home_carousel(monkeypatch, *, target=1, start=0, refreshed=False, ambiguous=False):
+    """Source-backed Home ListView refresh plus horizontal PageView fixture."""
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    state = {'page': start, 'refreshed': refreshed}
+    swipes, clicks = [], []
+    title = 'QA exact replacement'
+    def find(by, predicate):
+        assert 'XCUIElementTypeOther' in predicate
+        if 'label == ' in predicate:
+            assert 'label == "QA exact replacement"' in predicate
+            assert 'BEGINSWITH "QA exact replacement\\n"' in predicate
+            assert 'CONTAINS' not in predicate
+            if ambiguous:
+                return [object(), object()]
+            if state['refreshed'] and state['page'] == target:
+                return [SimpleNamespace(id='exact-card', click=lambda: clicks.append(title))]
+            return []
+        assert 'BEGINSWITH "QA "' in predicate
+        return [SimpleNamespace(id='visible-card-' + str(state['page']))]
+    def execute(command, arguments):
+        assert command == 'mobile: swipe'
+        swipes.append(dict(arguments))
+        direction = arguments['direction']
+        if direction == 'down':
+            state['refreshed'] = True  # Retain current page across the refresh.
+        else:
+            assert arguments['elementId'] == 'visible-card-' + str(state['page'])
+            state['page'] = min(2, state['page'] + 1) if direction == 'left' else max(0, state['page'] - 1)
+    phone = Phone(SimpleNamespace(find_elements=find, execute_script=execute), 38)
+    phone.labels = lambda: HOME | {'Add signer key'}
+    return phone, title, swipes, clicks
+
+
+def test_home_key_card_refreshes_stale_list_and_scrolls_exact_horizontal_card(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch, target=1)
+    control = phone.home_key_card(title)
+    assert clicks == []
+    assert swipes == [{'direction': 'down'}, {'direction': 'left', 'elementId': 'visible-card-0'}]
+    control.click()
+    assert clicks == [title]
+
+
+def test_home_key_card_can_appear_from_refresh_without_scrolling(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch, target=0)
+    phone.home_key_card(title).click()
+    assert swipes == [{'direction': 'down'}]
+    assert clicks == [title]
+
+
+def test_home_key_card_sweeps_back_from_retained_nonzero_page(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch, target=0, start=1)
+    phone.home_key_card(title).click()
+    directions = [gesture['direction'] for gesture in swipes]
+    assert directions == ['down'] + ['left'] * 8 + ['right'] * 2
+    assert clicks == [title]
+
+
+def test_home_key_card_ambiguity_blocks_before_refresh_swipe_or_tap(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch, ambiguous=True)
+    with pytest.raises(Blocked) as error:
+        phone.home_key_card(title)
+    assert error.value.code == 'PHONE_SELECTOR'
+    assert swipes == [] and clicks == []
+
+
+def test_home_key_card_absence_has_hard_gesture_bound(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch, target=-1)
+    with pytest.raises(Blocked) as error:
+        phone.home_key_card(title)
+    assert error.value.code == 'PHONE_CARD_MISSING'
+    assert len(swipes) == 25  # One refresh, eight forward and sixteen reverse gestures.
+    assert clicks == []
+
+
+def test_home_key_card_refuses_route_change_without_another_swipe(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch)
+    states = iter([HOME | {'Add signer key'}, {'Signer key', 'Back'}])
+    phone.labels = lambda: next(states)
+    with pytest.raises(Blocked) as error:
+        phone.home_key_card(title)
+    assert error.value.code == 'PHONE_HOME'
+    assert swipes == [{'direction': 'down'}] and clicks == []
+
+
+def test_home_key_card_refuses_ambiguous_carousel_gesture_scope(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch)
+    find = phone.driver.find_elements
+    phone.driver.find_elements = lambda by, predicate: find(by, predicate) if 'label == ' in predicate else [object(), object()]
+    with pytest.raises(Blocked) as error:
+        phone.home_key_card(title)
+    assert error.value.code == 'PHONE_CAROUSEL'
+    assert swipes == [{'direction': 'down'}] and clicks == []

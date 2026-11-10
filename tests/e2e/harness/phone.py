@@ -219,7 +219,7 @@ class Phone:
     def refresh(self):
         self.driver.execute_script("mobile: swipe", {"direction": "down"})
 
-    def card_control(self, title, timeout=15, *, container=False):
+    def matching_cards(self, title, *, container=False):
         """A known card title may be the first line of a merged AX label."""
         from appium.webdriver.common.appiumby import AppiumBy
         if not title or title.isdigit() or "\n" in title:
@@ -230,9 +230,12 @@ class Phone:
         predicate = ('visible == true AND enabled == true AND '
                      f'{types} AND '
                      f'(label == {exact} OR name == {exact} OR label BEGINSWITH {prefix} OR name BEGINSWITH {prefix})')
+        return self.driver.find_elements(AppiumBy.IOS_PREDICATE, predicate)
+
+    def card_control(self, title, timeout=15, *, container=False):
         until = time.monotonic() + timeout
         while True:
-            elements = self.driver.find_elements(AppiumBy.IOS_PREDICATE, predicate)
+            elements = self.matching_cards(title, container=container)
             if len(elements) == 1:
                 return elements[0]
             # The chooser can expose its title before hardware capability
@@ -241,6 +244,67 @@ class Phone:
             if len(elements) > 1 or time.monotonic() >= until:
                 raise Blocked("PHONE_SELECTOR", "Expected exactly one visible, enabled card with the intended title line.")
             time.sleep(.25)
+
+    def home_key_card(self, title, timeout=15):
+        """Refresh Home's key list and reveal its exact horizontal PageView card."""
+        from appium.webdriver.common.appiumby import AppiumBy
+        until = time.monotonic() + timeout
+
+        def find():
+            labels = self.labels()  # Foreground/auth and public-route guard.
+            if not {"Home", "Cubes", "Settings"} <= labels:
+                raise Blocked("PHONE_HOME", "Signer-card discovery must remain on the public Home route.")
+            candidates = self.matching_cards(title, container=True)
+            if len(candidates) > 1:
+                raise Blocked("PHONE_SELECTOR", "The exact signer title identifies multiple cards; no swipe or tap was sent.")
+            return (candidates[0] if candidates else None), labels
+
+        control, labels = find()
+        if control is not None:
+            return control
+        # home.dart nests the horizontal key PageView in a vertical ListView.
+        # The source-backed header proves we have reached its refresh boundary.
+        for _ in range(4):
+            if "Add signer key" in labels:
+                break
+            if time.monotonic() >= until:
+                raise Blocked("PHONE_CARD_MISSING", "The exact signer card was not revealed within the bounded Home search.")
+            self.driver.execute_script("mobile: swipe", {"direction": "down"})
+            time.sleep(.25)
+            control, labels = find()
+            if control is not None:
+                return control
+        if "Add signer key" not in labels:
+            raise Blocked("PHONE_HOME", "The Home refresh header could not be established without guessing.")
+        self.refresh()  # onRefresh dispatches GetUserKeysEvent in build 38.
+        time.sleep(.5)
+        # A retained PageController may start at a nonzero page. Sweep both
+        # directions with a hard gesture cap; never substitute another title.
+        for direction in ["left"] * 8 + ["right"] * 16:
+            control, labels = find()
+            if control is not None:
+                return control
+            if "Add signer key" not in labels:
+                raise Blocked("PHONE_HOME", "The public Home header disappeared during signer-card discovery.")
+            if time.monotonic() >= until:
+                break
+            # The observed QA cards expose one merged Other container. Scope
+            # a horizontal gesture to it when unique; otherwise use the public
+            # Home gesture surface, guarded above, without selecting any card.
+            cards = self.driver.find_elements(AppiumBy.IOS_PREDICATE,
+                'visible == true AND enabled == true AND type == "XCUIElementTypeOther" AND '
+                '(label BEGINSWITH "QA " OR name BEGINSWITH "QA ")')
+            if len(cards) > 1:
+                raise Blocked("PHONE_CAROUSEL", "The visible signer gesture container is ambiguous; no swipe was sent.")
+            gesture = {"direction": direction}
+            if cards:
+                gesture["elementId"] = cards[0].id
+            self.driver.execute_script("mobile: swipe", gesture)
+            time.sleep(.25)
+        control, _ = find()
+        if control is not None:
+            return control
+        raise Blocked("PHONE_CARD_MISSING", "The exact signer card is absent after a bounded refresh and carousel search.")
 
     def click_card(self, title, timeout=15, *, container=False):
         self.card_control(title, timeout, container=container).click()

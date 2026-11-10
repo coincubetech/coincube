@@ -494,7 +494,7 @@ def test_attach_uses_phone_flow_and_persists_intent_before_cube_selection():
     actions = []
     flow.phone.restore_navigation = lambda: actions.append('home-navigation')
     flow.phone.click = lambda label: actions.append(label)
-    flow.phone.click_card = lambda name, **kw: actions.append((name, kw))
+    flow.phone.home_key_card = lambda name, **kw: SimpleNamespace(click=lambda: actions.append((name, kw)))
     flow.wait = lambda title: actions.append(('wait', title))
     flow.reveal = lambda title: SimpleNamespace(click=lambda: actions.append(title))
     def select():
@@ -506,7 +506,7 @@ def test_attach_uses_phone_flow_and_persists_intent_before_cube_selection():
         return SimpleNamespace(click=select)
     flow.phone.card_control = find
     flow.attach_key('QA synthetic key', 'QA synthetic cube', journal)
-    assert actions == ['home-navigation', 'Home', ('QA synthetic key', {'container': True}),
+    assert actions == ['home-navigation', 'Home', ('QA synthetic key', {'timeout': flow.deadline}),
                        ('wait', 'Signer key'), 'Attach to Cube',
                        ('wait', 'Pick a cube on the testnet4 network.'), 'cube-selected']
 
@@ -718,3 +718,37 @@ def test_generation_continuation_never_replays_or_recreates(tmp_path, mutation):
             assert store.value['key_generation_reservation']['status'] == 'consumed'
     finally:
         journal.close()
+
+
+def test_attachment_dispatch_marker_blocks_before_navigation_or_lookup():
+    flow = controller(Store())
+    journal = SimpleNamespace(data={'artifacts': {'phone_key_attachment_started': True}})
+    flow.phone.restore_navigation = lambda: pytest.fail('An attachment retry must not navigate')
+    with pytest.raises(Blocked) as error:
+        flow.attach_key('QA exact replacement', 'QA exact cube', journal)
+    assert error.value.code == 'KEY_ATTACHMENT_PENDING'
+
+
+def test_uncertain_attachment_selection_is_never_repeated():
+    flow = controller(Store())
+    journal = SimpleNamespace(data={'artifacts': {}})
+    journal.artifact = lambda k, v: journal.data['artifacts'].update({k: v})
+    calls = []
+    flow.phone.restore_navigation = lambda: calls.append('navigation')
+    flow.phone.click = lambda label: calls.append(label)
+    flow.phone.home_key_card = lambda name, **kw: SimpleNamespace(click=lambda: calls.append(name))
+    flow.wait = lambda *args: None
+    flow.reveal = lambda title: SimpleNamespace(click=lambda: calls.append(title))
+    def selection():
+        assert journal.data['artifacts']['phone_key_attachment_started'] is True
+        calls.append('selection')
+        raise RuntimeError('Synthetic lost selection response')
+    flow.phone.card_control = lambda title: SimpleNamespace(click=selection)
+    with pytest.raises(RuntimeError):
+        flow.attach_key('QA exact replacement', 'QA exact cube', journal)
+    original = list(calls)
+    with pytest.raises(Blocked) as error:
+        flow.attach_key('QA exact replacement', 'QA exact cube', journal)
+    assert error.value.code == 'KEY_ATTACHMENT_PENDING'
+    assert calls == original
+    assert calls.count('selection') == 1
