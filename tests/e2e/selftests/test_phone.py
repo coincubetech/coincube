@@ -23,7 +23,7 @@ def scripted_phone(views):
 
 
 @pytest.mark.parametrize("restored,expected", [
-    ([{"Signature Submitted", "Done"}, {"Signing Requests", "Back"}], ["Done", "Back"]),
+    ([{"Signature Submitted", "Done"}], ["Done"]),
     ([{"Transaction approved", "Done"}], ["Done"]),
     ([REVIEW | {"Back"}], ["Back"]),
     ([{"Enter PIN", "Back", "1", "2"}, REVIEW | {"Back"}], ["Back", "Back"]),
@@ -39,10 +39,37 @@ def test_fixture_check_resumes_without_approval_or_pin(restored, expected, monke
 
 def test_unknown_restored_screen_never_guesses_navigation(monkeypatch):
     monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)
-    phone, clicks = scripted_phone([{"Approve", "Try Again", "Done", "Enter PIN"}] * 8)
+    phone, clicks = scripted_phone([{"Approve", "Try Again", "Done", "Enter PIN"}] * 16)
     with pytest.raises(Blocked) as error:
         phone.restore_navigation()
     assert error.value.code == "PHONE_NAVIGATION"
+    assert clicks == []
+
+
+def test_result_then_unlabeled_pending_page_restarts_without_reset(monkeypatch):
+    monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)
+    phone, clicks = scripted_phone([
+        {"Signature Submitted", "Done"}, {"Pending Requests"}, set(),
+        {"Home", "Cubes", "Settings"}, {"Testnet4"}, {"Disposable QA Cube"},
+    ])
+    lifecycle = []
+    phone.driver.terminate_app = lambda bundle: lifecycle.append(("terminate", bundle))
+    phone.driver.activate_app = lambda bundle: lifecycle.append(("activate", bundle))
+    phone.check_fixture("Disposable QA Cube")
+    assert clicks == ["Done", "Settings", "Cubes", "Home"]
+    assert lifecycle == [("terminate", "io.coincube.keychainApp"), ("activate", "io.coincube.keychainApp")]
+
+
+def test_pending_page_restart_is_bounded(monkeypatch):
+    monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)
+    phone, clicks = scripted_phone([{"Pending Requests"}] * 16)
+    lifecycle = []
+    phone.driver.terminate_app = lambda _: lifecycle.append("terminate")
+    phone.driver.activate_app = lambda _: lifecycle.append("activate")
+    with pytest.raises(Blocked) as error:
+        phone.restore_navigation()
+    assert error.value.code == "PHONE_NAVIGATION"
+    assert lifecycle == ["terminate", "activate"]
     assert clicks == []
 
 

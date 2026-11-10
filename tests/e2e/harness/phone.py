@@ -211,7 +211,8 @@ class Phone:
         # noReset preserves the route left by a previous attempt. Only dismiss
         # completed results or navigate back; never approve, reject, retry, or
         # enter credentials while reconciling an interrupted run.
-        for _ in range(8):
+        restarted = False
+        for _ in range(16):
             labels = self.labels()
             if {"Home", "Cubes", "Settings"} <= labels:
                 return
@@ -219,6 +220,14 @@ class Phone:
                 self.click("Done")
             elif "Back" in labels:
                 self.click("Back")
+            elif "Pending Requests" in labels and not restarted:
+                # This page uses an unlabeled IconButton for back. Restart
+                # only this known route instead of guessing coordinates or
+                # tapping an unrelated control. Flutter starts at '/', and
+                # persisted login/keys are retained (noReset).
+                self.driver.terminate_app(BUNDLE)
+                self.driver.activate_app(BUNDLE)
+                restarted = True
             time.sleep(.5)
         raise Blocked("PHONE_NAVIGATION", "Keychain could not safely return to its main navigation; no approval or PIN was retried.")
 
