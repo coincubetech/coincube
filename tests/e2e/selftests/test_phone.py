@@ -22,6 +22,30 @@ def scripted_phone(views):
     return phone, clicks
 
 
+@pytest.mark.parametrize("restored,expected", [
+    ([{"Signature Submitted", "Done"}, {"Signing Requests", "Back"}], ["Done", "Back"]),
+    ([{"Transaction approved", "Done"}], ["Done"]),
+    ([REVIEW | {"Back"}], ["Back"]),
+    ([{"Enter PIN", "Back", "1", "2"}, REVIEW | {"Back"}], ["Back", "Back"]),
+])
+def test_fixture_check_resumes_without_approval_or_pin(restored, expected, monkeypatch):
+    monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)
+    phone, clicks = scripted_phone(restored + [
+        {"Home", "Cubes", "Settings"}, {"Testnet4"}, {"Disposable QA Cube"},
+    ])
+    assert phone.check_fixture("Disposable QA Cube")["cube_visible"] is True
+    assert clicks == expected + ["Settings", "Cubes", "Home"]
+
+
+def test_unknown_restored_screen_never_guesses_navigation(monkeypatch):
+    monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)
+    phone, clicks = scripted_phone([{"Approve", "Try Again", "Done", "Enter PIN"}] * 8)
+    with pytest.raises(Blocked) as error:
+        phone.restore_navigation()
+    assert error.value.code == "PHONE_NAVIGATION"
+    assert clicks == []
+
+
 def test_approval_never_selects_an_unrelated_request(tmp_path):
     phone, clicks = scripted_phone([{"some other request"}])
     journal = Journal(tmp_path / "run", {})

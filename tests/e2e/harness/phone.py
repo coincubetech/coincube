@@ -207,7 +207,23 @@ class Phone:
     def refresh(self):
         self.driver.execute_script("mobile: swipe", {"direction": "down"})
 
+    def restore_navigation(self):
+        # noReset preserves the route left by a previous attempt. Only dismiss
+        # completed results or navigate back; never approve, reject, retry, or
+        # enter credentials while reconciling an interrupted run.
+        for _ in range(8):
+            labels = self.labels()
+            if {"Home", "Cubes", "Settings"} <= labels:
+                return
+            if "Done" in labels and labels & {"Signature Submitted", "Transaction approved"}:
+                self.click("Done")
+            elif "Back" in labels:
+                self.click("Back")
+            time.sleep(.5)
+        raise Blocked("PHONE_NAVIGATION", "Keychain could not safely return to its main navigation; no approval or PIN was retried.")
+
     def check_fixture(self, cube_label):
+        self.restore_navigation()
         self.click("Settings")
         if not any(v.casefold() == "testnet4" for v in self.labels()):
             raise Failed("PHONE_NETWORK", "Keychain Settings must show Testnet4 before running the scenario.")
