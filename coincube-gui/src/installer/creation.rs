@@ -343,7 +343,7 @@ pub(crate) mod tests {
         let _guard = crate::app::session::test_guard();
         let dir = TestDir::new();
         let (mut ctx, _) = fixture(dir.path());
-        let store = Arc::new(Store::default());
+        let store = Arc::new(Store::for_chain(Chain::Regtest));
         let original = input();
         let proposal = store
             .prepare_creation(original.clone(), |input| validate(input).map(|_| ()))
@@ -395,7 +395,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn proposal_reader_validates_before_storage_and_denies_wallet_reads() {
-        let store = Arc::new(Store::default());
+        let store = Arc::new(Store::for_chain(Chain::Regtest));
         let reader = CreationReader::new(store.clone());
         let mut invalid = input();
         invalid.keys.primary[0] = "not-a-public-key".into();

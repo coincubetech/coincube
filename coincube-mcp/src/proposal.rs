@@ -187,14 +187,10 @@ struct State {
 /// A fresh store belongs to each preparation grant. Native code must recheck
 /// that grant and session before offering any proposal-derived action. This
 /// service never authorizes, installs, opens windows, compiles or invents keys.
+/// Construct it with [`Store::for_chain`]; there is no implicit default chain.
 pub struct Store {
     network: Chain,
     state: Mutex<State>,
-}
-impl Default for Store {
-    fn default() -> Self {
-        Self::for_chain(Chain::Regtest)
-    }
 }
 impl Store {
     /// Bind a fresh grant to the exact chain of its trusted target Cube.
