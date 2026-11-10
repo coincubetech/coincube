@@ -237,14 +237,14 @@ mod tests {
                         ))]
                     ));
                 } else {
-                    let probe = inspect(
+                    let probe = capture::inspect(
                         "custom-actions",
                         template_actions(valid, false),
                         (1000, 700),
                         "dark",
                         theme::Theme::dark(),
                     );
-                    assert!(!probe.labels.iter().any(|(label, _)| label == "Customize"));
+                    assert!(!probe.contains("Customize"));
                 }
             }
         }
