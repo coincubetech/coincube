@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Build and sign the native QA helpers; never logs credentials or live data."""
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import plistlib
+import shutil
+import subprocess
+import sys
+
+os.umask(0o077)
+repo = Path(__file__).resolve().parents[2]
+local = repo / "tests/e2e/.local"
+local.mkdir(mode=0o700, exist_ok=True)
+if local.is_symlink() or local.stat().st_mode & 0o077:
+    raise SystemExit("NATIVE_DIRECTORY: helper directory must be private")
+lock = os.open(local / "build.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+fcntl.flock(lock, fcntl.LOCK_EX)
+head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo).decode().strip()
+clean = not subprocess.check_output(["git", "status", "--porcelain"], cwd=repo).strip()
+bundle = local / "Provision.app"
+executable = bundle / "Contents/MacOS/testnet4_provision"
+stamp = local / "native-build.json"
+signing = repo / "target/debug/examples/testnet4_connect"
+if clean and stamp.exists() and executable.exists() and signing.exists():
+    try:
+        saved = json.loads(stamp.read_text())
+        if (saved["head"] == head and saved["provision_sha256"] == hashlib.sha256(executable.read_bytes()).hexdigest()
+                and saved["signing_sha256"] == hashlib.sha256(signing.read_bytes()).hexdigest()):
+            subprocess.run(["codesign", "--verify", "--strict", str(bundle)], check=True, capture_output=True)
+            raise SystemExit(0)
+    except (KeyError, ValueError, subprocess.SubprocessError):
+        pass
+environment = dict(os.environ, BREEZ_API_KEY="testnet4-fixture-placeholder", COINCUBE_API_URL="https://api.coincube.io",
+                   COINCUBE_CONNECT_GRPC_URL="https://grpc.coincube.io:443", CARGO_TARGET_DIR=str(repo / "target"))
+environment["PATH"] = "/opt/homebrew/opt/rustup/bin:" + environment.get("PATH", "")
+identity = "Developer ID Application: COINCUBE TECHNOLOGY LLC (8UVR249AD5)"
+release = repo / "contrib/release/macos"
+try:
+    with (local / "native-build.log").open("wb") as log:
+        def run(args):
+            subprocess.run([str(a) for a in args], cwd=repo, env=environment, check=True,
+                           stdout=log, stderr=log, timeout=1500)
+        run(["cargo", "build", "--locked", "-p", "coincube-gui", "--features", "integration-tests",
+             "--example", "testnet4_connect", "--example", "testnet4_provision"])
+        run([release / "check-profile-authorises-cert.sh", release / "embedded.provisionprofile", "--identity", identity])
+        executable.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with (bundle / "Contents/Info.plist").open("wb") as stream:
+            plistlib.dump({"CFBundleIdentifier": "io.coincube.tenshu", "CFBundleExecutable": "testnet4_provision",
+                          "CFBundleName": "Testnet4Provision", "CFBundlePackageType": "APPL", "CFBundleVersion": "1"}, stream)
+        shutil.copy2(repo / "target/debug/examples/testnet4_provision", executable)
+        shutil.copy2(release / "embedded.provisionprofile", bundle / "Contents/embedded.provisionprofile")
+        run(["codesign", "-f", "-s", identity, "--options", "runtime", "--entitlements", release / "coincube.entitlements", bundle])
+        run(["codesign", "--verify", "--strict", bundle])
+        run([release / "check-profile-authorises-cert.sh", release / "embedded.provisionprofile", "--signed-bundle", bundle])
+        # A valid signature listing alone does not prove that macOS permits
+        # access to the Data Protection Keychain. Exercise both real storage
+        # and the Cube backup/reopen path before permitting live provisioning.
+        tests = subprocess.run(["cargo", "test", "--locked", "-p", "coincube-gui", "--features", "integration-tests",
+                                "--example", "testnet4_provision", "--no-run", "--message-format=json"],
+                               cwd=repo, env=environment, check=True, stdout=subprocess.PIPE, stderr=log, timeout=1500)
+        artifacts = [json.loads(line) for line in tests.stdout.splitlines()]
+        binaries = [v["executable"] for v in artifacts if v.get("reason") == "compiler-artifact"
+                    and v.get("target", {}).get("name") == "testnet4_provision" and v.get("executable")]
+        if len(binaries) != 1:
+            raise ValueError("Missing native test artifact")
+        test_bundle = local / "ProvisionTests.app"
+        shutil.copytree(bundle, test_bundle, dirs_exist_ok=True)
+        shutil.copy2(binaries[0], test_bundle / "Contents/MacOS/testnet4_provision")
+        run(["codesign", "-f", "-s", identity, "--options", "runtime", "--entitlements", release / "coincube.entitlements", test_bundle])
+        run(["codesign", "--verify", "--strict", test_bundle])
+        checked = subprocess.run([str(test_bundle / "Contents/MacOS/testnet4_provision"), "--ignored", "--test-threads=1"],
+                                 cwd=repo, env=environment, check=True, stdout=subprocess.PIPE, stderr=log, timeout=180)
+        log.write(checked.stdout)
+        for name in (b"signed_keychain_roundtrip_and_compare_and_swap", b"run_owned_cube_uses_real_backup_and_reopens_on_resume"):
+            if name + b" ... ok" not in checked.stdout:
+                raise ValueError("Required signed test did not pass")
+        if clean:
+            stamp.write_text(json.dumps({"head": head, "provision_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+                                         "signing_sha256": hashlib.sha256(signing.read_bytes()).hexdigest()}))
+except (OSError, ValueError, subprocess.SubprocessError):
+    print("NATIVE_BUILD: build/signing failed; private diagnostic log retained", file=sys.stderr)
+    raise SystemExit(2)

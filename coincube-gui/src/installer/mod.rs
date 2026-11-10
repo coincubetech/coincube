@@ -1,5 +1,16 @@
 mod claim;
 pub(crate) mod connect_vault;
+
+#[cfg(feature = "integration-tests")]
+pub mod integration {
+    pub use super::connect_vault::{create_connect_vault, ConnectVaultError, ConnectVaultOutcome};
+    pub use super::context::{ConnectVaultMemberPayload, Context, RemoteBackend};
+    pub use super::descriptor::PathKind;
+
+    pub fn testnet4_esplora_config(jwt: &str) -> coincubed::config::EsploraConfig {
+        super::connect_esplora_config(super::bitcoin::Network::Testnet4, jwt)
+    }
+}
 mod context;
 mod decrypt;
 mod descriptor;

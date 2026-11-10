@@ -169,6 +169,16 @@ def test_collect_before_phone_avoids_repeat_approval(runner, monkeypatch):
     runner.stage_sign()
 
 
+def test_approval_resume_keeps_polling_delayed_signature(runner, monkeypatch):
+    runner.journal.artifact("approval_started", True)
+    responses = iter([False, False, True])
+    runner.collect_once = lambda: next(responses)
+    monkeypatch.setattr("harness.runner.attach", lambda *args: pytest.fail("must not retry approval"))
+    monkeypatch.setattr("harness.runner.time.sleep", lambda _: None)
+    runner.stage_sign()
+    runner.stage_collect()
+
+
 def test_stage_dependency_failure_is_not_success(runner):
     with pytest.raises(Failed, match="order"):
         runner.run("broadcast")

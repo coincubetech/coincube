@@ -1,4 +1,5 @@
 import sys
+import json
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 from harness.runner import Runner, load_config
 from harness.state import Blocked, Failed
+from harness.state import private_read
+from harness.provisioning import FreshRunner, validate_config
 
 
 def pytest_addoption(parser):
@@ -35,7 +38,11 @@ def acceptance(request):
     if getattr(request.config.option, "numprocesses", None):
         pytest.fail("The live suite requires one serial worker; do not use pytest-xdist.", pytrace=False)
     try:
-        runner = Runner(load_config(path), directory, deadline=deadline, confirm=request.config.getoption("--qa-confirm"))
+        config = json.loads(private_read(path))
+        if config.get("version") == 2:
+            runner = FreshRunner(validate_config(config), directory, deadline=deadline, confirm=request.config.getoption("--qa-confirm"))
+        else:
+            runner = Runner(load_config(path), directory, deadline=deadline, confirm=request.config.getoption("--qa-confirm"))
     except Failed as error:
         pytest.fail(error.code + ": " + str(error), pytrace=False)
     except Blocked as error:
@@ -44,8 +51,10 @@ def acceptance(request):
     except Exception:
         request.config._testnet4_blocked = True
         pytest.skip("FIXTURE_CONFIG: private fixture configuration could not be loaded.")
-    yield runner
-    runner.journal.close()
+    try:
+        yield runner
+    finally:
+        runner.close()
 
 
 @pytest.hookimpl(trylast=True)

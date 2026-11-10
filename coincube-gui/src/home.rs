@@ -48,6 +48,9 @@ use crate::{
 };
 use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
 
+#[cfg(feature = "integration-tests")]
+pub mod integration;
+
 /// The firmware advisory whose one-time incident notice this install still
 /// owes the user, if any.
 ///

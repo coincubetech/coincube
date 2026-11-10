@@ -128,3 +128,10 @@ def test_real_banner_and_pin_flow_use_exact_labels(tmp_path, monkeypatch):
         assert "987654" not in journal.path.read_text()
     finally:
         journal.close()
+
+
+def test_key_creation_success_returns_home_without_retrying_creation(monkeypatch):
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    phone, clicks = scripted_phone([{'Signer key created', 'Back to home'}, {'Home', 'Cubes', 'Settings'}])
+    phone.restore_navigation()
+    assert clicks == ['Back to home']

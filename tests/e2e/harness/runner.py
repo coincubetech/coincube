@@ -65,6 +65,7 @@ def load_config(path):
 
 
 class Runner:
+    stages = STAGES
     def __init__(self, config, directory, *, deadline=90, confirm=False):
         self.config = config
         self.deadline = deadline
@@ -94,7 +95,7 @@ class Runner:
     def run(self, stage):
         if self.stop:
             raise Blocked("DEPENDENCY_BLOCKED", "An earlier stage did not complete in this invocation.")
-        preceding = set(STAGES[:STAGES.index(stage)])
+        preceding = set(self.stages[:self.stages.index(stage)])
         if not preceding <= self.completed:
             raise Failed("STAGE_ORDER", "Stages must run in the suite's declared order.")
         try:
@@ -113,6 +114,9 @@ class Runner:
     def stage_chain(self):
         self.core.chain()
         self.journal.artifact("chain", "bitcoin-testnet4")
+
+    def close(self):
+        self.journal.close()
 
     def stage_cube_creation(self):
         if not self.config["cube_creation"]:
@@ -192,6 +196,11 @@ class Runner:
 
     def stage_sign(self):
         if self.artifacts.get("already_broadcast") or self.collect_once():
+            return
+        if self.artifacts.get("approval_started"):
+            # An approval may have reached the phone even when its response
+            # was lost. Let collect keep polling across reruns; never enter
+            # the approval UI or PIN a second time.
             return
         with attach(self.config["ios"]) as phone:
             phone.approve(self.request_id, self.intent, self.artifacts["fee_sats"],

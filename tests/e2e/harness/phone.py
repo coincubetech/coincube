@@ -1,6 +1,7 @@
 """Appium/XCUITest over a USB-only WDA tunnel. No screenshots or raw UI logs."""
 from contextlib import contextmanager
 import json
+import hashlib
 import fcntl
 import os
 from pathlib import Path
@@ -160,12 +161,16 @@ def attach(config):
             "appium:webDriverAgentUrl": wda_url, "appium:noReset": True,
             "appium:autoLaunch": False, "appium:forceAppLaunch": False,
             "appium:shouldTerminateApp": False, "appium:skipLogCapture": True,
-            "appium:showXcodeLog": False, "appium:newCommandTimeout": 120,
+            # Funding/confirmation and native provisioning can leave the UI
+            # idle longer than a delivery timeout while this run owns USB.
+            "appium:showXcodeLog": False, "appium:newCommandTimeout": 7200,
         })
         client_config = AppiumClientConfig(remote_server_addr=url, timeout=30)
         driver = webdriver.Remote(options=options, client_config=client_config)
         driver.activate_app(BUNDLE)
-        yield Phone(driver, build)
+        phone = Phone(driver, build)
+        phone.device_digest = hashlib.sha256(device["hardwareProperties"]["udid"].encode()).hexdigest()
+        yield phone
     except Blocked:
         raise
     except Exception:
@@ -218,6 +223,10 @@ class Phone:
                 return
             if "Done" in labels and labels & {"Signature Submitted", "Transaction approved"}:
                 self.click("Done")
+            elif {"Signer key created", "Back to home"} <= labels:
+                self.click("Back to home")
+            elif "Go to home" in labels:
+                self.click("Go to home")
             elif "Back" in labels:
                 self.click("Back")
             elif "Pending Requests" in labels and not restarted:
@@ -231,18 +240,22 @@ class Phone:
             time.sleep(.5)
         raise Blocked("PHONE_NAVIGATION", "Keychain could not safely return to its main navigation; no approval or PIN was retried.")
 
-    def check_fixture(self, cube_label):
+    def check_fixture(self, cube_label, timeout=0):
         self.restore_navigation()
         self.click("Settings")
         if not any(v.casefold() == "testnet4" for v in self.labels()):
             raise Failed("PHONE_NETWORK", "Keychain Settings must show Testnet4 before running the scenario.")
         self.click("Cubes")
-        if cube_label not in self.labels():
-            raise Blocked("PHONE_CUBE", "The configured fixture Cube is not visible on the phone through Connect.")
+        until = time.monotonic() + timeout
+        while cube_label not in self.labels():
+            if time.monotonic() >= until:
+                raise Blocked("PHONE_CUBE", "The run's Cube is not visible on the phone through Connect.")
+            self.refresh()
+            time.sleep(1)
         self.click("Home")
         return {"build": self.build, "network": "testnet4", "cube_visible": True}
 
-    def approve(self, request_id, intent, fee_sats, pin_file, journal, timeout):
+    def approve(self, request_id, intent, fee_sats, pin_file, journal, timeout, *, pin_provider=None):
         note = "Testnet4 QA " + request_id
         until = time.monotonic() + timeout
         self.click("Home")
@@ -284,9 +297,9 @@ class Phone:
             if "Signature Submitted" in labels or "Transaction approved" in labels:
                 return
             if "Enter PIN" in labels and not pin_entered:
-                if not pin_file:
+                if not pin_file and pin_provider is None:
                     raise Blocked("SIGNER_PIN", "This fixture needs its existing disposable signing PIN file for unattended approval.")
-                pin = private_read(pin_file).decode().strip()
+                pin = pin_provider() if pin_provider else private_read(pin_file).decode().strip()
                 if len(pin) != 6 or not pin.isascii() or not pin.isdigit():
                     raise Blocked("SIGNER_PIN", "The private fixture signing PIN must contain six digits.")
                 for digit in pin:
