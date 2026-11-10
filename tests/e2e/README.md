@@ -78,8 +78,8 @@ desktop session from macOS Keychain and performs supported device registration.
 namespace. Both API endpoint values always remain pinned to production. `ios.minimum_build` must identify the installed
 reviewed Keychain build. Fresh onboarding also requires accessibility forwarding
 through Keychain's screenshot-protection wrapper: build 36 hides the recovery
-controls from XCTest, and cannot complete this flow. Build 37 is the candidate
-for that fix; its number alone is not source or acceptance evidence.
+controls from XCTest, and cannot complete this flow. The example selects build
+37, which includes that fix; its number alone is not source or acceptance evidence.
 `ios.xctestrun` can identify an already-signed WebDriverAgent
 runner so the suite starts it automatically when needed.
 

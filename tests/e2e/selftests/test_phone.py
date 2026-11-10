@@ -27,6 +27,7 @@ def scripted_phone(views):
     ([{"Transaction approved", "Done"}], ["Done"]),
     ([REVIEW | {"Back"}], ["Back"]),
     ([{"Enter PIN", "Back", "1", "2"}, REVIEW | {"Back"}], ["Back", "Back"]),
+    ([{"Create new signer key", "Create Key", "Cancel", "Home", "Cubes", "Settings"}], ["Cancel"]),
 ])
 def test_fixture_check_resumes_without_approval_or_pin(restored, expected, monkeypatch):
     monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)

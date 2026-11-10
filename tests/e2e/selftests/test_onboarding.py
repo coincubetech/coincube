@@ -190,6 +190,98 @@ def test_uncommitted_generation_requires_the_complete_fresh_chooser():
     assert store.writes == []
 
 
+class InputField:
+    def __init__(self, kind='XCUIElementTypeTextField', descendants=()):
+        self.kind, self.descendants, self.actions = kind, list(descendants), []
+
+    def get_attribute(self, name):
+        assert name == 'type'
+        return self.kind
+
+    def find_elements(self, by, query):
+        assert by == 'xpath'
+        assert query == 'descendant::XCUIElementTypeTextField | descendant::XCUIElementTypeSecureTextField'
+        return self.descendants
+
+    def click(self):
+        self.actions.append('click')
+
+    def clear(self):
+        self.actions.append('clear')
+
+    def send_keys(self, value):
+        self.actions.append(('input', value))
+
+
+def field_controller(candidates):
+    flow = controller(Store())
+    flow.phone.driver = SimpleNamespace(find_elements=lambda *args: candidates)
+    return flow
+
+
+def test_protection_wrapper_is_excluded_from_three_recovery_fields():
+    children = [InputField() for _ in range(3)]
+    wrapper = InputField('XCUIElementTypeSecureTextField', children)
+    assert field_controller([wrapper, *children]).fields() == children
+    assert wrapper.actions == []
+
+
+def test_protection_wrapper_never_receives_pin_but_real_secure_leaf_does():
+    leaf = InputField('XCUIElementTypeSecureTextField')
+    wrapper = InputField('XCUIElementTypeSecureTextField', [leaf])
+    field_controller([wrapper, leaf]).fill_one('123456')
+    assert wrapper.actions == []
+    assert leaf.actions == ['click', 'clear', ('input', '123456')]
+
+
+def test_hidden_or_disabled_descendant_does_not_make_wrapper_editable():
+    # Only the wrapper passed the top-level visible+enabled filter; its hidden
+    # input still identifies it as a container and must exclude it.
+    wrapper = InputField('XCUIElementTypeSecureTextField', [InputField()])
+    with pytest.raises(Blocked) as error:
+        field_controller([wrapper]).fill_one('123456')
+    assert error.value.code == 'PHONE_FIELD'
+    assert wrapper.actions == []
+
+
+def test_multiple_real_fields_never_fall_back_to_first_input():
+    children = [InputField(), InputField('XCUIElementTypeSecureTextField')]
+    wrapper = InputField('XCUIElementTypeSecureTextField', children)
+    with pytest.raises(Blocked) as error:
+        field_controller([wrapper, *children]).fill_one('123456')
+    assert error.value.code == 'PHONE_FIELD'
+    assert all(not field.actions for field in [wrapper, *children])
+
+
+def test_signer_creation_follows_normal_confirmation_sheet_before_name_and_pin():
+    store = Store({'identity': 'account:device', 'pin': '123456', 'verified': True})
+    view, clicks, filled, artifacts = [{'Home', 'Add signer key'}], [], [], {}
+    def click(label):
+        clicks.append(label)
+        if label == 'Add signer key':
+            view[0] = {'Create new signer key', 'Create Key', 'Cancel'}
+        elif label == 'Create Key':
+            view[0] = {'Name your signer key'}
+        elif label == 'Create signer key':
+            assert artifacts['phone_key_creation_started'] is True
+            assert filled == ['QA run']
+            view[0] = {'Enter your PIN'}
+        elif label == 'Unlock':
+            assert artifacts['phone_key_pin_entered'] is True
+            assert store.value['pending_attempt'] == 'key:QA run'
+            assert filled == ['QA run', '123456']
+            view[0] = {'Signer key created', 'Back to home'}
+        elif label == 'Back to home':
+            view[0] = {'Home'}
+    phone = SimpleNamespace(device_digest='device', labels=lambda: view[0],
+                            restore_navigation=lambda: None, click=click)
+    flow = Onboarding(phone, store, 'account', 1)
+    flow.fill_one = filled.append
+    journal = SimpleNamespace(data={'artifacts': artifacts}, artifact=lambda key, value: artifacts.update({key: value}))
+    flow.create_key('QA run', '123456', journal)
+    assert clicks == ['Home', 'Add signer key', 'Create Key', 'Create signer key', 'Unlock', 'Back to home']
+
+
 def test_encrypted_secret_store_uses_cas_and_verifies_readback():
     record = {'value': None, 'sha256': None}
     calls = []

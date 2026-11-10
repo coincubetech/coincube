@@ -47,8 +47,15 @@ class Onboarding:
 
     def fields(self):
         from appium.webdriver.common.appiumby import AppiumBy
-        return self.phone.driver.find_elements(AppiumBy.IOS_PREDICATE,
+        candidates = self.phone.driver.find_elements(AppiumBy.IOS_PREDICATE,
             'visible == true AND enabled == true AND (type == "XCUIElementTypeTextField" OR type == "XCUIElementTypeSecureTextField")')
+        # iOS screenshot protection wraps Flutter in a secure text field. Its
+        # forwarded AX children are editable; the container itself is not.
+        # Exclude only secure ancestors, never choose the first remaining field.
+        return [field for field in candidates
+                if field.get_attribute("type") != "XCUIElementTypeSecureTextField"
+                or not field.find_elements(AppiumBy.XPATH,
+                    'descendant::XCUIElementTypeTextField | descendant::XCUIElementTypeSecureTextField')]
 
     def fill_one(self, value):
         fields = self.fields()
@@ -203,7 +210,10 @@ class Onboarding:
             self.phone.driver.execute_script("mobile: swipe", {"direction": "up"})
             time.sleep(.3)
         self.phone.click("Add signer key")
-        self.wait("Name your signer key")
+        labels = self.wait("Create new signer key", "Name your signer key")
+        if "Create new signer key" in labels:
+            self.phone.click("Create Key")
+            self.wait("Name your signer key")
         self.fill_one(name)
         journal.artifact("phone_key_creation_started", True)
         self.phone.click("Create signer key")

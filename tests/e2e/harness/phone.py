@@ -233,9 +233,11 @@ class Phone:
         restarted = False
         for _ in range(16):
             labels = self.labels()
-            if {"Home", "Cubes", "Settings"} <= labels:
+            if {"Create new signer key", "Create Key", "Cancel"} <= labels:
+                self.click("Cancel")
+            elif {"Home", "Cubes", "Settings"} <= labels:
                 return
-            if "Done" in labels and labels & {"Signature Submitted", "Transaction approved"}:
+            elif "Done" in labels and labels & {"Signature Submitted", "Transaction approved"}:
                 self.click("Done")
             elif {"Signer key created", "Back to home"} <= labels:
                 self.click("Back to home")
