@@ -1295,7 +1295,16 @@ async fn handle_prepare_send(
     params: coincube_spark_protocol::PrepareSendParams,
     state: Arc<ServerState>,
 ) -> Response {
-    match prepare_send(id, params.input, params.amount_sat, None, &state).await {
+    match prepare_send(
+        id,
+        params.input,
+        params.amount_sat,
+        None,
+        params.fees_included,
+        &state,
+    )
+    .await
+    {
         Ok((prepare, _)) => Response::ok(id, OkPayload::PrepareSend(prepare)),
         Err(response) => response,
     }
@@ -1328,7 +1337,16 @@ async fn handle_prepare_send_from(
             return prepare_usdb_invoice(id, params.input, &sdk, &state).await;
         }
     }
-    match prepare_send(id, params.input, params.amount_sat, Some(pay_from), &state).await {
+    match prepare_send(
+        id,
+        params.input,
+        params.amount_sat,
+        Some(pay_from),
+        false,
+        &state,
+    )
+    .await
+    {
         Ok((prepare, conversion)) => Response::ok(
             id,
             OkPayload::PrepareSendFrom(PrepareSendFromOk {
@@ -1522,6 +1540,7 @@ async fn prepare_send(
     input: String,
     amount_sat: Option<u64>,
     pay_from_param: Option<WalletAsset>,
+    fees_included: bool,
     state: &ServerState,
 ) -> Result<(PrepareSendOk, Option<Box<ConversionQuote>>), Response> {
     let pay_from = pay_from_param.unwrap_or(WalletAsset::Bitcoin);
@@ -1542,27 +1561,35 @@ async fn prepare_send(
     // The cross-chain path uses the other variant — see `prepare_cross_chain`.
     let amount = amount_sat.map(|a| a as u128);
     let speed = selected_onchain_speed();
-    let prepared = prepare_funded(
-        pay_from,
-        amount_sat,
-        |conversion_options| {
-            sdk.sdk.prepare_send_payment(PrepareSendPaymentRequest {
-                payment_request: PaymentRequest::Input {
-                    input: input.clone(),
-                },
-                amount,
-                token_identifier: None,
-                conversion_options,
-                fee_policy: None,
-            })
-        },
-        |needed| usdb_shortfall_conversion(&sdk, needed),
-        |p: &PrepareSendPaymentResponse| {
-            clamp_u128_to_u64(p.amount).saturating_add(fee_and_method(&p.payment_method, &speed).0)
-        },
-        |p: &PrepareSendPaymentResponse| p.conversion_estimate.is_some(),
-    )
-    .await;
+    let prepare = |conversion_options| {
+        sdk.sdk.prepare_send_payment(PrepareSendPaymentRequest {
+            payment_request: PaymentRequest::Input {
+                input: input.clone(),
+            },
+            amount,
+            token_identifier: None,
+            conversion_options,
+            fee_policy: fees_included.then_some(breez_sdk_spark::FeePolicy::FeesIncluded),
+        })
+    };
+    // A fees-included send drains the bitcoin balance it names; it never tops
+    // itself up from USDB, so it skips the shortfall fallback.
+    let prepared = if fees_included {
+        prepare(None).await.map_err(PrepareError::Sdk)
+    } else {
+        prepare_funded(
+            pay_from,
+            amount_sat,
+            prepare,
+            |needed| usdb_shortfall_conversion(&sdk, needed),
+            |p: &PrepareSendPaymentResponse| {
+                clamp_u128_to_u64(p.amount)
+                    .saturating_add(fee_and_method(&p.payment_method, &speed).0)
+            },
+            |p: &PrepareSendPaymentResponse| p.conversion_estimate.is_some(),
+        )
+        .await
+    };
 
     match prepared {
         Ok(prepare) => {

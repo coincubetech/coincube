@@ -526,8 +526,31 @@ impl SparkClient {
         input: String,
         amount_sat: Option<u64>,
     ) -> Result<PrepareSendOk, SparkClientError> {
+        self.prepare_send_with(input, amount_sat, false).await
+    }
+
+    /// [`Self::prepare_send`] with the fee taken out of `amount_sat`: the
+    /// wallet spends exactly `amount_sat`, so the whole balance drains it.
+    pub async fn prepare_send_fees_included(
+        &self,
+        input: String,
+        amount_sat: u64,
+    ) -> Result<PrepareSendOk, SparkClientError> {
+        self.prepare_send_with(input, Some(amount_sat), true).await
+    }
+
+    async fn prepare_send_with(
+        &self,
+        input: String,
+        amount_sat: Option<u64>,
+        fees_included: bool,
+    ) -> Result<PrepareSendOk, SparkClientError> {
         match self
-            .request(Method::PrepareSend(PrepareSendParams { input, amount_sat }))
+            .request(Method::PrepareSend(PrepareSendParams {
+                input,
+                amount_sat,
+                fees_included,
+            }))
             .await?
         {
             OkPayload::PrepareSend(prepare) => Ok(prepare),

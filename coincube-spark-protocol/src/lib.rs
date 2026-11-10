@@ -428,6 +428,12 @@ pub struct PrepareSendParams {
     /// the bridge up-casts and validates.
     #[serde(default)]
     pub amount_sat: Option<u64>,
+    /// Take the fee out of `amount_sat` instead of adding it on top, so the
+    /// wallet spends exactly `amount_sat`: pass the whole balance to drain it.
+    /// The recipient gets `amount_sat - fee_sat`. Omitted on the wire when
+    /// false, so older bridges see the request they always did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fees_included: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2374,11 +2380,26 @@ mod tests {
                 Method::PrepareSend(PrepareSendParams {
                     input: "lnbc1".into(),
                     amount_sat: Some(15_000),
+                    fees_included: false,
                 })
             ),
             json!({
                 "type": "request", "id": 9, "method": "prepare_send",
                 "params": { "input": "lnbc1", "amount_sat": 15000 }
+            })
+        );
+        assert_eq!(
+            request_json(
+                10,
+                Method::PrepareSend(PrepareSendParams {
+                    input: "bc1q".into(),
+                    amount_sat: Some(15_000),
+                    fees_included: true,
+                })
+            ),
+            json!({
+                "type": "request", "id": 10, "method": "prepare_send",
+                "params": { "input": "bc1q", "amount_sat": 15000, "fees_included": true }
             })
         );
         assert_eq!(
