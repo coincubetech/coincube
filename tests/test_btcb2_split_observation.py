@@ -34,7 +34,8 @@ import tempfile
 import threading
 import time
 from decimal import Decimal
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from test_framework.http_bridge import CheckedThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import urlopen
@@ -273,6 +274,7 @@ class Bridge:
                 )
 
             def do_GET(self):
+                """Serve indexed chain data while retaining unexpected test failures."""
                 try:
                     if self.path == "/api/v1/connect/networks/bitcoin-blake2b/anchor":
                         return self.anchor()
@@ -298,11 +300,12 @@ class Bridge:
                             self.reply(response.status, body, content_type)
                     except HTTPError as error:
                         self.reply(error.code, error.read(262145))
-                except Exception as error:
+                except (OSError, ValueError, KeyError, TypeError) as error:
                     owner.errors.append(repr(error))
                     self.reply(503, {"error": "bridge-refused"})
 
             def do_POST(self):
+                """Proxy transaction submissions while retaining unexpected test failures."""
                 try:
                     node, _, suffix, network = self.route()
                     owner.posts.append((network, suffix))
@@ -344,11 +347,11 @@ class Bridge:
                             },
                         },
                     )
-                except Exception as error:
+                except (OSError, ValueError, KeyError, TypeError) as error:
                     owner.errors.append(repr(error))
                     self.reply(503, {"error": "bridge-refused"})
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = CheckedThreadingHTTPServer(("127.0.0.1", 0), Handler, self.errors)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.url = f"http://127.0.0.1:{self.server.server_port}"
@@ -357,6 +360,7 @@ class Bridge:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+        self.server.assert_no_errors()
 
 
 class SplitServiceChains(TwoChainRegtest):
