@@ -10,7 +10,8 @@ examples/ and src/. Every one is byte-identical to that crate except
 `src/v2/client.rs` (see "Source patch" below); SHA-256 hashes are
 recorded in UPSTREAM_SHA256.json and enforced by coincube-gui's `vendor_integrity`
 test, which also fails on any unpinned file anywhere in vendor/branta (other than
-this file, UPSTREAM_SHA256.json, Cargo.toml and a transient Cargo.lock). The crate's tests/,
+this file, UPSTREAM_SHA256.json, Cargo.toml, and a transient Cargo.lock or target/
+from running the SDK's own suite). The crate's tests/,
 Cargo.lock and CI files are not vendored. Do not format or edit these source files
 with wallet changes.
 
@@ -112,4 +113,5 @@ Decrypt-and-bind behavior relies on upstream's own unit suite (`src/v2/service.r
 `cargo test --manifest-path vendor/branta/Cargo.toml --lib`. CI runs it in the
 `branta_vendor_tests` job, seeded with the root Cargo.lock so shared dependencies
 use the reviewed versions. Delete the `vendor/branta/Cargo.lock` a local run
-creates; it is not vendored.
+creates (it is not vendored), or point `CARGO_TARGET_DIR` elsewhere to avoid a
+`vendor/branta/target/`; both are ignored by git and by `vendor_integrity`.

@@ -1116,14 +1116,17 @@ mod vendor_integrity {
         }
         // Every vendored file is pinned or one of Tenshu's own records, so a new unreviewed
         // file (a build.rs, tests/ or benches/ that Cargo would auto-detect) cannot slip in.
-        // A Cargo.lock left by running the SDK's own suite is not compiled and is ignored.
+        // A Cargo.lock or target/ left by running the SDK's own suite (the vendored crate is
+        // its own Cargo root) is not compiled into the wallet and is ignored.
         let own = ["Cargo.toml", "TENSHU_PROVENANCE.md", "UPSTREAM_SHA256.json"];
         let mut pending = vec![root.clone()];
         while let Some(dir) = pending.pop() {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
-                    pending.push(path);
+                    if path != root.join("target") {
+                        pending.push(path);
+                    }
                     continue;
                 }
                 let relative = path.strip_prefix(&root).unwrap().to_str().unwrap();
