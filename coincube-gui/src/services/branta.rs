@@ -2,8 +2,8 @@
 //! SDK errors, `unknown` and `incomplete` are silent; only a `tampered` verdict blocks a send.
 use async_trait::async_trait;
 use branta::{
-    BrantaApiOptions, BrantaEnvironment, BrantaError, BrantaService, DestinationType,
-    VerifyResult, VerifyStatus,
+    BrantaApiOptions, BrantaEnvironment, BrantaError, BrantaService, DestinationType, VerifyResult,
+    VerifyStatus,
 };
 use coincube_core::miniscript::bitcoin::{Address, Network};
 use iced::{
@@ -161,9 +161,7 @@ impl LookupRequest {
         // The SDK sends branta_id as supplied. Ensure this is an encrypted
         // envelope, not a plaintext address placed in the ID field.
         use base64::Engine;
-        let envelope = base64::engine::general_purpose::STANDARD
-            .decode(id?)
-            .ok()?;
+        let envelope = base64::engine::general_purpose::STANDARD.decode(id?).ok()?;
         if envelope.len() < 28 {
             return None;
         }
@@ -1078,10 +1076,18 @@ mod vendor_integrity {
         let files = hashes["files"].as_object().unwrap();
         let patched = hashes["patched_files"].as_object().unwrap();
         for (path, expected) in files {
-            assert_eq!(sha(path), expected.as_str().unwrap(), "unreviewed SDK change: {path}");
+            assert_eq!(
+                sha(path),
+                expected.as_str().unwrap(),
+                "unreviewed SDK change: {path}"
+            );
         }
         for (path, adapter) in patched {
-            assert!(!files.contains_key(path), "{path} listed as both upstream and patched");
+            assert!(
+                !files.contains_key(path),
+                "{} listed as both upstream and patched",
+                path
+            );
             assert_eq!(
                 sha(path),
                 adapter["patched_sha256"].as_str().unwrap(),
@@ -1101,7 +1107,8 @@ mod vendor_integrity {
                 let relative = relative.replace('\\', "/");
                 assert!(
                     files.contains_key(&relative) || patched.contains_key(&relative),
-                    "unpinned SDK file: {relative}"
+                    "unpinned SDK file: {}",
+                    relative
                 );
             }
         }
