@@ -248,7 +248,7 @@ fn concurrent_retries_still_have_one_bounded_draft_and_revocation_is_final() {
     assert_eq!(store.prepare(input()), Err(Error::AccessDenied));
 }
 
-#[cfg(feature = "adapter")]
+#[cfg(all(feature = "adapter", feature = "native-proposals"))]
 #[tokio::test]
 async fn sdk_proposals_are_state_changing_strict_and_do_not_upgrade_read_access() {
     use coincube_mcp::adapter::{Adapter, tools};
@@ -305,7 +305,7 @@ async fn sdk_proposals_are_state_changing_strict_and_do_not_upgrade_read_access(
     );
 }
 
-#[cfg(feature = "adapter")]
+#[cfg(all(feature = "adapter", feature = "native-proposals"))]
 #[tokio::test]
 async fn actual_stdio_proposal_is_not_a_wallet_and_cannot_approve_itself() {
     use serde_json::{Value, json};

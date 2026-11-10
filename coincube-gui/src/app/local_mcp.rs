@@ -13,6 +13,8 @@ use iced::widget::{button, checkbox, column, text_input};
 use std::sync::Arc;
 #[cfg(any(unix, windows))]
 use std::time::Duration;
+#[cfg(all(test, any(unix, windows)))]
+mod health_tests;
 mod pairings;
 mod presentation;
 #[cfg(feature = "mcp-transactions")]
@@ -1074,6 +1076,43 @@ impl wire::Reader for VaultReader {
 }
 #[cfg(any(unix, windows))]
 impl VaultReader {
+    /// Coarse health only: never export backend messages, heights or scan times.
+    fn sync_state(&self, info: &crate::daemon::model::GetInfoResult) -> &'static str {
+        if info.refused_reorg_depth.is_some()
+            || info.chain_divergence
+            || !info.sync.is_finite()
+            || !(0.0..=1.0).contains(&info.sync)
+        {
+            return "sync_failing";
+        }
+        match super::wallet::sync_status(
+            self.daemon.backend(),
+            info.block_height,
+            info.sync,
+            info.last_poll_timestamp,
+            self.last_poll_at_startup,
+            &info.history_sync,
+        ) {
+            super::wallet::SyncStatus::SyncFailing { .. } => "sync_failing",
+            super::wallet::SyncStatus::Synced if info.rescan_progress.is_none() => "synced",
+            _ => "syncing",
+        }
+    }
+
+    async fn wallet_info(&self) -> Result<crate::daemon::model::GetInfoResult, wire::Error> {
+        let info = self
+            .daemon
+            .get_info()
+            .await
+            .map_err(|_| wire::Error::Unavailable)?;
+        if info.descriptors.main.as_vault() != Some(&self.descriptor)
+            || info.chain_id != Some(self.chain)
+        {
+            return Err(wire::Error::Unavailable);
+        }
+        Ok(info)
+    }
+
     /// Validate the opaque wallet scope and daemon identity before projecting public data.
     async fn read_wallet(&self, request: wire::Request) -> Result<wire::Response, wire::Error> {
         if matches!(
@@ -1094,15 +1133,7 @@ impl VaultReader {
             return Err(wire::Error::InvalidInput);
         }
         let descriptor = &self.descriptor;
-        let info = self
-            .daemon
-            .get_info()
-            .await
-            .map_err(|_| wire::Error::Unavailable)?;
-        if info.descriptors.main.as_vault() != Some(descriptor) || info.chain_id != Some(self.chain)
-        {
-            return Err(wire::Error::Unavailable);
-        }
+        let info = self.wallet_info().await?;
         match request {
             wire::Request::PrepareProposal(_)
             | wire::Request::PrepareCreation(_)
@@ -1123,18 +1154,16 @@ impl VaultReader {
                     .await
                     .map_err(|_| wire::Error::Unavailable)?
                     .coins;
-                let sync = super::wallet::sync_status(
-                    self.daemon.backend(),
-                    info.block_height,
-                    info.sync,
-                    info.last_poll_timestamp,
-                    self.last_poll_at_startup,
-                    &info.history_sync,
-                );
-                let sync_state = match sync {
-                    super::wallet::SyncStatus::Synced => "synced",
-                    super::wallet::SyncStatus::SyncFailing { .. } => "sync_failing",
-                    _ => "syncing",
+                // Either endpoint of the read may be unhealthy; a scan finishing
+                // during the read must not make older coins look complete.
+                let after = self.wallet_info().await?;
+                let states = [self.sync_state(&info), self.sync_state(&after)];
+                let sync_state = if states.contains(&"sync_failing") {
+                    "sync_failing"
+                } else if states.contains(&"syncing") {
+                    "syncing"
+                } else {
+                    "synced"
                 }
                 .to_owned();
                 let unspent = || coins.iter().filter(|c| c.spend_info.is_none());
@@ -1158,11 +1187,19 @@ impl VaultReader {
                 }))
             }
             wire::Request::History(input) => {
+                // History has no completeness field. Never return an empty or
+                // partial list as authoritative while synchronization is unsafe.
+                if self.sync_state(&info) != "synced" {
+                    return Err(wire::Error::Unavailable);
+                }
                 let mut transactions = self
                     .daemon
                     .list_history_txs(0, u32::MAX, u64::from(input.limit))
                     .await
                     .map_err(|_| wire::Error::Unavailable)?;
+                if self.sync_state(&self.wallet_info().await?) != "synced" {
+                    return Err(wire::Error::Unavailable);
+                }
                 // The confirmed-history query applies DISTINCT after ORDER BY,
                 // which does not preserve newest-first. Sort before projecting
                 // so exact time, height and chain ID never cross the MCP boundary.
@@ -1655,7 +1692,7 @@ mod tests {
     }
 
     /// Create a disposable real SQLite wallet and matching GUI wallet wrapper.
-    fn fixture() -> (
+    pub(super) fn fixture() -> (
         std::path::PathBuf,
         Arc<Wallet>,
         Arc<dyn Daemon + Send + Sync>,

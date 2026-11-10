@@ -123,13 +123,25 @@ or reset when it may have leaked.
   Proposal support is false in ordinary builds; the experimental native build reports fixed Regtest limits, never live consent.
 - `tenshu_list_wallets`: one authorized active Vault, opaque session wallet ID.
 - `tenshu_get_wallet_summary`: current daemon balances in satoshis and sync state;
-  no promise that a policy is presently satisfiable or that data is fully synced.
+  no promise that a policy is presently satisfiable. Identity and health are
+  checked before and after the coin read. A pending rescan prevents `synced`;
+  chain alerts and invalid sync progress report `sync_failing`. Existing
+  full-scan, startup-poll and repeated-poll-failure checks also apply. Only coarse
+  health is exposed, never backend messages or scan timestamps.
 - `tenshu_get_transactions`: bounded confirmed history, newest-first; no labels,
   scripts, addresses or chain transaction ids. Each row carries a session activity
   id that changes on the next unlock and differs per client. Limits avoid inventing
-  unsupported cursor semantics.
+  unsupported cursor semantics. History returns `wallet_unavailable` unless
+  identity and health checks pass before and after the query, so an incomplete
+  empty result is not presented as authoritative. This is not an atomic chain
+  snapshot and does not freeze subsequent updates.
 - `tenshu_get_wallet_policy_summary`: script type, deterministic signing thresholds
   and key counts, recovery delays in blocks. No prediction of recovery eligibility.
+
+Companion tool dispatch is gated by the same `native-proposals` and
+`native-transactions` flags as discovery and static capabilities. Disabled names
+return `unknown_tool` before IPC even with a matching desktop grant; enabled
+operations still pass through the desktop's independent authorization gate.
 
 Signing-session status is deferred: Connect/LAN signing state has multiple owners
 and no single read-only authoritative session API. No fake status tool is shipped.

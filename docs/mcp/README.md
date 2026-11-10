@@ -7,18 +7,17 @@ yet. MCP starts disabled. Explicitly paired clients keep their selected scope un
 revoked; protected access pauses while the Cube is locked or Tenshu is closed.
 No Connect API or mobile Keychain changes are needed.
 
-## Feature testing on `mcp`
+## Integration and release status
 
-Local MCP access is experimental development work on the `mcp` feature branch.
-Feature PRs target `mcp`, where the Unix implementation and Windows follow-on can
-be integrated and tested together. PR #739 depends on the foundation in #736.
-Build from the feature checkout containing the changes being tested; the commands
-below do not imply that MCP is included in the production release.
+Local MCP access is integrated on `redesign`; the repository's primary branch is
+`master`. Build from the checkout containing the changes being tested. Presence
+on `redesign` does not imply inclusion in a production release. Follow-up work
+assigned to this integration targets `redesign`.
 
-Review and CI completion make a PR eligible for human review. Merging feature
-PRs into `mcp`, promoting the feature to `master`, and publishing a release are
-separate owner decisions. Packaged-client interoperability and signed-artifact
-checks remain release gates.
+Review and CI completion make a PR eligible for human review. Merging to
+`redesign`, promoting it to `master`, and publishing a release remain separate
+owner decisions. Packaged-client interoperability and signed-artifact checks
+remain release gates.
 
 ## Build and install
 
@@ -172,6 +171,12 @@ its Regtest bounds in `proposal_support`; this static metadata is not permission
 Read-only AI access cannot grant proposal authority. There is no direct MCP
 approve/install/sign/broadcast tool. See the experimental demo below.
 
+Discovery, static capabilities and dispatch use the same companion build flags:
+`native-proposals` enables the three proposal tools, and `native-transactions`
+enables the two transaction tools. Calling a disabled tool by name returns the
+protocol error `unknown_tool` before opening desktop IPC, even if the desktop
+has a matching grant. Enabled tools still require their separate desktop scope.
+
 The initial proposal shape is deliberately limited to a 3-of-5 primary and one
 explicitly chosen recovery path (1–5 slots, valid threshold, positive block delay)
 for Bitcoin Regtest P2WSH. No recovery values are silently selected by Tenshu.
@@ -186,7 +191,24 @@ UTXOs. Unconfirmed includes unspent change; the UI groups self-change differentl
 Available follows the existing owned-coin predicate and excludes immature/spending
 coins. This is coin availability, not proof that signatures or recovery conditions
 are satisfied. Snapshots can change between calls and during sync; do not interpret
-an unsynced zero as authoritative history. History kind is wallet-relative:
+an unsynced zero as authoritative history.
+
+Balance `sync_state` is `syncing` during blockchain/wallet synchronization or a
+pending rescan (even when its reported progress is 100%). It is `sync_failing`
+for repeated poll failures, a refused reorganization, unresolved chain divergence,
+or invalid blockchain sync progress. Only a healthy snapshot reports `synced`.
+The wallet identity and health are checked before and after reading balances;
+either unhealthy observation prevents a `synced` result. Backend diagnostics and
+scan timestamps are never exported.
+
+History has no completeness field, so it returns `wallet_unavailable` while
+either health observation is not `synced`, instead of presenting an incomplete
+or empty list as authoritative. It checks identity and health again after the
+history query. These checks are not an atomic chain snapshot: ordinary tip
+changes and later wallet updates can still change results. History remains
+limited to the requested number of recent confirmed entries.
+
+History kind is wallet-relative:
 `incoming` means the wallet did not spend an input, `outgoing` means it spent
 to a non-wallet output, and `self_transfer` means it spent only to itself.
 The rows retain order and coarse type/status, so a client could still correlate
@@ -222,7 +244,9 @@ memory/configuration; this feature does not sandbox arbitrary same-user malware.
   capability not selected. Wallet absence and lack of permission are intentionally
   indistinguishable. Review the grant in Tenshu; never let the AI approve itself.
 - `wallet_unavailable`: desktop/daemon closed or unavailable, stale socket path,
-  ten-second read timeout, or transport failure. Unlock/reapprove manually if needed.
+  ten-second read timeout, transport failure, or history requested while wallet
+  synchronization is incomplete/unsafe. Inspect Tenshu's sync state and retry
+  after it recovers; this error does not mean the wallet has no activity.
 - `invalid_input`: unknown fields, missing/wrong fields, wallet ID over 64 bytes,
   or history limit outside 1–50. Tool errors never return raw daemon exceptions.
 - No executable: build `make mcp` with the same Cargo profile/target as the desktop,
@@ -254,6 +278,17 @@ TENSHU_MCP_TEST_ADAPTER="$PWD/target/debug/tenshu-mcp" BREEZ_API_KEY=DUMMY_BREEZ
 BREEZ_API_KEY=DUMMY_BREEZ_API_KEY cargo test -p coincube-gui --lib app::local_mcp::tests
 cargo clippy -p coincube-mcp --features adapter --all-targets -- -D warnings
 cargo fmt --all -- --check
+```
+
+Capability-contract regressions cover each independent companion feature
+combination. Run all four when changing discovery, metadata or dispatch:
+
+```sh
+cargo test -p coincube-mcp --no-default-features --features adapter --locked
+cargo test -p coincube-mcp --no-default-features --features adapter,native-proposals --locked
+cargo test -p coincube-mcp --no-default-features --features adapter,native-transactions --locked
+cargo test -p coincube-mcp --no-default-features --features adapter,native-proposals,native-transactions --locked
+BREEZ_API_KEY=DUMMY_BREEZ_API_KEY cargo test -p coincube-gui --lib mcp_read_health --locked
 ```
 
 Before production release, complete packaged-client acceptance on each platform with

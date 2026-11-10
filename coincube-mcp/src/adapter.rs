@@ -115,10 +115,15 @@ impl Adapter {
             "tenshu_get_wallet_summary" => crate::Request::Summary(parse(arguments)?),
             "tenshu_get_transactions" => crate::Request::History(parse(arguments)?),
             "tenshu_get_wallet_policy_summary" => crate::Request::Policy(parse(arguments)?),
+            #[cfg(feature = "native-proposals")]
             "tenshu_prepare_wallet_proposal" => crate::Request::PrepareProposal(parse(arguments)?),
+            #[cfg(feature = "native-proposals")]
             "tenshu_prepare_wallet_creation" => crate::Request::PrepareCreation(parse(arguments)?),
+            #[cfg(feature = "native-proposals")]
             "tenshu_get_wallet_proposal" => crate::Request::Proposal(parse(arguments)?),
+            #[cfg(feature = "native-transactions")]
             "tenshu_prepare_transaction" => crate::Request::PrepareTransaction(parse(arguments)?),
+            #[cfg(feature = "native-transactions")]
             "tenshu_get_prepared_transaction" => crate::Request::Transaction(parse(arguments)?),
             _ => return Err(ErrorData::invalid_params("unknown_tool", None)),
         };
