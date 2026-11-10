@@ -358,7 +358,7 @@ class FreshRunner(Runner):
             phone = self.artifacts.get("phone", {})
             before = self.journal.data["stages"].get("phone", {})
             after = self.journal.data["stages"].get("sign", {})
-            if (not isinstance(phone, dict) or type(phone.get("build")) is not int or phone["build"] <= 0
+            if (not isinstance(phone, dict) or type(phone.get("build")) is not int or phone["build"] != 37
                     or phone.get("network") != "testnet4" or phone.get("cube_visible") is not True
                     or before.get("status") != "passed" or after.get("status") != "blocked"
                     or after.get("code") != "PHONE_AUTH"

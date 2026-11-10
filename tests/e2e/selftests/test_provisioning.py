@@ -731,11 +731,14 @@ def test_signing_pin_evidence_never_allows_upgrade_generation(runner, field):
     assert "approval_upgrade_recovery" not in runner.artifacts
 
 
-@pytest.mark.parametrize("change", ["build-missing", "phone-not-passed", "sign-not-blocked", "not-auth", "reversed", "missing-time", "missing-hash"])
+@pytest.mark.parametrize("change", ["build-missing", "build36", "build38", "build-bool", "phone-not-passed", "sign-not-blocked", "not-auth", "reversed", "missing-time", "missing-hash"])
 def test_legacy_adoption_requires_conclusive_ordered_original_evidence(runner, change):
     state, calls = signing_recovery(runner)
     stages = runner.journal.data["stages"]
     if change == "build-missing": runner.artifacts["phone"].pop("build")
+    if change == "build36": runner.artifacts["phone"]["build"] = 36
+    if change == "build38": runner.artifacts["phone"]["build"] = 38
+    if change == "build-bool": runner.artifacts["phone"]["build"] = True
     if change == "phone-not-passed": stages["phone"]["status"] = "blocked"
     if change == "sign-not-blocked": stages["sign"]["status"] = "passed"
     if change == "not-auth": stages["sign"]["code"] = "SIGNING_TIMEOUT"
