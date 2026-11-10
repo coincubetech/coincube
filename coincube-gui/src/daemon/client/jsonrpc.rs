@@ -23,9 +23,13 @@ use tokio::net::UnixStream;
 
 use std::fmt::Debug;
 
+#[cfg(not(windows))]
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use std::{error, fmt, io};
+
+// Preserve the public transport paths while keeping one canonical error type.
+pub use super::error::{Error, RpcError, RpcErrorCode};
 #[cfg(not(windows))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -248,132 +252,6 @@ impl<T> Response<T> {
     #[allow(dead_code)]
     pub fn is_none(&self) -> bool {
         self.result.is_none()
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Debug)]
-#[allow(non_camel_case_types)]
-pub enum RpcErrorCode {
-    // Standard errors defined by JSON-RPC 2.0 standard
-    /// Invalid request
-    JSONRPC2_INVALID_REQUEST = -32600,
-    /// Method not found
-    JSONRPC2_METHOD_NOT_FOUND = -32601,
-    /// Invalid parameters
-    JSONRPC2_INVALID_PARAMS = -32602,
-}
-
-/// A library error
-#[derive(Debug)]
-pub enum Error {
-    /// Json error
-    Json(serde_json::Error),
-    /// IO Error
-    Io(io::Error),
-    /// Error response
-    Rpc(RpcError),
-    /// Response has neither error nor result
-    NoErrorOrResult,
-    /// Response to a request did not have the expected nonce
-    NonceMismatch,
-    /// Response to a request had a jsonrpc field other than "2.0"
-    VersionMismatch,
-    /// unix socket communication is not supported.
-    NotSupported,
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(e: serde_json::Error) -> Error {
-        Error::Json(e)
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(e: io::Error) -> Error {
-        Error::Io(e)
-    }
-}
-
-impl From<RpcError> for Error {
-    fn from(e: RpcError) -> Error {
-        Error::Rpc(e)
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            Error::Json(ref e) => write!(f, "JSON decode error: {}", e),
-            Error::Io(ref e) => write!(f, "IO error response: {}", e),
-            Error::Rpc(ref r) => write!(f, "RPC error response: {:?}", r),
-            Error::NoErrorOrResult => write!(f, "Malformed RPC response"),
-            Error::NonceMismatch => write!(f, "Nonce of response did not match nonce of request"),
-            Error::VersionMismatch => write!(f, "`jsonrpc` field set to non-\"2.0\""),
-            Error::NotSupported => write!(f, "unix socket communication is not supported"),
-        }
-    }
-}
-
-impl error::Error for Error {
-    fn cause(&self) -> Option<&dyn error::Error> {
-        match *self {
-            Error::Json(ref e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<Error> for super::DaemonError {
-    fn from(e: Error) -> super::DaemonError {
-        match e {
-            Error::Io(e) => super::DaemonError::RpcSocket(Some(e.kind()), format!("io: {:?}", e)),
-            Error::Json(e) => super::DaemonError::RpcSocket(None, format!("json decode: {}", e)),
-            Error::NonceMismatch => {
-                super::DaemonError::RpcSocket(None, format!("transport: {}", e))
-            }
-            Error::VersionMismatch => {
-                super::DaemonError::RpcSocket(None, format!("transport: {}", e))
-            }
-            Error::NoErrorOrResult => super::DaemonError::NoAnswer,
-            Error::NotSupported => super::DaemonError::ClientNotSupported,
-            Error::Rpc(e)
-                if i64::from(e.code) == coincubed::commands::UNSAFE_LEGACY_ALTERNATIVE_ERROR =>
-            {
-                super::DaemonError::UnsafeLegacyAlternative(e.message)
-            }
-            Error::Rpc(e) => super::DaemonError::Rpc(e.code, e.message),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-/// A JSONRPC error object
-pub struct RpcError {
-    /// The integer identifier of the error
-    pub code: i32,
-    /// A string describing the error
-    pub message: String,
-    /// Additional data specific to the error
-    pub data: Option<serde_json::Value>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unsafe_legacy_rpc_code_preserves_the_typed_daemon_error() {
-        let daemon_error = super::super::DaemonError::from(Error::Rpc(RpcError {
-            code: coincubed::commands::UNSAFE_LEGACY_ALTERNATIVE_ERROR as i32,
-            message: "policy refusal".to_string(),
-            data: None,
-        }));
-        assert!(matches!(
-            daemon_error,
-            super::super::DaemonError::UnsafeLegacyAlternative(message)
-                if message == "policy refusal"
-        ));
     }
 }
 
