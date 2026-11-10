@@ -771,6 +771,11 @@ impl Home {
         !matches!(self.state, State::Unchecked)
     }
 
+    #[cfg(all(test, feature = "mcp-proposals"))]
+    pub(crate) fn chain_for_test(&self) -> ChainId {
+        self.network
+    }
+
     /// A sibling tab has just accepted a Connect login or token refresh.
     /// Reuse that accepted bearer instead of starting another keyring refresh:
     /// concurrent refreshes can rotate the token while a Cube is opening.

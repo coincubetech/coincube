@@ -1328,10 +1328,10 @@ impl Tab {
                     installer.expire_mcp_proposal();
                     if !installer.proposal_install_dispatched || installer.proposal_finished {
                         let root = installer.datadir.clone();
+                        let chain = installer.context.bitcoin_config.chain;
                         let failure = installer.proposal_failure.clone();
                         installer.stop();
-                        let (mut home, task) =
-                            Home::new_for_chain(root, Some(crate::chain::ChainId::Regtest));
+                        let (mut home, task) = Home::new_for_chain(root, Some(chain));
                         home.set_error(failure.unwrap_or_else(|| "Proposal setup locked. Reopen the Cube and approve a new client to continue.".into()));
                         self.state = State::Home(home);
                         return task.map(Message::Launch);
@@ -2016,10 +2016,10 @@ impl Tab {
                     return Task::none();
                 }
                 let root = installer.datadir.clone();
+                let chain = installer.context.bitcoin_config.chain;
                 let failure = installer.proposal_failure.clone();
                 installer.stop();
-                let (mut home, task) =
-                    Home::new_for_chain(root, Some(crate::chain::ChainId::Regtest));
+                let (mut home, task) = Home::new_for_chain(root, Some(chain));
                 if let Some(failure) = failure {
                     home.set_error(failure);
                 }
@@ -2408,10 +2408,10 @@ impl Tab {
                         return Task::none();
                     }
                     let root = i.datadir.clone();
+                    let chain = i.context.bitcoin_config.chain;
                     let failure = i.proposal_failure.clone();
                     i.stop();
-                    let (mut home, task) =
-                        Home::new_for_chain(root, Some(crate::chain::ChainId::Regtest));
+                    let (mut home, task) = Home::new_for_chain(root, Some(chain));
                     if let Some(failure) = failure {
                         home.set_error(failure);
                     }
@@ -8029,6 +8029,50 @@ mod mcp_proposal_routing_tests {
             assert!(matches!(tab.state, State::Home(_)));
             assert!(!proposal.active());
             assert!(!crate::app::session::is_open());
+        }
+    }
+    #[test]
+    fn proposal_exit_preserves_exact_chain_for_back_lock_and_expiry() {
+        use crate::app::settings::global::GlobalSettings;
+        let _guard = crate::app::session::test_guard();
+        for network in coincube_mcp::Chain::ALL {
+            for exit in 0..4 {
+                let root = TestDir::new();
+                // Match native admission of the test networks; retain the
+                // launcher's existing developer-mode preference behavior.
+                GlobalSettings::update_developer_mode(
+                    &GlobalSettings::path(&CoincubeDirectory::new(root.path().to_path_buf())),
+                    true,
+                )
+                .unwrap();
+                let chain = network.as_str().parse().unwrap();
+                let (mut tab, proposal) = proposal_tab_on_chain(root.path(), chain);
+                let task = match exit {
+                    // The generic navigation message has only a Bitcoin
+                    // encoding; the proposal must retain its own exact chain.
+                    0 => tab.update(Message::Install(installer::Message::BackToApp(
+                        Network::Regtest,
+                    ))),
+                    1 => tab.update(Message::LockCube),
+                    2 => {
+                        crate::app::session::close();
+                        tab.on_tick()
+                    }
+                    _ => {
+                        crate::app::session::age_for_proposal_test(
+                            Tab::IDLE_LOCK_AFTER + std::time::Duration::from_secs(1),
+                        );
+                        tab.on_tick()
+                    }
+                };
+                drop(task);
+                let State::Home(home) = &tab.state else {
+                    panic!("proposal exit must return to the locked launcher")
+                };
+                assert_eq!(home.chain_for_test(), chain, "exit {exit}");
+                assert!(!proposal.active());
+                assert!(!crate::app::session::is_open());
+            }
         }
     }
     #[test]
