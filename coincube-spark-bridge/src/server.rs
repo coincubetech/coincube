@@ -21,11 +21,12 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use breez_sdk_spark::{
-    AmountAdjustmentReason, CheckLightningAddressRequest, ClaimDepositRequest, ConversionEstimate,
-    ConversionOptions, ConversionType, CrossChainAddressDetails, CrossChainAddressFamily,
-    CrossChainRouteFilter, CrossChainRoutePair, EventListener, GetInfoRequest, GetInfoResponse,
-    InputType, LightningAddressInfo as SdkLightningAddressInfo, ListPaymentsRequest,
-    ListUnclaimedDepositsRequest, LnurlPayRequest, MaxFee, OnchainConfirmationSpeed,
+    AmountAdjustmentReason, CheckLightningAddressRequest, ClaimDeferredReason, ClaimDepositOutcome,
+    ClaimDepositRequest, ConversionEstimate, ConversionOptions, ConversionType,
+    CrossChainAddressDetails, CrossChainAddressFamily, CrossChainRouteFilter, CrossChainRoutePair,
+    EventListener, GetInfoRequest, GetInfoResponse, InputType,
+    LightningAddressInfo as SdkLightningAddressInfo, ListPaymentsRequest,
+    ListUnclaimedDepositsRequest, LnurlPayRequest, MaxFee, MaxOnchainFee, OnchainConfirmationSpeed,
     PaymentDetails, PaymentRequest, PrepareLnurlPayRequest, PrepareLnurlPayResponse,
     PrepareSendPaymentRequest, PrepareSendPaymentResponse, ReceivePaymentMethod,
     ReceivePaymentRequest, RegisterLightningAddressRequest, SdkEvent, SendOnchainFeeQuote,
@@ -526,18 +527,37 @@ impl EventListener for BridgeEventListener {
             // without the operators' cooperation). Nothing in the gui drives
             // one, so there is nothing to show yet.
             SdkEvent::UnilateralExitStateChanged => None,
-            // Fork-only (proposed upstream): a failed Stable Balance sweep or
-            // deactivation. The bridge configures no Stable Balance, so the
-            // SDK has no sweep to report; logged in case one ever runs.
+            // 0.28.0: a stored payment's details changed after it settled
+            // (e.g. a cross-chain receive's conversion info arriving late).
+            // Its status already reached the gui, and the history re-reads
+            // details on its next `list_payments`.
+            SdkEvent::PaymentMetadataUpdated { .. } => None,
+            // 0.28.0: sync found funds that left the balance and wait to be
+            // recovered on-chain with `recover_funds`. Nothing in the gui
+            // drives a recovery yet.
+            SdkEvent::RecoverableFunds {
+                recoverable_funds_sats,
+            } => {
+                tracing::warn!(
+                    "SDK reports {recoverable_funds_sats} sats awaiting on-chain recovery"
+                );
+                None
+            }
+            // 0.28.0: a failed Stable Balance conversion. The bridge
+            // configures no Stable Balance, so the SDK has none to report;
+            // logged in case one ever runs. `retry_in_secs` is unset for a
+            // per-receive conversion, which the SDK does not retry.
             SdkEvent::StableBalanceConversionFailed {
                 conversion,
                 error,
                 retry_in_secs,
             } => {
-                tracing::info!(
-                    "SDK reports {conversion:?} conversion failed, retrying in {retry_in_secs}s: \
-                     {error}"
-                );
+                match retry_in_secs {
+                    Some(secs) => tracing::info!(
+                        "SDK reports {conversion:?} conversion failed, retrying in {secs}s: {error}"
+                    ),
+                    None => tracing::info!("SDK reports {conversion:?} conversion failed: {error}"),
+                }
                 None
             }
         };
@@ -820,7 +840,7 @@ fn detail_summary(details: Option<&PaymentDetails>) -> PaymentDetailSummary {
             tx_id: non_empty(tx_hash),
             ..Default::default()
         },
-        Some(PaymentDetails::Withdraw { tx_id } | PaymentDetails::Deposit { tx_id, .. }) => {
+        Some(PaymentDetails::Withdraw { tx_id, .. } | PaymentDetails::Deposit { tx_id, .. }) => {
             PaymentDetailSummary {
                 tx_id: non_empty(tx_id),
                 ..Default::default()
@@ -1673,13 +1693,14 @@ async fn prepare_send(
 /// path retry-safe — see [`route_is_retry_safe`].
 fn route_accepts_btc(route: &CrossChainRoutePair) -> bool {
     // 0.25.0 renamed `supported_sources: Vec<SourceAsset>` to
-    // `accepted_assets: Vec<SparkAsset>` and added `delivery_methods` (the
-    // rail — Spark / Lightning / Bitcoin) alongside it. The rail is the
-    // SDK's concern; funding is what decides retry safety here.
+    // `accepted_assets` and added `delivery_methods` (the rail — Spark /
+    // Lightning / Bitcoin) alongside it; 0.28.0 wrapped each asset with its
+    // own limits. The rail is the SDK's concern; funding is what decides
+    // retry safety here.
     route
         .accepted_assets
         .iter()
-        .any(|s| matches!(s, SparkAsset::Bitcoin))
+        .any(|a| matches!(a.asset, SparkAsset::Bitcoin))
 }
 
 /// Whether a failed send along this route can be blind-retried.
@@ -1930,8 +1951,11 @@ async fn handle_get_cross_chain_routes(
         amount: details.amount,
     };
 
+    // Unset delivery method: routes paid from the Spark balance, the only
+    // kind the bridge sends.
     let filter = CrossChainRouteFilter::Send {
         address_details: details,
+        delivery_method: None,
     };
     match sdk.sdk.get_cross_chain_routes(&filter).await {
         Ok(routes) => {
@@ -2000,8 +2024,11 @@ async fn handle_prepare_cross_chain(
             "destination is not a recognised cross-chain address",
         );
     };
+    // Unset delivery method: routes paid from the Spark balance, the only
+    // kind the bridge sends.
     let filter = CrossChainRouteFilter::Send {
         address_details: details,
+        delivery_method: None,
     };
     let live_routes = match sdk.sdk.get_cross_chain_routes(&filter).await {
         Ok(routes) => routes,
@@ -2389,6 +2416,8 @@ async fn handle_receive_bolt11(
             amount_sats: params.amount_sat,
             expiry_secs: params.expiry_secs,
             payment_hash: None,
+            // 0.28.0: a caller-chosen preimage. Unset lets the SDK pick one.
+            preimage: None,
             // 0.25.0: invoices can be issued for another Spark identity.
             // Ours always pay this wallet.
             receiver_identity_public_key: None,
@@ -2840,8 +2869,13 @@ async fn handle_claim_deposit(
         // deposit until fees happen to drop that low. `NetworkRecommended`
         // adapts to current conditions; the SDK still pays only the rate
         // required to confirm, this is just the ceiling.
-        max_fee: Some(MaxFee::NetworkRecommended {
-            leeway_sat_per_vbyte: 5,
+        max_fee: Some(MaxFee {
+            onchain: MaxOnchainFee::NetworkRecommended {
+                leeway_sat_per_vbyte: 5,
+            },
+            // 0.27.0: an optional share of the deposit on top. None keeps the
+            // ceiling what it was: on-chain only.
+            proportional_ppm: None,
         }),
     };
 
@@ -2854,9 +2888,17 @@ async fn handle_claim_deposit(
             // transfer settles asynchronously and there is no Payment yet —
             // the gui hears about it through `PaymentSucceeded` /
             // `DepositsChanged` like any other incoming transfer.
-            let (payment_id, amount_sat) = match resp.payment {
-                Some(payment) => (Some(payment.id), Some(clamp_u128_to_u64(payment.amount))),
-                None => (None, None),
+            let (payment_id, amount_sat) = match resp.outcome {
+                ClaimDepositOutcome::Settled { payment } => {
+                    (Some(payment.id), Some(clamp_u128_to_u64(payment.amount)))
+                }
+                ClaimDepositOutcome::Submitted => (None, None),
+                // 0.28.0: nothing was claimed, and the SDK keeps trying on its
+                // own. Answered as an error so the deposit row keeps its
+                // Retry and shows why, rather than looking claimed.
+                ClaimDepositOutcome::Deferred { reason } => {
+                    return Response::err(id, ErrorKind::Sdk, claim_deferred_message(&reason));
+                }
             };
             Response::ok(
                 id,
@@ -2868,6 +2910,25 @@ async fn handle_claim_deposit(
         }
         Err(e) => Response::err(id, ErrorKind::Sdk, format!("claim_deposit failed: {e}")),
     }
+}
+
+/// Why a claim was deferred, for the deposit row's error hint.
+fn claim_deferred_message(reason: &ClaimDeferredReason) -> String {
+    let why = match reason {
+        ClaimDeferredReason::MaxFeeExceeded {
+            required_fee_sats,
+            max_fee_sats,
+        } => format!(
+            "claiming now costs {required_fee_sats} sats, over the {max_fee_sats}-sat fee ceiling"
+        ),
+        ClaimDeferredReason::NoEarlyClaimAvailable => {
+            "no early claim is offered at this depth yet".to_string()
+        }
+        ClaimDeferredReason::ProviderDeclined { message } => {
+            format!("the claim provider declined: {message}")
+        }
+    };
+    format!("Deposit not claimed yet ({why}). It will be claimed automatically.")
 }
 
 async fn handle_get_user_settings(id: u64, state: Arc<ServerState>) -> Response {
@@ -4181,7 +4242,13 @@ mod cross_chain_tests {
             contract_address: Some("0xabc".to_string()),
             decimals: 6,
             exact_out_eligible: true,
-            accepted_assets: sources,
+            accepted_assets: sources
+                .into_iter()
+                .map(|asset| breez_sdk_spark::CrossChainAcceptedAsset {
+                    asset,
+                    limits: None,
+                })
+                .collect(),
             delivery_methods: vec![breez_sdk_spark::DeliveryMethod::Spark],
         }
     }
@@ -4501,6 +4568,31 @@ mod detail_summary_tests {
         assert!(!format!("{summary:?}").contains("preimage-stays-in-the-bridge"));
     }
 
+    /// 0.28.0: a deferred claim is answered as an error naming why, so the
+    /// deposit row keeps its Retry instead of looking claimed.
+    #[test]
+    fn a_deferred_claim_says_why_and_that_it_will_be_claimed() {
+        let message = claim_deferred_message(&ClaimDeferredReason::MaxFeeExceeded {
+            required_fee_sats: 1_200,
+            max_fee_sats: 800,
+        });
+        assert_eq!(
+            message,
+            "Deposit not claimed yet (claiming now costs 1200 sats, over the 800-sat fee \
+             ceiling). It will be claimed automatically."
+        );
+        assert!(
+            claim_deferred_message(&ClaimDeferredReason::NoEarlyClaimAvailable)
+                .contains("no early claim is offered at this depth yet")
+        );
+        assert!(
+            claim_deferred_message(&ClaimDeferredReason::ProviderDeclined {
+                message: "busy".to_string(),
+            })
+            .contains("the claim provider declined: busy")
+        );
+    }
+
     #[test]
     fn on_chain_legs_carry_their_txid_and_empty_values_are_dropped() {
         assert_eq!(
@@ -4514,7 +4606,9 @@ mod detail_summary_tests {
         );
         assert_eq!(
             detail_summary(Some(&PaymentDetails::Withdraw {
-                tx_id: String::new()
+                tx_id: String::new(),
+                vout: 0,
+                destination_address: String::new(),
             })),
             PaymentDetailSummary::default()
         );
@@ -5221,6 +5315,9 @@ mod usdb_balance_tests {
         let ok = get_info_ok(GetInfoResponse {
             identity_pubkey: "03ab".to_string(),
             balance_sats: 25_053,
+            recoverable_funds_sats: 0,
+            last_sync_error: None,
+            last_synced_at: None,
             token_balances: balances([(OTHER, token(OTHER, 3, 0, "XYZ")), (USDB, usdb(held))]),
         });
         assert_eq!(ok.balance_sats, 25_053);
@@ -5251,6 +5348,9 @@ mod usdb_balance_tests {
         let ok = get_info_ok(GetInfoResponse {
             identity_pubkey: "03ab".to_string(),
             balance_sats: 25_053,
+            recoverable_funds_sats: 0,
+            last_sync_error: None,
+            last_synced_at: None,
             token_balances: balances([(OTHER, token(OTHER, 3, 0, "XYZ"))]),
         });
         assert!(ok.stable_balance.is_none());

@@ -113,8 +113,8 @@ jobs:
             || { echo "release tag $GITHUB_REF_NAME does not match Cargo version $COINCUBE_VERSION"; exit 1; }
 
       # The Spark bridge is a separate workspace with a separate lock and a
-      # separate target dir, and its dep graph (breez-sdk-spark, boltz-client,
-      # alloy) is expensive to build from scratch. Cache it alongside the root
+      # separate target dir, and its dep graph (breez-sdk-spark, alloy) is
+      # expensive to build from scratch. Cache it alongside the root
       # one, and key on both locks so a change to either invalidates.
       - name: Cache Cargo
         uses: actions/cache@v5

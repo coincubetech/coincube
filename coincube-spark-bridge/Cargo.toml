@@ -56,16 +56,16 @@ coincube-spark-protocol = { path = "../coincube-spark-protocol" }
 # Upstream commit 7ba9363a ("Flashnet: validate pool data and swap responses")
 # fixed it; never pin below that.
 #
-# Pinned to the coincubetech fork: upstream tag 0.25.0 plus the
-# `coincube/0.25.0-stable-balance-hardening` series (proposed to Breez). The
-# one that can't wait for upstream: 0.25.0 fails the whole pool listing when
-# any pool has a field its model can't take (`"hostName": null` appeared on
-# mainnet BTC/USDB on 2026-09-11), so every conversion reports
-# `NoPoolsAvailable`. The others: back off failed conversions, report them
-# as an event, persist a pending deactivation, and drop pools priced far
-# from the market. Drop back to an upstream tag once a release carries them.
-# Keep `rev` pinned — the fork branch is not otherwise frozen.
-breez-sdk-spark = { git = "https://github.com/coincubetech/spark-sdk", rev = "a38117dcc3c920703e5002b4206955213fe49eb7", features = [
+# Pinned to the coincubetech fork: upstream tag 0.28.1 plus one commit,
+# branch `coincube/0.28.1-pool-outlier-filter` (proposed to Breez): drop
+# pools priced more than 2x from the deepest pool's before scoring. Upstream
+# validates each pool against itself only, so a pool funded with a few sats
+# at an absurd, tick-corroborated price can still win on fee efficiency.
+# The rest of the old 0.25.0 hardening series (per-pool listing parse with a
+# null host, conversion backoff, `StableBalanceConversionFailed`) is upstream
+# as of 0.28.0. Drop back to an upstream tag once a release carries the
+# filter. Keep `rev` pinned — the fork branch is not otherwise frozen.
+breez-sdk-spark = { git = "https://github.com/coincubetech/spark-sdk", rev = "4610640b019ef960aa59493cb4f43076d1a4073f", features = [
     "sqlite",
 ] }
 async-trait = "0.1"
@@ -93,9 +93,3 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
-
-# Preserve the exact upstream source after breez/boltz-client became unavailable.
-# The mirror retains the original commit and MIT license; this changes fetch
-# location only, without upgrading Spark or re-enabling the Boltz provider.
-[patch."https://github.com/breez/boltz-client"]
-boltz-client = { git = "https://github.com/coincubetech/boltz-client", rev = "aea35af1628d1fb259ebf85266f96215cfdabcb5" }
