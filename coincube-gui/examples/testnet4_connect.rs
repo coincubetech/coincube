@@ -371,6 +371,23 @@ mod run {
         )
     }
 
+    fn collection_progress(
+        input: &Input,
+        session: &SigningSession,
+        descriptor_id: &str,
+        device: &str,
+        key: &DeviceTransportKey,
+        target: &SignerTarget,
+    ) -> Result<Value> {
+        validate_session(input, session, descriptor_id, device, key, target)?;
+        check(
+            (1..=6).contains(&session.status),
+            "session_terminal_or_unknown",
+        )?;
+        Ok(json!({"status":session.status,
+            "submitted_signature_count":session.submitted_signatures.len()}))
+    }
+
     async fn execute(input: Input) -> Result<Value> {
         validate_input(&input)?;
         let (descriptor, psbt, fingerprint) = fixture(&input)?;
@@ -492,12 +509,10 @@ mod run {
             .map_err(rpc_error)?
             .session
             .ok_or("session_missing")?;
-        validate_session(&input, &session, &descriptor_id, device, &key, &target)?;
-        output["status"] = json!(session.status);
-        check(
-            (1..=6).contains(&session.status),
-            "session_terminal_or_unknown",
-        )?;
+        let progress =
+            collection_progress(&input, &session, &descriptor_id, device, &key, &target)?;
+        output["status"] = progress["status"].clone();
+        output["submitted_signature_count"] = progress["submitted_signature_count"].clone();
         if session.submitted_signatures.is_empty() {
             check(
                 session.status != SessionStatus::Completed as i32,
@@ -718,6 +733,58 @@ mod run {
                 &target
             )
             .is_ok());
+            let mut collect = input();
+            collect.action = "collect".into();
+            collect.session_id = Some(session.session_id.clone());
+            session.status = SessionStatus::Viewed as i32;
+            let progress = collection_progress(
+                &collect,
+                &session,
+                "12345678",
+                "desktop-fixture",
+                &key,
+                &target,
+            )
+            .unwrap();
+            assert_eq!(progress["submitted_signature_count"], 0);
+            assert_eq!(progress["status"], SessionStatus::Viewed as i32);
+            session.submitted_signatures.push(Default::default());
+            let progress = collection_progress(
+                &collect,
+                &session,
+                "12345678",
+                "desktop-fixture",
+                &key,
+                &target,
+            )
+            .unwrap();
+            assert_eq!(progress["submitted_signature_count"], 1);
+            collect.session_id = Some("other-session".into());
+            assert_eq!(
+                collection_progress(
+                    &collect,
+                    &session,
+                    "12345678",
+                    "desktop-fixture",
+                    &key,
+                    &target
+                ),
+                Err("session_binding_mismatch")
+            );
+            collect.session_id = Some(session.session_id.clone());
+            session.targets[0].key_id = "other-key".into();
+            assert_eq!(
+                collection_progress(
+                    &collect,
+                    &session,
+                    "12345678",
+                    "desktop-fixture",
+                    &key,
+                    &target
+                ),
+                Err("session_target_mismatch")
+            );
+            session.targets[0] = target.clone();
             session.network = "bitcoin".into();
             assert_eq!(
                 validate_session(
