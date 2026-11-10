@@ -533,11 +533,14 @@ impl<'a, M: Clone + 'static> From<TextField<'a, M>> for Element<'a, M> {
         } else {
             Inert::new(input).into()
         };
-        // The layer, scope and input keep their places whatever the value, so
-        // clearing the field (by Escape or the Clear action) keeps Iced's
-        // focus and cursor state in the input.
-        let overlay = overlay.unwrap_or_else(|| iced::widget::Space::new().into());
-        let control = iced::widget::Stack::with_children([input, overlay]).width(Length::Fill);
+        // The scope and the input (the stack's first child) keep their places
+        // whatever the value, so clearing the field (by Escape or the Clear
+        // action) keeps Iced's focus and cursor state in the input. With no
+        // overlay the stack holds the input alone: an empty second child still
+        // opens a draw layer, and on a 2x display that empty layer clipped
+        // every later overlay (App preferences over a Cube) to this page.
+        let control = iced::widget::Stack::with_children(std::iter::once(input).chain(overlay))
+            .width(Length::Fill);
         let input_id = id.clone();
         let control = KeyScope::new(
             control,
