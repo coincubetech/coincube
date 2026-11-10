@@ -25,8 +25,8 @@
   "patched_files": {
     "src/v2/client.rs": {
       "upstream_sha256": "b4a16f8d2bbad4bffcb5f08ce17bc240a7c52348ee6e8a1c0af71f8db8a83d7b",
-      "patched_sha256": "91b9c499f266050b3f7797a54b13fc711ae7a477d50c1d391ef09f5cae29916e",
-      "patch": "Tenshu hardening: no redirects, 256 KiB lookup body cap, three offline tests; diff in TENSHU_PROVENANCE.md"
+      "patched_sha256": "700763f913dfec1ed9784caf3aeaf477448302a04df4870e785e9e849260e977",
+      "patch": "Tenshu hardening: no redirects, 256 KiB lookup body cap, four offline tests; diff in TENSHU_PROVENANCE.md"
     }
   },
   "adapted_manifest_sha256": "1c693a2fad8146ecd396908a09fc7c7fcf3ed200201f6bf72bb72404f4f9d551"

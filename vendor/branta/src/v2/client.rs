@@ -385,16 +385,49 @@ mod tests {
     async fn get_payments_rejects_oversized_body() {
         // Tenshu patch test.
         let server = MockServer::start().await;
+        let body = vec![b' '; MAX_LOOKUP_RESPONSE_BYTES + 1];
         Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_bytes(vec![b' '; MAX_LOOKUP_RESPONSE_BYTES + 1]),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
             .mount(&server)
             .await;
 
         let client = client_for(&server);
         let err = client.get_payments("value", None).await.unwrap_err();
         assert!(matches!(err, BrantaError::Incomplete));
+    }
+
+    #[tokio::test]
+    async fn get_payments_rejects_oversized_chunked_body_without_content_length() {
+        // Tenshu patch test: no Content-Length, so only the chunked read loop can stop it.
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            );
+            let chunk = vec![b' '; 64 * 1024];
+            for _ in 0..(MAX_LOOKUP_RESPONSE_BYTES / chunk.len() + 2) {
+                if stream
+                    .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                    .is_err()
+                    || stream.write_all(&chunk).is_err()
+                    || stream.write_all(b"\r\n").is_err()
+                {
+                    return;
+                }
+            }
+            let _ = stream.write_all(b"0\r\n\r\n");
+        });
+
+        let client = BrantaClient::new(options()).with_base_url_override(format!("http://{addr}"));
+        let err = client.get_payments("value", None).await.unwrap_err();
+        assert!(matches!(err, BrantaError::Incomplete));
+        drop(client);
+        server.join().unwrap();
     }
 
     #[tokio::test]

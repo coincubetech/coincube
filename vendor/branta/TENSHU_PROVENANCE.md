@@ -9,7 +9,8 @@ The vendored files are the published 4.0.0 crate's CHANGELOG.md, LICENSE, README
 examples/ and src/. Every one is byte-identical to that crate except
 `src/v2/client.rs` (see "Source patch" below); SHA-256 hashes are
 recorded in UPSTREAM_SHA256.json and enforced by coincube-gui's `vendor_integrity`
-test, which also fails on any unpinned file under src/. The crate's tests/,
+test, which also fails on any unpinned file anywhere in vendor/branta (other than
+this file, UPSTREAM_SHA256.json, Cargo.toml and a transient Cargo.lock). The crate's tests/,
 Cargo.lock and CI files are not vendored. Do not format or edit these source files
 with wallet changes.
 
@@ -51,8 +52,9 @@ configured from outside the crate. The patch:
 - reads lookup bodies chunk by chunk up to `MAX_LOOKUP_RESPONSE_BYTES` (256 KiB),
   rejecting a larger declared `Content-Length` before reading; an oversized body is
   `BrantaError::Incomplete`;
-- adds three offline wiremock tests (redirect not followed, oversized body
-  rejected, body exactly at the cap accepted), each marked "Tenshu patch test".
+- adds four offline tests (redirect not followed, oversized declared body rejected,
+  oversized chunked body without Content-Length rejected, body exactly at the cap
+  accepted), each marked "Tenshu patch test".
 
 `post_payment` and `is_api_key_valid` are untouched; Tenshu never calls them.
 UPSTREAM_SHA256.json records both the upstream hash (`b4a16f8d…`) and the patched
@@ -107,5 +109,7 @@ run the real `verify` only on paths that finish before any request: conflicting
 on-chain addresses (`tampered`), and plain or unbindable destinations (`unknown`).
 Decrypt-and-bind behavior relies on upstream's own unit suite (`src/v2/service.rs`,
 `src/v2/client.rs`), which runs offline against local mock servers:
-`cargo test --manifest-path vendor/branta/Cargo.toml --lib`. Delete the
-`vendor/branta/Cargo.lock` that run creates; it is not vendored.
+`cargo test --manifest-path vendor/branta/Cargo.toml --lib`. CI runs it in the
+`branta_vendor_tests` job, seeded with the root Cargo.lock so shared dependencies
+use the reviewed versions. Delete the `vendor/branta/Cargo.lock` a local run
+creates; it is not vendored.
