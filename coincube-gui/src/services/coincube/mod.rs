@@ -5,6 +5,7 @@ pub(crate) mod imported_checkpoint;
 pub mod network_anchor;
 pub mod network_status;
 pub mod vault_reconcile;
+pub mod worldview;
 pub use client::CoincubeClient;
 
 #[derive(Debug)]
