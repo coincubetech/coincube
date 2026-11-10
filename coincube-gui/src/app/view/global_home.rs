@@ -1305,18 +1305,6 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
     let mut rows = Column::new().spacing(2);
     for choice in ctx.other.choices {
         let selected = ctx.other.selected == Some(choice.cube_id.as_str());
-        let tag = (choice.chain != ctx.chain).then(|| {
-            Container::new(text(network_name(choice.chain)).size(12))
-                .padding([0, 6])
-                .style(|t: &theme::Theme| iced::widget::container::Style {
-                    border: iced::Border {
-                        color: t.colors.shell.muted,
-                        width: 1.0,
-                        radius: 4.0.into(),
-                    },
-                    ..Default::default()
-                })
-        });
         let sub =
             Column::new()
                 .spacing(2)
@@ -1336,12 +1324,7 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
         rows = rows.push(option_row(
             landing_control_id(ctx.cube_id, &choice.cube_id, "transfer-cube"),
             network_coin(choice.chain, ctx.light),
-            Row::new()
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .push(text(choice.name.clone()).size(P1_SIZE).bold())
-                .push_maybe(tag)
-                .into(),
+            text(choice.name.clone()).size(P1_SIZE).bold().into(),
             Some(sub.into()),
             Some(
                 Row::new()
@@ -5239,8 +5222,8 @@ mod tests {
             cube_choice("Archive", ChainId::Bitcoin, None),
             cube_choice(
                 "Lab",
-                ChainId::Testnet4,
-                Some("Different network: can’t receive this transfer"),
+                ChainId::Bitcoin,
+                Some("No Vault to receive this transfer"),
             ),
         ];
         let other = |page, step| {
@@ -5257,7 +5240,7 @@ mod tests {
             "Bitcoin mainnet Cubes only.",
             "Archive",
             "Lab",
-            "Different network: can’t receive this transfer",
+            "No Vault to receive this transfer",
             "Locked",
             "Locked Cubes show no balances.",
             "Continue with Archive",

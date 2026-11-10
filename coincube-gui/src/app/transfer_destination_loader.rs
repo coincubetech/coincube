@@ -127,16 +127,13 @@ impl CubeChoice {
     }
 }
 
-/// Every other local Cube on every chain, Bitcoin mainnet first.
+/// Every other local Cube on the source's chain; other networks can't receive.
 pub(crate) fn other_cubes(root: &CoincubeDirectory, source: &Source) -> Vec<CubeChoice> {
-    let mut choices: Vec<CubeChoice> = ChainId::ALL
-        .iter()
-        .flat_map(|chain| {
-            Settings::from_file(&root.network_directory(*chain))
-                .map(|settings| settings.cubes)
-                .unwrap_or_default()
-        })
-        .filter(|cube| cube.id != source.cube_id)
+    let mut choices: Vec<CubeChoice> = Settings::from_file(&root.network_directory(source.chain))
+        .map(|settings| settings.cubes)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|cube| cube.id != source.cube_id && cube.network == source.chain)
         .map(|cube| {
             let has_vault = cube.vault_wallet_id.is_some() && cube.bitcoin_import.is_none();
             let shares_source = cube.vault_wallet_id.as_ref().is_some_and(|id| {
@@ -153,9 +150,7 @@ pub(crate) fn other_cubes(root: &CoincubeDirectory, source: &Source) -> Vec<Cube
                     .vault_fingerprint
                     .as_deref()
                     .is_some_and(|fp| !fp.is_empty());
-            let refusal = if cube.network != source.chain {
-                Some("Different network: can’t receive this transfer")
-            } else if has_spark || vault_ready {
+            let refusal = if has_spark || vault_ready {
                 None
             } else if !has_vault {
                 Some("No Vault to receive this transfer")
@@ -180,7 +175,7 @@ pub(crate) fn other_cubes(root: &CoincubeDirectory, source: &Source) -> Vec<Cube
             }
         })
         .collect();
-    choices.sort_by_key(|choice| (choice.chain != ChainId::Bitcoin, choice.refusal.is_some()));
+    choices.sort_by_key(|choice| choice.refusal.is_some());
     choices
 }
 
@@ -1121,6 +1116,40 @@ mod tests {
         ] {
             assert!(spark_deposit_address(&request).is_none(), "{}", request);
         }
+    }
+
+    #[test]
+    fn other_cubes_lists_only_the_source_network() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = CoincubeDirectory::new(directory.path().to_owned());
+        for (chain, names) in [
+            (ChainId::Bitcoin, ["source", "Archive"]),
+            (ChainId::Testnet4, ["Lab", "Passkey"]),
+        ] {
+            let dir = root.network_directory(chain);
+            std::fs::create_dir_all(dir.path()).unwrap();
+            let cubes = names
+                .iter()
+                .map(|name| CubeSettings::new_with_raw_id((*name).into(), (*name).into(), chain))
+                .collect();
+            std::fs::write(
+                dir.path().join(super::super::settings::SETTINGS_FILE_NAME),
+                serde_json::to_vec(&Settings {
+                    cubes,
+                    ..Settings::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let choices = other_cubes(&root, &source());
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| (choice.name.as_str(), choice.chain))
+                .collect::<Vec<_>>(),
+            [("Archive", ChainId::Bitcoin)]
+        );
     }
 
     #[tokio::test]
