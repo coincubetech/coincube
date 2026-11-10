@@ -2437,6 +2437,8 @@ pub enum HomeMessage {
     OtherCubeSparkAddress(crate::app::transfer_destination_loader::SparkAddressReply),
     /// Unlock page → Amount, once every check passed.
     ContinueFromUnlock,
+    /// Amount page: send the source wallet's whole balance, fees included.
+    TransferMax,
     /// Done page: close the dialog and open Activity.
     OpenTransferActivity,
     /// Done page: start another transfer.
@@ -2483,7 +2485,8 @@ pub enum HomeMessage {
         generation: u64,
         direction: TransferDirection,
         feerate_vb: u64,
-        result: Result<Amount, String>,
+        /// The fee and what the destination receives.
+        result: Result<(Amount, Amount), String>,
     },
     /// Destination fetch result bound to the request and direction that started it.
     TransferDestinationReady {

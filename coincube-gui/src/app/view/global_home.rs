@@ -656,6 +656,7 @@ struct TransferCtx<'a> {
     vault_balance: Amount,
     fiat_converter: Option<FiatAmountConverter>,
     unit: BitcoinDisplayUnit,
+    max: bool,
     balance_masked: bool,
     other: OtherCubeView<'a>,
 }
@@ -1594,6 +1595,9 @@ fn fiat_estimate(amount: Amount, fiat_converter: Option<FiatAmountConverter>) ->
     })
 }
 
+/// Under the amount while Max is on.
+const MAX_NOTE: &str = "Sends the whole balance. Fees come out of this amount.";
+
 /// Amount: the destination, then the amount in the wallet's display unit, fiat estimate
 /// and the rails' limits; Prepare fetches the destination and the quote.
 fn amount_page<'a>(
@@ -1686,8 +1690,17 @@ fn amount_page<'a>(
                             .spacing(10)
                             .align_y(Alignment::Center)
                             .push(Container::new(input).width(Length::Fixed(260.0)))
-                            .push(muted(unit_label(ctx.unit))),
+                            .push(muted(unit_label(ctx.unit)))
+                            .push(
+                                button::secondary(None, "Max")
+                                    .padding([8, 14])
+                                    .on_press_maybe(
+                                        (!ctx.max && ctx.balance(source) > Amount::ZERO)
+                                            .then_some(Message::Home(HomeMessage::TransferMax)),
+                                    ),
+                            ),
                     )
+                    .push_maybe(ctx.max.then(|| muted(MAX_NOTE)))
                     .push_maybe(estimate.map(muted))
                     .push(muted(limits)),
             )
@@ -2476,6 +2489,8 @@ pub struct GlobalViewConfig<'a> {
     pub transfer_page: TransferPage,
     /// The unit the transfer amount is entered and shown in.
     pub transfer_unit: BitcoinDisplayUnit,
+    /// Max is on: the transfer sends the source's whole balance, fees included.
+    pub transfer_max: bool,
     pub other_cube: OtherCubeView<'a>,
 }
 
@@ -2572,6 +2587,7 @@ pub fn global_home_view<'a>(
         light_theme,
         transfer_page,
         transfer_unit,
+        transfer_max,
         other_cube,
     } = config;
 
@@ -2606,6 +2622,7 @@ pub fn global_home_view<'a>(
             vault_balance,
             fiat_converter,
             unit: transfer_unit,
+            max: transfer_max,
             balance_masked,
             other: other_cube,
         };
@@ -3581,6 +3598,7 @@ mod tests {
                 light_theme: false,
                 transfer_page: TransferPage::Wallets,
                 transfer_unit: BitcoinDisplayUnit::Sats,
+                transfer_max: false,
                 other_cube: OtherCubeView::default(),
             }
         }

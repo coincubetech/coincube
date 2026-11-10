@@ -32,6 +32,31 @@ fn cache_vault_pending_receive_sats(cache: &Cache) -> u64 {
         .to_sat()
 }
 
+/// The Vault coins a Max transfer sweeps, and their total: every unspent coin
+/// the wallet owns, as the Vault spend screen's MAX selects them.
+fn vault_sweep_coins(cache: &Cache) -> (Vec<OutPoint>, Amount) {
+    cache
+        .coins()
+        .iter()
+        .filter(|coin| coin.spend_info.is_none() && crate::daemon::model::coin_is_owned(coin))
+        .fold(
+            (Vec::new(), Amount::ZERO),
+            |(mut outpoints, total), coin| {
+                outpoints.push(coin.outpoint);
+                (outpoints, total + coin.amount)
+            },
+        )
+}
+
+/// What `psbt` pays to `script`.
+fn paid_to(psbt: &Psbt, script: &ScriptBuf) -> Amount {
+    psbt.unsigned_tx
+        .output
+        .iter()
+        .filter(|output| output.script_pubkey == *script)
+        .fold(Amount::ZERO, |total, output| total + output.value)
+}
+
 /// Construct a `form::Value<String>` at the default Transfer feerate. Used on
 /// `GlobalHome::new`, and on every flow reset so a value (or stuck loading
 /// flag) from a prior transfer doesn't leak into the next flow.
@@ -84,7 +109,9 @@ use breez_sdk_liquid::model::{
     PayOnchainRequest, PaymentDetails, PaymentType, PreparePayOnchainRequest,
     PreparePayOnchainResponse,
 };
-use coincube_core::miniscript::bitcoin::{bip32::ChildNumber, Address, Amount};
+use coincube_core::miniscript::bitcoin::{
+    bip32::ChildNumber, Address, Amount, OutPoint, Psbt, ScriptBuf,
+};
 
 use crate::app::wallets::{DomainPaymentDetails, DomainPaymentStatus};
 use coincube_ui::component::amount::BitcoinDisplayUnit;
@@ -421,6 +448,9 @@ pub struct GlobalHome {
     /// Unit the transfer amount is entered in, seeded from the Cube's
     /// display unit when the dialog opens.
     transfer_unit: BitcoinDisplayUnit,
+    /// Max was chosen for this source wallet: the transfer drains it and the
+    /// fee comes out of the amount. Inert once the source changes.
+    transfer_max: Option<WalletKind>,
     /// "Another Cube…": the local catalog read when that route opens.
     other_cubes: Vec<CubeChoice>,
     other_cube_selected: Option<String>,
@@ -622,6 +652,7 @@ impl GlobalHome {
             transfer_feerate_loading: None,
             transfer_page: TransferPage::Wallets,
             transfer_unit: BitcoinDisplayUnit::Sats,
+            transfer_max: None,
             other_cubes: Vec::new(),
             other_cube_selected: None,
             other_scope: None,
@@ -714,6 +745,7 @@ impl GlobalHome {
             transfer_feerate_loading: None,
             transfer_page: TransferPage::Wallets,
             transfer_unit: BitcoinDisplayUnit::Sats,
+            transfer_max: None,
             other_cubes: Vec::new(),
             other_cube_selected: None,
             other_scope: None,
@@ -876,14 +908,7 @@ impl GlobalHome {
             entered_amount: &self.entered_amount,
             receive_address: self.receive_address_info.as_ref().map(|info| &info.address),
             destination_ready: self.destination_is_ready(),
-            transfer_action_ready: self.destination_is_ready()
-                && self
-                    .transfer_direction
-                    .is_some_and(|direction| match direction.from_kind() {
-                        WalletKind::Vault => true,
-                        WalletKind::Liquid => self.prepare_onchain_send_response.is_some(),
-                        WalletKind::Spark => self.spark_send_handle.is_some(),
-                    }),
+            transfer_action_ready: self.transfer_action_ready(),
             receive_index: self.receive_address_info.as_ref().map(|info| &info.index),
             labels: self
                 .receive_address_info
@@ -922,6 +947,7 @@ impl GlobalHome {
             ),
             transfer_page: self.transfer_page,
             transfer_unit: self.transfer_unit,
+            transfer_max: self.sends_max(),
             other_cube: OtherCubeView {
                 choices: &self.other_cubes,
                 selected: self.other_cube_selected.as_deref(),
@@ -1133,6 +1159,7 @@ impl State for GlobalHome {
                             self.invalidate_transfer_destination();
                             self.wallet_picker = None;
                             self.entered_amount = form::Value::default();
+                            self.transfer_max = None;
                             // Fresh flow: reset the Vault-sourced feerate
                             // picker so a value (or stuck loading flag)
                             // from a prior transfer doesn't leak in.
@@ -1262,21 +1289,30 @@ impl State for GlobalHome {
                                     let Some(breez_client) = self.breez_client.clone() else {
                                         return Task::none();
                                     };
+                                    let pay_amount = if self.sends_max() {
+                                        breez_sdk_liquid::model::PayAmount::Drain
+                                    } else {
+                                        breez_sdk_liquid::model::PayAmount::Bitcoin {
+                                            receiver_amount_sat: amount.to_sat(),
+                                        }
+                                    };
                                     tasks.push(Task::perform(
                                         async move {
                                             breez_client
                                                 .prepare_pay_onchain(&PreparePayOnchainRequest {
                                                     fee_rate_sat_per_vbyte: None,
-                                                    amount: breez_sdk_liquid::model::PayAmount::Bitcoin { receiver_amount_sat: amount.to_sat() },
+                                                    amount: pay_amount,
                                                 })
                                                 .await
                                         },
                                         move |result| match result {
-                                            Ok(response) => Message::View(view::Message::Home(HomeMessage::PrepareOnChainResponseReceived {
-                                                generation,
-                                                direction,
-                                                response,
-                                            })),
+                                            Ok(response) => Message::View(view::Message::Home(
+                                                HomeMessage::PrepareOnChainResponseReceived {
+                                                    generation,
+                                                    direction,
+                                                    response,
+                                                },
+                                            )),
                                             Err(error) => Message::View(view::Message::Home(
                                                 HomeMessage::TransferDestinationFailed {
                                                     generation,
@@ -1421,21 +1457,30 @@ impl State for GlobalHome {
                                     let Some(breez_client) = self.breez_client.clone() else {
                                         return Task::none();
                                     };
+                                    let pay_amount = if self.sends_max() {
+                                        breez_sdk_liquid::model::PayAmount::Drain
+                                    } else {
+                                        breez_sdk_liquid::model::PayAmount::Bitcoin {
+                                            receiver_amount_sat: amount.to_sat(),
+                                        }
+                                    };
                                     tasks.push(Task::perform(
                                         async move {
                                             breez_client
                                                 .prepare_pay_onchain(&PreparePayOnchainRequest {
                                                     fee_rate_sat_per_vbyte: None,
-                                                    amount: breez_sdk_liquid::model::PayAmount::Bitcoin { receiver_amount_sat: amount.to_sat() },
+                                                    amount: pay_amount,
                                                 })
                                                 .await
                                         },
                                         move |result| match result {
-                                            Ok(response) => Message::View(view::Message::Home(HomeMessage::PrepareOnChainResponseReceived {
-                                                generation,
-                                                direction,
-                                                response,
-                                            })),
+                                            Ok(response) => Message::View(view::Message::Home(
+                                                HomeMessage::PrepareOnChainResponseReceived {
+                                                    generation,
+                                                    direction,
+                                                    response,
+                                                },
+                                            )),
                                             Err(error) => Message::View(view::Message::Home(
                                                 HomeMessage::TransferDestinationFailed {
                                                     generation,
@@ -1477,6 +1522,7 @@ impl State for GlobalHome {
                                     return Task::none();
                                 };
                                 let amount_sat = amount.to_sat();
+                                let fees_included = self.sends_max();
                                 tasks.push(Task::perform(
                                     async move {
                                         let addr_res = breez_client
@@ -1487,12 +1533,21 @@ impl State for GlobalHome {
                                                 detail: e.to_string(),
                                             })?;
                                         let destination = addr_res.destination;
-                                        let prep = spark
-                                            .prepare_send(destination.clone(), Some(amount_sat))
-                                            .await
-                                            .map_err(|e| TransferError::FeeEstimateFailed {
-                                                detail: e.to_string(),
-                                            })?;
+                                        let prep = if fees_included {
+                                            spark
+                                                .prepare_send_fees_included(
+                                                    destination.clone(),
+                                                    amount_sat,
+                                                )
+                                                .await
+                                        } else {
+                                            spark
+                                                .prepare_send(destination.clone(), Some(amount_sat))
+                                                .await
+                                        }
+                                        .map_err(|e| TransferError::FeeEstimateFailed {
+                                            detail: e.to_string(),
+                                        })?;
                                         Ok::<_, TransferError>((
                                             destination,
                                             prep.handle,
@@ -1569,6 +1624,7 @@ impl State for GlobalHome {
                                 let daemon = daemon.clone();
                                 self.current_view.next();
                                 let amount_sat = amount.to_sat();
+                                let fees_included = self.sends_max();
                                 tasks.push(Task::perform(
                                     async move {
                                         let addr_str = match other_address {
@@ -1586,12 +1642,21 @@ impl State for GlobalHome {
                                                 .address
                                                 .to_string(),
                                         };
-                                        let prep = spark
-                                            .prepare_send(addr_str.clone(), Some(amount_sat))
-                                            .await
-                                            .map_err(|e| TransferError::FeeEstimateFailed {
-                                                detail: e.to_string(),
-                                            })?;
+                                        let prep = if fees_included {
+                                            spark
+                                                .prepare_send_fees_included(
+                                                    addr_str.clone(),
+                                                    amount_sat,
+                                                )
+                                                .await
+                                        } else {
+                                            spark
+                                                .prepare_send(addr_str.clone(), Some(amount_sat))
+                                                .await
+                                        }
+                                        .map_err(|e| TransferError::FeeEstimateFailed {
+                                            detail: e.to_string(),
+                                        })?;
                                         let method =
                                             if direction == TransferDirection::SparkToOtherSpark {
                                                 "SparkAddress"
@@ -1685,6 +1750,10 @@ impl State for GlobalHome {
                         // handler into advancing the step machine.
                         self.is_sending = false;
                         self.current_view.previous();
+                        // Back on Amount, Max shows the whole balance again.
+                        if let Some(source) = self.transfer_max.filter(|_| self.sends_max()) {
+                            self.set_entered_amount(self.max_transfer_amount(source, cache));
+                        }
                         Task::none()
                     }
                     HomeMessage::SparkPrepareSendReady {
@@ -1709,7 +1778,7 @@ impl State for GlobalHome {
                             }
                             self.destination_ready = Some((generation, direction));
                             self.spark_send_handle = Some(prepare_handle);
-                            self.spark_send_fee_sat = Some(fee_sat);
+                            self.show_max_after_fee(fee_sat);
                             return Task::none();
                         }
                         // Parse the destination as a checked Bitcoin address — if
@@ -1766,7 +1835,7 @@ impl State for GlobalHome {
                         });
                         self.destination_ready = Some((generation, direction));
                         self.spark_send_handle = Some(prepare_handle);
-                        self.spark_send_fee_sat = Some(fee_sat);
+                        self.show_max_after_fee(fee_sat);
                         Task::none()
                     }
                     HomeMessage::ConfirmSparkSend => {
@@ -2498,6 +2567,20 @@ impl State for GlobalHome {
                             return Task::none();
                         }
                         self.entered_amount.value = amount;
+                        self.transfer_max = None;
+                        self.validate_entered_amount(cache);
+                        Task::none()
+                    }
+                    HomeMessage::TransferMax => {
+                        if self.current_view.step != 1 || self.transfer_page != TransferPage::Amount
+                        {
+                            return Task::none();
+                        }
+                        let Some(source) = self.transfer_direction.map(|d| d.from_kind()) else {
+                            return Task::none();
+                        };
+                        self.set_entered_amount(self.max_transfer_amount(source, cache));
+                        self.transfer_max = Some(source);
                         self.validate_entered_amount(cache);
                         Task::none()
                     }
@@ -2548,6 +2631,12 @@ impl State for GlobalHome {
                                                 amount_sat,
                                             );
 
+                                            // Max sweeps every owned coin to the
+                                            // destination, as the preview priced it.
+                                            let sweep = self
+                                                .sends_max()
+                                                .then(|| vault_sweep_coins(cache).0);
+                                            let script = address_info.address.script_pubkey();
                                             let daemon_clone = daemon.clone();
                                             let wallet = self.wallet.clone();
                                             let cache_clone =
@@ -2583,15 +2672,32 @@ impl State for GlobalHome {
                                             self.transfer_signed = false;
                                             return Task::perform(
                                                 async move {
-                                                    let psbt = match daemon_clone
-                                                        .create_spend_tx(
-                                                            &[],
-                                                            &destinations,
-                                                            feerate_vb,
-                                                            None,
-                                                        )
-                                                        .await
-                                                    {
+                                                    let built = match &sweep {
+                                                        Some(coins) => {
+                                                            daemon_clone
+                                                                .create_spend_tx(
+                                                                    coins,
+                                                                    &HashMap::new(),
+                                                                    feerate_vb,
+                                                                    destinations
+                                                                        .keys()
+                                                                        .next()
+                                                                        .cloned(),
+                                                                )
+                                                                .await
+                                                        }
+                                                        None => {
+                                                            daemon_clone
+                                                                .create_spend_tx(
+                                                                    &[],
+                                                                    &destinations,
+                                                                    feerate_vb,
+                                                                    None,
+                                                                )
+                                                                .await
+                                                        }
+                                                    };
+                                                    let psbt = match built {
                                                         Ok(CreateSpendResult::Success {
                                                             psbt,
                                                             ..
@@ -2610,6 +2716,13 @@ impl State for GlobalHome {
                                                             ));
                                                         }
                                                     };
+
+                                                    if sweep.is_some()
+                                                        && paid_to(&psbt, &script).to_sat()
+                                                            != amount_sat
+                                                    {
+                                                        return Err("The Vault balance changed. Go back and choose Max again.".to_string());
+                                                    }
 
                                                     daemon_clone
                                                         .update_spend_tx(&psbt)
@@ -3208,6 +3321,10 @@ impl State for GlobalHome {
                         if !self.destination_response_is_current(generation, direction) {
                             return Task::none();
                         }
+                        // A drain prepares the whole balance; show what arrives.
+                        if self.sends_max() {
+                            self.set_entered_amount(Amount::from_sat(response.receiver_amount_sat));
+                        }
                         self.prepare_onchain_send_response = Some(response);
                         Task::none()
                     }
@@ -3329,6 +3446,7 @@ impl State for GlobalHome {
                         self.transfer_to = None;
                         self.wallet_picker = None;
                         self.entered_amount = form::Value::default();
+                        self.transfer_max = None;
                         self.invalidate_transfer_destination();
                         self.onchain_send_limit = None;
                         self.onchain_receive_limit = None;
@@ -3696,8 +3814,12 @@ impl State for GlobalHome {
                             return Task::none();
                         }
                         match result {
-                            Ok(fees) => {
+                            Ok((fees, received)) => {
                                 self.spend_tx_fees = Some(fees);
+                                // A sweep's output is the balance less this fee.
+                                if self.sends_max() {
+                                    self.set_entered_amount(received);
+                                }
                             }
                             Err(e) => {
                                 // Quiet failure: the user sees blank Fees/Total,
@@ -4056,6 +4178,66 @@ impl GlobalHome {
         }
     }
 
+    /// The destination is current and the direction's prepared response or
+    /// handle is in, so Review can confirm.
+    fn transfer_action_ready(&self) -> bool {
+        self.destination_is_ready()
+            && self
+                .transfer_direction
+                .is_some_and(|direction| match direction.from_kind() {
+                    // Max shows what arrives only once the sweep is priced.
+                    WalletKind::Vault => !self.sends_max() || self.spend_tx_fees.is_some(),
+                    WalletKind::Liquid => self.prepare_onchain_send_response.is_some(),
+                    WalletKind::Spark => self.spark_send_handle.is_some(),
+                })
+    }
+
+    /// Max is on for the current source wallet.
+    fn sends_max(&self) -> bool {
+        self.transfer_max.is_some()
+            && self.transfer_max == self.transfer_direction.map(|d| d.from_kind())
+    }
+
+    /// What Max fills in for `source`, before fees.
+    fn max_transfer_amount(&self, source: WalletKind, cache: &Cache) -> Amount {
+        match source {
+            WalletKind::Liquid => self.liquid_balance,
+            WalletKind::Spark => self.spark_balance,
+            WalletKind::Vault => vault_sweep_coins(cache).1,
+        }
+    }
+
+    /// Writes `amount` into the amount field in the transfer's unit.
+    fn set_entered_amount(&mut self, amount: Amount) {
+        self.entered_amount.value = match self.transfer_unit {
+            BitcoinDisplayUnit::Sats => amount.to_sat().to_string(),
+            BitcoinDisplayUnit::BTC => {
+                amount.to_string_in(coincube_core::miniscript::bitcoin::Denomination::Bitcoin)
+            }
+        };
+    }
+
+    /// Stores Spark's quoted fee. With Max the prepared amount is the whole
+    /// balance with the fee inside it, so the field shows what arrives; the
+    /// fee is taken off once per preparation.
+    fn show_max_after_fee(&mut self, fee_sat: u64) {
+        if self.sends_max() && self.spark_send_fee_sat.is_none() {
+            let denomination = if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
+                coincube_core::miniscript::bitcoin::Denomination::Bitcoin
+            } else {
+                coincube_core::miniscript::bitcoin::Denomination::Satoshi
+            };
+            if let Ok(total) = Amount::from_str_in(&self.entered_amount.value, denomination) {
+                self.set_entered_amount(
+                    total
+                        .checked_sub(Amount::from_sat(fee_sat))
+                        .unwrap_or(Amount::ZERO),
+                );
+            }
+        }
+        self.spark_send_fee_sat = Some(fee_sat);
+    }
+
     fn invalidate_transfer_destination(&mut self) -> u64 {
         self.transfer_request_generation = self.transfer_request_generation.wrapping_add(1);
         self.destination_ready = None;
@@ -4286,36 +4468,48 @@ impl GlobalHome {
         if feerate_vb == 0 {
             return Task::none();
         }
-        let denomination = if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
-            coincube_core::miniscript::bitcoin::Denomination::Bitcoin
+        let destination = address_info.address.as_unchecked().clone();
+        let script = address_info.address.script_pubkey();
+        // Max sweeps every owned coin with the destination as the change
+        // address, so it gets the balance less the fee. Otherwise this PSBT
+        // only answers `fee()`: a fresh change address (`None`) would make the
+        // daemon reserve a change index durably on every valid keystroke of
+        // the feerate field; the wallet's fixed preview address sizes the
+        // change output identically and reserves nothing. The real transfer in
+        // `SignVaultToLiquidTx` still passes `None`.
+        let (outpoints, destinations, change) = if self.sends_max() {
+            (vault_sweep_coins(cache).0, HashMap::new(), destination)
         } else {
-            coincube_core::miniscript::bitcoin::Denomination::Satoshi
-        };
-        let Ok(amount) = Amount::from_str_in(&self.entered_amount.value, denomination) else {
-            return Task::none();
-        };
-        if !self.entered_amount.valid {
-            return Task::none();
-        }
-        let amount_sat = amount.to_sat();
-        let mut destinations = HashMap::new();
-        destinations.insert(address_info.address.as_unchecked().clone(), amount_sat);
-        // This PSBT only ever answers `fee()`. A fresh change address (`None`)
-        // would make the daemon reserve a change index durably on every valid
-        // keystroke of the feerate field; the wallet's fixed preview address
-        // sizes the change output identically and reserves nothing. The real
-        // transfer in `SignVaultToLiquidTx` still passes `None`.
-        let Some(preview_change) = self.wallet.as_ref().map(|w| w.preview_change_address()) else {
-            return Task::none();
+            let denomination = if matches!(self.transfer_unit, BitcoinDisplayUnit::BTC) {
+                coincube_core::miniscript::bitcoin::Denomination::Bitcoin
+            } else {
+                coincube_core::miniscript::bitcoin::Denomination::Satoshi
+            };
+            let Ok(amount) = Amount::from_str_in(&self.entered_amount.value, denomination) else {
+                return Task::none();
+            };
+            if !self.entered_amount.valid {
+                return Task::none();
+            }
+            let Some(preview_change) = self.wallet.as_ref().map(|w| w.preview_change_address())
+            else {
+                return Task::none();
+            };
+            (
+                Vec::new(),
+                HashMap::from([(destination, amount.to_sat())]),
+                preview_change,
+            )
         };
         Task::perform(
             async move {
                 match daemon
-                    .create_spend_tx(&[], &destinations, feerate_vb, Some(preview_change))
+                    .create_spend_tx(&outpoints, &destinations, feerate_vb, Some(change))
                     .await
                 {
                     Ok(CreateSpendResult::Success { psbt, .. }) => {
-                        psbt.fee().map_err(|e| e.to_string())
+                        let fee = psbt.fee().map_err(|e| e.to_string())?;
+                        Ok((fee, paid_to(&psbt, &script)))
                     }
                     Ok(CreateSpendResult::InsufficientFunds { missing }) => {
                         Err(format!("Insufficient funds: {missing} sats missing"))
@@ -5923,7 +6117,7 @@ mod tests {
                     generation: old_generation,
                     direction: TransferDirection::VaultToLiquid,
                     feerate_vb: 2,
-                    result: Ok(Amount::from_sat(500)),
+                    result: Ok((Amount::from_sat(500), Amount::from_sat(100_000))),
                 })),
             ));
             assert!(home.spend_tx_fees.is_none());
@@ -6549,6 +6743,105 @@ mod tests {
             assert_eq!(home.current_view.step, 3);
             assert!(home.other_locked_again);
             assert!(home.pending_spark_incoming.is_none());
+        }
+
+        #[test]
+        fn max_drains_spark_and_shows_what_arrives() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.current_view.step = 1;
+            home.transfer_page = TransferPage::Amount;
+            home.transfer_direction = Some(TransferDirection::SparkToLiquid);
+            home.transfer_unit = BitcoinDisplayUnit::Sats;
+            home.spark_balance = Amount::from_sat(50_000);
+
+            send(&mut home, &cache, HomeMessage::TransferMax);
+            assert!(home.sends_max());
+            assert_eq!(home.entered_amount.value, "50000");
+
+            // Spark's fee is inside the amount; it comes off once.
+            let generation = home.invalidate_transfer_destination();
+            home.current_view.step = 2;
+            for _ in 0..2 {
+                send(
+                    &mut home,
+                    &cache,
+                    HomeMessage::SparkPrepareSendReady {
+                        generation,
+                        direction: TransferDirection::SparkToLiquid,
+                        destination: MAINNET_ADDR.to_string(),
+                        prepare_handle: "max".to_string(),
+                        fee_sat: 1_200,
+                    },
+                );
+            }
+            assert_eq!(home.entered_amount.value, "48800");
+
+            // Back on Amount the whole balance shows again; typing ends Max.
+            send(&mut home, &cache, HomeMessage::PreviousStep);
+            assert_eq!(home.current_view.step, 1);
+            assert_eq!(home.entered_amount.value, "50000");
+            send(&mut home, &cache, HomeMessage::AmountEdited("1000".into()));
+            assert!(!home.sends_max());
+        }
+
+        #[test]
+        fn max_drains_liquid_to_the_quoted_receiver_amount() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.current_view.step = 1;
+            home.transfer_page = TransferPage::Amount;
+            home.transfer_direction = Some(TransferDirection::LiquidToSpark);
+            home.transfer_unit = BitcoinDisplayUnit::Sats;
+            home.liquid_balance = Amount::from_sat(60_000);
+
+            send(&mut home, &cache, HomeMessage::TransferMax);
+            assert_eq!(home.entered_amount.value, "60000");
+            let generation = home.invalidate_transfer_destination();
+            home.current_view.step = 2;
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::PrepareOnChainResponseReceived {
+                    generation,
+                    direction: TransferDirection::LiquidToSpark,
+                    response: PreparePayOnchainResponse {
+                        receiver_amount_sat: 58_500,
+                        claim_fees_sat: 100,
+                        total_fees_sat: 1_500,
+                    },
+                },
+            );
+            assert_eq!(home.entered_amount.value, "58500");
+        }
+
+        #[test]
+        fn max_vault_sweep_waits_for_its_price_and_shows_what_arrives() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.transfer_unit = BitcoinDisplayUnit::Sats;
+            home.transfer_max = Some(WalletKind::Vault);
+            assert!(!home.transfer_action_ready(), "no price, no confirm");
+
+            let feerate_vb = home.transfer_feerate.value.trim().parse().unwrap();
+            let generation = home.transfer_request_generation;
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::TransferPsbtPreviewReady {
+                    generation,
+                    direction: TransferDirection::VaultToLiquid,
+                    feerate_vb,
+                    result: Ok((Amount::from_sat(500), Amount::from_sat(99_500))),
+                },
+            );
+            assert_eq!(home.spend_tx_fees, Some(Amount::from_sat(500)));
+            assert_eq!(home.entered_amount.value, "99500");
+            assert!(home.transfer_action_ready());
+
+            // Max taken for another source does nothing here.
+            home.transfer_max = Some(WalletKind::Spark);
+            assert!(!home.sends_max());
         }
 
         #[test]
