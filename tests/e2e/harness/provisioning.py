@@ -139,7 +139,7 @@ def faucet_claim(address, journal):
         raise Blocked("FAUCET_RATE_LIMIT", "The faucet retry window has not elapsed; no claim was sent.")
     journal.artifact("funding_claim_started", True)
     request = Request(FAUCET, data=json.dumps({"network": "btc-testnet", "address": address}).encode(),
-                      headers={"Content-Type": "application/json"})
+                      headers={"Content-Type": "application/json", "User-Agent": "COINCUBE-Testnet4-QA/1.0"})
     try:
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=30) as response:
             result = json.loads(response.read(100_000))

@@ -78,6 +78,8 @@ def faucet_stub(monkeypatch, responses, journal):
     def send(request, timeout):
         # The durable attempt record must exist before a network mutation.
         assert json.loads(private_read(journal.path))["artifacts"]["funding_claim_started"] is True
+        assert request.get_header("User-agent") == "COINCUBE-Testnet4-QA/1.0"
+        assert request.get_header("Content-type") == "application/json"
         calls.append(json.loads(request.data))
         outcome = next(outcomes)
         if isinstance(outcome, BaseException):
