@@ -718,6 +718,66 @@ mod run {
         let suffix = origin_suffix(&path);
         Ok(format!("[{}{}]{}/<0;1>/*", row.fingerprint, suffix, xpub))
     }
+    fn bound_phone_descriptor(
+        rows: &[CubeKeyRaw],
+        target: &str,
+        fingerprint: &str,
+        encryption: &CubeEncryptionKey,
+        cube_id: u64,
+        exported: Option<&PhoneKey>,
+        saved: Option<&str>,
+    ) -> Result<String> {
+        let matches: Vec<_> = rows
+            .iter()
+            .filter(|row| row.id.to_string() == target)
+            .collect();
+        check(matches.len() <= 1, "ambiguous_phone_key")?;
+        let row = matches.first().ok_or("phone_key_not_attached")?;
+        check(
+            row.fingerprint == fingerprint,
+            "phone_key_identity_mismatch",
+        )?;
+        // W3 responses can omit the legacy cubeId field. Membership must always
+        // come from get_cube_keys; an explicit conflicting legacy value is invalid.
+        check(
+            row.cube_id == 0 || row.cube_id == cube_id,
+            "phone_key_cube_mismatch",
+        )?;
+        let envelope = row
+            .xpub_envelope
+            .as_ref()
+            .ok_or("phone_key_envelope_required")?;
+        // This scenario attaches an already-existing personal key, so resealing
+        // must bind its real row ID, not the legacy enrol-time zero ID.
+        encryption
+            .open(envelope, cube_id, row.id)
+            .map_err(|_| "phone_key_envelope_binding")?;
+        let phone = phone_descriptor(row, encryption, cube_id)?;
+        if let Some(exported) = exported {
+            check(
+                exported.network == "testnet4"
+                    && exported.key_id == target
+                    && exported.fingerprint == fingerprint,
+                "phone_key_identity_mismatch",
+            )?;
+            let path = DerivationPath::from_str(&exported.derivation_path)
+                .map_err(|_| "invalid_phone_derivation")?;
+            let expected = DescriptorPublicKey::from_str(&format!(
+                "[{}{}]{}/<0;1>/*",
+                exported.fingerprint,
+                origin_suffix(&path),
+                exported.xpub
+            ))
+            .map_err(|_| "invalid_phone_key_file")?;
+            let actual =
+                DescriptorPublicKey::from_str(&phone).map_err(|_| "invalid_descriptor_key")?;
+            check(actual == expected, "phone_key_export_mismatch")?;
+        }
+        if let Some(saved) = saved {
+            check(saved == phone, "phone_key_changed")?;
+        }
+        Ok(phone)
+    }
     fn origin_suffix(path: &DerivationPath) -> String {
         if path.as_ref().is_empty() {
             String::new()
@@ -786,30 +846,22 @@ mod run {
             .get_cube_keys(&state.cube_uuid)
             .await
             .map_err(rest_error)?;
-        let matches: Vec<_> = rows
-            .iter()
-            .filter(|r| r.id.to_string() == *target && r.fingerprint == *fp)
-            .collect();
-        check(matches.len() <= 1, "ambiguous_phone_key")?;
-        let phone = if let Some(row) = matches.first() {
-            phone_descriptor(row, &CubeEncryptionKey::derive(&master, NETWORK), cube_id)?
-        } else if let Some(path) = &input.phone_key_file {
-            // Optional fallback for an own account's personal key export. The
-            // atomic Connect enrollment still validates ownership and eligibility.
-            let key: PhoneKey =
-                serde_json::from_str(&private_read(path)?).map_err(|_| "invalid_phone_key_file")?;
-            check(
-                key.network == "testnet4" && key.key_id == *target && key.fingerprint == *fp,
-                "phone_key_identity_mismatch",
-            )?;
-            let row: CubeKeyRaw = serde_json::from_value(json!({"id":target.parse::<u64>().map_err(|_|"invalid_target")?,"name":"QA phone key","xpub":key.xpub,"fingerprint":key.fingerprint,"derivationPath":key.derivation_path,"network":"testnet4","status":"active"})).map_err(|_| "invalid_phone_key_file")?;
-            phone_descriptor(&row, &CubeEncryptionKey::derive(&master, NETWORK), cube_id)?
-        } else {
-            return Err("phone_key_not_found");
-        };
-        if let Some(saved) = &state.phone_descriptor_key {
-            check(saved == &phone, "phone_key_changed")?;
-        }
+        let exported: Option<PhoneKey> = input
+            .phone_key_file
+            .as_ref()
+            .map(|path| {
+                serde_json::from_str(&private_read(path)?).map_err(|_| "invalid_phone_key_file")
+            })
+            .transpose()?;
+        let phone = bound_phone_descriptor(
+            &rows,
+            target,
+            fp,
+            &CubeEncryptionKey::derive(&master, NETWORK),
+            cube_id,
+            exported.as_ref(),
+            state.phone_descriptor_key.as_deref(),
+        )?;
         let descriptor = descriptor(secrets, &phone)?;
         let descriptor_id = descriptor_id_fingerprint(&descriptor).to_string();
         if let Some(saved) = &state.descriptor_id {
@@ -1252,6 +1304,120 @@ mod run {
             assert!(!vault_is_absent(&CoincubeError::RateLimited {
                 retry_after: Duration::from_secs(60),
             }));
+        }
+
+        #[test]
+        fn phone_export_requires_real_cube_membership_and_exact_key() {
+            let signer = MasterSigner::from_str(NETWORK, "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap();
+            let secp = secp256k1::Secp256k1::new();
+            let path = DerivationPath::from_str("m/48'/1'/0'/2'").unwrap();
+            let encryption = CubeEncryptionKey::derive(&signer, NETWORK);
+            let mut exported = PhoneKey {
+                key_id: "7".into(),
+                fingerprint: signer.fingerprint(&secp).to_string(),
+                network: "testnet4".into(),
+                xpub: signer.xpub_at(&path, &secp).to_string(),
+                derivation_path: path.to_string(),
+            };
+            let mut row: CubeKeyRaw = serde_json::from_value(json!({
+                "id":7,"cubeId":42,"name":"synthetic phone key", "xpub":exported.xpub,
+                "fingerprint":exported.fingerprint,"derivationPath":exported.derivation_path,
+                "network":"testnet4","status":"active"
+            }))
+            .unwrap();
+            let resolve = |rows: &[CubeKeyRaw], export: &PhoneKey, saved: Option<&str>| {
+                bound_phone_descriptor(
+                    rows,
+                    "7",
+                    &signer.fingerprint(&secp).to_string(),
+                    &encryption,
+                    42,
+                    Some(export),
+                    saved,
+                )
+            };
+            assert_eq!(resolve(&[], &exported, None), Err("phone_key_not_attached"));
+            row.id = 8;
+            assert_eq!(
+                resolve(&[row.clone()], &exported, None),
+                Err("phone_key_not_attached")
+            );
+            row.id = 7;
+            row.cube_id = 20;
+            assert_eq!(
+                resolve(&[row.clone()], &exported, None),
+                Err("phone_key_cube_mismatch")
+            );
+            row.cube_id = 42;
+            assert_eq!(
+                resolve(&[row.clone()], &exported, None),
+                Err("phone_key_envelope_required")
+            );
+            // Published crypto known-answer vector: cube 42 / key 7.
+            row.xpub_envelope = Some(serde_json::from_value(json!({
+                "scheme":coincube_gui::services::inheritance::ecies::SCHEME,
+                "recipient":"cube-owner", "aadKeyIdBound":true,
+                "ephemeralPubkey":"032c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991", "nonce":"0000000000000000cafebabe", "ciphertext":"fc13b1b9639e00e163b3664b62f516ad49d7f19c5383a758706ca813fa8e236cf14a4189aa61ee94801d31cb26a14a999eb5ea2c90a53bc704c5b262ff2b4cf984e97d7c92d13069b829b972c501190db9eaba00b8df84a25c78125e602cff3b037c7db65974b063084596a64667d5f92d647067c3c5453237d7e9e3573a57"
+            })).unwrap());
+            let original = resolve(&[row.clone()], &exported, None).unwrap();
+            assert_eq!(
+                resolve(&[row.clone()], &exported, Some(&original)),
+                Ok(original.clone())
+            );
+            assert_eq!(
+                resolve(&[row.clone()], &exported, Some("changed")),
+                Err("phone_key_changed")
+            );
+            exported.xpub = MasterSigner::generate(NETWORK)
+                .unwrap()
+                .xpub_at(&path, &secp)
+                .to_string();
+            assert_eq!(
+                resolve(&[row.clone()], &exported, Some(&original)),
+                Err("phone_key_export_mismatch")
+            );
+            exported.xpub = row.xpub.clone();
+            exported.derivation_path = "m/48'/1'/1'/2'".into();
+            assert_eq!(
+                resolve(&[row.clone()], &exported, None),
+                Err("phone_key_export_mismatch")
+            );
+            exported.derivation_path = row.derivation_path.clone();
+            row.fingerprint = "deadbeef".into();
+            assert_eq!(
+                resolve(&[row.clone()], &exported, None),
+                Err("phone_key_identity_mismatch")
+            );
+            row.fingerprint = exported.fingerprint.clone();
+            row.cube_id = 0; // W3 omits the legacy field; the scoped row is still required.
+            assert_eq!(resolve(&[row.clone()], &exported, None), Ok(original));
+            let bound = row.xpub_envelope.clone();
+            row.xpub_envelope = Some(serde_json::from_value(json!({
+                "scheme":coincube_gui::services::inheritance::ecies::SCHEME,
+                "recipient":"cube-owner", "aadKeyIdBound":false,
+                "ephemeralPubkey":"029ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b", "nonce":"00000000000000000badc0de", "ciphertext":"317bb132d9a0d43257a3519b396a3fae30502124a693d4d06648f319f96fc6924b2b2b5af537437d128122c7f4ea7732d394c968c51bae9f20a7eff8cbefe1fc1503d462a415b380c1771ac1a31731ea25f757721a08aeb198219b1d14258ee5acd4697d58d3f9f7bbeb58dabec39253a454fc68aba4620df5c7207a4cf774"
+            })).unwrap());
+            assert_eq!(
+                resolve(&[row.clone()], &exported, None),
+                Err("phone_key_envelope_binding")
+            );
+            row.xpub_envelope = bound;
+            assert_eq!(
+                bound_phone_descriptor(
+                    &[row.clone()],
+                    "7",
+                    &exported.fingerprint,
+                    &encryption,
+                    43,
+                    Some(&exported),
+                    None
+                ),
+                Err("phone_key_envelope_binding")
+            );
+            assert_eq!(
+                resolve(&[row.clone(), row], &exported, None),
+                Err("ambiguous_phone_key")
+            );
         }
 
         struct Temp(PathBuf);
