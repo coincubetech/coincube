@@ -193,6 +193,11 @@ class Runner:
     def stage_sign(self):
         if self.artifacts.get("already_broadcast") or self.collect_once():
             return
+        # An earlier invocation already tapped Approve, so the phone may have
+        # submitted a signature Connect has not delivered yet. Never reopen the
+        # approval flow; stage_collect keeps polling for that signature.
+        if self.artifacts.get("approval_started"):
+            return
         with attach(self.config["ios"]) as phone:
             phone.approve(self.request_id, self.intent, self.artifacts["fee_sats"],
                           self.config["ios"].get("pin_file"), self.journal, self.deadline)
@@ -203,7 +208,7 @@ class Runner:
         until = time.monotonic() + self.deadline
         while not self.collect_once():
             if time.monotonic() >= until:
-                raise Blocked("SIGNATURE_DELIVERY", "Connect has not returned a verifiable second signature before the deadline.")
+                raise Blocked("SIGNATURE_DELIVERY", "Connect has not returned a verifiable second signature before the deadline; rerun to keep waiting without another approval.")
             time.sleep(2)
 
     def stage_broadcast(self):

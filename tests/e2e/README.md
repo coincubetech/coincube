@@ -149,9 +149,10 @@ identity; `results.xml` is a sanitized JUnit report. `signed.psbt` and
 `signed.hex`, if produced, remain private in the run directory. The process
 holds an exclusive run lock and a shared USB automation lease. File writes use
 atomic rename and fsync. Changed configuration or draft bytes cannot reuse a
-checkpoint. A crash during approval never causes an automatic second PIN
-attempt; the runner first queries Connect and otherwise reports the uncertain
-approval for reconciliation.
+checkpoint. A crash or timeout after the Approve tap never causes an automatic
+second approval or PIN attempt; rerunning skips the phone and keeps polling
+Connect for the signature, reporting `SIGNATURE_DELIVERY` if it still has not
+arrived.
 
 No raw Appium server logs, page source, screenshots, RPC payloads or native
 errors are saved. Failures use stable codes such as `REQUEST_DELIVERY`,
