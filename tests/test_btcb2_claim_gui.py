@@ -13,7 +13,8 @@ import time
 import subprocess
 import tempfile
 from decimal import Decimal
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+from test_framework.http_bridge import CheckedThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.request import Request, urlopen
@@ -179,6 +180,7 @@ class Bridge:
                 return harness.blake2b, harness.electrs_blake2b, suffix, network
 
             def do_GET(self):
+                """Serve indexed chain data while retaining unexpected test failures."""
                 try:
                     if self.path == "/api/v1/connect/networks/bitcoin-blake2b/anchor":
                         assert self.headers.get("Authorization") == "Bearer synthetic-regtest-only"
@@ -236,11 +238,12 @@ class Bridge:
                             )
                     except HTTPError as error:
                         self.reply(error.code, error.read(262145))
-                except Exception as error:
+                except (OSError, ValueError, KeyError, TypeError) as error:
                     owner.errors.append(repr(error))
                     self.reply(503, {"error": "bridge-refused"})
 
             def do_POST(self):
+                """Proxy transaction submissions while retaining unexpected test failures."""
                 try:
                     node, _, suffix, network = self.route()
                     if network == "mainnet" and owner.policy_node is not None:
@@ -274,11 +277,11 @@ class Bridge:
                         verdict["reject_reason"] = result["reject-reason"]
                     self.reply(200, {"success": True, "data": {
                         "network": network, "state": "available", "result": verdict}})
-                except Exception as error:
+                except (OSError, ValueError, KeyError, TypeError) as error:
                     owner.errors.append(repr(error))
                     self.reply(503, {"error": "bridge-refused"})
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = CheckedThreadingHTTPServer(("127.0.0.1", 0), Handler, self.errors)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.url = f"http://127.0.0.1:{self.server.server_port}"
@@ -287,6 +290,7 @@ class Bridge:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+        self.server.assert_no_errors()
 
 
 @pytest.mark.parametrize(

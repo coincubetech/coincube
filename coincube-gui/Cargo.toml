@@ -248,11 +248,12 @@ httpmock = "0.7"
 [features]
 # Explicit opt-in for disposable loopback regtest integration.
 regtest-harness = ["coincubed/regtest-harness"]
-# Opt-in tests that hit a real `coincube-api` dev endpoint. Requires
+# Opt-in tests that hit a real `coincube-api` endpoint (production with a
+# dedicated test account, or a local API; there is no dev server). Requires
 # the `COINCUBE_API_URL` env var (and, for the auth-flavoured tests,
 # `COINCUBE_INTEGRATION_TOKEN`) at run time. Always off in the default
-# `cargo test` matrix so PR CI stays hermetic; enabled by the nightly
-# job that targets the dev environment.
+# `cargo test` matrix so PR CI stays hermetic; enabled by the
+# connect-integration workflow when it is switched on.
 integration-tests = []
 
 [build-dependencies]

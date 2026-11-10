@@ -114,8 +114,8 @@ Esplora before using accepted development infrastructure:
 7. Test backup/export and wrong-chain restore refusal against same-ID Bitcoin
    controls. Repeat Bitcoin creation/open/sign behavior with the fork flag off.
 
-For the eventual manual dev check, use a disposable OS account/keyring and
-new datadir. Build with the accepted dev API URL and normal repository build
+For the eventual manual check, use a disposable OS account/keyring and
+new datadir. Build with `COINCUBE_API_URL` set to a local API or production (there is no dev API since 2026-11-09) and normal repository build
 instructions. The executable accepts `--datadir`; it has no BTCB2 CLI network
 switch. Select the chain through the authenticated Home UI after its gates pass.
 

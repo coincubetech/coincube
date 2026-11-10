@@ -179,6 +179,22 @@ def test_approval_resume_keeps_polling_delayed_signature(runner, monkeypatch):
     runner.stage_collect()
 
 
+def test_resume_after_approval_waits_for_delivery(runner, monkeypatch):
+    runner.journal.artifact("session_id", "same-session")
+    runner.journal.artifact("approval_started", True)
+    monkeypatch.setattr("harness.runner.attach", lambda *args: pytest.fail("must not reopen phone approval"))
+    monkeypatch.setattr("harness.runner.time.sleep", lambda _: None)
+    polls = []
+    def collect(action, **fields):
+        polls.append(action)
+        return {"ready": len(polls) == 3, "signature_count_min": 2}
+    runner.native.call = collect
+    runner.stage_sign()
+    runner.stage_collect()
+    assert polls == ["collect"] * 3
+    assert runner.artifacts["signature_count_min"] == 2
+
+
 def test_stage_dependency_failure_is_not_success(runner):
     with pytest.raises(Failed, match="order"):
         runner.run("broadcast")

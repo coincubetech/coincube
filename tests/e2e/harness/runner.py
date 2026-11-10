@@ -212,7 +212,7 @@ class Runner:
         until = time.monotonic() + self.deadline
         while not self.collect_once():
             if time.monotonic() >= until:
-                raise Blocked("SIGNATURE_DELIVERY", "Connect has not returned a verifiable second signature before the deadline.")
+                raise Blocked("SIGNATURE_DELIVERY", "Connect has not returned a verifiable second signature before the deadline; rerun to keep waiting without another approval.")
             time.sleep(2)
 
     def stage_broadcast(self):
