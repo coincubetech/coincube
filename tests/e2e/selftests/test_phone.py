@@ -222,3 +222,18 @@ def test_setup_card_never_retries_an_uncertain_click(monkeypatch):
     with pytest.raises(RuntimeError):
         phone.click_card('Use a PIN')
     assert clicks == [True]
+
+
+def test_gesture_card_uses_only_explicit_container_and_exact_title_line():
+    queries, clicks = [], []
+    def find(by, predicate):
+        queries.append(predicate)
+        return [SimpleNamespace(click=lambda: clicks.append(True))]
+    phone = Phone(SimpleNamespace(find_elements=find), 37)
+    control = phone.card_control('QA synthetic cube', container=True)
+    assert clicks == []  # Caller can record durable intent before dispatch.
+    control.click()
+    assert clicks == [True]
+    assert 'type == "XCUIElementTypeOther"' in queries[0]
+    assert 'BEGINSWITH "QA synthetic cube\\n"' in queries[0]
+    assert 'CONTAINS' not in queries[0]

@@ -485,3 +485,27 @@ def test_missing_keychain_item_with_saved_locator_cannot_regenerate_pin(tmp_path
     with pytest.raises(Failed) as error:
         store.load()
     assert error.value.code == 'SECRET_MISSING'
+
+
+def test_attach_uses_phone_flow_and_persists_intent_before_cube_selection():
+    flow = controller(Store())
+    journal = SimpleNamespace(data={'artifacts': {}})
+    journal.artifact = lambda k, v: journal.data['artifacts'].update({k: v})
+    actions = []
+    flow.phone.restore_navigation = lambda: actions.append('home-navigation')
+    flow.phone.click = lambda label: actions.append(label)
+    flow.phone.click_card = lambda name, **kw: actions.append((name, kw))
+    flow.wait = lambda title: actions.append(('wait', title))
+    flow.reveal = lambda title: SimpleNamespace(click=lambda: actions.append(title))
+    def select():
+        assert journal.data['artifacts']['phone_key_attachment_started'] is True
+        actions.append('cube-selected')
+    def find(title, **kw):
+        assert not journal.data['artifacts'].get('phone_key_attachment_started')
+        assert title == 'QA synthetic cube' and kw == {'container': True}
+        return SimpleNamespace(click=select)
+    flow.phone.card_control = find
+    flow.attach_key('QA synthetic key', 'QA synthetic cube', journal)
+    assert actions == ['home-navigation', 'Home', ('QA synthetic key', {'container': True}),
+                       ('wait', 'Signer key'), 'Attach to Cube',
+                       ('wait', 'Pick a cube on the testnet4 network.'), 'cube-selected']

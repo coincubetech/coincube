@@ -203,7 +203,7 @@ def test_multiple_eligible_funding_outputs_never_guess(runner):
 
 
 def phone_key(runner, **changes):
-    key = {"id": 12, "name": "QA " + runner.run_id, "network": "testnet4", "cubeId": None,
+    key = {"id": 12, "name": "QA " + runner.run_id, "network": "testnet4", "cubeId": None, "status": "active",
            "xpub": "synthetic-public-key", "fingerprint": "aabbccdd", "derivationPath": "m/48h/1h/0h/2h"}
     return dict(key, **changes)
 
@@ -477,10 +477,13 @@ def test_prior_validation_cannot_move_to_another_device(runner):
     assert caught.value.code == "PHONE_VALIDATION_CHANGED"
 
 
-def test_pending_sign_skips_all_fixture_navigation_until_verified_collection(runner):
+def test_pending_sign_skips_all_fixture_navigation_until_verified_collection(runner, monkeypatch):
     state, purpose = pending_phone(runner, "sign")
     runner.defer_pending_phone_attempt(state)
-    runner.artifacts.update(target_fingerprint="aabbccdd")
+    runner.artifacts.update(target_fingerprint="aabbccdd", cube_uuid="synthetic-cube")
+    runner.account = {"tokens": {"access_token": "synthetic-token"}}
+    runner.keys = lambda: [phone_key(runner, cubeId=17)]
+    monkeypatch.setattr(provision, "http", lambda *a, **k: b'{"data":[{"id":12,"xpubEnvelope":{"version":1}}]}')
     result = {"vault_id": 19, "descriptor_id": "descriptor", "descriptor_file": "/synthetic/descriptor",
               "receive_address": ADDRESS}
     runner.provision = SimpleNamespace(call=lambda *a, **k: result)
@@ -563,3 +566,88 @@ def test_first_run_phone_setup_still_checks_live_account_and_network(runner):
     assert calls == ["setup", "navigation", "Settings", "Home"]
     assert runner.artifacts["phone_validation"] == {"account": "synthetic-account", "device": "synthetic-phone",
                                                    "network": "testnet4", "source": "settings_ui"}
+
+
+def attachment_state(runner):
+    runner.artifacts.update(cube_id=17, cube_uuid='synthetic-cube', cube_name='QA synthetic cube',
+                            target_key_id='12', target_fingerprint='aabbccdd')
+    runner.account = {'tokens': {'access_token': 'synthetic-token'}}
+
+
+def test_attachment_runs_phone_reseal_once_and_reconciles_after_lost_reply(runner, monkeypatch):
+    attachment_state(runner)
+    key = phone_key(runner)
+    runner.keys = lambda: [key]
+    calls = []
+
+    def attach(name, cube, journal):
+        assert name == 'QA ' + runner.run_id and cube == 'QA synthetic cube'
+        journal.artifact('phone_key_attachment_started', True)
+        calls.append(True)
+        key['cubeId'] = 17
+        raise Blocked('SYNTHETIC_LOST_REPLY', 'Synthetic lost UI response')
+
+    runner.onboarding = SimpleNamespace(attach_key=attach)
+    with pytest.raises(Blocked):
+        runner.ensure_phone_key_attachment()
+    urls = []
+    def get(url, **kwargs):
+        urls.append(url)
+        assert 'body' not in kwargs  # Only Keychain mutates attachment/envelope.
+        return b'{"data":[{"id":12,"xpubEnvelope":{"version":1}}]}'
+    monkeypatch.setattr(provision, 'http', get)
+    runner.ensure_phone_key_attachment()
+    assert calls == [True]
+    assert runner.artifacts['phone_key_attached'] is True
+    assert urls == [provision.REST + '/api/v1/connect/cubes/synthetic-cube/keys']
+
+
+@pytest.mark.parametrize('change', [{'cubeId': 99}, {'status': 'revoked'}, {'network': 'bitcoin'},
+                                  {'fingerprint': '11223344'}, {'name': 'unrelated'}])
+def test_attachment_refuses_changed_key_before_any_phone_action(runner, change):
+    attachment_state(runner)
+    runner.keys = lambda: [phone_key(runner, **change)]
+    runner.onboarding = SimpleNamespace()  # Any UI action would fail the test.
+    with pytest.raises(Failed) as error:
+        runner.ensure_phone_key_attachment()
+    assert error.value.code == 'KEY_ATTACHMENT_IDENTITY'
+
+
+@pytest.mark.parametrize('bound', [False, True])
+def test_uncertain_attachment_never_replays_or_accepts_missing_envelope(runner, monkeypatch, bound):
+    attachment_state(runner)
+    runner.artifacts['phone_key_attachment_started'] = True
+    runner.keys = lambda: [phone_key(runner, cubeId=17 if bound else None)]
+    runner.onboarding = SimpleNamespace()
+    monkeypatch.setattr(provision, 'http', lambda *a, **k: b'{"data":[{"id":12}]}')
+    with pytest.raises(Blocked) as error:
+        runner.ensure_phone_key_attachment()
+    assert error.value.code == 'KEY_ATTACHMENT_PENDING'
+    assert not runner.artifacts.get('phone_key_attached')
+
+
+def test_pending_sign_cannot_navigate_to_repair_missing_attachment(runner):
+    attachment_state(runner)
+    runner.deferred_phone_purpose = 'sign:synthetic-request'
+    runner.keys = lambda: [phone_key(runner)]
+    runner.onboarding = SimpleNamespace()
+    with pytest.raises(Blocked) as error:
+        runner.ensure_phone_key_attachment()
+    assert error.value.code == 'KEY_ATTACHMENT_PENDING'
+
+
+def test_sealed_key_resume_preserves_original_public_export(runner):
+    runner.artifacts.update(cube_id=17, phone_key_creation_started=True, baseline_key_ids=[])
+    runner.onboarding = SimpleNamespace(reconcile_pin=lambda _: None)
+    key = phone_key(runner)
+    runner.keys = lambda: [key]
+    runner.stage_phone_key()
+    path = runner.journal.directory / 'phone-key.json'
+    original = private_read(path)
+    key.update(xpub='', cubeId=17)
+    runner.stage_phone_key()
+    assert private_read(path) == original
+    key['xpub'] = 'synthetic-different-key'
+    with pytest.raises(Failed) as error:
+        runner.stage_phone_key()
+    assert error.value.code == 'KEY_CHANGED'

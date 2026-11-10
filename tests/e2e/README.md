@@ -32,7 +32,10 @@ remain separate. The Keychain steps operate the actual iPhone interface.
    the actual backup challenge, reopen its encrypted seed and unlock it.
    Register its stable identity and encryption key with production Connect.
 4. Create a run-specific signer through Keychain's ordinary Add signer key
-   flow. Reconcile the exact new key through Connect before creating a vault.
+   flow. Reconcile the exact new key through Connect, then use the phone's
+   **Attach to Cube** flow to bind and encrypt its public key. Require the
+   Cube-scoped envelope to decrypt to the original exported public key before
+   creating a vault.
 5. Generate and reconstruct a Border Wallet grid phrase, pattern and checksum.
    Install a primary **2-of-3 Master / Keychain / Border Wallet** vault with a
    delayed Border Wallet recovery path through the production installer. Verify

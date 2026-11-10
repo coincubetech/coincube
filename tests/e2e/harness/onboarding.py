@@ -271,3 +271,18 @@ class Onboarding:
             self.wait("Signer key created")
         self.phone.click("Back to home")
         self.wait("Home")
+
+    def attach_key(self, name, cube_name, journal):
+        """Use Keychain's attach-and-reseal flow; no credential is required."""
+        self.phone.restore_navigation()
+        self.phone.click("Home")
+        self.phone.click_card(name, container=True)
+        self.wait("Signer key")
+        control = self.reveal("Attach to Cube")
+        control.click()
+        self.wait("Pick a cube on the testnet4 network.")
+        # The selection dispatches both binding and public-key resealing.
+        # An uncertain response is reconciled remotely, never tapped again.
+        control = self.phone.card_control(cube_name, container=True)
+        journal.artifact("phone_key_attachment_started", True)
+        control.click()

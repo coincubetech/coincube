@@ -367,17 +367,58 @@ class FreshRunner(Runner):
         key = matches[0]
         if str(key["id"]) in self.artifacts.get("baseline_key_ids", []):
             raise Failed("KEY_NOT_FRESH", "The purported new phone key existed before this run.")
-        if not key.get("xpub") or key.get("cubeId") not in (None, 0, self.artifacts["cube_id"]):
+        if key.get("cubeId") not in (None, 0, self.artifacts["cube_id"]):
             raise Failed("KEY_OWNERSHIP", "The generated key must be a personal key or attached only to this run's Cube.")
+        key_path = self.journal.directory / "phone-key.json"
+        identity = {"derivation_path": key["derivationPath"], "fingerprint": key["fingerprint"],
+                    "key_id": str(key["id"]), "network": "testnet4"}
+        saved = json.loads(private_read(key_path)) if key_path.exists() else None
+        if saved is not None and (any(saved.get(k) != v for k, v in identity.items())
+                                  or (key.get("xpub") and saved.get("xpub") != key["xpub"])):
+            raise Failed("KEY_CHANGED", "The registered key differs from this run's saved public identity.")
+        # Attaching/resealing intentionally removes the plaintext xpub from
+        # Connect. Keep the original public export for native envelope checking.
+        public_key = key.get("xpub") or (saved.get("xpub") if saved else None)
+        if not public_key:
+            raise Failed("KEY_OWNERSHIP", "The newly created key needs its original public export before attachment.")
         self.pin_artifact("target_key_id", str(key["id"]))
         self.pin_artifact("target_fingerprint", key["fingerprint"])
         self.onboarding.reconcile_pin("key:" + label)
-        key_path = self.journal.directory / "phone-key.json"
-        atomic_write(key_path, json.dumps({"xpub": key["xpub"], "derivation_path": key["derivationPath"],
-                     "fingerprint": key["fingerprint"], "key_id": str(key["id"]), "network": "testnet4"}).encode())
+        if saved is None:
+            atomic_write(key_path, json.dumps(dict(identity, xpub=public_key)).encode())
         self.finish_deferred_phone_attempt("key:" + label)
 
+    def ensure_phone_key_attachment(self):
+        target, cube = self.artifacts["target_key_id"], self.artifacts["cube_id"]
+        until = time.monotonic() + self.deadline
+        while True:
+            matches = [key for key in self.keys() if str(key["id"]) == target]
+            if len(matches) != 1:
+                raise Failed("KEY_ATTACHMENT_IDENTITY", "The exact created signer key must remain uniquely available.")
+            key = matches[0]
+            if (key.get("name") != "QA " + self.run_id or key.get("network") != "testnet4"
+                    or key.get("fingerprint") != self.artifacts["target_fingerprint"]
+                    or key.get("status") != "active" or key.get("cubeId") not in (None, 0, cube)):
+                raise Failed("KEY_ATTACHMENT_IDENTITY", "The created signer key changed identity, eligibility or Cube binding.")
+            if key.get("cubeId") == cube:
+                response = json.loads(http(REST + "/api/v1/connect/cubes/" + self.artifacts["cube_uuid"] + "/keys",
+                    headers={"Authorization": "Bearer " + self.account["tokens"]["access_token"]}))
+                rows = [row for row in response["data"] if str(row["id"]) == target]
+                if len(rows) == 1 and rows[0].get("xpubEnvelope"):
+                    # Presence is a polling condition only. The native vault
+                    # action verifies encryption and exact exported identity.
+                    self.journal.artifact("phone_key_attached", True)
+                    return
+            elif not self.artifacts.get("phone_key_attachment_started"):
+                if self.deferred_phone_purpose:
+                    raise Blocked("KEY_ATTACHMENT_PENDING", "An unresolved signing attempt forbids attachment navigation.")
+                self.onboarding.attach_key("QA " + self.run_id, self.artifacts["cube_name"], self.journal)
+            if time.monotonic() >= until:
+                raise Blocked("KEY_ATTACHMENT_PENDING", "Keychain binding and its encrypted public-key envelope are not both visible; no attachment was replayed.")
+            time.sleep(1)
+
     def stage_vault_creation(self):
+        self.ensure_phone_key_attachment()
         result = self.provision.call("vault", target_key_id=self.artifacts["target_key_id"],
                                     target_fingerprint=self.artifacts["target_fingerprint"],
                                     phone_key_file=str(self.journal.directory / "phone-key.json"))
