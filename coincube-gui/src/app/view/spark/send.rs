@@ -379,7 +379,7 @@ fn recipient_status_row(
     let status = if !enabled {
         "Checks off".to_owned()
     } else if let Some(identity) = identities.iter().find(|identity| identity.is_current()) {
-        localized_format!("Verified · {}", "Verificado · {}", identity.platform)
+        localized_format!("Identified · {}", "Identificado · {}", identity.platform)
     } else {
         "Not identified".to_owned()
     };
@@ -1638,11 +1638,11 @@ mod tests {
             )
         };
         assert!(inspect(true, std::slice::from_ref(&identity))
-            .contains("Verified · Example Coffee Co."));
+            .contains("Identified · Example Coffee Co."));
         let off = inspect(false, std::slice::from_ref(&identity));
         assert!(off.contains("Checks off"));
         assert!(off.contains("Turn on in Settings"));
-        assert!(!off.contains("Verified"));
+        assert!(!off.contains("Identified"));
         ticket.set_test_enabled(false);
         assert!(inspect(true, &[identity]).contains("Not identified"));
     }
