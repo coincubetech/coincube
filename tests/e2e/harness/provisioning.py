@@ -496,6 +496,10 @@ class FreshRunner(Runner):
         until = time.monotonic() + self.deadline
         while not matches:
             matches = [k for k in self.keys() if k["name"] == label and k["network"] == "testnet4"]
+            if not matches:
+                # Observe a surviving refusal without navigating, dismissing
+                # the pending ceremony, or replaying its credential attempt.
+                self.phone.labels()
             if time.monotonic() >= until:
                 raise Blocked("KEY_REGISTRATION", "The exact generated phone key has not appeared in Connect; no duplicate key was created.")
             if not matches:

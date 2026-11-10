@@ -509,6 +509,7 @@ def test_pending_sign_skips_all_fixture_navigation_until_verified_collection(run
 
 def test_pending_key_absence_keeps_prompt_and_match_releases_navigation(runner):
     state, purpose = pending_phone(runner)
+    runner.phone.labels = lambda: {"Enter your PIN"}
     runner.defer_pending_phone_attempt(state)
     runner.keys = lambda: []
     with pytest.raises(Blocked) as caught:
@@ -902,3 +903,21 @@ def test_status_callback_rejects_binding_change_before_native_call(runner):
     with pytest.raises(Failed) as caught: runner.require_viewed_unsubmitted()
     assert caught.value.code == "APPROVAL_CHANGED"
     assert calls == []
+
+
+def test_pending_key_capacity_refusal_is_read_only_and_preserves_attempt(runner):
+    from harness.phone import Phone, BUNDLE
+    state, purpose = pending_phone(runner)
+    runner.defer_pending_phone_attempt(state)
+    driver = SimpleNamespace(execute_script=lambda _: {"bundleId": BUNDLE},
+        page_source='<root><node visible="true" label="Key limit reached"/></root>')
+    runner.phone = Phone(driver, 38)
+    runner.phone.device_digest = "synthetic-phone"
+    runner.keys = lambda: []
+    before = deepcopy(runner.journal.data)
+    with pytest.raises(Blocked) as error:
+        runner.stage_phone_key()
+    assert error.value.code == "SIGNER_LIMIT"
+    assert runner.journal.data == before
+    assert state["pending_attempt"] == purpose
+    assert runner.deferred_phone_purpose == purpose
