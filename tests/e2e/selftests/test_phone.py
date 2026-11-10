@@ -10,6 +10,8 @@ INTENT = {"outputs": [{"address": "tb1fixture-recipient", "sats": 10000},
                       {"address": "tb1fixture-change", "sats": 989388}]}
 REVIEW = {"Approve transaction", "testnet4", "612 sats", "10000 sats", "989388 sats",
           "tb1fixture-recipient", "tb1fixture-change"}
+HOME = {"Home", "Cubes", "Settings"}
+INCOMING = {"Incoming transaction", "Review the details before approving", "View transaction", "Not now"}
 
 
 def scripted_phone(views):
@@ -18,6 +20,7 @@ def scripted_phone(views):
     phone.labels = lambda: next(screens)
     clicks = []
     phone.click = clicks.append
+    phone.click_line = clicks.append
     phone.refresh = lambda: None
     return phone, clicks
 
@@ -27,6 +30,7 @@ def scripted_phone(views):
     ([{"Transaction approved", "Done"}], ["Done"]),
     ([REVIEW | {"Back"}], ["Back"]),
     ([{"Enter PIN", "Back", "1", "2"}, REVIEW | {"Back"}], ["Back", "Back"]),
+    ([{"Create new signer key", "Create Key", "Cancel", "Home", "Cubes", "Settings"}], ["Cancel"]),
 ])
 def test_fixture_check_resumes_without_approval_or_pin(restored, expected, monkeypatch):
     monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)
@@ -74,7 +78,7 @@ def test_pending_page_restart_is_bounded(monkeypatch):
 
 
 def test_approval_never_selects_an_unrelated_request(tmp_path):
-    phone, clicks = scripted_phone([{"some other request"}])
+    phone, clicks = scripted_phone([HOME, {"some other request"}])
     journal = Journal(tmp_path / "run", {})
     try:
         with pytest.raises(Blocked) as error:
@@ -102,7 +106,7 @@ def test_uncertain_approval_never_retries_pin(tmp_path):
 def test_wrong_phone_summary_never_approves(tmp_path, monkeypatch):
     monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)
     wrong = REVIEW - {"tb1fixture-recipient"}
-    phone, clicks = scripted_phone([{"Testnet4 QA fixture"}] + [wrong] * 8)
+    phone, clicks = scripted_phone([HOME, {"Testnet4 QA fixture"}] + [wrong] * 8)
     journal = Journal(tmp_path / "run", {})
     try:
         with pytest.raises(Failed) as error:
@@ -115,7 +119,7 @@ def test_wrong_phone_summary_never_approves(tmp_path, monkeypatch):
 
 def test_real_banner_and_pin_flow_use_exact_labels(tmp_path, monkeypatch):
     monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)
-    phone, clicks = scripted_phone([{"1 signing request waiting"}, {"Testnet4 QA fixture"}, REVIEW,
+    phone, clicks = scripted_phone([HOME, {"1 signing request waiting"}, {"Testnet4 QA fixture"}, REVIEW,
                                    {"Enter PIN"}, {"Signature Submitted"}])
     pin = tmp_path / "pin"
     pin.write_text("987654")
@@ -128,3 +132,564 @@ def test_real_banner_and_pin_flow_use_exact_labels(tmp_path, monkeypatch):
         assert "987654" not in journal.path.read_text()
     finally:
         journal.close()
+
+
+def test_key_creation_success_returns_home_without_retrying_creation(monkeypatch):
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    phone, clicks = scripted_phone([{'Signer key created', 'Back to home'}, {'Home', 'Cubes', 'Settings'}])
+    phone.restore_navigation()
+    assert clicks == ['Back to home']
+
+
+@pytest.mark.parametrize('survives', [True, False])
+def test_pin_resume_probe_records_only_observed_lifecycle_survival(tmp_path, monkeypatch, survives):
+    ticks = iter([0, 0, 4])
+    monkeypatch.setattr('harness.phone.time.monotonic', lambda: next(ticks))
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    phone, clicks = scripted_phone([{'Enter PIN'} if survives else {'Approve transaction'}] * 2)
+    lifecycle = []
+    phone.driver.execute_script = lambda *args: lifecycle.append(args)
+    phone.driver.activate_app = lambda bundle: lifecycle.append(('activate', bundle))
+    journal = Journal(tmp_path / 'probe', {})
+    try:
+        if survives:
+            phone.verify_pin_resume(journal)
+            result = journal.data['artifacts']['pin_resume_probe']
+            assert result['status'] == 'passed'
+            assert result['home_refresh_proven'] is False
+        else:
+            with pytest.raises(Failed) as error:
+                phone.verify_pin_resume(journal)
+            assert error.value.code == 'PIN_CHALLENGE_DISMISSED'
+        assert clicks == []
+        assert lifecycle[0] == ('mobile: backgroundApp', {'seconds': 1})
+        assert lifecycle[1] == ('activate', 'io.coincube.keychainApp')
+    finally:
+        journal.close()
+
+
+def test_merged_setup_card_matches_only_complete_title_line():
+    from appium.webdriver.common.appiumby import AppiumBy
+    clicked, predicates = [], []
+    def find(by, predicate):
+        assert by == AppiumBy.IOS_PREDICATE
+        predicates.append(predicate)
+        return [SimpleNamespace(click=lambda: clicked.append(True))]
+    phone = Phone(SimpleNamespace(find_elements=find), 36)
+    phone.click_card('Use a PIN')
+    assert clicked == [True]
+    assert 'BEGINSWITH "Use a PIN\\n"' in predicates[0]
+    assert 'CONTAINS' not in predicates[0]
+    assert 'visible == true AND enabled == true' in predicates[0]
+    assert 'XCUIElementTypeStaticText' in predicates[0]
+    with pytest.raises(Failed):
+        phone.click_card('1')
+    assert len(predicates) == 1
+
+
+def test_merged_card_selector_refuses_ambiguous_ancestors():
+    phone = Phone(SimpleNamespace(find_elements=lambda *args: [object(), object()]), 36)
+    with pytest.raises(Blocked) as error:
+        phone.click_card('Use a PIN')
+    assert error.value.code == 'PHONE_SELECTOR'
+
+
+def test_setup_card_waits_for_readiness_without_broadening_predicate(monkeypatch):
+    waits, clicks, queries = [], [], []
+    results = iter([[], [], [SimpleNamespace(click=lambda: clicks.append(True))]])
+    def find(by, predicate):
+        queries.append((by, predicate))
+        return next(results)
+    monkeypatch.setattr('harness.phone.time.sleep', waits.append)
+    phone = Phone(SimpleNamespace(find_elements=find), 37)
+    phone.click_card('Use a PIN')
+    assert waits == [.25, .25]
+    assert clicks == [True]
+    assert len(set(queries)) == 1
+
+
+def test_setup_card_absence_is_bounded_and_never_clicks():
+    phone = Phone(SimpleNamespace(find_elements=lambda *args: []), 37)
+    with pytest.raises(Blocked) as error:
+        phone.click_card('Use a PIN', timeout=0)
+    assert error.value.code == 'PHONE_SELECTOR'
+
+
+def test_setup_card_never_retries_an_uncertain_click(monkeypatch):
+    clicks = []
+    def click():
+        clicks.append(True)
+        raise RuntimeError('Synthetic lost click response')
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: pytest.fail('must not retry'))
+    phone = Phone(SimpleNamespace(find_elements=lambda *args: [SimpleNamespace(click=click)]), 37)
+    with pytest.raises(RuntimeError):
+        phone.click_card('Use a PIN')
+    assert clicks == [True]
+
+
+def test_exact_action_waits_for_enabled_control_after_success_heading(monkeypatch):
+    waits, clicks, labels = [], [], []
+    results = iter([[], [], [SimpleNamespace(click=lambda: clicks.append('back'))]])
+    phone = Phone(SimpleNamespace(), 38)
+    phone.labels = lambda: labels.append('guard') or {'Signer key created'}
+    phone.matching_controls = lambda label: next(results) if label == 'Back to home' else pytest.fail('wrong label')
+    monkeypatch.setattr('harness.phone.time.sleep', waits.append)
+    phone.click('Back to home')
+    assert waits == [.25, .25] and clicks == ['back'] and len(labels) == 3
+
+
+@pytest.mark.parametrize('count', [0, 2])
+def test_exact_action_missing_or_ambiguous_never_dispatches(monkeypatch, count):
+    phone = Phone(SimpleNamespace(), 38)
+    phone.labels = lambda: HOME
+    phone.matching_controls = lambda _: [object()] * count
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: pytest.fail('must not wait'))
+    with pytest.raises(Blocked) as error:
+        phone.click('Back to home', timeout=0 if count == 0 else 15)
+    assert error.value.code == 'PHONE_SELECTOR'
+
+
+def test_exact_action_never_retries_lost_click_response(monkeypatch):
+    calls = []
+    def dispatch():
+        calls.append('click')
+        raise RuntimeError('Synthetic lost click response')
+    phone = Phone(SimpleNamespace(), 38)
+    phone.labels = lambda: HOME
+    phone.matching_controls = lambda _: [SimpleNamespace(click=dispatch)]
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: pytest.fail('must not retry'))
+    with pytest.raises(RuntimeError):
+        phone.click('Back to home')
+    assert calls == ['click']
+
+
+def test_exact_action_rechecks_foreground_before_waited_click(monkeypatch):
+    phone = Phone(SimpleNamespace(), 38)
+    guards = []
+    def guard():
+        guards.append(True)
+        if len(guards) == 2:
+            raise Blocked('PHONE_AUTH', 'Synthetic foreground auth transition')
+        return HOME
+    phone.labels = guard
+    queries = []
+    phone.matching_controls = lambda _: queries.append(True) or []
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    with pytest.raises(Blocked) as error:
+        phone.click('Back to home')
+    assert error.value.code == 'PHONE_AUTH' and queries == [True]
+
+
+def test_gesture_card_uses_only_explicit_container_and_exact_title_line():
+    queries, clicks = [], []
+    def find(by, predicate):
+        queries.append(predicate)
+        return [SimpleNamespace(click=lambda: clicks.append(True))]
+    phone = Phone(SimpleNamespace(find_elements=find), 37)
+    control = phone.card_control('QA synthetic cube', container=True)
+    assert clicks == []  # Caller can record durable intent before dispatch.
+    control.click()
+    assert clicks == [True]
+    assert 'type == "XCUIElementTypeOther"' in queries[0]
+    assert 'BEGINSWITH "QA synthetic cube\\n"' in queries[0]
+    assert 'CONTAINS' not in queries[0]
+
+
+def test_persisted_key_detail_with_disabled_back_relaunches_without_reset(monkeypatch):
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    phone, clicks = scripted_phone([{'Signer key', 'Back'}, {'Home', 'Cubes', 'Settings'}])
+    phone.matching_controls = lambda label: []
+    lifecycle = []
+    phone.driver.terminate_app = lambda bundle: lifecycle.append(('terminate', bundle))
+    phone.driver.activate_app = lambda bundle: lifecycle.append(('activate', bundle))
+    phone.restore_navigation()
+    assert clicks == []
+    assert lifecycle == [('terminate', 'io.coincube.keychainApp'), ('activate', 'io.coincube.keychainApp')]
+
+
+def test_incoming_sheet_is_dismissed_before_exact_queue_selection(tmp_path, monkeypatch):
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    phone, clicks = scripted_phone([INCOMING, HOME, INCOMING,
+        {'1 signing request waiting'}, {'Testnet4 QA fixture'}, REVIEW, {'Signature Submitted'}])
+    journal = Journal(tmp_path / 'incoming', {})
+    try:
+        phone.approve('fixture', INTENT, 612, None, journal, timeout=5)
+        assert clicks == ['Not now', 'Home', 'Not now', '1 signing request waiting',
+                          'Testnet4 QA fixture', 'Approve']
+        assert 'View transaction' not in clicks
+    finally:
+        journal.close()
+
+
+def test_not_now_on_unrelated_screen_is_not_dismissed():
+    phone, clicks = scripted_phone([])
+    assert not phone.dismiss_incoming({'Signer store needs repair', 'Not now'})
+    assert clicks == []
+
+
+def line_element(identifier, descendants=(), clicks=None):
+    def find(by, query):
+        assert by == 'xpath' and query == 'descendant::*'
+        return list(descendants)
+    return SimpleNamespace(id=identifier, find_elements=find,
+                           click=lambda: clicks.append(identifier))
+
+
+def test_request_line_selects_only_leaf_and_preserves_complete_line_boundaries():
+    clicks, queries = [], []
+    leaf = line_element('request-card', clicks=clicks)
+    ancestor = line_element('screen', [leaf], clicks)
+    def find(by, predicate):
+        queries.append(predicate)
+        return [ancestor, leaf]
+    phone = Phone(SimpleNamespace(find_elements=find), 37)
+    phone.click_line('Testnet4 QA fixture')
+    assert clicks == ['request-card']
+    query = queries[0]
+    assert 'ENDS WITH' not in query
+    assert 'ENDSWITH "\\nTestnet4 QA fixture"' in query
+    assert 'CONTAINS "\\nTestnet4 QA fixture\\n"' in query
+    assert 'CONTAINS "Testnet4 QA fixture"' not in query
+    assert 'visible == true AND enabled == true' in query
+
+
+@pytest.mark.parametrize('count', [0, 2])
+def test_missing_or_duplicate_request_lines_never_tap(count):
+    clicks = []
+    elements = [line_element(str(i), clicks=clicks) for i in range(count)]
+    phone = Phone(SimpleNamespace(find_elements=lambda *a: elements), 37)
+    with pytest.raises(Blocked) as error:
+        phone.click_line('Testnet4 QA fixture')
+    assert error.value.code == 'PHONE_SELECTOR'
+    assert clicks == []
+
+
+def test_line_selector_cannot_be_used_for_pin_digits():
+    phone = Phone(SimpleNamespace(), 37)
+    with pytest.raises(Failed) as error:
+        phone.click_line('1')
+    assert error.value.code == 'PHONE_LINE'
+
+
+def bound_phone():
+    calls = []
+    driver = SimpleNamespace(execute_script=lambda *args: {'bundleId': 'io.coincube.keychainApp', 'pid': 123},
+        terminate_app=lambda bundle: calls.append('terminate'), activate_app=lambda bundle: calls.append('activate'))
+    phone = Phone(driver, 38)
+    phone.device_digest = 'synthetic-device'
+    phone.matching_controls = lambda label: [object()]
+    phone.labels = lambda: {'Enter PIN', 'signing-pin-session:session', 'signing-pin-entry:empty'}
+    phone.click = calls.append
+    return phone, calls
+
+
+def bound_journal(tmp_path, phone):
+    journal = Journal(tmp_path / 'bound', {})
+    journal.artifact('approval_binding', {'session_id': 'session', 'request_id': 'request'})
+    journal.artifact('approval_started', True)
+    journal.artifact('approval_context', phone.approval_context('request', 'session', INTENT, 612, journal))
+    return journal
+
+
+@pytest.mark.parametrize('labels', [
+    {'Enter PIN'},
+    {'Enter PIN', 'signing-pin-session:other', 'signing-pin-entry:empty'},
+    {'Enter PIN', 'signing-pin-session:session', 'signing-pin-entry:nonempty'},
+    {'Enter PIN', 'signing-pin-session:session', 'signing-pin-entry:empty', 'Incorrect PIN'},
+])
+def test_bound_pin_never_enters_generic_wrong_nonempty_or_error_challenge(tmp_path, labels):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    phone.labels = lambda: labels
+    try:
+        with pytest.raises((Blocked, Failed)):
+            phone.resume_first_pin('request', 'session', INTENT, 612, journal, 0,
+                pin_provider=lambda: pytest.fail('credential must not be requested'), before_pin=lambda: True)
+        assert calls == []
+        assert 'pin_dispatch_started' not in journal.data['artifacts']
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize('changed', ['pid', 'device', 'build', 'intent', 'session', 'fee'])
+def test_bound_pin_refuses_changed_approval_context(tmp_path, changed):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    intent, session, fee = INTENT, 'session', 612
+    if changed == 'pid':
+        phone.driver.execute_script = lambda *a: {'bundleId': 'io.coincube.keychainApp', 'pid': 456}
+    elif changed == 'device':
+        phone.device_digest = 'other'
+    elif changed == 'build':
+        phone.build = 39
+    elif changed == 'intent':
+        intent = {'outputs': []}
+    elif changed == 'session':
+        session = 'other'
+    else:
+        fee = 613
+    try:
+        with pytest.raises(Blocked):
+            phone.resume_first_pin('request', session, intent, fee, journal, 0,
+                pin_provider=lambda: pytest.fail('credential must not be requested'), before_pin=lambda: True)
+        assert calls == []
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize('marker', ['pin_resume_probe', 'pin_dispatch_started'])
+def test_bound_pin_never_replays_durable_attempt_marker(tmp_path, marker):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    journal.artifact(marker, {'status': 'started'})
+    try:
+        with pytest.raises(Blocked) as error:
+            phone.resume_first_pin('request', 'session', INTENT, 612, journal, 0,
+                pin_provider=lambda: pytest.fail('must not retry'), before_pin=lambda: True)
+        assert error.value.code == 'PIN_ATTEMPT_UNCERTAIN'
+        assert calls == []
+    finally:
+        journal.close()
+
+
+def test_signature_arrival_before_pin_prevents_dispatch(tmp_path):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    try:
+        phone.resume_first_pin('request', 'session', INTENT, 612, journal, 0,
+            pin_provider=lambda: pytest.fail('already signed'), before_pin=lambda: False)
+        assert calls == []
+        assert 'pin_resume_probe' not in journal.data['artifacts']
+    finally:
+        journal.close()
+
+
+def test_pin_input_records_intent_before_provider_and_never_retries_lost_click(tmp_path):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    phone.verify_pin_resume = lambda journal, **kw: journal.artifact('pin_resume_probe', {'status': 'passed'})
+    checks = []
+    def provider():
+        assert journal.data['artifacts']['pin_dispatch_started']['context'] == journal.data['artifacts']['approval_context']
+        calls.append('provider')
+        return '987654'
+    def click(digit):
+        calls.append(digit)
+        raise RuntimeError('Synthetic lost input response')
+    phone.click = click
+    try:
+        with pytest.raises(RuntimeError):
+            phone.resume_first_pin('request', 'session', INTENT, 612, journal, 0,
+                pin_provider=provider, before_pin=lambda: checks.append(True) or True)
+        assert checks == [True, True]
+        assert calls == ['provider', '9']
+        with pytest.raises(Blocked):
+            phone.resume_first_pin('request', 'session', INTENT, 612, journal, 0,
+                pin_provider=provider, before_pin=lambda: True)
+        assert calls == ['provider', '9']
+        assert '987654' not in journal.path.read_text()
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize('stopped', [True, False])
+def test_upgrade_boundary_requires_verified_stop_before_activation(tmp_path, stopped):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    receipt = {'original_build': 37, 'current_build': 38, 'phase': 'planned'}
+    states = iter([1 if stopped else 4, 4])
+    phone.driver.query_app_state = lambda bundle: next(states)
+    def activate(bundle):
+        assert journal.data['artifacts']['approval_upgrade_recovery']['phase'] == 'process_stopped'
+        calls.append('activate')
+    phone.driver.activate_app = activate
+    try:
+        if stopped:
+            phone.restart_for_upgrade(journal, receipt)
+            assert receipt['phase'] == 'ready_for_review'
+            assert receipt['current_process']['pid'] == 123
+            assert calls == ['terminate', 'activate']
+        else:
+            with pytest.raises(Blocked):
+                phone.restart_for_upgrade(journal, receipt)
+            assert calls == ['terminate']
+    finally:
+        journal.close()
+
+
+def test_upgrade_approval_dispatch_consumes_receipt_before_uncertain_click(tmp_path):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    context = journal.data['artifacts']['approval_context']
+    receipt = {'original_build': 37, 'current_build': 38, 'phase': 'ready_for_review',
+               'binding': context['binding'], 'current_process': context['process']}
+    journal.artifact('approval_upgrade_recovery', receipt)
+    phone.restore_navigation = lambda: None
+    phone.refresh = lambda: None
+    views = iter([{'Testnet4 QA request'}, REVIEW])
+    phone.labels = lambda: next(views)
+    phone.click_line = calls.append
+    def click(label):
+        calls.append(label)
+        if label == 'Approve':
+            assert journal.data['artifacts']['approval_started'] is True
+            assert journal.data['artifacts']['approval_upgrade_recovery']['phase'] == 'approval_dispatched'
+            raise RuntimeError('Synthetic lost approval response')
+    phone.click = click
+    try:
+        with pytest.raises(RuntimeError):
+            phone.approve('request', INTENT, 612, None, journal, 10, session_id='session',
+                before_approve=lambda: True, before_pin=lambda: True, pin_provider=lambda: '987654', reapproval=True)
+        with pytest.raises(Blocked):
+            phone.approve('request', INTENT, 612, None, journal, 10, session_id='session',
+                before_approve=lambda: True, before_pin=lambda: True, pin_provider=lambda: '987654', reapproval=True)
+        assert calls.count('Approve') == 1
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize('visible', ['true', 'false'])
+def test_account_signer_limit_is_a_prompt_prerequisite_block_without_mutation(visible):
+    calls = []
+    driver = SimpleNamespace(
+        execute_script=lambda command: {'bundleId': 'io.coincube.keychainApp'},
+        page_source=f'<root><node visible="{visible}" label="Key limit reached"/></root>',
+        find_elements=lambda *a: pytest.fail('must not select controls'),
+        activate_app=lambda *a: pytest.fail('must not restart'),
+    )
+    phone = Phone(driver, 38)
+    phone.click = calls.append
+    if visible == 'true':
+        with pytest.raises(Blocked) as error:
+            phone.restore_navigation()
+        assert error.value.code == 'SIGNER_LIMIT'
+    else:
+        assert phone.labels() == set()
+    assert calls == []
+
+
+def test_capacity_observation_records_current_process_without_claiming_old_outcome():
+    phone, calls = bound_phone()
+    phone.driver.page_source = '<root><node visible="true" label="Key limit reached"/></root>'
+    del phone.labels
+    observation = phone.observe_key_limit()
+    assert observation == {'build': 38, 'code': 'SIGNER_LIMIT', 'process': {'pid': 123, 'bundle_id': 'io.coincube.keychainApp'},
+                           'observation': 'visible_capacity_modal'}
+    assert calls == []
+    phone.build = 39
+    with pytest.raises(Blocked):
+        phone.observe_key_limit()
+
+
+def test_new_generation_boundary_cannot_repeat_after_creation_dispatch(tmp_path):
+    phone, calls = bound_phone()
+    journal = bound_journal(tmp_path, phone)
+    receipt = {'phase': 'planned', 'creation_started': False, 'pin_entered': False}
+    states = iter([1, 4])
+    phone.driver.query_app_state = lambda _: next(states)
+    try:
+        phone.restart_for_key_generation(journal, receipt)
+        assert receipt['phase'] == 'ready_for_reconciliation'
+        assert receipt['current_process']['pid'] == 123
+        assert calls == ['terminate', 'activate']
+        receipt['phase'] = 'creation_dispatched'
+        receipt['creation_started'] = True
+        with pytest.raises(Blocked):
+            phone.restart_for_key_generation(journal, receipt)
+        assert calls == ['terminate', 'activate']
+    finally:
+        journal.close()
+
+
+def home_carousel(monkeypatch, *, target=1, start=0, refreshed=False, ambiguous=False):
+    """Source-backed Home ListView refresh plus horizontal PageView fixture."""
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    state = {'page': start, 'refreshed': refreshed}
+    swipes, clicks = [], []
+    title = 'QA exact replacement'
+    def find(by, predicate):
+        assert 'XCUIElementTypeOther' in predicate
+        if 'label == ' in predicate:
+            assert 'label == "QA exact replacement"' in predicate
+            assert 'BEGINSWITH "QA exact replacement\\n"' in predicate
+            assert 'CONTAINS' not in predicate
+            if ambiguous:
+                return [object(), object()]
+            if state['refreshed'] and state['page'] == target:
+                return [SimpleNamespace(id='exact-card', click=lambda: clicks.append(title))]
+            return []
+        assert 'BEGINSWITH "QA "' in predicate
+        return [SimpleNamespace(id='visible-card-' + str(state['page']))]
+    def execute(command, arguments):
+        assert command == 'mobile: swipe'
+        swipes.append(dict(arguments))
+        direction = arguments['direction']
+        if direction == 'down':
+            state['refreshed'] = True  # Retain current page across the refresh.
+        else:
+            assert arguments['elementId'] == 'visible-card-' + str(state['page'])
+            state['page'] = min(2, state['page'] + 1) if direction == 'left' else max(0, state['page'] - 1)
+    phone = Phone(SimpleNamespace(find_elements=find, execute_script=execute), 38)
+    phone.labels = lambda: HOME | {'Add signer key'}
+    return phone, title, swipes, clicks
+
+
+def test_home_key_card_refreshes_stale_list_and_scrolls_exact_horizontal_card(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch, target=1)
+    control = phone.home_key_card(title)
+    assert clicks == []
+    assert swipes == [{'direction': 'down'}, {'direction': 'left', 'elementId': 'visible-card-0'}]
+    control.click()
+    assert clicks == [title]
+
+
+def test_home_key_card_can_appear_from_refresh_without_scrolling(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch, target=0)
+    phone.home_key_card(title).click()
+    assert swipes == [{'direction': 'down'}]
+    assert clicks == [title]
+
+
+def test_home_key_card_sweeps_back_from_retained_nonzero_page(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch, target=0, start=1)
+    phone.home_key_card(title).click()
+    directions = [gesture['direction'] for gesture in swipes]
+    assert directions == ['down'] + ['left'] * 8 + ['right'] * 2
+    assert clicks == [title]
+
+
+def test_home_key_card_ambiguity_blocks_before_refresh_swipe_or_tap(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch, ambiguous=True)
+    with pytest.raises(Blocked) as error:
+        phone.home_key_card(title)
+    assert error.value.code == 'PHONE_SELECTOR'
+    assert swipes == [] and clicks == []
+
+
+def test_home_key_card_absence_has_hard_gesture_bound(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch, target=-1)
+    with pytest.raises(Blocked) as error:
+        phone.home_key_card(title)
+    assert error.value.code == 'PHONE_CARD_MISSING'
+    assert len(swipes) == 25  # One refresh, eight forward and sixteen reverse gestures.
+    assert clicks == []
+
+
+def test_home_key_card_refuses_route_change_without_another_swipe(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch)
+    states = iter([HOME | {'Add signer key'}, {'Signer key', 'Back'}])
+    phone.labels = lambda: next(states)
+    with pytest.raises(Blocked) as error:
+        phone.home_key_card(title)
+    assert error.value.code == 'PHONE_HOME'
+    assert swipes == [{'direction': 'down'}] and clicks == []
+
+
+def test_home_key_card_refuses_ambiguous_carousel_gesture_scope(monkeypatch):
+    phone, title, swipes, clicks = home_carousel(monkeypatch)
+    find = phone.driver.find_elements
+    phone.driver.find_elements = lambda by, predicate: find(by, predicate) if 'label == ' in predicate else [object(), object()]
+    with pytest.raises(Blocked) as error:
+        phone.home_key_card(title)
+    assert error.value.code == 'PHONE_CAROUSEL'
+    assert swipes == [{'direction': 'down'}] and clicks == []

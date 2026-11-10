@@ -1,53 +1,231 @@
 # Testnet4 acceptance, without an agent in the loop
 
 ```sh
-tests/e2e/run --qa-config /private/qa/config.json --qa-run-dir /private/qa/run-001
+tests/e2e/run --qa-fresh --qa-run-dir /private/qa/run-001
 ```
 
-Repeat **the same command and run directory** after a delivery timeout, app
-update, or interruption. No model, screenshot interpretation, camera pairing,
-or browser automation is used. Pytest owns sequencing and results; Appium's
-XCUITest driver controls the real iPhone through a USB-only WebDriverAgent
-tunnel. The native helper reuses Tenshu's production Connect, encryption,
-descriptor, PSBT merge, and signature-verification implementations.
+The fresh flow generates its Cube, recovery material, 2-of-3 vault, phone signer,
+funding request and transaction. It does not take an existing vault, descriptor,
+PSBT, address, PIN or recovery phrase as input. Repeat the **same command and
+run directory** to resume; choose a new directory for a separate disposable
+vault. Pytest sequences the work and produces JUnit results. Appium/XCUITest
+controls Keychain over USB. No model, camera, iPhone Mirroring, screenshots or
+browser automation is involved in reruns.
 
-This is an API/physical-signer integration suite, not desktop visual acceptance.
-It exercises Cube creation through the production Rust state machine. The live
-spend uses a **prepared disposable Testnet4 vault and locally signed draft**.
-It does not recreate an account, enroll a passkey, provision a vault, obtain
-faucet funds, or exercise the desktop's mouse-driven vault builder on each run.
-Those are fixture setup, not silently passing test cases. The original
-agent-driven run remains incomplete until delivery/signing/broadcast succeeds.
+Desktop provisioning exercises Tenshu's production Home, installer, storage and
+Connect code through a native test adapter. It does not drive desktop widgets or
+assert the balance shown in Tenshu's window; those visual acceptance checks
+remain separate. The Keychain steps operate the actual iPhone interface.
 
-## What one run does
+## Fresh flow
 
-1. Require a synchronized local Bitcoin Core on Testnet4, checking its chain
-   name and BIP94 genesis. Testnet3 address prefixes alone are insufficient.
-2. Run the signed, disposable Cube create → recovery verification → save →
-   reopen → unlock regression. A successful result is cached by source revision.
-3. Read the dedicated profile's existing Connect account/device/transport key.
-   Require production REST `https://api.coincube.io` and gRPC
-   `https://grpc.coincube.io:443`. Authenticate the Cube/vault and require
-   Testnet4, the expected descriptor, a primary 2-of-3 policy, exactly one valid
-   existing primary signature, and the enrolled phone signer.
-4. Attach Appium to WDA over USB. Check installed Keychain build, Testnet4 in
-   Settings, and the named Cube in the phone's Connect-backed Cubes list.
-5. Check the exact funded inputs, recipient, change, unsigned transaction ID
-   and fee. An absent/spent input blocks instead of silently re-funding.
-6. Create or recover the same encrypted Connect request using a stable,
-   checkpointed `request_id`. Select its unique note on the phone; never approve
-   the first arbitrary pending request.
-7. Verify the phone displays the intended network, both output addresses,
-   amounts and fee, then use its ordinary approval flow. An existing disposable
-   signer PIN can come from a private file. A real Face ID/passkey/OS prompt
-   that cannot be completed automatically reports BLOCKED; it is not bypassed.
-8. Fetch the exact session, decrypt the signature response, reject unexpected
-   transaction changes, merge only permitted signature material, and verify
-   the quorum with production native validation.
-9. Finalize with Core, recheck outputs/fee, run `testmempoolaccept`, record the
-   exact signed bytes before sending, and broadcast on Testnet4.
-10. Verify transaction acceptance independently with Mempool and Blockstream.
-    Add `--qa-confirm` to require mining; normal acceptance includes mempool.
+1. Verify both public explorers' Testnet4 genesis and production Connect
+   endpoints. Verify the configured QA account against the normal desktop
+   Keychain session, then register the run profile through the production
+   device-registration client. Persist its transport key before registration.
+   Existing private auth caches can also be copied without changing their source.
+2. Attach to the wired phone and verify the account. For a fresh signed-in QA
+   keychain, select **Use a PIN**, generate and save its PIN, capture all twelve
+   indexed recovery words, complete the real recovery challenge, and select
+   Testnet4. Later runs reuse this account/device-bound credential.
+3. Create a persistent Cube through the production Home state machine, complete
+   the actual backup challenge, reopen its encrypted seed and unlock it.
+   Register its stable identity and encryption key with production Connect.
+4. Create a run-specific signer through Keychain's ordinary Add signer key
+   flow. Reconcile the exact new key through Connect, then use the phone's
+   **Attach to Cube** flow to bind and encrypt its public key. Require the
+   Cube-scoped envelope to decrypt to the original exported public key before
+   creating a vault.
+5. Generate and reconstruct a Border Wallet grid phrase, pattern and checksum.
+   Install a primary **2-of-3 Master / Keychain / Border Wallet** vault with a
+   delayed Border Wallet recovery path through the production installer. Verify
+   its Cube appears on the phone through Connect.
+6. Request Testnet4 faucet funding once, then require two independent explorers
+   to agree on the funded outpoint and raw previous transaction. No prepared
+   funding transaction or local Bitcoin Core synchronization is required.
+7. Generate a recoverable test recipient and change address, construct a full
+   PSBT, and add the Master signature. Pin its exact inputs, outputs and fee.
+8. Create/recover one encrypted Connect request with a stable request ID. Verify
+   the network, destinations, amounts and fee shown on the phone before using
+   the generated PIN to approve it. Before entering the PIN, background/resume
+   the app and record three seconds of challenge survival. This is lifecycle
+   evidence; it does not claim to prove a Home-refresh event occurred.
+9. Collect and verify the phone signature using production native crypto.
+   Finalize against the saved spend intent, persist the signed bytes, and send
+   exactly that transaction to the Testnet4 Esplora broadcast endpoint.
+10. Require independent Mempool and Blockstream transaction acceptance. Add
+    `--qa-confirm` to require a mined confirmation.
+
+The fixed default spend is 10,000 sats with a 1,000-sat fee. Configured spend and
+fee are bounded at 100,000 and 10,000 sats respectively. The native helper
+verifies the funded script, previous transaction, primary quorum and actual
+signatures. Unlike the legacy Core-backed mode below, fresh mode does not run a
+separate local `testmempoolaccept`: the receiving Testnet4 node validates the
+broadcast, and two independent explorers verify its acceptance.
+
+## Workstation authentication and USB prerequisites
+
+The fresh flow needs a signed-in disposable QA account shared by Tenshu and
+Keychain. Account signup/email OTP, Apple trust/unlock/Developer Mode and
+certificate provisioning remain workstation prerequisites. They are not
+reported as successful test stages. The runner never logs out or replaces an
+existing master. An existing passkey master cannot become an unattended PIN
+signer merely by creating another key: it reports `PHONE_MASTER_NOT_OWNED`.
+A fresh QA account at **Use a PIN** is supported; once the suite has provisioned
+it, subsequent fresh-vault runs reuse its encrypted credentials automatically.
+
+Store nonsecret workstation settings in private, gitignored
+`tests/e2e/.local/workstation.json`, using `workstation.example.json` as its
+schema. `account_email` is the exact disposable QA account; native bootstrap
+refuses any different authenticated user before registering a device.
+`profile_dir` names the normal signed-in desktop profile, not a prepared Cube
+or vault. A legacy cache is optional: when absent, the suite reads the normal
+desktop session from macOS Keychain and performs supported device registration.
+`desktop_session_namespace` is `development` for a debug Tenshu build and
+`production` for the release app; this selects only its existing Keychain
+namespace. Both API endpoint values always remain pinned to production. `ios.minimum_build` must identify the installed
+reviewed Keychain build. Fresh onboarding also requires accessibility forwarding
+through Keychain's screenshot-protection wrapper: build 36 hides the recovery
+controls from XCTest, and cannot complete this flow. The example selects build
+38, which also routes PIN-backed signer entropy through real PIN verification and
+exposes non-spoken signing-session/empty-entry accessibility identifiers. A build
+number alone is not source or acceptance evidence.
+The QA account must have capacity for a new signer key. The exact **Key limit
+reached** screen produces `SIGNER_LIMIT` immediately; the runner never changes a
+plan, deletes existing keys, or reuses an existing signer as a fresh fixture.
+`ios.xctestrun` can identify an already-signed WebDriverAgent
+runner so the suite starts it automatically when needed.
+
+Install Appium 3.9.0 and XCUITest 12.22.8, plus Python 3.11+, Xcode and the pinned
+Rust toolchain. The launcher installs pinned Python dependencies once. Fresh
+mode builds both Rust helpers and signs the provisioning helper with the normal
+COINCUBE Developer ID/profile automatically. No TestFlight upload is required
+for a correctly signed build already installed over USB.
+
+```sh
+# Synthetic tests only: no phone, network, credentials or funds.
+tests/e2e/run --self-test
+
+# Read-only environment checks; no onboarding, Cube, funding or signing.
+tests/e2e/run --qa-fresh --qa-run-dir /private/qa/run-001 --qa-preflight
+
+# Full live flow. Repeat this exact command after an interruption.
+tests/e2e/run --qa-fresh --qa-run-dir /private/qa/run-001 --qa-deadline 180
+```
+
+Use `--qa-config /absolute/private/workstation.json` to override the default
+workstation configuration. Only one physical acceptance process may own the
+phone at a time; the suite holds a USB lease and exclusive run/account locks.
+
+## Credentials and recovery after interruption
+
+Generated Cube PIN, Master and recipient recovery phrases, Border Wallet phrase,
+pattern/checksum, and phone PIN/recovery words are encrypted in macOS Data
+Protection Keychain. The signed native helper verifies readback before use.
+Phone updates use compare-and-swap revisions; a stale process cannot overwrite
+newer recovery state. Nonsecret locator files and private checkpoints stay in
+the run directory. Keep both the Mac's Keychain and the run directory for
+recovery; copying the run directory alone does not copy its credentials.
+
+No secrets are placed in argv, Git, JUnit, screenshots or raw Appium logs.
+Authentication caches, descriptors, PSBTs and signed transactions remain private
+files under the run directory. The generated Cube uses production encrypted
+seed storage. Secret-get responses travel only over a captured child-process
+pipe; do not invoke them with stdout forwarded to a terminal or log.
+
+A faucet timeout leaves a durable claim intent. A rerun checks that address
+instead of requesting another payment. Explicit empty/rate-limit responses
+retain the service's retry window. The public faucet can be unavailable; that
+is `BLOCKED`, not successful funding. Its developer API uses `btc-testnet` for
+Testnet4 ([official API](https://www.cypherfaucet.com/api),
+[service source](https://github.com/Tech1k/cypherfaucet.com)).
+
+A PIN attempt is recorded before entry and blocks further attempts across
+process restarts and different run directories until the exact key/signature
+is verified through Connect. A delayed signature is polled without reopening
+approval. Before any first signing PIN, the runner checks the exact session's
+empty-entry accessibility identifiers, the foreground process, and production
+Connect's validated VIEWED status with zero submitted signatures. It records a
+background/resume probe and durable dispatch intent before requesting the
+protected credential. An interrupted probe or input is never retried.
+
+An approval interrupted before any PIN/probe may resume in the same process only
+with the saved build, device, session and immutable transaction context. One
+reviewed app upgrade may instead create a fresh UI review of that same request:
+the runner archives the original attempt, requires a strictly newer build,
+verifies termination (`NOT_RUNNING`), rechecks Connect, and repeats all account,
+network, Cube and transaction checks. The original approval marker is never
+cleared; a separate durable recovery receipt permits at most one new Approve
+dispatch. Legacy build-37 evidence is eligible only when its saved phone check
+precedes a recorded `PHONE_AUTH` block and no PIN attempt exists. Existing
+signatures always switch to collection. Neither path creates another spend or
+changes the saved transaction. Interrupted initial PIN entry fails closed if
+partial input cannot be determined. One completed PIN setup whose recovery words were never captured
+and whose challenge was never submitted may restart at the full fresh-setup
+chooser after an app restart. The runner archives the previous entry markers
+before acting and retains the same encrypted PIN. It never repeats an unlock,
+resets an existing master, or discards a saved phrase/submission. A second such
+restart is blocked. Keychain's normal local-blob and server-key guards must pass
+again before a new recovery phrase appears, and Settings identity is verified
+before Cube creation or funding. Recovery confirmation resolves the exact visible
+button before saving dispatch intent; an uncertain submission never re-enters
+answers or taps again. A completed Home/setup-success screen can reconcile it
+only with the already saved recovery proof. Lost broadcast responses reconcile the same transaction ID;
+retries can send only the previously pinned signed bytes.
+
+A separately authorized replacement generation is available for the narrowly
+reviewed build-38 capacity-blocked case. It requires an explicit authorization
+reference and the private checkpoint of an earlier same-account/device run that
+proved saved-PIN signing and broadcast:
+
+```sh
+tests/e2e/run --qa-fresh --qa-run-dir /private/qa/interrupted-run \
+  --qa-authorize-key-generation EXPLICIT-AUTHORIZATION-REFERENCE \
+  --qa-key-recovery-prior-run /private/qa/completed-run
+```
+
+This is not a retry of the old input. The operator must authorize one new attempt
+and establish that the same controlled device/account/master had no intervening
+PIN or master-change operations. The build-38 source resets the failure counter
+before reaching the observed capacity screen; the runner records this and the
+prior successful PIN signing as operational evidence, not a measured counter or
+a definitive outcome for the old key. Production capacity must actually be
+available. The prior checkpoint supplies recovery evidence only; it supplies no
+Cube, vault, signer, PSBT or funding fixture for the new generation.
+
+The runner archives the old pending purpose as **unresolved**, verifies a stopped
+app process and live account/network/Keychain identity, then uses one encrypted
+compare-and-swap to reserve a distinct key name for this run. The reservation
+blocks every unrelated credential use until it is consumed by the newly reached,
+empty PIN prompt. A second CAS records that new pending purpose before input.
+Before any PIN input, the same build-38 foreground process can continue its
+original newly created challenge with the exact unused encrypted reservation.
+This continuation never navigates, recreates the key, restarts Keychain, or
+clears input; an omitted WDA value is accepted only for that untouched prompt.
+Once the durable input marker is set, only remote reconciliation is allowed.
+Crashes reconcile the same reservation; they cannot clear a newer attempt or
+create another allowance. An old key appearing, changed identity, nonempty field,
+lockout/error, or uncertain input stops the run. Successful new registration
+retains the old unresolved history. Repeat the ordinary command without the two
+recovery options after the authorization has been checkpointed.
+
+Exit **0** means selected stages passed, **1** an assertion failed, **2** a
+selected live run was blocked. Preflight success is only preflight success.
+`checkpoint.json` records stage outcomes, and `results.xml` is sanitized JUnit.
+Ordinary repository collection skips live tests; these skips are not acceptance
+evidence. This flow is opt-in and is not added to GitHub CI.
+
+## Legacy prepared-vault replay
+
+Schema version 1 remains available for the original saved draft. It uses a
+prepared disposable vault, full locally signed PSBT, exact spend intent and a
+synchronized local Testnet4 Core. It requires its own explicit configuration:
+
+```sh
+tests/e2e/run --qa-config /private/qa/config.json --qa-run-dir /private/qa/legacy-run
+```
+
+The following setup details apply only to that legacy mode.
 
 ## One-time workstation and fixture setup
 
@@ -149,7 +327,7 @@ identity; `results.xml` is a sanitized JUnit report. `signed.psbt` and
 `signed.hex`, if produced, remain private in the run directory. The process
 holds an exclusive run lock and a shared USB automation lease. File writes use
 atomic rename and fsync. Changed configuration or draft bytes cannot reuse a
-checkpoint. A crash or timeout after the Approve tap never causes an automatic
+checkpoint. In this legacy flow, a crash or timeout after the Approve tap never causes an automatic
 second approval or PIN attempt; rerunning skips the phone and keeps polling
 Connect for the signature, reporting `SIGNATURE_DELIVERY` if it still has not
 arrived.

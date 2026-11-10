@@ -136,6 +136,34 @@ pub fn add_if_absent(service: &str, account: &str, secret: &[u8]) -> Result<bool
     }
 }
 
+/// Replace data atomically while retaining the mandatory protection attributes.
+/// The integration caller serializes its compare-and-swap with an OS file lock.
+#[cfg(feature = "integration-tests")]
+pub(super) fn update_for_integration(
+    service: &str,
+    account: &str,
+    secret: &[u8],
+) -> Result<(), UnlockError> {
+    let query = CFDictionary::from_CFType_pairs(&identity(service, account));
+    let mut values = required_attributes();
+    values.push((
+        cfstr(unsafe { kSecValueData }),
+        CFData::from_buffer(secret).into_CFType(),
+    ));
+    let values = CFDictionary::from_CFType_pairs(&values);
+    let status = unsafe {
+        security_framework_sys::keychain_item::SecItemUpdate(
+            query.as_concrete_TypeRef(),
+            values.as_concrete_TypeRef(),
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(keychain_error(status, "integration secret update failed"))
+    }
+}
+
 /// Turn an `OSStatus` into the right message.
 ///
 /// Shared by every entry point, because the entitlement failure is not specific

@@ -27,11 +27,16 @@ if not stamp.exists() or stamp.read_text() != digest:
     stamp.write_text(digest)
 
 args = sys.argv[1:]
+fresh = "--qa-fresh" in args
+if fresh:
+    args.remove("--qa-fresh")
+    if "--qa-config" not in args:
+        args += ["--qa-config", str(root / ".local/workstation.json")]
 if args == ["--self-test"]:
     target = root / "selftests"
     args = []
 else:
-    target = root / "test_acceptance.py"
+    target = root / ("test_full_flow.py" if fresh else "test_acceptance.py")
     if "--qa-config" not in args or "--qa-run-dir" not in args:
         raise SystemExit("Usage: tests/e2e/run --qa-config /private/config.json --qa-run-dir /private/run [--qa-preflight] [--qa-confirm]\n       tests/e2e/run --self-test")
     directory = Path(args[args.index("--qa-run-dir") + 1]).absolute()

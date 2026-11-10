@@ -1,5 +1,113 @@
 mod claim;
 pub(crate) mod connect_vault;
+
+#[cfg(feature = "integration-tests")]
+pub mod integration {
+    pub use super::connect_vault::{create_connect_vault, ConnectVaultError, ConnectVaultOutcome};
+    pub use super::context::{ConnectVaultMemberPayload, Context, RemoteBackend};
+    pub use super::descriptor::PathKind;
+
+    pub fn testnet4_esplora_config(jwt: &str) -> coincubed::config::EsploraConfig {
+        super::connect_esplora_config(super::bitcoin::Network::Testnet4, jwt)
+    }
+
+    /// Resume only the native test runner's verified Testnet4 seed write.
+    /// Normal app callers retain create-new behavior through install_local_wallet.
+    pub async fn install_testnet4_wallet_resumable(
+        ctx: Context,
+        wallet_id: super::WalletId,
+        signer: std::sync::Arc<std::sync::Mutex<crate::signer::Signer>>,
+    ) -> Result<super::WalletSettings, super::Error> {
+        if ctx.bitcoin_config.chain != crate::chain::ChainId::Testnet4
+            || ctx.recovered_signer.is_some()
+            || ctx.seed_cube_id().is_empty()
+        {
+            return Err(super::Error::Unexpected(
+                "Invalid Testnet4 resume context".into(),
+            ));
+        }
+        super::install_local_wallet_with_seed_mode(
+            ctx,
+            wallet_id,
+            signer,
+            super::SeedWriteMode::ResumeVerified,
+        )
+        .await
+    }
+
+    /// Verify the exact existing descriptor seed without changing any bytes.
+    /// Exposed only with integration-tests so offline crashpoint tests can use
+    /// an ephemeral device secret instead of accessing the system Keychain.
+    pub fn verify_existing_testnet4_seed(
+        ctx: &Context,
+        wallet_id: &super::WalletId,
+        signer: &crate::signer::Signer,
+        secret: &coincube_core::seed_crypt::DeviceSecret,
+    ) -> Result<bool, super::Error> {
+        use coincube_core::{
+            seed_crypt,
+            signer::{MasterSigner, MnemonicFileName},
+        };
+        let refuse = || {
+            super::Error::Unexpected(
+                "Existing Testnet4 seed could not be verified; no seed was changed".into(),
+            )
+        };
+        let descriptor = ctx.descriptor.as_ref().ok_or_else(refuse)?;
+        if ctx.bitcoin_config.chain != crate::chain::ChainId::Testnet4
+            || ctx.network != super::bitcoin::Network::Testnet4
+            || !descriptor.all_xpubs_net_is(super::bitcoin::Network::Testnet4)
+            || !descriptor.contains_fingerprint_in_path(signer.fingerprint(), None)
+            || ctx.seed_cube_id().is_empty()
+            || descriptor
+                .to_string()
+                .split_once('#')
+                .map(|(_, sum)| sum.to_owned())
+                .as_ref()
+                != Some(&wallet_id.descriptor_checksum)
+        {
+            return Err(refuse());
+        }
+        let timestamp = wallet_id.timestamp.ok_or_else(refuse)?;
+        let path = MasterSigner::mnemonics_folder_for_chain(
+            ctx.coincube_directory.path(),
+            ctx.bitcoin_config.chain,
+        )
+        .join(
+            MnemonicFileName {
+                fingerprint: signer.fingerprint(),
+                descriptor_info: Some((wallet_id.descriptor_checksum.clone(), timestamp)),
+            }
+            .to_string(),
+        );
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err(refuse()),
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 4096 {
+            return Err(refuse());
+        }
+        let bytes = std::fs::read(&path).map_err(|_| refuse())?;
+        if !bytes.starts_with(seed_crypt::ENCRYPTED_V3_MARKER) {
+            return Err(refuse());
+        }
+        let password = ctx.seed_password().ok_or_else(refuse)?;
+        let plaintext =
+            seed_crypt::decrypt_with(&bytes, password, ctx.seed_cube_id(), Some(secret))
+                .map_err(|_| refuse())?;
+        let phrase = std::str::from_utf8(&plaintext).map_err(|_| refuse())?;
+        let recovered = MasterSigner::from_str(super::bitcoin::Network::Testnet4, phrase)
+            .map_err(|_| refuse())?;
+        if recovered.words() != signer.mnemonic()
+            || recovered.fingerprint(&super::bitcoin::secp256k1::Secp256k1::new())
+                != signer.fingerprint()
+        {
+            return Err(refuse());
+        }
+        Ok(true)
+    }
+}
 mod context;
 mod decrypt;
 mod descriptor;
@@ -1518,10 +1626,25 @@ fn require_remote_installable_chain(ctx: &Context) -> Result<(), Error> {
     require_installable_chain(ctx)
 }
 
+enum SeedWriteMode {
+    Create,
+    #[cfg(feature = "integration-tests")]
+    ResumeVerified,
+}
+
 pub async fn install_local_wallet(
     ctx: Context,
     wallet_id: WalletId,
     signer: Arc<Mutex<Signer>>,
+) -> Result<WalletSettings, Error> {
+    install_local_wallet_with_seed_mode(ctx, wallet_id, signer, SeedWriteMode::Create).await
+}
+
+async fn install_local_wallet_with_seed_mode(
+    ctx: Context,
+    wallet_id: WalletId,
+    signer: Arc<Mutex<Signer>>,
+    seed_mode: SeedWriteMode,
 ) -> Result<WalletSettings, Error> {
     require_installable_chain(&ctx)?;
     let network_datadir = ctx
@@ -1661,21 +1784,38 @@ pub async fn install_local_wallet(
         // writing the master seed itself to disk in the clear. It gets the same
         // treatment as every other seed, not an exemption.
         let password = seed_password(&ctx)?;
-        signer
-            .lock()
-            .unwrap()
-            .store_encrypted_for_chain(
-                &ctx.coincube_directory,
-                cfg.bitcoin_config.chain,
-                &wallet_id.descriptor_checksum,
-                wallet_id
-                    .timestamp
-                    .expect("Every new wallet have now a timestamp"),
-                password.as_str(),
-                ctx.seed_cube_id(),
-                seed_device_secret(&ctx)?.as_ref(),
-            )
-            .map_err(|e| Error::Unexpected(format!("Failed to store mnemonic: {}", e)))?;
+        let already_verified = match seed_mode {
+            SeedWriteMode::Create => false,
+            #[cfg(feature = "integration-tests")]
+            SeedWriteMode::ResumeVerified => {
+                let secret = seed_device_secret(&ctx)?.ok_or_else(|| {
+                    Error::Unexpected("Testnet4 resume requires the Cube device secret".into())
+                })?;
+                integration::verify_existing_testnet4_seed(
+                    &ctx,
+                    &wallet_id,
+                    &signer.lock().unwrap(),
+                    &secret,
+                )?
+            }
+        };
+        if !already_verified {
+            signer
+                .lock()
+                .unwrap()
+                .store_encrypted_for_chain(
+                    &ctx.coincube_directory,
+                    cfg.bitcoin_config.chain,
+                    &wallet_id.descriptor_checksum,
+                    wallet_id
+                        .timestamp
+                        .expect("Every new wallet have now a timestamp"),
+                    password.as_str(),
+                    ctx.seed_cube_id(),
+                    seed_device_secret(&ctx)?.as_ref(),
+                )
+                .map_err(|e| Error::Unexpected(format!("Failed to store mnemonic: {}", e)))?;
+        }
 
         info!("Master signer mnemonic stored (encrypted)");
     }
