@@ -270,6 +270,8 @@ jobs:
       - name: Real wallet through installed STDIO companion
         if: matrix.toolchain == 'pinned' && runner.os != 'Windows'
         shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: |
           cargo build -p coincube-mcp --features adapter --locked
           adapter="$PWD/target/debug/tenshu-mcp"
