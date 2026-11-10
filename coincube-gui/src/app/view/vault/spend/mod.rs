@@ -2524,6 +2524,32 @@ mod tests {
         }
     }
 
+    /// A Branta tamper result leaves the draft fully selected
+    /// (`amount_left == Some(0)`) but blocks the send. Its warning must be
+    /// the hint shown, in a normal send and in recovery alike.
+    #[test]
+    #[ignore = "reproduces the hidden VAULT tamper warning; fixed in the next commit"]
+    fn a_tampered_recipient_shows_its_warning_and_blocks_prepare() {
+        const TAMPER: &str = "Synthetic tamper warning. Do not send.";
+        let fixture = Fixture::new(ThemeMode::Dark, 3);
+        for recovery in [false, true] {
+            let scenario = Scenario {
+                is_valid: false,
+                recovery,
+                amount_left: Some(0),
+                draft_warning: Some(TAMPER),
+                ..Scenario::valid_send()
+            };
+            let probe = Harness::new(compose(&fixture, &scenario), TALL).probe();
+            assert!(probe.contains(TAMPER), "recovery {}", recovery);
+            assert!(
+                !probe.has_focus(&Id::new(PREPARE_ID)),
+                "recovery {}",
+                recovery
+            );
+        }
+    }
+
     /// Until coins are chosen the section says the draft picks them, and
     /// Choose coins opens the existing list.
     #[test]
