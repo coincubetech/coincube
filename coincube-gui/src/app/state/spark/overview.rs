@@ -478,13 +478,17 @@ pub fn lightning_qr_png(address: &str) -> Result<Vec<u8>, String> {
 fn save_lightning_qr(address: String) -> Task<Message> {
     let name = address.split('@').next().unwrap_or("lightning");
     let file_name = format!("{name}-lightning-address.png");
+    // Dialog copy is read here, on the window's thread, so it follows the
+    // window language; the file name stays English.
+    let title = coincube_ui::locale::copy("Save QR image").to_string();
+    let filter = coincube_ui::locale::copy("PNG Image").to_string();
     Task::perform(
         async move {
             let png = lightning_qr_png(&address)?;
             let Some(handle) = rfd::AsyncFileDialog::new()
-                .set_title("Save QR image")
+                .set_title(title)
                 .set_file_name(file_name)
-                .add_filter("PNG Image", &["png"])
+                .add_filter(filter, &["png"])
                 .save_file()
                 .await
             else {
@@ -519,7 +523,7 @@ fn head_actions<'a>(
     let action = |label: &'static str, control: &str, on_press: Option<view::Message>| {
         let button: Element<'a, view::Message> = ActionButton::new(
             view::shared::landing::landing_control_id(cube_id, "Spark", control),
-            label,
+            coincube_ui::locale::copy(label),
             ActionKind::Secondary,
             view::Message::FocusAction,
         )
@@ -592,16 +596,20 @@ pub(crate) fn payment_summary_to_recent_tx(
         .clone()
         .filter(|d| !d.trim().is_empty())
         .unwrap_or_else(|| match method {
-            SparkPaymentMethod::Lightning => "Lightning payment".to_string(),
+            SparkPaymentMethod::Lightning => {
+                coincube_ui::locale::copy("Lightning payment").to_string()
+            }
             SparkPaymentMethod::OnChainBitcoin => {
                 if is_incoming {
-                    "On-chain deposit".to_string()
+                    coincube_ui::locale::copy("On-chain deposit").to_string()
                 } else {
-                    "On-chain withdrawal".to_string()
+                    coincube_ui::locale::copy("On-chain withdrawal").to_string()
                 }
             }
-            SparkPaymentMethod::Spark => "Spark transfer".to_string(),
-            SparkPaymentMethod::StableBalance => "Stable Balance".to_string(),
+            SparkPaymentMethod::Spark => coincube_ui::locale::copy("Spark transfer").to_string(),
+            SparkPaymentMethod::StableBalance => {
+                coincube_ui::locale::copy("Stable Balance").to_string()
+            }
         });
 
     SparkRecentTransaction {
@@ -659,7 +667,7 @@ fn token_payment_to_recent_tx(
         .description
         .clone()
         .filter(|d| !d.trim().is_empty())
-        .unwrap_or_else(|| "Stable Balance".to_string());
+        .unwrap_or_else(|| coincube_ui::locale::copy("Stable Balance").to_string());
 
     SparkRecentTransaction {
         id: p.id.clone(),

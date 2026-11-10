@@ -108,7 +108,7 @@ impl MarketplaceServerFlags {
 /// deliberately generic, since "off at the server" is not a per-network state.
 fn marketplace_off() -> Availability {
     Availability::Unavailable {
-        reason: "The Marketplace isn't available right now.".to_string(),
+        reason: coincube_ui::locale::copy("The Marketplace isn't available right now.").to_string(),
     }
 }
 
@@ -313,8 +313,9 @@ pub fn p2p<C: Into<ChainId>>(chain: C, has_test_coordinator: bool) -> Availabili
         // rather than misattribute the block to a missing coordinator when the
         // coordinator is present but Spark is down.
         other => Availability::Unavailable {
-            reason: format!(
+            reason: coincube_ui::localized_format!(
                 "P2P trading on {} needs a test Mostro coordinator and a connected Spark wallet.",
+                "El intercambio P2P en {} necesita un coordinador Mostro de prueba y una cartera Spark conectada.",
                 net_label(other)
             ),
         },
@@ -380,7 +381,12 @@ pub fn route_availability<C: Into<ChainId>>(
 
 fn unavailable(feature: &str, net: ChainId) -> Availability {
     Availability::Unavailable {
-        reason: format!("{} isn't available on {}.", feature, net_label(net)),
+        reason: coincube_ui::localized_format!(
+            "{} isn't available on {}.",
+            "{} no está disponible en {}.",
+            coincube_ui::locale::copy(feature),
+            net_label(net)
+        ),
     }
 }
 

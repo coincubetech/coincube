@@ -1,4 +1,7 @@
 use breez_sdk_liquid::{bitcoin::Denomination, model::PreparePayOnchainResponse};
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
+use coincube_ui::localized_format;
 use std::time::Duration;
 
 use coincube_ui::component::text::Text;
@@ -88,7 +91,7 @@ fn pending_deposit_card<'a>(
             .align_y(Alignment::Center)
             .push(warning_icon().size(12).style(theme::text::secondary))
             .push(
-                text("Pending deposit")
+                text(localized_copy("Pending deposit"))
                     .size(12)
                     .style(theme::text::secondary),
             )
@@ -204,7 +207,9 @@ fn wallet_card<'a>(
                                 Row::new().push(text("********").size(H2_SIZE))
                             } else if usdt_error {
                                 Row::new().push(
-                                    text("Balance unavailable").size(P1_SIZE).color(color::RED),
+                                    text(localized_copy("Balance unavailable"))
+                                        .size(P1_SIZE)
+                                        .color(color::RED),
                                 )
                             } else {
                                 Row::new()
@@ -230,8 +235,9 @@ fn wallet_card<'a>(
                                                     .style(theme::text::secondary),
                                             )
                                             .push(
-                                                text(format!(
+                                                text(localized_format!(
                                                     "-{} USDt pending",
+                                                    "-{} USDt pendiente",
                                                     format_usdt_display(pending_send_sats)
                                                 ))
                                                 .size(P2_SIZE)
@@ -252,8 +258,9 @@ fn wallet_card<'a>(
                                                     .style(theme::text::secondary),
                                             )
                                             .push(
-                                                text(format!(
+                                                text(localized_format!(
                                                     "+{} USDt pending",
+                                                    "+{} USDt pendiente",
                                                     format_usdt_display(pending_receive_sats)
                                                 ))
                                                 .size(P2_SIZE)
@@ -266,7 +273,7 @@ fn wallet_card<'a>(
                     )
                     .push(Space::new().width(Length::Fixed(8.0)))
                     .push(
-                        button::primary(None, "Send")
+                        button::primary(None, localized_copy("Send"))
                             .width(Length::Fixed(120.0))
                             .on_press(Message::Menu(Menu::Liquid(LiquidSubMenu::Send))),
                     )
@@ -298,11 +305,11 @@ fn wallet_card<'a>(
                     Some(overview_action.clone()),
                     theme::button::transparent,
                 ))
-                .push(text("Wallet import pending").style(theme::text::secondary))
+                .push(text(localized_copy("Wallet import pending")).style(theme::text::secondary))
                 .push(Space::new().width(Length::Fill))
                 .push(landing_button(
                     landing_control_id(cube_id, "Vault", "finish-import"),
-                    "Finish import",
+                    localized_copy("Finish import"),
                     None,
                     Message::FocusAction,
                     Some(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
@@ -329,7 +336,7 @@ fn wallet_card<'a>(
                         .push(
                             landing_button(
                                 landing_control_id(cube_id, "Vault", "restore"),
-                                "Restore from Connect",
+                                localized_copy("Restore from Connect"),
                                 None,
                                 Message::FocusAction,
                                 Some(Message::SetupVaultRestoreFromKit),
@@ -340,7 +347,7 @@ fn wallet_card<'a>(
                         .push(
                             landing_button(
                                 landing_control_id(cube_id, "Vault", "create"),
-                                "Create Vault",
+                                localized_copy("Create Vault"),
                                 None,
                                 Message::FocusAction,
                                 Some(Message::SetupVault),
@@ -390,7 +397,7 @@ fn wallet_card<'a>(
                     .push(
                         landing_button(
                             landing_control_id(cube_id, title, "send-btc"),
-                            "Send",
+                            localized_copy("Send"),
                             None,
                             Message::FocusAction,
                             Some(send_action),
@@ -401,7 +408,7 @@ fn wallet_card<'a>(
                     .push(
                         landing_button(
                             landing_control_id(cube_id, title, "receive-btc"),
-                            "Receive",
+                            localized_copy("Receive"),
                             None,
                             Message::FocusAction,
                             Some(receive_action),
@@ -504,7 +511,11 @@ fn wallet_card<'a>(
                                         .spacing(6)
                                         .align_y(Alignment::Center)
                                         .push(clock_icon().size(16))
-                                        .push(text("Recovery path").size(P1_SIZE).bold())
+                                        .push(
+                                            text(localized_copy("Recovery path"))
+                                                .size(P1_SIZE)
+                                                .bold(),
+                                        )
                                         .push(arrow_right().size(14)),
                                 )
                                 .padding(4),
@@ -876,12 +887,12 @@ fn overview_eye<'a>(
 ) -> Element<'a, Message> {
     let glyph = if masked { eye_slash_icon() } else { eye_icon() };
     let label = match (section, global_hidden, masked) {
-        ("Total Balance", true, _) => "Total balance hidden by global Hide",
-        ("Wallets", true, _) => "Wallet balances hidden by global Hide",
-        ("Total Balance", false, true) => "Show total balance",
-        ("Wallets", false, true) => "Show wallet balances",
-        ("Total Balance", false, false) => "Hide total balance",
-        _ => "Hide wallet balances",
+        ("Total Balance", true, _) => localized_copy("Total balance hidden by global Hide"),
+        ("Wallets", true, _) => localized_copy("Wallet balances hidden by global Hide"),
+        ("Total Balance", false, true) => localized_copy("Show total balance"),
+        ("Wallets", false, true) => localized_copy("Show wallet balances"),
+        ("Total Balance", false, false) => localized_copy("Hide total balance"),
+        _ => localized_copy("Hide wallet balances"),
     };
     iced::widget::tooltip(
         Action::new(
@@ -969,15 +980,20 @@ fn other_cube_context<'a>(
         return Some(status_line(
             lock_icon(),
             StatusTone::Good,
-            format!("{} is locked again.", ctx.other.name()),
+            localized_format!(
+                "{} is locked again.",
+                "{} está bloqueada de nuevo.",
+                ctx.other.name()
+            ),
         ));
     }
     (open && ctx.other.unlocked).then(|| {
         status_line(
             lock_icon(),
             StatusTone::Warn,
-            format!(
+            localized_format!(
                 "{} · {} · unlocked for this transfer",
+                "{} · {} · desbloqueado para esta transferencia",
                 ctx.other.name(),
                 network_name(ctx.chain)
             ),
@@ -1002,7 +1018,7 @@ fn transfer_dialog<'a>(
             Column::new()
                 .spacing(4)
                 .width(Length::Fill)
-                .push(text("Transfer").size(22).bold())
+                .push(text(localized_copy("Transfer")).size(22).bold())
                 .push(
                     Row::new()
                         .spacing(6)
@@ -1155,7 +1171,8 @@ fn transfer_wallet_row<'a>(
         ),
         wallet_kind_icon::<Message>(kind, 18.0),
         text(kind.label()).size(P1_SIZE).bold().into(),
-        (side == PickerSide::From && empty && !balance_masked).then(|| muted("Empty").into()),
+        (side == PickerSide::From && empty && !balance_masked)
+            .then(|| muted(localized_copy("Empty")).into()),
         Some(
             text(balance_text(
                 balance,
@@ -1196,8 +1213,8 @@ fn transfer_wallet_section<'a>(
     let mut col = Column::new().spacing(2).push(
         Container::new(
             text(match side {
-                PickerSide::From => "From",
-                PickerSide::To => "To",
+                PickerSide::From => localized_copy("From"),
+                PickerSide::To => localized_copy("To"),
             })
             .size(14)
             .bold(),
@@ -1239,12 +1256,15 @@ fn wallets_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
             .size(18)
             .style(theme::text::secondary)
             .into(),
-        text("Another Cube…").size(P1_SIZE).bold().into(),
+        text(localized_copy("Another Cube…"))
+            .size(P1_SIZE)
+            .bold()
+            .into(),
         Some(
             muted(if another_enabled {
-                "Unlocks for this transfer only"
+                localized_copy("Unlocks for this transfer only")
             } else {
-                "From Spark or Vault on Bitcoin mainnet"
+                localized_copy("From Spark or Vault on Bitcoin mainnet")
             })
             .into(),
         ),
@@ -1291,7 +1311,7 @@ fn wallets_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                     .spacing(10)
                     .align_y(Alignment::Center)
                     .push(dialog_button(
-                        "Continue",
+                        coincube_ui::locale::copy("Continue"),
                         None,
                         true,
                         (!source_empty).then_some(Message::Home(HomeMessage::ContinueFromWallets)),
@@ -1332,7 +1352,7 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                     .spacing(4)
                     .align_y(Alignment::Center)
                     .push(lock_icon().size(13).style(theme::text::secondary))
-                    .push(muted("Locked"))
+                    .push(muted(localized_copy("Locked")))
                     .into(),
             ),
             selected,
@@ -1343,7 +1363,7 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
         ));
     }
     if ctx.other.choices.is_empty() {
-        rows = rows.push(muted("No other Cubes on this device."));
+        rows = rows.push(muted(localized_copy("No other Cubes on this device.")));
     }
     let selected = ctx.other.choice().filter(|choice| choice.refusal.is_none());
     let wallets = selected.map(|choice| {
@@ -1375,7 +1395,11 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
             .spacing(20)
             .push(page_heading(
                 "Choose the other Cube".into(),
-                Some(format!("{} Cubes only.", network_name(ctx.chain))),
+                Some(localized_format!(
+                    "{} Cubes only.",
+                    "{} Cubes sólo.",
+                    network_name(ctx.chain)
+                )),
             ))
             .push(group(Some("Other Cubes".into()), rows))
             .push_maybe(wallets)
@@ -1393,7 +1417,7 @@ fn other_cube_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
             ))
             .push(page_actions(
                 Some(back_button(
-                    "Back",
+                    CopyText::Back.get(),
                     Some(Message::Home(HomeMessage::PreviousStep)),
                 )),
                 dialog_button(
@@ -1417,7 +1441,7 @@ fn check_row<'a>(label: String, state: std::cmp::Ordering) -> Element<'a, Messag
                     color: Some(t.colors.shell.good),
                 })
                 .into(),
-            "Done",
+            CopyText::Done.get(),
         ),
         Equal => (
             clock_icon().size(16).style(theme::text::secondary).into(),
@@ -1462,7 +1486,7 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
         UnlockPhase::Credential { busy } => {
             let unlock: Element<'a, Message> = if passkey {
                 dialog_button(
-                    "Use passkey",
+                    coincube_ui::locale::copy("Use passkey"),
                     Some(key_icon()),
                     true,
                     (!busy).then_some(Message::Home(HomeMessage::UnlockOtherCubePasskey)),
@@ -1470,7 +1494,7 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
             } else {
                 button::primary_loading(
                     None,
-                    "Unlock",
+                    CopyText::Unlock.get(),
                     busy,
                     (pin_complete && !busy).then_some(Message::Home(HomeMessage::UnlockOtherCube)),
                 )
@@ -1487,7 +1511,11 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                             pin.face_view()
                                 .map(|message| Message::Home(HomeMessage::OtherCubePin(message)))
                         }))
-                        .push(muted(format!("Not {}'s PIN.", ctx.cube_name)))
+                        .push(muted(localized_format!(
+                            "Not {}'s PIN.",
+                            "No la PIN de {}.",
+                            ctx.cube_name
+                        )))
                 }))
                 .push_maybe(error)
                 .push(
@@ -1497,7 +1525,7 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                         .push(unlock)
                         .push(Space::new().width(Length::Fill))
                         .push(back_button(
-                            "Cancel",
+                            CopyText::Cancel.get(),
                             Some(Message::Home(HomeMessage::PreviousStep)),
                         )),
                 )
@@ -1542,7 +1570,7 @@ fn unlock_page<'a>(ctx: &TransferCtx<'a>) -> Element<'a, Message> {
                         Some(Message::Home(HomeMessage::PreviousStep)),
                     )),
                     dialog_button(
-                        "Continue",
+                        coincube_ui::locale::copy("Continue"),
                         None,
                         true,
                         (done >= UNLOCK_CHECKS)
@@ -1651,7 +1679,7 @@ fn amount_page<'a>(
             Row::new()
                 .spacing(4)
                 .push(text(direction.to_wallet()))
-                .push(muted("· this Cube")),
+                .push(muted(localized_copy("· this Cube"))),
         )
     };
     let input = match ctx.unit {
@@ -1673,8 +1701,9 @@ fn amount_page<'a>(
             .spacing(20)
             .push(page_heading(
                 "Destination and amount".into(),
-                Some(format!(
+                Some(localized_format!(
                     "From {} · Available {}",
+                    "{} · {} disponible",
                     source.label(),
                     bitcoin_text(ctx.balance(source), ctx.unit, ctx.balance_masked)
                 )),
@@ -1684,7 +1713,7 @@ fn amount_page<'a>(
             .push(
                 Column::new()
                     .spacing(6)
-                    .push(text("Amount").bold())
+                    .push(text(localized_copy("Amount")).bold())
                     .push(
                         Row::new()
                             .spacing(10)
@@ -1706,11 +1735,11 @@ fn amount_page<'a>(
             )
             .push(page_actions(
                 Some(back_button(
-                    "Back",
+                    CopyText::Back.get(),
                     Some(Message::Home(HomeMessage::PreviousStep)),
                 )),
                 dialog_button(
-                    "Prepare",
+                    coincube_ui::locale::copy("Prepare"),
                     None,
                     true,
                     (parsed.is_some()).then_some(Message::Home(HomeMessage::NextStep)),
@@ -1821,21 +1850,24 @@ fn receiving_address<'a>(
                     P1_SIZE,
                 )
             })
-            .push(button::secondary(None, "Show QR code").on_press(Message::ShowQrCode(0)));
+            .push(
+                button::secondary(None, localized_copy("Show QR code"))
+                    .on_press(Message::ShowQrCode(0)),
+            );
         coincube_ui::component::tenshu::disclosure(
             landing_control_id(cube_id, "transfer", "address-details"),
             "Address details",
             expanded,
             Message::FocusAction,
         )
-        .caption("Label, QR code")
+        .caption(localized_copy("Label, QR code"))
         .on_toggle(|_| Message::SelectAddress(addr.clone()))
         .content(editor)
     });
 
     Column::new()
         .spacing(10)
-        .push(text("Receiving address").bold())
+        .push(text(localized_copy("Receiving address")).bold())
         .push(address)
         .push_maybe(disclosure)
         .into()
@@ -1904,15 +1936,24 @@ fn review_page<'a>(
         ),
         dl_row("Receiving wallet", text(receiving), false),
         dl_row("Route", text(route_text(direction)), false),
+        dl_row(
+            CopyText::BitcoinNetwork.get(),
+            text(crate::chain::canonical_network_name(ctx.chain)),
+            false,
+        ),
     ];
     if let Some(parsed) = parsed {
-        rows.push(dl_row("Amount", text(with_fiat(parsed)), false));
+        rows.push(dl_row(
+            localized_copy("Amount"),
+            text(with_fiat(parsed)),
+            false,
+        ));
     }
     rows.push(dl_row(
-        "Fees",
+        localized_copy("Fees"),
         match fees {
             Some(fees) => text(bitcoin_text(fees, unit, ctx.balance_masked)),
-            None => muted("Calculating…"),
+            None => muted(localized_copy("Calculating…")),
         },
         false,
     ));
@@ -1929,7 +1970,7 @@ fn review_page<'a>(
         .spark_address
         .filter(|_| direction == TransferDirection::SparkToOtherSpark && destination_ready)
     {
-        group(Some("Spark address".into()), text(address))
+        group(Some(localized_copy("Spark address").into()), text(address))
     } else {
         match receive_address {
             Some(addr) => receiving_address(
@@ -1940,7 +1981,7 @@ fn review_page<'a>(
                 address_expanded,
                 !direction.is_other_cube(),
             ),
-            None => muted("Getting the receiving address…").into(),
+            None => muted(localized_copy("Getting the receiving address…")).into(),
         }
     };
 
@@ -1950,7 +1991,7 @@ fn review_page<'a>(
     let feerate = (direction.from_kind() == WalletKind::Vault).then(|| {
         Column::new()
             .spacing(10)
-            .push(text("Fee rate (sats/vbyte)").bold())
+            .push(text(localized_copy("Fee rate (sats/vbyte)")).bold())
             .push(
                 crate::app::view::shared::feerate_picker::feerate_presets_row::<Message>(
                     transfer_feerate_loading,
@@ -1978,14 +2019,14 @@ fn review_page<'a>(
             if is_tx_signed {
                 button::primary_loading(
                     None,
-                    "Confirm transfer",
+                    coincube_ui::locale::copy("Confirm transfer"),
                     is_sending,
                     transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmTransfer)),
                 )
             } else {
                 button::primary_loading(
                     None,
-                    "Sign transaction",
+                    coincube_ui::locale::copy("Sign transaction"),
                     is_sending,
                     (transfer_feerate.valid && destination_ready)
                         .then_some(Message::Home(HomeMessage::SignVaultToLiquidTx)),
@@ -1995,7 +2036,7 @@ fn review_page<'a>(
         TransferDirection::LiquidToVault | TransferDirection::LiquidToSpark => {
             button::primary_loading(
                 None,
-                "Confirm transfer",
+                coincube_ui::locale::copy("Confirm transfer"),
                 is_sending,
                 transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmTransfer)),
             )
@@ -2008,7 +2049,7 @@ fn review_page<'a>(
         | TransferDirection::SparkToOtherSpark
         | TransferDirection::SparkToOtherCube => button::primary_loading(
             None,
-            "Confirm transfer",
+            coincube_ui::locale::copy("Confirm transfer"),
             is_sending,
             transfer_action_ready.then_some(Message::Home(HomeMessage::ConfirmSparkSend)),
         ),
@@ -2032,15 +2073,16 @@ fn review_page<'a>(
                 status_line(
                     lock_icon(),
                     StatusTone::Muted,
-                    format!(
+                    localized_format!(
                         "{} locks again once sent, or if you leave.",
+                        "{} cierra otra vez una vez enviado, o si te vas.",
                         ctx.other.name()
                     ),
                 )
             }))
             .push(page_actions(
                 Some(back_button(
-                    "Back",
+                    CopyText::Back.get(),
                     (!is_sending).then_some(Message::Home(HomeMessage::PreviousStep)),
                 )),
                 primary.width(Length::Fixed(200.0)).into(),
@@ -2073,12 +2115,12 @@ fn done_page<'a>(ctx: &TransferCtx<'a>, amount: &'a form::Value<String>) -> Elem
     )];
     if let Some(parsed) = parse_amount(amount, ctx.unit) {
         rows.push(dl_row(
-            "Amount",
+            localized_copy("Amount"),
             text(bitcoin_text(parsed, ctx.unit, ctx.balance_masked)),
             false,
         ));
     }
-    rows.push(dl_row("To", text(to), false));
+    rows.push(dl_row(localized_copy("To"), text(to), false));
     transfer_dialog(
         ctx,
         ctx.steps().len(),
@@ -2095,7 +2137,7 @@ fn done_page<'a>(ctx: &TransferCtx<'a>, amount: &'a form::Value<String>) -> Elem
                             color: Some(t.colors.shell.good),
                         }
                     }))
-                    .push(text("Transfer sent").size(18).bold()),
+                    .push(text(localized_copy("Transfer sent")).size(18).bold()),
             )
             .push(description_list(rows))
             .push_maybe((direction == TransferDirection::VaultToOtherSpark).then(|| {
@@ -2106,20 +2148,20 @@ fn done_page<'a>(ctx: &TransferCtx<'a>, amount: &'a form::Value<String>) -> Elem
                     .spacing(10)
                     .align_y(Alignment::Center)
                     .push(dialog_button(
-                        "See it in Activity",
+                        coincube_ui::locale::copy("See it in Activity"),
                         None,
                         true,
                         Some(Message::Home(HomeMessage::OpenTransferActivity)),
                     ))
                     .push(dialog_button(
-                        "Back to Overview",
+                        coincube_ui::locale::copy("Back to Overview"),
                         None,
                         false,
                         Some(Message::Home(HomeMessage::BackToHome)),
                     ))
                     .push(Space::new().width(Length::Fill))
                     .push(dialog_button(
-                        "New transfer",
+                        coincube_ui::locale::copy("New transfer"),
                         None,
                         false,
                         Some(Message::Home(HomeMessage::RestartTransfer)),
@@ -2734,7 +2776,7 @@ pub fn global_home_view<'a>(
         |wallet: &'static str, control: &'static str, msg: Message| -> Element<'a, Message> {
             landing_button(
                 landing_control_id(cube_id, wallet, control),
-                "Receive",
+                localized_copy("Receive"),
                 None,
                 Message::FocusAction,
                 Some(msg),
@@ -2763,7 +2805,11 @@ pub fn global_home_view<'a>(
                 .push(if wallet_balance_masked {
                     Row::new().push(text("********").size(P1_SIZE))
                 } else if liquid_balance_error {
-                    Row::new().push(text("Balance unavailable").size(P1_SIZE).color(color::RED))
+                    Row::new().push(
+                        text(localized_copy("Balance unavailable"))
+                            .size(P1_SIZE)
+                            .color(color::RED),
+                    )
                 } else if !liquid_balance_loaded {
                     Row::new().push(spinner::typing_text_carousel(
                         "...",
@@ -2786,7 +2832,7 @@ pub fn global_home_view<'a>(
                 .push(
                     landing_button(
                         landing_control_id(cube_id, "Liquid", "send-lbtc"),
-                        "Send",
+                        localized_copy("Send"),
                         None,
                         Message::FocusAction,
                         Some(Message::Home(HomeMessage::SendAsset(
@@ -2820,7 +2866,11 @@ pub fn global_home_view<'a>(
                             P2_SIZE,
                             bitcoin_unit,
                         ))
-                        .push(text("pending").size(P2_SIZE).style(theme::text::secondary))
+                        .push(
+                            text(localized_copy("pending"))
+                                .size(P2_SIZE)
+                                .style(theme::text::secondary),
+                        )
                 }),
         )
         .push_maybe(
@@ -2839,7 +2889,11 @@ pub fn global_home_view<'a>(
                             P2_SIZE,
                             bitcoin_unit,
                         ))
-                        .push(text("pending").size(P2_SIZE).style(theme::text::secondary))
+                        .push(
+                            text(localized_copy("pending"))
+                                .size(P2_SIZE)
+                                .style(theme::text::secondary),
+                        )
                 }),
         );
 
@@ -2857,7 +2911,11 @@ pub fn global_home_view<'a>(
                 .push(if wallet_balance_masked {
                     Row::new().push(text("********").size(P1_SIZE))
                 } else if usdt_balance_error {
-                    Row::new().push(text("Balance unavailable").size(P1_SIZE).color(color::RED))
+                    Row::new().push(
+                        text(localized_copy("Balance unavailable"))
+                            .size(P1_SIZE)
+                            .color(color::RED),
+                    )
                 } else if !usdt_balance_loaded {
                     Row::new().push(spinner::typing_text_carousel(
                         "...",
@@ -2876,7 +2934,7 @@ pub fn global_home_view<'a>(
                 .push(
                     landing_button(
                         landing_control_id(cube_id, "Liquid", "send-usdt"),
-                        "Send",
+                        localized_copy("Send"),
                         None,
                         Message::FocusAction,
                         Some(Message::Home(HomeMessage::SendAsset(
@@ -2905,8 +2963,9 @@ pub fn global_home_view<'a>(
                         .align_y(Alignment::Center)
                         .push(warning_icon().size(12).style(theme::text::secondary))
                         .push(
-                            text(format!(
+                            text(localized_format!(
                                 "-{} USDt pending",
+                                "-{} USDt pendiente",
                                 format_usdt_display(pending_usdt_send_sats)
                             ))
                             .size(P2_SIZE)
@@ -2925,8 +2984,9 @@ pub fn global_home_view<'a>(
                         .align_y(Alignment::Center)
                         .push(warning_icon().size(12).style(theme::text::secondary))
                         .push(
-                            text(format!(
+                            text(localized_format!(
                                 "+{} USDt pending",
+                                "+{} USDt pendiente",
                                 format_usdt_display(pending_usdt_receive_sats)
                             ))
                             .size(P2_SIZE)
@@ -2944,9 +3004,9 @@ pub fn global_home_view<'a>(
             || (usdt_balance > 0 && usable_usd_quote.is_none()))
     {
         amount_cell::<Message>(
-            AmountCell::unavailable(
+            AmountCell::unavailable(coincube_ui::locale::copy(
                 "Combined Liquid valuation is partial; asset amounts are below",
-            ),
+            )),
             AmountTier::Card,
         )
     } else if liquid_card_header_loaded {
@@ -3035,7 +3095,7 @@ pub fn global_home_view<'a>(
                     Row::new().push(text(AmountCell::masked().primary).size(P1_SIZE))
                 } else if spark_balance_error && !spark_balance_loaded {
                     Row::new().push(
-                        text("Balance unavailable")
+                        text(localized_copy("Balance unavailable"))
                             .size(P1_SIZE)
                             .style(theme::text::warning),
                     )
@@ -3068,7 +3128,7 @@ pub fn global_home_view<'a>(
                 .push(
                     landing_button(
                         landing_control_id(cube_id, "Spark", "send-btc"),
-                        "Send",
+                        localized_copy("Send"),
                         None,
                         Message::FocusAction,
                         Some(Message::Home(HomeMessage::SendSparkBtc)),
@@ -3090,7 +3150,9 @@ pub fn global_home_view<'a>(
         // Balance loading treatment for visual consistency.
         let spark_header: Element<'a, Message> = if spark_balance_error && !spark_balance_loaded {
             amount_cell::<Message>(
-                AmountCell::unavailable("Spark bridge has not returned a balance"),
+                AmountCell::unavailable(coincube_ui::locale::copy(
+                    "Spark bridge has not returned a balance",
+                )),
                 AmountTier::Card,
             )
         } else if spark_balance_loaded && spark_valuation_partial {
@@ -3098,7 +3160,9 @@ pub fn global_home_view<'a>(
                 if wallet_balance_masked {
                     AmountCell::masked()
                 } else {
-                    AmountCell::unavailable("Combined BTC and USDB valuation needs a BTC/USD quote")
+                    AmountCell::unavailable(coincube_ui::locale::copy(
+                        "Combined BTC and USDB valuation needs a BTC/USD quote",
+                    ))
                 },
                 AmountTier::Card,
             )
@@ -3172,7 +3236,9 @@ pub fn global_home_view<'a>(
                         if wallet_balance_masked {
                             AmountCell::masked()
                         } else if spark_balance_error && !spark_balance_loaded {
-                            AmountCell::unavailable("Spark bridge has not returned a balance")
+                            AmountCell::unavailable(coincube_ui::locale::copy(
+                                "Spark bridge has not returned a balance",
+                            ))
                         } else if !spark_balance_loaded {
                             AmountCell::unknown("Waiting for Spark sync")
                         } else {
@@ -3182,7 +3248,7 @@ pub fn global_home_view<'a>(
                     ))
             }))
             .push_maybe((spark_balance_error && spark_balance_loaded).then(|| {
-                text("Last known Spark balance · refresh failed")
+                text(localized_copy("Last known Spark balance · refresh failed"))
                     .size(P2_SIZE)
                     .style(theme::text::warning)
             }))
@@ -3239,10 +3305,10 @@ pub fn global_home_view<'a>(
         .spacing(8)
         .width(Length::Fill)
         .align_y(Alignment::Center)
-        .push(h3("Total balance").bold())
+        .push(h3(localized_copy("Total balance")).bold())
         .push(overview_eye(
             cube_id,
-            "Total Balance",
+            coincube_ui::locale::copy("Total Balance"),
             overview_masks.total,
             balance_masked,
             HomeMessage::ToggleTotalBalance,
@@ -3273,7 +3339,9 @@ pub fn global_home_view<'a>(
             if total_balance_masked {
                 AmountCell::masked()
             } else {
-                AmountCell::unavailable("No wallet balance has loaded successfully")
+                AmountCell::unavailable(coincube_ui::locale::copy(
+                    "No wallet balance has loaded successfully",
+                ))
             },
             AmountTier::Total,
         )
@@ -3302,9 +3370,11 @@ pub fn global_home_view<'a>(
         .push(total_balance_value)
         .push_maybe(
             (total_partial && !total_balance_loading && !total_balance_masked).then(|| {
-                text("Partial total · one or more wallet amounts or USD valuations are unavailable")
-                    .size(P2_SIZE)
-                    .style(theme::text::warning)
+                text(localized_copy(
+                    "Partial total · one or more wallet amounts or USD valuations are unavailable",
+                ))
+                .size(P2_SIZE)
+                .style(theme::text::warning)
             }),
         );
 
@@ -3321,10 +3391,10 @@ pub fn global_home_view<'a>(
                 Row::new()
                     .spacing(8)
                     .width(Length::Fill)
-                    .push(h3("Wallets").bold())
+                    .push(h3(localized_copy("Wallets")).bold())
                     .push(overview_eye(
                         cube_id,
-                        "Wallets",
+                        coincube_ui::locale::copy("Wallets"),
                         overview_masks.wallets,
                         balance_masked,
                         HomeMessage::ToggleWalletBalances,
@@ -3359,6 +3429,11 @@ pub fn overview_page<'a>(
     }
     let body = Column::new()
         .spacing(36)
+        .push_maybe(
+            coincube_ui::worldview_copy::VoiceLine::Overview
+                .get()
+                .map(|line| p2_regular(line).style(theme::text::secondary)),
+        )
         .push(overview)
         .push_maybe(recent_activity);
     crate::app::view::dashboard_headed(menu, cache, head, body)
@@ -5153,6 +5228,7 @@ mod tests {
         for label in [
             "Review and confirm",
             "Nothing moves until you confirm.",
+            "Bitcoin SHA-256 · Mainnet",
             "Sending from",
             "Spark · Everyday",
             "Receiving wallet",

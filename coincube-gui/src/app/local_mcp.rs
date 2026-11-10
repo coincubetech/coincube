@@ -5,12 +5,16 @@ use crate::daemon::Daemon;
 use coincube_mcp as wire;
 #[cfg(feature = "mcp-proposals")]
 use coincube_ui::component::text::{h3, text};
+#[cfg(feature = "mcp-proposals")]
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::widget::Element;
 #[cfg(feature = "mcp-proposals")]
 use iced::widget::{button, checkbox, column, text_input};
 use std::sync::Arc;
 #[cfg(any(unix, windows))]
 use std::time::Duration;
+#[cfg(all(test, any(unix, windows)))]
+mod health_tests;
 mod pairings;
 mod presentation;
 #[cfg(feature = "mcp-transactions")]
@@ -160,8 +164,9 @@ impl Settings {
         coincube_ui::widget::action::Action::new(
             "tenshu.ai-access.enable",
             iced::widget::text(format!(
-                "{} Enable AI access for this Cube",
-                if self.enabled { "☑" } else { "☐" }
+                "{} {}",
+                if self.enabled { "☑" } else { "☐" },
+                localized_copy("Enable AI access for this Cube")
             )),
             view::Message::FocusAction,
         )
@@ -940,53 +945,57 @@ impl Settings {
 impl Settings {
     fn proposal_view(&self) -> Element<'_, view::Message> {
         let msg = |m| view::Message::LocalMcp(m);
-        let mut content = column![h3("AI wallet preparation — Regtest experiment"),
-            text("Choose topology-only access, or allow the assistant to assemble public account keys for a 3-of-5 wallet with explicitly chosen recovery. Your AI provider may receive the public keys you give it. Neither permission allows secrets, signing, sending coins or creation approval."),
-            text("Tenshu validates the descriptor and fills its builder. You verify keys on the source devices, handle hardware, seed backups and PIN/passkey steps, and authorize creation here. Pairing survives lock and restart; each draft ends on lock/close or creation admission. Wallet reads require their own permission."),
+        let mut content = column![h3(localized_copy("AI wallet preparation — Regtest experiment")),
+            text(localized_copy("Choose topology-only access, or allow the assistant to assemble public account keys for a 3-of-5 wallet with explicitly chosen recovery. Your AI provider may receive the public keys you give it. Neither permission allows secrets, signing, sending coins or creation approval.")),
+            text(localized_copy("Tenshu validates the descriptor and fills its builder. You verify keys on the source devices, handle hardware, seed backups and PIN/passkey steps, and authorize creation here. Pairing survives lock and restart; each draft ends on lock/close or creation admission. Wallet reads require their own permission.")),
             self.enable_action()].spacing(16);
         if self.enabled {
             content = content
                 .push(
-                    text_input("Client label (for your reference)", &self.client_name)
+                    text_input(localized_copy("Client label (for your reference)"), &self.client_name)
                         .on_input(move |v| msg(Message::ClientName(v))),
                 )
                 .push(
                     checkbox(self.proposals_allowed)
-                        .label("Allow this client to prepare a Regtest wallet proposal")
+                        .label(localized_copy("Allow this client to prepare a Regtest wallet proposal"))
                         .on_toggle(move |v| msg(Message::Proposals(v))),
                 )
                 .push(
                     checkbox(self.creation_allowed)
-                        .label("Allow this client to prepare a Regtest wallet using public account keys")
+                        .label(localized_copy("Allow this client to prepare a Regtest wallet using public account keys"))
                         .on_toggle(move |v| msg(Message::Creation(v))),
                 )
                 .push(
-                    button("Pair setup client until revoked").on_press_maybe(
+                    button(localized_copy("Pair setup client until revoked")).on_press_maybe(
                         ((self.proposals_allowed || self.creation_allowed) && !self.client_name.trim().is_empty())
                             .then(|| msg(Message::Pair)),
                     ),
                 );
             if let Some(server) = &self.server {
                 content = content
-                    .push(text(if server.grant.active() {
+                    .push(text(localized_copy(if server.grant.active() {
                         "Proposal client authorized"
                     } else {
                         "Inactive — approve again"
-                    }))
-                    .push(button("Revoke access now").on_press(msg(Message::Revoke)));
+                    })))
+                    .push(
+                        button(localized_copy("Revoke access now")).on_press(msg(Message::Revoke)),
+                    );
                 if server.grant.active() {
-                    content = content.push(button("Copy private client configuration").on_press(msg(Message::CopyConfig)))
-                        .push(text("Save the temporary grant only in your client's private local configuration. Never paste it into chat."));
+                    content = content.push(button(localized_copy("Copy private client configuration")).on_press(msg(Message::CopyConfig)))
+                        .push(text(localized_copy("Save the temporary grant only in your client's private local configuration. Never paste it into chat.")));
                     if let Some(proposal) = self
                         .proposals
                         .as_ref()
                         .and_then(|s| s.pending().ok())
                         .flatten()
                     {
-                        content = content.push(text(format!("3-of-5 primary; recovery {}-of-{} after {} blocks. Actual keys and descriptor are not selected yet.", proposal.topology.recovery.quorum.threshold, proposal.topology.recovery.quorum.key_count, proposal.topology.recovery.relative_delay_blocks)))
-                            .push(button("Review proposal and select keys in Tenshu").on_press(msg(Message::ReviewProposal)));
+                        content = content.push(text(coincube_ui::localized_format!("3-of-5 primary; recovery {}-of-{} after {} blocks. Actual keys and descriptor are not selected yet.", "Principal 3 de 5; recuperación {} de {} después de {} bloques. Aún no se seleccionaron las claves ni el descriptor reales.", proposal.topology.recovery.quorum.threshold, proposal.topology.recovery.quorum.key_count, proposal.topology.recovery.relative_delay_blocks)))
+                            .push(button(localized_copy("Review proposal and select keys in Tenshu")).on_press(msg(Message::ReviewProposal)));
                     } else {
-                        content = content.push(text("Waiting for a proposal from your client."));
+                        content = content.push(text(localized_copy(
+                            "Waiting for a proposal from your client.",
+                        )));
                     }
                 }
             } else if self
@@ -994,11 +1003,13 @@ impl Settings {
                 .as_ref()
                 .is_none_or(|s| s.clients().is_empty())
             {
-                content = content.push(text("No proposal client is authorized."));
+                content = content.push(text(localized_copy("No proposal client is authorized.")));
             }
         }
         if self.failed {
-            content = content.push(text("Could not start local MCP. No access was granted."));
+            content = content.push(text(localized_copy(
+                "Could not start local MCP. No access was granted.",
+            )));
         }
         content.push(self.paired_clients_view()).into()
     }
@@ -1065,6 +1076,43 @@ impl wire::Reader for VaultReader {
 }
 #[cfg(any(unix, windows))]
 impl VaultReader {
+    /// Coarse health only: never export backend messages, heights or scan times.
+    fn sync_state(&self, info: &crate::daemon::model::GetInfoResult) -> &'static str {
+        if info.refused_reorg_depth.is_some()
+            || info.chain_divergence
+            || !info.sync.is_finite()
+            || !(0.0..=1.0).contains(&info.sync)
+        {
+            return "sync_failing";
+        }
+        match super::wallet::sync_status(
+            self.daemon.backend(),
+            info.block_height,
+            info.sync,
+            info.last_poll_timestamp,
+            self.last_poll_at_startup,
+            &info.history_sync,
+        ) {
+            super::wallet::SyncStatus::SyncFailing { .. } => "sync_failing",
+            super::wallet::SyncStatus::Synced if info.rescan_progress.is_none() => "synced",
+            _ => "syncing",
+        }
+    }
+
+    async fn wallet_info(&self) -> Result<crate::daemon::model::GetInfoResult, wire::Error> {
+        let info = self
+            .daemon
+            .get_info()
+            .await
+            .map_err(|_| wire::Error::Unavailable)?;
+        if info.descriptors.main.as_vault() != Some(&self.descriptor)
+            || info.chain_id != Some(self.chain)
+        {
+            return Err(wire::Error::Unavailable);
+        }
+        Ok(info)
+    }
+
     /// Validate the opaque wallet scope and daemon identity before projecting public data.
     async fn read_wallet(&self, request: wire::Request) -> Result<wire::Response, wire::Error> {
         if matches!(
@@ -1085,15 +1133,7 @@ impl VaultReader {
             return Err(wire::Error::InvalidInput);
         }
         let descriptor = &self.descriptor;
-        let info = self
-            .daemon
-            .get_info()
-            .await
-            .map_err(|_| wire::Error::Unavailable)?;
-        if info.descriptors.main.as_vault() != Some(descriptor) || info.chain_id != Some(self.chain)
-        {
-            return Err(wire::Error::Unavailable);
-        }
+        let info = self.wallet_info().await?;
         match request {
             wire::Request::PrepareProposal(_)
             | wire::Request::PrepareCreation(_)
@@ -1114,18 +1154,16 @@ impl VaultReader {
                     .await
                     .map_err(|_| wire::Error::Unavailable)?
                     .coins;
-                let sync = super::wallet::sync_status(
-                    self.daemon.backend(),
-                    info.block_height,
-                    info.sync,
-                    info.last_poll_timestamp,
-                    self.last_poll_at_startup,
-                    &info.history_sync,
-                );
-                let sync_state = match sync {
-                    super::wallet::SyncStatus::Synced => "synced",
-                    super::wallet::SyncStatus::SyncFailing { .. } => "sync_failing",
-                    _ => "syncing",
+                // Either endpoint of the read may be unhealthy; a scan finishing
+                // during the read must not make older coins look complete.
+                let after = self.wallet_info().await?;
+                let states = [self.sync_state(&info), self.sync_state(&after)];
+                let sync_state = if states.contains(&"sync_failing") {
+                    "sync_failing"
+                } else if states.contains(&"syncing") {
+                    "syncing"
+                } else {
+                    "synced"
                 }
                 .to_owned();
                 let unspent = || coins.iter().filter(|c| c.spend_info.is_none());
@@ -1149,11 +1187,19 @@ impl VaultReader {
                 }))
             }
             wire::Request::History(input) => {
+                // History has no completeness field. Never return an empty or
+                // partial list as authoritative while synchronization is unsafe.
+                if self.sync_state(&info) != "synced" {
+                    return Err(wire::Error::Unavailable);
+                }
                 let mut transactions = self
                     .daemon
                     .list_history_txs(0, u32::MAX, u64::from(input.limit))
                     .await
                     .map_err(|_| wire::Error::Unavailable)?;
+                if self.sync_state(&self.wallet_info().await?) != "synced" {
+                    return Err(wire::Error::Unavailable);
+                }
                 // The confirmed-history query applies DISTINCT after ORDER BY,
                 // which does not preserve newest-first. Sort before projecting
                 // so exact time, height and chain ID never cross the MCP boundary.
@@ -1646,7 +1692,7 @@ mod tests {
     }
 
     /// Create a disposable real SQLite wallet and matching GUI wallet wrapper.
-    fn fixture() -> (
+    pub(super) fn fixture() -> (
         std::path::PathBuf,
         Arc<Wallet>,
         Arc<dyn Daemon + Send + Sync>,
@@ -1783,6 +1829,12 @@ mod tests {
                 assert!(!inspection.contains("Your AI provider may receive financial information"));
                 assert!(!inspection.contains("TENSHU_MCP_CREDENTIAL"));
             }
+            let spanish =
+                coincube_ui::locale::render_in(coincube_ui::locale::Language::Spanish, || {
+                    settings.view_for_cube(true, false)
+                });
+            capture::inspect(scenario, spanish, (1440, 900), "dark", theme::Theme::dark())
+                .assert_spanish(&format!("AI access ({scenario})"));
         };
         render("r23-empty", &empty);
         let empty_focus = capture::inspect(
@@ -2558,7 +2610,7 @@ mod tests {
             let mut stdin = child.stdin.take().unwrap();
             let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
             /// Send a request and require the next JSON-RPC response to match its ID.
-            async fn response(
+            async fn rpc_response(
                 stdin: &mut tokio::process::ChildStdin,
                 stdout: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
                 request: Value,
@@ -2570,6 +2622,15 @@ mod tests {
                     .await.unwrap().unwrap().unwrap();
                 let value: Value = serde_json::from_str(&line).unwrap();
                 assert_eq!(value["id"], request["id"]);
+                value
+            }
+            /// Require a successful protocol response while retaining tool-level errors.
+            async fn response(
+                stdin: &mut tokio::process::ChildStdin,
+                stdout: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+                request: Value,
+            ) -> Value {
+                let value = rpc_response(stdin, stdout, request).await;
                 assert!(value.get("error").is_none(), "protocol error");
                 value["result"].clone()
             }
@@ -2585,9 +2646,8 @@ mod tests {
             let tools = discovered["tools"].as_array().unwrap();
             let names: std::collections::BTreeSet<_> = tools.iter()
                 .map(|tool| tool["name"].as_str().unwrap()).collect();
-            // CI builds the companion with `--features adapter` only. Optional
-            // Regtest tools remain callable for a denied-access check below,
-            // but are not advertised by this default read-only build.
+            // This acceptance test uses an adapter-only companion. Optional
+            // tools are neither advertised nor dispatched by this build.
             assert_eq!(tools.len(), 5);
             assert_eq!(names, std::collections::BTreeSet::from([
                 "tenshu_get_capabilities", "tenshu_list_wallets",
@@ -2612,25 +2672,33 @@ mod tests {
             let denied = response(&mut stdin, &mut stdout, call(7, "tenshu_get_wallet_summary", json!({"wallet_id":"another-wallet"}))).await;
             assert_eq!(denied["isError"], true);
             assert_eq!(denied["structuredContent"]["error"]["code"], "access_denied");
-            let setup_denied = response(&mut stdin, &mut stdout, call(10, "tenshu_prepare_wallet_creation", json!({
-                "request_id":"read-grant-must-not-prepare",
-                "topology":{
+            let topology = json!({
                     "primary":{"threshold":3,"key_count":5},
                     "recovery":{"quorum":{"threshold":2,"key_count":3},"relative_delay_blocks":144}
-                },
-                "keys":{"primary":vec!["unverified";5],"recovery":vec!["unverified";3]}
-            }))).await;
-            assert_eq!(setup_denied["isError"], true);
-            assert_eq!(setup_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
-            let transaction_denied = response(&mut stdin, &mut stdout, call(11, "tenshu_prepare_transaction", json!({
-                "wallet_id": id, "request_id": "read-grant-must-not-prepare",
-                "recipients": [{"address": "bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202", "amount_sats": 10000}],
-                "fee_rate_sat_vb": 2, "max_fee_sats": 1000
-            }))).await;
-            assert_eq!(transaction_denied["isError"], true);
-            assert_eq!(transaction_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
-            let draft_denied = response(&mut stdin, &mut stdout, call(12, "tenshu_get_prepared_transaction", json!({"wallet_id": id, "draft_id": "foreign"}))).await;
-            assert_eq!(draft_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
+            });
+            for (index, (name, arguments)) in [
+                ("tenshu_prepare_wallet_proposal", json!({
+                    "request_id":"disabled-proposal", "topology":topology
+                })),
+                ("tenshu_prepare_wallet_creation", json!({
+                    "request_id":"disabled-creation", "topology":topology,
+                    "keys":{"primary":vec!["unverified";5],"recovery":vec!["unverified";3]}
+                })),
+                ("tenshu_get_wallet_proposal", json!({"proposal_id":"foreign"})),
+                ("tenshu_prepare_transaction", json!({
+                    "wallet_id":id, "request_id":"disabled-transaction",
+                    "recipients":[{"address":"bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202","amount_sats":10000}],
+                    "fee_rate_sat_vb":2, "max_fee_sats":1000
+                })),
+                ("tenshu_get_prepared_transaction", json!({"wallet_id":id,"draft_id":"foreign"})),
+            ].iter().enumerate() {
+                let unavailable = rpc_response(
+                    &mut stdin, &mut stdout, call(index + 10, name, arguments.clone())
+                ).await;
+                assert_eq!(unavailable["error"]["code"], -32602, "{}", name);
+                assert_eq!(unavailable["error"]["message"], "unknown_tool", "{}", name);
+                assert!(unavailable.get("result").is_none(), "{}", name);
+            }
             super::super::session::close();
             let locked = response(&mut stdin, &mut stdout, call(8, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
             assert_eq!(locked["structuredContent"]["error"]["code"], "access_denied");

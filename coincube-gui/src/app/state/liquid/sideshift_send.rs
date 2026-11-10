@@ -415,7 +415,11 @@ impl SideshiftSendFlow {
                     Err(e) => {
                         self.loading = false;
                         self.phase = SendPhase::Failed;
-                        self.error = Some(format!("Failed to fetch SideShift config: {}", e));
+                        self.error = Some(coincube_ui::localized_format!(
+                            "Failed to fetch SideShift config: {}",
+                            "No se pudo obtener la configuración de SideShift: {}",
+                            e
+                        ));
                         Task::none()
                     }
                 }
@@ -435,7 +439,11 @@ impl SideshiftSendFlow {
                     Err(e) => {
                         self.loading = false;
                         self.phase = SendPhase::Failed;
-                        self.error = Some(format!("Quote failed: {}", e));
+                        self.error = Some(coincube_ui::localized_format!(
+                            "Quote failed: {}",
+                            "Error en la cotización: {}",
+                            e
+                        ));
                         Task::none()
                     }
                 }
@@ -453,7 +461,11 @@ impl SideshiftSendFlow {
                     }
                     Err(e) => {
                         self.phase = SendPhase::Failed;
-                        self.error = Some(format!("Failed to create shift: {}", e));
+                        self.error = Some(coincube_ui::localized_format!(
+                            "Failed to create shift: {}",
+                            "No se pudo crear el intercambio: {}",
+                            e
+                        ));
                     }
                 }
                 Task::none()
@@ -548,7 +560,11 @@ impl SideshiftSendFlow {
 
             SideshiftSendMessage::PaymentFailed(e) => {
                 self.phase = SendPhase::Failed;
-                self.error = Some(format!("Payment failed: {}", e));
+                self.error = Some(coincube_ui::localized_format!(
+                    "Payment failed: {}",
+                    "El pago falló: {}",
+                    e
+                ));
                 Task::none()
             }
 

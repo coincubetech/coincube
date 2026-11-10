@@ -4,6 +4,7 @@
 //! automatic renewal failed. The Spark Connections tab links here with
 //! [`cube_connections_row`].
 
+use coincube_ui::locale::copy as localized_copy;
 use iced::Length;
 
 use coincube_ui::component::tenshu::Tone;
@@ -44,15 +45,15 @@ pub fn live_updates_status(status: ConnectionStatus) -> (page::Status, &'static 
         ConnectionStatus::Reconnecting | ConnectionStatus::Renewing => page::Status::Warn,
         ConnectionStatus::Offline | ConnectionStatus::RenewFailed => page::Status::Off,
     };
-    (kind, status.word())
+    (kind, localized_copy(status.word()))
 }
 
 pub fn connections_content<'a>(cache: &'a Cache, support_open: bool) -> Element<'a, Message> {
     let signed_in = cache.connect_authenticated;
-    let mut account = page::row("Account").control(if signed_in {
-        page::status(page::Status::Ok, "Signed in")
+    let mut account = page::row(localized_copy("Account")).control(if signed_in {
+        page::status(page::Status::Ok, localized_copy("Signed in"))
     } else {
-        page::status(page::Status::Unknown, "Signed out")
+        page::status(page::Status::Unknown, localized_copy("Signed out"))
     });
     if let Some(email) = cache.connect_email.as_deref().filter(|_| signed_in) {
         account = account.line(page::muted(email));
@@ -88,7 +89,7 @@ pub fn connections_content<'a>(cache: &'a Cache, support_open: bool) -> Element<
                     .push(page::muted(reason.detail())),
                 Some(page::primary(
                     SIGN_IN_ID,
-                    "Sign in",
+                    localized_copy("Sign in"),
                     Some(Message::OpenConnectSignIn),
                 )),
             ));
@@ -98,12 +99,12 @@ pub fn connections_content<'a>(cache: &'a Cache, support_open: bool) -> Element<
 
     let status = cache.connect_stream_status;
     let (kind, word) = live_updates_status(status);
-    let mut live = page::row("Live updates").control(page::status(kind, word));
+    let mut live = page::row(localized_copy("Live updates")).control(page::status(kind, word));
     if let Some(line) = status.line() {
         live = live.description(line);
     }
     content = content.push(page::group(
-        "This computer",
+        localized_copy("This computer"),
         None,
         page::rows([live.into()]),
     ));
@@ -112,7 +113,7 @@ pub fn connections_content<'a>(cache: &'a Cache, support_open: bool) -> Element<
     if status == ConnectionStatus::RenewFailed {
         let mut notice = Column::new()
             .spacing(4)
-            .push(page::heading(crate::app::RENEW_FAILED_TITLE).size(14))
+            .push(page::heading(localized_copy(crate::app::RENEW_FAILED_TITLE)).size(14))
             .push(page::muted(crate::app::renew_failed_detail()))
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
             .push(
@@ -121,7 +122,7 @@ pub fn connections_content<'a>(cache: &'a Cache, support_open: bool) -> Element<
                     .align_y(iced::Alignment::Center)
                     .push(page::primary(
                         TRY_AGAIN_ID,
-                        "Try again",
+                        localized_copy("Try again"),
                         Some(Message::Settings(SettingsMessage::ReregisterConnectDevice)),
                     ))
                     .push(page::link(
@@ -140,11 +141,11 @@ pub fn connections_content<'a>(cache: &'a Cache, support_open: bool) -> Element<
                     Row::new()
                         .spacing(10)
                         .align_y(iced::Alignment::Center)
-                        .push(page::muted("Device ID"))
+                        .push(page::muted(localized_copy("Device ID")))
                         .push(page::muted(id).font(coincube_ui::font::MONO_REGULAR))
                         .push(page::button(
                             COPY_DEVICE_ID,
-                            "Copy",
+                            localized_copy("Copy"),
                             Some(Message::Clipboard(id.to_owned())),
                         )),
                 );
@@ -163,12 +164,12 @@ pub fn cube_connections_row<'a>(cache: &Cache, id: &'static str) -> Element<'a, 
     } else {
         live_updates_status(cache.connect_stream_status)
     };
-    page::row("Connect live updates")
+    page::row(localized_copy("Connect live updates"))
         .accessory(page::status(kind, word))
-        .description("Shared by every wallet in this Cube.")
+        .description(localized_copy("Shared by every wallet in this Cube."))
         .control(page::button(
             id,
-            "Cube connections",
+            localized_copy("Cube connections"),
             Some(Message::Menu(CUBE_CONNECTIONS_ROUTE)),
         ))
         .into()

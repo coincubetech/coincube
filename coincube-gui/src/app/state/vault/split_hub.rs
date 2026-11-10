@@ -6,9 +6,10 @@
 use std::sync::Arc;
 
 use coincube_core::miniscript::bitcoin::Amount;
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     component::{amount::format_u64_as_string, button, text::*},
-    theme,
+    localized_format, theme,
     widget::{Column, Container, Element, Row},
 };
 use iced::{Alignment, Length, Task};
@@ -80,33 +81,40 @@ pub struct HubFacts {
     pub copy_exists: bool,
 }
 
+/// The checklist, worded in the window's language: it is built while the
+/// panel renders.
 pub fn items(facts: HubFacts) -> Vec<HubItem> {
     let here = facts.here;
     let coins = HubItem {
-        title: "Coins on both chains".into(),
-        detail: if facts.both_chains > 0 {
-            format!(
-                "{} · {}. Split them from either chain; one side is enough.",
-                if facts.both_chains == 1 {
-                    "1 coin".to_string()
-                } else {
-                    format!("{} coins", facts.both_chains)
-                },
+        title: localized_copy("Coins on both chains").into(),
+        detail: if facts.both_chains == 1 {
+            localized_format!(
+                "1 coin · {}. Split them from either chain; one side is enough.",
+                "1 moneda · {}. Sepárala desde cualquiera de las dos cadenas; basta con un lado.",
+                sats(facts.both_total)
+            )
+        } else if facts.both_chains > 1 {
+            localized_format!(
+                "{} coins · {}. Split them from either chain; one side is enough.",
+                "{} monedas · {}. Sepáralas desde cualquiera de las dos cadenas; basta con un lado.",
+                facts.both_chains,
                 sats(facts.both_total)
             )
         } else if facts.splitting > 0 {
-            "Splitting. The coin rows show the confirmations.".into()
-        } else if facts.unverified > 0 {
-            format!(
-                "{} not verified yet. Coin control shows each coin's status.",
-                if facts.unverified == 1 {
-                    "1 coin".to_string()
-                } else {
-                    format!("{} coins", facts.unverified)
-                }
+            localized_copy("Splitting. The coin rows show the confirmations.").into()
+        } else if facts.unverified == 1 {
+            localized_format!(
+                "1 coin not verified yet. Coin control shows each coin's status.",
+                "1 moneda aún sin verificar. El Control de monedas muestra el estado de cada moneda."
+            )
+        } else if facts.unverified > 1 {
+            localized_format!(
+                "{} coins not verified yet. Coin control shows each coin's status.",
+                "{} monedas aún sin verificar. El Control de monedas muestra el estado de cada moneda.",
+                facts.unverified
             )
         } else {
-            "None. Every coin is split.".into()
+            localized_copy("None. Every coin is split.").into()
         },
         state: if facts.both_chains > 0 || facts.splitting > 0 || facts.unverified > 0 {
             ItemState::ToDo
@@ -117,18 +125,22 @@ pub fn items(facts: HubFacts) -> Vec<HubItem> {
     };
     let signature = here.is_blake2b() && facts.signature_available;
     let key = HubItem {
-        title: format!("Split key on {}", chain_name(here)),
+        title: localized_format!("Split key on {}", "Clave dividida en {}", chain_name(here)),
         detail: match facts.key {
-            Some(amount) => format!(
+            Some(amount) => localized_format!(
                 "{} · found only on {}. It comes back with every split, so one is enough.",
+                "{} · solo está en {}. Vuelve con cada separación, así que basta con una.",
                 sats(amount),
                 chain_name(here)
             ),
-            None if signature => {
-                "Not needed: this Vault can split with a replay-protected signature.".into()
-            }
-            None => format!(
+            None if signature => localized_copy(
+                "Not needed: this Vault can split with a replay-protected signature.",
+            )
+            .into(),
+            None => localized_format!(
                 "Needed to split from {}. The Split coins window shows where to send one.",
+                "Hace falta para separar desde {}. La ventana Separar monedas muestra adónde \
+                 enviar una.",
                 chain_name(here)
             ),
         },
@@ -144,11 +156,11 @@ pub fn items(facts: HubFacts) -> Vec<HubItem> {
         vec![
             coins,
             HubItem {
-                title: "Replay-protected signature".into(),
+                title: localized_copy("Replay-protected signature").into(),
                 detail: if facts.signature_available {
-                    "Available: this Vault can sign it. No split key needed.".into()
+                    localized_copy("Available: this Vault can sign it. No split key needed.").into()
                 } else {
-                    "Not available: this Vault has a hardware signer that can't make this signature. Use a split key.".into()
+                    localized_copy("Not available: this Vault has a hardware signer that can't make this signature. Use a split key.").into()
                 },
                 state: if facts.signature_available {
                     ItemState::Done
@@ -159,8 +171,11 @@ pub fn items(facts: HubFacts) -> Vec<HubItem> {
             },
             key,
             HubItem {
-                title: "Or split from Bitcoin".into(),
-                detail: "A split in the Bitcoin Cube separates these coins here too.".into(),
+                title: localized_copy("Or split from Bitcoin").into(),
+                detail: localized_copy(
+                    "A split in the Bitcoin Cube separates these coins here too.",
+                )
+                .into(),
                 state: ItemState::Optional,
                 action: None,
             },
@@ -170,11 +185,11 @@ pub fn items(facts: HubFacts) -> Vec<HubItem> {
             coins,
             key,
             HubItem {
-                title: "Bitcoin Blake2b copy".into(),
+                title: localized_copy("Bitcoin Blake2b copy").into(),
                 detail: if facts.copy_exists {
-                    "Created. Open it from the Cube switcher.".into()
+                    localized_copy("Created. Open it from the Cube switcher.").into()
                 } else {
-                    "Optional. Needed to spend your Bitcoin Blake2b coins, or to split them from that side.".into()
+                    localized_copy("Optional. Needed to spend your Bitcoin Blake2b coins, or to split them from that side.").into()
                 },
                 state: if facts.copy_exists {
                     ItemState::Done
@@ -188,8 +203,9 @@ pub fn items(facts: HubFacts) -> Vec<HubItem> {
 }
 
 pub fn hub_view<'a>(here: ChainId, items: Vec<HubItem>) -> Element<'a, ViewMessage> {
-    let intro = format!(
+    let intro = localized_format!(
         "Coins you held before the fork exist on both Bitcoin and Bitcoin Blake2b. Until one of them is spent in a way the other chain rejects, a transaction on one chain can be copied to the other and move both. Splitting from either chain is enough; you can also do both. This Cube is on {}.",
+        "Las monedas que tenías antes de la bifurcación existen tanto en Bitcoin como en Bitcoin Blake2b. Hasta que una de ellas se gaste de una forma que la otra cadena rechace, una transacción en una cadena puede copiarse a la otra y mover ambas. Basta con separar desde cualquiera de las dos cadenas; también puedes hacerlo en ambas. Este Cube está en {}.",
         chain_name(here)
     );
     let list = items
@@ -201,7 +217,7 @@ pub fn hub_view<'a>(here: ChainId, items: Vec<HubItem>) -> Element<'a, ViewMessa
                 ItemState::Optional => p1_bold("○").style(theme::text::secondary),
             };
             let action = item.action.map(|(label, action)| {
-                button::secondary(None, label).on_press(match action {
+                button::secondary(None, localized_copy(label)).on_press(match action {
                     HubAction::Split => ViewMessage::SplitFirst,
                     HubAction::CreateCopy => ViewMessage::CreateBlake2bCopy,
                 })
@@ -228,7 +244,7 @@ pub fn hub_view<'a>(here: ChainId, items: Vec<HubItem>) -> Element<'a, ViewMessa
         });
     Column::new()
         .spacing(20)
-        .push(h3("Split coins").bold())
+        .push(h3(localized_copy("Split coins")).bold())
         .push(p1_regular(intro).style(theme::text::secondary))
         .push(list)
         .into()

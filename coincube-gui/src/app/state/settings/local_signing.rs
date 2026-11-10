@@ -690,10 +690,20 @@ impl LocalSigningState {
         self.sync_in_flight = false;
         match res {
             Ok(report) if !report.removed_by_phone.is_empty() => {
-                self.unpaired_notice = Some(format!(
-                    "{} removed this pairing on the phone.",
-                    report.removed_by_phone.join(", ")
-                ));
+                let phones = report.removed_by_phone.join(", ");
+                self.unpaired_notice = Some(if report.removed_by_phone.len() == 1 {
+                    coincube_ui::localized_format!(
+                        "{} removed this pairing on the phone.",
+                        "{} eliminó esta vinculación en el teléfono.",
+                        phones
+                    )
+                } else {
+                    coincube_ui::localized_format!(
+                        "{} removed this pairing on the phone.",
+                        "{} eliminaron esta vinculación en sus teléfonos.",
+                        phones
+                    )
+                });
             }
             Ok(_) => {}
             Err(e) => tracing::debug!("paired-phone sync: {}", e),
@@ -827,10 +837,13 @@ impl State for LocalSigningState {
                     }
                     _ => None,
                 }) else {
-                    self.flow = PairingFlow::Error(PairingError::InternalError(format!(
-                        "Phone {} no longer discoverable on the LAN.",
-                        fp8
-                    )));
+                    self.flow = PairingFlow::Error(PairingError::InternalError(
+                        coincube_ui::localized_format!(
+                            "Phone {} no longer discoverable on the LAN.",
+                            "El teléfono {} ya no se puede encontrar en la red local.",
+                            fp8
+                        ),
+                    ));
                     return Task::none();
                 };
                 let identity =

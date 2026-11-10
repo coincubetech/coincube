@@ -168,7 +168,7 @@ impl State for VaultTransactionsPanel {
                 self.wallet.supports_inheritance(),
             );
             match &self.modal {
-                VaultTransactionsModal::CreateRbf(rbf) => rbf.view(content),
+                VaultTransactionsModal::CreateRbf(rbf) => rbf.view(content, self.wallet.chain),
                 _ => content,
             }
         } else {
@@ -776,10 +776,15 @@ impl CreateRbfModal {
         }
         Task::none()
     }
-    fn view<'a>(&'a self, content: Element<'a, view::Message>) -> Element<'a, view::Message> {
+    fn view<'a>(
+        &'a self,
+        content: Element<'a, view::Message>,
+        chain: crate::chain::ChainId,
+    ) -> Element<'a, view::Message> {
         let modal = Modal::new(
             content,
             view::vault::transactions::create_rbf_modal(
+                chain,
                 self.is_cancel,
                 &self.descendant_txids,
                 &self.feerate_val,

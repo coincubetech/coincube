@@ -7,6 +7,8 @@ use crate::app::view;
 #[cfg(feature = "mcp-transactions")]
 use coincube_mcp::transaction::Prepared;
 use coincube_ui::font;
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::theme::{self, tenshu::Tone};
 use coincube_ui::widget::{action::Action, Element};
 use iced::widget::{column, container, row, text, text_input, Column, Space};
@@ -74,7 +76,7 @@ fn action<'a>(
     use theme::tenshu::button::{action, ActionShape};
     Action::new(
         id,
-        text(label).size(13).font(font::MEDIUM),
+        text(localized_copy(label)).size(13).font(font::MEDIUM),
         view::Message::FocusAction,
     )
     .padding([8, 12])
@@ -89,9 +91,10 @@ fn selection<'a>(id: &'static str, label: &'static str, checked: bool, intent: M
     Action::new(
         id,
         text(format!(
-            "{} {label} · {}",
+            "{} {} · {}",
             if checked { "☑" } else { "☐" },
-            if checked { "Selected" } else { "Not selected" }
+            localized_copy(label),
+            localized_copy(if checked { "Selected" } else { "Not selected" })
         ))
         .size(13),
         view::Message::FocusAction,
@@ -108,35 +111,43 @@ pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
     let mut rows: Vec<Ui<'_>> = paired_client_rows(settings);
     let available = cfg!(any(unix, windows)) && supported;
     let pair = if settings.pairing_open {
-        page::button(PAIR_OPEN_ID, "Close", Some(message(Message::TogglePairing)))
+        page::button(
+            PAIR_OPEN_ID,
+            localized_copy("Close"),
+            Some(message(Message::TogglePairing)),
+        )
     } else {
         page::primary(
             PAIR_OPEN_ID,
-            "Pair a client",
+            localized_copy("Pair a client"),
             available.then(|| message(Message::TogglePairing)),
         )
     };
     // State first: an empty list says so, with the way to pair beside it.
     rows.push(
-        page::row(if rows.is_empty() {
+        page::row(localized_copy(if rows.is_empty() {
             "No clients paired"
         } else {
             "Pair another client"
-        })
-        .description(PAIR_HINT)
+        }))
+        .description(localized_copy(PAIR_HINT))
         .control(pair)
         .into(),
     );
     let mut clients = Column::new().width(Length::Fill);
     if let Some(error) = settings.pairing_error {
-        clients = clients.push(page::note(Tone::Bad, text(error).size(13), None));
+        clients = clients.push(page::note(
+            Tone::Bad,
+            text(localized_copy(error)).size(13),
+            None,
+        ));
         clients = clients.push(Space::new().height(Length::Fixed(12.0)));
     }
     clients = clients.push(page::rows(rows));
     if !available {
         clients = clients.push(page::note(
             Tone::Warn,
-            text("AI access currently supports a Bitcoin Vault served by the embedded daemon on macOS, Linux and Windows. This wallet is unavailable for MCP.").size(13),
+            text(localized_copy("AI access currently supports a Bitcoin Vault served by the embedded daemon on macOS, Linux and Windows. This wallet is unavailable for MCP.")).size(13),
             None,
         ));
     } else if settings.pairing_open {
@@ -154,8 +165,8 @@ pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
                 Column::new()
                     .spacing(6)
                     .width(Length::FillPortion(1))
-                    .push(text(title).size(13).font(font::SEMIBOLD)),
-                |column, item| column.push(muted(*item)),
+                    .push(text(localized_copy(title)).size(13).font(font::SEMIBOLD)),
+                |column, item| column.push(muted(localized_copy(item))),
             )
             .into()
     };
@@ -174,14 +185,18 @@ pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
             .padding([12, 0]),
         )
         .push(page::rule())
-        .push(page::note(Tone::Warn, muted(CAUTION), None));
+        .push(page::note(Tone::Warn, muted(localized_copy(CAUTION)), None));
 
     Column::new()
         .width(Length::Fill)
         .push(Space::new().height(Length::Fixed(page::GROUP_GAP)))
-        .push(page::muted(INTRO))
-        .push(page::group("Paired clients", None, clients))
-        .push(page::group("What a paired client can read", None, reads))
+        .push(page::muted(localized_copy(INTRO)))
+        .push(page::group(localized_copy("Paired clients"), None, clients))
+        .push(page::group(
+            localized_copy("What a paired client can read"),
+            None,
+            reads,
+        ))
         .into()
 }
 
@@ -230,19 +245,19 @@ fn paired_client_rows(settings: &Settings) -> Vec<Ui<'_>> {
             pairings::Scope::Proposal => "Regtest wallet proposal experiment",
             pairings::Scope::WalletCreation => "Regtest public-key wallet preparation",
         };
-        let mut detail = scope.to_owned();
+        let mut detail = localized_copy(scope).to_owned();
         if let pairings::Scope::Read { capabilities, .. } = &client.scope {
             let granted: Vec<&str> = capabilities
                 .iter()
                 .zip(["Balances", "Confirmed history", "Policy summary"])
                 .filter(|(enabled, _)| **enabled)
-                .map(|(_, label)| label)
+                .map(|(_, label)| localized_copy(label))
                 .collect();
             if !granted.is_empty() {
                 detail.push_str(&format!(" ({})", granted.join(", ")));
             }
         }
-        detail.push_str(&format!(" · {}", status));
+        detail.push_str(&format!(" · {}", localized_copy(status)));
         let open = settings.managing.as_deref() == Some(client.id.as_str())
             || settings.revoke_confirmation.as_deref() == Some(client.id.as_str());
         rows.push(
@@ -254,7 +269,7 @@ fn paired_client_rows(settings: &Settings) -> Vec<Ui<'_>> {
                             "tenshu.ai-access.client.{}.manage",
                             client.id
                         )),
-                        text(if open { "Close" } else { "Manage" })
+                        text(localized_copy(if open { "Close" } else { "Manage" }))
                             .size(13)
                             .font(font::MEDIUM),
                         view::Message::FocusAction,
@@ -294,9 +309,10 @@ fn client_controls<'a>(
     let mut body = Column::new()
         .spacing(9)
         .width(Length::Fill)
-        .push(muted("A private configuration can impersonate its client until revoked. Client names are labels for your reference."))
-        .push(muted(format!(
+        .push(muted(localized_copy("A private configuration can impersonate its client until revoked. Client names are labels for your reference.")))
+        .push(muted(localized_format!(
             "Successful operations this session: {}",
+            "Operaciones correctas en esta sesión: {}",
             runtime.map_or(0, |runtime| runtime
                 .server
                 .grant
@@ -354,16 +370,17 @@ fn client_controls<'a>(
                     .is_some()
             });
         body = body
-            .push(muted(format!(
+            .push(muted(localized_format!(
                 "3-of-5 primary, recovery {}-of-{} after {} blocks. {}",
+                "Principal 3 de 5, recuperación {} de {} después de {} bloques. {}",
                 proposal.topology.recovery.quorum.threshold,
                 proposal.topology.recovery.quorum.key_count,
                 proposal.topology.recovery.relative_delay_blocks,
-                if keys_ready {
+                localized_copy(if keys_ready {
                     "Public keys and descriptor validated. Verify device ownership and backups."
                 } else {
                     "Keys are not yet selected."
-                }
+                })
             )))
             .push(action(
                 iced::advanced::widget::Id::from(format!(
@@ -402,24 +419,24 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
         .spacing(0)
         .width(Length::Fill)
         .push(transaction_field(
-            "From",
-            if is_regtest {
+            localized_copy("From"),
+            localized_copy(if is_regtest {
                 "Active Vault · Bitcoin Regtest"
             } else {
                 "Unsupported network"
-            },
+            }),
             false,
         ));
     for (index, recipient) in draft.recipients.iter().enumerate() {
         let label = if draft.recipients.len() == 1 {
-            "Recipient".to_owned()
+            localized_copy("Recipient").to_owned()
         } else {
-            format!("Recipient {}", index + 1)
+            localized_format!("Recipient {}", "Destinatario {}", index + 1)
         };
         let amount_label = if draft.recipients.len() == 1 {
-            "Amount".to_owned()
+            localized_copy("Amount").to_owned()
         } else {
-            format!("Amount {}", index + 1)
+            localized_format!("Amount {}", "Importe {}", index + 1)
         };
         details = details
             .push(transaction_field(label, recipient.address.clone(), true))
@@ -431,47 +448,57 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
     }
     details = details
         .push(transaction_field(
-            "Payment total",
-            format!(
+            localized_copy("Payment total"),
+            localized_format!(
                 "{} · exact amount requested",
+                "{} · importe exacto solicitado",
                 transaction_sats(draft.amount_sats)
             ),
             true,
         ))
         .push(transaction_field(
-            "Miner fee",
-            format!(
+            localized_copy("Miner fee"),
+            localized_format!(
                 "{} · estimated {} sat/vB · added on top",
+                "{} · estimada en {} sat/vB · se suma al importe",
                 transaction_sats(draft.fee_sats),
                 draft.fee_rate_sat_vb
             ),
             true,
         ))
         .push(transaction_field(
-            "Total leaving Vault",
-            total.map_or_else(|| "Unavailable".to_owned(), transaction_sats),
+            localized_copy("Total leaving Vault"),
+            total.map_or_else(
+                || localized_copy("Unavailable").to_owned(),
+                transaction_sats,
+            ),
             true,
         ))
         .push(transaction_field(
-            "Change",
+            localized_copy("Change"),
             if draft.change_sats == 0 {
-                "No change output".to_owned()
+                localized_copy("No change output").to_owned()
             } else {
-                format!(
+                localized_format!(
                     "{} returned to this Vault",
+                    "{} vuelven a este Vault",
                     transaction_sats(draft.change_sats)
                 )
             },
             true,
         ))
         .push(transaction_field(
-            "Inputs",
-            format!("{} selected by Tenshu", draft.input_count),
+            localized_copy("Inputs"),
+            localized_format!(
+                "{} selected by Tenshu",
+                "{} seleccionadas por Tenshu",
+                draft.input_count
+            ),
             false,
         ))
         .push(transaction_field(
-            "Signatures",
-            "None at preparation · current signing status is not shown here",
+            localized_copy("Signatures"),
+            localized_copy("None at preparation · current signing status is not shown here"),
             false,
         ));
 
@@ -491,16 +518,20 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
         .width(Length::Fill)
         .push(
             row![
-                heading("Prepared transaction"),
-                page::scope_tag(if is_regtest { "REGTEST" } else { "UNSUPPORTED" })
+                heading(localized_copy("Prepared transaction")),
+                page::scope_tag(if is_regtest {
+                    "REGTEST"
+                } else {
+                    localized_copy("UNSUPPORTED")
+                })
             ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
         )
-        .push(muted("Prepared by this paired client with Tenshu's coin selection and fee engine. Preparing does not send bitcoin; check every recipient address and amount before signing. The assistant cannot spend."))
+        .push(muted(localized_copy("Prepared by this paired client with Tenshu's coin selection and fee engine. Preparing does not send bitcoin; check every recipient address and amount before signing. The assistant cannot spend.")))
         .push(page::status(
             if review { page::Status::Ok } else { page::Status::Warn },
-            if review { "Unsigned when prepared · current status is not tracked here" } else { "Draft unavailable for native review" },
+            localized_copy(if review { "Unsigned when prepared · current status is not tracked here" } else { "Draft unavailable for native review" }),
         ))
         .push(details)
         .push(action(
@@ -509,7 +540,7 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
             review_message,
             theme::tenshu::button::ActionKind::Primary,
         ))
-        .push(muted("This card does not update after native review. Fiat conversion, quote refresh, and signer availability are planned. This experimental tool accepts exact satoshi amounts only. The native Send flow owns signing and broadcast."));
+        .push(muted(localized_copy("This card does not update after native review. Fiat conversion, quote refresh, and signer availability are planned. This experimental tool accepts exact satoshi amounts only. The native Send flow owns signing and broadcast.")));
     card(content)
 }
 
@@ -936,9 +967,12 @@ mod mcp_transaction_presentation_tests {
 
 pub(super) fn revoke_confirmation<'a>(client_name: &str, id: &str) -> Ui<'a> {
     container(column![
-        heading("Revoke this client's access?"),
-        muted(format!("{client_name} will lose access immediately. This cannot be undone; pairing again creates a new private configuration.")),
-        muted("Information already read may remain with the AI provider. Revocation cannot erase data it has retained."),
+        heading(localized_copy("Revoke this client's access?")),
+        muted(localized_format!(
+            "{client_name} will lose access immediately. This cannot be undone; pairing again creates a new private configuration.",
+            "{client_name} perderá el acceso de inmediato. Esto no se puede deshacer; si lo vinculas de nuevo, se creará una nueva configuración privada."
+        )),
+        muted(localized_copy("Information already read may remain with the AI provider. Revocation cannot erase data it has retained.")),
         row![
             action(
                 "tenshu.ai-access.revoke.keep",
@@ -973,8 +1007,8 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
     let mut body = Column::new()
         .spacing(11)
         .width(Length::Fill)
-        .push(heading("Choose this client's access"))
-        .push(muted("Each client needs a name, this Vault, and an explicit permission. Nothing is selected automatically for the next client."))
+        .push(heading(localized_copy("Choose this client's access")))
+        .push(muted(localized_copy("Each client needs a name, this Vault, and an explicit permission. Nothing is selected automatically for the next client.")))
         .push(selection(
             "tenshu.ai-access.enable",
             "Enable AI access for this Cube",
@@ -985,19 +1019,24 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
     if settings.enabled {
         body = body
             .push(
-                text_input("Client name for your reference", &settings.client_name)
-                    .on_input(|value| message(Message::ClientName(value))),
+                text_input(
+                    localized_copy("Client name for your reference"),
+                    &settings.client_name,
+                )
+                .on_input(|value| message(Message::ClientName(value))),
             )
-            .push(muted("This label is not a verified application identity."))
+            .push(muted(localized_copy(
+                "This label is not a verified application identity.",
+            )))
             .push(selection(
                 "tenshu.ai-access.wallet",
                 "This Cube · active embedded Vault",
                 settings.wallet_allowed,
                 Message::Wallet(!settings.wallet_allowed),
             ))
-            .push(muted(
+            .push(muted(localized_copy(
                 "Read wallet information · choose exactly which data this client may see:",
-            ));
+            )));
 
         for (index, label) in ["Balances", "Confirmed history", "Spending-policy summary"]
             .iter()
@@ -1029,7 +1068,7 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
                     settings.transactions_allowed,
                     Message::Transactions(!settings.transactions_allowed),
                 ))
-                .push(muted("Exact satoshi recipients and fee limits only. Native review and signing remain in Tenshu. No self-send, recovery selection or fiat conversion; up to eight construction attempts per client and unlock."));
+                .push(muted(localized_copy("Exact satoshi recipients and fee limits only. Native review and signing remain in Tenshu. No self-send, recovery selection or fiat conversion; up to eight construction attempts per client and unlock.")));
         }
 
         let can_pair = settings.wallet_allowed
@@ -1043,7 +1082,7 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
                 can_pair.then(|| message(Message::Pair)),
                 theme::tenshu::button::ActionKind::Primary,
             ))
-            .push(muted("Copy the private configuration into the client's local settings, then clear the clipboard. Guided one-time-code pairing is planned."));
+            .push(muted(localized_copy("Copy the private configuration into the client's local settings, then clear the clipboard. Guided one-time-code pairing is planned.")));
 
         #[cfg(any(unix, windows))]
         if let Some(server) = &settings.server {
@@ -1051,15 +1090,16 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
             let calls = server.grant.successful_calls.load(Ordering::Relaxed);
             body = body.push(notice(
                 column![
-                    heading("Temporary session grant"),
-                    muted(format!(
+                    heading(localized_copy("Temporary session grant")),
+                    muted(localized_format!(
                         "{} · {} · successful reads this session: {}",
+                        "{} · {} · lecturas correctas en esta sesión: {}",
                         settings.approved_name,
-                        if available {
+                        localized_copy(if available {
                             "Authorized"
                         } else {
                             "Inactive — approve again"
-                        },
+                        }),
                         calls
                     )),
                     row![
@@ -1086,7 +1126,10 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
 
     if settings.failed {
         body = body.push(notice(
-            text("Could not start local MCP. No access was granted.").size(13),
+            text(localized_copy(
+                "Could not start local MCP. No access was granted.",
+            ))
+            .size(13),
             Tone::Bad,
         ));
     }

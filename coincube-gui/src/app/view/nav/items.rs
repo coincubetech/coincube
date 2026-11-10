@@ -79,7 +79,7 @@ pub fn render_item_row<'a>(menu: &Menu, item: &SubItem, rail_width: f32) -> Elem
 
     let body: Column<Message> = column![
         icon_el,
-        iced::widget::text(item.label)
+        iced::widget::text(coincube_ui::locale::copy(item.label))
             .size(LABEL_SIZE)
             .align_x(Alignment::Center),
     ]

@@ -5,6 +5,8 @@ use crate::{
     hw::HardwareWallets,
     installer::{message::Message, step::Step, view},
 };
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::{
     component::{button, text::*},
     theme,
@@ -22,11 +24,15 @@ pub struct ClaimOverview {
 impl ClaimOverview {
     /// The inherited unlock line: the copy has no PIN or passkey picker.
     pub fn unlock_line(&self) -> String {
-        format!(
-            "Same {} as {}",
-            if self.passkey { "passkey" } else { "PIN" },
-            self.source_name
-        )
+        if self.passkey {
+            localized_format!(
+                "Same passkey as {}",
+                "La misma llave de acceso que {}",
+                self.source_name
+            )
+        } else {
+            localized_format!("Same PIN as {}", "El mismo PIN que {}", self.source_name)
+        }
     }
 }
 
@@ -41,29 +47,31 @@ impl Step for ClaimOverview {
             "Bitcoin Blake2b copy",
             Column::new()
                 .spacing(20)
-                .push(p1_regular(format!(
+                .push(p1_regular(localized_format!(
                     "Creates a Cube on Bitcoin Blake2b with the same Vault as {}, so you can see and spend your Bitcoin Blake2b coins. Creating it doesn't move or split any coins.",
+                    "Crea un Cube en Bitcoin Blake2b con el mismo Vault que {}, para que puedas ver y gastar tus monedas de Bitcoin Blake2b. Crearlo no mueve ni divide ninguna moneda.",
                     self.source_name
                 )))
                 .push(h4_bold(self.unlock_line()))
                 .push(
-                    p1_regular(
+                    p1_regular(localized_copy(
                         "The copy unlocks the same way as the Cube it comes from. There is nothing new to remember.",
-                    )
+                    ))
                     .style(theme::text::secondary),
                 )
-                .push(p1_regular(format!(
+                .push(p1_regular(localized_format!(
                     "Same seed and keys as {}. Bitcoin Blake2b Cubes hold a Vault only, no Spark or Liquid.",
+                    "La misma frase y las mismas claves que {}. Los Cubes de Bitcoin Blake2b solo tienen un Vault, sin Spark ni Liquid.",
                     self.source_name
                 )))
                 .push(
-                    p1_regular(
+                    p1_regular(localized_copy(
                         "You only need the copy to spend your Bitcoin Blake2b coins, or to split coins from the Bitcoin Blake2b side. Splitting from Bitcoin needs no copy.",
-                    )
+                    ))
                     .style(theme::text::secondary),
                 )
                 .push(
-                    button::primary(None, "Create copy")
+                    button::primary(None, localized_copy("Create copy"))
                         .on_press(Message::Next)
                         .width(Length::Fixed(260.0)),
                 ),

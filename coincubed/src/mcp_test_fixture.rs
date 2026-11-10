@@ -131,8 +131,8 @@ fn wallet_on_chain(
         false,
     )
     .unwrap();
-    if chain == coincube_core::chain::ChainId::Regtest {
-        // The MCP transaction tests start from a polled wallet. The poller runs
+    {
+        // MCP history and transaction tests start from a polled wallet. The poller runs
         // on another thread, so waiting for its first scheduled tick in each
         // caller can time out on a busy CI runner before it publishes sync.
         let (done, received) = std::sync::mpsc::sync_channel(0);

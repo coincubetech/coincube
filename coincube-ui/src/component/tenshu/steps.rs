@@ -36,7 +36,7 @@ pub fn steps<'a, M: 'a>(labels: &[&'a str], current: usize) -> Element<'a, M> {
             let state = step_state(index, current);
             row.push(step(
                 index + 1,
-                label,
+                crate::locale::copy(label),
                 state == StepState::Current,
                 state == StepState::Done,
             ))

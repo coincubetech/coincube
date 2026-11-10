@@ -357,7 +357,11 @@ impl SideshiftReceiveFlow {
                     Err(e) => {
                         self.loading = false;
                         self.phase = ReceivePhase::Failed;
-                        self.error = Some(format!("Failed to fetch SideShift config: {}", e));
+                        self.error = Some(coincube_ui::localized_format!(
+                            "Failed to fetch SideShift config: {}",
+                            "No se pudo obtener la configuración de SideShift: {}",
+                            e
+                        ));
                         Some(Task::none())
                     }
                 }
@@ -377,7 +381,11 @@ impl SideshiftReceiveFlow {
                     Err(e) => {
                         self.loading = false;
                         self.phase = ReceivePhase::Failed;
-                        self.error = Some(format!("Quote failed: {}", e));
+                        self.error = Some(coincube_ui::localized_format!(
+                            "Quote failed: {}",
+                            "Error en la cotización: {}",
+                            e
+                        ));
                         Some(Task::none())
                     }
                 }
@@ -397,7 +405,11 @@ impl SideshiftReceiveFlow {
                     }
                     Err(e) => {
                         self.phase = ReceivePhase::Failed;
-                        self.error = Some(format!("Failed to create shift: {}", e));
+                        self.error = Some(coincube_ui::localized_format!(
+                            "Failed to create shift: {}",
+                            "No se pudo crear el intercambio: {}",
+                            e
+                        ));
                     }
                 }
                 Some(Task::none())

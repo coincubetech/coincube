@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::{
     color,
     component::{button, text},
@@ -38,7 +40,7 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
     let cs = &state.contacts_state;
 
     let header = Row::new()
-        .push(sheet_title("Contacts").width(Length::Fill))
+        .push(sheet_title(localized_copy("Contacts")).width(Length::Fill))
         .push(
             iced::widget::button(centred(
                 Row::new()
@@ -48,7 +50,7 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
                             .style(action_ink(ActionKind::Secondary)),
                     )
                     .push(
-                        iced::widget::text("Add contact")
+                        iced::widget::text(localized_copy("Add contact"))
                             .size(14)
                             .font(font::MEDIUM)
                             .style(action_ink(ActionKind::Secondary)),
@@ -68,7 +70,7 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
     let mut col = Column::new()
         .push(header)
         .push(lead(
-            "People you trust with recovery alerts or Vault invitations. Roles are verified by Connect.",
+            localized_copy("People you trust with recovery alerts or Vault invitations. Roles are verified by Connect."),
         ))
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
         .spacing(0)
@@ -94,9 +96,12 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
         if let Some(err) = cs.error.as_deref() {
             if cs.contacts.is_some() || cs.invites.is_some() || cs.received_invites.is_some() {
                 col = col.push(
-                    container(text::p2_regular(err).color(color::RED))
-                        .padding(8)
-                        .width(Length::Fill),
+                    container(
+                        text::p2_regular(coincube_ui::locale::notice(err.to_owned()))
+                            .color(color::RED),
+                    )
+                    .padding(8)
+                    .width(Length::Fill),
                 );
                 col = col.push(iced::widget::Space::new().height(Length::Fixed(10.0)));
             }
@@ -111,7 +116,7 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
     let received: &[ReceivedInvite] = cs.received_invites.as_deref().unwrap_or_default();
 
     if !received.is_empty() {
-        col = col.push(group_title("Received invites"));
+        col = col.push(group_title(localized_copy("Received invites")));
         col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
 
         for invite in received {
@@ -132,7 +137,7 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
         .collect();
 
     if !pending.is_empty() {
-        col = col.push(group_title("Pending invites"));
+        col = col.push(group_title(localized_copy("Pending invites")));
         col = col.push(iced::widget::Space::new().height(Length::Fixed(8.0)));
 
         for invite in &pending {
@@ -154,9 +159,9 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
             .push(
                 container(
                     Column::new()
-                        .push(group_title("No contacts yet"))
+                        .push(group_title(localized_copy("No contacts yet")))
                         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
-                        .push(lead("Add someone you trust. They can receive recovery alerts or Vault invitations once Connect verifies their role.")),
+                        .push(lead(localized_copy("Add someone you trust. They can receive recovery alerts or Vault invitations once Connect verifies their role."))),
                 )
                 .padding([28, 0])
                 .width(Length::Fill),
@@ -204,17 +209,13 @@ fn invite_card<'a>(invite: &'a Invite) -> Element<'a, ConnectAccountMessage> {
 
     let invite_id = invite.id;
     let actions = Row::new()
-        .push(
-            button::secondary(None, "Resend").on_press(ConnectAccountMessage::Contacts(
-                ContactsMessage::ResendInvite(invite_id),
-            )),
-        )
+        .push(button::secondary(None, localized_copy("Resend")).on_press(
+            ConnectAccountMessage::Contacts(ContactsMessage::ResendInvite(invite_id)),
+        ))
         .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            button::secondary(None, "Revoke").on_press(ConnectAccountMessage::Contacts(
-                ContactsMessage::RevokeInvite(invite_id),
-            )),
-        )
+        .push(button::secondary(None, localized_copy("Revoke")).on_press(
+            ConnectAccountMessage::Contacts(ContactsMessage::RevokeInvite(invite_id)),
+        ))
         .align_y(Alignment::Center);
 
     container(
@@ -263,7 +264,7 @@ fn received_invite_card<'a>(
             .on_press_maybe(None)
             .into()
     } else {
-        button::primary(None, "Accept")
+        button::primary(None, localized_copy("Accept"))
             .on_press(ConnectAccountMessage::Contacts(
                 ContactsMessage::AcceptReceivedInvite(invite_id),
             ))
@@ -295,7 +296,9 @@ fn expiry_element<'a>(expires_at: &str) -> Element<'a, ConnectAccountMessage> {
         Some(0) => text::p2_regular("Expires today")
             .color(color::ORANGE)
             .into(),
-        Some(d) if d < 0 => text::p2_regular("Expired").color(color::RED).into(),
+        Some(d) if d < 0 => text::p2_regular(localized_copy("Expired"))
+            .color(color::RED)
+            .into(),
         _ => text::p2_regular("").into(),
     }
 }
@@ -317,7 +320,7 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
         Row::new()
             .push(previous_icon().style(theme::text::primary))
             .push(iced::widget::Space::new().width(Length::Fixed(5.0)))
-            .push(text::p1_medium("Back").style(theme::text::secondary))
+            .push(text::p1_medium(localized_copy("Back")).style(theme::text::secondary))
             .spacing(5)
             .align_y(Alignment::Center),
     )
@@ -345,7 +348,7 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
         .style(theme::button::primary)
         .into()
     } else {
-        button::primary(None, "Send Invite")
+        button::primary(None, localized_copy("Send Invite"))
             .on_press_maybe((email_valid && !email_trimmed.is_empty()).then_some(
                 ConnectAccountMessage::Contacts(ContactsMessage::SubmitInvite),
             ))
@@ -356,9 +359,9 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
     let mut form = Column::new()
         .push(back_button)
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-        .push(text::h4_bold("Invite Contact").style(theme::text::primary))
+        .push(text::h4_bold(localized_copy("Invite Contact")).style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-        .push(text::p2_regular("Email Address").color(color::GREY_3))
+        .push(text::p2_regular(localized_copy("Email Address")).color(color::GREY_3))
         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
         .push(
             TextInput::new("email@example.com", email)
@@ -382,7 +385,10 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
         if !cubes.is_empty() {
             form = form
                 .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-                .push(text::p2_regular("Also add to Cube(s) (optional)").color(color::GREY_3))
+                .push(
+                    text::p2_regular(localized_copy("Also add to Cube(s) (optional)"))
+                        .color(color::GREY_3),
+                )
                 .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
                 .push(invite_cubes_section(cubes, &cs.invite_cube_selections));
         }
@@ -398,7 +404,7 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
     if let Some(err) = cs.error.as_deref() {
         form = form
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-            .push(text::p2_regular(err).color(color::RED));
+            .push(text::p2_regular(coincube_ui::locale::notice(err.to_owned())).color(color::RED));
     }
 
     if let Some(msg) = cs.invite_cube_error.as_deref() {
@@ -442,15 +448,22 @@ fn invite_cube_conflict_card<'a>(msg: &str) -> Element<'a, ConnectAccountMessage
     container(
         Column::new()
             .push(
-                text::p1_bold("One or more selected cubes is no longer available")
-                    .color(color::RED),
+                text::p1_bold(localized_copy(
+                    "One or more selected cubes is no longer available",
+                ))
+                .color(color::RED),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
-            .push(text::p2_regular(msg.to_string()).style(theme::text::primary))
+            .push(
+                text::p2_regular(coincube_ui::locale::notice(msg.to_string()))
+                    .style(theme::text::primary),
+            )
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
             .push(
-                text::p2_regular("Review your cube selection above and try again.")
-                    .color(color::GREY_3),
+                text::p2_regular(localized_copy(
+                    "Review your cube selection above and try again.",
+                ))
+                .color(color::GREY_3),
             )
             .padding(16)
             .spacing(0),
@@ -482,7 +495,7 @@ fn contact_detail_ux<'a>(
         Row::new()
             .push(previous_icon().style(theme::text::primary))
             .push(iced::widget::Space::new().width(Length::Fixed(5.0)))
-            .push(text::p1_medium("Back").style(theme::text::secondary))
+            .push(text::p1_medium(localized_copy("Back")).style(theme::text::secondary))
             .spacing(5)
             .align_y(Alignment::Center),
     )
@@ -502,7 +515,7 @@ fn contact_detail_ux<'a>(
         return Column::new()
             .push(back_button)
             .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
-            .push(text::p1_regular("Contact not found").color(color::GREY_3))
+            .push(text::p1_regular(localized_copy("Contact not found")).color(color::GREY_3))
             .width(Length::Fill)
             .into();
     };
@@ -561,7 +574,14 @@ fn contact_detail_ux<'a>(
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
             .push(role_badge)
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
-            .push(text::p2_regular(format!("Connected {}", connected_date)).color(color::GREY_3))
+            .push(
+                text::p2_regular(localized_format!(
+                    "Connected {}",
+                    "Conexión desde {}",
+                    connected_date
+                ))
+                .color(color::GREY_3),
+            )
             .align_x(Alignment::Center)
             .width(Length::Fill)
             .padding(20)
@@ -574,24 +594,23 @@ fn contact_detail_ux<'a>(
     let cubes_section: Element<ConnectAccountMessage> = match &cs.detail_cubes {
         None if cs.detail_cubes_error.is_some() => Column::new()
             .push(
-                text::p2_regular(
+                text::p2_regular(coincube_ui::locale::notice(
                     cs.detail_cubes_error
                         .as_deref()
-                        .unwrap_or("Failed to load cubes"),
-                )
+                        .unwrap_or("Failed to load cubes")
+                        .to_owned(),
+                ))
                 .color(color::RED),
             )
             .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-            .push(
-                button::secondary(None, "Retry").on_press(ConnectAccountMessage::Contacts(
-                    ContactsMessage::ShowDetail(contact_id),
-                )),
-            )
+            .push(button::secondary(None, localized_copy("Retry")).on_press(
+                ConnectAccountMessage::Contacts(ContactsMessage::ShowDetail(contact_id)),
+            ))
             .into(),
         None => text::p2_regular("Loading cubes\u{2026}")
             .color(color::GREY_3)
             .into(),
-        Some(cubes) if cubes.is_empty() => text::p2_regular("No cubes found")
+        Some(cubes) if cubes.is_empty() => text::p2_regular(localized_copy("No cubes found"))
             .color(color::GREY_3)
             .into(),
         Some(cubes) => {
@@ -626,21 +645,23 @@ fn contact_detail_ux<'a>(
                     .push(iced::widget::Space::new().width(Length::Fill));
                 if cube.has_recovery_kit {
                     row = row.push(
-                        container(text::caption("Recovery Kit").color(color::ORANGE))
-                            .padding(iced::Padding {
-                                top: 2.0,
-                                bottom: 2.0,
-                                left: 6.0,
-                                right: 6.0,
-                            })
-                            .style(|_t| container::Style {
-                                border: iced::Border {
-                                    color: color::ORANGE,
-                                    width: 0.5,
-                                    radius: 6.0.into(),
-                                },
-                                ..Default::default()
-                            }),
+                        container(
+                            text::caption(localized_copy("Recovery Kit")).color(color::ORANGE),
+                        )
+                        .padding(iced::Padding {
+                            top: 2.0,
+                            bottom: 2.0,
+                            left: 6.0,
+                            right: 6.0,
+                        })
+                        .style(|_t| container::Style {
+                            border: iced::Border {
+                                color: color::ORANGE,
+                                width: 0.5,
+                                radius: 6.0.into(),
+                            },
+                            ..Default::default()
+                        }),
                     );
                 }
                 cube_col = cube_col.push(row);
@@ -656,7 +677,7 @@ fn contact_detail_ux<'a>(
     // was removed as it's no longer a valid option.
     let can_add = contact.contact_user.is_some();
     let add_actions: Option<Element<ConnectAccountMessage>> = can_add.then(|| {
-        button::primary(None, "Add to Cube(s)…")
+        button::primary(None, localized_copy("Add to Cube(s)…"))
             .on_press(ConnectAccountMessage::Contacts(
                 ContactsMessage::OpenAddToCubeDialog(contact_id),
             ))
@@ -674,7 +695,7 @@ fn contact_detail_ux<'a>(
         .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
         .push(contact_header)
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-        .push(text::p1_bold("Associated Cubes").style(theme::text::primary))
+        .push(text::p1_bold(localized_copy("Associated Cubes")).style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(
             container(Column::new().push(cubes_section).padding(16).spacing(2))
@@ -707,7 +728,7 @@ fn add_to_cube_dialog_card<'a>(
     dialog: &'a crate::app::state::connect::AddToCubeDialog,
 ) -> Element<'a, ConnectAccountMessage> {
     let header = Row::new()
-        .push(text::p1_bold("Add to Cube(s)").style(theme::text::primary))
+        .push(text::p1_bold(localized_copy("Add to Cube(s)")).style(theme::text::primary))
         .push(iced::widget::Space::new().width(Length::Fill))
         .push(
             iced::widget::button(cross_icon().color(color::GREY_3))
@@ -723,10 +744,10 @@ fn add_to_cube_dialog_card<'a>(
         None => text::p2_regular("Loading eligible cubes\u{2026}")
             .color(color::GREY_3)
             .into(),
-        Some([]) => text::p2_regular(
+        Some([]) => text::p2_regular(localized_copy(
             "No eligible cubes — the contact is already in all of your \
              active-network cubes, or you have none.",
-        )
+        ))
         .color(color::GREY_3)
         .into(),
         Some(cubes) => {
@@ -748,7 +769,10 @@ fn add_to_cube_dialog_card<'a>(
                 if let Some(err) = dialog.failures.get(&id) {
                     row = row
                         .push(iced::widget::Space::new().width(Length::Fill))
-                        .push(text::p2_regular(err.clone()).color(color::RED));
+                        .push(
+                            text::p2_regular(coincube_ui::locale::notice(err.clone()))
+                                .color(color::RED),
+                        );
                 }
                 col = col.push(row);
             }
@@ -771,11 +795,9 @@ fn add_to_cube_dialog_card<'a>(
         .spacing(8)
         .align_y(Alignment::Center)
         .push(iced::widget::Space::new().width(Length::Fill))
-        .push(
-            button::secondary(None, "Cancel").on_press(ConnectAccountMessage::Contacts(
-                ContactsMessage::CloseAddToCubeDialog,
-            )),
-        )
+        .push(button::secondary(None, localized_copy("Cancel")).on_press(
+            ConnectAccountMessage::Contacts(ContactsMessage::CloseAddToCubeDialog),
+        ))
         .push(confirm_btn);
 
     container(
@@ -783,8 +805,9 @@ fn add_to_cube_dialog_card<'a>(
             .spacing(12)
             .push(header)
             .push(
-                text::p2_regular(format!(
+                text::p2_regular(localized_format!(
                     "Add {} to the selected cubes.",
+                    "Añadir {} a los Cubes seleccionados.",
                     dialog.contact_email
                 ))
                 .color(color::GREY_3),

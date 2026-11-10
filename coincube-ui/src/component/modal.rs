@@ -1,3 +1,4 @@
+use crate::locale::copy as localized_copy;
 use iced::{
     alignment::{Horizontal, Vertical},
     widget::{
@@ -86,7 +87,7 @@ where
         Row::new()
             .push(icon::previous_icon().style(theme::text::secondary))
             .push(Space::new().width(Length::Fixed(4.0)))
-            .push(text::p1_medium("Back").style(theme::text::secondary))
+            .push(text::p1_medium(localized_copy("Back")).style(theme::text::secondary))
             .spacing(4)
             .align_y(Vertical::Center),
     )

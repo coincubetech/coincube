@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use std::{
     collections::HashMap,
     str::FromStr,
@@ -787,7 +789,7 @@ impl SelectKeySource {
         if let Ok(DescriptorPublicKey::XPub(key)) = DescriptorPublicKey::from_str(&xpub) {
             if !key.derivation_path.is_master() {
                 self.form_xpub.valid = false;
-                self.form_xpub.warning = Some("Wrong derivation path");
+                self.form_xpub.warning = Some(localized_copy("Wrong derivation path"));
             } else if let Some((fingerprint, _)) = key.origin {
                 self.form_xpub.valid = if self.network == Network::Bitcoin {
                     key.xkey.network == Network::Bitcoin.into()
@@ -795,11 +797,11 @@ impl SelectKeySource {
                     key.xkey.network == Network::Testnet.into()
                 };
                 if !self.form_xpub.valid {
-                    self.form_xpub.warning = Some("Wrong network");
+                    self.form_xpub.warning = Some(localized_copy("Wrong network"));
                     self.form_xpub.valid = false;
                 }
                 if self.keys.contains_key(&fingerprint) {
-                    self.form_xpub.warning = Some("Key already used");
+                    self.form_xpub.warning = Some(localized_copy("Key already used"));
                     self.form_xpub.valid = false;
                 }
 
@@ -808,12 +810,12 @@ impl SelectKeySource {
                 }
             } else {
                 self.form_xpub.valid = false;
-                self.form_xpub.warning = Some("Origin missing");
+                self.form_xpub.warning = Some(localized_copy("Origin missing"));
             }
         } else {
             self.form_xpub.valid = xpub.is_empty();
             if !self.form_xpub.valid {
-                self.form_xpub.warning = Some("Invalid Xpub");
+                self.form_xpub.warning = Some(localized_copy("Invalid Xpub"));
             }
         }
         Task::none()
@@ -873,7 +875,8 @@ impl SelectKeySource {
             SelectedKey::New(k) => Some(k.fingerprint),
         } {
             if alias_already_exists(&alias, fg, &self.keys) {
-                self.form_alias.warning = Some("This alias is already used for another key");
+                self.form_alias.warning =
+                    Some(localized_copy("This alias is already used for another key"));
                 self.form_alias.valid = false;
             }
         }
@@ -1115,9 +1118,11 @@ impl SelectKeySource {
         // failure this owner has already reported — the keyholder has one
         // re-enrol prompt pending, and a second adds nothing.
         if resolved.raw.is_envelope_invalid() {
-            self.error = Some(format!(
+            self.error = Some(localized_format!(
                 "“{}” is waiting to be re-shared. Its owner has been asked to share it again \
                  from their Keychain app.",
+                "“{}” está esperando a que se vuelva a compartir. Se le pidió a su titular \
+                 que la comparta de nuevo desde su app Keychain.",
                 resolved.raw.name
             ));
             return Task::none();
@@ -1126,7 +1131,11 @@ impl SelectKeySource {
         let derivation_str = &resolved.raw.derivation_path;
 
         let Ok(fingerprint) = Fingerprint::from_str(fingerprint_str) else {
-            self.error = Some(format!("Invalid fingerprint: {}", fingerprint_str));
+            self.error = Some(localized_format!(
+                "Invalid fingerprint: {}",
+                "Huella digital no válida: {}",
+                fingerprint_str
+            ));
             return Task::none();
         };
         // Connect blinding (PR D3): the key arrives as an envelope sealed to
@@ -1161,7 +1170,11 @@ impl SelectKeySource {
             }
         };
         let Ok(derivation_path) = DerivationPath::from_str(derivation_str) else {
-            self.error = Some(format!("Invalid derivation path: {}", derivation_str));
+            self.error = Some(localized_format!(
+                "Invalid derivation path: {}",
+                "Ruta de derivación no válida: {}",
+                derivation_str
+            ));
             return Task::none();
         };
 
@@ -1289,7 +1302,7 @@ impl SelectKeySource {
 
     fn view_my_keychain_keys(&self) -> Element<Message> {
         let mut col = Column::new().spacing(modal::V_SPACING).width(modal::BTN_W);
-        col = col.push(p1_bold("My Keychain Keys"));
+        col = col.push(p1_bold(localized_copy("My Keychain Keys")));
 
         // Treat "not yet fetched" as loading — the auto-fetch fires on
         // the first update() call, leaving a brief pre-fetch window
@@ -1298,21 +1311,25 @@ impl SelectKeySource {
             && self.my_keychain_keys.is_empty()
             && self.keychain_keys_error.is_none()
         {
-            col = col.push(p1_regular("Fetching Keychain keys…"));
+            col = col.push(p1_regular(localized_copy("Fetching Keychain keys…")));
             return col.into();
         }
         if let Some(err) = &self.keychain_keys_error {
-            col = col.push(p1_regular(format!("Failed to load keys: {}", err)));
+            col = col.push(p1_regular(localized_format!(
+                "Failed to load keys: {}",
+                "No se pudieron cargar las claves: {}",
+                err
+            )));
             col = col.push(
-                button::secondary(Some(icon::reload_icon()), "Retry")
+                button::secondary(Some(icon::reload_icon()), localized_copy("Retry"))
                     .on_press(Self::route(SelectKeySourceMessage::FetchCubeKeys)),
             );
             return col.into();
         }
         if self.my_keychain_keys.is_empty() {
-            col = col.push(p1_regular(
+            col = col.push(p1_regular(localized_copy(
                 "No Keychain keys. Add one in the COINCUBE mobile app.",
-            ));
+            )));
             return col.into();
         }
 
@@ -1354,13 +1371,13 @@ impl SelectKeySource {
             // claimed by another Vault, then an exact reuse in this quorum,
             // then the owner being placed elsewhere.
             let warning = if is_recovery {
-                Some("Recovery key — restores this Cube, never signs".to_string())
+                Some(localized_copy("Recovery key — restores this Cube, never signs").to_string())
             } else if used_elsewhere {
-                Some("Used by another Vault".to_string())
+                Some(localized_copy("Used by another Vault").to_string())
             } else if key_reused {
-                Some("Already used in this Vault".to_string())
+                Some(localized_copy("Already used in this Vault").to_string())
             } else if owner_blocked {
-                Some("Already selected".to_string())
+                Some(localized_copy("Already selected").to_string())
             } else {
                 None
             };
@@ -1379,26 +1396,32 @@ impl SelectKeySource {
 
     fn view_contact_keychain_keys(&self) -> Element<Message> {
         let mut col = Column::new().spacing(modal::V_SPACING).width(modal::BTN_W);
-        col = col.push(p1_bold("Contact Keychain Keys"));
+        col = col.push(p1_bold(localized_copy("Contact Keychain Keys")));
 
         // Treat "not yet fetched" as loading (see view_my_keychain_keys).
         if (!self.keychain_keys_fetched || self.keychain_keys_loading)
             && self.contact_keychain_keys.is_empty()
             && self.keychain_keys_error.is_none()
         {
-            col = col.push(p1_regular("Fetching contact keys…"));
+            col = col.push(p1_regular(localized_copy("Fetching contact keys…")));
             return col.into();
         }
         if let Some(err) = &self.keychain_keys_error {
-            col = col.push(p1_regular(format!("Failed to load keys: {}", err)));
+            col = col.push(p1_regular(localized_format!(
+                "Failed to load keys: {}",
+                "No se pudieron cargar las claves: {}",
+                err
+            )));
             col = col.push(
-                button::secondary(Some(icon::reload_icon()), "Retry")
+                button::secondary(Some(icon::reload_icon()), localized_copy("Retry"))
                     .on_press(Self::route(SelectKeySourceMessage::FetchCubeKeys)),
             );
             return col.into();
         }
         if self.contact_keychain_keys.is_empty() {
-            col = col.push(p1_regular("None of your contacts have shared keys yet."));
+            col = col.push(p1_regular(localized_copy(
+                "None of your contacts have shared keys yet.",
+            )));
             return col.into();
         }
 
@@ -1446,11 +1469,11 @@ impl SelectKeySource {
                         })
                     };
                     let warning = if used_elsewhere {
-                        Some("Used by another Vault".to_string())
+                        Some(localized_copy("Used by another Vault").to_string())
                     } else if key_reused {
-                        Some("Already used in this Vault".to_string())
+                        Some(localized_copy("Already used in this Vault").to_string())
                     } else if owner_blocked {
-                        Some("Already selected".to_string())
+                        Some(localized_copy("Already selected").to_string())
                     } else {
                         None
                     };
@@ -1557,7 +1580,7 @@ impl SelectKeySource {
         _hws: Vec<DetectedHw>,
     ) -> Element<Message> {
         let header = modal::header(
-            Some("Select key source".to_string()),
+            Some(localized_copy("Select key source").to_string()),
             Some(|| Message::Close),
         );
 
@@ -1610,7 +1633,7 @@ impl SelectKeySource {
         let tip_row: Element<Message> = if let Some(copy) = tooltip_copy {
             Row::new()
                 .push(Space::new().width(Length::Fill))
-                .push(tooltip::tooltip(copy))
+                .push(tooltip::tooltip(localized_copy(copy)))
                 .into()
         } else {
             Space::new().height(Length::Fixed(18.0)).into()
@@ -1624,7 +1647,7 @@ impl SelectKeySource {
             .push(Space::new().height(Length::Fill))
             .push(icon_el.size(icon_size))
             .push(Space::new().height(Length::Fixed(8.0)))
-            .push(p1_bold(title.to_string()))
+            .push(p1_bold(localized_copy(title).to_string()))
             .push(Space::new().height(Length::Fill))
             .align_x(Horizontal::Center)
             .width(Length::Fill)
@@ -1678,7 +1701,10 @@ impl SelectKeySource {
     }
 
     fn view_hardware_listen(&self, hws: Vec<DetectedHw>) -> Element<Message> {
-        let header = modal::header(Some("Hardware Device".to_string()), Some(|| Message::Close));
+        let header = modal::header(
+            Some(localized_copy("Hardware Device").to_string()),
+            Some(|| Message::Close),
+        );
 
         // Present the "waiting for a device" prompt as its own full-width
         // card so it reads as a peer of the device rows below rather than a
@@ -1686,7 +1712,7 @@ impl SelectKeySource {
         let listening = Container::new(
             column![
                 icon::usb_icon().size(60),
-                p1_regular("Plug in a hardware device ..."),
+                p1_regular(localized_copy("Plug in a hardware device ...")),
             ]
             .align_x(Horizontal::Center)
             .width(Length::Fill)
@@ -1727,7 +1753,10 @@ impl SelectKeySource {
     }
 
     fn view_keychain_keys_screen(&self) -> Element<Message> {
-        let header = modal::header(Some("Keychain Keys".to_string()), Some(|| Message::Close));
+        let header = modal::header(
+            Some(localized_copy("Keychain Keys").to_string()),
+            Some(|| Message::Close),
+        );
 
         let footer = Row::new()
             .push(modal::back_button(|| {
@@ -1755,7 +1784,10 @@ impl SelectKeySource {
     /// modal to `Step::Details` for alias entry. Parse errors stay on
     /// this screen with `import_xpub_error` rendered below the input.
     fn view_paste_xpub_screen(&self) -> Element<Message> {
-        let header = modal::header(Some("Paste xpub".to_string()), Some(|| Message::Close));
+        let header = modal::header(
+            Some(localized_copy("Paste xpub").to_string()),
+            Some(|| Message::Close),
+        );
 
         let input = iced::widget::TextInput::new("xpub…", &self.form_xpub.value)
             .on_input(|s| Self::route(SelectKeySourceMessage::Xpub(s)))
@@ -1765,7 +1797,7 @@ impl SelectKeySource {
             .size(16)
             .padding(12);
 
-        let paste_btn = button::secondary(Some(icon::paste_icon()), "Paste")
+        let paste_btn = button::secondary(Some(icon::paste_icon()), localized_copy("Paste"))
             .on_press(Self::route(SelectKeySourceMessage::PasteXpub));
 
         // Parse errors live in two places depending on entry path:
@@ -1781,7 +1813,8 @@ impl SelectKeySource {
             .warning
             .map(|w| w.to_string())
             .or_else(|| self.import_xpub_error.clone());
-        let error = error_text.map(|e| p1_regular(e).color(color::RED));
+        let error =
+            error_text.map(|e| p1_regular(coincube_ui::locale::notice(e)).color(color::RED));
 
         // Footer: [Back] [spacer] [Paste]. Paste is the primary action
         // on this screen (it pulls clipboard contents into the text
@@ -1797,9 +1830,9 @@ impl SelectKeySource {
         let column = Column::new()
             .spacing(12)
             .push(header)
-            .push(p1_regular(
+            .push(p1_regular(localized_copy(
                 "Paste an extended public key (xpub) to add it as a signer.",
-            ))
+            )))
             .push(input)
             .push_maybe(error)
             .push(footer)
@@ -1897,7 +1930,7 @@ impl SelectKeySource {
         // Full width so the heading and device rows sit flush-left rather
         // than shrinking to the button width and being centred by the
         // parent modal column's `align_x(Center)`.
-        let mut col = column![p1_bold("Detected hardware")]
+        let mut col = column![p1_bold(localized_copy("Detected hardware"))]
             .spacing(5)
             .width(Length::Fill);
         for hw in hws {
@@ -1906,7 +1939,7 @@ impl SelectKeySource {
         if hws.is_empty() {
             col = col.push(row![
                 Space::new().width(Length::Fill),
-                p1_regular("- No other sources detected -"),
+                p1_regular(localized_copy("- No other sources detected -")),
                 Space::new().width(Length::Fill)
             ])
         }
@@ -1917,7 +1950,7 @@ impl SelectKeySource {
         // Full width so the section sits flush-left with the card grid below,
         // rather than shrinking to the button width and being centred by the
         // parent modal column's `align_x(Center)`.
-        let mut col = column![p1_bold("Already used sources")]
+        let mut col = column![p1_bold(localized_copy("Already used sources"))]
             .spacing(5)
             .width(Length::Fill);
         for key in keys {
@@ -1933,10 +1966,14 @@ impl SelectKeySource {
         let mut enabled = true;
         let message = match (state, support_taproot, self.taproot) {
             (HwState::Locked { pairing_code }, _, _) => Some(match pairing_code {
-                Some(code) => format!("Pairing code: {code}"),
-                None => "Please unlock the device".to_string(),
+                Some(code) => {
+                    localized_format!("Pairing code: {code}", "Código de vinculación: {code}")
+                }
+                None => localized_copy("Please unlock the device").to_string(),
             }),
-            (_, false, true) => Some("This device does not support taproot".to_string()),
+            (_, false, true) => {
+                Some(localized_copy("This device does not support taproot").to_string())
+            }
             (HwState::Unsupported(ur), _, _) => {
                 enabled = false;
                 match ur {
@@ -1945,8 +1982,9 @@ impl SelectKeySource {
                         note,
                     } => {
                         enabled = true;
-                        let mut msg = format!(
-                            "Device version not supported, upgrade to version > {minimal_supported_version}"
+                        let mut msg = localized_format!(
+                            "Device version not supported, upgrade to version > {minimal_supported_version}",
+                            "Versión del dispositivo no compatible. Actualiza a una versión posterior a {minimal_supported_version}"
                         );
                         if let Some(note) = note {
                             msg.push_str(". ");
@@ -1954,15 +1992,16 @@ impl SelectKeySource {
                         }
                         Some(msg)
                     }
-                    UnsupportedReason::Method(m) => {
-                        Some(format!("Device not supported, method: {m}"))
-                    }
+                    UnsupportedReason::Method(m) => Some(localized_format!(
+                        "Device not supported, method: {m}",
+                        "Dispositivo no compatible, método: {m}"
+                    )),
                     UnsupportedReason::NotPartOfWallet(_) => None, // unreachable
-                    UnsupportedReason::WrongNetwork => {
-                        Some("The device is configured on wrong network".to_string())
-                    }
+                    UnsupportedReason::WrongNetwork => Some(
+                        localized_copy("The device is configured on wrong network").to_string(),
+                    ),
                     UnsupportedReason::AppIsNotOpen => {
-                        Some("Please open the app on device".to_string())
+                        Some(localized_copy("Please open the app on device").to_string())
                     }
                 }
             }
@@ -2029,7 +2068,7 @@ impl SelectKeySource {
             Some(fg_str),
             None,
             None,
-            message,
+            message.map(coincube_ui::locale::notice),
             on_press,
         )
     }
@@ -2197,7 +2236,11 @@ impl super::DescriptorEditModal for SelectKeySource {
             Step::Details => self.details_view(),
         };
         let content = Column::new()
-            .push(self.error.clone().map(|e| card::error("Error", e)))
+            .push(
+                self.error
+                    .clone()
+                    .map(|e| card::error(localized_copy("Error"), e)),
+            )
             .push(content)
             .into();
         if let Some(modal) = &self.modal {
@@ -2229,13 +2272,17 @@ where
 {
     let pick_account = pick_account
         .map(|pick_account| row![pick_account, Space::new().width(Length::Fill)].spacing(5));
-    let info = "Switch account if you already uses the same hardware in other configurations";
+    let info = localized_copy(
+        "Switch account if you already uses the same hardware in other configurations",
+    );
 
-    let error = error.clone().map(|e| p1_regular(e).color(color::ORANGE));
+    let error = error
+        .clone()
+        .map(|e| p1_regular(coincube_ui::locale::notice(e)).color(color::ORANGE));
 
     let spacer = replace_message.is_some().then(|| Space::new().width(10));
     let replace_btn = replace_message.map(|m| {
-        let mut btn = button::secondary(None, "Replace");
+        let mut btn = button::secondary(None, localized_copy("Replace"));
         if alias.valid {
             btn = btn.on_press(m);
         }
@@ -2252,15 +2299,15 @@ where
             .push(Space::new().width(Length::Fill))
             .push(replace_btn)
             .push(spacer)
-            .push(button::primary(None, "Apply").on_press_maybe(apply_msg))
+            .push(button::primary(None, localized_copy("Apply")).on_press_maybe(apply_msg))
             .align_y(Vertical::Center)
     } else if let Some(retry_msg) = retry_msg {
         Row::new()
             .push(back)
             .push(Space::new().width(Length::Fill))
-            .push(button::primary(None, "Retry").on_press(retry_msg))
+            .push(button::primary(None, localized_copy("Retry")).on_press(retry_msg))
             .push(Space::new().width(5))
-            .push(button::secondary(None, "Apply"))
+            .push(button::secondary(None, localized_copy("Apply")))
             .spacing(5)
             .align_y(Vertical::Center)
     } else {
@@ -2269,27 +2316,35 @@ where
             .push(Space::new().width(Length::Fill))
             .push(replace_btn)
             .push(spacer)
-            .push(button::primary(None, "Apply"))
+            .push(button::primary(None, localized_copy("Apply")))
             .align_y(Vertical::Center)
     };
     let column = Column::new()
         .spacing(5)
         .push(header)
         .push(row![
-            p1_bold("Key name (alias):"),
+            p1_bold(localized_copy("Key name (alias):")),
             Space::new().width(Length::Fill)
         ])
         .push(row![
-            p1_regular("Give this key a friendly name. It will help you identify it later:"),
+            p1_regular(localized_copy(
+                "Give this key a friendly name. It will help you identify it later:"
+            )),
             Space::new().width(Length::Fill)
         ])
         .push(
-            container(form::Form::new("E.g. My Hardware Wallet", alias, alias_msg).padding(10))
-                .width(300),
+            container(
+                form::Form::new(localized_copy("E.g. My Hardware Wallet"), alias, alias_msg)
+                    .padding(10),
+            )
+            .width(300),
         )
         .push(Space::new().height(10))
         .push(if pick_account.is_some() {
-            Some(row![p1_bold("Key path account:"), tooltip(info)].align_y(Vertical::Center))
+            Some(
+                row![p1_bold(localized_copy("Key path account:")), tooltip(info)]
+                    .align_y(Vertical::Center),
+            )
         } else {
             None
         })
@@ -2353,7 +2408,7 @@ impl super::DescriptorEditModal for EditKeyAlias {
 
                     if alias_already_exists(&alias, self.fingerprint, &self.keys) {
                         self.form_alias.warning =
-                            Some("This alias is already used for another key");
+                            Some(localized_copy("This alias is already used for another key"));
                         self.form_alias.valid = false;
                     }
                     if alias.chars().count() <= MAX_ALIAS_LEN {

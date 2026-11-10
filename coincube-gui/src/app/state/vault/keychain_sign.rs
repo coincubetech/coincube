@@ -29,6 +29,7 @@ use coincube_core::miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt};
 use iced::{Subscription, Task};
 use tokio::sync::RwLock;
 
+use coincube_ui::localized_format;
 use coincube_ui::{
     component::{
         button, modal as modal_const,
@@ -547,21 +548,30 @@ impl KeychainSignModal {
         if !has_pending_nonterminal {
             return None;
         }
-        const SENT: &str = "Requests already sent stay on Connect;";
+        // Built while the picker renders, so the templates follow the
+        // window's language.
         match self.stream_health {
             crate::app::ConnectionStatus::Connecting
             | crate::app::ConnectionStatus::Reconnecting
-            | crate::app::ConnectionStatus::Renewing => Some(format!(
-                "Reconnecting to Connect. {SENT} signatures reach Tenshu once live updates \
-                 are back."
+            | crate::app::ConnectionStatus::Renewing => Some(coincube_ui::localized_format!(
+                "Reconnecting to Connect. Requests already sent stay on Connect; signatures \
+                 reach Tenshu once live updates are back.",
+                "Reconectando con Connect. Las solicitudes ya enviadas siguen en Connect; las \
+                 firmas llegarán a Tenshu cuando vuelvan las actualizaciones en vivo."
             )),
-            crate::app::ConnectionStatus::Offline => Some(format!(
-                "No internet connection. {SENT} signatures reach Tenshu once you’re back online."
+            crate::app::ConnectionStatus::Offline => Some(coincube_ui::localized_format!(
+                "No internet connection. Requests already sent stay on Connect; signatures \
+                 reach Tenshu once you’re back online.",
+                "Sin conexión a internet. Las solicitudes ya enviadas siguen en Connect; las \
+                 firmas llegarán a Tenshu cuando vuelvas a estar en línea."
             )),
-            crate::app::ConnectionStatus::RenewFailed => Some(format!(
-                "{}. {SENT} signatures reach Tenshu once it reconnects. Try again from the \
-                 Connect control in the top bar.",
-                crate::app::RENEW_FAILED_TITLE,
+            crate::app::ConnectionStatus::RenewFailed => Some(coincube_ui::localized_format!(
+                "{}. Requests already sent stay on Connect; signatures reach Tenshu once it \
+                 reconnects. Try again from the Connect control in the top bar.",
+                "{}. Las solicitudes ya enviadas siguen en Connect; las firmas llegarán a \
+                 Tenshu cuando se vuelva a conectar. Inténtalo de nuevo desde el control de \
+                 Connect en la barra superior.",
+                coincube_ui::locale::copy(crate::app::RENEW_FAILED_TITLE),
             )),
             crate::app::ConnectionStatus::Inactive | crate::app::ConnectionStatus::Connected => {
                 None
@@ -2339,49 +2349,62 @@ fn unresolved_signer_reason(entry: &str) -> Option<&str> {
 /// device that they had none, while the real fix was one screen away.
 pub(crate) fn friendly_unresolved_signer(entry: &str) -> String {
     match unresolved_signer_reason(entry) {
-        Some("signer_app_outdated") => format!(
+        Some("signer_app_outdated") => localized_format!(
             "{}'s Keychain needs updating before it can sign on Bitcoin Blake2b.",
+            "El Keychain de {} necesita actualizarse antes de poder firmar en Bitcoin Blake2b.",
             entry.trim_end_matches(" (signer_app_outdated)"),
         ),
-        Some("no_device_registered") => format!(
+        Some("no_device_registered") => localized_format!(
             "{} hasn't set up the Keychain app yet. Ask them to install it \
              and sign in, then retry.",
+            "{} aún no configuró la app Keychain. Pídele que la instale e \
+             inicie sesión, y vuelve a intentarlo.",
             entry,
         ),
-        Some("all_devices_revoked") => format!(
+        Some("all_devices_revoked") => localized_format!(
             "{} has revoked every device on their account. They need to \
              register a new device before this transaction can be signed.",
+            "{} revocó todos los dispositivos de su cuenta. Necesita registrar \
+             un dispositivo nuevo antes de poder firmar esta transacción.",
             entry,
         ),
         // The target device's transport key is past its confirmation TTL.
         // Opening Keychain re-registers the device; nothing about the
         // account's registration state is wrong, so say nothing about it.
-        Some("transport_key_stale") => format!(
+        Some("transport_key_stale") => localized_format!(
             "{} — this signer's Keychain hasn't checked in with Connect \
              recently. Ask them to open Keychain on their phone, then retry.",
+            "{} — el Keychain de este firmante no se ha comunicado con Connect \
+             recientemente. Pídele que abra Keychain en su teléfono y vuelve a intentarlo.",
             entry,
         ),
         // The key is bound to a device Connect can no longer target (revoked,
         // deleted, or owned by another account). Connect does not guess a
         // replacement; Keychain re-claims the key on launch on the handset
         // that holds it (keychain-app#145).
-        Some("enrolled_device_unavailable") => format!(
+        Some("enrolled_device_unavailable") => localized_format!(
             "{} is bound to a Keychain that can no longer be reached. Ask them \
              to open Keychain on the phone that holds this key, then retry.",
+            "{} está vinculado a un Keychain al que ya no se puede llegar. Pídele \
+             que abra Keychain en el teléfono que tiene esta clave y vuelve a intentarlo.",
             entry,
         ),
         // Kept for compatibility, but no server code path emits this token
         // today; the Go constants above are the source of truth. Do not read
         // "three matching arms" as "the list is complete" — that is how the
         // stale-transport-key case was missed.
-        Some("owner_unknown") => format!(
+        Some("owner_unknown") => localized_format!(
             "{} — this signer's owner isn't known to the backend. \
              Contact support if this persists.",
+            "{} — el servidor no conoce al propietario de este firmante. \
+             Contacta con soporte si esto continúa.",
             entry,
         ),
-        _ => format!(
+        _ => localized_format!(
             "Cannot sign with {}: COINCUBE doesn't recognise this reason. Update \
              COINCUBE, or contact support at coincube.io/support.",
+            "No se puede firmar con {}: COINCUBE no reconoce este motivo. Actualiza \
+             COINCUBE o contacta con soporte en coincube.io/support.",
             entry,
         ),
     }

@@ -797,7 +797,10 @@ impl State for LiquidReceive {
 
                             let (desc, usdt_display) = if let Some(minor) = usdt_amount {
                                 (
-                                    "USDt Transfer".to_owned(),
+                                    coincube_ui::localized_format!(
+                                        "USDt Transfer",
+                                        "Transferencia de USDt"
+                                    ),
                                     Some(format!("{} USDt", format_usdt_display(minor))),
                                 )
                             } else {
@@ -958,16 +961,18 @@ impl LiquidReceive {
                     if amount < min_amount {
                         self.loading = false;
                         return Task::done(Message::View(view::Message::LiquidReceive(
-                            LiquidReceiveMessage::Error(format!(
+                            LiquidReceiveMessage::Error(coincube_ui::localized_format!(
                                 "Amount below minimum limit of {}",
+                                "El importe es inferior al mínimo de {}",
                                 min_amount
                             )),
                         )));
                     } else if amount > max_amount {
                         self.loading = false;
                         return Task::done(Message::View(view::Message::LiquidReceive(
-                            LiquidReceiveMessage::Error(format!(
+                            LiquidReceiveMessage::Error(coincube_ui::localized_format!(
                                 "Amount above maximum limit of {}",
+                                "El importe supera el máximo de {}",
                                 max_amount
                             )),
                         )));

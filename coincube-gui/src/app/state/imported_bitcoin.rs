@@ -24,6 +24,7 @@ use coincube_core::{
     public_wallet_finalize::FinalizeError,
     wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor},
 };
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     component::{button, date_picker, spinner, text::*},
     theme,
@@ -104,6 +105,44 @@ fn birthday_timestamp(date: chrono::NaiveDate) -> Result<u32, String> {
     u32::try_from(timestamp).map_err(|_| "The wallet creation date is out of range.".into())
 }
 
+/// Show an English error or notice from this panel or its services in the
+/// window's language. State keeps the English; the panel's own templates are
+/// matched here and everything else goes to `locale::notice`, which copies
+/// unknown diagnostics exactly.
+fn shown_notice(english: &str) -> String {
+    if let Some(error) = english.strip_prefix("Hardware wallet: ") {
+        return coincube_ui::localized_format!(
+            "Hardware wallet: {}",
+            "Cartera de hardware: {}",
+            shown_notice(error)
+        );
+    }
+    if let Some(error) = english.strip_prefix("Could not expand the wallet history search: ") {
+        return coincube_ui::localized_format!(
+            "Could not expand the wallet history search: {}",
+            "No se pudo ampliar la búsqueda del historial de la cartera: {}",
+            shown_notice(error)
+        );
+    }
+    if let Some(error) = english.strip_prefix("Could not read signed PSBT: ") {
+        return coincube_ui::localized_format!(
+            "Could not read signed PSBT: {}",
+            "No se pudo leer la PSBT firmada: {}",
+            error
+        );
+    }
+    if let Some(missing) = english
+        .strip_prefix("Insufficient funds: ")
+        .and_then(|rest| rest.strip_suffix(" more satoshis are needed."))
+    {
+        return coincube_ui::localized_format!(
+            "Insufficient funds: {missing} more satoshis are needed.",
+            "Fondos insuficientes: faltan {missing} satoshis."
+        );
+    }
+    coincube_ui::locale::notice(english.to_owned())
+}
+
 static NEXT_PANEL_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn fresh_generation() -> u64 {
@@ -131,10 +170,10 @@ impl Provider {
 
 fn public_server_label(endpoint: &str) -> String {
     let Ok(url) = reqwest::Url::parse(endpoint) else {
-        return "Configured server".into();
+        return localized_copy("Configured server").into();
     };
     let Some(host) = url.host_str() else {
-        return "Configured server".into();
+        return localized_copy("Configured server").into();
     };
     let port = url
         .port()
@@ -168,13 +207,13 @@ fn check_words(
 fn wallet_summary(descriptor: &ImportedWalletDescriptor) -> (&'static str, String, String) {
     let receive = descriptor.receive_descriptor().to_string();
     let script = if receive.starts_with("sh(wpkh(") {
-        "Nested SegWit"
+        localized_copy("Nested SegWit")
     } else if receive.starts_with("wpkh(") {
-        "Native SegWit"
+        localized_copy("Native SegWit")
     } else if receive.starts_with("pkh(") {
-        "Legacy"
+        localized_copy("Legacy")
     } else {
-        "Multisig SegWit"
+        localized_copy("Multisig SegWit")
     };
     let mut fingerprints = BTreeSet::new();
     let mut signer_keys = 0usize;
@@ -191,8 +230,13 @@ fn wallet_summary(descriptor: &ImportedWalletDescriptor) -> (&'static str, Strin
         .split_once("multi(")
         .and_then(|(_, rest)| rest.split_once(','))
         .map_or_else(
-            || "1 signer".to_string(),
-            |(required, _)| format!("{required} of {signer_keys} signers"),
+            || localized_copy("1 signer").to_string(),
+            |(required, _)| {
+                coincube_ui::localized_format!(
+                    "{required} of {signer_keys} signers",
+                    "{required} de {signer_keys} firmantes"
+                )
+            },
         );
     let fingerprints = fingerprints.into_iter().collect::<Vec<_>>().join(", ");
     (script, threshold, fingerprints)
@@ -366,8 +410,10 @@ pub enum ImportMessage {
     CopyPsbt,
     SignedPsbtEdited(String),
     ImportSignedPsbt,
-    SavePsbt,
-    LoadSignedPsbt,
+    /// Carries the language of the view that offered it, for the file
+    /// dialog's title.
+    SavePsbt(coincube_ui::locale::Language),
+    LoadSignedPsbt(coincube_ui::locale::Language),
     Broadcast,
     Hardware(HardwareWalletMessage),
     SignWithDevice(String),
@@ -1142,8 +1188,8 @@ impl ImportedBitcoinPanel {
                     | ImportMessage::CopyPsbt
                     | ImportMessage::SignedPsbtEdited(_)
                     | ImportMessage::ImportSignedPsbt
-                    | ImportMessage::SavePsbt
-                    | ImportMessage::LoadSignedPsbt
+                    | ImportMessage::SavePsbt(_)
+                    | ImportMessage::LoadSignedPsbt(_)
                     | ImportMessage::Broadcast
                     | ImportMessage::Hardware(_)
                     | ImportMessage::SignWithDevice(_)
@@ -1718,7 +1764,7 @@ impl ImportedBitcoinPanel {
                     },
                 )
             }
-            ImportMessage::SavePsbt => {
+            ImportMessage::SavePsbt(language) => {
                 let Some(draft) = &self.draft else {
                     return Task::none();
                 };
@@ -1728,11 +1774,14 @@ impl ImportedBitcoinPanel {
                 let gate = self.generation_gate.clone();
                 self.busy = true;
                 self.error = None;
+                let title = coincube_ui::locale::render_in(language, || {
+                    localized_copy("Save unsigned Bitcoin PSBT").to_owned()
+                });
                 Task::perform(
                     async move {
                         let name = format!("bitcoin-spend-{}.psbt", &id.to_string()[..12]);
                         let Some(handle) = rfd::AsyncFileDialog::new()
-                            .set_title("Save unsigned Bitcoin PSBT")
+                            .set_title(title)
                             .set_file_name(&name)
                             .save_file()
                             .await
@@ -1758,7 +1807,7 @@ impl ImportedBitcoinPanel {
                     },
                 )
             }
-            ImportMessage::LoadSignedPsbt => {
+            ImportMessage::LoadSignedPsbt(language) => {
                 let Some(draft) = &self.draft else {
                     return Task::none();
                 };
@@ -1778,10 +1827,13 @@ impl ImportedBitcoinPanel {
                 let gate = self.generation_gate.clone();
                 self.busy = true;
                 self.error = None;
+                let title = coincube_ui::locale::render_in(language, || {
+                    localized_copy("Choose a signed Bitcoin PSBT").to_owned()
+                });
                 Task::perform(
                     async move {
                         let Some(handle) = rfd::AsyncFileDialog::new()
-                            .set_title("Choose a signed Bitcoin PSBT")
+                            .set_title(title)
                             .add_filter("Bitcoin PSBT", &["psbt", "txt"])
                             .pick_file()
                             .await
@@ -2749,27 +2801,49 @@ impl ImportedBitcoinPanel {
             .count();
         let mut parts = Vec::new();
         match &self.keys_stored {
-            KeysStored::Stored(count) => parts.push(format!(
+            KeysStored::Stored(count) => parts.push(coincube_ui::localized_format!(
                 "{count} from recovery words, stored encrypted on this device for this Cube. \
-                 They are not in the Recovery Kit yet, so keep your original backup"
+                 They are not in the Recovery Kit yet, so keep your original backup",
+                "{count} con palabras de recuperación, guardadas cifradas en este dispositivo \
+                 para este Cube. Todavía no están en el Kit de recuperación, así que conserva \
+                 tu copia original"
             )),
-            KeysStored::Storing => parts.push("storing the recovery words…".to_string()),
+            KeysStored::Storing => {
+                parts.push(localized_copy("storing the recovery words…").to_string())
+            }
             KeysStored::Failed(error) => {
                 return Some(
-                    p1_regular(format!("Keys: the recovery words were not stored. {error}"))
-                        .style(theme::text::error)
-                        .into(),
+                    p1_regular(coincube_ui::localized_format!(
+                        "Keys: the recovery words were not stored. {}",
+                        "Claves: no se guardaron las palabras de recuperación. {}",
+                        shown_notice(error)
+                    ))
+                    .style(theme::text::error)
+                    .into(),
                 )
             }
             KeysStored::None => (),
         }
         if devices > 0 {
-            parts.push(format!("{devices} on a hardware wallet"));
+            parts.push(coincube_ui::localized_format!(
+                "{devices} on a hardware wallet",
+                "{devices} en una cartera de hardware"
+            ));
         }
         if elsewhere > 0 {
-            parts.push(format!("{elsewhere} signs elsewhere"));
+            parts.push(coincube_ui::localized_format!(
+                "{elsewhere} signs elsewhere",
+                "{elsewhere} con firma externa"
+            ));
         }
-        (!parts.is_empty()).then(|| p1_regular(format!("Keys: {}", parts.join(" · "))).into())
+        (!parts.is_empty()).then(|| {
+            p1_regular(coincube_ui::localized_format!(
+                "Keys: {}",
+                "Claves: {}",
+                parts.join(" · ")
+            ))
+            .into()
+        })
     }
 
     fn key_slot(&mut self, index: usize) -> Option<&mut keys::KeySlot> {
@@ -3059,18 +3133,15 @@ impl ImportedBitcoinPanel {
         let count = self.stored_keys?;
         let mut content = Column::new()
             .spacing(8)
-            .push(p1_bold("Keys on this device"));
+            .push(p1_bold(localized_copy("Keys on this device")));
         if count == 0 {
             content = content
                 .push(
-                    p1_regular(
-                        "No recovery words for this wallet are stored on this device. If you \
-                         hold any of its keys as recovery words, add them.",
-                    )
+                    p1_regular(localized_copy("No recovery words for this wallet are stored on this device. If you hold any of its keys as recovery words, add them."))
                     .style(theme::text::secondary),
                 )
                 .push(
-                    button::secondary(None, "Add recovery words")
+                    button::secondary(None, localized_copy("Add recovery words"))
                         .width(iced::Length::Shrink)
                         .on_press_maybe(
                             (!self.adding_keys)
@@ -3079,9 +3150,12 @@ impl ImportedBitcoinPanel {
                 );
         } else {
             content = content.push(
-                p1_regular(format!(
+                p1_regular(coincube_ui::localized_format!(
                     "{count} from recovery words, stored encrypted on this device for this \
-                     Cube. They are not in the Recovery Kit yet, so keep your original backup."
+                     Cube. They are not in the Recovery Kit yet, so keep your original backup.",
+                    "{count} con palabras de recuperación, guardadas cifradas en este \
+                     dispositivo para este Cube. Todavía no están en el Kit de recuperación, \
+                     así que conserva tu copia original."
                 ))
                 .style(theme::text::secondary),
             );
@@ -3095,19 +3169,19 @@ impl ImportedBitcoinPanel {
         Column::new()
             .spacing(16)
             .max_width(800)
-            .push(h3("Finish importing your Bitcoin wallet"))
+            .push(h3(localized_copy("Finish importing your Bitcoin wallet")))
             .push(
-                p1_regular("This Cube is waiting for your existing Bitcoin wallet. Continue in Import or restore, or use a new Vault instead.")
+                p1_regular(localized_copy("This Cube is waiting for your existing Bitcoin wallet. Continue in Import or restore, or use a new Vault instead."))
                     .style(theme::text::secondary),
             )
             .push(
                 Row::new()
                     .spacing(10)
-                    .push(button::primary(None, "Continue import").on_press(
+                    .push(button::primary(None, localized_copy("Continue import")).on_press(
                         view::Message::ImportedBitcoin(ImportMessage::ResumeJourney),
                     ))
                     .push(
-                        button::secondary(None, "Use a new Vault instead").on_press_maybe(
+                        button::secondary(None, localized_copy("Use a new Vault instead")).on_press_maybe(
                             (!self.busy).then_some(view::Message::ImportedBitcoin(
                                 ImportMessage::Abandon,
                             )),
@@ -3118,7 +3192,7 @@ impl ImportedBitcoinPanel {
             .push_maybe(
                 self.error
                     .as_ref()
-                    .map(|error| p1_regular(error).style(theme::text::error)),
+                    .map(|error| p1_regular(shown_notice(error)).style(theme::text::error)),
             )
             .into()
     }
@@ -3184,6 +3258,9 @@ impl ImportedBitcoinPanel {
             .iter()
             .position(|label| *label == step.label())
             .unwrap_or(steps.len() - 1);
+        // The stepper's labels are compared in English above and shown here.
+        let shown_steps: Vec<&'static str> =
+            steps.iter().map(|label| localized_copy(label)).collect();
         let (form, actions): (Element<'a, view::Message>, Element<'a, view::Message>) = match step {
             JourneyStep::Source | JourneyStep::Review => self.setup_step(),
             JourneyStep::Keys => match &self.keys {
@@ -3201,24 +3278,27 @@ impl ImportedBitcoinPanel {
                         Row::new()
                             .spacing(10)
                             .align_y(Alignment::Center)
-                            .push(button::secondary(None, "Receive").width(Length::Shrink))
                             .push(
-                                caption(
+                                button::secondary(None, localized_copy("Receive"))
+                                    .width(Length::Shrink),
+                            )
+                            .push(
+                                caption(localized_copy(
                                     "Wait for the complete Bitcoin history scan before receiving.",
-                                )
+                                ))
                                 .style(theme::text::secondary),
                             ),
                     )
                     .push_maybe(
                         self.error
                             .as_ref()
-                            .map(|error| p1_regular(error).style(theme::text::error)),
+                            .map(|error| p1_regular(shown_notice(error)).style(theme::text::error)),
                     )
                     .into(),
                 Row::new()
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        button::primary(None, "Continue")
+                        button::primary(None, localized_copy("Continue"))
                             .width(Length::Shrink)
                             .on_press(view::Message::ImportedBitcoin(
                                 ImportMessage::ContinueFromScan,
@@ -3231,7 +3311,7 @@ impl ImportedBitcoinPanel {
                 Row::new()
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        button::primary(None, "Open Cube")
+                        button::primary(None, localized_copy("Open Cube"))
                             .width(Length::Shrink)
                             .on_press_maybe((self.keys_stored != KeysStored::Storing).then_some(
                                 view::Message::ImportedBitcoin(ImportMessage::LeaveJourney),
@@ -3242,20 +3322,26 @@ impl ImportedBitcoinPanel {
         };
         // The Cube now exists, so the import is the only path left open.
         let nav = restore_frame::nav()
-            .push(restore_frame::nav_label("Overview", false))
-            .push(restore_frame::nav_label("Import Bitcoin wallet", true));
+            .push(restore_frame::nav_label(localized_copy("Overview"), false))
+            .push(restore_frame::nav_label(
+                localized_copy("Import Bitcoin wallet"),
+                true,
+            ));
         let body = iced::widget::scrollable(
             Column::new()
                 .spacing(20)
                 .padding([24, 28])
-                .push_maybe((step != JourneyStep::Done).then(|| h2("Import Bitcoin wallet")))
+                .push_maybe(
+                    (step != JourneyStep::Done)
+                        .then(|| h2(localized_copy("Import Bitcoin wallet"))),
+                )
                 .push(form),
         )
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
         let region = restore_frame::region(
-            Some(restore_frame::step_rail(steps, active)),
+            Some(restore_frame::step_rail(&shown_steps, active)),
             body,
             Some(actions),
         );
@@ -3271,7 +3357,7 @@ impl ImportedBitcoinPanel {
             Space::new().into()
         };
         let header = restore_frame::sheet_header(
-            "Import or restore",
+            localized_copy("Import or restore"),
             restore_frame::network_chip(self.chain(), light),
             close,
         );
@@ -3295,26 +3381,36 @@ impl ImportedBitcoinPanel {
             ScanDisplay::Retrying | ScanDisplay::NeedsAttention
         );
         let line = if ready {
-            "Your wallet is now this Cube's Vault. Open it to receive or review its history."
+            localized_copy(
+                "Your wallet is now this Cube's Vault. Open it to receive or review its history.",
+            )
         } else if stalled {
-            "The history scan stopped before it finished. Retry it here or from the Vault page."
+            localized_copy(
+                "The history scan stopped before it finished. Retry it here or from the Vault page.",
+            )
         } else {
-            "Your wallet is now this Cube's Vault. Its history appears when the scan finishes."
+            localized_copy(
+                "Your wallet is now this Cube's Vault. Its history appears when the scan finishes.",
+            )
         };
         Column::new()
             .spacing(16)
             .width(iced::Length::Fill)
             .align_x(iced::Alignment::Center)
             .push(crate::home::restore_frame::done_art(light))
-            .push(h3(format!("{} is ready", cache.cube_name)))
+            .push(h3(coincube_ui::localized_format!(
+                "{} is ready",
+                "{} está listo",
+                cache.cube_name
+            )))
             .push(p1_regular(line).style(theme::text::secondary))
             .push_maybe((!ready && stalled).then(|| {
                 button::secondary(
                     None,
                     if self.sync_requesting {
-                        "Retrying…"
+                        localized_copy("Retrying…")
                     } else {
-                        self.synchronization_action_label()
+                        localized_copy(self.synchronization_action_label())
                     },
                 )
                 .width(iced::Length::Shrink)
@@ -3328,7 +3424,7 @@ impl ImportedBitcoinPanel {
                     .align_x(iced::Alignment::Center)
                     .push_maybe(self.keys_line())
                     .push(
-                        button::secondary(None, "Store keys again")
+                        button::secondary(None, localized_copy("Store keys again"))
                             .width(iced::Length::Shrink)
                             .on_press(view::Message::ImportedBitcoin(
                                 ImportMessage::RetryStoreKeys,
@@ -3342,7 +3438,7 @@ impl ImportedBitcoinPanel {
     /// in it, the user can delete it instead of keeping an empty Cube; the
     /// Launcher's delete confirmation does the deleting.
     fn delete_cube_button(&self) -> Element<'_, view::Message> {
-        button::secondary(None, "Delete this Cube")
+        button::secondary(None, localized_copy("Delete this Cube"))
             .width(iced::Length::Shrink)
             .on_press_maybe(
                 self.can_delete_cube()
@@ -3365,7 +3461,7 @@ impl ImportedBitcoinPanel {
             .spacing(10)
             .align_y(iced::Alignment::Center)
             .push(
-                button::secondary(None, "Use a new Vault instead")
+                button::secondary(None, localized_copy("Use a new Vault instead"))
                     .width(iced::Length::Shrink)
                     .on_press_maybe(
                         (!self.busy)
@@ -3375,23 +3471,23 @@ impl ImportedBitcoinPanel {
             .push(self.delete_cube_button())
             .push(iced::widget::Space::new().width(iced::Length::Fill));
         if self.review.is_none() {
-            content = content.push(p1_regular("Use your existing Bitcoin wallet in this Cube. The descriptor describes the wallet; you add its keys on the next step.").style(theme::text::secondary));
+            content = content.push(p1_regular(localized_copy("Use your existing Bitcoin wallet in this Cube. The descriptor describes the wallet; you add its keys on the next step.")).style(theme::text::secondary));
             let beginning = if self.scan_from_beginning {
-                button::primary(None, "From the beginning")
+                button::primary(None, localized_copy("From the beginning"))
             } else {
-                button::secondary(None, "From the beginning")
+                button::secondary(None, localized_copy("From the beginning"))
             };
             let dated = if self.scan_from_beginning {
-                button::secondary(None, "From a creation date")
+                button::secondary(None, localized_copy("From a creation date"))
             } else {
-                button::primary(None, "From a creation date")
+                button::primary(None, localized_copy("From a creation date"))
             };
             content = content
                 .push(wallet_source_form::view(&self.source, &SourceFormCopy::import()).map(|m| {
                     view::Message::ImportedBitcoin(ImportMessage::Source(m))
                 }))
                 .push(iced::widget::Space::new().height(8))
-                .push(p1_bold("Where should the history scan start?"))
+                .push(p1_bold(localized_copy("Where should the history scan start?")))
                 .push(Row::new().spacing(10)
                     .push(beginning
                         .width(iced::Length::Fill)
@@ -3403,7 +3499,7 @@ impl ImportedBitcoinPanel {
                     Row::new()
                         .spacing(10)
                         .align_y(iced::Alignment::Center)
-                        .push(text_input("YYYY-MM-DD", &self.birthday)
+                        .push(text_input(localized_copy("YYYY-MM-DD"), &self.birthday)
                             .on_input(|s| view::Message::ImportedBitcoin(ImportMessage::BirthdayEdited(s)))
                             .padding(10))
                         .push(date_picker::calendar_button(
@@ -3416,18 +3512,18 @@ impl ImportedBitcoinPanel {
                         ).map(view::Message::ImportedBitcoin))
                 }))
                 .push(caption(if self.scan_from_beginning {
-                    "Starts at Bitcoin's first block. Choose this if you do not know when the wallet was created; it may take longer."
+                    localized_copy("Starts at Bitcoin's first block. Choose this if you do not know when the wallet was created; it may take longer.")
                 } else {
-                    "Choose the original wallet's creation date or an earlier date so older transactions are included."
+                    localized_copy("Choose the original wallet's creation date or an earlier date so older transactions are included.")
                 }).style(theme::text::secondary))
                 .push(iced::widget::Space::new().height(8))
-                .push(p1_bold("Addresses to search per branch"))
+                .push(p1_bold(localized_copy("Addresses to search per branch")))
                 .push(text_input("200", &self.lookahead)
                     .on_input(|s| view::Message::ImportedBitcoin(ImportMessage::LookaheadEdited(s)))
                     .padding(10))
-                .push(caption("Start with 200 receive and 200 change addresses. You can search further after the scan finishes.").style(theme::text::secondary))
+                .push(caption(localized_copy("Start with 200 receive and 200 change addresses. You can search further after the scan finishes.")).style(theme::text::secondary))
                 .push(iced::widget::Space::new().height(8))
-                .push(p1_bold("Bitcoin server"));
+                .push(p1_bold(localized_copy("Bitcoin server")));
             let mut providers = Column::new().spacing(8);
             let mut provider_row = Row::new().spacing(8);
             for provider in [
@@ -3437,9 +3533,9 @@ impl ImportedBitcoinPanel {
                 Provider::Electrum,
             ] {
                 let button = if self.provider == provider {
-                    button::primary(None, provider.label())
+                    button::primary(None, localized_copy(provider.label()))
                 } else {
-                    button::secondary(None, provider.label())
+                    button::secondary(None, localized_copy(provider.label()))
                 };
                 provider_row = provider_row.push(button.width(iced::Length::Fill).on_press(
                     view::Message::ImportedBitcoin(ImportMessage::ProviderSelected(provider)),
@@ -3452,7 +3548,7 @@ impl ImportedBitcoinPanel {
             content = content.push(providers);
             if matches!(self.provider, Provider::Esplora | Provider::Electrum) {
                 content = content.push(
-                    text_input("Server URL", &self.endpoint)
+                    text_input(localized_copy("Server URL"), &self.endpoint)
                         .on_input(|s| {
                             view::Message::ImportedBitcoin(ImportMessage::EndpointEdited(s))
                         })
@@ -3460,7 +3556,7 @@ impl ImportedBitcoinPanel {
                 );
             }
             footer = footer.push(
-                button::primary(None, "Review wallet")
+                button::primary(None, localized_copy("Review wallet"))
                     .width(iced::Length::Shrink)
                     .on_press(view::Message::ImportedBitcoin(ImportMessage::Review)),
             );
@@ -3468,53 +3564,59 @@ impl ImportedBitcoinPanel {
             let retry = matches!(&self.import.stage, BitcoinImportStage::Installing { .. });
             let (script, threshold, fingerprints) = wallet_summary(&wallet.descriptor);
             let sample_address = sample_receive_address(&wallet.descriptor)
-                .unwrap_or_else(|_| "Unable to derive a sample address".into());
+                .unwrap_or_else(|_| localized_copy("Unable to derive a sample address").into());
             content = content
-                .push(h3("Review Bitcoin wallet"))
-                .push(p1_bold("Wallet details"))
-                .push(p1_regular(format!("Bitcoin mainnet · {script} · {threshold}")))
-                .push(p1_regular(format!("Signer fingerprints: {}", if fingerprints.is_empty() { "Not provided" } else { &fingerprints })))
+                .push(h3(localized_copy("Review Bitcoin wallet")))
+                .push(p1_bold(localized_copy("Wallet details")))
+                .push(p1_regular(format!("{} · {script} · {threshold}", crate::chain::canonical_network_name(wallet.descriptor.chain()))))
+                .push(p1_regular(coincube_ui::localized_format!("Signer fingerprints: {}", "Huellas de los firmantes: {}", if fingerprints.is_empty() { localized_copy("Not provided") } else { &fingerprints })))
                 .push_maybe(self.keys.as_ref().filter(|keys| !keys.slots.is_empty()).map(|keys| p1_regular(keys.summary())))
-                .push(p1_bold("First receive address"))
+                .push(p1_bold(localized_copy("First receive address")))
                 .push(p1_regular(sample_address.clone()).wrapping(iced::widget::text::Wrapping::WordOrGlyph))
-                .push(button::secondary_compact(None, "Copy address")
+                .push(button::secondary_compact(None, localized_copy("Copy address"))
                     .on_press(view::Message::CopyWithToast(sample_address, "Address copied".into())))
-                .push(caption("Compare this address with your original wallet before importing.").style(theme::text::secondary))
-                .push(p1_regular(format!("History starts: {}",
-                    if wallet.birthday == 0 { "Beginning".to_string() } else {
+                .push(caption(localized_copy("Compare this address with your original wallet before importing.")).style(theme::text::secondary))
+                .push(p1_regular(coincube_ui::localized_format!("History starts: {}", "El historial empieza: {}",
+                    if wallet.birthday == 0 { localized_copy("Beginning").to_string() } else {
                         chrono::DateTime::from_timestamp(i64::from(wallet.birthday), 0)
                             .map(|date| date.format("%Y-%m-%d").to_string())
-                            .unwrap_or_else(|| "Invalid date".into())
+                            .unwrap_or_else(|| localized_copy("Invalid date").into())
                     })))
-                .push(p1_regular(format!("Address search: {} receive and {} change addresses", wallet.initial_lookahead, wallet.initial_lookahead)))
-                .push(caption("Your balance and transactions will appear after the scan finishes. Then update the Cube Recovery Kit to include this wallet.").style(theme::text::secondary))
-                .push(button::secondary_compact(None, if self.show_details { "Hide descriptor details" } else { "Show descriptor details" })
+                .push(p1_regular(coincube_ui::localized_format!("Address search: {} receive and {} change addresses", "Búsqueda de direcciones: {} de recepción y {} de cambio", wallet.initial_lookahead, wallet.initial_lookahead)))
+                .push(caption(localized_copy("Your balance and transactions will appear after the scan finishes. Then update the Cube Recovery Kit to include this wallet.")).style(theme::text::secondary))
+                .push(button::secondary_compact(None, if self.show_details { localized_copy("Hide descriptor details") } else { localized_copy("Show descriptor details") })
                     .on_press(view::Message::ImportedBitcoin(ImportMessage::ToggleDetails)));
             if self.show_details {
                 content = content
-                    .push(caption(format!(
+                    .push(caption(coincube_ui::localized_format!(
                         "Wallet identity: {}",
+                        "Identidad de la cartera: {}",
                         wallet.wallet_id.descriptor_checksum
                     )))
                     .push(
-                        caption(format!(
+                        caption(coincube_ui::localized_format!(
                             "Receive: {}",
+                            "Recepción: {}",
                             wallet.descriptor.receive_descriptor()
                         ))
                         .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
                         .style(theme::text::secondary),
                     )
                     .push(
-                        caption(format!("Change: {}", wallet.descriptor.change_descriptor()))
-                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
-                            .style(theme::text::secondary),
+                        caption(coincube_ui::localized_format!(
+                            "Change: {}",
+                            "Cambio: {}",
+                            wallet.descriptor.change_descriptor()
+                        ))
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                        .style(theme::text::secondary),
                     );
             }
             content = content
-                .push(p1_bold("Bitcoin server"))
-                .push(p1_regular(self.provider.label()));
+                .push(p1_bold(localized_copy("Bitcoin server")))
+                .push(p1_regular(localized_copy(self.provider.label())));
             if retry {
-                content = content.push(caption("The wallet identity is locked to this Cube. Choose the Bitcoin server to finish an interrupted import."));
+                content = content.push(caption(localized_copy("The wallet identity is locked to this Cube. Choose the Bitcoin server to finish an interrupted import.")));
                 let mut providers = Column::new().spacing(8);
                 let mut provider_row = Row::new().spacing(8);
                 for provider in [
@@ -3524,9 +3626,9 @@ impl ImportedBitcoinPanel {
                     Provider::Electrum,
                 ] {
                     let option = if self.provider == provider {
-                        button::primary(None, provider.label())
+                        button::primary(None, localized_copy(provider.label()))
                     } else {
-                        button::secondary(None, provider.label())
+                        button::secondary(None, localized_copy(provider.label()))
                     };
                     provider_row =
                         provider_row.push(option.width(iced::Length::Fill).on_press_maybe(
@@ -3542,7 +3644,7 @@ impl ImportedBitcoinPanel {
                 content = content.push(providers);
                 if matches!(self.provider, Provider::Esplora | Provider::Electrum) {
                     content = content.push(
-                        text_input("Server URL", &self.endpoint)
+                        text_input(localized_copy("Server URL"), &self.endpoint)
                             .on_input(|value| {
                                 view::Message::ImportedBitcoin(ImportMessage::EndpointEdited(value))
                             })
@@ -3554,10 +3656,10 @@ impl ImportedBitcoinPanel {
                 content = content.push(caption(public_server_label(&self.endpoint)));
             }
             if self.provider == Provider::Public {
-                content = content.push(caption("Public server: mempool.space, with blockstream.info fallback. This reveals wallet addresses to those providers."));
+                content = content.push(caption(localized_copy("Public server: mempool.space, with blockstream.info fallback. This reveals wallet addresses to those providers.")));
             }
             if self.provider == Provider::Connect {
-                content = content.push(caption("Connect server: COINCUBE's authenticated Bitcoin proxy, with public fallback servers."));
+                content = content.push(caption(localized_copy("Connect server: COINCUBE's authenticated Bitcoin proxy, with public fallback servers.")));
             }
             footer = footer.push(
                 Row::new()
@@ -3566,9 +3668,9 @@ impl ImportedBitcoinPanel {
                         button::secondary(
                             None,
                             if self.keys.is_some() {
-                                "Back to keys"
+                                localized_copy("Back to keys")
                             } else {
-                                "Edit wallet"
+                                localized_copy("Edit wallet")
                             },
                         )
                         .width(iced::Length::Shrink)
@@ -3584,13 +3686,11 @@ impl ImportedBitcoinPanel {
                         button::primary(
                             None,
                             if self.busy {
-                                "Importing…"
+                                localized_copy("Importing…")
+                            } else if retry {
+                                localized_copy("Retry import")
                             } else {
-                                if retry {
-                                    "Retry import"
-                                } else {
-                                    "Import and scan wallet"
-                                }
+                                localized_copy("Import and scan wallet")
                             },
                         )
                         .width(iced::Length::Shrink)
@@ -3602,7 +3702,7 @@ impl ImportedBitcoinPanel {
             );
         }
         if let Some(error) = &self.error {
-            content = content.push(p1_regular(error).style(theme::text::error));
+            content = content.push(p1_regular(shown_notice(error)).style(theme::text::error));
         }
         (content.into(), footer.into())
     }
@@ -3615,40 +3715,44 @@ impl ImportedBitcoinPanel {
             .push(h2("Vault"));
         if ready {
             if let Some(balance) = self.authoritative_balance() {
-                content = content.push(h3(format!(
+                content = content.push(h3(coincube_ui::localized_format!(
                     "{} available",
+                    "{} disponible",
                     passive_wallet_amount(balance.to_sat(), mask_amounts)
                 )));
             }
             content = content
-                .push(p1_regular("The signing keys remain in your original wallet or hardware devices. Your Cube recovery seed cannot sign for this Bitcoin wallet."))
-                .push(p1_regular("Update the Cube Recovery Kit now that this wallet is attached."))
+                .push(p1_regular(localized_copy("The signing keys remain in your original wallet or hardware devices. Your Cube recovery seed cannot sign for this Bitcoin wallet.")))
+                .push(p1_regular(localized_copy("Update the Cube Recovery Kit now that this wallet is attached.")))
                 .push(Row::new().spacing(10)
-                    .push_maybe((!self.chain().is_blake2b()).then(||button::primary(None, "Send").on_press(view::Message::ImportedBitcoin(ImportMessage::ShowSend))))
-                    .push(button::primary(None, "Receive").on_press(view::Message::ImportedBitcoin(ImportMessage::Receive)))
-                    .push(button::secondary(None, "Refresh").on_press(view::Message::ImportedBitcoin(ImportMessage::Refresh))));
+                    .push_maybe((!self.chain().is_blake2b()).then(||button::primary(None, localized_copy("Send")).on_press(view::Message::ImportedBitcoin(ImportMessage::ShowSend))))
+                    .push(button::primary(None, localized_copy("Receive")).on_press(view::Message::ImportedBitcoin(ImportMessage::Receive)))
+                    .push(button::secondary(None, localized_copy("Refresh")).on_press(view::Message::ImportedBitcoin(ImportMessage::Refresh))));
             if let Some(address) = &self.address {
                 content = content.push(p1_regular(address.address.to_string())).push(
-                    button::secondary(None, "Copy address")
+                    button::secondary(None, localized_copy("Copy address"))
                         .on_press(view::Message::ImportedBitcoin(ImportMessage::CopyAddress)),
                 );
             }
-            content = content.push(p1_bold("Recent transactions"));
+            content = content.push(p1_bold(localized_copy("Recent transactions")));
             if self.history.is_empty() {
-                content = content.push(caption("No transactions found in the completed scan."));
+                content = content.push(caption(localized_copy(
+                    "No transactions found in the completed scan.",
+                )));
             } else {
                 for tx in self.history.iter().take(20) {
                     let (direction, amount) = match tx.kind {
                         model::TransactionKind::IncomingSinglePayment(_)
                         | model::TransactionKind::IncomingPaymentBatch(_) => {
-                            ("Received", tx.incoming_amount.to_sat())
+                            (localized_copy("Received"), tx.incoming_amount.to_sat())
                         }
-                        model::TransactionKind::SendToSelf => {
-                            ("Moved within wallet", tx.incoming_amount.to_sat())
-                        }
+                        model::TransactionKind::SendToSelf => (
+                            localized_copy("Moved within wallet"),
+                            tx.incoming_amount.to_sat(),
+                        ),
                         model::TransactionKind::OutgoingSinglePayment(_)
                         | model::TransactionKind::OutgoingPaymentBatch(_) => {
-                            ("Sent", tx.outgoing_amount.to_sat())
+                            (localized_copy("Sent"), tx.outgoing_amount.to_sat())
                         }
                     };
                     let date = tx
@@ -3657,12 +3761,16 @@ impl ImportedBitcoinPanel {
                             chrono::DateTime::from_timestamp(i64::from(time), 0)
                                 .map(|date| date.format("%Y-%m-%d").to_string())
                         })
-                        .unwrap_or_else(|| "Date unknown".into());
+                        .unwrap_or_else(|| localized_copy("Date unknown").into());
                     let confirmation = match (tx.height, self.info.as_ref()) {
                         (Some(height), Some(info)) if height > 0 && info.block_height >= height => {
-                            format!("{} confirmations", info.block_height - height + 1)
+                            coincube_ui::localized_format!(
+                                "{} confirmations",
+                                "{} confirmaciones",
+                                info.block_height - height + 1
+                            )
                         }
-                        _ => "Unconfirmed".into(),
+                        _ => localized_copy("Unconfirmed").into(),
                     };
                     content = content
                         .push(p1_regular(format!(
@@ -3680,9 +3788,9 @@ impl ImportedBitcoinPanel {
                 if !self.chain().is_blake2b() && status.discovery_target < 10_000 {
                     content = content
                         .push(iced::widget::Space::new().height(8))
-                        .push(p1_bold("Missing an older transaction?"))
-                        .push(caption("Search 200 more receive and change addresses. This starts another history scan.").style(theme::text::secondary))
-                        .push(button::secondary_compact(None, "Search more addresses")
+                        .push(p1_bold(localized_copy("Missing an older transaction?")))
+                        .push(caption(localized_copy("Search 200 more receive and change addresses. This starts another history scan.")).style(theme::text::secondary))
+                        .push(button::secondary_compact(None, localized_copy("Search more addresses"))
                             .on_press_maybe((!self.busy).then_some(
                                 view::Message::ImportedBitcoin(ImportMessage::ExpandDiscovery)
                             )));
@@ -3692,7 +3800,7 @@ impl ImportedBitcoinPanel {
             content = self.scan_content(content);
         }
         if let Some(error) = &self.error {
-            content = content.push(p1_regular(error).style(theme::text::error));
+            content = content.push(p1_regular(shown_notice(error)).style(theme::text::error));
         }
         content.into()
     }
@@ -3704,11 +3812,11 @@ impl ImportedBitcoinPanel {
     ) -> Column<'a, view::Message> {
         let scan = ScanDisplay::from_info(self.info.as_ref(), self.sync_failed);
         let label = match scan {
-            ScanDisplay::Starting => "Finding your wallet's Bitcoin history",
-            ScanDisplay::Scanning { .. } => "Scanning your Bitcoin wallet history",
-            ScanDisplay::Saving => "Finishing your Bitcoin history scan",
-            ScanDisplay::Retrying => "Bitcoin history scan was interrupted",
-            ScanDisplay::NeedsAttention => "Bitcoin history needs attention",
+            ScanDisplay::Starting => localized_copy("Finding your wallet's Bitcoin history"),
+            ScanDisplay::Scanning { .. } => localized_copy("Scanning your Bitcoin wallet history"),
+            ScanDisplay::Saving => localized_copy("Finishing your Bitcoin history scan"),
+            ScanDisplay::Retrying => localized_copy("Bitcoin history scan was interrupted"),
+            ScanDisplay::NeedsAttention => localized_copy("Bitcoin history needs attention"),
         };
         content = content.push(h3(label));
         if matches!(
@@ -3716,8 +3824,10 @@ impl ImportedBitcoinPanel {
             ScanDisplay::Starting | ScanDisplay::Scanning { .. } | ScanDisplay::Saving
         ) {
             content = content.push(
-                p1_regular("Your balance and transactions will appear when the scan finishes.")
-                    .style(theme::text::secondary),
+                p1_regular(localized_copy(
+                    "Your balance and transactions will appear when the scan finishes.",
+                ))
+                .style(theme::text::secondary),
             );
         }
         match scan {
@@ -3732,8 +3842,9 @@ impl ImportedBitcoinPanel {
                             .style(theme::progress_bar::primary),
                     )
                     .push(
-                        caption(format!(
+                        caption(coincube_ui::localized_format!(
                             "{:.0}% · {checked} addresses checked (about {expected} expected)",
+                            "{:.0}% · {checked} direcciones revisadas (se esperan unas {expected})",
                             progress * 100.0
                         ))
                         .style(theme::text::secondary),
@@ -3750,9 +3861,9 @@ impl ImportedBitcoinPanel {
             ScanDisplay::Retrying | ScanDisplay::NeedsAttention => {
                 if self.error.is_none() {
                     content = content.push(
-                        p1_regular(
+                        p1_regular(localized_copy(
                             "Check your connection and Bitcoin server, then retry the scan.",
-                        )
+                        ))
                         .style(theme::text::secondary),
                     );
                 }
@@ -3760,9 +3871,9 @@ impl ImportedBitcoinPanel {
                     button::secondary_compact(
                         None,
                         if self.sync_requesting {
-                            "Retrying…"
+                            localized_copy("Retrying…")
                         } else {
-                            self.synchronization_action_label()
+                            localized_copy(self.synchronization_action_label())
                         },
                     )
                     .on_press_maybe(
@@ -3778,8 +3889,10 @@ impl ImportedBitcoinPanel {
             ScanDisplay::Starting | ScanDisplay::Scanning { .. } | ScanDisplay::Saving
         ) {
             content = content.push(
-                caption("Progress updates automatically. Keep Tenshu open while it scans.")
-                    .style(theme::text::secondary),
+                caption(localized_copy(
+                    "Progress updates automatically. Keep Tenshu open while it scans.",
+                ))
+                .style(theme::text::secondary),
             );
         }
         content
@@ -3789,66 +3902,77 @@ impl ImportedBitcoinPanel {
         if self.chain().is_blake2b() {
             return Column::new()
                 .spacing(16)
-                .push(h2("Send"))
-                .push(p1_regular(
+                .push(h2(localized_copy("Send")))
+                .push(p1_regular(localized_copy(
                     "Sending from paired imported Bitcoin Blake2b wallets is not available.",
-                ))
+                )))
                 .into();
         }
         let mut content = Column::new()
             .spacing(14)
-            .push(h2(if psbts_only { "PSBTs" } else { "Send Bitcoin" }))
-            .push(p1_regular("Spend from the imported wallet using its original signer or hardware device. Your Cube seed cannot sign this transaction."))
-            .push(button::secondary(None, "Back to overview")
+            .push(h2(if psbts_only { "PSBTs" } else { localized_copy("Send Bitcoin") }))
+            .push(p1_regular(localized_copy("Spend from the imported wallet using its original signer or hardware device. Your Cube seed cannot sign this transaction.")))
+            .push(button::secondary(None, localized_copy("Back to overview"))
                 .on_press(view::Message::Menu(Menu::Vault(VaultSubMenu::Overview))));
         if let Some(txid) = self.last_broadcast_txid {
-            content = content.push(p1_bold(format!("Broadcast transaction: {txid}")));
+            content = content.push(p1_bold(coincube_ui::localized_format!(
+                "Broadcast transaction: {txid}",
+                "Transacción publicada: {txid}"
+            )));
         }
         if let Some(notice) = &self.broadcast_notice {
-            content = content.push(caption(notice));
+            content = content.push(caption(shown_notice(notice)));
         }
         if let Some(notice) = &self.file_notice {
-            content = content.push(caption(notice));
+            content = content.push(caption(shown_notice(notice)));
         }
         if let Some(draft) = &self.draft {
             content = content
-                .push(p1_bold("Review transaction"))
-                .push(caption(format!(
+                .push(p1_bold(localized_copy("Review transaction")))
+                .push(p1_regular(crate::chain::canonical_network_name(
+                    self.chain(),
+                )))
+                .push(caption(coincube_ui::localized_format!(
                     "Draft ID: {}",
+                    "ID del borrador: {}",
                     draft.psbt.unsigned_tx.compute_txid()
                 )));
             for output in &draft.psbt.unsigned_tx.output {
                 let address = Address::from_script(&output.script_pubkey, Network::Bitcoin)
                     .map(|address| address.to_string())
-                    .unwrap_or_else(|_| "Unsupported output script".into());
+                    .unwrap_or_else(|_| localized_copy("Unsupported output script").into());
                 content = content.push(p1_regular(format!(
                     "{} sats → {address}",
                     output.value.to_sat()
                 )));
             }
             if let Ok(fee) = draft.psbt.fee() {
-                content = content.push(p1_regular(format!("Network fee: {} sats", fee.to_sat())));
+                content = content.push(p1_regular(coincube_ui::localized_format!(
+                    "Network fee: {} sats",
+                    "Comisión de red: {} sats",
+                    fee.to_sat()
+                )));
             }
             for warning in &draft.warnings {
-                content = content.push(caption(warning));
+                content = content.push(caption(shown_notice(warning)));
             }
             content = content
-                .push(caption(format!("Valid signer signatures per input: {}",
+                .push(caption(coincube_ui::localized_format!("Valid signer signatures per input: {}", "Firmas válidas por entrada: {}",
                     draft.signatures_per_input.iter().map(|count| count.to_string()).collect::<Vec<_>>().join(", "))))
-                .push(p1_regular("Save or copy this PSBT for the original signing wallet. Load the signed file or paste its base64 below. For multisig, repeat with each signer."))
+                .push(p1_regular(localized_copy("Save or copy this PSBT for the original signing wallet. Load the signed file or paste its base64 below. For multisig, repeat with each signer.")))
                 .push(Row::new().spacing(10)
-                    .push(button::secondary(None, "Save PSBT file")
-                        .on_press_maybe((!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::SavePsbt))))
-                    .push(button::secondary(None, "Load signed PSBT")
-                        .on_press_maybe((!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::LoadSignedPsbt))))
-                    .push(button::secondary(None, "Copy PSBT")
+                    .push(button::secondary(None, localized_copy("Save PSBT file"))
+                        .on_press_maybe((!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::SavePsbt(coincube_ui::locale::language())))))
+                    .push(button::secondary(None, localized_copy("Load signed PSBT"))
+                        .on_press_maybe((!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::LoadSignedPsbt(coincube_ui::locale::language())))))
+                    .push(button::secondary(None, localized_copy("Copy PSBT"))
                         .on_press(view::Message::ImportedBitcoin(ImportMessage::CopyPsbt))))
-                .push(p1_bold("Sign with a connected device"));
+                .push(p1_bold(localized_copy("Sign with a connected device")));
             if let Some(listing) = &self.hardware_wallets {
                 if listing.list.is_empty() {
-                    content = content.push(caption(
+                    content = content.push(caption(localized_copy(
                         "Connect and unlock a hardware wallet to sign here.",
-                    ));
+                    )));
                 }
                 for device in &listing.list {
                     let label = match device {
@@ -3857,49 +3981,64 @@ impl ImportedBitcoinPanel {
                         } => {
                             format!("{kind} · {fingerprint}")
                         }
-                        HardwareWallet::Locked { kind, .. } => format!("{kind} · unlock device"),
-                        HardwareWallet::Unsupported { kind, .. } => format!("{kind} · unsupported"),
+                        HardwareWallet::Locked { kind, .. } => coincube_ui::localized_format!(
+                            "{kind} · unlock device",
+                            "{kind} · desbloquea el dispositivo"
+                        ),
+                        HardwareWallet::Unsupported { kind, .. } => {
+                            coincube_ui::localized_format!(
+                                "{kind} · unsupported",
+                                "{kind} · no compatible"
+                            )
+                        }
                     };
                     content = content.push(caption(label));
                     if device.is_supported() {
-                        content =
-                            content.push(button::secondary(None, "Sign PSBT").on_press_maybe(
+                        content = content.push(
+                            button::secondary(None, localized_copy("Sign PSBT")).on_press_maybe(
                                 (!self.busy).then_some(view::Message::ImportedBitcoin(
                                     ImportMessage::SignWithDevice(device.id().clone()),
                                 )),
-                            ));
+                            ),
+                        );
                     }
                 }
             }
             content = content
                 .push(
-                    text_input("Paste signed PSBT (base64)", &self.signed_psbt_text)
-                        .on_input(|value| {
-                            view::Message::ImportedBitcoin(ImportMessage::SignedPsbtEdited(value))
-                        })
-                        .padding(10),
+                    text_input(
+                        localized_copy("Paste signed PSBT (base64)"),
+                        &self.signed_psbt_text,
+                    )
+                    .on_input(|value| {
+                        view::Message::ImportedBitcoin(ImportMessage::SignedPsbtEdited(value))
+                    })
+                    .padding(10),
                 )
-                .push(button::secondary(None, "Import signatures").on_press_maybe(
-                    (!self.busy && !self.signed_psbt_text.trim().is_empty()).then_some(
-                        view::Message::ImportedBitcoin(ImportMessage::ImportSignedPsbt),
+                .push(
+                    button::secondary(None, localized_copy("Import signatures")).on_press_maybe(
+                        (!self.busy && !self.signed_psbt_text.trim().is_empty()).then_some(
+                            view::Message::ImportedBitcoin(ImportMessage::ImportSignedPsbt),
+                        ),
                     ),
-                ));
+                );
             let draft_id = draft.psbt.unsigned_tx.compute_txid();
             let already_broadcast = self.spend_drafts.iter().any(|entry| {
                 entry.psbt.unsigned_tx.compute_txid() == draft_id && entry.broadcast_txid.is_some()
             });
             if let Some(final_txid) = draft.final_txid {
                 content = content
-                    .push(p1_bold(format!(
-                        "Ready to broadcast · Final transaction ID: {final_txid}"
+                    .push(p1_bold(coincube_ui::localized_format!(
+                        "Ready to broadcast · Final transaction ID: {final_txid}",
+                        "Lista para publicar · ID de la transacción final: {final_txid}"
                     )))
                     .push(
                         button::primary(
                             None,
                             if self.busy {
-                                "Broadcasting…"
+                                localized_copy("Broadcasting…")
                             } else {
-                                "Broadcast transaction"
+                                localized_copy("Broadcast transaction")
                             },
                         )
                         .on_press_maybe(
@@ -3909,33 +4048,37 @@ impl ImportedBitcoinPanel {
                         ),
                     );
                 if already_broadcast {
-                    content =
-                        content.push(caption("This saved transaction was already broadcast."));
+                    content = content.push(caption(localized_copy(
+                        "This saved transaction was already broadcast.",
+                    )));
                 }
             } else {
-                content = content.push(caption(
+                content = content.push(caption(localized_copy(
                     "Waiting for enough valid signatures on every input.",
-                ));
+                )));
             }
         } else if !psbts_only {
             content = content
-                .push(p1_bold("New transaction"))
+                .push(p1_bold(localized_copy("New transaction")))
                 .push(
-                    text_input("Bitcoin recipient address", &self.send_recipient)
-                        .on_input(|value| {
-                            view::Message::ImportedBitcoin(ImportMessage::RecipientEdited(value))
-                        })
-                        .padding(10),
+                    text_input(
+                        localized_copy("Bitcoin recipient address"),
+                        &self.send_recipient,
+                    )
+                    .on_input(|value| {
+                        view::Message::ImportedBitcoin(ImportMessage::RecipientEdited(value))
+                    })
+                    .padding(10),
                 )
                 .push(
-                    text_input("Amount in satoshis", &self.send_amount)
+                    text_input(localized_copy("Amount in satoshis"), &self.send_amount)
                         .on_input(|value| {
                             view::Message::ImportedBitcoin(ImportMessage::AmountEdited(value))
                         })
                         .padding(10),
                 )
                 .push(
-                    text_input("Fee rate in sat/vB", &self.send_feerate)
+                    text_input(localized_copy("Fee rate in sat/vB"), &self.send_feerate)
                         .on_input(|value| {
                             view::Message::ImportedBitcoin(ImportMessage::FeerateEdited(value))
                         })
@@ -3945,9 +4088,9 @@ impl ImportedBitcoinPanel {
                     button::primary(
                         None,
                         if self.busy {
-                            "Preparing…"
+                            localized_copy("Preparing…")
                         } else {
-                            "Review PSBT"
+                            localized_copy("Review PSBT")
                         },
                     )
                     .on_press_maybe(
@@ -3958,85 +4101,98 @@ impl ImportedBitcoinPanel {
         }
         if psbts_only && self.draft.is_none() {
             content = content.push(
-                button::primary(None, "New transaction")
+                button::primary(None, localized_copy("New transaction"))
                     .on_press(view::Message::Menu(Menu::Vault(VaultSubMenu::Send))),
             );
         }
         if !self.spend_drafts.is_empty() {
-            content = content.push(p1_bold("Saved transactions"));
+            content = content.push(p1_bold(localized_copy("Saved transactions")));
             for entry in self.spend_drafts.iter().take(10) {
                 let id = entry.psbt.unsigned_tx.compute_txid();
-                content = content.push(caption(format!("Draft {id}"))).push(
-                    button::secondary(None, "Open saved PSBT").on_press_maybe(
-                        (!self.busy).then_some(view::Message::ImportedBitcoin(
-                            ImportMessage::SelectDraft(id),
-                        )),
-                    ),
-                );
+                content = content
+                    .push(caption(coincube_ui::localized_format!(
+                        "Draft {id}",
+                        "Borrador {id}"
+                    )))
+                    .push(
+                        button::secondary(None, localized_copy("Open saved PSBT")).on_press_maybe(
+                            (!self.busy).then_some(view::Message::ImportedBitcoin(
+                                ImportMessage::SelectDraft(id),
+                            )),
+                        ),
+                    );
             }
         }
         if let Some(error) = &self.error {
-            content = content.push(p1_regular(error).style(theme::text::error));
+            content = content.push(p1_regular(shown_notice(error)).style(theme::text::error));
         }
         content.into()
     }
 
     fn settings_view(&self, option: Option<SettingsOption>) -> Element<'_, view::Message> {
-        let mut content = Column::new().spacing(16).push(h2("Vault settings"));
+        let mut content = Column::new()
+            .spacing(16)
+            .push(h2(localized_copy("Vault settings")));
         match option.unwrap_or(SettingsOption::Node) {
             SettingsOption::Node | SettingsOption::Connections => {
-                content = content
-                    .push(p1_bold("Bitcoin server"))
-                    .push(p1_regular(if self.provider_known {
-                        self.provider.label()
-                    } else {
-                        "Server settings unavailable"
-                    }))
-                    .push(caption(public_server_label(&self.endpoint)))
-                    .push(
-                        button::secondary(None, "Retry synchronization").on_press_maybe(
-                            (!self.busy)
-                                .then_some(view::Message::ImportedBitcoin(ImportMessage::Refresh)),
-                        ),
-                    );
+                content =
+                    content
+                        .push(p1_bold(localized_copy("Bitcoin server")))
+                        .push(p1_regular(if self.provider_known {
+                            localized_copy(self.provider.label())
+                        } else {
+                            localized_copy("Server settings unavailable")
+                        }))
+                        .push(caption(public_server_label(&self.endpoint)))
+                        .push(
+                            button::secondary(None, localized_copy("Retry synchronization"))
+                                .on_press_maybe((!self.busy).then_some(
+                                    view::Message::ImportedBitcoin(ImportMessage::Refresh),
+                                )),
+                        );
                 if let Some(status) = self
                     .info
                     .as_ref()
                     .and_then(|info| info.imported_wallet.as_ref())
                 {
-                    content = content.push(caption(format!(
+                    content = content.push(caption(coincube_ui::localized_format!(
                         "History checked: receive {} · change {} · target {} per branch",
-                        status.receive_scanned, status.change_scanned, status.discovery_target
+                        "Historial revisado: recepción {} · cambio {} · objetivo {} por rama",
+                        status.receive_scanned,
+                        status.change_scanned,
+                        status.discovery_target
                     )));
                     if !self.chain().is_blake2b() && status.discovery_target < 10_000 {
                         content = content.push(
-                            button::secondary(None, "Search 200 more addresses").on_press_maybe(
-                                (self.is_ready() && !self.busy).then_some(
+                            button::secondary(None, localized_copy("Search 200 more addresses"))
+                                .on_press_maybe((self.is_ready() && !self.busy).then_some(
                                     view::Message::ImportedBitcoin(ImportMessage::ExpandDiscovery),
-                                ),
-                            ),
+                                )),
                         );
                     }
                 }
             }
             SettingsOption::Wallet | SettingsOption::ImportExport => {
                 content = content
-                    .push(p1_regular("This Vault uses the imported wallet's original signer keys. The Cube seed unlocks the Cube but cannot sign its Bitcoin transactions."))
-                    .push(p1_regular("Keep the Cube Recovery Kit current after importing this wallet or reserving a new receive address."))
+                    .push(p1_regular(localized_copy("This Vault uses the imported wallet's original signer keys. The Cube seed unlocks the Cube but cannot sign its Bitcoin transactions.")))
+                    .push(p1_regular(localized_copy("Keep the Cube Recovery Kit current after importing this wallet or reserving a new receive address.")))
                     .push_maybe(self.stored_keys_view());
                 if let Some(wallet) = self.import.active_attachment() {
-                    content = content.push(caption(format!(
+                    content = content.push(caption(coincube_ui::localized_format!(
                         "Wallet ID: {}",
+                        "ID de la cartera: {}",
                         wallet.wallet_id.descriptor_checksum
                     )));
                     if self.show_details {
                         content = content
-                            .push(caption(format!(
+                            .push(caption(coincube_ui::localized_format!(
                                 "Receive: {}",
+                                "Recepción: {}",
                                 wallet.descriptor.receive_descriptor()
                             )))
-                            .push(caption(format!(
+                            .push(caption(coincube_ui::localized_format!(
                                 "Change: {}",
+                                "Cambio: {}",
                                 wallet.descriptor.change_descriptor()
                             )));
                     }
@@ -4044,9 +4200,9 @@ impl ImportedBitcoinPanel {
                         button::secondary(
                             None,
                             if self.show_details {
-                                "Hide public descriptors"
+                                localized_copy("Hide public descriptors")
                             } else {
-                                "Show public descriptors"
+                                localized_copy("Show public descriptors")
                             },
                         )
                         .on_press(view::Message::ImportedBitcoin(ImportMessage::ToggleDetails)),
@@ -4056,7 +4212,7 @@ impl ImportedBitcoinPanel {
             SettingsOption::LocalSigning => {}
         }
         if let Some(error) = &self.error {
-            content = content.push(p1_regular(error).style(theme::text::error));
+            content = content.push(p1_regular(shown_notice(error)).style(theme::text::error));
         }
         content.into()
     }
@@ -5176,7 +5332,7 @@ mod tests {
             &shown,
             &[
                 "Import or restore",
-                "Bitcoin",
+                "Bitcoin SHA-256 · Mainnet",
                 "Overview",
                 "Import Bitcoin wallet",
                 "Cube",

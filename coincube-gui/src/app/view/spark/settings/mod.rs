@@ -17,6 +17,8 @@
 //! `ConnectCubePanel` into the form (the `State::view` trait signature
 //! doesn't reach Connect state).
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 pub mod lightning_address;
 
 use coincube_ui::{
@@ -80,11 +82,11 @@ pub const NICKNAME_ID: &str = "tenshu.settings.spark.nickname";
 /// the Cube's. Return saves it, and so does leaving the tab.
 pub fn nickname_group<'a>(input: Option<&'a str>, saved: Option<&'a str>) -> Element<'a, Message> {
     let value = input.or(saved).unwrap_or_default();
-    let row = page::row("Nickname")
-        .description(
+    let row = page::row(localized_copy("Nickname"))
+        .description(localized_copy(
             "Shown in the side panel as “Spark · nickname”. Leave it empty to show “Spark”. \
              Saved when you press Return or leave this tab.",
-        )
+        ))
         .control(
             Container::new(
                 text_field(NICKNAME_ID, "Spark nickname", value, Message::FocusAction)
@@ -102,7 +104,11 @@ pub fn nickname_group<'a>(input: Option<&'a str>, saved: Option<&'a str>) -> Ele
             )
             .width(Length::Fixed(280.0)),
         );
-    page::group("Spark identity", None, page::rows([row.into()]))
+    page::group(
+        localized_copy("Spark identity"),
+        None,
+        page::rows([row.into()]),
+    )
 }
 
 impl SparkSettingsView {
@@ -111,7 +117,7 @@ impl SparkSettingsView {
     pub fn render<'a>(self) -> Element<'a, Message> {
         if matches!(self.status, SparkSettingsStatus::Unavailable) {
             return page::group(
-                "Spark isn't available",
+                localized_copy("Spark isn't available"),
                 Some(
                     "Spark is not configured for this Cube, or the bridge subprocess failed to \
                      spawn. Configure a Spark signer on this Cube and restart the app to connect."
@@ -147,7 +153,7 @@ impl SparkSettingsView {
             SparkSettingsStatus::Loading => page::Status::Busy,
             SparkSettingsStatus::Error(_) | SparkSettingsStatus::Unavailable => page::Status::Bad,
         };
-        let mut service = page::row("Spark wallet service")
+        let mut service = page::row(localized_copy("Spark wallet service"))
             .accessory(page::status(kind, headline))
             .description(service_summary(&self.status))
             .line(page::link(
@@ -167,7 +173,7 @@ impl SparkSettingsView {
             );
         }
         page::group(
-            "Health",
+            localized_copy("Health"),
             None,
             page::rows([
                 service.into(),
@@ -215,13 +221,13 @@ fn stable_balance_group<'a>(
         (Some(true), true) => (page::Status::Ok, "On"),
         (Some(false), true) => (page::Status::Off, "Off"),
     };
-    let auto = page::row("Auto-convert received bitcoin")
+    let auto = page::row(localized_copy("Auto-convert received bitcoin"))
         .accessory(page::status(kind, word))
-        .description(
+        .description(localized_copy(
             "When on, new bitcoin payments received in Spark convert to USDB. Bitcoin you already \
              have and bitcoin from manual swaps stay bitcoin. Turning this off keeps your USDB \
              as USDB. Each conversion can fill slightly differently from the rate at the time.",
-        )
+        ))
         .control(
             toggle(
                 STABLE_BALANCE_ID,
@@ -238,18 +244,18 @@ fn stable_balance_group<'a>(
             })),
         )
         .top();
-    let pay_from = page::row("Pay from USDB when bitcoin runs short")
-        .accessory(page::status(page::Status::Ok, "Always on"))
-        .description(
+    let pay_from = page::row(localized_copy("Pay from USDB when bitcoin runs short"))
+        .accessory(page::status(page::Status::Ok, localized_copy("Always on")))
+        .description(localized_copy(
             "A send uses bitcoin first, then converts just enough USDB to cover the rest. The \
              review step shows the conversion before you confirm.",
-        );
+        ));
     let mut column = Column::new().width(Length::Fill);
     if let Some((failures, reason)) = paused {
         column = column.push(page::note(
             coincube_ui::component::tenshu::Tone::Warn,
-            page::muted(format!(
-                "Auto-convert paused after {} failed conversions: {}. Turn it on again to retry.",
+            page::muted(localized_format!(
+                "Auto-convert paused after {} failed conversions: {}. Turn it on again to retry.", "Auto-convertido se detuvo después de las conversiones fallidas de {}: {}. Enciende de nuevo para volver a entrar.",
                 failures, reason
             )),
             None,
@@ -258,16 +264,16 @@ fn stable_balance_group<'a>(
     if held && active == Some(true) {
         column = column.push(page::note(
             coincube_ui::component::tenshu::Tone::Muted,
-            page::muted(
+            page::muted(localized_copy(
                 "Auto-convert is waiting while a swap out of USDB settles. Bitcoin received \
                  meanwhile stays bitcoin.",
-            ),
+            )),
             None,
         ));
     }
     column
         .push(page::group(
-            "US dollar balance (USDB)",
+            localized_copy("US dollar balance (USDB)"),
             None,
             page::rows([auto.into(), pay_from.into()]),
         ))
@@ -281,18 +287,22 @@ fn conversion_group<'a>(swap_available: bool) -> Element<'a, Message> {
     let cap = crate::app::view::spark::swap::price_change(
         coincube_spark_protocol::CONVERSION_MAX_SLIPPAGE_BPS,
     );
-    let max = page::row("Max price change")
+    let max = page::row(localized_copy("Max price change"))
         .accessory(page::muted(cap))
-        .description("A conversion that would fill worse than this doesn't go through.");
+        .description(localized_copy(
+            "A conversion that would fill worse than this doesn't go through.",
+        ));
     let mut rows: Vec<Element<'a, Message>> = vec![max.into()];
     if swap_available {
         rows.push(
-            page::row("Swap by hand")
-                .description("Move any amount between bitcoin and USDB. Also on the Spark page.")
+            page::row(localized_copy("Swap by hand"))
+                .description(localized_copy(
+                    "Move any amount between bitcoin and USDB. Also on the Spark page.",
+                ))
                 .control(
                     ActionButton::new(
                         iced::advanced::widget::Id::new(SWAP_BY_HAND_ID),
-                        "Swap BTC ⇄ USDB",
+                        localized_copy("Swap BTC ⇄ USDB"),
                         ActionKind::Secondary,
                         Message::FocusAction,
                     )
@@ -304,7 +314,7 @@ fn conversion_group<'a>(swap_available: bool) -> Element<'a, Message> {
                 .into(),
         );
     }
-    page::group("Conversion", None, page::rows(rows))
+    page::group(localized_copy("Conversion"), None, page::rows(rows))
 }
 
 /// "Turn off auto-convert?", over the page.
@@ -314,7 +324,7 @@ pub fn turn_off_dialog<'a>() -> Element<'a, Message> {
     Container::new(
         Column::new()
             .spacing(16)
-            .push(h4_bold("Turn off auto-convert?"))
+            .push(h4_bold(localized_copy("Turn off auto-convert?")))
             .push(p1_regular(TURN_OFF_COPY))
             .push(
                 Row::new()
@@ -323,7 +333,7 @@ pub fn turn_off_dialog<'a>() -> Element<'a, Message> {
                     .push(
                         ActionButton::new(
                             iced::advanced::widget::Id::new(KEEP_AUTO_CONVERT_ID),
-                            "Keep auto-convert",
+                            localized_copy("Keep auto-convert"),
                             ActionKind::Secondary,
                             Message::FocusAction,
                         )
@@ -334,7 +344,7 @@ pub fn turn_off_dialog<'a>() -> Element<'a, Message> {
                     .push(
                         ActionButton::new(
                             iced::advanced::widget::Id::new(TURN_OFF_AUTO_CONVERT_ID),
-                            "Turn off",
+                            localized_copy("Turn off"),
                             ActionKind::Primary,
                             Message::FocusAction,
                         )
@@ -383,21 +393,21 @@ fn bridge_status_copy(
         SparkSettingsStatus::Loading => (
             "●",
             color::GREY_3,
-            "Checking…",
+            localized_copy("Checking…"),
             "Bridge subprocess · JSON-RPC over stdio. Waiting for the first get_info round-trip."
                 .to_string(),
         ),
         SparkSettingsStatus::Connected => (
             "✓",
             color::GREEN,
-            "Connected",
+            localized_copy("Connected"),
             "Bridge subprocess · JSON-RPC over stdio. The last get_info round-trip succeeded."
                 .to_string(),
         ),
         SparkSettingsStatus::Error(err) => (
             "✗",
             color::RED,
-            "Disconnected",
+            localized_copy("Disconnected"),
             format!(
                 "Bridge subprocess · JSON-RPC over stdio. The last get_info call failed; \
                  restarting the Cube re-spawns the bridge. Error: {}",
@@ -407,7 +417,7 @@ fn bridge_status_copy(
         SparkSettingsStatus::Unavailable => (
             "✗",
             color::RED,
-            "Unavailable",
+            localized_copy("Unavailable"),
             "Bridge subprocess · JSON-RPC over stdio. No Spark signer is configured, or the \
              bridge subprocess failed to spawn."
                 .to_string(),

@@ -1,6 +1,8 @@
 //! View for Vault → Settings → Pair with Keychain: the key the phone will
 //! hold, the pairing steps, and the phones already paired.
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::widget::{
     qr_code::{self, QRCode},
     Column, Container, Row, Space,
@@ -45,12 +47,14 @@ pub fn section<'a>(
             Column::new()
                 .width(Length::Fill)
                 .push(Space::new().height(Length::Fixed(page::GROUP_GAP)))
-                .push(page::rows([page::row("This Vault has no Keychain key")
-                    .description(
-                        "Phones sign with a key from the COINCUBE Keychain app, and that key \
+                .push(page::rows([page::row(localized_copy(
+                    "This Vault has no Keychain key",
+                ))
+                .description(localized_copy(
+                    "Phones sign with a key from the COINCUBE Keychain app, and that key \
                          can only be added when a Vault is created.",
-                    )
-                    .into()])),
+                ))
+                .into()])),
         );
     }
     let mut col = Column::new()
@@ -61,9 +65,9 @@ pub fn section<'a>(
 
     if !matches!(state.flow, PairingFlow::Waiting { .. }) {
         if let Some(fp) = state.wallet_fingerprint {
-            col = col.push(page::caption(format!(
+            col = col.push(page::caption(localized_format!(
                 "Phones paired here sign for this Vault (id {}). This identifier is derived \
-                 from the Vault descriptor and is distinct from any signer's master fingerprint.",
+                 from the Vault descriptor and is distinct from any signer's master fingerprint.", "Los teléfonos emparejados aquí firman para este Vault (id {}). Este identificador se deriva del descriptor Vault y es distinto de la huella maestra de cualquier firmante.",
                 fp
             )));
         }
@@ -81,12 +85,12 @@ fn no_keychain_key(state: &LocalSigningState) -> bool {
 fn key_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
     if no_keychain_key(state) {
         return page::group(
-            "Key for the phone",
+            localized_copy("Key for the phone"),
             None,
-            page::rows([page::row("No Keychain keys to pair")
+            page::rows([page::row(localized_copy("No Keychain keys to pair"))
                 .description(
-                    "This Vault doesn't have a key from the COINCUBE Keychain app, so there's \
-                     no phone that can sign for it. Keychain keys are added when you create a Vault.",
+                    localized_copy("This Vault doesn't have a key from the COINCUBE Keychain app, so there's \
+                     no phone that can sign for it. Keychain keys are added when you create a Vault."),
                 )
                 .into()]),
         );
@@ -122,10 +126,10 @@ fn key_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
             Row::new()
                 .spacing(8)
                 .align_y(Alignment::Center)
-                .push(page::muted("Rename keys in"))
+                .push(page::muted(localized_copy("Rename keys in")))
                 .push(page::link(
                     RENAME_KEYS_ID,
-                    "Wallet & signers",
+                    localized_copy("Wallet & signers"),
                     Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
                         SettingsOption::Wallet,
                     )))),
@@ -141,7 +145,7 @@ fn key_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
                     local(LocalSigningMessage::ToggleKeyDetails),
                 )),
         );
-    page::group("Key for the phone", None, content)
+    page::group(localized_copy("Key for the phone"), None, content)
 }
 
 /// A key's display name: the name the user gave it, else a generic label
@@ -175,7 +179,7 @@ fn pair_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
         PairingFlow::Error(e) => error_body(e),
     };
     page::group(
-        "Pair a phone",
+        localized_copy("Pair a phone"),
         Some(
             "Same Wi-Fi. No Connect account needed. Pairing does not move a key to the phone."
                 .into(),
@@ -226,10 +230,10 @@ fn waiting_body<'a>(
     let mut info = Column::new()
         .spacing(4)
         .width(Length::Fill)
-        .push(tenshu::label(format!("Scan with Keychain on phone {}", phone.cert_fp8)))
+        .push(tenshu::label(localized_format!("Scan with Keychain on phone {}", "Escanea con Keychain en el teléfono {}", phone.cert_fp8)))
         .push(page::muted(if remaining > 0 {
-            format!(
-                "Phone at {}. The phone and Tenshu verify pairing automatically; no private key leaves this computer.",
+            localized_format!(
+                "Phone at {}. The phone and Tenshu verify pairing automatically; no private key leaves this computer.", "Teléfono en {}. El teléfono y Tenshu verifican emparejar automáticamente; ninguna llave privada deja este ordenador.",
                 phone.addr
             )
         } else {
@@ -239,10 +243,10 @@ fn waiting_body<'a>(
         .push(if remaining > 0 {
             page::status(
                 page::Status::Busy,
-                format!("Waiting · expires in {}s", remaining),
+                localized_format!("Waiting · expires in {}s", "En espera · vence en {} s", remaining),
             )
         } else {
-            page::status(page::Status::Bad, "Pairing offer expired")
+            page::status(page::Status::Bad, localized_copy("Pairing offer expired"))
         })
         .push(Space::new().height(Length::Fixed(6.0)))
         .push(cancel("Cancel pairing"));
@@ -281,19 +285,19 @@ fn picker_body<'a>(
         let id =
             iced::advanced::widget::Id::from(format!("tenshu.settings.pair.phone.{}", d.cert_fp8));
         rows.push(
-            page::row(format!("Phone {}", d.cert_fp8))
+            page::row(localized_format!("Phone {}", "Teléfono {}", d.cert_fp8))
                 .description(d.addr.to_string())
                 .control(if i == 0 {
-                    page::primary(id, "Pair", press)
+                    page::primary(id, localized_copy("Pair"), press)
                 } else {
-                    page::button(id, "Pair", press)
+                    page::button(id, localized_copy("Pair"), press)
                 })
                 .into(),
         );
     }
     Column::new()
         .width(Length::Fill)
-        .push(page::status(page::Status::Busy, "Looking for phones on this Wi-Fi…"))
+        .push(page::status(page::Status::Busy, localized_copy("Looking for phones on this Wi-Fi…")))
         .push(Space::new().height(Length::Fixed(12.0)))
         .push(page::rows(rows))
         .push(Space::new().height(Length::Fixed(12.0)))
@@ -303,9 +307,9 @@ fn picker_body<'a>(
                 .align_y(Alignment::Center)
                 .push(
                     Container::new(page::muted(if discovered.is_empty() {
-                        "No phones yet. Open Keychain on a phone on the same network and keep it unlocked."
+                        localized_copy("No phones yet. Open Keychain on a phone on the same network and keep it unlocked.")
                     } else {
-                        "Not listed? Check both are on the same Wi-Fi."
+                        localized_copy("Not listed? Check both are on the same Wi-Fi.")
                     }))
                     .width(Length::Fill),
                 )
@@ -317,17 +321,22 @@ fn picker_body<'a>(
 fn error_body<'a>(err: &'a PairingError) -> Element<'a, Message> {
     let (title, body) = match err {
         PairingError::OfferExpired => (
-            "Offer expired",
-            "The pairing offer ran out before any phone scanned it. \
-             Generate a new offer and try again."
-                .to_string(),
+            localized_copy("Offer expired"),
+            localized_copy(
+                "The pairing offer ran out before any phone scanned it. \
+                 Generate a new offer and try again.",
+            )
+            .to_string(),
         ),
         PairingError::WalletFingerprintMismatch { expected, claimed } => (
-            "Wrong wallet",
-            format!(
+            localized_copy("Wrong wallet"),
+            localized_format!(
                 "The phone reports it can sign for wallet {} but \
                  this wallet expects {}. Confirm the phone is paired \
                  with the right vault.",
+                "El teléfono indica que puede firmar para la cartera {}, \
+                 pero esta cartera espera {}. Confirma que el teléfono \
+                 esté vinculado con el Vault correcto.",
                 claimed,
                 expected
                     .iter()
@@ -337,42 +346,54 @@ fn error_body<'a>(err: &'a PairingError) -> Element<'a, Message> {
             ),
         ),
         PairingError::ReplayRefused => (
-            "QR already used",
-            "This pairing QR has already completed a pairing. Go \
-             back and start a fresh offer rather than re-using it."
-                .to_string(),
+            localized_copy("QR already used"),
+            localized_copy(
+                "This pairing QR has already completed a pairing. Go \
+                 back and start a fresh offer rather than re-using it.",
+            )
+            .to_string(),
         ),
         PairingError::PhoneVerificationFailed => (
-            "Couldn't verify the phone",
-            "The device that scanned the QR couldn't prove it's the \
-             phone you're pairing. This can happen on an untrusted \
-             network. Make sure both devices are on a network you \
-             trust, then start a fresh pairing."
-                .to_string(),
+            localized_copy("Couldn't verify the phone"),
+            localized_copy(
+                "The device that scanned the QR couldn't prove it's the \
+                 phone you're pairing. This can happen on an untrusted \
+                 network. Make sure both devices are on a network you \
+                 trust, then start a fresh pairing.",
+            )
+            .to_string(),
         ),
         PairingError::TransportKeyMissing => (
-            "Keychain needs updating",
-            "This Keychain didn't send an encryption key, so signing requests \
-             to it couldn't be encrypted. Update the Keychain app on the phone, \
-             then pair again."
-                .to_string(),
+            localized_copy("Keychain needs updating"),
+            localized_copy(
+                "This Keychain didn't send an encryption key, so signing requests \
+                 to it couldn't be encrypted. Update the Keychain app on the phone, \
+                 then pair again.",
+            )
+            .to_string(),
         ),
         PairingError::NetworkError(s) => (
-            "Network error",
-            format!(
+            localized_copy("Network error"),
+            localized_format!(
                 "Could not finish the TLS handshake or stream the \
                  pairing envelope. Confirm both devices are on the \
                  same Wi-Fi and try again. ({})",
+                "No se pudo completar el protocolo TLS ni transmitir el \
+                 sobre de vinculación. Confirma que ambos dispositivos \
+                 estén en la misma red Wi-Fi e inténtalo de nuevo. ({})",
                 s
             ),
         ),
-        PairingError::InternalError(s) => ("Pairing failed", s.clone()),
+        PairingError::InternalError(s) => (
+            localized_copy("Pairing failed"),
+            coincube_ui::locale::notice(s.clone()),
+        ),
     };
     let mut actions = Row::new().spacing(8);
     if err.is_retriable() {
         actions = actions.push(page::primary(
             PAIR_RETRY_ID,
-            "Try again",
+            localized_copy("Try again"),
             Some(local(LocalSigningMessage::StartPairing)),
         ));
     }
@@ -412,10 +433,10 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
     let mut rows: Vec<Element<'a, Message>> = Vec::new();
     if phones_for_vault.is_empty() {
         rows.push(
-            page::row("No phones paired yet.")
-                .description(
+            page::row(localized_copy("No phones paired yet."))
+                .description(localized_copy(
                     "Paired phones appear as a signer whenever they're reachable on your Wi-Fi.",
-                )
+                ))
                 .into(),
         );
     }
@@ -458,7 +479,7 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
         };
         rows.push(
             page::row(if p.name.is_empty() {
-                "Phone"
+                localized_copy("Phone")
             } else {
                 p.name.as_str()
             })
@@ -488,7 +509,7 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
             .push(
                 field(
                     format!("tenshu.settings.pair.{}.name", fp8),
-                    "Phone name",
+                    coincube_ui::locale::copy("Phone name"),
                     name_value,
                 )
                 .on_input(move |s| local(LocalSigningMessage::DraftName(fp8_for_name.clone(), s))),
@@ -496,17 +517,17 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
             .push(
                 field(
                     format!("tenshu.settings.pair.{}.fallback", fp8),
-                    "Fallback host:port",
+                    coincube_ui::locale::copy("Fallback host:port"),
                     fallback_value,
                 )
-                .placeholder("For networks that block mDNS")
+                .placeholder(localized_copy("For networks that block mDNS"))
                 .on_input(move |s| {
                     local(LocalSigningMessage::DraftFallback(fp8_for_fb.clone(), s))
                 }),
             )
             .push(page::button(
                 iced::advanced::widget::Id::from(format!("tenshu.settings.pair.{}.save", fp8)),
-                "Save",
+                localized_copy("Save"),
                 Some(local(LocalSigningMessage::SaveRow(fp8_for_save))),
             ));
         let mut detail_col = Column::new().spacing(10).push(edit);
@@ -515,21 +536,21 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
                 Tone::Bad,
                 Column::new()
                     .spacing(2)
-                    .push(text("Remove this local pairing?").size(13).bold())
+                    .push(text(localized_copy("Remove this local pairing?")).size(13).bold())
                     .push(page::muted(
-                        "This removes the phone from this desktop's paired list and tries to notify it if reachable. It does not delete the key held on the phone or prove remote removal.",
+                        localized_copy("This removes the phone from this desktop's paired list and tries to notify it if reachable. It does not delete the key held on the phone or prove remote removal."),
                     )),
                 Some(
                     Row::new()
                         .spacing(8)
                         .push(page::primary(
                             "tenshu.settings.pair.remove",
-                            "Remove local pairing",
+                            localized_copy("Remove local pairing"),
                             Some(local(LocalSigningMessage::RemovePhone(fp8.clone()))),
                         ))
                         .push(page::button(
                             "tenshu.settings.pair.keep",
-                            "Keep phone",
+                            localized_copy("Keep phone"),
                             Some(local(LocalSigningMessage::CancelRemovePhone)),
                         ))
                         .into(),
@@ -550,10 +571,18 @@ fn paired_phones_group<'a>(state: &'a LocalSigningState) -> Element<'a, Message>
     let mut content = Column::new().width(Length::Fill);
     if let Some(notice) = state.unpaired_notice.as_ref() {
         content = content
-            .push(page::note(Tone::Muted, page::muted(notice.as_str()), None))
+            .push(page::note(
+                Tone::Muted,
+                page::muted(coincube_ui::locale::notice(notice.clone())),
+                None,
+            ))
             .push(Space::new().height(Length::Fixed(12.0)));
     }
-    page::group("Paired phones", None, content.push(page::rows(rows)))
+    page::group(
+        localized_copy("Paired phones"),
+        None,
+        content.push(page::rows(rows)),
+    )
 }
 
 #[cfg(test)]

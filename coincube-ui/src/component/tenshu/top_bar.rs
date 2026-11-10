@@ -266,7 +266,7 @@ pub fn icon_action<'a, M>(
     IconAction {
         id: id.into(),
         glyph,
-        label: label.into(),
+        label: localized(label.into()),
         focus_intent,
         on_press: None,
         pressed: false,
@@ -350,7 +350,17 @@ pub fn resting_icon<'a, M: 'a>(
         .height(Length::Fixed(ICON_BUTTON))
         .center_x(Length::Fixed(ICON_BUTTON))
         .center_y(Length::Fixed(ICON_BUTTON));
-    AccessibleLabel::new(icon, label.into()).into()
+    AccessibleLabel::new(icon, localized(label.into())).into()
+}
+
+/// An icon's accessible name and tooltip in the accepted language. Callers
+/// pass the English name, which tests and focus logic match on.
+fn localized(label: Cow<'_, str>) -> Cow<'_, str> {
+    let spanish = crate::locale::copy(&label);
+    if spanish != label.as_ref() {
+        return Cow::Owned(spanish.to_owned());
+    }
+    label
 }
 
 fn tip<'a, M: 'a>(label: Cow<'a, str>) -> Element<'a, M> {

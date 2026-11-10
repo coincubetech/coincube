@@ -259,6 +259,19 @@ pub(crate) mod capture {
             self.text.iter().any(|(value, _)| value.contains(needle))
         }
 
+        /// Fails when a screen rendered under `render_in(Language::Spanish, …)`
+        /// still shows English (see `coincube_ui::locale::english_leaks`).
+        pub fn assert_spanish(&self, scenario: &str) {
+            let leaks =
+                coincube_ui::locale::english_leaks(self.text.iter().map(|(v, _)| v.as_str()));
+            assert!(
+                leaks.is_empty(),
+                "{scenario}: English reached a Spanish screen. Route each string through \
+                 locale::copy / localized_format! and add it to desktop.es.json:\n  {}",
+                leaks.join("\n  ")
+            );
+        }
+
         pub fn has_focus(&self, id: Id) -> bool {
             self.focus.iter().any(|(actual, _)| actual == &id)
         }

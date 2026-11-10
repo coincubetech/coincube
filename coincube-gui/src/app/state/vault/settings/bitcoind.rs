@@ -1015,13 +1015,16 @@ impl State for BitcoindSettingsState {
                                 return Task::none();
                             }
                             Some(true) => {
-                                self.warning = Some(Error::Unexpected(format!(
-                                    "Bitcoin node is still syncing ({:.1}%). \
-                                     Please wait until sync is complete before switching.",
-                                    crate::utils::syncing_percent(
-                                        cache.node_bitcoind_sync_progress.unwrap_or(0.0)
-                                    )
-                                )));
+                                self.warning =
+                                    Some(Error::Unexpected(coincube_ui::localized_format!(
+                                        "Bitcoin node is still syncing ({:.1}%). \
+                                         Please wait until sync is complete before switching.",
+                                        "El nodo de Bitcoin aún se está sincronizando ({:.1} %). \
+                                         Espera a que termine la sincronización antes de cambiar.",
+                                        crate::utils::syncing_percent(
+                                            cache.node_bitcoind_sync_progress.unwrap_or(0.0)
+                                        )
+                                    )));
                                 return Task::none();
                             }
                             Some(false) => {}
@@ -1354,9 +1357,9 @@ impl State for BitcoindSettingsState {
                     !local && pending, recovery_in_progress, false,
                     cfg.is_some_and(|cfg| cfg.auto_switch_to_pending != Some(false)),
                     self.node_switch_processing, cache.daemon_switch_in_progress,
-                    self.warning.as_ref().map(|e| e.to_string()),
+                    self.warning.as_ref().map(shown_warning),
                 ).map(|msg| view::Message::Settings(view::SettingsMessage::NodeSettings(msg))),
-                coincube_ui::component::text::text("The pruned Bitcoin Knots node uses outbound peer connections. Inbound Tor and node resource editing are unavailable for Bitcoin Blake2b.").into(),
+                coincube_ui::component::text::text(coincube_ui::locale::copy("The pruned Bitcoin Knots node uses outbound peer connections. Inbound Tor and node resource editing are unavailable for Bitcoin Blake2b.")).into(),
             ];
             if let Some(card) = self.background_install_card(cache) {
                 panels.insert(
@@ -1532,7 +1535,7 @@ impl State for BitcoindSettingsState {
                             || can_switch_to_connect
                             || can_switch_to_bitcoind
                     })
-                    .map(|e| e.to_string());
+                    .map(shown_warning);
                 setting_panels.push(
                     view::vault::settings::node_backend_status(
                         active_backend,
@@ -1620,7 +1623,7 @@ impl State for BitcoindSettingsState {
                     advanced_disclosure = true;
                     setting_panels.push(crate::app::view::settings::page::disclosure(
                         "tenshu.settings.node.advanced",
-                        "Advanced node settings",
+                        coincube_ui::locale::copy("Advanced node settings"),
                         None,
                         self.node_advanced,
                         map_node_msg(view::NodeSettingsMessage::NodeAdvancedToggled),
@@ -1808,6 +1811,19 @@ fn wallet_history_recovery_in_progress(cache: &Cache) -> bool {
                 crate::node::history::Phase::Complete | crate::node::history::Phase::Cancelled
             )
         })
+}
+
+/// The node-settings warning as shown: an app-authored [`Error::Unexpected`]
+/// reason in the window's language (the stored error stays English).
+fn shown_warning(error: &Error) -> String {
+    match error {
+        Error::Unexpected(reason) => coincube_ui::localized_format!(
+            "Unexpected error: {}",
+            "Error inesperado: {}",
+            coincube_ui::locale::notice(reason.clone())
+        ),
+        error => error.to_string(),
+    }
 }
 
 fn local_node_serves_vault(cache: &Cache) -> Result<(), String> {

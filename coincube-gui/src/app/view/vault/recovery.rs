@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use std::collections::{HashMap, HashSet};
 
 use iced::{
@@ -39,41 +41,60 @@ pub fn recovery<'a>(
         menu,
         cache,
         Column::new()
-            .push(Container::new(h3("Recovery path").bold()).width(Length::Fill))
+            .push(Container::new(h3(localized_copy("Recovery path")).bold()).width(Length::Fill))
             .push(Container::new(text(INFO_TEXT)))
-            .push(cache.unswept_recovery_notice().map(text))
+            .push(
+                cache
+                    .unswept_recovery_notice()
+                    .map(|notice| text(localized_copy(notice))),
+            )
             .push(Space::new().height(Length::Fixed(20.0)))
             .push(
                 Container::new(
                     Column::new()
                         .push(
                             text(if no_recovery_paths {
-                                "No recovery path is currently available.".to_string()
+                                localized_copy("No recovery path is currently available.")
+                                    .to_string()
+                            } else if recovery_paths.len() == 1 {
+                                localized_format!(
+                                    "{} recovery path is available:",
+                                    "Hay {} ruta de recuperación disponible:",
+                                    1
+                                )
                             } else {
-                                format!(
-                                    "{} recovery path{} available:",
-                                    recovery_paths.len(),
-                                    if recovery_paths.len() > 1 {
-                                        "s are"
-                                    } else {
-                                        " is"
-                                    },
+                                localized_format!(
+                                    "{} recovery paths are available:",
+                                    "Hay {} rutas de recuperación disponibles:",
+                                    recovery_paths.len()
                                 )
                             })
                             .width(Length::Fill),
                         )
                         .push(next_recovery_sequence.map(|sequence| {
                             let days = super::coins::blocks_to_days_ceil(sequence);
-                            text(format!(
-                                "{} in ≈ {} day{}.",
-                                if no_recovery_paths {
-                                    "Recovery path available"
-                                } else {
-                                    "Next recovery path available"
-                                },
-                                days,
-                                if days == 1 { "" } else { "s" },
-                            ))
+                            text(match (no_recovery_paths, days == 1) {
+                                (true, true) => localized_format!(
+                                    "Recovery path available in ≈ {} day.",
+                                    "Ruta de recuperación disponible en ≈ {} día.",
+                                    days
+                                ),
+                                (true, false) => localized_format!(
+                                    "Recovery path available in ≈ {} days.",
+                                    "Ruta de recuperación disponible en ≈ {} días.",
+                                    days
+                                ),
+                                (false, true) => localized_format!(
+                                    "Next recovery path available in ≈ {} day.",
+                                    "Próxima ruta de recuperación disponible en ≈ {} día.",
+                                    days
+                                ),
+                                (false, false) => localized_format!(
+                                    "Next recovery path available in ≈ {} days.",
+                                    "Próxima ruta de recuperación disponible en ≈ {} días.",
+                                    days
+                                ),
+                            })
                         }))
                         .push((!no_recovery_paths).then_some(Space::new().height(20)))
                         .push(Column::with_children(recovery_paths).spacing(20))
@@ -89,7 +110,7 @@ pub fn recovery<'a>(
                     Row::new()
                         .push(Space::new().width(Length::Fill))
                         .push(
-                            button::primary(None, "Next")
+                            button::primary(None, localized_copy("Next"))
                                 .on_press_maybe(selected_path.map(|_| Message::Next))
                                 .width(Length::Fixed(200.0)),
                         )
@@ -122,8 +143,9 @@ pub fn recovery_path_view<'a>(
                         .align_y(Alignment::Center)
                         .spacing(10)
                         .push(
-                            text(format!(
+                            text(localized_format!(
                                 "{} signature{} from",
+                                "{} firma{} de",
                                 threshold,
                                 if threshold > 1 { "s" } else { "" }
                             ))
@@ -154,9 +176,10 @@ pub fn recovery_path_view<'a>(
                 .push(
                     Row::new()
                         .spacing(5)
-                        .push(text("can recover"))
-                        .push(text(format!(
+                        .push(text(localized_copy("can recover")))
+                        .push(text(localized_format!(
                             "{} coin{} totalling",
+                            "{} moneda{} con un total de",
                             number_of_coins,
                             if number_of_coins > 1 { "s" } else { "" }
                         )))

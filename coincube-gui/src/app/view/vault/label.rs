@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use iced::{advanced::text::Shaping, widget::row, Alignment};
 
 use coincube_ui::{
@@ -36,10 +37,12 @@ pub fn label_editable(
         }
     }
     Container::new(
-        button::secondary(Some(icon::pencil_icon()), "Add label").on_press(view::Message::Label(
-            labelled,
-            view::message::LabelMessage::Edited(String::default()),
-        )),
+        button::secondary(Some(icon::pencil_icon()), localized_copy("Add label")).on_press(
+            view::Message::Label(
+                labelled,
+                view::message::LabelMessage::Edited(String::default()),
+            ),
+        ),
     )
     .width(iced::Length::Shrink)
     .into()

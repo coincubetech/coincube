@@ -3,6 +3,9 @@
 //! v157, `P-Advanced`).
 
 use coincube_core::miniscript::bitcoin::{Amount, OutPoint};
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
+use coincube_ui::localized_format;
 use coincube_ui::{
     component::{amount::*, button, text::*},
     theme,
@@ -65,9 +68,9 @@ fn sats(amount: Amount) -> String {
 
 fn coins_count(n: usize) -> String {
     if n == 1 {
-        "1 coin".to_string()
+        localized_copy("1 coin").to_string()
     } else {
-        format!("{} coins", n)
+        localized_format!("{} coins", "{} monedas", n)
     }
 }
 
@@ -79,28 +82,43 @@ pub fn both_chains_banner<'a>(
     can_split: bool,
     mask_amounts: bool,
 ) -> Element<'a, Message> {
-    let text = format!(
-        "{} · {} also {} on {}. Until split, a transaction on one chain can be copied to the other.",
-        coins_count(count),
-        if mask_amounts { "•••••• sats".to_string() } else { sats(total) },
-        if count == 1 { "exists" } else { "exist" },
-        chain_name(twin(here)),
-    );
+    let amount = if mask_amounts {
+        "•••••• sats".to_string()
+    } else {
+        sats(total)
+    };
+    let text = if count == 1 {
+        localized_format!(
+            "{} · {} also exists on {}. Until split, a transaction on one chain can be copied to the other.",
+            "{} · {} también existe en {}. Hasta separarla, una transacción en una cadena se puede copiar a la otra.",
+            coins_count(count),
+            amount,
+            chain_name(twin(here)),
+        )
+    } else {
+        localized_format!(
+            "{} · {} also exist on {}. Until split, a transaction on one chain can be copied to the other.",
+            "{} · {} también existen en {}. Hasta separarlas, una transacción en una cadena se puede copiar a la otra.",
+            coins_count(count),
+            amount,
+            chain_name(twin(here)),
+        )
+    };
     Container::new(
         Row::new()
             .spacing(16)
             .align_y(Alignment::Center)
             .push(
-                Container::new(p2_bold("Both chains"))
+                Container::new(p2_bold(localized_copy("Both chains")))
                     .padding([4, 10])
                     .style(theme::pill::warning),
             )
             .push(Container::new(p2_regular(text)).width(Length::Fill))
             .push(if can_split {
-                button::primary_compact(None, "Split coins")
+                button::primary_compact(None, coincube_ui::locale::copy("Split coins"))
                     .on_press(Message::CoinControl(CoinControlMessage::OpenSplit))
             } else {
-                button::primary_compact(None, "Split coins")
+                button::primary_compact(None, coincube_ui::locale::copy("Split coins"))
             }),
     )
     .padding(16)
@@ -135,10 +153,10 @@ pub fn selection_bar<'a>(count: usize, total: Amount, mask_amounts: bool) -> Ele
             button::secondary_compact(None, "Clear")
         })
         .push(if count > 0 {
-            button::primary_compact(None, "Send selected")
+            button::primary_compact(None, coincube_ui::locale::copy("Send selected"))
                 .on_press(Message::CoinControl(CoinControlMessage::SendSelected))
         } else {
-            button::primary_compact(None, "Send selected")
+            button::primary_compact(None, coincube_ui::locale::copy("Send selected"))
         })
         .into()
 }
@@ -154,18 +172,26 @@ pub fn send_warning<'a>(here: ChainId, count: usize, ack: bool) -> Element<'a, M
         format!("{} selected coins also exist on {}", count, other)
     };
     let body = if here.is_blake2b() {
-        "Your hardware signer can't make a replay-protected signature, so this transaction could be copied to Bitcoin and move your bitcoin too. Split these coins first."
+        localized_copy("Your hardware signer can't make a replay-protected signature, so this transaction could be copied to Bitcoin and move your bitcoin too. Split these coins first.")
     } else {
-        "A Bitcoin transaction that spends them can be copied to Bitcoin Blake2b and move those coins too, to the same recipient. Split them first, or continue if that doesn't matter to you."
+        localized_copy("A Bitcoin transaction that spends them can be copied to Bitcoin Blake2b and move those coins too, to the same recipient. Split them first, or continue if that doesn't matter to you.")
     };
     let mut column = Column::new()
         .spacing(16)
         .push(h4_bold(question))
+        .push(p1_regular(crate::chain::canonical_network_name(here)))
+        .push(p1_regular(CopyText::ReplaySiblingNetwork.get().replacen(
+            "{network}",
+            crate::chain::canonical_network_name(twin(here)),
+            1,
+        )))
         .push(p1_regular(body).style(theme::text::secondary));
     if !here.is_blake2b() {
         column = column.push(
             checkbox(ack)
-                .label("I understand the Bitcoin Blake2b copies may move too")
+                .label(localized_copy(
+                    "I understand the Bitcoin Blake2b copies may move too",
+                ))
                 .on_toggle(|ack| {
                     Message::CoinControl(CoinControlMessage::AcknowledgeBothChains(ack))
                 }),
@@ -176,19 +202,19 @@ pub fn send_warning<'a>(here: ChainId, count: usize, ack: bool) -> Element<'a, M
         .align_y(Alignment::Center)
         .push(Space::new().width(Length::Fill))
         .push(
-            button::secondary(None, "Cancel")
+            button::secondary(None, CopyText::Cancel.get())
                 .on_press(Message::CoinControl(CoinControlMessage::CloseWarning)),
         );
     if !here.is_blake2b() {
         footer = footer.push(if ack {
-            button::secondary(None, "Send anyway")
+            button::secondary(None, localized_copy("Send anyway"))
                 .on_press(Message::CoinControl(CoinControlMessage::SendAnyway))
         } else {
-            button::secondary(None, "Send anyway")
+            button::secondary(None, localized_copy("Send anyway"))
         });
     }
     footer = footer.push(
-        button::primary(None, "Split first")
+        button::primary(None, localized_copy("Split first"))
             .on_press(Message::CoinControl(CoinControlMessage::OpenSplit)),
     );
     Container::new(column.push(footer))
@@ -269,13 +295,17 @@ fn input_row<'a>(row: &InputRow, here: ChainId) -> Element<'a, Message> {
         )
         .push(
             Container::new(
-                Container::new(p2_bold(if row.key { "Split key" } else { "Splitting" }))
-                    .padding([2, 8])
-                    .style(if row.key {
-                        theme::pill::success
-                    } else {
-                        theme::pill::warning
-                    }),
+                Container::new(p2_bold(if row.key {
+                    localized_copy("Split key")
+                } else {
+                    localized_copy("Splitting")
+                }))
+                .padding([2, 8])
+                .style(if row.key {
+                    theme::pill::success
+                } else {
+                    theme::pill::warning
+                }),
             )
             .width(Length::Fixed(100.0)),
         )
@@ -337,14 +367,19 @@ pub fn split_overlay<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
     };
     let mut body = Column::new()
         .spacing(20)
-        .push(h4_bold(format!("Split coins on {}", chain_name(here))))
+        .push(h4_bold(localized_format!(
+            "Split coins on {}",
+            "Monedas divididas en {}",
+            chain_name(here)
+        )))
+        .push(p1_regular(crate::chain::canonical_network_name(here)))
         .push(p1_regular(intro).style(theme::text::secondary));
 
     if here.is_blake2b() {
         body = body.push(
             Column::new()
                 .spacing(8)
-                .push(p1_bold("How to split"))
+                .push(p1_bold(localized_copy("How to split")))
                 .push(method_choice(
                     overlay.method == Method::Signature,
                     overlay.signature_available,
@@ -370,7 +405,7 @@ pub fn split_overlay<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
     let table = overlay.inputs.iter().fold(
         Column::new()
             .spacing(8)
-            .push(p1_bold("Coins in this transaction")),
+            .push(p1_bold(localized_copy("Coins in this transaction"))),
         |table, row| table.push(input_row(row, here)),
     );
     body = body.push(table);
@@ -379,8 +414,8 @@ pub fn split_overlay<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
         body = body.push(if overlay.key_needed {
             key_needed_box(overlay)
         } else {
-            p2_regular(format!(
-                "The split key is a coin found only on {}. It comes back with the split, so you can use it again.",
+            p2_regular(localized_format!(
+                "The split key is a coin found only on {}. It comes back with the split, so you can use it again.", "La llave dividida es una moneda que se encuentra sólo en {}. Regresa con la división, por lo que se puede utilizar de nuevo.",
                 chain_name(here)
             ))
             .style(theme::text::secondary)
@@ -389,9 +424,16 @@ pub fn split_overlay<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
     }
 
     let fee = match (overlay.fee(), overlay.feerate) {
-        (Some(fee), Some(rate)) => format!("Fee ≈ {} at {} sat/vB", sats(fee), rate),
-        _ if overlay.fee_failed => "Fee rate unavailable".to_string(),
-        _ => "Getting the fee rate…".to_string(),
+        (Some(fee), Some(rate)) => {
+            localized_format!(
+                "Fee ≈ {} at {} sat/vB",
+                "Comisión ≈ {} a {} sat/vB",
+                sats(fee),
+                rate
+            )
+        }
+        _ if overlay.fee_failed => localized_copy("Fee rate unavailable").to_string(),
+        _ => localized_copy("Getting the fee rate…").to_string(),
     };
     let back = overlay
         .fee()
@@ -399,37 +441,43 @@ pub fn split_overlay<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
     body = body.push(
         Column::new()
             .spacing(6)
-            .push(p1_bold("Result"))
-            .push(p2_regular(format!(
+            .push(p1_bold(localized_copy("Result")))
+            .push(p2_regular(localized_format!(
                 "Spends {} · {}{}",
+                "Gasta {} · {}{}",
                 coins_count(coins),
                 sats(spent),
                 if overlay.method == Method::SplitKey && overlay.has_key() {
-                    " including the split key"
+                    localized_copy(" including the split key")
                 } else {
                     ""
                 }
             )))
             .push(p2_regular(match back {
-                Some(back) => format!("Back to this Vault · fresh address · ≈ {}", sats(back)),
-                None => "Back to this Vault · fresh address".to_string(),
+                Some(back) => localized_format!(
+                    "Back to this Vault · fresh address · ≈ {}",
+                    "Volver a este Vault · dirección nueva · ≈ {}",
+                    sats(back)
+                ),
+                None => localized_copy("Back to this Vault · fresh address").to_string(),
             }))
             .push(p2_regular(fee).style(theme::text::secondary)),
     );
     body = body
         .push(
-            p2_regular(format!(
-                "After 6 confirmations these coins exist on each chain separately. Their {} copies stay where they are and can be spent on their own.",
+            p2_regular(localized_format!(
+                "After 6 confirmations these coins exist on each chain separately. Their {} copies stay where they are and can be spent on their own.", "Después de 6 confirmaciones estas monedas existen en cada cadena por separado. Sus copias {} se quedan donde están y pueden ser gastadas por su cuenta.",
                 other
             ))
             .style(theme::text::secondary),
         )
         .push(
-            p2_regular("Spending these coins together links them to each other on the blockchain.")
+            p2_regular(localized_copy("Spending these coins together links them to each other on the blockchain."))
                 .style(theme::text::secondary),
         );
     if let Some(error) = &overlay.error {
-        body = body.push(p2_regular(error.clone()).style(theme::text::error));
+        body = body
+            .push(p2_regular(coincube_ui::locale::notice(error.clone())).style(theme::text::error));
     }
 
     let blocked = overlay.blocked();
@@ -441,16 +489,16 @@ pub fn split_overlay<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
                 .width(Length::Fill),
         )
         .push(if overlay.working {
-            button::secondary(None, "Cancel")
+            button::secondary(None, CopyText::Cancel.get())
         } else {
-            button::secondary(None, "Cancel")
+            button::secondary(None, CopyText::Cancel.get())
                 .on_press(Message::CoinControl(CoinControlMessage::CancelSplit))
         })
         .push(if blocked.is_none() {
-            button::primary(None, "Sign and send")
+            button::primary(None, localized_copy("Sign and send"))
                 .on_press(Message::CoinControl(CoinControlMessage::SignSplit))
         } else {
-            button::primary(None, "Sign and send")
+            button::primary(None, localized_copy("Sign and send"))
         });
 
     Container::new(
@@ -477,20 +525,20 @@ fn key_needed_box<'a>(overlay: &SplitOverlay) -> Element<'a, Message> {
     Container::new(
         Column::new()
             .spacing(8)
-            .push(p1_bold("This needs a split key"))
-            .push(p2_regular(format!(
-                "Send one small coin that exists only on {} to this Vault from somewhere else. At least {}.",
+            .push(p1_bold(localized_copy("This needs a split key")))
+            .push(p2_regular(localized_format!(
+                "Send one small coin that exists only on {} to this Vault from somewhere else. At least {}.", "Envíe una pequeña moneda que sólo existe en {} a este Vault de algún otro lugar. Al menos {}.",
                 chain_name(here),
                 sats(Amount::from_sat(MIN_KEY_SATS))
             )))
             .push(match &overlay.address {
                 Some(address) => p1_regular(address.clone()),
-                None => p2_regular("Getting an address…").style(theme::text::secondary),
+                None => p2_regular(localized_copy("Getting an address…")).style(theme::text::secondary),
             })
-            .push(p2_regular(format!("Where from: {}", from)).style(theme::text::secondary))
+            .push(p2_regular(localized_format!("Where from: {}", "Dónde de: {}", from)).style(theme::text::secondary))
             .push(
-                p2_regular(format!(
-                    "A coin counts only once its history proves it exists only on {}, for example coins mined after the fork. If it can't be proven, it shows Couldn't verify and you can try another source.",
+                p2_regular(localized_format!(
+                    "A coin counts only once its history proves it exists only on {}, for example coins mined after the fork. If it can't be proven, it shows Couldn't verify and you can try another source.", "Una moneda cuenta sólo una vez que su historia demuestra que existe sólo en {}, por ejemplo monedas extraídas después del tenedor. Si no se puede probar, muestra No se pudo verificar y se puede probar otra fuente.",
                     chain_name(here)
                 ))
                 .style(theme::text::secondary),
