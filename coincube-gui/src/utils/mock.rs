@@ -15,9 +15,11 @@ pub struct DaemonClient {
     transport: Mutex<(Sender<Value>, TransportReceiver)>,
 }
 
+#[async_trait::async_trait]
+
 impl Client for DaemonClient {
     type Error = DaemonError;
-    fn request<S: Serialize + Debug, D: DeserializeOwned + Debug>(
+    async fn request<S: Serialize + Debug + Send, D: DeserializeOwned + Debug + Send>(
         &self,
         method: &str,
         params: Option<S>,

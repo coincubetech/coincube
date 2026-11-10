@@ -60,6 +60,7 @@ iced_runtime  = "0.14.0"
 email_address = "0.2.7"
 
 tokio = { version = "1", features = [
+	"net",
 	"signal",
 	"process",
 	"io-util",
