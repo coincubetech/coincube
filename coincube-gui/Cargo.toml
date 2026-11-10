@@ -30,7 +30,7 @@ async-hwi = "0.0.32"
 # to fetch even for SDK consumers. SDK Rust source and manifests are unchanged.
 # See COINCUBE_BUILD_PATCH.md at the pinned dependency revision.
 breez-sdk-liquid = { git = "https://github.com/coincubetech/breez-sdk-liquid", rev = "4ac5017c18dd3bb174cb3f193570c0d8b6ef3afa" }
-coincube-mcp = { path = "../coincube-mcp" }
+coincube-mcp = { path = "../coincube-mcp", default-features = false }
 coincube-core = { path = "../coincube-core" }
 coincube-spark-protocol = { path = "../coincube-spark-protocol" }
 coincubed = { path = "../coincubed", default-features = false, features = [
@@ -254,7 +254,8 @@ tokio = { version = "1", features = ["rt", "macros", "test-util"] }
 httpmock = "0.7"
 
 [features]
-# Experimental native-consent wallet proposal demo. Never enabled by default.
+default = ["mcp-proposals", "mcp-transactions"]
+# Native-consent workflows are included in normal builds; pairing remains opt-in.
 mcp-proposals = ["coincube-mcp/native-proposals"]
 mcp-transactions = ["coincube-mcp/native-transactions"]
 # Opt-in test knobs for ancestry checks against a disposable regtest

@@ -18,13 +18,32 @@ fn enable_beta(root: &CoincubeDirectory) {
     crate::app::settings::global::GlobalSettings::update_bitcoin_blake2b_beta(&path, true).unwrap();
 }
 
-fn assert_only_beta_settings_files(root: &CoincubeDirectory) {
+fn assert_only_beta_settings_files(root: &CoincubeDirectory, cube: Option<&str>) {
     let mut names: Vec<_> = std::fs::read_dir(root.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
+    let mut expected = vec![
+        "global_settings.json".to_owned(),
+        "global_settings.lock".to_owned(),
+    ];
+    #[cfg(feature = "mcp-proposals")]
+    if let Some(cube) = cube {
+        use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash};
+        let key = sha256::Hash::hash(cube.as_bytes());
+        let name = format!(".vault-creation-{key}.lock");
+        // The shared admission mutex is metadata only. Feature refusal must
+        // leave it empty: no proposal tombstone or wallet/chain state.
+        let metadata = std::fs::metadata(root.path().join(&name)).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.len(), 0);
+        expected.push(name);
+    }
+    #[cfg(not(feature = "mcp-proposals"))]
+    let _ = cube;
     names.sort();
-    assert_eq!(names, ["global_settings.json", "global_settings.lock"]);
+    expected.sort();
+    assert_eq!(names, expected);
 }
 
 fn client(server: &MockServer) -> CoincubeClient {
@@ -239,7 +258,7 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
     let cube_id = installer.context.seed_cube_id().to_owned();
     let fingerprint = installer.master_signer_fingerprint();
     let wallet_id = WalletId::generate(installer.context.descriptor.as_ref().unwrap());
-    assert_only_beta_settings_files(&root);
+    assert_only_beta_settings_files(&root, None);
     let settings = install_local_wallet(
         installer.context.clone(),
         wallet_id,
@@ -385,12 +404,16 @@ async fn feature_refusals_precede_anchor_requests_and_all_fork_filesystem_writes
                     secondary_fallback_token: None,
                 }));
             let wallet_id = WalletId::generate(installer.context.descriptor.as_ref().unwrap());
+            let cube_id = installer.context.cube_id.clone();
             assert!(
                 install_local_wallet(installer.context, wallet_id, installer.signer)
                     .await
                     .is_err()
             );
-            assert_only_beta_settings_files(&CoincubeDirectory::new(root_path.clone()));
+            assert_only_beta_settings_files(
+                &CoincubeDirectory::new(root_path.clone()),
+                cube_id.as_deref(),
+            );
             assert_eq!(std::fs::read(&settings_path).unwrap(), settings_before);
             std::fs::remove_dir_all(root_path).unwrap();
             features.assert_hits_async(1).await;

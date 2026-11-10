@@ -1163,6 +1163,31 @@ impl Tab {
     /// for the afternoon.
     const IDLE_LOCK_AFTER: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+    /// Admit the proposal or discard the rejected builder and show a locked launcher.
+    #[cfg(feature = "mcp-proposals")]
+    fn open_mcp_proposal_handoff(
+        &mut self,
+        mut install: Installer,
+        settings: app::local_mcp::Settings,
+        proposal: installer::proposal::Session,
+    ) -> Task<Message> {
+        match install.use_mcp_proposal(settings, proposal) {
+            Ok(task) => {
+                self.state = State::Installer(Box::new(install));
+                task.map(Message::Install)
+            }
+            Err(error) => {
+                let root = install.datadir.clone();
+                let chain = install.context.bitcoin_config.chain;
+                install.stop();
+                drop(install);
+                let (home, task) = Home::after_native_refusal(root, chain, error);
+                self.state = State::Home(home);
+                task.map(Message::Launch)
+            }
+        }
+    }
+
     /// Emit the pending migration warning once the tab is actually in `App`.
     ///
     /// Open a Bitcoin Blake2b Cube that has no Vault yet. It lands where a
@@ -1328,10 +1353,10 @@ impl Tab {
                     installer.expire_mcp_proposal();
                     if !installer.proposal_install_dispatched || installer.proposal_finished {
                         let root = installer.datadir.clone();
+                        let chain = installer.context.bitcoin_config.chain;
                         let failure = installer.proposal_failure.clone();
                         installer.stop();
-                        let (mut home, task) =
-                            Home::new_for_chain(root, Some(crate::chain::ChainId::Regtest));
+                        let (mut home, task) = Home::new_for_chain(root, Some(chain));
                         home.set_error(failure.unwrap_or_else(|| "Proposal setup locked. Reopen the Cube and approve a new client to continue.".into()));
                         self.state = State::Home(home);
                         return task.map(Message::Launch);
@@ -1583,6 +1608,9 @@ impl Tab {
         let State::Home(home) = &self.state else {
             return Err("The Launcher destination is no longer open.".into());
         };
+        if !home.accepts_launcher_message(message) {
+            return Err("Acknowledge the native refusal before opening another Cube.".into());
+        }
         match message {
             home::Message::Run(root, _, chain, cube)
             | home::Message::RunFromFloor(root, _, chain, cube, _)
@@ -1657,6 +1685,11 @@ impl Tab {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if let (State::Home(home), Message::Launch(launch)) = (&self.state, &message) {
+            if !home.accepts_launcher_message(launch) {
+                return Task::none();
+            }
+        }
         if let State::App(app) = &self.state {
             let origin = app.cache().app_generation;
             if !self
@@ -2016,10 +2049,10 @@ impl Tab {
                     return Task::none();
                 }
                 let root = installer.datadir.clone();
+                let chain = installer.context.bitcoin_config.chain;
                 let failure = installer.proposal_failure.clone();
                 installer.stop();
-                let (mut home, task) =
-                    Home::new_for_chain(root, Some(crate::chain::ChainId::Regtest));
+                let (mut home, task) = Home::new_for_chain(root, Some(chain));
                 if let Some(failure) = failure {
                     home.set_error(failure);
                 }
@@ -2408,10 +2441,10 @@ impl Tab {
                         return Task::none();
                     }
                     let root = i.datadir.clone();
+                    let chain = i.context.bitcoin_config.chain;
                     let failure = i.proposal_failure.clone();
                     i.stop();
-                    let (mut home, task) =
-                        Home::new_for_chain(root, Some(crate::chain::ChainId::Regtest));
+                    let (mut home, task) = Home::new_for_chain(root, Some(chain));
                     if let Some(failure) = failure {
                         home.set_error(failure);
                     }
@@ -2760,6 +2793,19 @@ impl Tab {
                         settings_opt
                     };
 
+                    #[cfg(feature = "mcp-proposals")]
+                    if i.context.mcp_proposal.is_some() {
+                        // Complete association, then drop all installer/client
+                        // handles. Even a still-open original session must unlock
+                        // afresh; old tokens/proposal IDs never become read grants.
+                        let root = i.datadir.clone();
+                        i.stop();
+                        let (mut home, task) = Home::new_for_chain(root, Some(cube.network));
+                        home.set_error("Vault created. Reopen this Cube to verify keys/backups and approve fresh read access.");
+                        self.state = State::Home(home);
+                        return task.map(Message::Launch);
+                    }
+
                     if cube.network.is_blake2b() {
                         // A copy (Tools › Split coins → Create copy) is
                         // finished once saved. Its source App is still open in
@@ -2841,18 +2887,6 @@ impl Tab {
                         return Task::none();
                     }
 
-                    #[cfg(feature = "mcp-proposals")]
-                    if i.context.mcp_proposal.is_some() {
-                        // Complete association, then drop all installer/client
-                        // handles. Even a still-open original session must unlock
-                        // afresh; old tokens/proposal IDs never become read grants.
-                        let root = i.datadir.clone();
-                        i.stop();
-                        let (mut home, task) = Home::new_for_chain(root, Some(cube.network));
-                        home.set_error("Regtest Vault created. Reopen this Cube to verify keys/backups and approve fresh read access.");
-                        self.state = State::Home(home);
-                        return task.map(Message::Launch);
-                    }
                     if let Some(settings) = settings_opt {
                         let cfg = app::Config::from_file(
                             &i.datadir
@@ -3344,6 +3378,14 @@ impl Tab {
                         if !app.mcp_proposals_supported() {
                             return Task::none();
                         }
+                        if app.fork_feature_unconfirmed() {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "Checking Bitcoin Blake2b availability. Try again in a moment."
+                                        .into(),
+                                ),
+                            )));
+                        }
                         // Construct the normal builder only in response to the
                         // user's native review click, never from an MCP worker.
                         match Installer::try_new_for_chain(
@@ -3355,9 +3397,9 @@ impl Tab {
                             app.breez_client(),
                             app.spark_backend(),
                             false,
-                            None,
+                            app.authenticated_coincube_client(),
                         ) {
-                            Ok((mut install, _)) => {
+                            Ok((install, _)) => {
                                 let client = match review {
                                     app::local_mcp::Message::ReviewPairedProposal(id) => {
                                         Some(id.as_str())
@@ -3368,9 +3410,7 @@ impl Tab {
                                 else {
                                     return Task::none();
                                 };
-                                let task = install.use_mcp_proposal(settings, session);
-                                self.state = State::Installer(Box::new(install));
-                                task.map(Message::Install)
+                                self.open_mcp_proposal_handoff(install, settings, session)
                             }
                             Err(error) => Task::done(Message::Run(app::Message::View(
                                 app::view::Message::ShowError(error.to_string()),
@@ -7950,22 +7990,27 @@ mod seed_export_duress_routing_tests {
 #[cfg(all(test, feature = "mcp-proposals"))]
 mod mcp_proposal_routing_tests {
     use super::*;
-    use crate::installer::proposal::tests::{fixture, TestDir};
+    use crate::installer::proposal::tests::TestDir;
     use coincube_core::miniscript::bitcoin::Network;
     fn proposal_tab(
         root: &std::path::Path,
     ) -> (Tab, std::sync::Arc<crate::installer::proposal::Session>) {
-        let (ctx, proposal) = fixture(root);
+        proposal_tab_on_chain(root, crate::chain::ChainId::Regtest)
+    }
+    fn proposal_tab_on_chain(
+        root: &std::path::Path,
+        chain: crate::chain::ChainId,
+    ) -> (Tab, std::sync::Arc<crate::installer::proposal::Session>) {
+        let (ctx, proposal) = crate::installer::proposal::tests::fixture_for_chain(root, chain);
         let cube = crate::app::settings::Settings::from_file(
-            &ctx.coincube_directory
-                .network_directory(crate::chain::ChainId::Regtest),
+            &ctx.coincube_directory.network_directory(chain),
         )
         .unwrap()
         .cubes
         .remove(0);
         let (mut installer, _) = Installer::try_new_for_chain(
             ctx.coincube_directory.clone(),
-            crate::chain::ChainId::Regtest,
+            chain,
             UserFlow::CreateWallet,
             true,
             Some(cube),
@@ -7977,6 +8022,117 @@ mod mcp_proposal_routing_tests {
         .unwrap();
         installer.context = ctx;
         (Tab::new(1, State::Installer(Box::new(installer))), proposal)
+    }
+    #[test]
+    fn mcp_proposal_completion_locks_every_production_chain_before_native_reopen() {
+        let _guard = crate::app::session::test_guard();
+        for network in coincube_mcp::Chain::ALL {
+            let root = TestDir::new();
+            let chain = network.as_str().parse().unwrap();
+            let (mut tab, proposal) = proposal_tab_on_chain(root.path(), chain);
+            let State::Installer(installer) = &mut tab.state else {
+                panic!()
+            };
+            installer.proposal_install_dispatched = true;
+            let cube = installer.cube_settings.clone().unwrap();
+            let _ = tab.update(Message::Install(installer::Message::CubeSaved(
+                Ok((cube, None, None)),
+                None,
+                None,
+            )));
+            assert!(matches!(tab.state, State::Home(_)));
+            assert!(!proposal.active());
+            assert!(!crate::app::session::is_open());
+        }
+    }
+    #[test]
+    fn rejected_proposal_handoff_returns_to_the_native_chain_with_an_error() {
+        use crate::chain::ChainId;
+        let _guard = crate::app::session::test_guard();
+        for (target, proposed) in [
+            (ChainId::Bitcoin, ChainId::BitcoinBlake2b),
+            (ChainId::BitcoinBlake2b, ChainId::Bitcoin),
+        ] {
+            let root = TestDir::new();
+            let (prepared, original) = proposal_tab_on_chain(root.path(), target);
+            let State::Installer(mut install) = prepared.state else {
+                panic!()
+            };
+            install.context.mcp_proposal = None;
+            drop(original);
+            let cube = install.cube_settings.clone().unwrap();
+
+            let foreign = TestDir::new();
+            let (mut context, session) =
+                crate::installer::proposal::tests::fixture_for_chain(foreign.path(), proposed);
+            context.mcp_proposal = None;
+            drop(context);
+            let session = Arc::try_unwrap(session).ok().unwrap();
+            assert!(session.active());
+            let (home, startup) = Home::new_for_chain(
+                CoincubeDirectory::new(root.path().to_path_buf()),
+                Some(target),
+            );
+            drop(startup);
+            let mut tab = Tab::new(1, State::Home(home));
+            drop(tab.open_mcp_proposal_handoff(
+                *install,
+                app::local_mcp::Settings::default(),
+                session,
+            ));
+            let State::Home(home) = &tab.state else {
+                panic!("a refused handoff must discard the ordinary installer")
+            };
+            assert_eq!(home.chain_for_test(), target);
+            assert_eq!(home.error(), Some(
+                "This proposal belongs to a different network than this Cube. Reopen the Cube and prepare a new proposal."
+            ));
+            // Deliver the startup feature result through the real tab route;
+            // the initial synchronous launcher state is not the final screen.
+            drop(
+                tab.update(Message::Launch(home::Message::GlobalFeatureLoaded(
+                    0, false,
+                ))),
+            );
+            let State::Home(home) = &tab.state else {
+                panic!("startup must leave the rejected handoff locked")
+            };
+            assert_eq!(home.chain_for_test(), target);
+            assert_eq!(home.error(), Some(
+                "This proposal belongs to a different network than this Cube. Reopen the Cube and prepare a new proposal."
+            ));
+            let root = CoincubeDirectory::new(root.path().to_path_buf());
+            for queued in [
+                home::Message::Install(root.clone(), target, UserFlow::CreateWallet, None),
+                home::Message::Run(
+                    root.clone(),
+                    app::config::Config::new(false),
+                    target,
+                    cube.clone(),
+                ),
+                home::Message::RunFromFloor(
+                    root.clone(),
+                    app::config::Config::new(false),
+                    target,
+                    cube.clone(),
+                    0,
+                ),
+                home::Message::RunToRecovery(
+                    root.clone(),
+                    app::config::Config::new(false),
+                    target,
+                    cube.clone(),
+                ),
+                home::Message::CubeCreated(Ok(cube.clone())),
+                home::Message::StartRecovery,
+            ] {
+                assert!(tab.validate_home_exit(&queued).is_err());
+                assert_eq!(tab.update(Message::Launch(queued)).units(), 0);
+                assert!(matches!(tab.state, State::Home(_)));
+                assert!(tab.pending_recovery_route.is_none());
+            }
+            assert!(!crate::app::session::is_open());
+        }
     }
     #[test]
     fn proposal_back_and_lock_never_reopen_an_app_from_retained_clients() {
@@ -7993,6 +8149,50 @@ mod mcp_proposal_routing_tests {
             assert!(matches!(tab.state, State::Home(_)));
             assert!(!proposal.active());
             assert!(!crate::app::session::is_open());
+        }
+    }
+    #[test]
+    fn proposal_exit_preserves_exact_chain_for_back_lock_and_expiry() {
+        use crate::app::settings::global::GlobalSettings;
+        let _guard = crate::app::session::test_guard();
+        for network in coincube_mcp::Chain::ALL {
+            for exit in 0..4 {
+                let root = TestDir::new();
+                // Match native admission of the test networks; retain the
+                // launcher's existing developer-mode preference behavior.
+                GlobalSettings::update_developer_mode(
+                    &GlobalSettings::path(&CoincubeDirectory::new(root.path().to_path_buf())),
+                    true,
+                )
+                .unwrap();
+                let chain = network.as_str().parse().unwrap();
+                let (mut tab, proposal) = proposal_tab_on_chain(root.path(), chain);
+                let task = match exit {
+                    // The generic navigation message has only a Bitcoin
+                    // encoding; the proposal must retain its own exact chain.
+                    0 => tab.update(Message::Install(installer::Message::BackToApp(
+                        Network::Regtest,
+                    ))),
+                    1 => tab.update(Message::LockCube),
+                    2 => {
+                        crate::app::session::close();
+                        tab.on_tick()
+                    }
+                    _ => {
+                        crate::app::session::age_for_proposal_test(
+                            Tab::IDLE_LOCK_AFTER + std::time::Duration::from_secs(1),
+                        );
+                        tab.on_tick()
+                    }
+                };
+                drop(task);
+                let State::Home(home) = &tab.state else {
+                    panic!("proposal exit must return to the locked launcher")
+                };
+                assert_eq!(home.chain_for_test(), chain, "exit {exit}");
+                assert!(!proposal.active());
+                assert!(!crate::app::session::is_open());
+            }
         }
     }
     #[test]

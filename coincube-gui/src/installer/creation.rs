@@ -1,4 +1,4 @@
-//! Public-key assembly for the MCP experiment. No signer, keystore or install access.
+//! Public-key assembly for a chain-bound MCP preparation. No signer, keystore or install access.
 use super::{
     descriptor::{Key, KeySource},
     step::descriptor::editor::key::new_multixkey_from_xpub,
@@ -12,7 +12,7 @@ use coincube_core::{
 };
 use coincube_mcp::{
     proposal::{CreationInput, Store},
-    Error, Reader, Request, Response,
+    Chain, Error, Reader, Request, Response,
 };
 use std::{
     collections::{BTreeMap, HashSet},
@@ -32,6 +32,11 @@ pub(crate) fn validate(input: &CreationInput) -> Result<Validated, Error> {
     if !input.valid() {
         return Err(Error::InvalidInput);
     }
+    let network = match input.network {
+        Chain::Bitcoin | Chain::BitcoinBlake2b => Network::Bitcoin,
+        Chain::Testnet4 | Chain::BitcoinBlake2bTestnet4 => Network::Testnet4,
+        Chain::Regtest => Network::Regtest,
+    };
     let mut fingerprints = HashSet::new();
     let mut accounts = HashSet::new();
     let mut parse = |keys: &[String], path: &str| -> Result<Vec<Key>, Error> {
@@ -44,7 +49,7 @@ pub(crate) fn validate(input: &CreationInput) -> Result<Validated, Error> {
                     return Err(Error::InvalidInput);
                 };
                 let (fingerprint, origin) = xpub.origin.as_ref().ok_or(Error::InvalidInput)?;
-                if xpub.xkey.network != Network::Testnet.into()
+                if xpub.xkey.network != network.into()
                     || xpub.wildcard != Wildcard::None
                     || !xpub.derivation_path.as_ref().is_empty()
                     || origin.as_ref().len() != usize::from(xpub.xkey.depth)
@@ -158,16 +163,25 @@ pub(crate) mod tests {
     };
 
     pub(crate) fn input() -> CreationInput {
+        input_for_chain(Chain::Regtest)
+    }
+
+    pub(crate) fn input_for_chain(network: Chain) -> CreationInput {
+        let encoding = match network {
+            Chain::Bitcoin | Chain::BitcoinBlake2b => Network::Bitcoin,
+            _ => Network::Testnet4,
+        };
         let secp = Secp256k1::new();
         let keys: Vec<_> = (1..=8)
             .map(|index| {
-                let private = Xpriv::new_master(Network::Regtest, &[index; 32]).unwrap();
+                let private = Xpriv::new_master(encoding, &[index; 32]).unwrap();
                 let public = Xpub::from_priv(&secp, &private);
                 format!("[{}]{public}", public.fingerprint())
             })
             .collect();
         CreationInput {
             request_id: "public-key-fixture".into(),
+            network,
             topology: Topology {
                 primary: Quorum {
                     threshold: 3,
@@ -213,6 +227,41 @@ pub(crate) mod tests {
             .iter()
             .chain(&prepared.recovery)
             .all(|key| key.source == KeySource::Manual));
+    }
+
+    #[test]
+    fn production_proposals_validate_chain_key_encoding_without_conflating_forks() {
+        for chain in Chain::ALL {
+            let input = input_for_chain(chain);
+            let prepared = validate(&input).unwrap();
+            let mainnet = matches!(chain, Chain::Bitcoin | Chain::BitcoinBlake2b);
+            assert!(prepared.descriptor.all_xpubs_net_is(if mainnet {
+                Network::Bitcoin
+            } else {
+                Network::Testnet4
+            }));
+            let opposite = input_for_chain(if mainnet {
+                Chain::Testnet4
+            } else {
+                Chain::Bitcoin
+            });
+            for primary in [true, false] {
+                let mut wrong_version = input.clone();
+                if primary {
+                    wrong_version.keys.primary[0] = opposite.keys.primary[0].clone();
+                } else {
+                    wrong_version.keys.recovery[0] = opposite.keys.recovery[0].clone();
+                }
+                assert!(matches!(validate(&wrong_version), Err(Error::InvalidInput)));
+            }
+            // Key encoding is shared across forks. The grant-bound store,
+            // not an xpub prefix, establishes the exact intended chain.
+            let store = Store::for_chain(chain);
+            let proposal = store
+                .prepare_creation(input, |input| validate(input).map(|_| ()))
+                .unwrap();
+            assert_eq!(proposal.network, chain);
+        }
     }
 
     #[test]
@@ -294,7 +343,7 @@ pub(crate) mod tests {
         let _guard = crate::app::session::test_guard();
         let dir = TestDir::new();
         let (mut ctx, _) = fixture(dir.path());
-        let store = Arc::new(Store::default());
+        let store = Arc::new(Store::for_chain(Chain::Regtest));
         let original = input();
         let proposal = store
             .prepare_creation(original.clone(), |input| validate(input).map(|_| ()))
@@ -303,6 +352,7 @@ pub(crate) mod tests {
         let session = Arc::new(Session::new(
             "proposal-test".into(),
             crate::app::session::generation_for("proposal-test").unwrap(),
+            crate::chain::ChainId::Regtest,
             grant.clone(),
             store.clone(),
             proposal,
@@ -345,7 +395,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn proposal_reader_validates_before_storage_and_denies_wallet_reads() {
-        let store = Arc::new(Store::default());
+        let store = Arc::new(Store::for_chain(Chain::Regtest));
         let reader = CreationReader::new(store.clone());
         let mut invalid = input();
         invalid.keys.primary[0] = "not-a-public-key".into();

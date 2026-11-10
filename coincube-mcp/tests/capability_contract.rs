@@ -25,7 +25,7 @@ impl Reader for RecordingReader {
 /// Use valid arguments AND a matching grant: disabled operations must stop at
 /// the adapter, rather than appearing safe only because the desktop denies them.
 #[tokio::test]
-async fn experimental_dispatch_matches_discovery_and_capabilities() {
+async fn dispatch_matches_discovery_and_capabilities() {
     let topology = json!({"primary":{"threshold":3,"key_count":5},
         "recovery":{"quorum":{"threshold":1,"key_count":1},"relative_delay_blocks":144}});
     let caps = Capabilities::current();
@@ -34,7 +34,7 @@ async fn experimental_dispatch_matches_discovery_and_capabilities() {
         (
             "tenshu_prepare_wallet_proposal",
             caps.wallet_proposals,
-            json!({"request_id":"request-1","topology":topology}),
+            json!({"request_id":"request-1","network":"regtest","topology":topology}),
             Grant::paired_proposals(credential.clone(), || true).unwrap(),
         ),
         (
@@ -46,14 +46,14 @@ async fn experimental_dispatch_matches_discovery_and_capabilities() {
         (
             "tenshu_prepare_wallet_creation",
             caps.wallet_proposals,
-            json!({"request_id":"request-1","topology":topology,
+            json!({"request_id":"request-1","network":"regtest","topology":topology,
                 "keys":{"primary":["public-1","public-2","public-3","public-4","public-5"],"recovery":["public-6"]}}),
             Grant::paired_creation(credential.clone(), || true).unwrap(),
         ),
         (
             "tenshu_prepare_transaction",
             caps.transaction_preparation,
-            json!({"wallet_id":"wallet","request_id":"request-1",
+            json!({"wallet_id":"wallet","request_id":"request-1","network":"regtest",
                 "recipients":[{"address":"bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202","amount_sats":10000}],
                 "fee_rate_sat_vb":2,"max_fee_sats":1000}),
             Grant::paired_transactions("wallet".into(), credential.clone(), || true).unwrap(),

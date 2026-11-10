@@ -77,7 +77,7 @@ pub enum Message {
     CopyConfig,
     /// Pair this client persistently with exactly the displayed scope.
     Pair,
-    /// Separate consent for unsigned Regtest transaction preparation.
+    /// Separate consent for chain-bound unsigned transaction preparation.
     #[cfg(feature = "mcp-transactions")]
     Transactions(bool),
     /// Native-only opening of the exact prepared unsigned PSBT.
@@ -101,7 +101,7 @@ pub enum Message {
     CancelRevokePair,
     /// Copy a stable private configuration for a stored client.
     CopyPair(String),
-    /// Explicit separate consent for an empty Regtest Cube's proposal session.
+    /// Explicit separate consent for an empty Cube's proposal session.
     #[cfg(feature = "mcp-proposals")]
     Proposals(bool),
     /// Explicit public-key assembly consent, separate from topology-only access.
@@ -319,7 +319,9 @@ impl Settings {
                 client.scope,
                 pairings::Scope::Proposal | pairings::Scope::WalletCreation
             )
-            .then(|| Arc::new(wire::proposal::Store::default()));
+            .then(|| chain.dir_name().parse().ok())
+            .flatten()
+            .map(|network| Arc::new(wire::proposal::Store::for_chain(network)));
             #[cfg(feature = "mcp-transactions")]
             let mut transactions = None;
             let built: Option<(Arc<dyn wire::Reader>, wire::ipc::Grant)> = match &client.scope {
@@ -367,7 +369,7 @@ impl Settings {
                     wallet: expected_wallet,
                     descriptor,
                     opaque,
-                } if supported && chain == crate::chain::ChainId::Regtest => {
+                } if supported && transactions::supported_chain(chain) => {
                     match (&wallet, &daemon) {
                         (Some(wallet), Some(daemon))
                             if wallet.id().to_string() == *expected_wallet
@@ -384,6 +386,7 @@ impl Settings {
                             .ok()
                             .map(|grant| {
                                 let service = Arc::new(transactions::Service::new(
+                                    chain,
                                     wallet
                                         .main_descriptor
                                         .as_vault()
@@ -401,7 +404,9 @@ impl Settings {
                         _ => None,
                     }
                 }
-                pairings::Scope::Proposal if proposal_supported => {
+                pairings::Scope::Proposal
+                    if proposal_supported && chain.dir_name().parse::<wire::Chain>().is_ok() =>
+                {
                     #[cfg(feature = "mcp-proposals")]
                     {
                         wire::ipc::Grant::paired_proposals(client.credential.clone(), guard)
@@ -417,7 +422,9 @@ impl Settings {
                         None
                     }
                 }
-                pairings::Scope::WalletCreation if proposal_supported => {
+                pairings::Scope::WalletCreation
+                    if proposal_supported && chain.dir_name().parse::<wire::Chain>().is_ok() =>
+                {
                     #[cfg(feature = "mcp-proposals")]
                     {
                         wire::ipc::Grant::paired_creation(client.credential.clone(), guard)
@@ -487,7 +494,7 @@ impl Settings {
                 if self.transactions_allowed
                     && self.wallet_allowed
                     && !self.capabilities.iter().any(|v| *v)
-                    && wallet.chain == crate::chain::ChainId::Regtest
+                    && transactions::supported_chain(wallet.chain)
                     && wallet.main_descriptor.as_vault().is_some()
                     && daemon.backend().is_embedded()
                     && self
@@ -524,7 +531,7 @@ impl Settings {
                     && self
                         .pairing_location
                         .as_ref()
-                        .is_some_and(|v| v.chain_matches(crate::chain::ChainId::Regtest)) =>
+                        .is_some_and(|v| v.transaction_supported()) =>
             {
                 if self.creation_allowed {
                     pairings::Scope::WalletCreation
@@ -751,7 +758,10 @@ impl Settings {
                 {
                     let generation = super::session::generation_for(cube_id)?;
                     let cube_id = cube_id.to_owned();
-                    let store = Arc::new(wire::proposal::Store::default());
+                    let chain = self.pairing_location.as_ref()?.chain()?;
+                    let store = Arc::new(wire::proposal::Store::for_chain(
+                        chain.dir_name().parse().ok()?,
+                    ));
                     let grant =
                         wire::ipc::Grant::for_proposals(Duration::from_secs(3600), move || {
                             super::session::generation_for(&cube_id) == Some(generation)
@@ -841,6 +851,7 @@ impl Settings {
         Some(crate::installer::proposal::Session::new(
             cube_id.to_owned(),
             super::session::generation_for(cube_id)?,
+            self.pairing_location.as_ref()?.chain()?,
             server.grant.clone(),
             store.clone(),
             proposal,
@@ -862,6 +873,7 @@ impl Settings {
         Some(crate::installer::proposal::Session::new(
             cube_id.to_owned(),
             super::session::generation_for(cube_id)?,
+            self.pairing_location.as_ref()?.chain()?,
             runtime.server.grant.clone(),
             store.clone(),
             proposal,
@@ -874,7 +886,9 @@ impl Settings {
         client_id: &str,
         wallet: &Wallet,
     ) -> Option<Arc<transactions::Service>> {
-        if wallet.chain != crate::chain::ChainId::Regtest {
+        if !transactions::supported_chain(wallet.chain)
+            || !self.pairing_location.as_ref()?.chain_matches(wallet.chain)
+        {
             return None;
         }
         let client = self
@@ -899,7 +913,10 @@ impl Settings {
         if !runtime.server.grant.active() {
             return None;
         }
-        runtime.transactions.clone()
+        runtime
+            .transactions
+            .clone()
+            .filter(|service| service.chain == wallet.chain)
     }
 
     #[cfg(all(test, feature = "mcp-transactions"))]
@@ -920,7 +937,7 @@ impl Settings {
                 && self
                     .pairing_location
                     .as_ref()
-                    .is_some_and(|v| v.chain_matches(crate::chain::ChainId::Regtest))
+                    .is_some_and(|v| v.transaction_supported())
         }
         #[cfg(not(feature = "mcp-transactions"))]
         false
@@ -945,30 +962,38 @@ impl Settings {
 impl Settings {
     fn proposal_view(&self) -> Element<'_, view::Message> {
         let msg = |m| view::Message::LocalMcp(m);
-        let mut content = column![h3(localized_copy("AI wallet preparation — Regtest experiment")),
+        let mut content = column![h3(localized_copy("AI wallet preparation")),
             text(localized_copy("Choose topology-only access, or allow the assistant to assemble public account keys for a 3-of-5 wallet with explicitly chosen recovery. Your AI provider may receive the public keys you give it. Neither permission allows secrets, signing, sending coins or creation approval.")),
             text(localized_copy("Tenshu validates the descriptor and fills its builder. You verify keys on the source devices, handle hardware, seed backups and PIN/passkey steps, and authorize creation here. Pairing survives lock and restart; each draft ends on lock/close or creation admission. Wallet reads require their own permission.")),
             self.enable_action()].spacing(16);
         if self.enabled {
             content = content
                 .push(
-                    text_input(localized_copy("Client label (for your reference)"), &self.client_name)
-                        .on_input(move |v| msg(Message::ClientName(v))),
+                    text_input(
+                        localized_copy("Client label (for your reference)"),
+                        &self.client_name,
+                    )
+                    .on_input(move |v| msg(Message::ClientName(v))),
                 )
                 .push(
                     checkbox(self.proposals_allowed)
-                        .label(localized_copy("Allow this client to prepare a Regtest wallet proposal"))
+                        .label(localized_copy(
+                            "Allow this client to prepare a wallet proposal",
+                        ))
                         .on_toggle(move |v| msg(Message::Proposals(v))),
                 )
                 .push(
                     checkbox(self.creation_allowed)
-                        .label(localized_copy("Allow this client to prepare a Regtest wallet using public account keys"))
+                        .label(localized_copy(
+                            "Allow this client to prepare a wallet using public account keys",
+                        ))
                         .on_toggle(move |v| msg(Message::Creation(v))),
                 )
                 .push(
                     button(localized_copy("Pair setup client until revoked")).on_press_maybe(
-                        ((self.proposals_allowed || self.creation_allowed) && !self.client_name.trim().is_empty())
-                            .then(|| msg(Message::Pair)),
+                        ((self.proposals_allowed || self.creation_allowed)
+                            && !self.client_name.trim().is_empty())
+                        .then(|| msg(Message::Pair)),
                     ),
                 );
             if let Some(server) = &self.server {
@@ -1142,6 +1167,7 @@ impl VaultReader {
             | wire::Request::Transaction(_) => Err(wire::Error::AccessDenied),
             wire::Request::List(_) => Ok(wire::Response::List(wire::WalletList {
                 wallets: vec![wire::WalletMetadata {
+                    network: self.chain.to_string(),
                     wallet_id: self.wallet_id.clone(),
                     display_name: "Vault".into(),
                     wallet_type: "vault".into(),
@@ -1169,7 +1195,7 @@ impl VaultReader {
                 let unspent = || coins.iter().filter(|c| c.spend_info.is_none());
                 Ok(wire::Response::Summary(wire::Summary {
                     wallet_id: self.wallet_id.clone(),
-                    network: info.network.to_string(),
+                    network: self.chain.to_string(),
                     wallet_type: "vault".into(),
                     confirmed_sats: unspent()
                         .filter(|c| c.block_height.is_some())
@@ -2610,7 +2636,7 @@ mod tests {
             let mut stdin = child.stdin.take().unwrap();
             let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
             /// Send a request and require the next JSON-RPC response to match its ID.
-            async fn rpc_response(
+            async fn response(
                 stdin: &mut tokio::process::ChildStdin,
                 stdout: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
                 request: Value,
@@ -2622,15 +2648,6 @@ mod tests {
                     .await.unwrap().unwrap().unwrap();
                 let value: Value = serde_json::from_str(&line).unwrap();
                 assert_eq!(value["id"], request["id"]);
-                value
-            }
-            /// Require a successful protocol response while retaining tool-level errors.
-            async fn response(
-                stdin: &mut tokio::process::ChildStdin,
-                stdout: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
-                request: Value,
-            ) -> Value {
-                let value = rpc_response(stdin, stdout, request).await;
                 assert!(value.get("error").is_none(), "protocol error");
                 value["result"].clone()
             }
@@ -2646,16 +2663,19 @@ mod tests {
             let tools = discovered["tools"].as_array().unwrap();
             let names: std::collections::BTreeSet<_> = tools.iter()
                 .map(|tool| tool["name"].as_str().unwrap()).collect();
-            // This acceptance test uses an adapter-only companion. Optional
-            // tools are neither advertised nor dispatched by this build.
-            assert_eq!(tools.len(), 5);
+            // The shipping companion advertises both native-preparation
+            // workflows. This read-only pairing must still deny every write.
+            assert_eq!(tools.len(), 10);
             assert_eq!(names, std::collections::BTreeSet::from([
                 "tenshu_get_capabilities", "tenshu_list_wallets",
                 "tenshu_get_wallet_summary", "tenshu_get_transactions",
-                "tenshu_get_wallet_policy_summary",
+                "tenshu_get_wallet_policy_summary", "tenshu_prepare_wallet_proposal",
+                "tenshu_get_wallet_proposal", "tenshu_prepare_wallet_creation",
+                "tenshu_prepare_transaction", "tenshu_get_prepared_transaction",
             ]));
             let call = |id, name: &str, arguments: Value| json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{"name":name,"arguments":arguments}});
             let listed = response(&mut stdin, &mut stdout, call(3, "tenshu_list_wallets", json!({}))).await;
+            assert_eq!(listed["structuredContent"]["wallets"][0]["network"], "bitcoin");
             let id = listed["structuredContent"]["wallets"][0]["wallet_id"].as_str().unwrap();
             let summary = response(&mut stdin, &mut stdout, call(4, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
             assert_eq!(summary["structuredContent"]["confirmed_sats"], 55_000);
@@ -2672,33 +2692,25 @@ mod tests {
             let denied = response(&mut stdin, &mut stdout, call(7, "tenshu_get_wallet_summary", json!({"wallet_id":"another-wallet"}))).await;
             assert_eq!(denied["isError"], true);
             assert_eq!(denied["structuredContent"]["error"]["code"], "access_denied");
-            let topology = json!({
+            let setup_denied = response(&mut stdin, &mut stdout, call(10, "tenshu_prepare_wallet_creation", json!({
+                "network":"bitcoin", "request_id":"read-grant-must-not-prepare",
+                "topology":{
                     "primary":{"threshold":3,"key_count":5},
                     "recovery":{"quorum":{"threshold":2,"key_count":3},"relative_delay_blocks":144}
-            });
-            for (index, (name, arguments)) in [
-                ("tenshu_prepare_wallet_proposal", json!({
-                    "request_id":"disabled-proposal", "topology":topology
-                })),
-                ("tenshu_prepare_wallet_creation", json!({
-                    "request_id":"disabled-creation", "topology":topology,
-                    "keys":{"primary":vec!["unverified";5],"recovery":vec!["unverified";3]}
-                })),
-                ("tenshu_get_wallet_proposal", json!({"proposal_id":"foreign"})),
-                ("tenshu_prepare_transaction", json!({
-                    "wallet_id":id, "request_id":"disabled-transaction",
-                    "recipients":[{"address":"bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202","amount_sats":10000}],
-                    "fee_rate_sat_vb":2, "max_fee_sats":1000
-                })),
-                ("tenshu_get_prepared_transaction", json!({"wallet_id":id,"draft_id":"foreign"})),
-            ].iter().enumerate() {
-                let unavailable = rpc_response(
-                    &mut stdin, &mut stdout, call(index + 10, name, arguments.clone())
-                ).await;
-                assert_eq!(unavailable["error"]["code"], -32602, "{}", name);
-                assert_eq!(unavailable["error"]["message"], "unknown_tool", "{}", name);
-                assert!(unavailable.get("result").is_none(), "{}", name);
-            }
+                },
+                "keys":{"primary":vec!["unverified";5],"recovery":vec!["unverified";3]}
+            }))).await;
+            assert_eq!(setup_denied["isError"], true);
+            assert_eq!(setup_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
+            let transaction_denied = response(&mut stdin, &mut stdout, call(11, "tenshu_prepare_transaction", json!({
+                "network":"bitcoin", "wallet_id": id, "request_id": "read-grant-must-not-prepare",
+                "recipients": [{"address": "bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202", "amount_sats": 10000}],
+                "fee_rate_sat_vb": 2, "max_fee_sats": 1000
+            }))).await;
+            assert_eq!(transaction_denied["isError"], true);
+            assert_eq!(transaction_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
+            let draft_denied = response(&mut stdin, &mut stdout, call(12, "tenshu_get_prepared_transaction", json!({"wallet_id": id, "draft_id": "foreign"}))).await;
+            assert_eq!(draft_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
             super::super::session::close();
             let locked = response(&mut stdin, &mut stdout, call(8, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
             assert_eq!(locked["structuredContent"]["error"]["code"], "access_denied");
@@ -3176,6 +3188,7 @@ mod proposal_consent_tests {
             let socket = settings.paired[0].server.socket.clone();
             let token = settings.paired[0].server.grant.credential().to_owned();
             let input = wire::proposal::PrepareInput {
+                network: wire::Chain::Regtest,
                 request_id: "same-request".into(),
                 topology: wire::proposal::Topology {
                     primary: wire::proposal::Quorum {
@@ -3290,6 +3303,15 @@ mod proposal_consent_tests {
         rt.block_on(async {
             crate::app::session::open_without_pin("empty-proposal-fixture");
             let mut settings = Settings::default();
+            let root = crate::installer::proposal::tests::TestDir::new();
+            settings.pairing_location = Some(
+                pairings::Location::new(
+                    root.path(),
+                    crate::chain::ChainId::Regtest,
+                    "empty-proposal-fixture",
+                )
+                .unwrap(),
+            );
             for message in [
                 Message::Enable(true),
                 Message::ClientName("fixture".into()),
@@ -3310,6 +3332,7 @@ mod proposal_consent_tests {
                 &socket,
                 &credential,
                 wire::Request::PrepareProposal(wire::proposal::PrepareInput {
+                    network: wire::Chain::Regtest,
                     request_id: "fixture".into(),
                     topology: wire::proposal::Topology {
                         primary: wire::proposal::Quorum {

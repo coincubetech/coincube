@@ -5,8 +5,8 @@ edition = "2024"
 license = "BSD-3-Clause"
 
 [features]
-default = []
-# Only companion builds paired with the experimental native Regtest workflow.
+default = ["native-proposals", "native-transactions"]
+# Features permit minimal builds; normal packaged companions expose both workflows.
 native-proposals = []
 native-transactions = []
 adapter = ["dep:rmcp"]

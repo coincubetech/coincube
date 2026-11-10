@@ -53,7 +53,10 @@ pub fn replace_tip_hash_same_height(root: &std::path::Path) {
         height: tip.height,
     });
 }
-fn wallet_on_chain(
+/// Public-only synthetic chain fixture. This module is compiled only with
+/// test-utils; supplied DummyBitcoind never contacts a node or moves funds.
+/// Production fork admission is tested separately and remains mandatory.
+pub fn wallet_on_chain(
     root: &std::path::Path,
     descriptor: coincube_core::descriptors::CoincubeDescriptor,
     chain: coincube_core::chain::ChainId,
@@ -110,7 +113,7 @@ fn wallet_on_chain(
     }]);
     connection.confirm_coins(&[(outpoint, 1, 1)]);
     connection.update_tip(&DummyBitcoind::new().tip);
-    if chain == coincube_core::chain::ChainId::Regtest {
+    {
         // This fixture's synthetic confirmed coins represent a completed poll.
         // Populate its corresponding readiness metadata deterministically;
         // production synchronization checks are not bypassed.
@@ -124,13 +127,17 @@ fn wallet_on_chain(
         descriptor.clone(),
         DataDirectory::new(root.join("daemon")),
     );
-    let handle = DaemonHandle::start(
-        config.clone(),
-        Some(DummyBitcoind::new()),
-        Some(database),
-        false,
-    )
-    .unwrap();
+    let handle = if chain.is_blake2b() {
+        synthetic_fork_handle(config.clone(), database)
+    } else {
+        DaemonHandle::start(
+            config.clone(),
+            Some(DummyBitcoind::new()),
+            Some(database),
+            false,
+        )
+        .unwrap()
+    };
     {
         // MCP history and transaction tests start from a polled wallet. The poller runs
         // on another thread, so waiting for its first scheduled tick in each
@@ -147,4 +154,49 @@ fn wallet_on_chain(
             .expect("synthetic wallet poll completed");
     }
     (config, handle)
+}
+
+/// Only the test-utils feature compiles this module. Construct a synthetic
+/// fork controller with the real command/SQLite/poller implementation, without
+/// claiming to exercise network or production backend admission. Production
+/// start/start_local_fork checks are unchanged.
+fn synthetic_fork_handle(config: Config, database: SqliteDb) -> DaemonHandle {
+    use std::sync::{atomic::AtomicBool, mpsc, Arc, Mutex};
+    let bitcoin: Arc<Mutex<dyn crate::bitcoin::BitcoinInterface>> =
+        Arc::new(Mutex::new(DummyBitcoind::new()));
+    let db: Arc<Mutex<dyn crate::database::DatabaseInterface>> = Arc::new(Mutex::new(database));
+    let sync_progress = Arc::new(crate::bitcoin::SyncProgressCache::default());
+    let reorg_alert = Arc::new(crate::bitcoin::ReorgAlertCache::default());
+    let history_sync = Arc::new(crate::bitcoin::HistorySyncCache::default());
+    let mut poller = crate::poller::Poller::new(
+        bitcoin.clone(),
+        db.clone(),
+        config.main_descriptor.clone(),
+        sync_progress.clone(),
+        reorg_alert.clone(),
+        history_sync.clone(),
+    )
+    .unwrap();
+    let (poller_sender, receiver) = mpsc::sync_channel(1);
+    let poller_handle = std::thread::Builder::new()
+        .name("MCP synthetic fork poller".into())
+        .spawn(move || poller.poll_forever(Duration::from_secs(3600), receiver))
+        .unwrap();
+    let control = crate::DaemonControl::new(
+        config,
+        bitcoin,
+        poller_sender.clone(),
+        db,
+        Secp256k1::verification_only(),
+        sync_progress,
+        reorg_alert,
+        history_sync,
+    );
+    DaemonHandle::Controller {
+        poller_sender,
+        poller_handle,
+        control,
+        scan_abort: Arc::new(AtomicBool::new(false)),
+        datadir_lock: None,
+    }
 }

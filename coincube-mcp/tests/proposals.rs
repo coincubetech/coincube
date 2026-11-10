@@ -5,6 +5,7 @@ use std::{sync::Arc, time::Duration};
 fn input() -> PrepareInput {
     PrepareInput {
         request_id: "regtest-demo-1".into(),
+        network: Chain::Regtest,
         topology: Topology {
             primary: Quorum {
                 threshold: 3,
@@ -36,11 +37,11 @@ fn server(store: Arc<Store>) -> Server {
 
 #[test]
 fn bounded_drafts_are_retry_safe_and_never_descriptors() {
-    let store = Store::default();
+    let store = Store::for_chain(Chain::Regtest);
     let first = store.prepare(input()).unwrap();
     assert_eq!(first.state, ProposalState::NeedsKeys);
     assert!(!first.descriptor_validated);
-    assert_eq!(first.network, "regtest");
+    assert_eq!(first.network, Chain::Regtest);
     assert_eq!(first.revision, 1);
     assert_eq!(store.prepare(input()).unwrap(), first);
     let mut changed = input();
@@ -87,7 +88,7 @@ fn bounded_drafts_are_retry_safe_and_never_descriptors() {
 
 #[test]
 fn invalid_topologies_and_references_do_not_fill_the_slot() {
-    let store = Store::default();
+    let store = Store::for_chain(Chain::Regtest);
     let mut cases = vec![];
     for count in [0, 4, 6, 255] {
         let mut v = input();
@@ -135,7 +136,7 @@ fn invalid_topologies_and_references_do_not_fill_the_slot() {
 
 #[tokio::test]
 async fn proposal_and_read_grants_are_disjoint_over_real_transport() {
-    let store = Arc::new(Store::default());
+    let store = Arc::new(Store::for_chain(Chain::Regtest));
     let proposal_server = server(store.clone());
     let p = proposal(
         call(
@@ -192,7 +193,7 @@ async fn proposal_and_read_grants_are_disjoint_over_real_transport() {
             Error::AccessDenied
         );
     }
-    let other = server(Arc::new(Store::default()));
+    let other = server(Arc::new(Store::for_chain(Chain::Regtest)));
     assert_eq!(
         call(
             &other.socket,
@@ -230,7 +231,7 @@ async fn proposal_and_read_grants_are_disjoint_over_real_transport() {
 
 #[test]
 fn concurrent_retries_still_have_one_bounded_draft_and_revocation_is_final() {
-    let store = Arc::new(Store::default());
+    let store = Arc::new(Store::for_chain(Chain::Regtest));
     let barrier = Arc::new(std::sync::Barrier::new(8));
     let threads: Vec<_> = (0..8)
         .map(|_| {
@@ -252,7 +253,7 @@ fn concurrent_retries_still_have_one_bounded_draft_and_revocation_is_final() {
 #[tokio::test]
 async fn sdk_proposals_are_state_changing_strict_and_do_not_upgrade_read_access() {
     use coincube_mcp::adapter::{Adapter, tools};
-    let server = server(Arc::new(Store::default()));
+    let server = server(Arc::new(Store::for_chain(Chain::Regtest)));
     let adapter = Adapter {
         pairing: None,
         socket: server.socket.clone(),
@@ -314,7 +315,7 @@ async fn actual_stdio_proposal_is_not_a_wallet_and_cannot_approve_itself() {
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
         process::Command,
     };
-    let server = server(Arc::new(Store::default()));
+    let server = server(Arc::new(Store::for_chain(Chain::Regtest)));
     let mut child = Command::new(env!("CARGO_BIN_EXE_tenshu-mcp"))
         .env("TENSHU_MCP_SOCKET", &server.socket)
         .env("TENSHU_MCP_CREDENTIAL", server.grant.credential())
@@ -536,6 +537,7 @@ fn native_validation_cannot_extend_expiration() {
 fn creation_input() -> CreationInput {
     CreationInput {
         request_id: "public-assignments".into(),
+        network: Chain::Regtest,
         topology: input().topology,
         keys: PublicKeys {
             primary: vec!["public-key".into(); 5],
@@ -546,7 +548,7 @@ fn creation_input() -> CreationInput {
 
 #[test]
 fn creation_preparation_is_immutable_bounded_and_requires_native_validation() {
-    let store = Store::default();
+    let store = Store::for_chain(Chain::Regtest);
     assert_eq!(
         store.prepare_creation(creation_input(), |_| Err(Error::InvalidInput)),
         Err(Error::InvalidInput)

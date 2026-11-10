@@ -1,4 +1,4 @@
-//! Presentation-only entry to the opt-in native Regtest proposal flow.
+//! Presentation-only entry to the native proposal flow.
 use super::{proposal, Context, Message, Step};
 use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::localized_format;
@@ -70,8 +70,8 @@ impl Step for ProposalHandoff {
                 )),
                 caption(localized_copy("Block time varies; the delay is not a calendar deadline.")),
                 text(localized_copy("Script · P2WSH")),
-                text(localized_copy("Network · Bitcoin Regtest")),
-                text(localized_copy("Node · isolated loopback, port 28443")),
+                text(format!("Network · {}", crate::chain::canonical_network_name(self.session.chain()))),
+                text(localized_copy("Node · selected and verified in Tenshu")),
             ]
             .spacing(10),
         )
@@ -96,9 +96,9 @@ impl Step for ProposalHandoff {
         .width(Length::FillPortion(1));
 
         let content = column![
-            caption(localized_copy("EXPERIMENTAL REGTEST SETUP")),
+            caption(localized_copy("VAULT SETUP")),
             h3(localized_copy("Vault setup from a paired client")),
-            text(localized_copy("This opt-in handoff is available only for an empty Regtest Cube. Tenshu keeps creation approval with you.")),
+            text(localized_copy("This handoff prepares a Vault for this empty Cube. You approve creation in Tenshu.")),
             handoff,
             row![plan, checks].spacing(16).width(Length::Fill),
             caption(localized_copy("No read access is granted. Ending setup locks this Cube and discards this proposal; pairing remains until revoked.")),
@@ -106,7 +106,7 @@ impl Step for ProposalHandoff {
                 button::primary_action("proposal-handoff-continue", None, localized_copy("Continue to key selection"), Message::FocusAction)
                     .on_press_maybe(active.then_some(Message::Next)),
                 button::secondary_action("proposal-handoff-return", None, localized_copy(if active { "End setup" } else { "Return to launcher" }), Message::FocusAction)
-                    .on_press(if active { Message::Previous } else { Message::BackToApp(coincube_core::miniscript::bitcoin::Network::Regtest) }),
+                    .on_press(if active { Message::Previous } else { Message::BackToApp(self.session.chain().bitcoin_network()) }),
             ]
             .spacing(12),
         ]
@@ -200,7 +200,10 @@ mod tests {
                 .labels
                 .iter()
                 .any(|s| s.contains("3 of 5 public-key slots")));
-            assert!(probe.labels.iter().any(|s| s.contains("port 28443")));
+            assert!(probe
+                .labels
+                .iter()
+                .any(|s| s.contains("selected and verified in Tenshu")));
             assert!(probe
                 .labels
                 .iter()

@@ -1109,6 +1109,9 @@ async fn a_claim_interrupted_after_the_seed_write_can_be_retried_after_a_restart
         "a retry must land on the identity the leftover seed file was written \
          for, or that file blocks every future attempt"
     );
+    // A restart drops the old installer and its creation lease. Keeping it
+    // alive would correctly block a second installer in the same process.
+    drop(first);
     let identity = crate::gui::tab::installer_exit_identity(&second).unwrap();
     let exit_seed = crate::gui::tab::installer_exit_seed(&second).unwrap();
     anchor.delete_async().await;
@@ -1321,6 +1324,9 @@ async fn an_install_interrupted_between_the_wallet_and_the_cube_stays_retryable(
     anchor.delete_async().await;
     let _anchor = register_anchor(&server).await;
     let second = build(source);
+    // A restart drops the old installer and its creation lease. Keeping it
+    // alive would correctly block a second installer in the same process.
+    drop(first);
     let identity = crate::gui::tab::installer_exit_identity(&second).unwrap();
     let exit_seed = crate::gui::tab::installer_exit_seed(&second).unwrap();
     let wallet_id = WalletId::generate(second.context.descriptor.as_ref().unwrap());

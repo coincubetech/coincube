@@ -1058,18 +1058,23 @@ impl Installer {
         (installer, command)
     }
 
-    /// Replace only this experimental flow's steps after a native handoff.
+    /// Replace this proposal flow's steps after a native handoff.
+    /// A mismatched target closes the session and must return to the launcher.
     #[cfg(feature = "mcp-proposals")]
     pub(crate) fn use_mcp_proposal(
         &mut self,
         settings: crate::app::local_mcp::Settings,
         proposal: proposal::Session,
-    ) -> Task<Message> {
+    ) -> Result<Task<Message>, &'static str> {
+        if proposal.chain() != self.context.bitcoin_config.chain {
+            proposal.close();
+            return Err("This proposal belongs to a different network than this Cube. Reopen the Cube and prepare a new proposal.");
+        }
         let proposal = Arc::new(proposal);
         self.context.descriptor_template = context::DescriptorTemplate::Custom;
         self.context.mcp_proposal = Some(proposal.clone());
-        // This local demo has no Connect enrollment or remote key fetching.
-        self.context.coincube_client = None;
+        // Keep the native client for managed fork feature admission.
+        // Wallet installation uses the native local-node workflow.
         self.context.use_coincube_connect = false;
         self.steps = vec![
             Box::new(proposal_handoff::ProposalHandoff::new(proposal.clone())),
@@ -1077,17 +1082,28 @@ impl Installer {
             BackupMnemonic::new(self.signer.clone()).into(),
             BackupDescriptor::default().into(),
             RegisterDescriptor::new_create_wallet().into(),
-            DefineNode::new(crate::node::NodeType::Bitcoind).into(),
-            WalletAlias::default().into(),
-            Box::new(proposal::Review::new(proposal)),
-            Final::new().into(),
         ];
+        if proposal.chain().is_blake2b() {
+            self.context.node_flavor = crate::node::bitcoind::NodeFlavor::KnotsBlake2b;
+            self.context.bitcoind_is_external = false;
+            self.context.install_node_alongside_connect = false;
+            self.steps
+                .push(InternalBitcoindStep::new(&self.context.coincube_directory).into());
+        } else {
+            self.steps
+                .push(DefineNode::new(crate::node::NodeType::Bitcoind).into());
+        }
+        self.steps.extend(vec![
+            WalletAlias::default().into(),
+            Box::new(proposal::Review::new(proposal)) as Box<dyn Step>,
+            Final::new().into(),
+        ]);
         self.proposal_settings = Some(settings);
         // The proposal hand-off and review are not Create Vault stages.
         self.create_vault = false;
         self.current = 0;
         self.steps[0].load_context(&self.context);
-        self.steps[0].load()
+        Ok(self.steps[0].load())
     }
 
     #[cfg(feature = "mcp-proposals")]
@@ -1442,7 +1458,7 @@ impl Installer {
         #[cfg(feature = "mcp-proposals")]
         if self.proposal_locked {
             return iced::widget::column![
-                coincube_ui::component::text::h3(localized_copy(if self.proposal_failure.is_some() { "Regtest setup needs inspection" } else { "Cube locked" })),
+                coincube_ui::component::text::h3(localized_copy(if self.proposal_failure.is_some() { "Vault setup needs inspection" } else { "Cube locked" })),
                 coincube_ui::component::text::text(localized_copy(self.proposal_failure.as_deref().unwrap_or("MCP access ended. An already authorized installation may finish. Its result will return to the launcher and require a fresh unlock."))),
                 iced::widget::button(localized_copy("Return to launcher")).on_press_maybe(self.proposal_finished.then_some(Message::BackToApp(self.network)))
             ].spacing(16).padding(24).into();
@@ -2385,6 +2401,47 @@ mod proposal_handoff_flow_tests {
     use super::*;
 
     #[test]
+    fn mismatched_proposal_chain_closes_session_and_explains_refusal() {
+        let _guard = crate::app::session::test_guard();
+        let root = TestDir::new();
+        let chain = crate::chain::ChainId::Bitcoin;
+        let (mut ctx, session) = super::proposal::tests::fixture_for_chain(root.path(), chain);
+        let cube = crate::app::settings::Settings::from_file(
+            &ctx.coincube_directory.network_directory(chain),
+        )
+        .unwrap()
+        .cubes
+        .remove(0);
+        let (mut installer, _) = Installer::try_new_for_chain(
+            ctx.coincube_directory.clone(),
+            chain,
+            UserFlow::CreateWallet,
+            true,
+            Some(cube),
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        ctx.mcp_proposal = None;
+        // Simulate a changed native target with the same Bitcoin encoding.
+        // The rejected proposal must not silently enter the ordinary flow.
+        ctx.bitcoin_config.chain = crate::chain::ChainId::BitcoinBlake2b;
+        installer.context = ctx;
+        let session = Arc::try_unwrap(session).ok().unwrap();
+        assert!(session.active());
+        let refused =
+            installer.use_mcp_proposal(crate::app::local_mcp::Settings::default(), session);
+        assert!(!crate::app::session::is_open());
+        assert!(installer.context.mcp_proposal.is_none());
+        assert!(installer.proposal_settings.is_none());
+        assert_eq!(refused.err(), Some(
+            "This proposal belongs to a different network than this Cube. Reopen the Cube and prepare a new proposal."
+        ));
+    }
+
+    #[test]
     fn prepared_handoff_continues_to_native_selection_and_lock_stops_navigation() {
         let _guard = crate::app::session::test_guard();
         let root = TestDir::new();
@@ -2411,7 +2468,9 @@ mod proposal_handoff_flow_tests {
         ctx.mcp_proposal = None;
         installer.context = ctx;
         let session = Arc::try_unwrap(session).ok().unwrap();
-        let _ = installer.use_mcp_proposal(crate::app::local_mcp::Settings::default(), session);
+        let _ = installer
+            .use_mcp_proposal(crate::app::local_mcp::Settings::default(), session)
+            .unwrap();
         assert_eq!(installer.current, 0);
         let _ = installer.update(Message::Next);
         assert_eq!(installer.current, 1, "Continue enters native key selection");
@@ -2451,7 +2510,9 @@ mod proposal_handoff_flow_tests {
         ctx.mcp_proposal = None;
         installer.context = ctx;
         let session = Arc::try_unwrap(session).ok().unwrap();
-        let _ = installer.use_mcp_proposal(crate::app::local_mcp::Settings::default(), session);
+        let _ = installer
+            .use_mcp_proposal(crate::app::local_mcp::Settings::default(), session)
+            .unwrap();
         let proposal = installer.context.mcp_proposal.as_ref().unwrap().clone();
         assert_eq!(installer.current, 0);
         assert!(proposal.active());
@@ -2495,7 +2556,9 @@ mod proposal_handoff_flow_tests {
         ctx.mcp_proposal = None;
         installer.context = ctx;
         let session = Arc::try_unwrap(session).ok().unwrap();
-        let _ = installer.use_mcp_proposal(crate::app::local_mcp::Settings::default(), session);
+        let _ = installer
+            .use_mcp_proposal(crate::app::local_mcp::Settings::default(), session)
+            .unwrap();
         let proposal = installer.context.mcp_proposal.as_ref().unwrap().clone();
         proposal.revoke();
         assert!(!proposal.active());

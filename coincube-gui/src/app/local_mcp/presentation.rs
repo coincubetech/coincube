@@ -240,10 +240,10 @@ fn paired_client_rows(settings: &Settings) -> Vec<Ui<'_>> {
         let scope = match &client.scope {
             pairings::Scope::Read { .. } => "Vault · Read wallet information",
             pairings::Scope::TransactionPreparation { .. } => {
-                "Vault · Prepare unsigned Regtest transactions"
+                "Vault · Prepare unsigned transactions"
             }
-            pairings::Scope::Proposal => "Regtest wallet proposal experiment",
-            pairings::Scope::WalletCreation => "Regtest public-key wallet preparation",
+            pairings::Scope::Proposal => "Wallet policy proposal",
+            pairings::Scope::WalletCreation => "Public-key wallet preparation",
         };
         let mut detail = localized_copy(scope).to_owned();
         if let pairings::Scope::Read { capabilities, .. } = &client.scope {
@@ -405,26 +405,29 @@ fn client_controls<'a>(
         .into()
 }
 
-/// The only live transaction state is an unsigned Regtest construction. Keep
+/// The only live transaction state is an unsigned chain-bound construction. Keep
 /// the artboard's review rhythm while deriving every value from the MCP result.
 #[cfg(feature = "mcp-transactions")]
 fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
     use crate::app::view::settings::page;
 
-    let is_regtest = draft.network == "regtest";
-    let ready =
-        is_regtest && draft.status == "unsigned_ready_for_native_review" && draft.signing_required;
+    let chain = draft
+        .network
+        .parse::<crate::chain::ChainId>()
+        .ok()
+        .filter(|chain| super::transactions::supported_chain(*chain));
+    let ready = chain.is_some()
+        && draft.status == "unsigned_ready_for_native_review"
+        && draft.signing_required;
     let total = draft.amount_sats.checked_add(draft.fee_sats);
     let mut details: Column<'static, view::Message, theme::Theme> = Column::new()
         .spacing(0)
         .width(Length::Fill)
         .push(transaction_field(
             localized_copy("From"),
-            localized_copy(if is_regtest {
-                "Active Vault · Bitcoin Regtest"
-            } else {
-                "Unsupported network"
-            }),
+            chain
+                .map(crate::chain::canonical_network_name)
+                .unwrap_or_else(|| localized_copy("Unsupported network")),
             false,
         ));
     for (index, recipient) in draft.recipients.iter().enumerate() {
@@ -519,10 +522,13 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
         .push(
             row![
                 heading(localized_copy("Prepared transaction")),
-                page::scope_tag(if is_regtest {
-                    "REGTEST"
-                } else {
-                    localized_copy("UNSUPPORTED")
+                page::scope_tag(match chain {
+                    Some(crate::chain::ChainId::Bitcoin) => "BTC · MAINNET",
+                    Some(crate::chain::ChainId::Testnet4) => "BTC · TESTNET4",
+                    Some(crate::chain::ChainId::Regtest) => "REGTEST",
+                    Some(crate::chain::ChainId::BitcoinBlake2b) => "BTCB2 · MAINNET",
+                    Some(crate::chain::ChainId::BitcoinBlake2bTestnet4) => "BTCB2 · TESTNET4",
+                    _ => localized_copy("UNSUPPORTED"),
                 })
             ]
                 .spacing(8)
@@ -540,7 +546,7 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
             review_message,
             theme::tenshu::button::ActionKind::Primary,
         ))
-        .push(muted(localized_copy("This card does not update after native review. Fiat conversion, quote refresh, and signer availability are planned. This experimental tool accepts exact satoshi amounts only. The native Send flow owns signing and broadcast.")));
+        .push(muted(localized_copy("This card does not update after native review. Fiat conversion, quote refresh, and signer availability are planned. This tool accepts exact satoshi amounts only. The native Send flow owns signing and broadcast.")));
     card(content)
 }
 
@@ -1059,12 +1065,12 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
         if settings
             .pairing_location
             .as_ref()
-            .is_some_and(|location| location.chain_matches(crate::chain::ChainId::Regtest))
+            .is_some_and(|location| location.transaction_supported())
         {
             body = body
                 .push(selection(
                     "tenshu.ai-access.transactions",
-                    "Experimental · prepare unsigned Regtest transactions (separate scope)",
+                    "Prepare unsigned transactions (separate scope)",
                     settings.transactions_allowed,
                     Message::Transactions(!settings.transactions_allowed),
                 ))
@@ -1136,7 +1142,7 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
     card(body)
 }
 
-/// The paired-client rows on their own, for the Regtest proposal view.
+/// The paired-client rows on their own, for the proposal view.
 #[cfg(feature = "mcp-proposals")]
 pub(super) fn paired_clients(settings: &Settings) -> Ui<'_> {
     crate::app::view::settings::page::rows(paired_client_rows(settings))

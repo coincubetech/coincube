@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise a packaged Unix STDIO adapter without a wallet or network access."""
+import argparse
 import concurrent.futures
 import json
 import os
@@ -8,12 +9,11 @@ import secrets
 import selectors
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 
 
-def check(binary, expect_proposals=False, expect_transactions=False):
+def check(binary, expect_proposals=True, expect_transactions=True):
     with tempfile.TemporaryDirectory(prefix="mcp-smoke-", dir="/tmp") as directory:
         endpoint = str(Path(directory) / "rpc")
         credential = secrets.token_hex(32)
@@ -31,7 +31,7 @@ def check(binary, expect_proposals=False, expect_transactions=False):
                     assert secrets.compare_digest(request["credential"], credential)
                     assert request["request"] == {"operation": "List", "input": {}}
                     connection.sendall(json.dumps({"Ok": {"kind": "List", "data": {
-                        "wallets": [{"wallet_id": "packaging-fixture", "display_name": "Fixture", "wallet_type": "vault"}]
+                        "wallets": [{"wallet_id": "packaging-fixture", "display_name": "Fixture", "wallet_type": "vault", "network": "regtest"}]
                     }}}).encode() + b"\n")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
@@ -91,13 +91,22 @@ def check(binary, expect_proposals=False, expect_transactions=False):
                     send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
                         "name": "tenshu_get_capabilities", "arguments": {}}})
                     capabilities = receive(3)["structuredContent"]
-                    assert capabilities["schema_version"] == 1
+                    assert capabilities["schema_version"] == 2
                     assert capabilities["wallet_proposals"] is expect_proposals
                     assert capabilities["wallet_creation_via_mcp"] is False
                     assert capabilities["transaction_preparation"] is expect_transactions
+                    networks = ["bitcoin", "testnet4", "regtest", "bitcoin-blake2b", "bitcoin-blake2b-testnet4"]
+                    for enabled, field in [(expect_proposals, "proposal_support"),
+                                           (expect_transactions, "transaction_support")]:
+                        if enabled:
+                            assert capabilities[field]["networks"] == networks
+                        else:
+                            assert field not in capabilities
                     send({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
                         "name": "tenshu_list_wallets", "arguments": {}}})
-                    assert receive(4)["structuredContent"]["wallets"][0]["wallet_id"] == "packaging-fixture"
+                    wallet = receive(4)["structuredContent"]["wallets"][0]
+                    assert wallet["wallet_id"] == "packaging-fixture"
+                    assert wallet["network"] == "regtest"
                     peer.result(timeout=10)
                     process.stdin.close()
                     assert process.wait(timeout=5) == 0
@@ -111,7 +120,12 @@ def check(binary, expect_proposals=False, expect_transactions=False):
 
 
 if __name__ == "__main__":
-    flags = set(sys.argv[2:])
-    if len(sys.argv) < 2 or not flags <= {"--expect-proposals", "--expect-transactions"} or len(flags) != len(sys.argv[2:]):
-        raise SystemExit("usage: check_mcp_binary.py /path/to/tenshu-mcp [--expect-proposals] [--expect-transactions]")
-    check(sys.argv[1], "--expect-proposals" in flags, "--expect-transactions" in flags)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("binary")
+    for feature in ["proposals", "transactions"]:
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument(f"--expect-{feature}", dest=feature, action="store_true")
+        group.add_argument(f"--no-{feature}", dest=feature, action="store_false")
+        parser.set_defaults(**{feature: True})
+    args = parser.parse_args()
+    check(args.binary, args.proposals, args.transactions)
