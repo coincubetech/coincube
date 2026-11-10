@@ -41,6 +41,14 @@ impl Location {
             && self.binding.chain == chain.dir_name()
             && self.binding.cube == cube
     }
+    #[cfg(any(feature = "mcp-proposals", feature = "mcp-transactions"))]
+    pub fn transaction_supported(&self) -> bool {
+        self.binding.chain.parse::<coincube_mcp::Chain>().is_ok()
+    }
+    #[cfg(feature = "mcp-proposals")]
+    pub fn chain(&self) -> Option<crate::chain::ChainId> {
+        self.binding.chain.parse().ok()
+    }
     pub fn chain_matches(&self, chain: crate::chain::ChainId) -> bool {
         self.binding.chain == chain.dir_name()
     }

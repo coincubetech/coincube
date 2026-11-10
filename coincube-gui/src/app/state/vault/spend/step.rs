@@ -93,7 +93,7 @@ impl TransactionDraft {
 
     #[cfg(feature = "mcp-transactions")]
     pub(super) fn from_mcp(native: crate::app::local_mcp::transactions::NativeDraft) -> Self {
-        let mut draft = Self::new(Network::Regtest, None);
+        let mut draft = Self::new(native.chain.bitcoin_network(), None);
         draft.inputs = native.coins;
         draft.generated = Some((native.psbt, native.warnings));
         draft

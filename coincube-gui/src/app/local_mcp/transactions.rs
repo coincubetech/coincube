@@ -1,4 +1,4 @@
-//! Regtest unsigned constructions. Holds public policy and a daemon, never a signer.
+//! Chain-bound unsigned constructions. Holds public policy and a daemon, never a signer.
 use crate::{
     app::wallet::SyncStatus,
     chain::ChainId,
@@ -9,7 +9,7 @@ use crate::{
 };
 use coincube_core::{
     descriptors::CoincubeDescriptor,
-    miniscript::bitcoin::{secp256k1, Address, BlockHash, Network, Psbt},
+    miniscript::bitcoin::{secp256k1, Address, BlockHash, Psbt},
 };
 use coincube_mcp::{
     self as wire,
@@ -27,6 +27,7 @@ use std::{
 /// A native-only construction; never serializable over MCP.
 #[derive(Clone)]
 pub struct NativeDraft {
+    pub chain: ChainId,
     pub psbt: Psbt,
     pub coins: Vec<Coin>,
     pub warnings: Vec<String>,
@@ -58,6 +59,10 @@ impl ChainSnapshot {
         }
     }
 }
+pub(crate) fn supported_chain(chain: ChainId) -> bool {
+    chain.dir_name().parse::<wire::Chain>().is_ok()
+}
+
 const STALE_STATUS: &str = "stale_requires_new_request";
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReviewStatus {
@@ -73,6 +78,7 @@ fn stale(draft: &mut Draft) {
 #[derive(Clone)]
 pub(crate) struct Service {
     session_id: uuid::Uuid,
+    pub(super) chain: ChainId,
     descriptor: CoincubeDescriptor,
     daemon: Arc<dyn Daemon + Send + Sync>,
     wallet_id: String,
@@ -83,6 +89,7 @@ pub(crate) struct Service {
 }
 impl Service {
     pub fn new(
+        chain: ChainId,
         descriptor: CoincubeDescriptor,
         daemon: Arc<dyn Daemon + Send + Sync>,
         wallet_id: String,
@@ -90,6 +97,7 @@ impl Service {
     ) -> Self {
         Self {
             session_id: uuid::Uuid::new_v4(),
+            chain,
             descriptor,
             daemon,
             wallet_id,
@@ -206,7 +214,15 @@ impl Service {
         if !selected_inputs_unchanged(&native.coins, &current.coins) {
             return false;
         }
-        if validate(&draft.input, &native.psbt, &current.coins, &self.descriptor).is_err() {
+        if validate(
+            self.chain,
+            &draft.input,
+            &native.psbt,
+            &current.coins,
+            &self.descriptor,
+        )
+        .is_err()
+        {
             return false;
         }
         let Ok(tip_after) = self.daemon.chain_tip_hash().await else {
@@ -222,10 +238,11 @@ impl Service {
     }
     fn ready(&self, info: &crate::daemon::model::GetInfoResult) -> bool {
         !(!self.daemon.backend().is_embedded()
-            || info.chain_id != Some(ChainId::Regtest)
+            || info.chain_id != Some(self.chain)
+            || !supported_chain(self.chain)
             || !info.sync.is_finite()
             || info.sync != 1.0
-            || info.network != Network::Regtest
+            || info.network != self.chain.bitcoin_network()
             || info.descriptors.main.as_vault() != Some(&self.descriptor)
             || info.rescan_progress.is_some()
             || info.refused_reorg_depth.is_some()
@@ -249,7 +266,9 @@ impl Service {
         }
         match &request {
             wire::Request::List(_) => {}
-            wire::Request::PrepareTransaction(v) if v.wallet_id == self.wallet_id => {}
+            wire::Request::PrepareTransaction(v)
+                if v.wallet_id == self.wallet_id && v.network.as_str() == self.chain.dir_name() => {
+            }
             wire::Request::Transaction(v) if v.wallet_id == self.wallet_id => {}
             _ => return Err(Error::AccessDenied),
         }
@@ -273,6 +292,7 @@ impl Service {
         match request {
             wire::Request::List(_) => Ok(wire::Response::List(wire::WalletList {
                 wallets: vec![wire::WalletMetadata {
+                    network: self.chain.to_string(),
                     wallet_id: self.wallet_id.clone(),
                     display_name: "Vault".into(),
                     wallet_type: "vault".into(),
@@ -328,7 +348,7 @@ impl Service {
         for recipient in &input.recipients {
             let address = Address::from_str(&recipient.address)
                 .map_err(|_| Error::InvalidInput)?
-                .require_network(Network::Regtest)
+                .require_network(self.chain.bitcoin_network())
                 .map_err(|_| Error::InvalidInput)?;
             if output_below_floor(recipient.amount_sats, address.script_pubkey())
                 || destinations
@@ -416,7 +436,7 @@ impl Service {
             .map_err(|_| Error::Unavailable)?
             .coins;
         let (fee_sats, change_sats, fee_rate_sat_vb) =
-            validate(input, &psbt, &coins, &self.descriptor)?;
+            validate(self.chain, input, &psbt, &coins, &self.descriptor)?;
         // The returned rate is the maximum-size estimate. Broadcast checks
         // the requested rate against that same prepared maximum signed size.
         coincube_core::spend::stamp_mcp_fee_cap(
@@ -430,7 +450,7 @@ impl Service {
         let summary = Prepared {
             wallet_id: self.wallet_id.clone(),
             draft_id: uuid::Uuid::new_v4().to_string(),
-            network: "regtest".into(),
+            network: self.chain.to_string(),
             status: "unsigned_ready_for_native_review".into(),
             recipients: input.recipients.clone(),
             amount_sats: input.recipients.iter().map(|r| r.amount_sats).sum(),
@@ -443,6 +463,7 @@ impl Service {
         Ok((
             summary,
             NativeDraft {
+                chain: self.chain,
                 psbt,
                 coins,
                 warnings,
@@ -503,13 +524,16 @@ fn output_below_floor(
 
 /// Independently verify the engine's public construction before exposing a summary.
 fn validate(
+    chain: ChainId,
     input: &PrepareInput,
     psbt: &Psbt,
     coins: &[Coin],
     descriptor: &CoincubeDescriptor,
 ) -> Result<(u64, u64, u64), wire::Error> {
     use wire::Error;
-    if psbt.serialize().len() > 65_536
+    if input.network.as_str() != chain.dir_name()
+        || !supported_chain(chain)
+        || psbt.serialize().len() > 65_536
         || psbt.inputs.is_empty()
         || psbt.inputs.len() > 128
         || psbt.inputs.len() != psbt.unsigned_tx.input.len()
@@ -526,6 +550,18 @@ fn validate(
         })
     {
         return Err(Error::Unavailable);
+    }
+    // Fork signatures are proprietary input records, not partial_sigs. A
+    // construction must be unsigned in both representations before disclosure.
+    if chain.is_blake2b() {
+        use coincube_core::psbt_unified::{unified_signatures, UnifiedPsbt};
+        let unified = UnifiedPsbt::from_psbt(psbt.clone()).map_err(|_| Error::Unavailable)?;
+        if !unified_signatures(&unified)
+            .map_err(|_| Error::Unavailable)?
+            .is_empty()
+        {
+            return Err(Error::Unavailable);
+        }
     }
     let secp = secp256k1::Secp256k1::verification_only();
     let mut seen = HashSet::new();
@@ -561,7 +597,7 @@ fn validate(
     for r in &input.recipients {
         let script = Address::from_str(&r.address)
             .map_err(|_| Error::InvalidInput)?
-            .require_network(Network::Regtest)
+            .require_network(chain.bitcoin_network())
             .map_err(|_| Error::InvalidInput)?
             .script_pubkey();
         if expected.insert(script, r.amount_sats).is_some() {
@@ -622,6 +658,7 @@ fn validate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coincube_core::miniscript::bitcoin::Network;
     use coincube_core::{
         descriptors::{CoincubePolicy, PathInfo},
         miniscript::{
@@ -632,13 +669,16 @@ mod tests {
     use wire::Reader;
 
     async fn fixture() -> (std::path::PathBuf, Service) {
+        fixture_on_chain(ChainId::Regtest).await
+    }
+    pub(super) async fn fixture_on_chain(chain: ChainId) -> (std::path::PathBuf, Service) {
         let owner = DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4zLqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*").unwrap();
         let recovery = DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8UutBsBbgKHzaD5HkTkifK/<0;1>/*").unwrap();
-        // Re-encode the existing public fixture accounts for the Regtest chain.
+        // Re-encode the existing public fixture accounts for the selected chain.
         // Their public key/chain code are unchanged; no signing keys are generated.
         let testnet = |mut key: DescriptorPublicKey| {
             if let DescriptorPublicKey::MultiXPub(ref mut account) = key {
-                account.xkey.network = coincube_core::miniscript::bitcoin::NetworkKind::Test;
+                account.xkey.network = chain.bitcoin_network().into();
             }
             key
         };
@@ -656,10 +696,10 @@ mod tests {
             std::env::temp_dir().join(format!("mcp-transaction-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let (config, handle) =
-            coincubed::mcp_test_fixture::regtest_wallet(&root, descriptor.clone());
+            coincubed::mcp_test_fixture::wallet_on_chain(&root, descriptor.clone(), chain);
         let daemon =
             Arc::new(crate::daemon::embedded::EmbeddedDaemon::from_regtest_handle(config, handle));
-        let service = Service::new(descriptor, daemon, "wallet".into(), None);
+        let service = Service::new(chain, descriptor, daemon, "wallet".into(), None);
         // The poller updates its sync-progress cache after DaemonHandle::start.
         // Wait for the same complete readiness state required by MCP requests.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -681,9 +721,10 @@ mod tests {
         }
         (root, service)
     }
-    fn input() -> PrepareInput {
+    pub(super) fn input() -> PrepareInput {
         let script = ScriptBuf::new_p2wsh(&WScriptHash::all_zeros());
         PrepareInput {
+            network: wire::Chain::Regtest,
             wallet_id: "wallet".into(),
             request_id: "payment-1".into(),
             recipients: vec![wire::transaction::Recipient {
@@ -706,7 +747,7 @@ mod tests {
             _ => panic!("expected transaction summary"),
         }
     }
-    async fn cleanup(root: std::path::PathBuf, service: Service) {
+    pub(super) async fn cleanup(root: std::path::PathBuf, service: Service) {
         service.daemon.stop().await.unwrap();
         drop(service);
         std::fs::remove_dir_all(root).unwrap();
@@ -918,7 +959,14 @@ mod tests {
             let summary = prepared(&service, input()).await;
             let native = service.native(&summary.draft_id).unwrap();
             assert_eq!(
-                validate(&input(), &native.psbt, &native.coins, &service.descriptor).unwrap(),
+                validate(
+                    ChainId::Regtest,
+                    &input(),
+                    &native.psbt,
+                    &native.coins,
+                    &service.descriptor
+                )
+                .unwrap(),
                 (
                     summary.fee_sats,
                     summary.change_sats,
@@ -946,6 +994,7 @@ mod tests {
             one_sat_request.fee_rate_sat_vb = 1;
             assert_eq!(
                 validate(
+                    ChainId::Regtest,
                     &one_sat_request,
                     &one_sat_per_vbyte,
                     &native.coins,
@@ -987,17 +1036,37 @@ mod tests {
                 coincube_core::miniscript::bitcoin::Sequence::from_height(144);
             cases.push(recovery);
             for psbt in cases {
-                assert!(validate(&input(), &psbt, &native.coins, &service.descriptor).is_err());
+                assert!(validate(
+                    ChainId::Regtest,
+                    &input(),
+                    &psbt,
+                    &native.coins,
+                    &service.descriptor
+                )
+                .is_err());
             }
             let mut cap = input();
             cap.max_fee_sats = 1;
             assert_eq!(
-                validate(&cap, &native.psbt, &native.coins, &service.descriptor),
+                validate(
+                    ChainId::Regtest,
+                    &cap,
+                    &native.psbt,
+                    &native.coins,
+                    &service.descriptor
+                ),
                 Err(wire::Error::FeeLimitExceeded)
             );
             let mut spent = native.coins.clone();
             spent[0].is_immature = true;
-            assert!(validate(&input(), &native.psbt, &spent, &service.descriptor).is_err());
+            assert!(validate(
+                ChainId::Regtest,
+                &input(),
+                &native.psbt,
+                &spent,
+                &service.descriptor
+            )
+            .is_err());
             cleanup(root, service).await;
         });
     }
@@ -1392,3 +1461,7 @@ mod tests {
         assert!(!output_below_floor(legacy_dust, p2pkh));
     }
 }
+
+#[cfg(test)]
+#[path = "transactions_production_tests.rs"]
+mod production_tests;

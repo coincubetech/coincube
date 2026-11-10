@@ -6504,7 +6504,7 @@ impl App {
             } = &message
             {
                 if self.mcp_supported()
-                    && self.cube_settings.network == crate::chain::ChainId::Regtest
+                    && local_mcp::transactions::supported_chain(self.cube_settings.network)
                 {
                     if let Some(wallet) = &self.wallet {
                         if let Some(service) = self.local_mcp.transaction_service(client_id, wallet)
@@ -6546,7 +6546,7 @@ impl App {
                 let unavailable = "Native review is temporarily unavailable. Try Review again.";
                 let stale = "This draft is stale. Ask the paired client to prepare a new request, then review it in Tenshu.";
                 let failure = if self.mcp_supported()
-                    && self.cube_settings.network == crate::chain::ChainId::Regtest
+                    && local_mcp::transactions::supported_chain(self.cube_settings.network)
                 {
                     if let Some(wallet) = &self.wallet {
                         if let Some(service) = self.local_mcp.transaction_service(client_id, wallet)
@@ -6554,7 +6554,10 @@ impl App {
                             if service.session_id() == *session_id {
                                 match service.review_status(draft_id) {
                                     local_mcp::transactions::ReviewStatus::Ready => {
-                                        if let Some(native) = native {
+                                        if let Some(native) = native
+                                            .as_ref()
+                                            .filter(|draft| draft.chain == wallet.chain)
+                                        {
                                             if let Some(panel) = self.panels.current_mut() {
                                                 panel.interrupt();
                                             }
@@ -11450,7 +11453,12 @@ impl App {
 
     pub(crate) fn mcp_proposals_supported(&self) -> bool {
         cfg!(feature = "mcp-proposals")
-            && self.cube_settings.network == crate::chain::ChainId::Regtest
+            && self
+                .cube_settings
+                .network
+                .dir_name()
+                .parse::<coincube_mcp::Chain>()
+                .is_ok()
             && self.wallet.is_none()
             && self.daemon.is_none()
             && self.cube_settings.vault_wallet_id.is_none()
@@ -11492,15 +11500,13 @@ impl App {
     }
 
     fn mcp_supported(&self) -> bool {
-        !self.cube_settings.network.is_blake2b()
-            && self
-                .wallet
-                .as_ref()
-                .is_some_and(|wallet| wallet.main_descriptor.as_vault().is_some())
-            && self
-                .daemon
-                .as_ref()
-                .is_some_and(|daemon| daemon.backend().is_embedded())
+        self.wallet.as_ref().is_some_and(|wallet| {
+            wallet.chain == self.cube_settings.network
+                && wallet.main_descriptor.as_vault().is_some()
+        }) && self
+            .daemon
+            .as_ref()
+            .is_some_and(|daemon| daemon.backend().is_embedded())
             && !self.daemon_switch_in_progress
     }
 

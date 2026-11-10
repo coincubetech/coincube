@@ -1058,18 +1058,22 @@ impl Installer {
         (installer, command)
     }
 
-    /// Replace only this experimental flow's steps after a native handoff.
+    /// Replace this proposal flow's steps after a native handoff.
     #[cfg(feature = "mcp-proposals")]
     pub(crate) fn use_mcp_proposal(
         &mut self,
         settings: crate::app::local_mcp::Settings,
         proposal: proposal::Session,
     ) -> Task<Message> {
+        if proposal.chain() != self.context.bitcoin_config.chain {
+            proposal.close();
+            return Task::none();
+        }
         let proposal = Arc::new(proposal);
         self.context.descriptor_template = context::DescriptorTemplate::Custom;
         self.context.mcp_proposal = Some(proposal.clone());
-        // This local demo has no Connect enrollment or remote key fetching.
-        self.context.coincube_client = None;
+        // Keep the native client for managed fork feature admission.
+        // Wallet installation uses the native local-node workflow.
         self.context.use_coincube_connect = false;
         self.steps = vec![
             Box::new(proposal_handoff::ProposalHandoff::new(proposal.clone())),
@@ -1077,11 +1081,22 @@ impl Installer {
             BackupMnemonic::new(self.signer.clone()).into(),
             BackupDescriptor::default().into(),
             RegisterDescriptor::new_create_wallet().into(),
-            DefineNode::new(crate::node::NodeType::Bitcoind).into(),
-            WalletAlias::default().into(),
-            Box::new(proposal::Review::new(proposal)),
-            Final::new().into(),
         ];
+        if proposal.chain().is_blake2b() {
+            self.context.node_flavor = crate::node::bitcoind::NodeFlavor::KnotsBlake2b;
+            self.context.bitcoind_is_external = false;
+            self.context.install_node_alongside_connect = false;
+            self.steps
+                .push(InternalBitcoindStep::new(&self.context.coincube_directory).into());
+        } else {
+            self.steps
+                .push(DefineNode::new(crate::node::NodeType::Bitcoind).into());
+        }
+        self.steps.extend(vec![
+            WalletAlias::default().into(),
+            Box::new(proposal::Review::new(proposal)) as Box<dyn Step>,
+            Final::new().into(),
+        ]);
         self.proposal_settings = Some(settings);
         // The proposal hand-off and review are not Create Vault stages.
         self.create_vault = false;
@@ -1442,7 +1457,7 @@ impl Installer {
         #[cfg(feature = "mcp-proposals")]
         if self.proposal_locked {
             return iced::widget::column![
-                coincube_ui::component::text::h3(localized_copy(if self.proposal_failure.is_some() { "Regtest setup needs inspection" } else { "Cube locked" })),
+                coincube_ui::component::text::h3(localized_copy(if self.proposal_failure.is_some() { "Vault setup needs inspection" } else { "Cube locked" })),
                 coincube_ui::component::text::text(localized_copy(self.proposal_failure.as_deref().unwrap_or("MCP access ended. An already authorized installation may finish. Its result will return to the launcher and require a fresh unlock."))),
                 iced::widget::button(localized_copy("Return to launcher")).on_press_maybe(self.proposal_finished.then_some(Message::BackToApp(self.network)))
             ].spacing(16).padding(24).into();

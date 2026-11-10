@@ -10,6 +10,7 @@ use std::{
 
 fn input() -> PrepareInput {
     PrepareInput {
+        network: coincube_mcp::Chain::Regtest,
         wallet_id: "wallet".into(),
         request_id: "payment-1".into(),
         recipients: vec![Recipient {
@@ -29,7 +30,7 @@ fn transaction_contract_rejects_ambiguous_units_unbounded_values_and_extra_autho
         ("psbt", serde_json::json!("external")),
         ("broadcast", serde_json::json!(true)),
         ("change_address", serde_json::json!("external")),
-        ("network", serde_json::json!("bitcoin")),
+        ("network", serde_json::json!("unknown-chain")),
         ("fee_rate_sat_vb", serde_json::json!("2")),
         ("max_fee_sats", serde_json::json!(-1)),
     ] {

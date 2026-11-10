@@ -2760,6 +2760,19 @@ impl Tab {
                         settings_opt
                     };
 
+                    #[cfg(feature = "mcp-proposals")]
+                    if i.context.mcp_proposal.is_some() {
+                        // Complete association, then drop all installer/client
+                        // handles. Even a still-open original session must unlock
+                        // afresh; old tokens/proposal IDs never become read grants.
+                        let root = i.datadir.clone();
+                        i.stop();
+                        let (mut home, task) = Home::new_for_chain(root, Some(cube.network));
+                        home.set_error("Vault created. Reopen this Cube to verify keys/backups and approve fresh read access.");
+                        self.state = State::Home(home);
+                        return task.map(Message::Launch);
+                    }
+
                     if cube.network.is_blake2b() {
                         // A copy (Tools › Split coins → Create copy) is
                         // finished once saved. Its source App is still open in
@@ -2841,18 +2854,6 @@ impl Tab {
                         return Task::none();
                     }
 
-                    #[cfg(feature = "mcp-proposals")]
-                    if i.context.mcp_proposal.is_some() {
-                        // Complete association, then drop all installer/client
-                        // handles. Even a still-open original session must unlock
-                        // afresh; old tokens/proposal IDs never become read grants.
-                        let root = i.datadir.clone();
-                        i.stop();
-                        let (mut home, task) = Home::new_for_chain(root, Some(cube.network));
-                        home.set_error("Regtest Vault created. Reopen this Cube to verify keys/backups and approve fresh read access.");
-                        self.state = State::Home(home);
-                        return task.map(Message::Launch);
-                    }
                     if let Some(settings) = settings_opt {
                         let cfg = app::Config::from_file(
                             &i.datadir
@@ -3344,6 +3345,14 @@ impl Tab {
                         if !app.mcp_proposals_supported() {
                             return Task::none();
                         }
+                        if app.fork_feature_unconfirmed() {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "Checking Bitcoin Blake2b availability. Try again in a moment."
+                                        .into(),
+                                ),
+                            )));
+                        }
                         // Construct the normal builder only in response to the
                         // user's native review click, never from an MCP worker.
                         match Installer::try_new_for_chain(
@@ -3355,7 +3364,7 @@ impl Tab {
                             app.breez_client(),
                             app.spark_backend(),
                             false,
-                            None,
+                            app.authenticated_coincube_client(),
                         ) {
                             Ok((mut install, _)) => {
                                 let client = match review {
@@ -7950,22 +7959,27 @@ mod seed_export_duress_routing_tests {
 #[cfg(all(test, feature = "mcp-proposals"))]
 mod mcp_proposal_routing_tests {
     use super::*;
-    use crate::installer::proposal::tests::{fixture, TestDir};
+    use crate::installer::proposal::tests::TestDir;
     use coincube_core::miniscript::bitcoin::Network;
     fn proposal_tab(
         root: &std::path::Path,
     ) -> (Tab, std::sync::Arc<crate::installer::proposal::Session>) {
-        let (ctx, proposal) = fixture(root);
+        proposal_tab_on_chain(root, crate::chain::ChainId::Regtest)
+    }
+    fn proposal_tab_on_chain(
+        root: &std::path::Path,
+        chain: crate::chain::ChainId,
+    ) -> (Tab, std::sync::Arc<crate::installer::proposal::Session>) {
+        let (ctx, proposal) = crate::installer::proposal::tests::fixture_for_chain(root, chain);
         let cube = crate::app::settings::Settings::from_file(
-            &ctx.coincube_directory
-                .network_directory(crate::chain::ChainId::Regtest),
+            &ctx.coincube_directory.network_directory(chain),
         )
         .unwrap()
         .cubes
         .remove(0);
         let (mut installer, _) = Installer::try_new_for_chain(
             ctx.coincube_directory.clone(),
-            crate::chain::ChainId::Regtest,
+            chain,
             UserFlow::CreateWallet,
             true,
             Some(cube),
@@ -7977,6 +7991,28 @@ mod mcp_proposal_routing_tests {
         .unwrap();
         installer.context = ctx;
         (Tab::new(1, State::Installer(Box::new(installer))), proposal)
+    }
+    #[test]
+    fn mcp_proposal_completion_locks_every_production_chain_before_native_reopen() {
+        let _guard = crate::app::session::test_guard();
+        for network in coincube_mcp::Chain::ALL {
+            let root = TestDir::new();
+            let chain = network.as_str().parse().unwrap();
+            let (mut tab, proposal) = proposal_tab_on_chain(root.path(), chain);
+            let State::Installer(installer) = &mut tab.state else {
+                panic!()
+            };
+            installer.proposal_install_dispatched = true;
+            let cube = installer.cube_settings.clone().unwrap();
+            let _ = tab.update(Message::Install(installer::Message::CubeSaved(
+                Ok((cube, None, None)),
+                None,
+                None,
+            )));
+            assert!(matches!(tab.state, State::Home(_)));
+            assert!(!proposal.active());
+            assert!(!crate::app::session::is_open());
+        }
     }
     #[test]
     fn proposal_back_and_lock_never_reopen_an_app_from_retained_clients() {

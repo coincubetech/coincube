@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin};
 
 pub mod capabilities;
+pub mod chain;
+pub use chain::Chain;
 pub mod pairing;
 pub use capabilities::{Capabilities, ReadCapability, ReadPermissions};
 pub mod proposal;
@@ -96,6 +98,8 @@ impl Request {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WalletMetadata {
+    /// Exact chain identity, including the Bitcoin Blake2b fork where applicable.
+    pub network: String,
     /// Opaque identity valid only in the current authorized session.
     pub wallet_id: String,
     /// Generic wallet name; user-authored labels are not exported.

@@ -1,9 +1,11 @@
 # Tenshu local AI access (MCP)
 
-This first slice supports **Bitcoin Vaults using Tenshu's embedded daemon on
-macOS, Linux and Windows**. It reads the existing wallet engine. It does not support
-Liquid, Spark, imported non-Vault policies, Bitcoin Blake2b or external daemons
-yet. MCP starts disabled. Explicitly paired clients keep their selected scope until
+Local MCP supports **Bitcoin and Bitcoin Blake2b Vaults using Tenshu's embedded
+daemon on macOS, Linux and Windows**. Supported exact chain identities are
+`bitcoin`, `testnet4`, `regtest`, `bitcoin-blake2b` and
+`bitcoin-blake2b-testnet4`. Normal builds include wallet proposals, public-key
+wallet preparation and unsigned transaction preparation. Liquid, Spark, imported
+non-Vault policies and external daemons remain unsupported. MCP starts disabled. Explicitly paired clients keep their selected scope until
 revoked; protected access pauses while the Cube is locked or Tenshu is closed.
 No Connect API or mobile Keychain changes are needed.
 
@@ -42,7 +44,9 @@ build and stage it before signing. Packaging changes still need validation by CI
 and a signed-release smoke test. Both macOS release architectures use native
 runners and execute `contrib/check_mcp_binary.py` on the signed adapter before
 publishing; the check covers initialization, discovery, authenticated fixture
-reads and clean shutdown. Do not copy a development executable into an
+reads and clean shutdown. The checker expects both preparation workflows and
+schema version 2 in normal packaged builds. For deliberately minimal builds,
+pass `--no-proposals` and/or `--no-transactions` to match the disabled features. Do not copy a development executable into an
 already signed application bundle.
 
 ## Pair a client until revoked
@@ -151,27 +155,33 @@ and scoped inside Tenshu, regardless of what the adapter or host claims.
 
 | Tool | Input | Result / limitations |
 |---|---|---|
-| `tenshu_get_capabilities` | `{}` | Public static build metadata only; no installed-wallet inventory or live consent. Proposal availability depends on the experimental native build flag; direct MCP wallet creation is prohibited by design. |
+| `tenshu_get_capabilities` | `{}` | Public static build metadata only; no installed-wallet inventory or live consent. Schema version 2 reports supported exact chains and build capabilities; direct MCP wallet creation is prohibited by design. |
 | `tenshu_list_wallets` | `{}` | Only the authorized active Vault; opaque session ID and generic display name. |
 | `tenshu_get_wallet_summary` | `{"wallet_id":"…"}` | Confirmed, unconfirmed and available sats, network and sync state. |
 | `tenshu_get_transactions` | `{"wallet_id":"…","limit":20}` | Up to 50 most recent confirmed activities, newest first. Rows contain a session activity id, coarse kind (`incoming`, `outgoing`, `self_transfer`) and `confirmed` status. No exact amount, time, block height, chain id, pending history or pagination cursor. |
 | `tenshu_get_wallet_policy_summary` | `{"wallet_id":"…"}` | Deterministic script type, thresholds, key counts, relative recovery delays in blocks. |
-| `tenshu_prepare_wallet_proposal` | Explicit 3-of-5 primary, recovery quorum/delay, bounded retry ID | Requires separate proposal consent in the opt-in Regtest native build. Produces an in-memory topology draft; keys, actual descriptor validation and creation approval are native-only. |
+| `tenshu_prepare_wallet_proposal` | Exact `network`, explicit 3-of-5 primary, recovery quorum/delay, bounded retry ID | Requires separate proposal consent in an empty unlocked Cube. Produces an in-memory topology draft; keys, actual descriptor validation and creation approval are native-only. |
 | `tenshu_get_wallet_proposal` | `{"proposal_id":"…"}` | Only the current proposal grant's draft. Existing read grants cannot access proposals, and proposal grants cannot access wallet reads. |
-| `tenshu_prepare_wallet_creation` | Public account keys and explicit topology | Separate setup pairing, actual descriptor validation and native builder; creation approval remains native. |
-| `tenshu_prepare_transaction` | Opaque wallet/request IDs, recipients in sats, fee rate and fee ceiling | Separate transaction pairing; unsigned Regtest PSBT stays in Tenshu, only a summary is returned. |
+| `tenshu_prepare_wallet_creation` | Exact `network`, public account keys and explicit topology | Separate setup pairing, actual descriptor validation and native builder; creation approval remains native. |
+| `tenshu_prepare_transaction` | Exact `network`, opaque wallet/request IDs, recipients in sats, fee rate and fee ceiling | Separate transaction pairing; unsigned PSBT stays in Tenshu, only a summary is returned. |
 | `tenshu_get_prepared_transaction` | Opaque wallet and draft IDs | Current transaction pairing/session summary only; no PSBT or input/change-address export. |
 
 The history output schema removes the former `incoming_sats`, `outgoing_sats`,
 `timestamp` and `height` fields. They are absent, not optional or null. Clients
 that used those fields must use the coarse `kind` and `status` instead.
 
-Ordinary builds report `wallet_proposals:false`. The opt-in native demo reports
-its Regtest bounds in `proposal_support`; this static metadata is not permission.
-Read-only AI access cannot grant proposal authority. There is no direct MCP
-approve/install/sign/broadcast tool. See the experimental demo below.
+Normal builds report `wallet_proposals:true` and `transaction_preparation:true`.
+Schema version 2 uses `proposal_support.networks` and
+`transaction_support.networks` to list the five exact supported chains. This
+static metadata is not permission. Read-only AI access cannot grant preparation
+authority. There is no direct MCP approve/install/sign/broadcast tool.
+Wallet list entries include their exact `network`. Every preparation request
+must explicitly supply the paired Cube's identity; missing or different chains
+are rejected. Bitcoin and Bitcoin Blake2b share address/key encodings, as do their
+Testnet4 variants, so an address or xpub prefix cannot establish chain identity.
 
-Discovery, static capabilities and dispatch use the same companion build flags:
+Discovery, static capabilities and dispatch use the same companion build flags,
+enabled by default:
 `native-proposals` enables the three proposal tools, and `native-transactions`
 enables the two transaction tools. Calling a disabled tool by name returns the
 protocol error `unknown_tool` before opening desktop IPC, even if the desktop
@@ -179,8 +189,10 @@ has a matching grant. Enabled tools still require their separate desktop scope.
 
 The initial proposal shape is deliberately limited to a 3-of-5 primary and one
 explicitly chosen recovery path (1–5 slots, valid threshold, positive block delay)
-for Bitcoin Regtest P2WSH. No recovery values are silently selected by Tenshu.
-The topology-only tool accepts no keys, descriptors, paths, networks, labels or credentials. Separately scoped public-key wallet assembly is described below.
+for P2WSH on the selected supported chain. No recovery values are silently
+selected by Tenshu. The topology-only tool requires the intended `network` and
+accepts no keys, descriptors, paths, labels or credentials. Separately scoped
+public-key wallet assembly is described below.
 Only one draft per proposal grant is retained. An exact retry returns that draft;
 changed content or a second request returns `proposal_conflict`. Revocation clears
 access, and native setup must independently verify the live session before using
@@ -259,6 +271,10 @@ memory/configuration; this feature does not sandbox arbitrary same-user malware.
 `coincube-mcp/tests/security.rs` covers the SDK and actual STDIO process, typed
 inputs, permissions, per-client isolation, expiration, revocation during reads,
 shutdown, disconnection, Unix socket permissions, Windows logon-session ACLs and peer identity, bounded frames and sanitized errors.
+`coincube-mcp/tests/production_proposals.rs` covers required exact-chain inputs,
+pairwise chain rejection before validation/storage, and immutable retries. Native
+creation tests check mainnet/test-network public-key versions and managed fork
+backend admission without installing a wallet.
 `app::local_mcp::tests` exercises trusted settings and the actual embedded daemon
 against a disposable SQLite wallet containing public-only synthetic transactions;
 the blockchain backend is a test double. It is not a funded regtest/full client UI
@@ -293,28 +309,28 @@ BREEZ_API_KEY=DUMMY_BREEZ_API_KEY cargo test -p coincube-gui --lib mcp_read_heal
 
 Before production release, complete packaged-client acceptance on each platform with
 Maple and Claude, verify signed packaging, and obtain independent security review.
-Windows named-pipe and pairing-file security are included. Any later unsigned
-transaction proposal needs a separate
-capability, scoped operation ID and trusted desktop review. Signing remains with
-existing user/Keychain mechanisms; it cannot be an extension of this read dispatch.
+Windows named-pipe and pairing-file security are included. Unsigned transaction
+preparation has a separate capability, scoped operation ID and trusted desktop
+review. Signing remains with existing user/Keychain mechanisms; read permissions
+cannot authorize preparation or signing.
 
-## Experimental native proposal demo
+## Native wallet proposals
 
-Ordinary builds keep proposal support off. A build opting into GUI
-`mcp-proposals` and companion `native-proposals,adapter` implements the first
-native-consent flow on an **empty, unlocked Bitcoin Regtest Cube only**. It is
-not enabled in release/nightly workflows. Capability discovery reports the
-build flag and bounded topology limits; that report is never live consent.
+Normal desktop builds enable `mcp-proposals`; normal companion builds enable
+`native-proposals`. The workflow requires an **empty, unlocked Cube** on one of
+the five supported chains. Capability discovery reports the build support and
+bounded topology limits; that report is never live consent. Minimal builds can
+omit these features explicitly with `--no-default-features`.
 
 1. Discuss signer independence, shared failure locations and loss of any two
    primary signers. Choose the recovery quorum and positive relative block delay
    explicitly. Block time varies; possession/control of keys and recovery
    eligibility are separate from a descriptor's mathematical validity.
-2. In a fresh disposable Regtest Cube, enable AI access and approve the separate
+2. In an empty Cube on the intended chain, enable AI access and approve the separate
    proposal permission. Existing wallet-read grants cannot prepare a proposal.
    Save the private client configuration only in the trusted client's local file.
-3. The client prepares one topology draft. It receives `needs_keys` with no
-   public/private keys or descriptor. In Tenshu, click **Review proposal and
+3. The client prepares one topology draft with `network` matching the paired
+   Cube. It receives `needs_keys` with no public/private keys or descriptor. In Tenshu, click **Review proposal and
    select keys**. This native click opens the existing key picker, backup and
    hardware registration flows. These preparatory actions have their existing
    local/device confirmations; they are not MCP approvals.
@@ -327,13 +343,16 @@ build flag and bounded topology limits; that report is never live consent.
    `ready_for_native_review` / `descriptor_validated:true`. Revisions advance
    when validation is invalidated/restored. This proves neither independent
    custody nor a completed key/backup verification.
-5. **Create this Regtest Vault** is a native action. Immediately before any
+5. **Create this Vault** is a native action. Immediately before any
    wallet/daemon persistence, a shared per-Cube OS reservation, captured session
    generation, live grant and exact review snapshot must all pass. There is no
-   approve/install/sign/broadcast MCP operation. This first demo accepts only an
-   external loopback Bitcoin Core/Knots RPC on port 28443 and no Connect/provider
-   enrollment. Creating consumes the current proposal runtime authorization,
-   without deleting persistent client pairing.
+   approve/install/sign/broadcast MCP operation. Bitcoin-family creation uses
+   a native-configured Bitcoin node. Bitcoin Blake2b creation uses Tenshu's
+   isolated managed Knots Blake2b node, including the existing saved beta/global
+   feature gate and exact-chain backend admission. Arbitrary fork RPC and
+   Connect/provider enrollment are not added by this workflow. Creating consumes
+   the current proposal runtime authorization without deleting persistent
+   client pairing.
 6. Completion returns to the launcher. Unlock afresh. A proposal-only pairing
    stays registered but does not gain permission to read the new Vault. Explicitly
    pair a read-scoped client to inspect its policy/balance; future setup workflow
@@ -346,37 +365,39 @@ never automatically delete an existing/partial wallet or retry it. Inspect the
 local outcome before cleanup/retry; no MCP method can clear the tombstone. The
 reservation is retained through native post-install association. Closing the
 process can interrupt completion, which is a recovery/inspection case, not a
-claim of rollback. This is an experimental Regtest gate, not production release
-acceptance.
+claim of rollback. Enabling this workflow in normal builds does not replace
+packaged-client, hardware and signed-release acceptance.
 
 Keychain guidance uses existing setup and verification screens. The owner's
 Cube Recovery Kit encryption key is not a Vault signing key. Do not label a
 manually entered key as phone-attested, or claim that a backup/recovery rehearsal
 passed because a key or descriptor exists. Phone/Connect-dependent setup is a
-separate manual checkpoint when unavailable in the isolated offline demo.
+separate manual checkpoint when unavailable in local setup.
 
 
-## AI-assisted wallet preparation (Regtest experiment)
+## AI-assisted wallet preparation
 
-With the `mcp-proposals` GUI feature and matching `native-proposals` companion,
-a separately paired client can call `tenshu_prepare_wallet_creation`. It assembles
-one immutable 3-of-5 primary policy with an explicitly chosen timed recovery path
+With the default `mcp-proposals` GUI feature and matching `native-proposals`
+companion, a separately paired client can call `tenshu_prepare_wallet_creation`.
+It assembles one immutable 3-of-5 primary policy with an explicitly chosen timed recovery path
 and public account-key assignments. The desktop compiles the actual P2WSH
 descriptor using the existing wallet engine and fills the native builder. It does
 not create a wallet or assert that devices, independent custody or backups were
 verified.
 
-In an unlocked empty Regtest Cube, open AI access, select **Allow this client to
-prepare a Regtest wallet using public account keys**, and choose **Pair setup
+In an unlocked empty Cube on a supported chain, open AI access, select the
+public-account-key wallet preparation permission, and choose **Pair setup
 client until revoked**. This is a distinct durable scope. Existing balance/history/
 policy and topology-only clients do not gain this permission. Each client still
 needs the user's ordinary Cube unlock; drafts and approval do not survive lock.
 
-Arguments are a JSON object with `request_id`, `topology` and `keys`:
+Arguments are a JSON object with `request_id`, required `network`, `topology` and `keys`
+(this example selects Testnet4):
 
 ```json
 {
-  "request_id": "inheritance-demo-1",
+  "request_id": "inheritance-1",
+  "network": "testnet4",
   "topology": {
     "primary": {"threshold": 3, "key_count": 5},
     "recovery": {
@@ -392,14 +413,17 @@ Arguments are a JSON object with `request_id`, `topology` and `keys`:
 ```
 
 Replace the placeholders with public account xpubs supplied for this setup. Only
-origin-bearing test-network account keys without derivation suffixes or wildcards
-are accepted; the origin path must match the account depth. All assignments need
+origin-bearing account keys without derivation suffixes or wildcards are accepted.
+Use `xpub` encoding for Bitcoin/Bitcoin Blake2b and `tpub` encoding for
+Testnet4/Bitcoin Blake2b Testnet4/Regtest; the origin path must match the account
+depth. All assignments need
 distinct fingerprints and underlying account keys in this first slice. For an
 account deeper than the master key, the origin fingerprint is caller-supplied and
 is not checked against the xpub. Native review shows the account xpub fingerprint
 and says the origin was not checked. Distinct
 fingerprints are not proof of separate ownership. Private keys, seed phrases,
-PINs, arbitrary descriptors, filesystem paths and network overrides are not inputs.
+PINs, arbitrary descriptors and filesystem paths are not inputs. The required
+`network` confirms the paired chain; it cannot override it.
 No hardware command, secret access or remote request is performed by this tool.
 
 The returned minimized proposal identifies the topology and native descriptor
@@ -409,27 +433,26 @@ the same proposal; changed keys, topology or retry identity conflict. Use
 Then open **Review prepared wallet in Tenshu**. The ordinary builder is populated
 with the public keys and manual/unverified provenance. The user verifies hardware
 and fingerprints, handles seed/backup/PIN/passkey steps, reviews the exact
-configuration, and chooses **Create this Regtest Vault** in Tenshu. Actual key
+configuration, and chooses **Create this Vault** in Tenshu. Actual key
 changes require a fresh proposal; aliases and other native configuration are
 bound by the final native review. No MCP call can approve creation or skip these
 steps. The existing local node restriction and once-only creation admission apply.
 
 Creation consumes the proposal session and does not grant read access to the new
-Vault. Wallet reads require their own explicit pairing scope. This experimental
-acceptance is separate from hardware-device, named-client and production-release
-validation; it does not enable production wallet creation.
+Vault. Wallet reads require their own explicit pairing scope. Hardware-device,
+named-client and production-release validation remain separate acceptance work.
 
 
-## Experimental unsigned transaction preparation
+## Unsigned transaction preparation
 
-Build the desktop with `--features mcp-transactions` and its companion with
-`--features adapter,native-transactions` (add the existing proposal features when
-also testing wallet setup). This feature is off by default and restricted to a
-Bitcoin Regtest Vault on an embedded daemon. It does not enable production wallets,
-Liquid/Spark, imported policies, external daemons, signing or broadcasting.
+Normal builds enable desktop `mcp-transactions` and companion
+`native-transactions`. This workflow supports an existing Vault on an embedded
+daemon on all five supported chains. Bitcoin Blake2b retains the existing native
+backend/feature admission. Liquid/Spark, imported policies and external daemons
+remain excluded. MCP cannot sign or broadcast.
 
 In **Cube → Settings → AI access**, select the Vault and **Prepare unsigned
-Regtest transactions**, then explicitly pair the new client. This is separate
+transactions**, then explicitly pair the new client. This is separate
 from all read and wallet-setup scopes: existing clients are not upgraded, and a
 transaction client cannot read balances/history/policy. It can list only its
 paired Vault to obtain its opaque wallet ID. Pairing persists until revoked;
@@ -441,13 +464,15 @@ unsigned drafts last only for that unlocked session.
 {
   "wallet_id": "OPAQUE_ID_FROM_THIS_CLIENTS_WALLET_LIST",
   "request_id": "payment-1",
-  "recipients": [{"address": "BARE_REGTEST_ADDRESS", "amount_sats": 10000}],
+  "network": "testnet4",
+  "recipients": [{"address": "BARE_TESTNET4_ADDRESS", "amount_sats": 10000}],
   "fee_rate_sat_vb": 2,
   "max_fee_sats": 1000
 }
 ```
 
-The first slice uses exact integer satoshis and an explicit fee ceiling, with
+The request must match the Vault's exact chain, even when a different chain shares
+its address encoding. The workflow uses exact integer satoshis and an explicit fee ceiling, with
 1–8 distinct recipient addresses and 1–1000 sat/vB. Fiat conversion, payment URIs,
 send-max, self-send, recovery-path selection, caller-supplied change addresses,
 raw scripts/PSBTs and signing/broadcast arguments are excluded. The existing

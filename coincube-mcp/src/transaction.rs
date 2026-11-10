@@ -13,7 +13,7 @@ pub const MAX_SATS: u64 = 2_100_000_000_000_000;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Recipient {
-    /// Bare address, checked for the active Regtest network by Tenshu.
+    /// Bare address, checked against the explicitly selected chain's encoding.
     #[schemars(length(min = 14, max = 90))]
     pub address: String,
     /// Exact integer satoshis, with dust checked by the wallet engine.
@@ -25,6 +25,9 @@ pub struct Recipient {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareInput {
+    /// Intended chain from the authorized wallet list. Required even when two
+    /// chains share address encodings; a mismatch never starts construction.
+    pub network: crate::Chain,
     /// Opaque identity from this pairing's authorized wallet list.
     #[schemars(length(min = 1, max = 64))]
     pub wallet_id: String,
@@ -94,7 +97,7 @@ pub struct Prepared {
     pub wallet_id: String,
     /// Session-local native review identity.
     pub draft_id: String,
-    /// Always regtest for this experiment.
+    /// Exact chain identity of the paired Vault; never inferred from an address.
     pub network: String,
     /// `unsigned_ready_for_native_review` while current, otherwise
     /// `stale_requires_new_request`. Neither status means signed, saved, or broadcast.

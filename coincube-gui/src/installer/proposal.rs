@@ -1,4 +1,4 @@
-//! Experimental native review and creation admission. No MCP setter can approve.
+//! Native review and chain-bound creation admission. No MCP setter can approve.
 use super::{Context, Error, Message, Step};
 use coincube_core::{
     descriptors::PathInfo,
@@ -27,6 +27,7 @@ use std::{
 pub(crate) struct Session {
     cube_id: String,
     generation: u64,
+    chain: crate::chain::ChainId,
     grant: Arc<Grant>,
     store: Arc<Store>,
     proposal: Proposal,
@@ -36,6 +37,7 @@ impl Session {
     pub(crate) fn new(
         cube_id: String,
         generation: u64,
+        chain: crate::chain::ChainId,
         grant: Arc<Grant>,
         store: Arc<Store>,
         proposal: Proposal,
@@ -43,11 +45,15 @@ impl Session {
         Self {
             cube_id,
             generation,
+            chain,
             grant,
             store,
             proposal,
             approval: Mutex::new(None),
         }
+    }
+    pub(crate) fn chain(&self) -> crate::chain::ChainId {
+        self.chain
     }
     pub(crate) fn topology(&self) -> Topology {
         self.proposal.topology
@@ -70,6 +76,7 @@ impl Session {
     }
     pub(crate) fn active(&self) -> bool {
         self.grant.active()
+            && self.proposal.network.as_str() == self.chain.dir_name()
             && crate::app::session::generation_for(&self.cube_id) == Some(self.generation)
     }
     pub(crate) fn invalidate(&self) {
@@ -92,16 +99,17 @@ impl Session {
     fn validate(&self, ctx: &Context) -> Result<sha256::Hash, Error> {
         if !self.topology().valid()
             || ctx.cube_id.as_deref() != Some(&self.cube_id)
-            || ctx.bitcoin_config.chain != crate::chain::ChainId::Regtest
-            || ctx.network != coincube_core::miniscript::bitcoin::Network::Regtest
+            || self.proposal.network.as_str() != self.chain.dir_name()
+            || ctx.bitcoin_config.chain != self.chain
+            || ctx.bitcoin_config.check_chain_encoding().is_err()
+            || ctx.network != self.chain.bitcoin_network()
             || ctx.use_coincube_connect
-            || ctx.coincube_client.is_some()
             || ctx.backup.is_some()
             || ctx.restored_imported_wallet.is_some()
             || ctx.claim_source.is_some()
+            || ctx.fresh_fork_cube
             || ctx.keys.values().any(|key| key.provider_key.is_some())
             || ctx.install_node_alongside_connect
-            || ctx.internal_bitcoind.is_some()
             || ctx.pending_bitcoind_config.is_some()
         {
             return Err(failed("Proposal context changed; start a fresh proposal."));
@@ -121,8 +129,10 @@ impl Session {
                 return Err(failed("Public keys differ from the assistant's immutable proposal. Prepare a fresh proposal before creating."));
             }
         }
-        if descriptor.is_taproot() {
-            return Err(failed("This demo requires P2WSH."));
+        if descriptor.is_taproot() || !descriptor.all_xpubs_net_is(self.chain.bitcoin_network()) {
+            return Err(failed(
+                "This proposal requires P2WSH keys encoded for its chain.",
+            ));
         }
         // CoincubeDescriptor is engine-validated. Read its actual compiled
         // policy, never infer it from requested slots or an AI assertion.
@@ -144,15 +154,30 @@ impl Session {
         {
             return Err(failed("The actual policy differs from the proposal. Return to key selection or prepare a new proposal."));
         }
-        let Some(coincubed::config::BitcoinBackend::Bitcoind(node)) = &ctx.bitcoin_backend else {
-            return Err(failed(
-                "This experiment requires your isolated loopback Regtest node.",
-            ));
+        let Some(coincubed::config::BitcoinBackend::Bitcoind(_)) = &ctx.bitcoin_backend else {
+            return Err(failed("Select a Bitcoin node in native setup first."));
         };
-        if !node.addr.ip().is_loopback() || node.addr.port() != 28443 {
-            return Err(failed(
-                "Use the disposable loopback Regtest node on port 28443.",
-            ));
+        if self.chain.is_blake2b() {
+            // Classify the already configured managed node without creating a
+            // wallet directory. Installation still performs the asynchronous
+            // beta/feature and exact-chain admission before daemon writes.
+            let cfg = coincubed::config::Config::new(
+                ctx.bitcoin_config.clone(),
+                ctx.bitcoin_backend.clone(),
+                log::LevelFilter::Info,
+                descriptor.clone(),
+                coincubed::datadir::DataDirectory::new(
+                    ctx.coincube_directory
+                        .network_directory(self.chain)
+                        .path()
+                        .to_owned(),
+                ),
+            );
+            if !ctx.in_cube_fork_vault
+                || !crate::chain::is_managed_local_fork(&cfg, &ctx.coincube_directory)
+            {
+                return Err(failed("Select Tenshu's managed Bitcoin Blake2b node. Native installation must verify its availability and exact chain."));
+            }
         }
         // Fingerprints/provenance/aliases and exact persisted daemon config
         // are bound locally, including auth changes. The digest is private and
@@ -160,6 +185,7 @@ impl Session {
         let mut keys = ctx.keys.iter().collect::<Vec<_>>();
         keys.sort_by_key(|(fp, _)| **fp);
         let bytes = serde_json::to_vec(&(
+            (self.chain, self.proposal.network),
             descriptor.to_string(),
             ctx.coincube_directory
                 .path()
@@ -187,7 +213,7 @@ impl Session {
             &ctx.bitcoin_backend,
             &ctx.pending_bitcoind_config,
             ctx.install_node_alongside_connect,
-            ctx.internal_bitcoind.is_some(),
+            (ctx.internal_bitcoind.is_some(), ctx.in_cube_fork_vault),
         ))
         .map_err(|_| failed("Could not bind the native review."))?;
         Ok(sha256::Hash::hash(&bytes))
@@ -303,11 +329,13 @@ pub(crate) fn reserve(ctx: &Context) -> Result<Option<Lease>, Error> {
             .iter()
             .find(|c| c.id == cube)
             .ok_or_else(|| failed("Target Cube is unavailable."))?;
-        if target.network != crate::chain::ChainId::Regtest
+        if target.network != proposal.chain
             || target.vault_wallet_id.is_some()
             || target.bitcoin_import.is_some()
         {
-            return Err(failed("Target Cube is no longer an empty Regtest Cube."));
+            return Err(failed(
+                "Target Cube is no longer empty or its chain changed.",
+            ));
         }
         proposal.admit(ctx, &mut file)?;
     }
@@ -322,6 +350,7 @@ pub(crate) struct Review {
     session: Arc<Session>,
     snapshot: Option<sha256::Hash>,
     descriptor: String,
+    backend: String,
     signers: Vec<String>,
     warning: Option<String>,
 }
@@ -331,6 +360,7 @@ impl Review {
             session,
             snapshot: None,
             descriptor: String::new(),
+            backend: String::new(),
             signers: Vec::new(),
             warning: None,
         }
@@ -363,6 +393,12 @@ impl Step for Review {
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_default();
+        self.backend = match &ctx.bitcoin_backend {
+            Some(coincubed::config::BitcoinBackend::Bitcoind(node)) => {
+                format!("Bitcoin node · {}", node.addr)
+            }
+            _ => "Bitcoin node not selected".into(),
+        };
         self.signers.clear();
         let assistant_origins = self
             .session
@@ -466,7 +502,9 @@ impl Step for Review {
         _progress: (usize, usize),
     ) -> Element<'a, Message> {
         let topology = self.session.topology();
-        let mut content = column![h3(localized_copy("Review and authorize this Regtest Vault")),
+        let mut content = column![h3(localized_copy("Review and authorize this Vault")),
+            text(format!("Network · {}", self.session.chain().dir_name())),
+            text(&self.backend),
             text(coincube_ui::localized_format!("Primary: 3 of 5. Recovery: {} of {} after {} relative blocks for each coin. Block time varies; this is not a calendar deadline.", "Principal: 3 de 5. Recuperación: {} de {} después de {} bloques relativos para cada moneda. El tiempo de los bloques varía; no es una fecha límite de calendario.", topology.recovery.quorum.threshold, topology.recovery.quorum.key_count, topology.recovery.relative_delay_blocks)),
             text(localized_copy("Tenshu validated this actual descriptor. For assistant-supplied keys, the account xpub fingerprint below is computed from the key itself; the origin fingerprint was supplied by the assistant and was not checked. Verify every key on its source device, signer distribution and recovery assumptions before creating. Distinct fingerprints do not prove independent custody.")),
             text(&self.descriptor),
@@ -477,11 +515,9 @@ impl Step for Review {
         }
         content = content
             .push(button(localized_copy("Back to setup")).on_press(Message::Previous))
-            .push(
-                button(localized_copy("Create this Regtest Vault")).on_press_maybe(
-                    (self.snapshot.is_some() && self.session.active()).then_some(Message::Next),
-                ),
-            );
+            .push(button(localized_copy("Create this Vault")).on_press_maybe(
+                (self.snapshot.is_some() && self.session.active()).then_some(Message::Next),
+            ));
         scrollable(content).into()
     }
     fn revert(&self, _ctx: &mut Context) {
@@ -561,23 +597,31 @@ pub(crate) mod tests {
         }
     }
     pub(crate) fn fixture(root: &std::path::Path) -> (Context, Arc<Session>) {
+        fixture_for_chain(root, crate::chain::ChainId::Regtest)
+    }
+    pub(crate) fn fixture_for_chain(
+        root: &std::path::Path,
+        chain: crate::chain::ChainId,
+    ) -> (Context, Arc<Session>) {
+        let network = chain.dir_name().parse::<coincube_mcp::Chain>().unwrap();
         let cube = crate::app::settings::CubeSettings::new_with_raw_id(
             "proposal-test".into(),
             "Disposable".into(),
-            crate::chain::ChainId::Regtest,
+            chain,
         );
         crate::app::session::open_without_pin(&cube.id);
         let generation = crate::app::session::generation_for(&cube.id).unwrap();
         let mut ctx = Context::new(
-            Network::Regtest,
+            chain.bitcoin_network(),
             crate::dir::CoincubeDirectory::new(root.to_owned()),
             Some(&cube),
             None,
         );
-        let store = Arc::new(Store::default());
+        let store = Arc::new(Store::for_chain(network));
         let proposal = store
             .prepare(PrepareInput {
                 request_id: "fixture".into(),
+                network,
                 topology: topology(),
             })
             .unwrap();
@@ -585,12 +629,20 @@ pub(crate) mod tests {
         let session = Arc::new(Session::new(
             cube.id.clone(),
             generation,
+            chain,
             grant,
             store,
             proposal,
         ));
         ctx.mcp_proposal = Some(session.clone());
-        ctx.descriptor = Some(descriptor(3));
+        ctx.in_cube_fork_vault = chain.is_blake2b();
+        ctx.descriptor = Some(
+            super::super::creation::validate(&super::super::creation::tests::input_for_chain(
+                network,
+            ))
+            .unwrap()
+            .descriptor,
+        );
         ctx.bitcoin_backend = Some(coincubed::config::BitcoinBackend::Bitcoind(
             coincubed::config::BitcoindConfig {
                 addr: "127.0.0.1:28443".parse().unwrap(),
@@ -600,7 +652,7 @@ pub(crate) mod tests {
                 ),
             },
         ));
-        let dir = root.join("regtest");
+        let dir = root.join(chain.dir_name());
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("settings.json"),
@@ -686,6 +738,96 @@ pub(crate) mod tests {
         crate::app::session::close();
     }
     #[test]
+    fn production_native_review_binds_chain_backend_and_target_without_installing() {
+        let _guard = crate::app::session::test_guard();
+        for chain in [
+            crate::chain::ChainId::Bitcoin,
+            crate::chain::ChainId::Testnet4,
+        ] {
+            let temp = TestDir::new();
+            let (mut ctx, session) = fixture_for_chain(temp.path(), chain);
+            assert!(session.approve(&ctx));
+            // A backend change invalidates the exact native approval, even
+            // though it remains a valid selection for a subsequent review.
+            if let Some(coincubed::config::BitcoinBackend::Bitcoind(node)) =
+                &mut ctx.bitcoin_backend
+            {
+                node.addr.set_port(8332);
+            }
+            assert!(reserve(&ctx).is_err());
+            assert!(session.approve(&ctx));
+            let lease = reserve(&ctx).unwrap();
+            assert!(!session.active());
+            assert!(!temp.path().join(chain.dir_name()).join("data").exists());
+            drop(lease);
+            crate::app::session::close();
+        }
+    }
+
+    #[test]
+    fn production_review_requires_managed_fork_backend_and_keeps_fork_identity() {
+        let _guard = crate::app::session::test_guard();
+        for chain in [
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let temp = TestDir::new();
+            let (mut ctx, session) = fixture_for_chain(temp.path(), chain);
+            assert!(ctx.in_cube_fork_vault);
+            assert!(
+                !session.approve(&ctx),
+                "arbitrary RPC cannot bypass fork admission"
+            );
+            let directory = crate::node::bitcoind::internal_bitcoind_datadir_for(
+                &ctx.coincube_directory,
+                crate::node::bitcoind::NodeChainFamily::BitcoinBlake2b,
+            );
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut managed = crate::node::bitcoind::InternalBitcoindConfig::for_flavor(
+                crate::node::bitcoind::NodeFlavor::KnotsBlake2b,
+            );
+            managed.networks.insert(
+                chain.bitcoin_network(),
+                crate::node::bitcoind::InternalBitcoindNetworkConfig {
+                    rpc_port: 18444,
+                    p2p_port: 18445,
+                    prune: 550,
+                    rpc_auth: None,
+                },
+            );
+            managed
+                .to_ini()
+                .write_to_file(crate::node::bitcoind::internal_bitcoind_config_path(
+                    &directory,
+                ))
+                .unwrap();
+            ctx.bitcoin_backend = Some(coincubed::config::BitcoinBackend::Bitcoind(
+                coincubed::config::BitcoindConfig {
+                    addr: "127.0.0.1:18444".parse().unwrap(),
+                    rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(
+                        crate::node::bitcoind::internal_bitcoind_cookie_path(
+                            &directory,
+                            &chain.bitcoin_network(),
+                        ),
+                    ),
+                },
+            ));
+            assert!(session.approve(&ctx));
+            // Identical address/xpub encoding cannot stand in for exact chain.
+            ctx.bitcoin_config.chain = crate::chain::ChainId::from(chain.bitcoin_network());
+            assert!(session.validate(&ctx).is_err());
+            assert!(reserve(&ctx).is_err());
+            ctx.bitcoin_config.chain = chain;
+            assert!(session.approve(&ctx));
+            let lease = reserve(&ctx).unwrap();
+            assert!(!session.active());
+            assert!(!temp.path().join(chain.dir_name()).join("data").exists());
+            drop(lease);
+            crate::app::session::close();
+        }
+    }
+
+    #[test]
     fn read_grants_revocation_wrong_target_or_backend_cannot_create() {
         let _guard = crate::app::session::test_guard();
         let temp = TestDir::new();
@@ -701,9 +843,7 @@ pub(crate) mod tests {
             crate::chain::ChainId::Regtest,
             Duration::from_secs(10),
         );
-        if let Some(coincubed::config::BitcoinBackend::Bitcoind(node)) = &mut ctx.bitcoin_backend {
-            node.addr = "192.0.2.1:8332".parse().unwrap();
-        }
+        ctx.bitcoin_backend = None;
         assert!(session.validate(&ctx).is_err());
         assert!(reserve(&ctx).is_err());
         session.revoke();

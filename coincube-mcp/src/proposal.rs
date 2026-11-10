@@ -1,5 +1,5 @@
 //! Bounded session-only topology drafts. No keys, descriptors or wallet engine.
-use crate::{Error, Reader, Request, Response};
+use crate::{Chain, Error, Reader, Request, Response};
 use rand::RngCore;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -33,17 +33,17 @@ pub struct Recovery {
     pub relative_delay_blocks: u16,
 }
 
-/// Restricted first-demo policy. Real keys are selected only inside Tenshu.
+/// Bounded multisignature policy. Native review still verifies actual keys.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Topology {
-    /// First demo supports 3-of-5 primary spending only.
+    /// Supports 3-of-5 primary spending only.
     pub primary: Quorum,
     /// Explicit chosen recovery; no default is silently added.
     pub recovery: Recovery,
 }
 impl Topology {
-    /// Validate the bounded first-demo topology, not a descriptor.
+    /// Validate the bounded topology, not a descriptor.
     pub fn valid(self) -> bool {
         self.primary
             == (Quorum {
@@ -70,7 +70,9 @@ pub struct PrepareInput {
     /// Grant-local retry key, never a path, URL, label or credential.
     #[schemars(length(min = 1, max = 64), regex(pattern = "^[A-Za-z0-9_-]+$"))]
     pub request_id: String,
-    /// No key material, descriptors or network override can be supplied here.
+    /// Exact intended chain; must match the Cube selected during pairing.
+    pub network: Chain,
+    /// No key material or descriptors can be supplied here.
     pub topology: Topology,
 }
 impl PrepareInput {
@@ -85,7 +87,7 @@ impl PrepareInput {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PublicKeys {
-    /// Five origin-bearing test-network account xpubs, without suffixes.
+    /// Five origin-bearing account xpubs with the selected chain encoding, without suffixes.
     #[schemars(length(min = 5, max = 5))]
     pub primary: Vec<String>,
     /// Account xpubs for the explicitly chosen recovery quorum.
@@ -100,7 +102,9 @@ pub struct CreationInput {
     /// Client-local immutable retry identity, not a path or credential.
     #[schemars(length(min = 1, max = 64), regex(pattern = "^[A-Za-z0-9_-]+$"))]
     pub request_id: String,
-    /// The same bounded Regtest topology as the initial proposal experiment.
+    /// Exact intended chain; must match the Cube selected during pairing.
+    pub network: Chain,
+    /// Explicit primary and recovery quorums.
     pub topology: Topology,
     /// Public account keys only. Native parsing and compilation are mandatory.
     pub keys: PublicKeys,
@@ -156,9 +160,9 @@ pub struct Proposal {
     pub proposal_id: String,
     /// Immutable draft revision. Native edits need a new reviewed revision.
     pub revision: u64,
-    /// Only the disposable Bitcoin Regtest demonstration is supported.
-    pub network: String,
-    /// Requested first-demo script form, not a compiled descriptor.
+    /// Exact chain pinned by the native pairing, including fork identity.
+    pub network: Chain,
+    /// Requested script form, not a compiled descriptor.
     pub script_type: String,
     /// Human-requested paths, not claims about real signers or devices.
     pub topology: Topology,
@@ -184,11 +188,19 @@ struct State {
 /// that grant and session before offering any proposal-derived action. This
 /// service never authorizes, installs, opens windows, compiles or invents keys.
 pub struct Store {
+    network: Chain,
     state: Mutex<State>,
 }
 impl Default for Store {
     fn default() -> Self {
+        Self::for_chain(Chain::Regtest)
+    }
+}
+impl Store {
+    /// Bind a fresh grant to the exact chain of its trusted target Cube.
+    pub fn for_chain(network: Chain) -> Self {
         Self {
+            network,
             state: Mutex::new(State {
                 revoked: false,
                 draft: None,
@@ -211,7 +223,7 @@ impl Store {
         if state.revoked {
             return Err(Error::AccessDenied);
         }
-        if !input.valid() {
+        if !input.valid() || input.network != self.network {
             return Err(Error::InvalidInput);
         }
         if let Some(draft) = &state.draft {
@@ -226,7 +238,7 @@ impl Store {
         let proposal = Proposal {
             proposal_id: random.iter().map(|b| format!("{b:02x}")).collect(),
             revision: 1,
-            network: "regtest".into(),
+            network: self.network,
             script_type: "p2wsh".into(),
             topology: input.topology,
             state: ProposalState::NeedsKeys,
@@ -252,7 +264,7 @@ impl Store {
         if state.revoked {
             return Err(Error::AccessDenied);
         }
-        if !input.valid() {
+        if !input.valid() || input.network != self.network {
             return Err(Error::InvalidInput);
         }
         if let Some(draft) = &state.draft {
@@ -268,7 +280,7 @@ impl Store {
         let proposal = Proposal {
             proposal_id: random.iter().map(|b| format!("{b:02x}")).collect(),
             revision: 1,
-            network: "regtest".into(),
+            network: self.network,
             script_type: "p2wsh".into(),
             topology: input.topology,
             state: ProposalState::ReadyForNativeReview,
@@ -277,6 +289,7 @@ impl Store {
         state.draft = Some(Draft {
             input: PrepareInput {
                 request_id: input.request_id.clone(),
+                network: input.network,
                 topology: input.topology,
             },
             proposal: proposal.clone(),

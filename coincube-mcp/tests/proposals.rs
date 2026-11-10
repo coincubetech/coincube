@@ -5,6 +5,7 @@ use std::{sync::Arc, time::Duration};
 fn input() -> PrepareInput {
     PrepareInput {
         request_id: "regtest-demo-1".into(),
+        network: Chain::Regtest,
         topology: Topology {
             primary: Quorum {
                 threshold: 3,
@@ -40,7 +41,7 @@ fn bounded_drafts_are_retry_safe_and_never_descriptors() {
     let first = store.prepare(input()).unwrap();
     assert_eq!(first.state, ProposalState::NeedsKeys);
     assert!(!first.descriptor_validated);
-    assert_eq!(first.network, "regtest");
+    assert_eq!(first.network, Chain::Regtest);
     assert_eq!(first.revision, 1);
     assert_eq!(store.prepare(input()).unwrap(), first);
     let mut changed = input();
@@ -536,6 +537,7 @@ fn native_validation_cannot_extend_expiration() {
 fn creation_input() -> CreationInput {
     CreationInput {
         request_id: "public-assignments".into(),
+        network: Chain::Regtest,
         topology: input().topology,
         keys: PublicKeys {
             primary: vec!["public-key".into(); 5],

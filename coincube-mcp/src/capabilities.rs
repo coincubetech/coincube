@@ -67,16 +67,16 @@ pub struct Capabilities {
     /// Implemented, bounded confirmed-history request limit.
     pub max_confirmed_transactions: u8,
     /// End-to-end proposal workflow through native consent; not a grant.
-    /// False while only the underlying protocol/service is staged.
+    /// Independent of live pairing permissions.
     pub wallet_proposals: bool,
-    /// Static first-demo constraints, absent in ordinary builds. Never consent.
+    /// Static proposal constraints, absent when the feature is disabled. Never consent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal_support: Option<ProposalSupport>,
     /// Whether an MCP call can create a wallet. Always false for this design.
     pub wallet_creation_via_mcp: bool,
     /// Unsigned native transaction preparation is implemented in this build.
     pub transaction_preparation: bool,
-    /// Explicit first-slice limits, not current client permission.
+    /// Explicit preparation limits, not current client permission.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transaction_support: Option<TransactionSupport>,
     /// Whether the MCP surface exports public keys or descriptors.
@@ -84,12 +84,12 @@ pub struct Capabilities {
     /// Whether the MCP surface exports secrets or offers signing/broadcast.
     pub secrets_or_signing: bool,
 }
-/// Non-sensitive protocol limits and human checkpoints for the first demo.
+/// Non-sensitive protocol limits and human checkpoints for wallet preparation.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProposalSupport {
-    /// Only an isolated Bitcoin Regtest Cube with no Vault/import is eligible.
-    pub network: String,
+    /// Exact supported chains; an unlocked Cube with no Vault/import is required.
+    pub networks: Vec<crate::Chain>,
     /// Fixed supported primary threshold.
     pub primary_threshold: u8,
     /// Fixed supported primary key count; not verified independent owners.
@@ -114,12 +114,12 @@ pub struct ProposalSupport {
     /// The owner's Cube Recovery Kit encryption key is never a Vault signer.
     pub owner_recovery_key_is_vault_signer: bool,
 }
-/// Regtest unsigned-payment constraints; signing and broadcasting stay native.
+/// Unsigned-payment constraints; signing and broadcasting stay native.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TransactionSupport {
-    /// Only Bitcoin Regtest is eligible.
-    pub network: String,
+    /// Exact supported chains, including fork identities with shared encodings.
+    pub networks: Vec<crate::Chain>,
     /// Exact integer satoshis only; no implicit fiat conversion.
     pub amount_unit: String,
     /// Bounded memory per paired client and unlock.
@@ -137,7 +137,7 @@ impl Capabilities {
     /// Describe only operations actually implemented in this build.
     pub fn current() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             wallet_family: "bitcoin_vault_embedded".into(),
             reads_require_existing_vault: true,
             wallet_data_requires_consent: true,
@@ -145,7 +145,7 @@ impl Capabilities {
             max_confirmed_transactions: 50,
             wallet_proposals: cfg!(feature = "native-proposals"),
             proposal_support: cfg!(feature = "native-proposals").then(|| ProposalSupport {
-                network: "regtest".into(),
+                networks: crate::Chain::ALL.to_vec(),
                 primary_threshold: 3,
                 primary_key_count: 5,
                 recovery_required: true,
@@ -162,7 +162,7 @@ impl Capabilities {
             transaction_preparation: cfg!(feature = "native-transactions"),
             transaction_support: cfg!(feature = "native-transactions").then(|| {
                 TransactionSupport {
-                    network: "regtest".into(),
+                    networks: crate::Chain::ALL.to_vec(),
                     amount_unit: "sats".into(),
                     max_drafts_per_session: crate::transaction::MAX_DRAFTS,
                     max_recipients: crate::transaction::MAX_RECIPIENTS,

@@ -62,7 +62,7 @@ pub fn tools() -> Vec<Tool> {
         tools.extend([
         tool::<proposal::PrepareInput, proposal::Proposal>(
             "tenshu_prepare_wallet_proposal",
-            "Prepare a bounded session-only Regtest 3-of-5 topology draft with explicitly chosen recovery. Requires separate proposal consent; keys and descriptor validation happen in Tenshu. Never creates a wallet.",
+            "Prepare a bounded session-only 3-of-5 topology draft with explicitly chosen recovery. The network must match the paired Cube exactly. Requires separate proposal consent; keys and descriptor validation happen in Tenshu. Never creates a wallet.",
         ).annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
         tool::<proposal::ProposalInput, proposal::Proposal>(
             "tenshu_get_wallet_proposal",
@@ -70,7 +70,7 @@ pub fn tools() -> Vec<Tool> {
         ),
         tool::<proposal::CreationInput, proposal::Proposal>(
             "tenshu_prepare_wallet_creation",
-            "Assemble one immutable Regtest 3-of-5 wallet proposal from origin-bearing public account xpubs and explicitly chosen recovery. Requires separate wallet-preparation pairing. Tenshu validates the actual descriptor and fills its builder. The user must verify hardware/keys/backups and authorize creation in Tenshu. Never supply seeds, private keys or PINs; never creates a wallet itself.",
+            "Assemble one immutable 3-of-5 wallet proposal from origin-bearing public account xpubs and explicitly chosen recovery. The network must match the paired Cube exactly. Requires separate wallet-preparation pairing. Tenshu validates the actual descriptor and fills its builder. The user must verify hardware/keys/backups and authorize creation in Tenshu. Never supply seeds, private keys or PINs; never creates a wallet itself.",
         ).annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
         ]);
     }
@@ -78,7 +78,7 @@ pub fn tools() -> Vec<Tool> {
         tools.extend([
         tool::<transaction::PrepareInput, transaction::Prepared>(
             "tenshu_prepare_transaction",
-            "Prepare an unsigned Regtest Vault transaction from exact satoshi recipients, explicit fee rate and total-fee ceiling. Requires a separate transaction-preparation pairing. Repeated identical request_id returns the same draft; changed input conflicts. The PSBT stays in Tenshu for native review and user signing. Never signs, saves a spend or broadcasts; no fiat quotes, send-max, recovery selection or caller change address.",
+            "Prepare an unsigned Vault transaction from exact satoshi recipients, explicit fee rate and total-fee ceiling. The network must match the paired Vault exactly, including Bitcoin versus Bitcoin Blake2b. Requires a separate transaction-preparation pairing. Repeated identical request_id returns the same draft; changed input conflicts. The PSBT stays in Tenshu for native review and user signing. Never signs, saves a spend or broadcasts; no fiat quotes, send-max, recovery selection or caller change address.",
         ).annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
         tool::<transaction::DraftInput, transaction::Prepared>(
             "tenshu_get_prepared_transaction",

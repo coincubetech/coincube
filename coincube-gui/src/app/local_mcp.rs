@@ -77,7 +77,7 @@ pub enum Message {
     CopyConfig,
     /// Pair this client persistently with exactly the displayed scope.
     Pair,
-    /// Separate consent for unsigned Regtest transaction preparation.
+    /// Separate consent for chain-bound unsigned transaction preparation.
     #[cfg(feature = "mcp-transactions")]
     Transactions(bool),
     /// Native-only opening of the exact prepared unsigned PSBT.
@@ -101,7 +101,7 @@ pub enum Message {
     CancelRevokePair,
     /// Copy a stable private configuration for a stored client.
     CopyPair(String),
-    /// Explicit separate consent for an empty Regtest Cube's proposal session.
+    /// Explicit separate consent for an empty Cube's proposal session.
     #[cfg(feature = "mcp-proposals")]
     Proposals(bool),
     /// Explicit public-key assembly consent, separate from topology-only access.
@@ -319,7 +319,9 @@ impl Settings {
                 client.scope,
                 pairings::Scope::Proposal | pairings::Scope::WalletCreation
             )
-            .then(|| Arc::new(wire::proposal::Store::default()));
+            .then(|| chain.dir_name().parse().ok())
+            .flatten()
+            .map(|network| Arc::new(wire::proposal::Store::for_chain(network)));
             #[cfg(feature = "mcp-transactions")]
             let mut transactions = None;
             let built: Option<(Arc<dyn wire::Reader>, wire::ipc::Grant)> = match &client.scope {
@@ -367,7 +369,7 @@ impl Settings {
                     wallet: expected_wallet,
                     descriptor,
                     opaque,
-                } if supported && chain == crate::chain::ChainId::Regtest => {
+                } if supported && transactions::supported_chain(chain) => {
                     match (&wallet, &daemon) {
                         (Some(wallet), Some(daemon))
                             if wallet.id().to_string() == *expected_wallet
@@ -384,6 +386,7 @@ impl Settings {
                             .ok()
                             .map(|grant| {
                                 let service = Arc::new(transactions::Service::new(
+                                    chain,
                                     wallet
                                         .main_descriptor
                                         .as_vault()
@@ -401,7 +404,9 @@ impl Settings {
                         _ => None,
                     }
                 }
-                pairings::Scope::Proposal if proposal_supported => {
+                pairings::Scope::Proposal
+                    if proposal_supported && chain.dir_name().parse::<wire::Chain>().is_ok() =>
+                {
                     #[cfg(feature = "mcp-proposals")]
                     {
                         wire::ipc::Grant::paired_proposals(client.credential.clone(), guard)
@@ -417,7 +422,9 @@ impl Settings {
                         None
                     }
                 }
-                pairings::Scope::WalletCreation if proposal_supported => {
+                pairings::Scope::WalletCreation
+                    if proposal_supported && chain.dir_name().parse::<wire::Chain>().is_ok() =>
+                {
                     #[cfg(feature = "mcp-proposals")]
                     {
                         wire::ipc::Grant::paired_creation(client.credential.clone(), guard)
@@ -487,7 +494,7 @@ impl Settings {
                 if self.transactions_allowed
                     && self.wallet_allowed
                     && !self.capabilities.iter().any(|v| *v)
-                    && wallet.chain == crate::chain::ChainId::Regtest
+                    && transactions::supported_chain(wallet.chain)
                     && wallet.main_descriptor.as_vault().is_some()
                     && daemon.backend().is_embedded()
                     && self
@@ -524,7 +531,7 @@ impl Settings {
                     && self
                         .pairing_location
                         .as_ref()
-                        .is_some_and(|v| v.chain_matches(crate::chain::ChainId::Regtest)) =>
+                        .is_some_and(|v| v.transaction_supported()) =>
             {
                 if self.creation_allowed {
                     pairings::Scope::WalletCreation
@@ -751,7 +758,10 @@ impl Settings {
                 {
                     let generation = super::session::generation_for(cube_id)?;
                     let cube_id = cube_id.to_owned();
-                    let store = Arc::new(wire::proposal::Store::default());
+                    let chain = self.pairing_location.as_ref()?.chain()?;
+                    let store = Arc::new(wire::proposal::Store::for_chain(
+                        chain.dir_name().parse().ok()?,
+                    ));
                     let grant =
                         wire::ipc::Grant::for_proposals(Duration::from_secs(3600), move || {
                             super::session::generation_for(&cube_id) == Some(generation)
@@ -841,6 +851,7 @@ impl Settings {
         Some(crate::installer::proposal::Session::new(
             cube_id.to_owned(),
             super::session::generation_for(cube_id)?,
+            self.pairing_location.as_ref()?.chain()?,
             server.grant.clone(),
             store.clone(),
             proposal,
@@ -862,6 +873,7 @@ impl Settings {
         Some(crate::installer::proposal::Session::new(
             cube_id.to_owned(),
             super::session::generation_for(cube_id)?,
+            self.pairing_location.as_ref()?.chain()?,
             runtime.server.grant.clone(),
             store.clone(),
             proposal,
@@ -874,7 +886,9 @@ impl Settings {
         client_id: &str,
         wallet: &Wallet,
     ) -> Option<Arc<transactions::Service>> {
-        if wallet.chain != crate::chain::ChainId::Regtest {
+        if !transactions::supported_chain(wallet.chain)
+            || !self.pairing_location.as_ref()?.chain_matches(wallet.chain)
+        {
             return None;
         }
         let client = self
@@ -899,7 +913,10 @@ impl Settings {
         if !runtime.server.grant.active() {
             return None;
         }
-        runtime.transactions.clone()
+        runtime
+            .transactions
+            .clone()
+            .filter(|service| service.chain == wallet.chain)
     }
 
     #[cfg(all(test, feature = "mcp-transactions"))]
@@ -920,7 +937,7 @@ impl Settings {
                 && self
                     .pairing_location
                     .as_ref()
-                    .is_some_and(|v| v.chain_matches(crate::chain::ChainId::Regtest))
+                    .is_some_and(|v| v.transaction_supported())
         }
         #[cfg(not(feature = "mcp-transactions"))]
         false
@@ -945,30 +962,38 @@ impl Settings {
 impl Settings {
     fn proposal_view(&self) -> Element<'_, view::Message> {
         let msg = |m| view::Message::LocalMcp(m);
-        let mut content = column![h3(localized_copy("AI wallet preparation — Regtest experiment")),
+        let mut content = column![h3(localized_copy("AI wallet preparation")),
             text(localized_copy("Choose topology-only access, or allow the assistant to assemble public account keys for a 3-of-5 wallet with explicitly chosen recovery. Your AI provider may receive the public keys you give it. Neither permission allows secrets, signing, sending coins or creation approval.")),
             text(localized_copy("Tenshu validates the descriptor and fills its builder. You verify keys on the source devices, handle hardware, seed backups and PIN/passkey steps, and authorize creation here. Pairing survives lock and restart; each draft ends on lock/close or creation admission. Wallet reads require their own permission.")),
             self.enable_action()].spacing(16);
         if self.enabled {
             content = content
                 .push(
-                    text_input(localized_copy("Client label (for your reference)"), &self.client_name)
-                        .on_input(move |v| msg(Message::ClientName(v))),
+                    text_input(
+                        localized_copy("Client label (for your reference)"),
+                        &self.client_name,
+                    )
+                    .on_input(move |v| msg(Message::ClientName(v))),
                 )
                 .push(
                     checkbox(self.proposals_allowed)
-                        .label(localized_copy("Allow this client to prepare a Regtest wallet proposal"))
+                        .label(localized_copy(
+                            "Allow this client to prepare a wallet proposal",
+                        ))
                         .on_toggle(move |v| msg(Message::Proposals(v))),
                 )
                 .push(
                     checkbox(self.creation_allowed)
-                        .label(localized_copy("Allow this client to prepare a Regtest wallet using public account keys"))
+                        .label(localized_copy(
+                            "Allow this client to prepare a wallet using public account keys",
+                        ))
                         .on_toggle(move |v| msg(Message::Creation(v))),
                 )
                 .push(
                     button(localized_copy("Pair setup client until revoked")).on_press_maybe(
-                        ((self.proposals_allowed || self.creation_allowed) && !self.client_name.trim().is_empty())
-                            .then(|| msg(Message::Pair)),
+                        ((self.proposals_allowed || self.creation_allowed)
+                            && !self.client_name.trim().is_empty())
+                        .then(|| msg(Message::Pair)),
                     ),
                 );
             if let Some(server) = &self.server {
@@ -1142,6 +1167,7 @@ impl VaultReader {
             | wire::Request::Transaction(_) => Err(wire::Error::AccessDenied),
             wire::Request::List(_) => Ok(wire::Response::List(wire::WalletList {
                 wallets: vec![wire::WalletMetadata {
+                    network: self.chain.to_string(),
                     wallet_id: self.wallet_id.clone(),
                     display_name: "Vault".into(),
                     wallet_type: "vault".into(),
@@ -1169,7 +1195,7 @@ impl VaultReader {
                 let unspent = || coins.iter().filter(|c| c.spend_info.is_none());
                 Ok(wire::Response::Summary(wire::Summary {
                     wallet_id: self.wallet_id.clone(),
-                    network: info.network.to_string(),
+                    network: self.chain.to_string(),
                     wallet_type: "vault".into(),
                     confirmed_sats: unspent()
                         .filter(|c| c.block_height.is_some())
@@ -3160,6 +3186,7 @@ mod proposal_consent_tests {
             let socket = settings.paired[0].server.socket.clone();
             let token = settings.paired[0].server.grant.credential().to_owned();
             let input = wire::proposal::PrepareInput {
+                network: wire::Chain::Regtest,
                 request_id: "same-request".into(),
                 topology: wire::proposal::Topology {
                     primary: wire::proposal::Quorum {
@@ -3274,6 +3301,15 @@ mod proposal_consent_tests {
         rt.block_on(async {
             crate::app::session::open_without_pin("empty-proposal-fixture");
             let mut settings = Settings::default();
+            let root = crate::installer::proposal::tests::TestDir::new();
+            settings.pairing_location = Some(
+                pairings::Location::new(
+                    root.path(),
+                    crate::chain::ChainId::Regtest,
+                    "empty-proposal-fixture",
+                )
+                .unwrap(),
+            );
             for message in [
                 Message::Enable(true),
                 Message::ClientName("fixture".into()),
@@ -3294,6 +3330,7 @@ mod proposal_consent_tests {
                 &socket,
                 &credential,
                 wire::Request::PrepareProposal(wire::proposal::PrepareInput {
+                    network: wire::Chain::Regtest,
                     request_id: "fixture".into(),
                     topology: wire::proposal::Topology {
                         primary: wire::proposal::Quorum {

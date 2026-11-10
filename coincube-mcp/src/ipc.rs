@@ -79,7 +79,7 @@ impl Grant {
     }
     /// New preparation-only grant, with a mandatory trusted session guard.
     /// It cannot list or read wallets. The trusted desktop must supply a fresh
-    /// proposal store and a guard for the correct unlocked, empty Regtest Cube.
+    /// proposal store and a guard for the correct unlocked, empty Cube.
     pub fn for_proposals(
         duration: Duration,
         valid: impl Fn() -> bool + Send + Sync + 'static,
