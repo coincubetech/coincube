@@ -28,8 +28,12 @@ Keep confirmations, failures, security warnings and recovery instructions neutra
 ## Device preference
 
 Place **Bitcoin Worldview** in **App preferences → Appearance**, reachable from
-the Launcher and inside a Cube. Use the shared segmented control and the existing
-“This device” scope. Show the selected mode's tagline beneath the control.
+the Launcher and inside a Cube, with the existing “This device” scope. Offer one
+choice per mode that shows its tagline. Under the choices, show what the selected
+mode changes: its network names from the chain presentation registry (BLAKE2b
+only where that network is switched on) and example wording from the voice
+catalog. Samurai has no voice lines, so it lists the standard wording those
+screens already use.
 
 Persist the choice in installation-wide `global_settings.json` with the stable
 values `samurai`, `suitcoiner` and `luke`. A missing value or an unrecognized

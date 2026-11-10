@@ -1693,7 +1693,7 @@ pub fn fiat_price<'a>(
         ))
         .push(labeled_select_row(
             "Exchange-rate source",
-            Some("Never changes a balance."),
+            None,
             "settings-fiat-source",
             enabled,
             select(
