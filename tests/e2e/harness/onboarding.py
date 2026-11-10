@@ -393,19 +393,38 @@ class Onboarding:
         labels = self.wait("Enter your PIN", "Signer key created")
         if "Enter your PIN" not in labels:
             raise Blocked("KEY_GENERATION_AUTH", "The authorized PIN-backed generation did not reach its normal PIN challenge.")
+        self.resume_recovery_key_pin(journal, receipt, before_pin=before_pin)
+
+    def resume_recovery_key_pin(self, journal, receipt, *, before_pin):
+        """Continue only the first input of this still-running new generation."""
+        if (receipt.get("phase") != "creation_dispatched" or receipt.get("creation_started") is not True
+                or receipt.get("pin_entered") is not False or self.phone.build != 38
+                or self.phone.process_identity() != receipt.get("current_process")):
+            raise Blocked("KEY_GENERATION_UNCERTAIN", "Only the untouched challenge in the original generation process may continue.")
+        # In creation_dispatched, this call can only validate an existing
+        # reservation; it cannot create one or release the old quarantine.
+        if self.reserve_key_generation(receipt) != "reserved":
+            raise Blocked("KEY_GENERATION_UNCERTAIN", "The generation credential reservation was already consumed.")
+        labels = self.phone.labels()
+        if "Enter your PIN" not in labels:
+            raise Blocked("KEY_GENERATION_AUTH", "The original generation's PIN challenge is no longer visible.")
         self.phone.reject_pin_error(labels)
         if any(term in value.casefold() for value in labels for term in
                ("wrong pin", "locked", "try again", "re-verified", "binding", "wiped", "restore")):
             raise Blocked("KEY_GENERATION_AUTH", "The new PIN challenge reports an authentication prerequisite.")
         fields = self.fields()
-        if len(fields) != 1 or fields[0].get_attribute("value") not in ("", "6-digit PIN"):
+        # Build 38's _UnlockPinSheet creates an empty TextEditingController.
+        # WDA omits value for that empty Flutter leaf. None is accepted ONLY
+        # here, after same-process/no-input/unused-reservation proof above;
+        # it is not a general assertion that obscured inputs are empty.
+        if len(fields) != 1 or fields[0].get_attribute("value") not in (None, "", "6-digit PIN"):
             raise Blocked("KEY_GENERATION_INPUT", "The new credential field is not provably empty and unique.")
         if self.phone.process_identity() != receipt["current_process"]:
             raise Blocked("KEY_GENERATION_PROCESS", "The new PIN challenge belongs to a different process.")
         before_pin()
         if (self.phone.process_identity() != receipt["current_process"]
                 or "Enter your PIN" not in self.phone.labels()
-                or fields[0].get_attribute("value") not in ("", "6-digit PIN")):
+                or fields[0].get_attribute("value") not in (None, "", "6-digit PIN")):
             raise Blocked("KEY_GENERATION_INPUT", "The exact empty new challenge changed before credential dispatch.")
         receipt["pin_entered"] = True
         journal.artifact("key_generation_recovery", deepcopy(receipt))

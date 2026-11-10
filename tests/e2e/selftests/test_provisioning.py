@@ -1177,3 +1177,78 @@ def test_recovery_resume_rejects_metadata_drift_before_any_ui(runner, tmp_path, 
     with pytest.raises(Failed) as error: runner.prepare_key_generation_recovery(state)
     assert error.value.code == "KEY_RECOVERY_CHANGED"
     assert calls == []
+
+
+def dispatched_recovery_without_pin(runner, tmp_path, monkeypatch):
+    state, _, keys, plan, _, calls = key_generation_case(runner, tmp_path, monkeypatch)
+    runner.prepare_key_generation_recovery(state)
+    receipt = runner.artifacts["key_generation_recovery"]
+    runner.onboarding.reserve_key_generation(receipt)
+    receipt.update(phase="creation_dispatched", creation_started=True, pin_entered=False,
+                   current_process={"pid": 10, "bundle_id": "io.coincube.keychainApp"})
+    runner.journal.artifact("key_generation_recovery", receipt)
+    runner.defer_pending_phone_attempt(state)
+    calls.clear()
+    return state, receipt, keys, plan, calls
+
+
+def test_dispatched_key_generation_resumes_first_pin_without_navigation_or_creation(runner, tmp_path, monkeypatch):
+    state, receipt, keys, _, calls = dispatched_recovery_without_pin(runner, tmp_path, monkeypatch)
+    def resume(journal, passed, *, before_pin):
+        assert passed is receipt
+        assert passed["phase"] == "creation_dispatched"
+        assert state["key_generation_reservation"]["status"] == "reserved"
+        before_pin()
+        calls.append("first-pin-only")
+        passed["pin_entered"] = True
+        state["key_generation_reservation"]["status"] = "consumed"
+        state["pending_attempt"] = passed["binding"]["new_purpose"]
+        journal.artifact("key_generation_recovery", deepcopy(passed))
+        keys.append(dict(phone_key(runner), id=12, name=passed["binding"]["new_key_label"], keychainId=8))
+    runner.onboarding.resume_recovery_key_pin = resume
+    runner.stage_phone_key()
+    assert calls == ["first-pin-only", "reconciled", "account-network"]
+    assert runner.artifacts["key_generation_recovery"]["phase"] == "completed"
+    assert state["key_generation_reservation"]["status"] == "completed"
+    assert state["quarantined_attempts"][0]["disposition"] == "outcome_unresolved"
+
+
+def test_uncertain_resumed_first_pin_is_never_dispatched_twice(runner, tmp_path, monkeypatch):
+    state, receipt, _, _, calls = dispatched_recovery_without_pin(runner, tmp_path, monkeypatch)
+    def interrupted(journal, passed, *, before_pin):
+        before_pin()
+        calls.append("first-pin-only")
+        passed["pin_entered"] = True
+        state["key_generation_reservation"]["status"] = "consumed"
+        state["pending_attempt"] = passed["binding"]["new_purpose"]
+        journal.artifact("key_generation_recovery", deepcopy(passed))
+        raise Blocked("PHONE_INPUT_DISPATCH", "Synthetic lost response")
+    runner.onboarding.resume_recovery_key_pin = interrupted
+    with pytest.raises(Blocked) as error: runner.stage_phone_key()
+    assert error.value.code == "PHONE_INPUT_DISPATCH"
+    with pytest.raises(Blocked) as error: runner.stage_phone_key()
+    assert error.value.code == "KEY_REGISTRATION"
+    assert calls == ["first-pin-only"]
+    assert receipt["creation_started"] is True and receipt["pin_entered"] is True
+    assert state["key_generation_reservation"]["status"] == "consumed"
+
+
+def test_resume_first_key_pin_rechecks_capacity_before_touching_prompt(runner, tmp_path, monkeypatch):
+    _, _, _, plan, calls = dispatched_recovery_without_pin(runner, tmp_path, monkeypatch)
+    plan["data"]["entitlements"]["personalKeyLimit"] = 1
+    runner.onboarding.resume_recovery_key_pin = lambda *a, **k: pytest.fail("No prompt interaction without capacity")
+    with pytest.raises(Blocked) as error: runner.stage_phone_key()
+    assert error.value.code == "KEY_RECOVERY_CAPACITY"
+    assert calls == []
+
+
+@pytest.mark.parametrize("refusal", ["KEY_GENERATION_PROCESS", "KEY_GENERATION_UNCERTAIN", "KEY_GENERATION_INPUT"])
+def test_first_pin_helper_refusal_never_falls_back_to_restart_or_creation(runner, tmp_path, monkeypatch, refusal):
+    _, receipt, _, _, calls = dispatched_recovery_without_pin(runner, tmp_path, monkeypatch)
+    def refuse(*args, **kwargs):
+        raise Blocked(refusal, "Synthetic process, reservation or field refusal")
+    runner.onboarding.resume_recovery_key_pin = refuse
+    with pytest.raises(Blocked) as error: runner.stage_phone_key()
+    assert error.value.code == refusal
+    assert calls == []
+    assert receipt["pin_entered"] is False

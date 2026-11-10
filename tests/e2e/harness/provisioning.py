@@ -702,6 +702,13 @@ class FreshRunner(Runner):
             raise Failed("KEY_NOT_FRESH", "A matching key predates this run's recorded creation attempt.")
         if not matches and recovery and not started:
             self.recover_key_generation(recovery)
+        elif not matches and recovery and started and recovery["pin_entered"] is False:
+            # Continue only the first input in the already-dispatched generation.
+            # The helper proves its original process, unused reservation and
+            # empty prompt; it never navigates, restarts or creates another key.
+            self.require_key_generation_capacity()
+            self.onboarding.resume_recovery_key_pin(self.journal, recovery,
+                before_pin=self.require_key_generation_capacity)
         elif not matches and not started:
             self.pin_artifact("baseline_key_ids", sorted(str(k["id"]) for k in keys))
             self.onboarding.create_key(label, self.pin, self.journal)

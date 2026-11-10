@@ -603,7 +603,7 @@ def recovery_creation_phone(flow, receipt, *, pin_value='6-digit PIN', name='new
     process = {'pid': 7, 'bundle_id': BUNDLE}
     receipt.update(phase='reserved', current_process=process)
     calls = []
-    phone = SimpleNamespace(process_identity=lambda: process, restore_navigation=lambda: calls.append('restore'),
+    phone = SimpleNamespace(build=38, process_identity=lambda: process, restore_navigation=lambda: calls.append('restore'),
         click=calls.append, labels=lambda: {'Add signer key', 'Enter your PIN'}, reject_pin_error=Phone.reject_pin_error)
     flow.phone = phone
     flow.wait = lambda *choices: {choices[0]}
@@ -662,3 +662,59 @@ def test_quarantine_history_must_still_match_at_first_input():
         flow.reserved_key_pin(receipt)
     assert store.value['key_generation_reservation']['status'] == 'reserved'
     assert 'pending_attempt' not in store.value
+
+
+@pytest.mark.parametrize('value', [None, '', '6-digit PIN'])
+def test_same_process_generation_resumes_first_input_without_navigation(tmp_path, value):
+    from harness.state import Journal
+    flow, store, receipt = key_recovery()
+    flow.reserve_key_generation(receipt)
+    calls = recovery_creation_phone(flow, receipt, pin_value=value)
+    flow.fields()  # Discard the synthetic name field; creation already happened.
+    receipt.update(phase='creation_dispatched', creation_started=True)
+    journal = Journal(tmp_path / 'resume', {})
+    try:
+        flow.resume_recovery_key_pin(journal, receipt, before_pin=lambda: calls.append('guard-pin'))
+        assert calls == ['guard-pin', 'focus', 'pin-dispatch', 'Unlock', 'Back to home']
+        assert receipt['pin_entered'] is True
+        assert store.value['key_generation_reservation']['status'] == 'consumed'
+        with pytest.raises(Blocked):
+            flow.resume_recovery_key_pin(journal, receipt, before_pin=lambda: None)
+        assert calls.count('pin-dispatch') == 1
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize('mutation', ['process', 'build', 'pin', 'creation', 'phase', 'consumed', 'missing', 'pending', 'identity', 'nonempty', 'lost-input'])
+def test_generation_continuation_never_replays_or_recreates(tmp_path, mutation):
+    from harness.state import Journal
+    flow, store, receipt = key_recovery()
+    flow.reserve_key_generation(receipt)
+    calls = recovery_creation_phone(flow, receipt, pin_value='••' if mutation == 'nonempty' else None,
+        lose_input=mutation == 'lost-input')
+    flow.fields()
+    receipt.update(phase='creation_dispatched', creation_started=True)
+    if mutation == 'process': receipt['current_process'] = {'pid': 8, 'bundle_id': 'io.coincube.keychainApp'}
+    if mutation == 'build': flow.phone.build = 39
+    if mutation == 'pin': receipt['pin_entered'] = True
+    if mutation == 'creation': receipt['creation_started'] = False
+    if mutation == 'phase': receipt['phase'] = 'reserved'
+    if mutation == 'consumed':
+        store.value['key_generation_reservation']['status'] = 'consumed'
+        store.value['pending_attempt'] = 'key:new'
+    if mutation == 'missing': store.value.pop('key_generation_reservation')
+    if mutation == 'pending': store.value['pending_attempt'] = 'key:foreign'
+    if mutation == 'identity': store.value['identity'] = 'other:device'
+    journal = Journal(tmp_path / mutation, {})
+    try:
+        with pytest.raises((Blocked, Failed)):
+            flow.resume_recovery_key_pin(journal, receipt, before_pin=lambda: None)
+        assert 'restore' not in calls and 'Create signer key' not in calls
+        assert calls.count('pin-dispatch') == (1 if mutation == 'lost-input' else 0)
+        if mutation == 'lost-input':
+            with pytest.raises(Blocked):
+                flow.resume_recovery_key_pin(journal, receipt, before_pin=lambda: None)
+            assert calls.count('pin-dispatch') == 1
+            assert store.value['key_generation_reservation']['status'] == 'consumed'
+    finally:
+        journal.close()

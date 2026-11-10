@@ -198,6 +198,11 @@ app process and live account/network/Keychain identity, then uses one encrypted
 compare-and-swap to reserve a distinct key name for this run. The reservation
 blocks every unrelated credential use until it is consumed by the newly reached,
 empty PIN prompt. A second CAS records that new pending purpose before input.
+Before any PIN input, the same build-38 foreground process can continue its
+original newly created challenge with the exact unused encrypted reservation.
+This continuation never navigates, recreates the key, restarts Keychain, or
+clears input; an omitted WDA value is accepted only for that untouched prompt.
+Once the durable input marker is set, only remote reconciliation is allowed.
 Crashes reconcile the same reservation; they cannot clear a newer attempt or
 create another allowance. An old key appearing, changed identity, nonempty field,
 lockout/error, or uncertain input stops the run. Successful new registration
