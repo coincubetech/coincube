@@ -64,8 +64,8 @@ networks the bridge is skipped and the Spark panels stay disconnected.
   precedence over the discovery order above.
 - `$COINCUBE_LNURL_DOMAIN` — LNURL domain the bridge registers Lightning
   Addresses against via the Breez-hosted LNURL server. Defaults to
-  `coincube.io`. Set to an allowlisted staging domain (e.g.
-  `dev.coincube.io`) for non-production builds.
+  `coincube.io`, the only Lightning Address domain; an override must be a
+  domain allowlisted with Breez.
 
 ## Regtest
 In order to test out the "Liquid" wallet which utilizes the Breez Liquid SDK, please follow these directions [Breez SDK Regtest Setup](/docs/BREEZ_SDK_REGTEST.md)
