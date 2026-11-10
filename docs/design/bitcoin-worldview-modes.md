@@ -54,9 +54,10 @@ saved choice.
 | Suitcoiner | Gilded Exchange | Gilded Wall Street |
 | Luke | The Stone Crossing | Purist’s Woodcut |
 
-Full scenes appear in the 160-point Opening and 240-point empty activity
-slots. The existing sets retain their original presentation at those sizes.
-The other slots use their original state-specific illustrations.
+Full scenes cover the 160-point Opening and 240-point empty activity slots,
+plus Sent, Received, Restore complete, Recovery Kit protection and removal,
+and the PIN prompt. Opening and empty activity share a scene. The six other
+slots each have their own scene.
 
 ## Localization
 
@@ -143,13 +144,17 @@ confirmation. Mode aliases are confined to the existing passive display surfaces
   empty and celebration contexts. `image.rs` supplies the castle mark, sealed
   Cube art for Restore and the recovery illustrations used by Backup and
   Recovery Kit. Preserve these files and their current Samurai bindings.
-- Bundle eight illustrations per alternate mode under
-  `coincube-ui/static/images/worldview`. The slots cover opening and syncing,
-  empty activity, send and receive celebrations, restore completion, Recovery
-  Kit protection and removal, and Backup and Recovery Kit PIN prompts.
-  Celebrations share their artwork across payment rails. Each slot keeps the
-  incumbent Samurai image and its layout as the fallback. Quote choice stays
-  stable during a mode switch.
+- Bundle artwork under `coincube-ui/static/images/worldview`. The existing
+  sets keep their original screen illustrations, with dedicated send and
+  receive artwork for Bitcoin, Lightning, Note, and Spark. The full-scene
+  sets also have a separate scene for each of those payment directions and
+  methods. Generic payment contexts use the corresponding Sent or Received
+  artwork. Liquid-native payments and Liquid empty activity use the
+  existing presentation.
+- Mascot quote illustrations follow the selected artwork set, including on
+  the startup error screen. Kage, the Broker, and the armored Warden are
+  available in their existing artwork sets. Each full-scene set has its own
+  portrait in the scene's style. Quote choice stays stable during a mode switch.
 - Use restrained decorative accents in both color schemes. Preserve established
   warning, error, success, focus and chain-identification semantics. Keep asset
   symbols, user avatars, the interactive Launcher Cube and the app mark outside

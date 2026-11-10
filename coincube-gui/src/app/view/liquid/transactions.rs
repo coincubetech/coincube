@@ -252,11 +252,14 @@ pub fn liquid_transactions_view<'a>(
                 .width(Length::Fill)
                 .align_x(Alignment::Center)
                 .push(Space::new().height(Length::Fixed(40.0)))
-                .push(quote_display::display(&QuoteDisplayProps::new(
-                    "empty-wallet",
-                    empty_state_quote,
-                    empty_state_image_handle,
-                )))
+                .push(quote_display::display(
+                    &QuoteDisplayProps::new(
+                        "empty-wallet",
+                        empty_state_quote,
+                        empty_state_image_handle,
+                    )
+                    .existing_artwork(),
+                ))
                 .push(Space::new().height(Length::Fixed(10.0)))
                 .push(
                     text(match asset_filter {

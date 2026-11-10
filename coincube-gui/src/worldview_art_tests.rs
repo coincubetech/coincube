@@ -3,7 +3,7 @@ use coincube_ui::component::{
 };
 use coincube_ui::illustration::Slot;
 use coincube_ui::image;
-use coincube_ui::theme::{Theme, WorldviewMode};
+use coincube_ui::theme::{ArtworkStyle, Theme, WorldviewMode};
 
 use crate::app::view::settings::page::illustrated_flow;
 use crate::app::view::shared::landing::capture;
@@ -14,10 +14,24 @@ use crate::home::restore_frame::done_art;
 
 #[test]
 fn worldview_art_fits_existing_views() {
+    check_worldview_art(ArtworkStyle::Existing, "existing");
+}
+
+#[test]
+fn worldview_art_fits_full_scene_views() {
+    check_worldview_art(ArtworkStyle::Scene, "scene");
+}
+
+fn check_worldview_art(artwork: ArtworkStyle, art_label: &str) {
     let loading = quote_display::image_handle_for_context("loading");
     let empty = quote_display::image_handle_for_context("empty-wallet");
     let loading_quote = quote_display::random_quote("loading");
     let empty_quote = quote_display::random_quote("empty-wallet");
+    let startup_error = crate::loader::Step::Error(Box::new(crate::loader::Error::Unexpected(
+        "Fixture startup error".into(),
+    )));
+    let error_quote = quote_display::random_quote("error");
+    let error_image = quote_display::image_handle_for_context("error");
     let sent_quote = quote_display::random_quote("bitcoin-send");
     let sent_image = quote_display::image_handle_for_context("bitcoin-send");
     let received_quote = quote_display::random_quote("spark-receive");
@@ -28,8 +42,9 @@ fn worldview_art_fits_existing_views() {
         (WorldviewMode::Luke, "luke"),
     ] {
         for (appearance, theme) in [("dark", Theme::dark()), ("light", Theme::light())] {
+            let theme = theme.with_worldview(mode).with_artwork(artwork);
             let opened = capture::inspect_filled(
-                &format!("worldview-{}-opening", name),
+                &format!("worldview-{name}-{art_label}-opening"),
                 opening_body(
                     project_opening("Everyday", ChainId::Bitcoin),
                     &crate::loader::Step::Connecting,
@@ -39,12 +54,21 @@ fn worldview_art_fits_existing_views() {
                 ),
                 (1024, 768),
                 appearance,
-                theme.with_worldview(mode),
+                theme,
                 (1024, 768),
             );
             assert!(opened.contains("Connecting to daemon"));
+            let failed = capture::inspect_filled(
+                &format!("worldview-{name}-{art_label}-startup-error"),
+                crate::loader::view(&startup_error, &error_quote, &error_image),
+                (1024, 768),
+                appearance,
+                theme,
+                (1024, 768),
+            );
+            assert!(failed.contains("Tenshu failed to start"));
             let history = capture::inspect(
-                &format!("worldview-{}-empty-history", name),
+                &format!("worldview-{name}-{art_label}-empty-history"),
                 SparkTransactionsView {
                     status: SparkTransactionsStatus::Loaded(vec![]),
                     recent_transactions: &[],
@@ -61,11 +85,10 @@ fn worldview_art_fits_existing_views() {
                 .render(),
                 (1024, 768),
                 appearance,
-                theme.with_worldview(mode),
+                theme,
             );
             assert!(history.contains("Your Spark wallet is ready"));
 
-            let theme = theme.with_worldview(mode);
             use coincube_ui::worldview_copy::{self, VoiceLine};
             let sent_line = VoiceLine::PaymentSent.for_mode(mode);
             let received_line = VoiceLine::PaymentReceived.for_mode(mode);
@@ -133,7 +156,7 @@ fn worldview_art_fits_existing_views() {
                 ),
             ] {
                 let rendered = capture::inspect(
-                    &format!("worldview-{name}-{screen}"),
+                    &format!("worldview-{name}-{art_label}-{screen}"),
                     view,
                     (1024, 768),
                     appearance,

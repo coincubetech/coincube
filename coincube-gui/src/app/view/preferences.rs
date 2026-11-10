@@ -129,7 +129,7 @@ fn artwork_row<'a>(saved: DevicePreferences, enabled: bool) -> Element<'a, Messa
         (
             ArtworkStyle::Scene,
             scene_name,
-            localized_copy("New scene"),
+            localized_copy("Full scenes"),
             "tenshu.preferences.artwork.scene",
         ),
     ];
@@ -173,8 +173,8 @@ fn artwork_row<'a>(saved: DevicePreferences, enabled: bool) -> Element<'a, Messa
         .tag(CopyText::ThisDevice.get())
         .trailing_tag()
         .description(coincube_ui::localized_format!(
-            "Choose the artwork for {mode_name} on opening and empty activity.",
-            "Elige las ilustraciones de {mode_name} para la apertura y las pantallas sin actividad."
+            "Choose the artwork set for {mode_name}.",
+            "Elige la colección de ilustraciones de {mode_name}."
         ))
         .note(
             localized_copy("Each worldview remembers its own choice."),
