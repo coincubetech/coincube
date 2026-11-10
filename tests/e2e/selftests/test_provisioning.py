@@ -1252,3 +1252,182 @@ def test_first_pin_helper_refusal_never_falls_back_to_restart_or_creation(runner
     assert error.value.code == refusal
     assert calls == []
     assert receipt["pin_entered"] is False
+
+
+def discovery_case(runner):
+    state, calls = signing_recovery(runner)
+    runner.artifacts.pop('approval_started')
+    runner.artifacts['phone']['build'] = runner.phone.build
+    runner.pin_artifact('approval_binding', runner.approval_binding())
+    runner.journal.data['stages']['sign'] = {'status': 'blocked', 'code': 'REQUEST_DELIVERY', 'at': 20}
+    runner.native_call = lambda *a, **k: {'ready': False, 'status': 1, 'submitted_signature_count': 0}
+    def restart(journal, receipt, *, before_restart):
+        if not before_restart():
+            return False
+        calls.append('discovery-restart')
+        receipt.update(phase='completed', stopped_verified=True,
+                       before_process={'pid': 10, 'bundle_id': 'io.coincube.keychainApp'},
+                       after_process={'pid': 11, 'bundle_id': 'io.coincube.keychainApp'})
+        journal.artifact('request_discovery_restart', deepcopy(receipt))
+        return True
+    runner.phone.restart_for_request_discovery = restart
+    runner.approve_phone = lambda: calls.append('ordinary-review')
+    return state, calls
+
+
+def test_prior_delivery_timeout_is_archived_and_restart_occurs_once(runner):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    evidence = deepcopy(runner.artifacts['request_discovery_timeout'])
+    runner.journal.outcome('sign', 'passed')
+    runner.stage_sign()
+    assert calls == ['discovery-restart', 'account-network', 'cube-review', 'ordinary-review']
+    assert runner.artifacts['request_discovery_timeout'] == evidence
+    assert 'approval_started' not in runner.artifacts
+    calls.clear()
+    runner.stage_sign()
+    assert calls == ['ordinary-review']
+    assert runner.artifacts['request_discovery_timeout'] == evidence
+
+
+def test_first_delivery_timeout_gets_only_one_bounded_restart(runner):
+    _, calls = discovery_case(runner)
+    def absent():
+        calls.append('ordinary-review')
+        raise Blocked('REQUEST_DELIVERY', 'Synthetic request absence')
+    runner.approve_phone = absent
+    with pytest.raises(Blocked) as error: runner.stage_sign()
+    assert error.value.code == 'REQUEST_DELIVERY'
+    assert calls == ['ordinary-review', 'discovery-restart', 'account-network', 'cube-review', 'ordinary-review']
+    calls.clear()
+    with pytest.raises(Blocked): runner.stage_sign()
+    assert calls == ['ordinary-review']
+
+
+@pytest.mark.parametrize('code', ['PHONE_SELECTOR', 'PHONE_AUTH', 'PHONE_REVIEW', 'SIGNER_PIN'])
+def test_other_approval_failures_do_not_restart_discovery(runner, code):
+    _, calls = discovery_case(runner)
+    def failed(): raise Blocked(code, 'Synthetic failure')
+    runner.approve_phone = failed
+    with pytest.raises(Blocked) as error: runner.stage_sign()
+    assert error.value.code == code
+    assert calls == [] and 'request_discovery_restart' not in runner.artifacts
+
+
+@pytest.mark.parametrize('marker', ['approval_started', 'approval_context', 'pin_resume_probe', 'pin_dispatch_started',
+                                    'pending_attempt', 'key_generation_reservation', 'unverified', 'foreign-credential'])
+def test_discovery_restart_refuses_any_input_or_active_credential_evidence(runner, marker):
+    state, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    if marker == 'pending_attempt': state[marker] = 'sign:' + runner.request_id
+    elif marker == 'key_generation_reservation': state[marker] = {'status': 'reserved'}
+    elif marker == 'unverified': state['verified'] = False
+    elif marker == 'foreign-credential': state['identity'] = 'other'
+    else: runner.artifacts[marker] = False  # Presence alone is enough to refuse.
+    with pytest.raises(Blocked) as error: runner.restart_request_discovery()
+    assert error.value.code == 'REQUEST_DISCOVERY_INPUT'
+    assert calls == [] and 'request_discovery_restart' not in runner.artifacts
+
+
+@pytest.mark.parametrize('status,count', [(2, 0), (3, 0), (4, 0), (6, 0), (1, 1), (1, None), (True, 0), (1, False)])
+def test_discovery_restart_requires_fresh_pending_zero_submission(runner, status, count):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    runner.native_call = lambda *a, **k: {'ready': False, 'status': status, 'submitted_signature_count': count}
+    with pytest.raises(Blocked) as error: runner.restart_request_discovery()
+    assert error.value.code == 'REQUEST_DISCOVERY_ADVANCED'
+    assert calls == [] and 'request_discovery_restart' not in runner.artifacts
+
+
+def test_signature_arriving_at_discovery_boundary_prevents_restart(runner):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    runner.native_call = lambda *a, **k: {'ready': True, 'status': 6, 'submitted_signature_count': 1, 'signature_count_min': 2}
+    assert runner.restart_request_discovery() is False
+    assert calls == [] and 'request_discovery_restart' not in runner.artifacts
+    assert runner.artifacts['signature_count_min'] == 2
+
+
+def test_uncertain_discovery_receipt_blocks_all_navigation_and_cannot_repeat(runner):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    failure = runner.artifacts['request_discovery_timeout']
+    runner.journal.artifact('request_discovery_restart', {'binding': runner.discovery_binding(),
+        'timeout': deepcopy(failure), 'timeout_sha256': provision.digest(failure), 'phase': 'attempted'})
+    with pytest.raises(Blocked) as error: runner.validate_discovery_restart()
+    assert error.value.code == 'REQUEST_DISCOVERY_UNCERTAIN'
+    with pytest.raises(Blocked): runner.stage_sign()
+    assert calls == []
+
+
+def test_completed_discovery_receipt_allows_later_signature_reconciliation(runner):
+    state, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    runner.restart_request_discovery()
+    calls.clear()
+    runner.artifacts['approval_started'] = True
+    runner.artifacts['pin_dispatch_started'] = {'context': 'synthetic'}
+    state['pending_attempt'] = 'sign:' + runner.request_id
+    runner.validate_discovery_restart()  # Validation is not an idle-credential reset.
+    runner.native_call = lambda *a, **k: {'ready': True, 'status': 6, 'submitted_signature_count': 1, 'signature_count_min': 2}
+    runner.stage_sign()
+    assert calls == []
+    assert runner.artifacts['approval_started'] is True
+
+
+@pytest.mark.parametrize('field', ['session_id', 'request_id', 'psbt_sha256', 'descriptor_id', 'target_key_id',
+                                   'vault_id', 'account_identity', 'desktop_identity', 'build'])
+def test_discovery_receipt_cannot_move_to_changed_request_or_device_build(runner, field):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    runner.restart_request_discovery()
+    calls.clear()
+    if field == 'build': runner.phone.build += 1
+    else: runner.artifacts[field] = 'f' * 64
+    with pytest.raises(Failed): runner.validate_discovery_restart()
+    assert calls == []
+
+
+def auth_discovery_case(runner, tmp_path, monkeypatch):
+    from harness.state import atomic_write
+    state, calls = discovery_case(runner)
+    runner.config['phone_state_dir'] = str(tmp_path / 'private-phone-state')
+    account = {'email': runner.config['account_email'], 'device_id': 'synthetic-desktop'}
+    runner.artifacts['account_identity'] = provision.digest({'email': account['email'].casefold(), 'user_id': 42})
+    runner.artifacts['desktop_identity'] = provision.digest(account['device_id'])
+    runner.onboarding.identity = runner.artifacts['account_identity'] + ':' + runner.phone.device_digest
+    state['identity'] = runner.onboarding.identity
+    runner.artifacts['approval_binding'] = runner.approval_binding()
+    runner.profile.mkdir(mode=0o700)
+    (runner.profile / 'testnet4').mkdir(mode=0o700)
+    atomic_write(runner.profile / 'testnet4/connect.json', json.dumps({'accounts': [account], 'active_email': account['email']}).encode())
+    runner.provision = SimpleNamespace(binary='/synthetic/native', call=lambda *a, **k: dict(account, user_id=42))
+    monkeypatch.setattr(provision.SecretStore, 'load', lambda _: deepcopy(state))
+    return state, calls
+
+
+def test_authentication_blocks_uncertain_restart_before_any_phone_navigation(runner, tmp_path, monkeypatch):
+    _, calls = auth_discovery_case(runner, tmp_path, monkeypatch)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    failure = runner.artifacts['request_discovery_timeout']
+    runner.journal.artifact('request_discovery_restart', {'binding': runner.discovery_binding(),
+        'timeout': deepcopy(failure), 'timeout_sha256': provision.digest(failure), 'phase': 'attempted'})
+    runner.phone.labels = lambda: pytest.fail('Uncertain restart must block before reading or navigating UI')
+    with pytest.raises(Blocked) as error: runner.stage_authentication()
+    assert error.value.code == 'REQUEST_DISCOVERY_UNCERTAIN'
+    assert calls == []
+
+
+def test_authentication_archives_original_timeout_before_any_phone_navigation(runner, tmp_path, monkeypatch):
+    _, calls = auth_discovery_case(runner, tmp_path, monkeypatch)
+    before = deepcopy(runner.journal.data['stages']['sign'])
+    def labels():
+        assert runner.artifacts['request_discovery_timeout']['outcome'] == before
+        return {'Home', 'Cubes', 'Settings', runner.config['account_email']}
+    runner.phone.labels = labels
+    runner.phone.click = calls.append
+    runner.stage_authentication()
+    assert calls == ['Settings', 'Home']
+    runner.journal.outcome('sign', 'blocked', 'OTHER')
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    assert runner.artifacts['request_discovery_timeout']['outcome'] == before

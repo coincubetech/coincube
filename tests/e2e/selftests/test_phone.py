@@ -693,3 +693,73 @@ def test_home_key_card_refuses_ambiguous_carousel_gesture_scope(monkeypatch):
         phone.home_key_card(title)
     assert error.value.code == 'PHONE_CAROUSEL'
     assert swipes == [{'direction': 'down'}] and clicks == []
+
+
+def discovery_phone(*, failure=None, modal=False, signed=False):
+    journal = SimpleNamespace(data={'artifacts': {}})
+    journal.artifact = lambda name, value: journal.data['artifacts'].update({name: value})
+    calls, identities = [], iter([10, 10, 11 if failure != 'same-pid' else 10])
+    def terminate(bundle):
+        assert journal.data['artifacts']['request_discovery_restart']['phase'] == 'attempted'
+        calls.append('terminate')
+        if failure == 'terminate': raise RuntimeError('Synthetic lost terminate response')
+    def activate(bundle):
+        calls.append('activate')
+        if failure == 'activate': raise RuntimeError('Synthetic lost activate response')
+    states = iter([2 if failure == 'not-stopped' else 1, 4])
+    phone = Phone(SimpleNamespace(terminate_app=terminate, activate_app=activate,
+        query_app_state=lambda _: next(states), find_elements=lambda *a: [object()] if modal else []), 38)
+    phone.labels = lambda: HOME | {'Add signer key'}
+    phone.process_identity = lambda: {'pid': next(identities), 'bundle_id': 'io.coincube.keychainApp'}
+    receipt = {'binding': {'build': 38}}
+    return phone, journal, receipt, calls
+
+
+def test_discovery_restart_persists_intent_before_terminate_and_verifies_new_process():
+    phone, journal, receipt, calls = discovery_phone()
+    assert phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: True)
+    assert calls == ['terminate', 'activate']
+    saved = journal.data['artifacts']['request_discovery_restart']
+    assert saved['phase'] == 'completed' and saved['stopped_verified'] is True
+    assert saved['before_process']['pid'] == 10 and saved['after_process']['pid'] == 11
+    with pytest.raises(Blocked): phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: True)
+    assert calls == ['terminate', 'activate']
+
+
+@pytest.mark.parametrize('failure', ['terminate', 'activate', 'not-stopped', 'same-pid'])
+def test_uncertain_discovery_restart_stays_attempted_and_never_repeats(failure):
+    phone, journal, receipt, calls = discovery_phone(failure=failure)
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: True)
+    assert error.value.code == 'REQUEST_DISCOVERY_UNCERTAIN'
+    assert journal.data['artifacts']['request_discovery_restart']['phase'] == 'attempted'
+    prior_calls = list(calls)
+    with pytest.raises(Blocked): phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: True)
+    assert calls == prior_calls
+
+
+@pytest.mark.parametrize('blocked', ['native-modal', 'Enter PIN', 'Incoming transaction', 'not-home'])
+def test_discovery_restart_requires_public_home_without_modal_or_authentication(blocked):
+    phone, journal, receipt, calls = discovery_phone(modal=blocked == 'native-modal')
+    phone.labels = lambda: ({'Signer key', 'Back'} if blocked == 'not-home' else HOME | {'Add signer key', blocked})
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: pytest.fail('Public route first'))
+    assert error.value.code == 'REQUEST_DISCOVERY_HOME'
+    assert calls == [] and not journal.data['artifacts']
+
+
+def test_remote_signature_race_leaves_discovery_restart_allowance_unused():
+    phone, journal, receipt, calls = discovery_phone()
+    assert phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: False) is False
+    assert calls == [] and not journal.data['artifacts']
+
+
+def test_modal_arriving_during_remote_guard_prevents_discovery_restart():
+    phone, journal, receipt, calls = discovery_phone()
+    def incoming():
+        phone.labels = lambda: HOME | {'Add signer key', 'Incoming transaction'}
+        return True
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=incoming)
+    assert error.value.code == 'REQUEST_DISCOVERY_HOME'
+    assert calls == [] and not journal.data['artifacts']

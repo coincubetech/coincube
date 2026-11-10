@@ -445,6 +445,51 @@ class Phone:
         receipt["phase"] = "ready_for_reconciliation"
         journal.artifact("key_generation_recovery", deepcopy(receipt))
 
+    def restart_for_request_discovery(self, journal, receipt, *, before_restart):
+        if "request_discovery_restart" in journal.data["artifacts"]:
+            raise Blocked("REQUEST_DISCOVERY_UNCERTAIN", "The run's single discovery restart was already attempted.")
+        from appium.webdriver.common.appiumby import AppiumBy
+        def require_home():
+            labels = self.labels()
+            forbidden = {"Incoming transaction", "View transaction", "Not now", "Enter PIN", "Enter your PIN",
+                         "Approve transaction", "Create new signer key", "Name your signer key", "Set up your keychain",
+                         "Pick a cube on the testnet4 network."}
+            modals = self.driver.find_elements(AppiumBy.IOS_PREDICATE,
+                'visible == true AND (type == "XCUIElementTypeAlert" OR type == "XCUIElementTypeSheet")')
+            if not {"Home", "Cubes", "Settings", "Add signer key"} <= labels or labels & forbidden or modals:
+                raise Blocked("REQUEST_DISCOVERY_HOME", "Discovery restart requires public Home with no modal or authentication challenge.")
+        require_home()
+        before = self.process_identity()
+        if receipt.get("binding", {}).get("build") != self.build:
+            raise Failed("REQUEST_DISCOVERY_BINDING", "The phone build changed before discovery restart.")
+        if not before_restart():
+            return False
+        require_home()  # A modal may arrive while the remote state is checked.
+        if self.process_identity() != before:
+            raise Blocked("REQUEST_DISCOVERY_PROCESS", "The original process changed before discovery restart.")
+        receipt.update(phase="attempted", before_process=before)
+        journal.artifact("request_discovery_restart", deepcopy(receipt))
+        # Even a lost terminate/activate response consumes the allowance. Never
+        # retry this boundary: a surviving ceremony must remain untouched.
+        try:
+            self.driver.terminate_app(BUNDLE)
+            if int(self.driver.query_app_state(BUNDLE)) != 1:
+                raise Blocked("REQUEST_DISCOVERY_UNCERTAIN", "The old app process was not conclusively stopped.")
+            self.driver.activate_app(BUNDLE)
+            until = time.monotonic() + 15
+            while int(self.driver.query_app_state(BUNDLE)) != 4:
+                if time.monotonic() >= until:
+                    raise Blocked("REQUEST_DISCOVERY_UNCERTAIN", "The new app process did not reach the foreground.")
+                time.sleep(.25)
+            after = self.process_identity()
+            if after["pid"] == before["pid"]:
+                raise Blocked("REQUEST_DISCOVERY_UNCERTAIN", "A new foreground app process was not verified.")
+        except Exception:
+            raise Blocked("REQUEST_DISCOVERY_UNCERTAIN", "The attempted discovery restart has an uncertain outcome and cannot repeat.") from None
+        receipt.update(phase="completed", after_process=after, stopped_verified=True)
+        journal.artifact("request_discovery_restart", deepcopy(receipt))
+        return True
+
     def restart_for_upgrade(self, journal, receipt):
         if (self.build < 38 or self.build <= receipt["original_build"]
                 or receipt["current_build"] != self.build

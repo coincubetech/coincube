@@ -149,6 +149,19 @@ Connect's validated VIEWED status with zero submitted signatures. It records a
 background/resume probe and durable dispatch intent before requesting the
 protected credential. An interrupted probe or input is never retried.
 
+A `REQUEST_DELIVERY` timeout before any approval or PIN activity permits one
+journaled app restart solely to rediscover the same request. The runner preserves
+the original timeout and exact run/account/device/build/transaction bindings,
+requires public Home and a verified idle credential (including no unfinished key
+reservation), and rechecks native-validated PENDING status with zero submitted
+signatures immediately before termination. It records the attempt before the
+restart and requires `NOT_RUNNING` followed by a different foreground process.
+An uncertain response blocks all further navigation on resume; it never repeats
+the restart. A completed receipt permits ordinary account/network checks and full
+transaction review. A second delivery timeout stops without another restart.
+No request, approval, or PIN marker is reset or replaced. This is a bounded
+discovery repair, not evidence that the underlying delivery cause is resolved.
+
 An approval interrupted before any PIN/probe may resume in the same process only
 with the saved build, device, session and immutable transaction context. One
 reviewed app upgrade may instead create a fresh UI review of that same request:
