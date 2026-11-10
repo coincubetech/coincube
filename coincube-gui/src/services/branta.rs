@@ -81,6 +81,11 @@ fn is_bolt11(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.starts_with("lnbc") || lower.starts_with("lntb") || lower.starts_with("lnbcrt")
 }
+/// The SDK strips interior tab, CR and LF before parsing, so a request containing them
+/// could parse differently there than in these pre-filters. Reject all controls and spaces.
+fn has_control_or_space(raw: &str) -> bool {
+    raw.bytes().any(|b| b <= 0x20 || b == 0x7f)
+}
 fn percent_decode(value: &str) -> String {
     percent_encoding::percent_decode_str(value)
         .decode_utf8_lossy()
@@ -102,7 +107,7 @@ impl fmt::Debug for LookupRequest {
 impl LookupRequest {
     pub fn bolt11(raw: &str) -> Option<Self> {
         let raw = raw.trim();
-        if !raw.is_ascii() || raw.len() > MAX_REQUEST_BYTES {
+        if !raw.is_ascii() || has_control_or_space(raw) || raw.len() > MAX_REQUEST_BYTES {
             return None;
         }
         let dest = if raw
@@ -126,6 +131,7 @@ impl LookupRequest {
     pub fn bitcoin(raw: &str, address: &Address) -> Option<Self> {
         let raw = raw.trim();
         if !raw.is_ascii()
+            || has_control_or_space(raw)
             || !safe_percent_encoding(raw)
             || raw.len() > MAX_REQUEST_BYTES
             || !raw.get(..8)?.eq_ignore_ascii_case("bitcoin:")
@@ -140,7 +146,7 @@ impl LookupRequest {
         if parsed.assume_checked().script_pubkey() != address.script_pubkey() {
             return None;
         }
-        // Reject ambiguous parameters before the SDK's last-key-wins parser sees them.
+        // Reject ambiguous parameters before the SDK's first-value-wins parser sees them.
         let mut keys = std::collections::HashSet::new();
         let (mut id, mut secret) = (None, None);
         for pair in query.split('&') {
@@ -663,6 +669,9 @@ mod tests {
             if self.mode == 6 {
                 dest.value = "lnbc-other".into();
             }
+            if self.mode == 12 {
+                dest.r#type = Some(DestinationType::BitcoinAddress);
+            }
             Ok(VerifyResult {
                 status: VerifyStatus::Match,
                 payments: vec![branta::Payment {
@@ -856,7 +865,7 @@ mod tests {
     }
     #[tokio::test]
     async fn ordinary_errors_empty_unbound_and_timeout_are_silent_only_tampered_blocks() {
-        for mode in [2, 3, 4, 5, 6, 11] {
+        for mode in [2, 3, 4, 5, 6, 11, 12] {
             let (t, _) = fake_ticket(mode);
             assert!(matches!(t.lookup(request()).await, LookupResult::Silent));
         }
@@ -1059,6 +1068,17 @@ mod sdk_contract_tests {
             LookupRequest::bitcoin(&format!("{raw}&lightning=%F0%9F%98%80"), &address).is_none()
         );
         assert!(!safe_percent_encoding("x%z0"));
+        // The SDK would strip the tab, see two branta_id keys and send the first (plain) one.
+        let smuggled = format!(
+            "bitcoin:{ADDRESS}?bran\tta_id={ADDRESS}&branta_id={encrypted}&branta_secret=key"
+        );
+        assert!(LookupRequest::bitcoin(&smuggled, &address).is_none());
+        for control in ["\n", "\r", " ", "\u{7f}"] {
+            let raw = raw.replace("&branta_secret", &format!("{control}&branta_secret"));
+            assert!(LookupRequest::bitcoin(&raw, &address).is_none());
+        }
+        assert!(LookupRequest::bolt11("lnbc1te\tst").is_none());
+        assert!(LookupRequest::bolt11(" lnbc1test\n").is_some());
     }
 }
 
@@ -1094,8 +1114,11 @@ mod vendor_integrity {
                 "unreviewed SDK patch: {path}"
             );
         }
-        // Every compiled source file is pinned, so a new unreviewed file cannot slip in.
-        let mut pending = vec![root.join("src")];
+        // Every vendored file is pinned or one of Tenshu's own records, so a new unreviewed
+        // file (a build.rs, tests/ or benches/ that Cargo would auto-detect) cannot slip in.
+        // A Cargo.lock left by running the SDK's own suite is not compiled and is ignored.
+        let own = ["Cargo.toml", "TENSHU_PROVENANCE.md", "UPSTREAM_SHA256.json"];
+        let mut pending = vec![root.clone()];
         while let Some(dir) = pending.pop() {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
@@ -1106,7 +1129,10 @@ mod vendor_integrity {
                 let relative = path.strip_prefix(&root).unwrap().to_str().unwrap();
                 let relative = relative.replace('\\', "/");
                 assert!(
-                    files.contains_key(&relative) || patched.contains_key(&relative),
+                    files.contains_key(&relative)
+                        || patched.contains_key(&relative)
+                        || own.contains(&relative.as_str())
+                        || relative == "Cargo.lock",
                     "unpinned SDK file: {}",
                     relative
                 );
