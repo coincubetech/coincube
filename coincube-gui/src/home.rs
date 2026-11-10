@@ -433,6 +433,11 @@ struct PendingRemoteRename {
     new_name: String,
 }
 
+struct NativeReturn {
+    chain: ChainId,
+    notice: String,
+}
+
 pub struct Home {
     global_blake2b_enabled: bool,
     global_feature_request: u64,
@@ -452,6 +457,9 @@ pub struct Home {
     network: ChainId,
     pub datadir_path: CoincubeDirectory,
     error: Option<String>,
+    /// A locked native refusal survives asynchronous launcher reconciliation
+    /// until the user explicitly returns to the ordinary Cube list.
+    native_return: Option<NativeReturn>,
     delete_cube_modal: Option<DeleteCubeModal>,
     create_cube_name: coincube_ui::component::form::Value<String>,
     create_cube_pin: pin_input::PinInput,
@@ -642,6 +650,32 @@ impl Home {
         datadir_path: CoincubeDirectory,
         network: Option<ChainId>,
     ) -> (Self, Task<Message>) {
+        Self::new_for_chain_inner(datadir_path, network, None)
+    }
+
+    /// Show a native refusal on its trusted chain without carrying an unlock
+    /// or granting access to a chain that is currently unavailable.
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) fn after_native_refusal(
+        datadir_path: CoincubeDirectory,
+        chain: ChainId,
+        notice: impl Into<String>,
+    ) -> (Self, Task<Message>) {
+        Self::new_for_chain_inner(
+            datadir_path,
+            Some(chain),
+            Some(NativeReturn {
+                chain,
+                notice: notice.into(),
+            }),
+        )
+    }
+
+    fn new_for_chain_inner(
+        datadir_path: CoincubeDirectory,
+        network: Option<ChainId>,
+        native_return: Option<NativeReturn>,
+    ) -> (Self, Task<Message>) {
         let system_reduces_motion = crate::app::settings::system_accessibility::reduces_motion();
         let developer_mode =
             GlobalSettings::load_developer_mode(&GlobalSettings::path(&datadir_path));
@@ -655,7 +689,9 @@ impl Home {
                 .cloned()
                 .unwrap_or(ChainId::Bitcoin),
         );
-        let network = if developer_mode || selected_network.is_blake2b() {
+        let network = if let Some(context) = &native_return {
+            context.chain
+        } else if developer_mode || selected_network.is_blake2b() {
             selected_network
         } else {
             ChainId::Bitcoin
@@ -678,6 +714,7 @@ impl Home {
                 network,
                 datadir_path: datadir_path.clone(),
                 error: None,
+                native_return,
                 delete_cube_modal: None,
                 create_cube_name: coincube_ui::component::form::Value::default(),
                 create_cube_pin: pin_input::PinInput::new(),
@@ -1202,7 +1239,10 @@ impl Home {
 
     /// The top-level error currently shown on the home screen, if any.
     pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+        self.native_return
+            .as_ref()
+            .map(|context| context.notice.as_str())
+            .or(self.error.as_deref())
     }
 
     pub fn subscription(&self, foreground: bool) -> Subscription<Message> {
@@ -1423,7 +1463,7 @@ impl Home {
         self.connect_account.bitcoin_blake2b_opt_in =
             GlobalSettings::load_bitcoin_blake2b_beta(&path);
         self.refresh_displayed_networks();
-        if !self.displayed_networks.contains(&self.network) {
+        if self.native_return.is_none() && !self.displayed_networks.contains(&self.network) {
             self.abandon_creation_backup();
             self.create_cube_pin.clear();
             self.create_cube_pin_confirm.clear();
@@ -1466,7 +1506,43 @@ impl Home {
         }
     }
 
+    /// A refusal admits only its dismissal and background launcher results.
+    /// Tab uses the same boundary before dispatching queued lifecycle outputs.
+    pub(crate) fn accepts_launcher_message(&self, message: &Message) -> bool {
+        self.native_return.is_none()
+            || matches!(
+                message,
+                Message::GlobalSettingsChanged
+                    | Message::ConnectLightTick
+                    | Message::ConnectSignedOutBy(_)
+                    | Message::GlobalFeatureLoaded(..)
+                    | Message::FocusedCubes { .. }
+                    | Message::Checked { .. }
+                    | Message::NetworkCatalogLoaded { .. }
+                    | Message::RemoteCubesLoaded { .. }
+                    | Message::CubeLimitsLoaded(_)
+                    | Message::CatchUpSyncFinished(_)
+                    | Message::ConnectSignedInBubble
+                    | Message::View(
+                        ViewMessage::DismissNativeReturn
+                            | ViewMessage::Check
+                            | ViewMessage::ConnectAccount(_)
+                            | ViewMessage::ConnectSheetAccount(_)
+                    )
+            )
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if !self.accepts_launcher_message(&message) {
+            return Task::none();
+        }
+        if matches!(&message, Message::View(ViewMessage::DismissNativeReturn)) {
+            if self.native_return.take().is_some() {
+                self.error = None;
+                return self.reload_global_settings();
+            }
+            return Task::none();
+        }
         // List presentation messages never enter the lifecycle dispatch. The
         // transient selection is reconciled with whatever screen and list
         // each message leaves, including after an early return.
@@ -5402,6 +5478,22 @@ impl Home {
         &self,
         worldview: crate::app::settings::preferences::WorldviewMode,
     ) -> Element<Message> {
+        if let Some(context) = &self.native_return {
+            return Container::new(
+                Column::new()
+                    .spacing(16)
+                    .push(h3(context.chain.label()))
+                    .push(text(coincube_ui::locale::notice(context.notice.clone())))
+                    .push(
+                        button::secondary(None, localized_copy("Back to Cube list"))
+                            .on_press(Message::View(ViewMessage::DismissNativeReturn)),
+                    ),
+            )
+            .padding(30)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
+        }
         // The Launcher and Create journey own their chrome and body scrolling.
         // Other Home sections keep the legacy frame.
         let layout: Element<Message> = if self.showing_create_journey() {
@@ -8063,6 +8155,8 @@ pub enum Message {
 
 #[derive(Debug, Clone)]
 pub enum ViewMessage {
+    /// Acknowledge a locked native refusal and resume normal launcher policy.
+    DismissNativeReturn,
     /// "Not now" on the Connect sheet's signed-out notice: clears the red
     /// light everywhere (the GUI relays it to every tab).
     DismissConnectSignOut,
@@ -9224,6 +9318,9 @@ async fn check_network_datadir(
         Err(e) => Err(format!("Failed to read settings: {}", e)),
     }
 }
+
+#[cfg(all(test, feature = "mcp-proposals"))]
+mod native_return_tests;
 
 #[cfg(test)]
 mod network_catalog_tests {

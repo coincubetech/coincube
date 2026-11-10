@@ -1181,8 +1181,7 @@ impl Tab {
                 let chain = install.context.bitcoin_config.chain;
                 install.stop();
                 drop(install);
-                let (mut home, task) = Home::new_for_chain(root, Some(chain));
-                home.set_error(error);
+                let (home, task) = Home::after_native_refusal(root, chain, error);
                 self.state = State::Home(home);
                 task.map(Message::Launch)
             }
@@ -1609,6 +1608,9 @@ impl Tab {
         let State::Home(home) = &self.state else {
             return Err("The Launcher destination is no longer open.".into());
         };
+        if !home.accepts_launcher_message(message) {
+            return Err("Acknowledge the native refusal before opening another Cube.".into());
+        }
         match message {
             home::Message::Run(root, _, chain, cube)
             | home::Message::RunFromFloor(root, _, chain, cube, _)
@@ -1683,6 +1685,11 @@ impl Tab {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if let (State::Home(home), Message::Launch(launch)) = (&self.state, &message) {
+            if !home.accepts_launcher_message(launch) {
+                return Task::none();
+            }
+        }
         if let State::App(app) = &self.state {
             let origin = app.cache().app_generation;
             if !self
@@ -8053,6 +8060,7 @@ mod mcp_proposal_routing_tests {
             };
             install.context.mcp_proposal = None;
             drop(original);
+            let cube = install.cube_settings.clone().unwrap();
 
             let foreign = TestDir::new();
             let (mut context, session) =
@@ -8079,6 +8087,50 @@ mod mcp_proposal_routing_tests {
             assert_eq!(home.error(), Some(
                 "This proposal belongs to a different network than this Cube. Reopen the Cube and prepare a new proposal."
             ));
+            // Deliver the startup feature result through the real tab route;
+            // the initial synchronous launcher state is not the final screen.
+            drop(
+                tab.update(Message::Launch(home::Message::GlobalFeatureLoaded(
+                    0, false,
+                ))),
+            );
+            let State::Home(home) = &tab.state else {
+                panic!("startup must leave the rejected handoff locked")
+            };
+            assert_eq!(home.chain_for_test(), target);
+            assert_eq!(home.error(), Some(
+                "This proposal belongs to a different network than this Cube. Reopen the Cube and prepare a new proposal."
+            ));
+            let root = CoincubeDirectory::new(root.path().to_path_buf());
+            for queued in [
+                home::Message::Install(root.clone(), target, UserFlow::CreateWallet, None),
+                home::Message::Run(
+                    root.clone(),
+                    app::config::Config::new(false),
+                    target,
+                    cube.clone(),
+                ),
+                home::Message::RunFromFloor(
+                    root.clone(),
+                    app::config::Config::new(false),
+                    target,
+                    cube.clone(),
+                    0,
+                ),
+                home::Message::RunToRecovery(
+                    root.clone(),
+                    app::config::Config::new(false),
+                    target,
+                    cube.clone(),
+                ),
+                home::Message::CubeCreated(Ok(cube.clone())),
+                home::Message::StartRecovery,
+            ] {
+                assert!(tab.validate_home_exit(&queued).is_err());
+                assert_eq!(tab.update(Message::Launch(queued)).units(), 0);
+                assert!(matches!(tab.state, State::Home(_)));
+                assert!(tab.pending_recovery_route.is_none());
+            }
             assert!(!crate::app::session::is_open());
         }
     }
