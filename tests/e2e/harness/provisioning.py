@@ -176,6 +176,7 @@ class FreshRunner(Runner):
         self.core = Explorer()  # chain()/known() interface; v1 continues using full Core RPC.
         self.intent = None
         self.phone = None
+        self.deferred_phone_purpose = None
 
     def close(self):
         self.stack.close()
@@ -235,6 +236,9 @@ class FreshRunner(Runner):
         secret_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "coincube-phone/" + self.artifacts["account_identity"] + "/" + self.phone.device_digest))
         store = SecretStore(Provision(self.provision.binary, phone_dir, phone_dir, secret_id), phone_dir / "phone-secrets.keychain.json")
         self.onboarding = Onboarding(self.phone, store, self.artifacts["account_identity"], self.deadline)
+        self.defer_pending_phone_attempt(store.load())
+        if self.deferred_phone_purpose:
+            return
         labels = self.phone.labels()
         if {"Home", "Cubes", "Settings"} <= labels:
             self.phone.click("Settings")
@@ -242,7 +246,78 @@ class FreshRunner(Runner):
                 raise Failed("PHONE_ACCOUNT", "Keychain and the desktop must be signed into the same QA account.")
             self.phone.click("Home")
 
+    def phone_validation_identity(self):
+        return {"account": self.artifacts["account_identity"],
+                "device": self.phone.device_digest, "network": "testnet4"}
+
+    def defer_pending_phone_attempt(self, state):
+        """Reconcile an existing attempt before touching its surviving UI."""
+        self.deferred_phone_purpose = None
+        if state is not None and state.get("identity") != self.onboarding.identity:
+            raise Failed("PHONE_IDENTITY", "Saved phone credentials belong to a different account or device.")
+        pending = state.get("pending_attempt") if state else None
+        if state and "pending_attempt" in state and (not isinstance(pending, str) or not pending):
+            raise Failed("PHONE_PENDING_INTENT", "The saved PIN purpose is malformed; no phone navigation is allowed.")
+        key_purpose = "key:QA " + self.run_id
+        request = self.artifacts.get("request_id")
+        sign_purpose = "sign:" + request if isinstance(request, str) else None
+        # Approval is recorded before opening the PIN screen. Its interruption
+        # can precede the credential marker and must still preserve that route.
+        if pending is None:
+            if self.artifacts.get("approval_started") and self.artifacts.get("signature_count_min", 0) < 2:
+                pending = sign_purpose or "invalid-sign-request"
+            elif self.artifacts.get("phone_key_pin_entered") and not self.artifacts.get("target_key_id"):
+                pending = key_purpose
+            else:
+                return
+        if not state or state.get("verified") is not True:
+            raise Blocked("PHONE_PENDING_IDENTITY", "An unresolved phone attempt requires a verified account/device credential record.")
+        if pending == key_purpose:
+            baseline = self.artifacts.get("baseline_key_ids")
+            if (self.artifacts.get("phone_key_creation_started") is not True
+                    or self.artifacts.get("phone_key_pin_entered") is not True
+                    or not isinstance(baseline, list) or any(not isinstance(v, str) for v in baseline)
+                    or not self.artifacts.get("cube_id")):
+                raise Failed("PHONE_PENDING_INTENT", "The pending key attempt lacks this run's durable creation evidence.")
+        elif sign_purpose is not None and pending == sign_purpose:
+            intent = self.artifacts.get("intent")
+            txid = intent.get("txid") if isinstance(intent, dict) else None
+            if (self.artifacts.get("approval_started") is not True
+                    or not isinstance(txid, str) or not re.fullmatch(r"[0-9a-f]{64}", txid)
+                    or request != str(uuid.uuid5(uuid.UUID(self.run_id), txid))
+                    or not isinstance(self.artifacts.get("session_id"), str) or not self.artifacts["session_id"]
+                    or not self.artifacts.get("target_key_id") or not self.artifacts.get("vault_id")
+                    or not intent.get("inputs") or not intent.get("outputs")):
+                raise Failed("PHONE_PENDING_INTENT", "The pending signing attempt lacks this run's exact session and spend evidence.")
+        else:
+            raise Blocked("PHONE_PENDING_FOREIGN", "An unresolved phone attempt belongs to another operation or run; no navigation is allowed.")
+        expected = self.phone_validation_identity()
+        validation = self.artifacts.get("phone_validation")
+        if validation is None:
+            # Older checkpoints predate the explicit receipt. Their passed
+            # stage is bound to this same run/configuration by Journal.
+            previous = self.journal.data["stages"].get("phone_setup", {})
+            if previous.get("status") != "passed":
+                raise Blocked("PHONE_VALIDATION_REQUIRED", "An unresolved attempt has no prior successful account/network check in this run.")
+            validation = {**expected, "source": "legacy_phone_setup", "stage_outcome": dict(previous)}
+            self.journal.artifact("phone_validation", validation)
+        if (not isinstance(validation, dict) or any(validation.get(k) != v for k, v in expected.items())
+                or validation.get("source") not in ("settings_ui", "legacy_phone_setup")):
+            raise Failed("PHONE_VALIDATION_CHANGED", "Saved phone account, device or network validation does not match this run.")
+        self.journal.artifact("phone_validation_reused", {"purpose": pending, "validation": validation})
+        self.deferred_phone_purpose = pending
+
+    def finish_deferred_phone_attempt(self, purpose):
+        if self.deferred_phone_purpose != purpose:
+            return
+        # Only callers with a matched key or cryptographically verified signature
+        # reach here. No absent/timeout result can release the navigation guard.
+        self.deferred_phone_purpose = None
+        self.stage_phone_setup()
+
     def stage_phone_setup(self):
+        if self.deferred_phone_purpose:
+            return  # Historical validation receipt is retained, not re-observed.
         self.pin = self.onboarding.setup()
         self.phone.restore_navigation()
         self.phone.click("Settings")
@@ -258,6 +333,7 @@ class FreshRunner(Runner):
             self.phone.click("Testnet4")
             self.onboarding.wait("Testnet4")
         self.phone.click("Home")
+        self.journal.artifact("phone_validation", {**self.phone_validation_identity(), "source": "settings_ui"})
 
     def stage_cube_creation(self):
         result = self.provision.call("cube")
@@ -299,6 +375,7 @@ class FreshRunner(Runner):
         key_path = self.journal.directory / "phone-key.json"
         atomic_write(key_path, json.dumps({"xpub": key["xpub"], "derivation_path": key["derivationPath"],
                      "fingerprint": key["fingerprint"], "key_id": str(key["id"]), "network": "testnet4"}).encode())
+        self.finish_deferred_phone_attempt("key:" + label)
 
     def stage_vault_creation(self):
         result = self.provision.call("vault", target_key_id=self.artifacts["target_key_id"],
@@ -306,7 +383,8 @@ class FreshRunner(Runner):
                                     phone_key_file=str(self.journal.directory / "phone-key.json"))
         for key in ("vault_id", "descriptor_id", "descriptor_file", "receive_address"):
             self.pin_artifact(key, result[key])
-        self.phone.check_fixture(self.artifacts["cube_name"], self.deadline)
+        if not self.deferred_phone_purpose:
+            self.phone.check_fixture(self.artifacts["cube_name"], self.deadline)
 
     def stage_funding(self):
         if self.artifacts.get("funding_outpoint"):
@@ -368,6 +446,8 @@ class FreshRunner(Runner):
                 raise Blocked("INPUT_SPENT", "The generated funding output is unavailable; no replacement funding will be requested.")
 
     def stage_phone(self):
+        if self.deferred_phone_purpose:
+            return
         self.journal.artifact("phone", self.phone.check_fixture(self.artifacts["cube_name"], self.deadline))
 
     def stage_sign(self):
@@ -380,6 +460,9 @@ class FreshRunner(Runner):
     def stage_collect(self):
         super().stage_collect()
         self.onboarding.reconcile_pin("sign:" + self.request_id)
+        if self.deferred_phone_purpose == "sign:" + self.request_id:
+            self.finish_deferred_phone_attempt("sign:" + self.request_id)
+            self.stage_phone()
 
     def stage_broadcast(self):
         self.core.chain()

@@ -357,7 +357,8 @@ def test_funding_preserves_native_minimum_change(runner, funded, accepted):
         assert 'funding_outpoint' not in runner.artifacts
 
 
-def test_account_credential_binding_survives_new_desktop_registration(config, tmp_path):
+def test_account_credential_binding_survives_new_desktop_registration(config, tmp_path, monkeypatch):
+    monkeypatch.setattr(provision.SecretStore, "load", lambda _: None)
     from harness.state import atomic_write
     config['phone_state_dir'] = str(tmp_path / 'phone-state')
     account_ids, desktop_ids, credential_paths = [], [], []
@@ -391,3 +392,174 @@ def test_native_bootstrap_distinguishes_prerequisites_from_assertions(tmp_path, 
     with pytest.raises(category) as error:
         native.call('bootstrap_auth')
     assert type(error.value) is category
+
+
+def pending_phone(runner, purpose="key", *, validated=True, marker=True):
+    runner.journal.artifact("account_identity", "synthetic-account")
+    runner.phone = SimpleNamespace(device_digest="synthetic-phone")
+    runner.onboarding = SimpleNamespace(identity="synthetic-account:synthetic-phone")
+    runner.journal.artifact("cube_id", 17)
+    runner.journal.artifact("cube_name", "synthetic-cube")
+    runner.journal.artifact("phone_key_creation_started", True)
+    runner.journal.artifact("phone_key_pin_entered", True)
+    runner.journal.artifact("baseline_key_ids", ["1", "2"])
+    if validated:
+        runner.journal.outcome("phone_setup", "passed")
+    if purpose == "sign":
+        import uuid
+        intent = {"txid": TXID, "inputs": [FUNDING_TXID + ":1"], "outputs": [{"address": ADDRESS, "sats": 10000}]}
+        request = str(uuid.uuid5(uuid.UUID(runner.run_id), TXID))
+        for key, value in {"intent": intent, "request_id": request, "session_id": "synthetic-session",
+                           "approval_started": True, "target_key_id": "12", "vault_id": 19}.items():
+            runner.journal.artifact(key, value)
+        runner.request_id = request
+        bound_purpose = "sign:" + request
+    else:
+        bound_purpose = "key:QA " + runner.run_id
+    state = {"identity": runner.onboarding.identity, "verified": True, "pin": "000000"}
+    if marker:
+        state["pending_attempt"] = bound_purpose
+    return state, bound_purpose
+
+
+@pytest.mark.parametrize("purpose", ["key", "sign"])
+def test_bound_pending_attempt_reuses_prior_validation_without_navigation(runner, purpose):
+    state, expected = pending_phone(runner, purpose)
+    prior = deepcopy(runner.journal.data["stages"]["phone_setup"])
+    runner.defer_pending_phone_attempt(state)
+    runner.stage_phone_setup()  # No phone/onboarding navigation methods supplied.
+    assert runner.deferred_phone_purpose == expected
+    receipt = runner.artifacts["phone_validation_reused"]
+    assert receipt["purpose"] == expected
+    assert receipt["validation"]["stage_outcome"] == prior
+    assert receipt["validation"]["account"] == "synthetic-account"
+    assert receipt["validation"]["device"] == "synthetic-phone"
+    assert receipt["validation"]["network"] == "testnet4"
+    assert state["pending_attempt"] == expected
+
+
+@pytest.mark.parametrize("bad", ["key:another-run", "sign:another-request", "unexpected", "", 42])
+def test_foreign_or_malformed_pending_intent_blocks_before_ui(runner, bad):
+    state, _ = pending_phone(runner)
+    state["pending_attempt"] = bad
+    with pytest.raises(Blocked) as caught:
+        runner.defer_pending_phone_attempt(state)
+    assert caught.value.code in ("PHONE_PENDING_FOREIGN", "PHONE_PENDING_INTENT")
+    assert runner.deferred_phone_purpose is None
+    assert "phone_validation_reused" not in runner.artifacts
+
+
+@pytest.mark.parametrize("purpose,missing", [("key", "baseline_key_ids"), ("key", "phone_key_creation_started"),
+    ("sign", "session_id"), ("sign", "intent"), ("sign", "approval_started")])
+def test_pending_attempt_requires_exact_run_checkpoints(runner, purpose, missing):
+    state, _ = pending_phone(runner, purpose)
+    runner.artifacts.pop(missing)
+    with pytest.raises(Failed) as caught:
+        runner.defer_pending_phone_attempt(state)
+    assert caught.value.code == "PHONE_PENDING_INTENT"
+
+
+@pytest.mark.parametrize("purpose", ["key", "sign"])
+def test_verified_credential_alone_cannot_skip_first_run_account_network_checks(runner, purpose):
+    state, _ = pending_phone(runner, purpose, validated=False)
+    with pytest.raises(Blocked) as caught:
+        runner.defer_pending_phone_attempt(state)
+    assert caught.value.code == "PHONE_VALIDATION_REQUIRED"
+    assert "phone_validation_reused" not in runner.artifacts
+
+
+def test_prior_validation_cannot_move_to_another_device(runner):
+    state, _ = pending_phone(runner)
+    runner.journal.artifact("phone_validation", {"account": "synthetic-account", "device": "other-phone",
+                                                "network": "testnet4", "source": "settings_ui"})
+    with pytest.raises(Failed) as caught:
+        runner.defer_pending_phone_attempt(state)
+    assert caught.value.code == "PHONE_VALIDATION_CHANGED"
+
+
+def test_pending_sign_skips_all_fixture_navigation_until_verified_collection(runner):
+    state, purpose = pending_phone(runner, "sign")
+    runner.defer_pending_phone_attempt(state)
+    runner.artifacts.update(target_fingerprint="aabbccdd")
+    result = {"vault_id": 19, "descriptor_id": "descriptor", "descriptor_file": "/synthetic/descriptor",
+              "receive_address": ADDRESS}
+    runner.provision = SimpleNamespace(call=lambda *a, **k: result)
+    runner.stage_phone_setup()
+    runner.stage_vault_creation()
+    runner.stage_phone()  # Phone intentionally has no navigation methods.
+    runner.collect_once = lambda: False
+    runner.stage_sign()  # approval_started prevents a second review/approval.
+    with pytest.raises(Blocked) as caught:
+        runner.stage_collect()
+    assert caught.value.code == "SIGNATURE_DELIVERY"
+    assert runner.deferred_phone_purpose == purpose
+    actions = []
+    runner.collect_once = lambda: True
+    runner.onboarding.reconcile_pin = lambda p: actions.append(("reconciled", p))
+    runner.stage_phone_setup = lambda: actions.append("checked-account-network")
+    runner.phone.check_fixture = lambda *a: actions.append("checked-cube") or {"network": "testnet4", "cube_visible": True}
+    runner.stage_collect()
+    assert actions == [("reconciled", purpose), "checked-account-network", "checked-cube"]
+    assert runner.deferred_phone_purpose is None
+    assert runner.artifacts["phone_validation_reused"]["purpose"] == purpose
+
+
+def test_pending_key_absence_keeps_prompt_and_match_releases_navigation(runner):
+    state, purpose = pending_phone(runner)
+    runner.defer_pending_phone_attempt(state)
+    runner.keys = lambda: []
+    with pytest.raises(Blocked) as caught:
+        runner.stage_phone_key()
+    assert caught.value.code == "KEY_REGISTRATION"
+    assert runner.deferred_phone_purpose == purpose
+    actions = []
+    runner.keys = lambda: [phone_key(runner)]
+    runner.onboarding.reconcile_pin = lambda p: actions.append(("reconciled", p))
+    runner.stage_phone_setup = lambda: actions.append("checked-account-network")
+    runner.stage_phone_key()
+    assert actions == [("reconciled", purpose), "checked-account-network"]
+    assert runner.deferred_phone_purpose is None
+    assert runner.artifacts["target_key_id"] == "12"
+
+
+def test_approval_before_pin_provider_still_preserves_the_open_prompt(runner):
+    state, purpose = pending_phone(runner, "sign", marker=False)
+    runner.defer_pending_phone_attempt(state)
+    runner.stage_phone_setup()
+    assert runner.deferred_phone_purpose == purpose
+    assert "pending_attempt" not in state
+
+
+def test_authentication_loads_pending_intent_before_even_reading_phone_labels(runner, tmp_path, monkeypatch):
+    from harness.state import atomic_write, digest
+    runner.config["phone_state_dir"] = str(tmp_path / "phone-state")
+    runner.profile.mkdir(mode=0o700)
+    (runner.profile / "testnet4").mkdir(mode=0o700)
+    account = {"email": runner.config["account_email"], "device_id": "synthetic-desktop"}
+    atomic_write(runner.profile / "testnet4/connect.json", json.dumps({"accounts": [account], "active_email": account["email"]}).encode())
+    runner.provision = SimpleNamespace(binary="/synthetic/native", call=lambda *a, **k: dict(account, user_id=42))
+    def no_ui():
+        raise AssertionError("Pending authentication must not inspect or navigate the phone")
+    runner.phone = SimpleNamespace(device_digest="synthetic-phone", labels=no_ui)
+    identity = digest({"email": account["email"].casefold(), "user_id": 42}) + ":synthetic-phone"
+    state = {"identity": identity, "verified": True, "pending_attempt": "key:QA " + runner.run_id}
+    monkeypatch.setattr(provision.SecretStore, "load", lambda _: deepcopy(state))
+    for key, value in {"cube_id": 17, "phone_key_creation_started": True, "phone_key_pin_entered": True,
+                       "baseline_key_ids": []}.items():
+        runner.journal.artifact(key, value)
+    runner.journal.outcome("phone_setup", "passed")
+    runner.stage_authentication()
+    assert runner.deferred_phone_purpose == state["pending_attempt"]
+
+
+def test_first_run_phone_setup_still_checks_live_account_and_network(runner):
+    calls = []
+    runner.journal.artifact("account_identity", "synthetic-account")
+    runner.account = {"email": "qa@example.invalid"}
+    runner.onboarding = SimpleNamespace(setup=lambda: calls.append("setup") or "000000")
+    runner.phone = SimpleNamespace(device_digest="synthetic-phone", restore_navigation=lambda: calls.append("navigation"),
+                                  click=lambda label: calls.append(label), labels=lambda: {"qa@example.invalid", "Testnet4"})
+    runner.stage_phone_setup()
+    assert calls == ["setup", "navigation", "Settings", "Home"]
+    assert runner.artifacts["phone_validation"] == {"account": "synthetic-account", "device": "synthetic-phone",
+                                                   "network": "testnet4", "source": "settings_ui"}
