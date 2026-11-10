@@ -1,6 +1,6 @@
 use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::localized_format;
-use iced::{Alignment, Length};
+use iced::Alignment;
 
 use coincube_ui::{
     color,
@@ -13,7 +13,6 @@ use coincube_ui::{
 };
 
 use crate::installer::{
-    context,
     descriptor::{Path, PathKind, PathSequence},
     message::{self, Message},
     view::{
