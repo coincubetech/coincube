@@ -73,8 +73,9 @@ optional logos begin, so slow images cannot prevent later recipient checks. Logo
 exhausting their remaining budget preserves the already-bound identity. A VAULT batch shares one deadline
 and has at most three outstanding lookups. Unsupported input, empty response,
 transport/parsing/decryption error or timeout shows nothing and does not block
-sending. Positive identity requires a successfully decrypted ZK destination equal
-to the prepared destination. Identity attribution makes no claim of payment safety.
+sending. Positive identity requires a `match` from the SDK, which returns only payments
+bound by decryption, and a returned destination of the same type equal to the
+prepared destination. Identity attribution makes no claim of payment safety.
 
 Only a `tampered` verdict from the SDK's `verify` blocks sending and requires
 replacing the request. In SDK 4.0.0 it covers an on-chain BIP21 address that does
