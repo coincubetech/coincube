@@ -741,9 +741,15 @@ impl DefineSpend {
                     let min_amount = format_btc_string(Amount::from_sat(DUST_OUTPUT_SATS).to_btc());
                     if let Some(recipient) = self.recipients.get_mut(i) {
                         recipient.dust_warning = Some(if all_selected {
-                            format!("Minimum amount is {min_amount} BTC. Add funds to your wallet to spend the coin(s).")
+                            coincube_ui::localized_format!(
+                                "Minimum amount is {min_amount} BTC. Add funds to your wallet to spend the coin(s).",
+                                "El importe mínimo es {min_amount} BTC. Agrega fondos a tu cartera para gastar las monedas."
+                            )
                         } else {
-                            format!("Minimum amount is {min_amount} BTC. Select more coins to continue.")
+                            coincube_ui::localized_format!(
+                                "Minimum amount is {min_amount} BTC. Select more coins to continue.",
+                                "El importe mínimo es {min_amount} BTC. Selecciona más monedas para continuar."
+                            )
                         });
                         recipient.update(
                             self.network,
@@ -1644,7 +1650,7 @@ impl Recipient {
                         self.fiat_amount = Some(form::Value {
                             value: fiat_amt_str,
                             valid: false,
-                            warning: Some("Could not convert to BTC"),
+                            warning: Some(coincube_ui::locale::copy("Could not convert to BTC")),
                         });
                     }
                 }
@@ -1669,8 +1675,9 @@ impl Recipient {
                             Amount::from_str_in(truncated, Denomination::Bitcoin).is_ok()
                         })
                         .inspect(|_| {
-                            self.amount.warning =
-                                Some("Amount has been truncated to 8 decimal places");
+                            self.amount.warning = Some(coincube_ui::locale::copy(
+                                "Amount has been truncated to 8 decimal places",
+                            ));
                         })
                         .unwrap_or(amount),
                     BitcoinDisplayUnit::Sats => amount,
@@ -1692,7 +1699,9 @@ impl Recipient {
         if let Ok((_, Some(_))) = parse_payment_request(&self.address.value) {
             if !self.amount.value.is_empty() && self.amount().is_err() {
                 self.amount.valid = false;
-                self.amount.warning = Some("Amount must match the Bitcoin payment request");
+                self.amount.warning = Some(coincube_ui::locale::copy(
+                    "Amount must match the Bitcoin payment request",
+                ));
             }
         }
     }
@@ -1849,8 +1858,10 @@ impl Step for SaveSpend {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
         let (psbt_state, warnings) = self.spend.as_ref().unwrap();
         let Some(policy) = psbt_state.desc_policy.as_ref() else {
-            return iced::widget::text("Use the imported wallet Send screen for this account.")
-                .into();
+            return iced::widget::text(coincube_ui::locale::copy(
+                "Use the imported wallet Send screen for this account.",
+            ))
+            .into();
         };
         let content = view::vault::spend::spend_view(
             psbt_state.action_scope(),

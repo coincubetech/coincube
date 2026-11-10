@@ -6,6 +6,8 @@
 //! [`crate::app::state::liquid::swap`] for the quote model.
 
 use coincube_core::miniscript::bitcoin::Amount;
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     color,
     component::{
@@ -180,7 +182,11 @@ fn balance_row<'a>(
 ) -> Element<'a, LiquidSwapMessage> {
     Row::new()
         .spacing(6)
-        .push(text("Balance:").size(P2_SIZE).style(theme::text::secondary))
+        .push(
+            text(localized_copy("Balance:"))
+                .size(P2_SIZE)
+                .style(theme::text::secondary),
+        )
         .push(
             text(if mask_amounts {
                 "••••••".into()
@@ -266,7 +272,7 @@ fn amount_input_field<'a>(
         }
         (SendAsset::Usdt, _) => form::Form::new_amount_numeric("0.00", value, on_edit),
     };
-    form.maybe_warning(value.warning)
+    form.maybe_warning(value.warning.map(coincube_ui::locale::copy))
         .size(H3_SIZE)
         .padding(10)
         .into_container()
@@ -280,7 +286,9 @@ fn last_swaps_section<'a>(config: &LiquidSwapConfig<'a>) -> Option<Element<'a, L
     if config.recent_swaps.is_empty() {
         return None;
     }
-    let mut col = Column::new().spacing(10).push(h4_bold("Last swaps"));
+    let mut col = Column::new()
+        .spacing(10)
+        .push(h4_bold(localized_copy("Last swaps")));
     for (idx, payment) in config.recent_swaps.iter().enumerate() {
         col = col.push(swap_leg_row(idx, payment, config));
     }
@@ -366,7 +374,7 @@ fn swap_pending_badge() -> Element<'static, LiquidSwapMessage> {
                     .style(move |_| iced::widget::text::Style { color: Some(fg) }),
             )
             .push(
-                text("Pending")
+                text(localized_copy("Pending"))
                     .bold()
                     .size(14)
                     .style(move |_| iced::widget::text::Style { color: Some(fg) }),
@@ -399,7 +407,7 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
 
     let swap_all = Action::new(
         SWAP_ALL_ACTION_ID,
-        text("Swap All")
+        text(localized_copy("Swap All"))
             .size(P2_SIZE)
             .bold()
             .style(|t: &theme::Theme| iced::widget::text::Style {
@@ -413,7 +421,7 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
     .into();
 
     let from_card = asset_card(
-        "YOU PAY",
+        coincube_ui::locale::copy("YOU PAY"),
         Some(swap_all),
         pay_field,
         config.from_asset,
@@ -455,7 +463,7 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
     );
 
     let to_card = asset_card(
-        "YOU RECEIVE",
+        coincube_ui::locale::copy("YOU RECEIVE"),
         None,
         receive_field,
         config.to_asset,
@@ -470,7 +478,11 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
         status = status.push(
             Row::new()
                 .spacing(6)
-                .push(text("Fee:").size(P2_SIZE).style(theme::text::secondary))
+                .push(
+                    text(localized_copy("Fee:"))
+                        .size(P2_SIZE)
+                        .style(theme::text::secondary),
+                )
                 .push(
                     text(fmt_amount(
                         config.from_asset,
@@ -483,7 +495,7 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
         );
     } else if config.quoting {
         status = status.push(
-            text("Fetching quote…")
+            text(localized_copy("Fetching quote…"))
                 .size(P2_SIZE)
                 .style(theme::text::secondary),
         );
@@ -491,7 +503,7 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
 
     let continue_btn = Action::new(
         CONTINUE_ACTION_ID,
-        text("Continue")
+        text(localized_copy("Continue"))
             .size(P1_SIZE)
             .font(coincube_ui::font::MEDIUM)
             .width(Length::Fill)
@@ -522,18 +534,18 @@ fn input_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMess
 
     let mut content = Column::new().spacing(16).width(Length::Fill);
     if config.syncing {
-        content = content.push(hint_banner(
+        content = content.push(hint_banner(coincube_ui::locale::copy(
             "Wallet is still syncing — swaps are paused until it finishes.",
-        ));
+        )));
     } else if config.sync_failed {
-        content = content.push(hint_banner(
+        content = content.push(hint_banner(coincube_ui::locale::copy(
             "Couldn't sync the wallet — swaps are paused. It'll retry automatically.",
-        ));
+        )));
     }
     if config.needs_lbtc_for_fees {
-        content = content.push(hint_banner(
+        content = content.push(hint_banner(coincube_ui::locale::copy(
             "You need a little L-BTC to pay network fees for this swap. Receive some L-BTC first.",
-        ));
+        )));
     }
     content = content
         .push(cards_row)
@@ -576,19 +588,19 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
         let mut content = Column::new()
             .spacing(16)
             .max_width(680)
-            .push(h4_bold("Review swap"));
+            .push(h4_bold(localized_copy("Review swap")));
         if let Some(err) = config.error {
             content = content.push(error_card(err));
         }
         let status = if config.quoting {
-            "Fetching a fresh quote…"
+            localized_copy("Fetching a fresh quote…")
         } else {
-            "Quote expired."
+            localized_copy("Quote expired.")
         };
         content = content
             .push(text(status).size(P1_SIZE).style(theme::text::secondary))
             .push(
-                button::secondary(None, "Back")
+                button::secondary(None, CopyText::Back.get())
                     .on_press(LiquidSwapMessage::BackToInput)
                     .width(Length::Fixed(120.0)),
             );
@@ -622,20 +634,20 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
     let summary = Column::new()
         .width(Length::Fill)
         .push(rule())
-        .push(line("Network", "Liquid".to_owned()))
+        .push(line(CopyText::Network.get(), "Liquid".to_owned()))
         .push(rule())
         .push(line(
-            "You pay",
+            localized_copy("You pay"),
             fmt_amount(config.from_asset, q.from_total_base(), config.bitcoin_unit),
         ))
         .push(rule())
         .push(line(
-            "You receive",
+            localized_copy("You receive"),
             fmt_amount(config.to_asset, q.receiver_base, config.bitcoin_unit),
         ))
         .push(rule())
         .push(line(
-            "Rate",
+            localized_copy("Rate"),
             format!(
                 "1 {} = {}",
                 ticker(config.from_asset),
@@ -644,12 +656,12 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
         ))
         .push(rule())
         .push(line(
-            "SideSwap + network fee",
+            localized_copy("SideSwap + network fee"),
             fmt_amount(config.from_asset, q.fee_base, config.bitcoin_unit),
         ))
         .push(rule())
         .push(line(
-            "Quote expires in",
+            localized_copy("Quote expires in"),
             if config.is_sending {
                 "processing…".to_string()
             } else {
@@ -660,13 +672,13 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
 
     let confirm_btn = {
         let label = if config.is_sending {
-            "Swapping…"
+            localized_copy("Swapping…")
         } else if config.syncing {
-            "Waiting for sync…"
+            localized_copy("Waiting for sync…")
         } else if config.sync_failed {
-            "Sync failed"
+            localized_copy("Sync failed")
         } else {
-            "Confirm swap"
+            localized_copy("Confirm swap")
         };
         let mut b = button::primary(None, label).width(Length::Fixed(180.0));
         // Disabled for an expired quote, a send in flight, or a wallet that
@@ -677,22 +689,22 @@ fn review_screen<'a>(config: &LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMes
         b
     };
 
-    let back_btn = button::secondary(None, "Back")
+    let back_btn = button::secondary(None, CopyText::Back.get())
         .on_press(LiquidSwapMessage::BackToInput)
         .width(Length::Fixed(120.0));
 
     let mut content = Column::new()
         .spacing(16)
         .max_width(680)
-        .push(h4_bold("Review swap"));
+        .push(h4_bold(localized_copy("Review swap")));
     if config.syncing {
-        content = content.push(hint_banner(
+        content = content.push(hint_banner(coincube_ui::locale::copy(
             "Wallet is still syncing — swaps are paused until it finishes.",
-        ));
+        )));
     } else if config.sync_failed {
-        content = content.push(hint_banner(
+        content = content.push(hint_banner(coincube_ui::locale::copy(
             "Couldn't sync the wallet — swaps are paused. It'll retry automatically.",
-        ));
+        )));
     }
     content = content.push(summary).push(
         Row::new()
@@ -736,11 +748,15 @@ fn hint_banner<'a>(message: &'a str) -> Element<'a, LiquidSwapMessage> {
 }
 
 fn error_card(err: &str) -> Element<'_, LiquidSwapMessage> {
-    Container::new(text(err.to_string()).size(14).color(color::RED))
-        .padding(10)
-        .style(theme::card::invalid)
-        .width(Length::Fill)
-        .into()
+    Container::new(
+        text(coincube_ui::locale::notice(err.to_string()))
+            .size(14)
+            .color(color::RED),
+    )
+    .padding(10)
+    .style(theme::card::invalid)
+    .width(Length::Fill)
+    .into()
 }
 
 pub fn liquid_swap_view<'a>(config: LiquidSwapConfig<'a>) -> Element<'a, LiquidSwapMessage> {
@@ -752,7 +768,7 @@ pub fn liquid_swap_view<'a>(config: LiquidSwapConfig<'a>) -> Element<'a, LiquidS
             config.sent_amount_display,
             config.sent_quote,
             config.sent_image_handle,
-            "is on its way.",
+            CopyText::IsOnItsWay.get(),
             LiquidSwapMessage::Done,
         ),
     }

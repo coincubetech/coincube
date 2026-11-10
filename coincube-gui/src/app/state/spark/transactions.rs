@@ -216,15 +216,24 @@ impl State for SparkTransactions {
                 let modal_content = match state {
                     ImportExportState::Ended => Column::new()
                         .spacing(20)
-                        .push(text("Export successful!").size(20).bold())
                         .push(
-                            coincube_ui::component::button::primary(None, "Close")
-                                .width(150)
-                                .on_press(view::Message::ImportExport(ImportExportMessage::Close)),
+                            text(coincube_ui::locale::copy("Export successful!"))
+                                .size(20)
+                                .bold(),
+                        )
+                        .push(
+                            coincube_ui::component::button::primary(
+                                None,
+                                coincube_ui::locale::copy("Close"),
+                            )
+                            .width(150)
+                            .on_press(view::Message::ImportExport(ImportExportMessage::Close)),
                         ),
-                    _ => Column::new()
-                        .spacing(20)
-                        .push(text("Exporting payments…").size(20).bold()),
+                    _ => Column::new().spacing(20).push(
+                        text(coincube_ui::locale::copy("Exporting payments…"))
+                            .size(20)
+                            .bold(),
+                    ),
                 };
 
                 Modal::new(content, modal_content)

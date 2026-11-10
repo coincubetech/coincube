@@ -18,6 +18,8 @@
 
 use coincube_core::miniscript::bitcoin::Amount;
 use coincube_spark_protocol::PaymentSummary;
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
 use iced::widget::image;
 
 use crate::app::wallets::DomainPaymentStatus;
@@ -76,32 +78,31 @@ impl<'a> SparkTransactionsView<'a> {
         // The title is in the page head (`state::spark::transactions`).
         content = content.push(
             Row::new().push(Space::new().width(Length::Fill)).push(
-                button::secondary(Some(icon::backup_icon()), "Export")
+                button::secondary(Some(icon::backup_icon()), localized_copy("Export"))
                     .on_press(ImportExportMessage::Open.into()),
             ),
         );
 
         match self.status {
             SparkTransactionsStatus::Unavailable => {
-                content = content.push(Column::new().spacing(10).push(p1_regular(
+                content = content.push(Column::new().spacing(10).push(p1_regular(localized_copy(
                     "Spark is not configured for this cube. Set up a Spark \
                              signer to see your payment history here.",
-                )));
+                ))));
                 return content.into();
             }
             SparkTransactionsStatus::Loading => {
-                content = content.push(
-                    Column::new()
-                        .push(p1_regular("Loading payment history from the Spark bridge…")),
-                );
+                content = content.push(Column::new().push(p1_regular(localized_copy(
+                    "Loading payment history from the Spark bridge…",
+                ))));
                 return content.into();
             }
             SparkTransactionsStatus::Error(err) => {
                 content = content.push(
                     Column::new()
                         .spacing(10)
-                        .push(p1_regular("Failed to load payment history"))
-                        .push(p2_regular(err)),
+                        .push(p1_regular(localized_copy("Failed to load payment history")))
+                        .push(p2_regular(coincube_ui::locale::notice(err.to_owned()))),
                 );
                 return content.into();
             }
@@ -126,25 +127,23 @@ impl<'a> SparkTransactionsView<'a> {
                     )))
                     .push(Space::new().height(Length::Fixed(10.0)))
                     .push(
-                        text(
-                            "Your Spark wallet is ready. Once you send or receive\nfunds, they'll show up here.",
-                        )
-                        .size(16)
-                        .style(theme::text::secondary)
-                        .wrapping(iced::widget::text::Wrapping::Word)
-                        .align_x(iced::alignment::Horizontal::Center),
+                        text(CopyText::SparkHistoryEmpty.get())
+                            .size(16)
+                            .style(theme::text::secondary)
+                            .wrapping(iced::widget::text::Wrapping::Word)
+                            .align_x(iced::alignment::Horizontal::Center),
                     )
                     .push(
                         Row::new()
                             .spacing(15)
                             .push(
-                                button::primary(None, "Send sats")
+                                button::primary(None, localized_copy("Send"))
                                     .on_press(Message::Menu(Menu::Spark(SparkSubMenu::Send)))
                                     .padding(15)
                                     .width(Length::Fixed(150.0)),
                             )
                             .push(
-                                button::transparent_border(None, "Receive sats")
+                                button::transparent_border(None, CopyText::ReceiveSats.get())
                                     .on_press(Message::Menu(Menu::Spark(SparkSubMenu::Receive)))
                                     .padding(15)
                                     .width(Length::Fixed(150.0)),
@@ -259,9 +258,9 @@ fn transaction_row<'a>(
 /// The detail page's title, shown in its page head.
 pub fn transaction_detail_title(tx: &SparkRecentTransaction) -> &'static str {
     if tx.is_incoming {
-        "Incoming payment"
+        localized_copy("Incoming payment")
     } else {
-        "Outgoing payment"
+        localized_copy("Outgoing payment")
     }
 }
 
@@ -310,8 +309,8 @@ pub fn transaction_detail_view<'a>(
         SparkPaymentMethod::Spark => asset_network_logo::<Message>("btc", "spark", 56.0),
         SparkPaymentMethod::StableBalance => asset_network_logo::<Message>("btc", "spark", 56.0),
     };
-    let method_text = payment_method_text(tx.method, is_incoming);
-    let status_text = payment_status_text(tx.status);
+    let method_text = localized_copy(payment_method_text(tx.method, is_incoming));
+    let status_text = localized_copy(payment_status_text(tx.status));
     let date_text = format_timestamp(tx.timestamp).unwrap_or_else(|| "Unknown".to_string());
     let fiat_str = total_fiat
         .as_ref()
@@ -368,14 +367,14 @@ pub fn transaction_detail_view<'a>(
 
     let mut info = Column::new()
         .spacing(15)
-        .push(kv("Date", text(date_text).into()))
-        .push(kv("Status", text(status_text).into()))
-        .push(kv("Method", text(method_text).into()))
-        .push(kv("Payment ID", payment_id_row));
+        .push(kv(localized_copy("Date"), text(date_text).into()))
+        .push(kv(localized_copy("Status"), text(status_text).into()))
+        .push(kv(localized_copy("Method"), text(method_text).into()))
+        .push(kv(localized_copy("Payment ID"), payment_id_row));
 
     if tx.fees_sat.to_sat() > 0 {
         info = info.push(kv(
-            "Fees",
+            localized_copy("Fees"),
             if mask_amounts {
                 text("••••••").into()
             } else {
@@ -432,7 +431,7 @@ fn payment_status_text(status: DomainPaymentStatus) -> &'static str {
 }
 
 fn detail_back_button() -> Element<'static, Message> {
-    button::secondary(None, "< Back")
+    button::secondary(None, localized_copy("< Back"))
         .width(Length::Fixed(150.0))
         .on_press(Message::Close)
         .into()

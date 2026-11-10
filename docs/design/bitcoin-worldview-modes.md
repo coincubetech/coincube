@@ -80,8 +80,15 @@ combinations must work. Spanish is the first additional locale to validate.
   currencies according to the app's locale policy when available, without
   changing their values, rounding rules, units or amount parsing in this feature.
 
-The initial preference slice uses English copy. Spanish UI enablement belongs to
-the app's localization rollout.
+The desktop language selector is a device preference under **App preferences →
+Appearance**. It defaults to English and uses the accepted settings receipt
+independently of worldview. The Spanish catalog includes Samurai's desktop
+navigation, setup, wallet screens, settings, bundled quotes, and app-authored
+error guidance. Translate messages at presentation time so the accepted locale
+also applies to deferred views and errors received earlier. Preserve canonical
+network names, addresses, amounts, and support codes. Diagnostics returned by
+external services, devices, or libraries may appear in their original language.
+Voice lines use the accepted language independently of the selected worldview.
 
 ## Chain identity and financial safety
 
@@ -102,6 +109,33 @@ construction and signing, PSBTs, descriptors, replay checks, broadcast targets,
 fees, price symbols, Connect/API/RPC payloads, exports and wallet persistence.
 Keep asset and amount arithmetic on the existing typed paths. Use the existing
 wallet and chain data as input to presentation.
+
+## Voice and humor
+
+Samurai uses calm, direct language and is the default when a view has no
+accepted worldview. Suitcoiner treats market consensus and institutional
+adoption with absolute confidence. Luke treats validation, sovereignty, and
+the ledger with austere conviction. Deliver the satire sincerely. A short line
+beside a clear label is usually enough.
+
+Keep the English and Spanish pairs together in
+[`coincube-ui/src/worldview_copy.rs`](../../coincube-ui/src/worldview_copy.rs).
+The launcher welcome, overview, creation, empty history, synchronization,
+payment success, and Appearance screens draw from that registry. The picker
+lets Suitcoiner say “Consensus by market capitalization.” and Luke answer
+“Consensus is not a popularity contest.” A switch message follows an accepted
+device preference save. Rivalry Easter eggs are reserved for a later pass.
+
+On a visible, synchronized Vault with a known zero balance, the active typed
+mainnet selects the joke. Suitcoiner calls an empty BLAKE2b Vault
+“institutionally compliant.” Luke is pleased when a SHA-256 Vault has no
+Spamcoin. A hidden, loading, stale, or unscanned balance and any test network
+suppress these lines.
+
+Keep seed phrases, recovery instructions, error messages, fees, addresses,
+confirmation statuses, and technical settings neutral. Payment captions are
+secondary to the existing outcome and amount. Broadcasting does not establish
+confirmation. Mode aliases are confined to the existing passive display surfaces.
 
 ## Artwork and accents
 

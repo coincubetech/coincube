@@ -5,6 +5,7 @@
 //! whole-tree focus intent on pointer press. An action without an intent is
 //! inert and leaves the Tab order.
 
+use crate::locale::copy as localized_copy;
 use std::borrow::Cow;
 
 use iced::advanced::text::Shaping;
@@ -199,9 +200,14 @@ pub fn transfer_action<'a, M: Clone + 'static>(
     focus_intent: fn(Id) -> M,
     on_press: Option<M>,
 ) -> ActionButton<'a, M> {
-    ActionButton::new(id, "Transfer", ActionKind::Secondary, focus_intent)
-        .icon(icon::arrow_down_up_icon())
-        .on_press_maybe(on_press)
+    ActionButton::new(
+        id,
+        localized_copy("Transfer"),
+        ActionKind::Secondary,
+        focus_intent,
+    )
+    .icon(icon::arrow_down_up_icon())
+    .on_press_maybe(on_press)
 }
 
 /// An interactive chip (`.chip`), such as the top bar's account entry.

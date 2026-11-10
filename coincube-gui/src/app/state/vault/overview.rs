@@ -140,8 +140,9 @@ impl VaultOverview {
     /// an empty answer from an unfinished scan says nothing about the
     /// payments. The Vault page and the Overview share it.
     pub fn unknown_history_note(&self) -> Option<&'static str> {
-        self.history_unknown()
-            .then_some("Transactions appear once the Vault's history has loaded")
+        self.history_unknown().then(|| {
+            coincube_ui::locale::copy("Transactions appear once the Vault's history has loaded")
+        })
     }
 
     /// The balance row's own test: the Vault's history is not known yet.
@@ -215,6 +216,7 @@ impl VaultOverview {
             &self.expiring_coins,
             recent_activity,
             &cache.cube_id,
+            cache.chain(),
             &self.sync_status,
             self.show_rescan_prompt,
             self.awaiting_rescan_date,
@@ -612,7 +614,7 @@ fn head_actions<'a>(
     let action = |label: &'static str, control: &str, route: Menu| {
         let button: Element<'a, view::Message> = ActionButton::new(
             view::shared::landing::landing_control_id(cube_id, "Vault", control),
-            label,
+            coincube_ui::locale::copy(label),
             ActionKind::Secondary,
             view::Message::FocusAction,
         )

@@ -34,6 +34,8 @@
 //! names the build, and deliberately does not mention the Apple ID or iCloud
 //! Keychain — see that variant for why.
 
+use coincube_ui::locale::Text as CopyText;
+use coincube_ui::locale::{copy as localized_copy, notice as localized_notice};
 use iced::widget::{image, Space};
 use iced::{Alignment, Length, Task};
 
@@ -488,7 +490,7 @@ impl PasskeyUnlock {
                         &self.loading_image_handle,
                     )))
                     .push(crate::loading::loading_indicator(None))
-                    .push(text("Loading your Cube...").style(theme::text::secondary))
+                    .push(text(CopyText::LoadingYourCube.get()).style(theme::text::secondary))
                     .push(Space::new().height(Length::Fill)),
             )
             .width(Length::Fill)
@@ -520,7 +522,7 @@ impl PasskeyUnlock {
             Phase::Authenticating => {
                 fields = fields
                     .push(face::face_words(
-                        "Confirm with Touch ID to unlock this Cube.",
+                        localized_copy("Confirm with Touch ID to unlock this Cube."),
                         13.0,
                         coincube_ui::font::REGULAR,
                         true,
@@ -545,7 +547,7 @@ impl PasskeyUnlock {
                 if let Some(error) = error {
                     fields = fields
                         .push(
-                            p1_regular(error.as_str())
+                            p1_regular(localized_notice(error.clone()))
                                 .size(12)
                                 .style(theme::text::error),
                         )
@@ -554,7 +556,7 @@ impl PasskeyUnlock {
                 fields = fields.push(
                     Action::new(
                         begin_button_id(),
-                        face::face_button_label("Unlock with passkey"),
+                        face::face_button_label(localized_copy("Unlock with passkey")),
                         Message::Focus,
                     )
                     .height(Length::Fixed(36.0))
@@ -565,7 +567,7 @@ impl PasskeyUnlock {
             }
             Phase::Opening => unreachable!("handled above"),
         }
-        let cancel = iced::widget::button(face::face_link_label("Cancel"))
+        let cancel = iced::widget::button(face::face_link_label(CopyText::Cancel.get()))
             .padding([2.0, 4.0])
             .style(face::face_link_style)
             .on_press(Message::Back);
@@ -596,6 +598,25 @@ mod tests {
                 connect_client: None,
             },
         )
+    }
+
+    #[test]
+    fn spanish_passkey_unlock_renders_action_and_error() {
+        use crate::app::view::shared::landing::capture;
+        use coincube_ui::locale::{render_in, Language};
+
+        let mut passkey = screen();
+        passkey.fail_open(PasskeyError::Cancelled.user_message());
+        let view = render_in(Language::Spanish, || passkey.unlock_controls());
+        let shown = capture::inspect(
+            "passkey-error-es",
+            view,
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown.contains("Desbloquear con llave de acceso"));
+        assert!(shown.contains("Se canceló la comprobación con Touch ID"));
     }
 
     /// Losing the session between a successful assertion and the wallet load

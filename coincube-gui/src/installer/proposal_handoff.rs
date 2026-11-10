@@ -1,5 +1,7 @@
 //! Presentation-only entry to the opt-in native Regtest proposal flow.
 use super::{proposal, Context, Message, Step};
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use coincube_ui::{
     component::{
         button, card,
@@ -39,13 +41,13 @@ impl Step for ProposalHandoff {
         let active = self.session.active();
         let handoff = card::simple(
             column![
-                caption(if active { "PROPOSAL PREPARED · WAITING FOR YOU" } else { "PROPOSAL ACCESS ENDED" }),
-                h3(if active { "Continue setup in Tenshu" } else { "Setup ended" }),
-                text(if active {
+                caption(localized_copy(if active { "PROPOSAL PREPARED · WAITING FOR YOU" } else { "PROPOSAL ACCESS ENDED" })),
+                h3(localized_copy(if active { "Continue setup in Tenshu" } else { "Setup ended" })),
+                text(localized_copy(if active {
                     "A paired client prepared a policy proposal. No Vault has been created. You will select the real keys and review the compiled descriptor in Tenshu before creation."
                 } else {
                     "This proposal can no longer continue. Return to the launcher, unlock this Cube, and ask the paired client to prepare a fresh proposal."
-                }),
+                })),
             ]
             .spacing(12),
         )
@@ -53,21 +55,23 @@ impl Step for ProposalHandoff {
 
         let plan = card::simple(
             column![
-                h4_bold("Proposed plan"),
-                text(format!(
+                h4_bold(localized_copy("Proposed plan")),
+                text(localized_format!(
                     "Primary · {} of {} public-key slots",
+                    "Principal · {} de {} espacios de clave pública",
                     topology.primary.threshold, topology.primary.key_count
                 )),
-                text(format!(
+                text(localized_format!(
                     "Recovery · {} of {} keys after {} relative blocks for each coin",
+                    "Recuperación · {} de {} claves después de {} bloques relativos para cada moneda",
                     topology.recovery.quorum.threshold,
                     topology.recovery.quorum.key_count,
                     topology.recovery.relative_delay_blocks
                 )),
-                caption("Block time varies; the delay is not a calendar deadline."),
-                text("Script · P2WSH"),
-                text("Network · Bitcoin Regtest"),
-                text("Node · isolated loopback, port 28443"),
+                caption(localized_copy("Block time varies; the delay is not a calendar deadline.")),
+                text(localized_copy("Script · P2WSH")),
+                text(localized_copy("Network · Bitcoin Regtest")),
+                text(localized_copy("Node · isolated loopback, port 28443")),
             ]
             .spacing(10),
         )
@@ -75,29 +79,33 @@ impl Step for ProposalHandoff {
 
         let checks = card::simple(
             column![
-                h4_bold("What happens next"),
-                text("1  Choose and check the real public keys in Tenshu"),
-                text("2  Complete native backup and node steps"),
-                text("3  Review the actual descriptor and approve creation"),
-                caption("Device control · not verified"),
-                caption("Backup possession · not verified"),
-                caption("Recovery test · not verified"),
+                h4_bold(localized_copy("What happens next")),
+                text(localized_copy(
+                    "1  Choose and check the real public keys in Tenshu"
+                )),
+                text(localized_copy("2  Complete native backup and node steps")),
+                text(localized_copy(
+                    "3  Review the actual descriptor and approve creation"
+                )),
+                caption(localized_copy("Device control · not verified")),
+                caption(localized_copy("Backup possession · not verified")),
+                caption(localized_copy("Recovery test · not verified")),
             ]
             .spacing(10),
         )
         .width(Length::FillPortion(1));
 
         let content = column![
-            caption("EXPERIMENTAL REGTEST SETUP"),
-            h3("Vault setup from a paired client"),
-            text("This opt-in handoff is available only for an empty Regtest Cube. Tenshu keeps creation approval with you."),
+            caption(localized_copy("EXPERIMENTAL REGTEST SETUP")),
+            h3(localized_copy("Vault setup from a paired client")),
+            text(localized_copy("This opt-in handoff is available only for an empty Regtest Cube. Tenshu keeps creation approval with you.")),
             handoff,
             row![plan, checks].spacing(16).width(Length::Fill),
-            caption("No read access is granted. Ending setup locks this Cube and discards this proposal; pairing remains until revoked."),
+            caption(localized_copy("No read access is granted. Ending setup locks this Cube and discards this proposal; pairing remains until revoked.")),
             row![
-                button::primary_action("proposal-handoff-continue", None, "Continue to key selection", Message::FocusAction)
+                button::primary_action("proposal-handoff-continue", None, localized_copy("Continue to key selection"), Message::FocusAction)
                     .on_press_maybe(active.then_some(Message::Next)),
-                button::secondary_action("proposal-handoff-return", None, if active { "End setup" } else { "Return to launcher" }, Message::FocusAction)
+                button::secondary_action("proposal-handoff-return", None, localized_copy(if active { "End setup" } else { "Return to launcher" }), Message::FocusAction)
                     .on_press(if active { Message::Previous } else { Message::BackToApp(coincube_core::miniscript::bitcoin::Network::Regtest) }),
             ]
             .spacing(12),

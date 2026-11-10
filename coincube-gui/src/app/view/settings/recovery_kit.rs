@@ -1,6 +1,8 @@
 //! Recovery Kit views shared with Cube creation through a message mapper.
 //! Authentication, password policy and removal gates remain in the state machine.
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
     component::tenshu::{self, ActionButton, ActionKind, Tone},
     image, theme,
@@ -49,7 +51,8 @@ fn flow<'a, M: 'a>(
 fn error_note<'a, M: 'a>(message: &'a str) -> Element<'a, M> {
     page::note(
         Tone::Bad,
-        tenshu::body(message).style(|t| theme::tenshu::text::tone(t, Tone::Bad)),
+        tenshu::body(coincube_ui::locale::notice(message.to_owned()))
+            .style(|t| theme::tenshu::text::tone(t, Tone::Bad)),
         None,
     )
 }
@@ -68,7 +71,7 @@ fn actions<'a, M: Clone + 'a>(
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(page::plain_button(
-                    "Cancel",
+                    CopyText::Cancel.get(),
                     ActionKind::Secondary,
                     Some(on(RecoveryKitMessage::Cancel)),
                 ))
@@ -84,18 +87,26 @@ fn actions<'a, M: Clone + 'a>(
 
 pub fn pin_entry_view<'a>(pin: &'a PinInput, error: Option<&'a str>) -> Element<'a, Message> {
     let mut content = page::illustrated_flow(
-        "Confirm your Cube PIN",
-        "Enter your Cube PIN to unlock your Master Seed Phrase. We'll encrypt it on-device before uploading.",
+        CopyText::ConfirmYourCubePin.get(),
+        CopyText::EnterYourCubePinToUnlockYourMasterSeed.get(),
         image::pin_unlock_lock(),
         coincube_ui::illustration::Slot::Pin,
-    ).push(Column::new().spacing(8).push(tenshu::label("Cube PIN"))
-        .push(pin.face_view().map(|m| wrap(RecoveryKitMessage::PinInput(m)))));
+    )
+    .push(
+        Column::new()
+            .spacing(8)
+            .push(tenshu::label(CopyText::CubePin.get()))
+            .push(
+                pin.face_view()
+                    .map(|m| wrap(RecoveryKitMessage::PinInput(m))),
+            ),
+    );
     if let Some(error) = error {
         content = content.push(error_note(error));
     }
     content
         .push(actions(
-            "Unlock",
+            CopyText::Unlock.get(),
             pin.is_complete(),
             RecoveryKitMessage::VerifyPin,
             wrap,
@@ -120,9 +131,9 @@ pub fn password_entry_view<'a, M: Clone + 'a>(
     let mut fields = Column::new()
         .spacing(8)
         .width(Length::Fill)
-        .push(tenshu::label("Recovery password"))
+        .push(tenshu::label(CopyText::RecoveryPassword.get()))
         .push(
-            TextInput::new("Choose a password", password.as_str())
+            TextInput::new(CopyText::ChooseAPassword.get(), password.as_str())
                 .on_input(move |value| {
                     on(RecoveryKitMessage::PasswordChanged(Zeroizing::new(value)))
                 })
@@ -138,15 +149,19 @@ pub fn password_entry_view<'a, M: Clone + 'a>(
                 .girth(4)
                 .style(theme::progress_bar::primary),
         )
-        .push(tenshu::caption(format!("Strength: {}", strength.label())));
+        .push(tenshu::caption(CopyText::PasswordStrength.get().replacen(
+            "{strength}",
+            localized_copy(strength.label()),
+            1,
+        )));
     if let Some(hint) = hint {
-        fields = fields.push(tenshu::caption(hint));
+        fields = fields.push(tenshu::caption(coincube_ui::locale::notice(hint)));
     }
     fields = fields
         .push(Space::new().height(8))
-        .push(tenshu::label("Confirm recovery password"))
+        .push(tenshu::label(CopyText::ConfirmRecoveryPassword.get()))
         .push(
-            TextInput::new("Re-enter password", confirm.as_str())
+            TextInput::new(CopyText::ReEnterPassword.get(), confirm.as_str())
                 .on_input(move |value| {
                     on(RecoveryKitMessage::ConfirmChanged(Zeroizing::new(value)))
                 })
@@ -166,23 +181,32 @@ pub fn password_entry_view<'a, M: Clone + 'a>(
         );
     if !confirm.is_empty() && password.as_str() != confirm.as_str() {
         fields = fields.push(
-            tenshu::caption("Passwords don't match.")
+            tenshu::caption(CopyText::PasswordsDonTMatch.get())
                 .style(|t| theme::tenshu::text::tone(t, Tone::Bad)),
         );
     }
-    let mut content = flow("Choose a recovery password",
-        "This is separate from your Cube PIN — write it down somewhere safe. COINCUBE cannot recover it for you.", false)
-        .push(fields)
-        .push(CheckBox::new(acknowledged)
-            .label("I've written this password down somewhere I can find it")
+    let mut content = flow(
+        CopyText::ChooseARecoveryPassword.get(),
+        CopyText::ThisIsSeparateFromYourCubePinWriteIt.get(),
+        false,
+    )
+    .push(fields)
+    .push(
+        CheckBox::new(acknowledged)
+            .label(CopyText::IVeWrittenThisPasswordDownSomewhereICan.get())
             .on_toggle(move |value| on(RecoveryKitMessage::AcknowledgeToggled(value)))
-            .text_size(14).size(18).spacing(10).width(Length::Fill).style(theme::checkbox::primary));
+            .text_size(14)
+            .size(18)
+            .spacing(10)
+            .width(Length::Fill)
+            .style(theme::checkbox::primary),
+    );
     if let Some(error) = error {
         content = content.push(error_note(error));
     }
     content
         .push(actions(
-            "Back up Recovery Kit",
+            CopyText::BackUpRecoveryKit.get(),
             can_submit,
             RecoveryKitMessage::SubmitPassword,
             on,
@@ -197,37 +221,43 @@ pub fn protection_choice_view<'a>(
     keychain_backed: bool,
 ) -> Element<'a, Message> {
     let mut content = flow(
-        "Choose how to protect your Recovery Kit",
-        "Use a recovery password, your phone (Keychain), or both so either one restores.",
+        CopyText::ChooseHowToProtectYourRecoveryKit.get(),
+        CopyText::KitProtectionOptions.get(),
         false,
     );
     if password_backed || keychain_backed {
         let mut status = Row::new().spacing(16).align_y(Alignment::Center);
         if password_backed {
-            status = status.push(page::status(page::Status::Ok, "Password backed up"));
+            status = status.push(page::status(
+                page::Status::Ok,
+                CopyText::PasswordBackedUp.get(),
+            ));
         }
         if keychain_backed {
-            status = status.push(page::status(page::Status::Ok, "Keychain backed up"));
+            status = status.push(page::status(
+                page::Status::Ok,
+                CopyText::KeychainBackedUp.get(),
+            ));
         }
         content = content.push(status);
     }
     let phone_ready = matches!(phone, PhoneKey::Present);
     content = content.push(page::rows([
-        page::row("Recovery password")
-            .description("Restore by typing your recovery password.")
+        page::row(CopyText::RecoveryPassword.get())
+            .description(CopyText::RestoreByTypingYourRecoveryPassword.get())
             .control(page::primary(
                 "tenshu.kit.password",
-                "Use password",
+                CopyText::UsePassword.get(),
                 Some(wrap(RecoveryKitMessage::SelectProtectionMode(
                     RecoveryProtectionMode::Password,
                 ))),
             ))
             .into(),
-        page::row("Phone (Keychain)")
-            .description("Restore by approving on your phone, with no password to remember.")
+        page::row(CopyText::PhoneKeychain.get())
+            .description(CopyText::KitPhoneOptionDescription.get())
             .control(page::button(
                 "tenshu.kit.phone",
-                "Use my phone",
+                CopyText::UseMyPhone.get(),
                 phone_ready.then(|| {
                     wrap(RecoveryKitMessage::SelectProtectionMode(
                         RecoveryProtectionMode::Phone,
@@ -235,11 +265,11 @@ pub fn protection_choice_view<'a>(
                 }),
             ))
             .into(),
-        page::row("Password and phone")
-            .description("Back up both ways so either one restores.")
+        page::row(CopyText::PasswordAndPhone.get())
+            .description(CopyText::BackUpBothWaysSoEitherOneRestores.get())
             .control(page::button(
                 "tenshu.kit.both",
-                "Use both",
+                CopyText::UseBoth.get(),
                 phone_ready.then(|| {
                     wrap(RecoveryKitMessage::SelectProtectionMode(
                         RecoveryProtectionMode::Both,
@@ -249,15 +279,17 @@ pub fn protection_choice_view<'a>(
             .into(),
     ]));
     content = content.push(match phone {
-        PhoneKey::Checking => page::status(page::Status::Busy,"Checking for your phone key…"),
-        PhoneKey::Present => page::caption("Phone key found. Choose “Use my phone” or “Use both” — you'll restore by approving on your Keychain."),
-        PhoneKey::Absent => page::caption("No phone key yet. Create a recovery key in your Keychain app — signed in to this same Connect account — to enable phone recovery. You'll need this phone (or its recovery phrase) to restore."),
+        PhoneKey::Checking => {
+            page::status(page::Status::Busy, CopyText::CheckingForYourPhoneKey.get())
+        }
+        PhoneKey::Present => page::caption(CopyText::KitPhoneKeyPresent.get()),
+        PhoneKey::Absent => page::caption(CopyText::KitPhoneKeyAbsent.get()),
         PhoneKey::Error(error) => error_note(error),
     });
     if matches!(phone, PhoneKey::Absent | PhoneKey::Error(_)) {
         content = content.push(page::link(
             "tenshu.kit.recheck",
-            "Check again",
+            CopyText::CheckAgain.get(),
             wrap(RecoveryKitMessage::ProvisionPhone),
         ));
     }
@@ -267,7 +299,7 @@ pub fn protection_choice_view<'a>(
     content
         .push(page::button(
             "tenshu.kit.choice.cancel",
-            "Cancel",
+            CopyText::Cancel.get(),
             Some(wrap(RecoveryKitMessage::Cancel)),
         ))
         .into()
@@ -275,35 +307,51 @@ pub fn protection_choice_view<'a>(
 
 pub fn phone_sealing_view() -> Element<'static, Message> {
     flow(
-        "Sealing to your phone…",
-        "Encrypting your recovery material to your Keychain key and uploading.",
+        CopyText::SealingToYourPhone.get(),
+        CopyText::KitPhoneEncryptionProgress.get(),
         false,
     )
-    .push(page::status(page::Status::Busy, "Backing up…"))
+    .push(page::status(page::Status::Busy, CopyText::BackingUp.get()))
     .into()
 }
 
 pub fn passkey_reauth_view() -> Element<'static, Message> {
-    flow("Confirm with Touch ID", "Your Recovery Kit carries this Cube's master seed, so we ask for your passkey again before backing it up.", false)
-        .push(page::status(page::Status::Busy,"Waiting for Touch ID…"))
-        .push(page::rule())
-        .push(page::button("tenshu.kit.passkey.cancel", "Cancel", Some(wrap(RecoveryKitMessage::Cancel)))).into()
+    flow(
+        CopyText::ConfirmWithTouchId.get(),
+        CopyText::YourRecoveryKitCarriesThisCubeSMasterSeed.get(),
+        false,
+    )
+    .push(page::status(
+        page::Status::Busy,
+        CopyText::WaitingForTouchId.get(),
+    ))
+    .push(page::rule())
+    .push(page::button(
+        "tenshu.kit.passkey.cancel",
+        CopyText::Cancel.get(),
+        Some(wrap(RecoveryKitMessage::Cancel)),
+    ))
+    .into()
 }
 
 pub fn uploading_view() -> Element<'static, Message> {
-    flow("Encrypting and uploading…", "This takes a moment.", false)
-        .push(page::status(page::Status::Busy, "Backing up…"))
-        .into()
+    flow(
+        CopyText::EncryptingAndUploading.get(),
+        CopyText::ThisTakesAMoment.get(),
+        false,
+    )
+    .push(page::status(page::Status::Busy, CopyText::BackingUp.get()))
+    .into()
 }
 
 /// Name exactly the hosted paths being removed, always password first.
 pub(crate) fn confirm_remove_paths(password: bool, keychain: bool) -> Vec<&'static str> {
     let mut paths = Vec::new();
     if password {
-        paths.push("Your password-encrypted Recovery Kit");
+        paths.push(CopyText::YourPasswordEncryptedRecoveryKit.get());
     }
     if keychain {
-        paths.push("The copy sealed to your phone (Keychain)");
+        paths.push(CopyText::TheCopySealedToYourPhoneKeychain.get());
     }
     paths
 }
@@ -312,21 +360,43 @@ pub fn confirm_remove_view<'a>(password: bool, keychain: bool) -> Element<'a, Me
     let paths = confirm_remove_paths(password, keychain)
         .into_iter()
         .map(|path| page::row(path).into());
-    flow("Remove your Recovery Kit?", "This will delete from your Connect account:", true)
-        .push(page::rows(paths))
-        .push(tenshu::body("COINCUBE can't undo this. Your Cube and the recovery phrase you wrote down stay exactly as they are — this only removes the copies hosted in Connect. Afterwards, if you lose this device you won't be able to restore this Cube from Connect; you'll need your local recovery phrase."))
-        .push(page::rule())
-        .push(Row::new().spacing(8).align_y(Alignment::Center)
-            .push(page::button("tenshu.kit.remove.cancel", "Cancel", Some(wrap(RecoveryKitMessage::Cancel))))
+    flow(
+        CopyText::RemoveYourRecoveryKit.get(),
+        CopyText::ThisWillDeleteFromYourConnectAccount.get(),
+        true,
+    )
+    .push(page::rows(paths))
+    .push(tenshu::body(
+        CopyText::CoincubeCanTUndoThisYourCubeAndThe.get(),
+    ))
+    .push(page::rule())
+    .push(
+        Row::new()
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(page::button(
+                "tenshu.kit.remove.cancel",
+                CopyText::Cancel.get(),
+                Some(wrap(RecoveryKitMessage::Cancel)),
+            ))
             .push(Space::new().width(Length::Fill))
-            .push(ActionButton::new("tenshu.kit.remove.confirm", "Remove backup", ActionKind::Destructive, Message::FocusAction)
-                .compact().on_press(wrap(RecoveryKitMessage::ConfirmRemove))))
-        .into()
+            .push(
+                ActionButton::new(
+                    "tenshu.kit.remove.confirm",
+                    CopyText::RemoveBackup.get(),
+                    ActionKind::Destructive,
+                    Message::FocusAction,
+                )
+                .compact()
+                .on_press(wrap(RecoveryKitMessage::ConfirmRemove)),
+            ),
+    )
+    .into()
 }
 
 pub fn removing_view() -> Element<'static, Message> {
-    flow("Removing Recovery Kit from Connect…", "", true)
-        .push(page::status(page::Status::Busy, "Removing…"))
+    flow(CopyText::RemovingRecoveryKitFromConnect.get(), "", true)
+        .push(page::status(page::Status::Busy, CopyText::Removing.get()))
         .into()
 }
 
@@ -335,13 +405,13 @@ pub fn completed_view(
     has_seed: bool,
     has_descriptor: bool,
 ) -> Element<'static, Message> {
-    let subtitle = match (has_seed,has_descriptor) {
-        (true,true) => "Both your Master Seed Phrase and Wallet Descriptor are backed up.",
-        (true,false) => "Your Master Seed Phrase is backed up. Add your Wallet Descriptor once you have a Vault.",
-        (false,true) => "Your Wallet Descriptor is backed up.",
-        (false,false) => "Nothing is currently backed up.",
+    let subtitle = match (has_seed, has_descriptor) {
+        (true, true) => CopyText::KitSeedAndDescriptorSaved.get(),
+        (true, false) => CopyText::YourMasterSeedPhraseIsBackedUpAddYour.get(),
+        (false, true) => CopyText::YourWalletDescriptorIsBackedUp.get(),
+        (false, false) => CopyText::NothingIsCurrentlyBackedUp.get(),
     };
-    flow("Recovery Kit backed up", subtitle, false)
+    flow(CopyText::RecoveryKitBackedUp.get(), subtitle, false)
         .push(page::status(
             if has_seed || has_descriptor {
                 page::Status::Ok
@@ -349,32 +419,37 @@ pub fn completed_view(
                 page::Status::Off
             },
             if has_seed || has_descriptor {
-                "Backed up"
+                localized_copy("Backed up")
             } else {
-                "Not backed up"
+                localized_copy("Not backed up")
             },
         ))
-        .push(tenshu::caption(format!("Last updated: {}", updated_at)))
+        .push(tenshu::caption(
+            CopyText::KitLastUpdated
+                .get()
+                .replacen("{date}", updated_at, 1),
+        ))
         .push(page::rule())
         .push(page::primary(
             "tenshu.kit.done",
-            "Back to Settings",
+            CopyText::BackToSettings.get(),
             Some(wrap(RecoveryKitMessage::DismissCompleted)),
         ))
         .into()
 }
 
 pub fn error_view(message: &str) -> Element<'static, Message> {
-    flow("Couldn't complete Recovery Kit action", "", false)
+    flow(CopyText::CouldnTCompleteRecoveryKitAction.get(), "", false)
         .push(page::note(
             Tone::Bad,
-            tenshu::body(message.to_owned()).style(|t| theme::tenshu::text::tone(t, Tone::Bad)),
+            tenshu::body(coincube_ui::locale::notice(message.to_owned()))
+                .style(|t| theme::tenshu::text::tone(t, Tone::Bad)),
             None,
         ))
         .push(page::rule())
         .push(page::primary(
             "tenshu.kit.error.back",
-            "Back to Settings",
+            CopyText::BackToSettings.get(),
             Some(wrap(RecoveryKitMessage::Cancel)),
         ))
         .into()

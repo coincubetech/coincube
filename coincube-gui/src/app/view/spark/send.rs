@@ -6,6 +6,9 @@
 //! polish (fee tier picker, fiat estimate, address book, QR scanner)
 //! lands in a later phase once the bridge write path has soaked a bit.
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
+use coincube_ui::localized_format;
 use coincube_ui::{
     color,
     component::{
@@ -119,10 +122,10 @@ impl<'a> SparkSendView<'a> {
         if !self.backend_available {
             return Column::new()
                 .spacing(20)
-                .push(p1_regular(
+                .push(p1_regular(localized_copy(
                     "Spark is not available for this cube. Set up a Spark \
                      signer to send payments.",
-                ))
+                )))
                 .into();
         }
 
@@ -133,7 +136,8 @@ impl<'a> SparkSendView<'a> {
                 self.sent_amount_display,
                 self.sent_quote,
                 self.sent_image_handle,
-                "has been sent successfully.",
+                CopyText::HasBeenSentSuccessfully.get(),
+                coincube_ui::worldview_copy::VoiceLine::PaymentSent.get(),
                 Message::SparkSend(crate::app::view::SparkSendMessage::Reset),
             );
         }
@@ -144,7 +148,7 @@ impl<'a> SparkSendView<'a> {
         // place whatever the phase, so the inputs keep their widget state
         // when a note, a hint or the loading line comes and goes.
         let destination = text_input(
-            self.receive_target.destination_placeholder(),
+            localized_copy(self.receive_target.destination_placeholder()),
             self.destination_input,
         )
         .id(DESTINATION_INPUT_ID)
@@ -160,9 +164,9 @@ impl<'a> SparkSendView<'a> {
         // it, so a BTC-configured wallet enters BTC and a sats one enters sats.
         let is_btc = matches!(self.bitcoin_unit, BitcoinDisplayUnit::BTC);
         let amount_label = if is_btc {
-            "Amount (BTC)"
+            localized_copy("Amount (BTC)")
         } else {
-            "Amount (sats)"
+            localized_copy("Amount (sats)")
         };
         let amount_placeholder = match (self.receive_target.is_stablecoin(), is_btc) {
             (true, true) => "Amount in BTC — funded from your Bitcoin balance",
@@ -186,7 +190,8 @@ impl<'a> SparkSendView<'a> {
         let amount_notes = Column::new()
             .spacing(6)
             .push_maybe(self.amount_set_by_invoice.then(|| {
-                p2_regular("This invoice sets its own amount.").style(theme::text::secondary)
+                p2_regular(localized_copy("This invoice sets its own amount."))
+                    .style(theme::text::secondary)
             }))
             .push_maybe(
                 self.usdb_conversion_hint
@@ -203,7 +208,7 @@ impl<'a> SparkSendView<'a> {
         let available = Row::new()
             .spacing(6)
             .push(Space::new().width(Length::Fill))
-            .push(p2_regular("Available").style(theme::text::secondary))
+            .push(p2_regular(localized_copy("Available")).style(theme::text::secondary))
             .push(
                 text(if self.mask_amounts {
                     "••••••".to_owned()
@@ -242,7 +247,7 @@ impl<'a> SparkSendView<'a> {
                         Row::new()
                             .spacing(12)
                             .align_y(Alignment::Center)
-                            .push(h4_bold("Payment details").width(Length::Fill))
+                            .push(h4_bold(localized_copy("Payment details")).width(Length::Fill))
                             .push(send_kind_selector(self.receive_target, self.network)),
                     )
                     .padding([16, 24])
@@ -258,7 +263,7 @@ impl<'a> SparkSendView<'a> {
                 .push(card_section(
                     Column::new()
                         .spacing(10)
-                        .push(p1_bold("Destination"))
+                        .push(p1_bold(localized_copy("Destination")))
                         .push(destination),
                 ))
                 .push(iced::widget::rule::horizontal(1))
@@ -342,7 +347,7 @@ fn send_kind_selector(target: SparkSendTarget, network: Network) -> Element<'sta
             segment(
                 "spark-send-kind-stablecoin",
                 true,
-                "Stablecoin (cross-chain)",
+                localized_copy("Stablecoin (cross-chain)"),
             )
             .enabled(cross_chain::supported_on(network)),
         ],
@@ -374,7 +379,7 @@ fn recipient_status_row(
     let status = if !enabled {
         "Checks off".to_owned()
     } else if let Some(identity) = identities.iter().find(|identity| identity.is_current()) {
-        format!("Verified · {}", identity.platform)
+        localized_format!("Verified · {}", "Verificado · {}", identity.platform)
     } else {
         "Not identified".to_owned()
     };
@@ -384,11 +389,11 @@ fn recipient_status_row(
             Row::new()
                 .spacing(12)
                 .align_y(Alignment::Center)
-                .push(p2_regular("Recipient identity (Branta)").width(Length::Fill))
+                .push(p2_regular(localized_copy("Recipient identity (Branta)")).width(Length::Fill))
                 .push(p2_bold(status)),
         )
         .push_maybe((!enabled).then(|| {
-            iced::widget::button(text("Turn on in Settings").color(color::ORANGE))
+            iced::widget::button(text(localized_copy("Turn on in Settings")).color(color::ORANGE))
                 .padding([2, 0])
                 .style(theme::button::transparent)
                 .on_press(Message::Menu(crate::app::menu::Menu::Cube(
@@ -427,7 +432,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                 .spacing(12)
                 .push(p1_regular(crate::services::branta::MISMATCH_MESSAGE))
                 .push(
-                    button::primary(None, "Replace payment request")
+                    button::primary(None, localized_copy("Replace payment request"))
                         .on_press(Message::SparkSend(SparkSendMessage::Reset)),
                 ),
         )
@@ -461,17 +466,19 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
             let Some(ctx) = cross_chain_ctx else {
                 // The phase can't be reached without a context — but render an
                 // honest message rather than a blank card if it ever is.
-                return Container::new(p1_regular("No cross-chain destination selected."))
-                    .padding(16)
-                    .style(theme::card::simple)
-                    .into();
+                return Container::new(p1_regular(localized_copy(
+                    "No cross-chain destination selected.",
+                )))
+                .padding(16)
+                .style(theme::card::simple)
+                .into();
             };
             let (address, routes, selected) = (&ctx.address, &ctx.routes, &ctx.selected);
 
             let mut col = Column::new()
                 .spacing(12)
-                .push(h4_bold("Confirm the network"))
-                .push(kv_row("Address", address.address.clone()));
+                .push(h4_bold(localized_copy("Confirm the network")))
+                .push(kv_row(CopyText::Address.get(), address.address.clone()));
 
             if let Some(route) = routes.get(*selected) {
                 col = col.push(p1_regular(cross_chain::chain_confirmation(address, route)));
@@ -515,9 +522,9 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                 button::transparent_border(
                     None,
                     if *advanced_open {
-                        "Hide advanced"
+                        localized_copy("Hide advanced")
                     } else {
-                        "Advanced"
+                        localized_copy("Advanced")
                     },
                 )
                 .on_press(Message::SparkSend(SparkSendMessage::ToggleAdvanced))
@@ -525,9 +532,9 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
             );
             if *advanced_open {
                 col = col
-                    .push(p2_regular(format!(
+                    .push(p2_regular(localized_format!(
                         "Max slippage, in basis points ({}–{}). Leave blank for the default of \
-                         {} ({}%).",
+                         {} ({}%).", "Deslizamiento máximo, en puntos básicos ({}–{}). Deja el campo vacío para usar el valor predeterminado de {} ({}%).",
                         cross_chain::MIN_SLIPPAGE_BPS,
                         cross_chain::MAX_SLIPPAGE_BPS,
                         cross_chain::DEFAULT_SLIPPAGE_BPS,
@@ -544,14 +551,14 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                 Row::new()
                     .spacing(10)
                     .push(
-                        button::primary(None, "Get quote")
+                        button::primary(None, localized_copy("Get quote"))
                             .on_press(Message::SparkSend(
                                 SparkSendMessage::CrossChainQuoteRequested,
                             ))
                             .width(Length::Fixed(160.0)),
                     )
                     .push(
-                        button::transparent_border(None, "Cancel")
+                        button::transparent_border(None, CopyText::Cancel.get())
                             .on_press(Message::SparkSend(SparkSendMessage::Reset))
                             .width(Length::Fixed(120.0)),
                     ),
@@ -580,10 +587,13 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                 );
                 let mut col = Column::new()
                     .spacing(14)
-                    .push(h4_bold("Preview"))
-                    .push(kv_row("Source Bitcoin network", bitcoin_network.to_owned()))
+                    .push(h4_bold(CopyText::Preview.get()))
                     .push(kv_row(
-                        "They receive",
+                        CopyText::SourceBitcoinNetwork.get(),
+                        bitcoin_network.to_owned(),
+                    ))
+                    .push(kv_row(
+                        localized_copy("They receive"),
                         format!(
                             "≈ {} {}",
                             cross_chain::format_asset_amount(
@@ -594,7 +604,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                         ),
                     ))
                     .push(kv_row(
-                        "Network",
+                        CopyText::Network.get(),
                         format!("{} — via {}", quote.route.chain, quote.route.provider),
                     ))
                     // The old single mixed-unit "Fee" line hid how much each part
@@ -602,14 +612,14 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                     // provider) and a destination-asset conversion fee (provider
                     // spread + gas, already netted out of "They receive").
                     .push(kv_row(
-                        "Network fee",
+                        localized_copy("Network fee"),
                         format!(
                             "{} sats",
                             format_u64_as_string(quote.source_transfer_fee_sats, ",")
                         ),
                     ))
                     .push(kv_row(
-                        "Conversion fee",
+                        localized_copy("Conversion fee"),
                         conversion_fee_display(
                             quote.fee_amount,
                             quote.route.decimals,
@@ -633,24 +643,30 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                 // replaced — not merely disabled — once it runs out.
                 col = col.push(match quote_countdown {
                     Some(cross_chain::QuoteCountdown::Valid { seconds_left }) => {
-                        p2_regular(format!("Quote valid for {}s.", seconds_left))
+                        p2_regular(localized_format!(
+                            "Quote valid for {}s.",
+                            "Cotización válida durante {} s.",
+                            seconds_left
+                        ))
                     }
-                    _ => p1_regular("This quote has expired. Get a fresh one to continue."),
+                    _ => p1_regular(localized_copy(
+                        "This quote has expired. Get a fresh one to continue.",
+                    )),
                 });
 
                 let action = if expired {
-                    button::primary(None, "Get a fresh quote")
+                    button::primary(None, localized_copy("Get a fresh quote"))
                         .on_press(Message::SparkSend(SparkSendMessage::ReQuoteRequested))
                         .width(Length::Fixed(200.0))
                 } else {
-                    button::primary(None, "Confirm and send")
+                    button::primary(None, localized_copy("Confirm and send"))
                         .on_press(Message::SparkSend(SparkSendMessage::ConfirmRequested))
                         .width(Length::Fixed(200.0))
                 };
 
                 col = col.push(Space::new().height(Length::Fixed(8.0))).push(
                     Row::new().spacing(10).push(action).push(
-                        button::transparent_border(None, "Cancel")
+                        button::transparent_border(None, CopyText::Cancel.get())
                             .on_press(Message::SparkSend(SparkSendMessage::Reset))
                             .width(Length::Fixed(120.0)),
                     ),
@@ -672,7 +688,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                 },
             ))
             .spacing(8);
-            let confirm = button::primary(None, "Confirm and send")
+            let confirm = button::primary(None, localized_copy("Confirm and send"))
                 .on_press_maybe(
                     (!recipient_mismatch)
                         .then_some(Message::SparkSend(SparkSendMessage::ConfirmRequested)),
@@ -681,24 +697,24 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
             Container::new(
                 Column::new()
                     .spacing(14)
-                    .push(h4_bold("Preview"))
-                    .push(kv_row("Bitcoin network", bitcoin_network.to_owned()))
-                    .push(kv_row("Method", ok.method.clone()))
-                    .push(kv_row("Paid from", pay_from_label(paid_from).to_owned()))
+                    .push(h4_bold(CopyText::Preview.get()))
+                    .push(kv_row(CopyText::BitcoinNetwork.get(), bitcoin_network.to_owned()))
+                    .push(kv_row(localized_copy("Method"), ok.method.clone()))
+                    .push(kv_row(localized_copy("Paid from"), pay_from_label(paid_from).to_owned()))
                     // The conversion funding the send, with its own fee and
                     // the price cap that stops it, as Swap's Review shows them.
                     .push_maybe(conversion.map(|quote| {
-                        kv_row("Conversion", conversion_line(quote, usdb_decimals))
+                        kv_row(localized_copy("Conversion"), conversion_line(quote, usdb_decimals))
                     }))
                     .push_maybe(conversion.map(|quote| {
                         kv_row(
-                            "Conversion fee",
+                            localized_copy("Conversion fee"),
                             crate::app::view::spark::swap::quote_fee_line(quote, usdb_decimals),
                         )
                     }))
                     .push_maybe(conversion.map(|quote| {
                         kv_row(
-                            "Max price change",
+                            localized_copy("Max price change"),
                             crate::app::view::spark::swap::price_change(quote.max_slippage_bps),
                         )
                     }))
@@ -711,12 +727,12 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                     }))
                     .push_maybe(ok.method.starts_with("Spark").then(|| {
                         p2_regular(
-                            "Spark transfer — instant, lower fee than Lightning or on-chain.",
+                            localized_copy("Spark transfer — instant, lower fee than Lightning or on-chain."),
                         )
                     }))
                     .push(identities)
                     .push_maybe(recipient_mismatch.then(|| p1_regular(
-                        "This payment request’s address does not match its verification data. Do not send. Return and replace the payment request."
+                        localized_copy("This payment request’s address does not match its verification data. Do not send. Return and replace the payment request.")
                     )))
                     .push(Space::new().height(Length::Fixed(8.0)))
                     .push(
@@ -724,7 +740,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                             .spacing(10)
                             .push(confirm)
                             .push(
-                                button::transparent_border(None, "Cancel")
+                                button::transparent_border(None, CopyText::Cancel.get())
                                     .on_press(Message::SparkSend(SparkSendMessage::Reset))
                                     .width(Length::Fixed(120.0)),
                             ),
@@ -746,7 +762,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                     // `CrossChainRetryRequested` re-sends the same retained quote
                     // — same swap id, so the BTC leg can't pay twice — or, once
                     // the quote has expired, downgrades to "check status".
-                    button::primary(None, "Try again")
+                    button::primary(None, localized_copy("Try again"))
                         .on_press(Message::SparkSend(
                             SparkSendMessage::CrossChainRetryRequested,
                         ))
@@ -754,13 +770,13 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                 );
             } else {
                 actions = actions.push(
-                    button::primary(None, "Check status")
+                    button::primary(None, localized_copy("Check status"))
                         .on_press(Message::SparkSend(SparkSendMessage::History))
                         .width(Length::Fixed(160.0)),
                 );
             }
             actions = actions.push(
-                button::transparent_border(None, "Start over")
+                button::transparent_border(None, localized_copy("Start over"))
                     .on_press(Message::SparkSend(SparkSendMessage::Reset))
                     .width(Length::Fixed(140.0)),
             );
@@ -768,9 +784,9 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
             Container::new(
                 Column::new()
                     .spacing(12)
-                    .push(h4_bold("Send failed"))
-                    .push(p1_regular(message.clone()))
-                    .push(p2_regular(policy.guidance()))
+                    .push(h4_bold(localized_copy("Send failed")))
+                    .push(p1_regular(coincube_ui::locale::notice(message.clone())))
+                    .push(p2_regular(localized_copy(policy.guidance())))
                     .push(Space::new().height(Length::Fixed(8.0)))
                     .push(actions),
             )
@@ -780,7 +796,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
         }
 
         SparkSendPhase::Sending => Container::new(Column::new().spacing(10).push(p1_regular(
-            "Sending… waiting for the Spark SDK to settle the payment.",
+            localized_copy("Sending… waiting for the Spark SDK to settle the payment."),
         )))
         .padding(16)
         .style(theme::card::simple)
@@ -800,25 +816,27 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
             let guard = *guard;
             let mut content = Column::new()
                 .spacing(12)
-                .push(h4_bold("Payment status unconfirmed"))
-                .push(p1_regular(message.clone()));
+                .push(h4_bold(localized_copy("Payment status unconfirmed")))
+                .push(p1_regular(coincube_ui::locale::notice(message.clone())));
 
             let mut actions = Row::new().spacing(10);
             match (checking, outcome) {
                 (true, _) | (_, None) => {
-                    content = content.push(p2_regular(
+                    content = content.push(p2_regular(localized_copy(
                         "Checking your payment history to find out whether it went through. \
                          Don't send it again until this finishes.",
-                    ));
+                    )));
                 }
                 (false, Some(outcome)) => {
-                    content = content.push(p2_regular(outcome.guidance(guard)));
+                    content = content.push(p2_regular(coincube_ui::locale::notice(
+                        outcome.guidance(guard),
+                    )));
                     if outcome.may_resend(guard) {
                         actions = actions.push(
                             // Keeps the original idempotency key — see
                             // `ResendAfterUnknownRequested`. Never `Reset`,
                             // which would mint a new one and could pay twice.
-                            button::primary(None, "Send again")
+                            button::primary(None, localized_copy("Send again"))
                                 .on_press(Message::SparkSend(
                                     SparkSendMessage::ResendAfterUnknownRequested,
                                 ))
@@ -826,7 +844,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                         );
                     }
                     actions = actions.push(
-                        button::secondary(None, "Check again")
+                        button::secondary(None, CopyText::CheckAgain.get())
                             .on_press(Message::SparkSend(SparkSendMessage::ReconcileRequested))
                             .width(Length::Fixed(140.0)),
                     );
@@ -841,7 +859,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
             // user most wants to go look for their payment offered nothing to
             // press.
             actions = actions.push(
-                button::transparent_border(None, "View transactions")
+                button::transparent_border(None, localized_copy("View transactions"))
                     .on_press(Message::SparkSend(SparkSendMessage::History))
                     .width(Length::Fixed(180.0)),
             );
@@ -864,11 +882,11 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
         SparkSendPhase::Error(err) => Container::new(
             Column::new()
                 .spacing(10)
-                .push(h4_bold("Error"))
-                .push(p1_regular(err.clone()))
+                .push(h4_bold(localized_copy("Error")))
+                .push(p1_regular(coincube_ui::locale::notice(err.clone())))
                 .push(Space::new().height(Length::Fixed(8.0)))
                 .push(
-                    button::primary(None, "Try again")
+                    button::primary(None, localized_copy("Try again"))
                         .on_press(Message::SparkSend(SparkSendMessage::Reset))
                         .width(Length::Fixed(140.0)),
                 ),
@@ -1005,7 +1023,7 @@ const PAY_FROM_CLOSE_ID: &str = "spark-send-pay-from-close";
 fn pay_from_label(asset: coincube_spark_protocol::WalletAsset) -> &'static str {
     match asset {
         coincube_spark_protocol::WalletAsset::Bitcoin => "Bitcoin",
-        coincube_spark_protocol::WalletAsset::Usdb => "US Dollar",
+        coincube_spark_protocol::WalletAsset::Usdb => localized_copy("US Dollar"),
     }
 }
 
@@ -1089,7 +1107,7 @@ pub fn pay_from_picker_modal<'a>(
             let enabled = asset == WalletAsset::Bitcoin || usdb_unavailable.is_none();
             let selected = asset == current;
             let line = match (asset, usdb_unavailable) {
-                (WalletAsset::Usdb, Some(reason)) => reason.to_owned(),
+                (WalletAsset::Usdb, Some(reason)) => localized_copy(reason).to_owned(),
                 _ => balance_of(pay_from_label(asset)),
             };
             let row = Row::new()
@@ -1152,7 +1170,7 @@ pub fn pay_from_picker_modal<'a>(
             Row::new().push(Space::new().width(Length::Fill)).push(
                 Action::new(
                     PAY_FROM_CLOSE_ID,
-                    text("Close").size(P2_SIZE).bold(),
+                    text(CopyText::Close.get()).size(P2_SIZE).bold(),
                     Message::FocusAction,
                 )
                 .style(theme::button::transparent_border)
@@ -1160,7 +1178,7 @@ pub fn pay_from_picker_modal<'a>(
                 .on_press(Message::SparkSend(SparkSendMessage::ClosePayFromPicker)),
             ),
         );
-    picker_modal_card("YOU SEND FROM", list)
+    picker_modal_card(coincube_ui::locale::copy("YOU SEND FROM"), list)
 }
 const PREPARE_ACTION_ID: &str = "spark-send-prepare";
 const TARGET_PICKER_CLOSE_ID: &str = "spark-send-target-picker-close";
@@ -1276,7 +1294,7 @@ fn compose_footer<'a>(status: &'static str, prepare: Option<Message>) -> Element
         .push(
             Action::new(
                 PREPARE_ACTION_ID,
-                text("Prepare").size(P1_SIZE).bold(),
+                text(localized_copy("Prepare")).size(P1_SIZE).bold(),
                 Message::FocusAction,
             )
             .style(theme::button::primary)
@@ -1323,14 +1341,14 @@ fn spark_send_cards<'a>(
             .spacing(8)
             .push(
                 Row::new()
-                    .push(tile_caption("You send"))
+                    .push(tile_caption(coincube_ui::locale::copy("You send")))
                     .push(Space::new().width(Length::Fill))
                     .push_maybe(choose.then(|| {
-                        text("Change").size(P2_SIZE).style(|theme: &theme::Theme| {
-                            iced::widget::text::Style {
+                        text(localized_copy("Change")).size(P2_SIZE).style(
+                            |theme: &theme::Theme| iced::widget::text::Style {
                                 color: Some(theme.colors.shell.accent_ink),
-                            }
-                        })
+                            },
+                        )
                     })),
             )
             .push(asset(logo, label))
@@ -1351,40 +1369,43 @@ fn spark_send_cards<'a>(
         you_send_body.style(fixed_tile_style).into()
     };
 
-    let they_receive = Action::new(
-        RECEIVE_TARGET_ACTION_ID,
-        Container::new(
-            Column::new()
-                .spacing(8)
-                .push(
-                    Row::new()
-                        .push(tile_caption("They receive"))
-                        .push(Space::new().width(Length::Fill))
-                        .push(text("Change").size(P2_SIZE).style(|theme: &theme::Theme| {
-                            iced::widget::text::Style {
-                                color: Some(theme.colors.shell.accent_ink),
-                            }
-                        })),
-                )
-                .push(asset(target_logo(target, 40.0), target.label()))
-                .push(
-                    Row::new()
-                        .spacing(10)
-                        .align_y(Alignment::Center)
-                        .push(orange_badge(target.badge()))
-                        .push_maybe(destination_empty.then(|| tile_caption("Add a destination"))),
-                ),
+    let they_receive =
+        Action::new(
+            RECEIVE_TARGET_ACTION_ID,
+            Container::new(
+                Column::new()
+                    .spacing(8)
+                    .push(
+                        Row::new()
+                            .push(tile_caption(coincube_ui::locale::copy("They receive")))
+                            .push(Space::new().width(Length::Fill))
+                            .push(text(localized_copy("Change")).size(P2_SIZE).style(
+                                |theme: &theme::Theme| iced::widget::text::Style {
+                                    color: Some(theme.colors.shell.accent_ink),
+                                },
+                            )),
+                    )
+                    .push(asset(target_logo(target, 40.0), target.label()))
+                    .push(
+                        Row::new()
+                            .spacing(10)
+                            .align_y(Alignment::Center)
+                            .push(orange_badge(localized_copy(target.badge())))
+                            .push_maybe(destination_empty.then(|| {
+                                tile_caption(coincube_ui::locale::copy("Add a destination"))
+                            })),
+                    ),
+            )
+            .padding([14, 16])
+            .width(Length::Fill)
+            .height(Length::Fixed(ROUTE_TILE_HEIGHT)),
+            Message::FocusAction,
         )
-        .padding([14, 16])
+        .style(receive_tile_button_style)
+        .padding(0)
         .width(Length::Fill)
-        .height(Length::Fixed(ROUTE_TILE_HEIGHT)),
-        Message::FocusAction,
-    )
-    .style(receive_tile_button_style)
-    .padding(0)
-    .width(Length::Fill)
-    .focus_radius(8.0)
-    .on_press(Message::SparkSend(SparkSendMessage::OpenReceivePicker));
+        .focus_radius(8.0)
+        .on_press(Message::SparkSend(SparkSendMessage::OpenReceivePicker));
 
     Row::new()
         .spacing(16)
@@ -1412,7 +1433,7 @@ fn target_picker_row<'a>(target: SparkSendTarget, selected: bool) -> Element<'a,
                 .bold()
                 .style(theme::text::primary),
         )
-        .push(orange_badge(target.badge()))
+        .push(orange_badge(localized_copy(target.badge())))
         .push(Space::new().width(Length::Fill))
         .push_maybe(selected.then(|| icon::check2_icon().size(18).color(color::ORANGE)));
 
@@ -1461,7 +1482,7 @@ pub fn send_target_picker_modal<'a>(
     // deployment), so they only appear there.
     if supported_on(network) {
         list = list.push(Space::new().height(Length::Fixed(6.0))).push(
-            text("Stablecoin (cross-chain)")
+            text(localized_copy("Stablecoin (cross-chain)"))
                 .size(P2_SIZE)
                 .style(theme::text::secondary),
         );
@@ -1476,7 +1497,7 @@ pub fn send_target_picker_modal<'a>(
         Row::new().push(Space::new().width(Length::Fill)).push(
             Action::new(
                 TARGET_PICKER_CLOSE_ID,
-                text("Close").size(P2_SIZE).bold(),
+                text(CopyText::Close.get()).size(P2_SIZE).bold(),
                 Message::FocusAction,
             )
             .style(theme::button::transparent_border)
@@ -1485,7 +1506,7 @@ pub fn send_target_picker_modal<'a>(
         ),
     );
 
-    picker_modal_card("THEY RECEIVE", list)
+    picker_modal_card(coincube_ui::locale::copy("THEY RECEIVE"), list)
 }
 
 #[cfg(test)]

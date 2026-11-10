@@ -4,6 +4,7 @@
 
 use coincube_ui::component::tenshu::{segment, segmented, tabs, PageHead, SegmentSize};
 use coincube_ui::icon;
+use coincube_ui::locale::copy as localized_copy;
 
 use crate::app::cache::Cache;
 use crate::app::features;
@@ -260,8 +261,9 @@ fn head_line(scope: RouteScope, cache: &Cache) -> String {
 /// no narrow-window substitute.
 pub fn page_head(menu: &Menu, cache: &Cache) -> Option<PageHead<'static, Message>> {
     let scope = route_scope(menu)?;
-    let mut head = coincube_ui::component::tenshu::page_head("Settings", Message::FocusAction)
-        .context(crate::app::view::cube_coin(cache), head_line(scope, cache));
+    let mut head =
+        coincube_ui::component::tenshu::page_head(localized_copy("Settings"), Message::FocusAction)
+            .context(crate::app::view::cube_coin(cache), head_line(scope, cache));
 
     // A switch with one scope isn't a choice, so a Cube with neither a Vault
     // nor Spark shows none (master plan: segmented controls only for real
@@ -292,7 +294,8 @@ pub fn page_head(menu: &Menu, cache: &Cache) -> Option<PageHead<'static, Message
         head.rule(
             tabs(
                 sections.iter().enumerate().map(|(index, tab)| {
-                    segment(tab.id, index, tab.label.clone()).enabled(tab.enabled)
+                    segment(tab.id, index, localized_copy(&tab.label).to_owned())
+                        .enabled(tab.enabled)
                 }),
                 sections.iter().position(|tab| tab.selected),
                 Message::FocusAction,

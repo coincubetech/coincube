@@ -1,4 +1,7 @@
 use chrono::{DateTime, Local, Utc};
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
+use coincube_ui::localized_format;
 use std::{collections::HashMap, time::Duration, vec};
 
 use iced::{
@@ -56,7 +59,7 @@ fn rescan_date_prompt<'a>(cube_id: &str) -> Element<'a, Message> {
                     .push(Space::new().width(Length::Fill))
                     .push(landing_button(
                         landing_control_id(cube_id, "Vault", "rescan-pick-date"),
-                        "Pick a date",
+                        localized_copy("Pick a date"),
                         None,
                         Message::FocusAction,
                         Some(Message::Menu(Menu::Vault(menu::VaultSubMenu::Settings(
@@ -66,7 +69,7 @@ fn rescan_date_prompt<'a>(cube_id: &str) -> Element<'a, Message> {
                     ))
                     .push(landing_button(
                         landing_control_id(cube_id, "Vault", "rescan-dismiss"),
-                        "Dismiss",
+                        localized_copy("Dismiss"),
                         Some(cross_icon()),
                         Message::FocusAction,
                         Some(Message::HideRescanPrompt),
@@ -92,8 +95,9 @@ pub(crate) fn balance_sync_state(
     awaiting_rescan_date: bool,
 ) -> SyncState {
     let empty = total_balance == bitcoin::Amount::ZERO;
-    let awaiting_label = "Balance unknown until this Vault's history is scanned. \
-                          Pick the date it was created to start.";
+    let awaiting_label = localized_copy(
+        "Balance unknown until this Vault's history is scanned. Pick the date it was created to start.",
+    );
     match sync_status {
         // However far the node or the wallet has synced, a restore awaiting its
         // rescan date has no history: its zero is not a balance.
@@ -107,25 +111,25 @@ pub(crate) fn balance_sync_state(
         SyncStatus::BlockchainSync(progress) if empty && awaiting_rescan_date => {
             SyncState::Unknown {
                 progress: Some(*progress),
-                label: "Syncing blockchain; the balance stays unknown until this Vault's \
-                        history is scanned"
-                    .to_string(),
+                label: localized_copy(
+                    "Syncing blockchain; the balance stays unknown until this Vault's history is scanned",
+                ).to_owned(),
                 failing: false,
             }
         }
         SyncStatus::Synced => SyncState::Synced,
         SyncStatus::BlockchainSync(progress) => SyncState::Syncing {
             progress: Some(*progress),
-            label: "Syncing blockchain".to_string(),
+            label: localized_copy("Syncing blockchain").to_owned(),
         },
         SyncStatus::WalletFullScan { progress } if empty => SyncState::Unknown {
             progress: *progress,
-            label: "Loading Vault history".to_string(),
+            label: localized_copy("Loading Vault history").to_owned(),
             failing: false,
         },
         SyncStatus::WalletFullScan { progress } => SyncState::Syncing {
             progress: *progress,
-            label: "Syncing".to_string(),
+            label: localized_copy("Syncing").to_owned(),
         },
         SyncStatus::LatestWalletSync => SyncState::Checking,
         SyncStatus::SyncFailing {
@@ -134,8 +138,9 @@ pub(crate) fn balance_sync_state(
             retry_progress,
         } if empty => SyncState::Unknown {
             progress: None,
-            label: format!(
+            label: localized_format!(
                 "Balance unavailable: syncing has failed since {}{}. {}",
+                "Saldo no disponible. La sincronización falla desde {}{}. {}",
                 format_failure_time(*since),
                 retry_note(*retry_progress),
                 failure_detail(message),
@@ -147,8 +152,9 @@ pub(crate) fn balance_sync_state(
             since,
             retry_progress,
         } => SyncState::Stale {
-            message: format!(
+            message: localized_format!(
                 "Last known balance: syncing has failed since {}{}. {}",
+                "Último saldo conocido. La sincronización falla desde {}{}. {}",
                 format_failure_time(*since),
                 retry_note(*retry_progress),
                 failure_detail(message),
@@ -161,15 +167,20 @@ pub(crate) fn balance_sync_state(
 /// is getting somewhere does not read as failed throughout.
 fn retry_note(retry_progress: Option<f64>) -> String {
     retry_progress
-        .map(|p| format!(", retrying ({:.1}%)", 100.0 * p))
+        .map(|p| localized_format!(", retrying ({:.1}%)", ", reintentando ({:.1}%)", 100.0 * p))
         .unwrap_or_default()
 }
 
 /// When a run of failed polls began, in local time.
 fn format_failure_time(since: u32) -> String {
     DateTime::<Utc>::from_timestamp(i64::from(since), 0)
-        .map(|at| at.with_timezone(&Local).format("%b %-d, %H:%M").to_string())
-        .unwrap_or_else(|| "recently".to_string())
+        .map(|at| {
+            let local = at.with_timezone(&Local);
+            local
+                .format(&coincube_ui::locale::date_pattern("%b %-d, %H:%M", &local))
+                .to_string()
+        })
+        .unwrap_or_else(|| localized_copy("recently").to_owned())
 }
 
 /// The daemon's failure message, trimmed to fit under the balance. The daemon log
@@ -262,7 +273,7 @@ fn protection_strip<'a>(
                 ProtectionItem::Psbts(copy) => (
                     copy,
                     "review-psbts",
-                    "Review",
+                    CopyText::Review.get(),
                     Menu::Vault(VaultSubMenu::PSBTs(None)),
                     None,
                 ),
@@ -291,6 +302,27 @@ fn protection_strip<'a>(
     )
 }
 
+/// An empty database, hidden amount, or test network must never earn a
+/// balance-based voice line.
+fn empty_vault_voice(
+    chain: crate::chain::ChainId,
+    balance: bitcoin::Amount,
+    sync: &SyncState,
+    masked: bool,
+) -> Option<&'static str> {
+    use crate::chain::ChainId;
+    use coincube_ui::worldview_copy::VoiceLine;
+
+    if masked || balance != bitcoin::Amount::ZERO || !matches!(sync, SyncState::Synced) {
+        return None;
+    }
+    match chain {
+        ChainId::Bitcoin => VoiceLine::EmptySha256Vault.get(),
+        ChainId::BitcoinBlake2b => VoiceLine::EmptyBlake2bVault.get(),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn vault_overview_view<'a>(
     balance: &'a bitcoin::Amount,
@@ -300,6 +332,7 @@ pub fn vault_overview_view<'a>(
     expiring_coins: &[bitcoin::OutPoint],
     recent_activity: Option<Element<'a, Message>>,
     cube_id: &str,
+    chain: crate::chain::ChainId,
     sync_status: &SyncStatus,
     show_rescan_prompt: bool,
     awaiting_rescan_date: bool,
@@ -328,6 +361,7 @@ pub fn vault_overview_view<'a>(
         *message = format!("{} · {}. {}", alert.word(), alert.title(), alert.detail());
     }
     let history_unknown = matches!(sync, SyncState::Unknown { .. });
+    let voice = empty_vault_voice(chain, total_balance, &sync, mask_amounts || alert.is_some());
     let primary = Figure::new(total_balance.to_formatted_string_with_unit(bitcoin_unit))
         .unit(bitcoin_unit.label());
     let secondary = fiat_balance
@@ -338,7 +372,7 @@ pub fn vault_overview_view<'a>(
         "Bitcoin",
         if history_unknown {
             BalanceValue::Pending {
-                label: "Vault history has not loaded".into(),
+                label: localized_copy("Vault history has not loaded").into(),
             }
         } else if total_balance == bitcoin::Amount::ZERO {
             BalanceValue::Zero { primary, secondary }
@@ -353,7 +387,7 @@ pub fn vault_overview_view<'a>(
         [
             landing_button(
                 landing_control_id(cube_id, "Vault", "send-btc"),
-                "Send",
+                localized_copy("Send"),
                 None,
                 Message::FocusAction,
                 Some(Message::Menu(Menu::Vault(VaultSubMenu::Send))),
@@ -363,7 +397,7 @@ pub fn vault_overview_view<'a>(
             .into(),
             landing_button(
                 landing_control_id(cube_id, "Vault", "receive-btc"),
-                "Receive",
+                localized_copy("Receive"),
                 None,
                 Message::FocusAction,
                 Some(Message::Menu(Menu::Vault(VaultSubMenu::Receive))),
@@ -381,7 +415,7 @@ pub fn vault_overview_view<'a>(
                     .push(
                         Column::new()
                             .spacing(8)
-                            .push(h4_bold("Total balance"))
+                            .push(h4_bold(localized_copy("Total balance")))
                             .push(wallet_header::<Message>(WalletHeaderProps {
                                 sats: total_balance,
                                 fiat: fiat_balance,
@@ -401,7 +435,8 @@ pub fn vault_overview_view<'a>(
                             })),
                     )
                     .push(iced::widget::rule::horizontal(1))
-                    .push(vault_btc_row),
+                    .push(vault_btc_row)
+                    .push_maybe(voice.map(|line| p2_regular(line).style(theme::text::secondary))),
             ))
             .push(show_rescan_prompt.then_some(rescan_date_prompt(cube_id)))
             .push(match (node_bitcoind_ibd, node_bitcoind_sync_progress) {
@@ -411,8 +446,9 @@ pub fn vault_overview_view<'a>(
                             .spacing(10)
                             .align_y(Alignment::Center)
                             .push(
-                                text(format!(
+                                text(localized_format!(
                                     "Your local node is syncing — {:.1}% complete",
+                                    "Tu nodo local se está sincronizando. Progreso: {:.1}%",
                                     crate::utils::syncing_percent(progress)
                                 ))
                                 .style(theme::text::secondary)
@@ -462,10 +498,10 @@ pub fn payment_view<'a>(
     let title =
         match tx.kind {
             TransactionKind::OutgoingSinglePayment(_)
-            | TransactionKind::OutgoingPaymentBatch(_) => "Outgoing payment",
+            | TransactionKind::OutgoingPaymentBatch(_) => localized_copy("Outgoing payment"),
             TransactionKind::IncomingSinglePayment(_)
-            | TransactionKind::IncomingPaymentBatch(_) => "Incoming payment",
-            _ => "Payment",
+            | TransactionKind::IncomingPaymentBatch(_) => localized_copy("Incoming payment"),
+            _ => localized_copy("Payment"),
         };
     dashboard_headed(
         menu,
@@ -495,7 +531,7 @@ pub fn payment_view<'a>(
                 amount_with_size(&tx.tx.output[output_index].value, H3_SIZE)
             }))
             .push(Space::new().height(H3_SIZE))
-            .push(Container::new(h3("Transaction")).width(Length::Fill))
+            .push(Container::new(h3(localized_copy("Transaction"))).width(Length::Fill))
             .push(if tx.is_batch() {
                 if let Some(label) = labels_editing.get(&txid) {
                     Some(label::label_editing(vec![txid.clone()], label, H3_SIZE))
@@ -512,7 +548,7 @@ pub fn payment_view<'a>(
             .push(tx.fee_amount.map(|fee_amount| {
                 Row::new()
                     .align_y(Alignment::Center)
-                    .push(h3("Miner fee: ").style(theme::text::secondary))
+                    .push(h3(localized_copy("Miner fee: ")).style(theme::text::secondary))
                     .push(if cache.balance_amounts_masked() {
                         Row::new().push(text("••••••").size(H3_SIZE))
                     } else {
@@ -535,14 +571,22 @@ pub fn payment_view<'a>(
             .push(card::simple(
                 Column::new()
                     .push(tx.time.map(|t| {
-                        let date = DateTime::<Utc>::from_timestamp(t as i64, 0)
+                        let local = DateTime::<Utc>::from_timestamp(t as i64, 0)
                             .unwrap()
-                            .with_timezone(&Local)
-                            .format("%b. %d, %Y - %T");
+                            .with_timezone(&Local);
+                        let date = local
+                            .format(&coincube_ui::locale::date_pattern(
+                                "%b. %d, %Y - %T",
+                                &local,
+                            ))
+                            .to_string();
                         Row::new()
                             .width(Length::Fill)
-                            .push(Container::new(text("Date:").bold()).width(Length::Fill))
-                            .push(Container::new(text(format!("{}", date))).width(Length::Shrink))
+                            .push(
+                                Container::new(text(localized_copy("Date:")).bold())
+                                    .width(Length::Fill),
+                            )
+                            .push(Container::new(text(date)).width(Length::Shrink))
                     }))
                     .push(
                         Row::new()
@@ -568,9 +612,11 @@ pub fn payment_view<'a>(
                     .spacing(5),
             ))
             .push(
-                button::secondary(None, "See transaction details").on_press(Message::Menu(
-                    Menu::Vault(VaultSubMenu::Transactions(Some(tx.tx.compute_txid()))),
-                )),
+                button::secondary(None, localized_copy("See transaction details")).on_press(
+                    Message::Menu(Menu::Vault(VaultSubMenu::Transactions(Some(
+                        tx.tx.compute_txid(),
+                    )))),
+                ),
             )
             .spacing(20),
     )
@@ -588,16 +634,70 @@ pub fn received_celebration_page<'a>(
         amount_display,
         quote,
         image_handle,
-        "has arrived.",
+        CopyText::HasArrived.get(),
         Message::DismissReceivedCelebration,
     )
 }
 
 #[cfg(test)]
 mod balance_state_tests {
-    use super::{balance_sync_state, coins, failure_detail, protection_items, ProtectionItem};
+    use super::{
+        balance_sync_state, coins, empty_vault_voice, failure_detail, protection_items,
+        ProtectionItem,
+    };
     use crate::app::{view::wallet_header::SyncState, wallet::SyncStatus};
     use coincube_core::miniscript::bitcoin::Amount;
+
+    #[test]
+    fn worldview_empty_vault_copy_requires_a_visible_synced_zero_on_the_exact_mainnet() {
+        use crate::chain::ChainId;
+        use coincube_ui::{theme::WorldviewMode, worldview_copy};
+
+        let zero = Amount::ZERO;
+        let visible = false;
+        let synced = SyncState::Synced;
+        let waiting = balance_sync_state(&SyncStatus::Synced, zero, true);
+        worldview_copy::render_in(WorldviewMode::Luke, || {
+            assert_eq!(
+                empty_vault_voice(ChainId::Bitcoin, zero, &synced, visible),
+                Some("No Spamcoin detected. Excellent.")
+            );
+            assert_eq!(
+                empty_vault_voice(ChainId::Bitcoin, zero, &synced, true),
+                None
+            );
+            assert_eq!(
+                empty_vault_voice(ChainId::Bitcoin, zero, &waiting, visible),
+                None
+            );
+            assert_eq!(
+                empty_vault_voice(ChainId::Bitcoin, zero, &SyncState::Checking, visible),
+                None
+            );
+            assert_eq!(
+                empty_vault_voice(ChainId::Bitcoin, Amount::from_sat(1), &synced, visible),
+                None
+            );
+            assert_eq!(
+                empty_vault_voice(ChainId::Testnet4, zero, &synced, visible),
+                None
+            );
+        });
+        worldview_copy::render_in(WorldviewMode::Suitcoiner, || {
+            assert_eq!(
+                empty_vault_voice(ChainId::BitcoinBlake2b, zero, &synced, visible),
+                Some("Your portfolio remains institutionally compliant.")
+            );
+            assert_eq!(
+                empty_vault_voice(ChainId::BitcoinBlake2bTestnet4, zero, &synced, visible),
+                None
+            );
+        });
+        assert_eq!(
+            empty_vault_voice(ChainId::Bitcoin, zero, &synced, visible),
+            None
+        );
+    }
 
     /// The incident: a restored Vault's history was still loading and the header said
     /// "$0.00" as though that were its balance. An empty balance during a full scan is
@@ -830,6 +930,7 @@ mod capture_tests {
                                 expiring,
                                 None,
                                 "synthetic-cube",
+                                crate::chain::ChainId::Bitcoin,
                                 &SyncStatus::Synced,
                                 false,
                                 false,
@@ -864,6 +965,7 @@ mod capture_tests {
                 &[],
                 None,
                 "synthetic-cube",
+                crate::chain::ChainId::Bitcoin,
                 &SyncStatus::Synced,
                 false,
                 false,
@@ -909,6 +1011,7 @@ mod capture_tests {
                             &[],
                             None,
                             "synthetic-cube",
+                            crate::chain::ChainId::Bitcoin,
                             $sync,
                             $rescan,
                             $rescan,
@@ -987,6 +1090,7 @@ mod capture_tests {
                 &expiring,
                 None,
                 "synthetic-cube",
+                crate::chain::ChainId::Bitcoin,
                 &SyncStatus::Synced,
                 false,
                 false,

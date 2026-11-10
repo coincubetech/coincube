@@ -1,6 +1,7 @@
 //! One recent-activity grammar for wallet landings and the later Activity table.
 //! The caller owns the source order, stable identity, and action destination.
 
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     component::text::{text, Text as _, P1_SIZE, P2_SIZE},
     icon, theme,
@@ -48,9 +49,9 @@ pub enum ActivityDirection {
 impl ActivityDirection {
     fn label(self) -> &'static str {
         match self {
-            Self::Incoming => "Received",
-            Self::Outgoing => "Sent",
-            Self::SelfTransfer => "Self-transfer",
+            Self::Incoming => localized_copy("Received"),
+            Self::Outgoing => localized_copy("Sent"),
+            Self::SelfTransfer => localized_copy("Self-transfer"),
         }
     }
 }
@@ -72,16 +73,16 @@ pub enum ActivityStatus {
 impl ActivityStatus {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Created => "Created",
-            Self::Pending => "Pending",
-            Self::Complete => "Complete",
-            Self::Failed => "Failed",
-            Self::TimedOut => "Timed out",
-            Self::Refundable => "Refund available",
-            Self::RefundPending => "Refund pending",
-            Self::WaitingFeeAcceptance => "Review fee",
-            Self::Unconfirmed => "Unconfirmed",
-            Self::ReviewRequired => "Review required",
+            Self::Created => localized_copy("Created"),
+            Self::Pending => localized_copy("Pending"),
+            Self::Complete => localized_copy("Complete"),
+            Self::Failed => localized_copy("Failed"),
+            Self::TimedOut => localized_copy("Timed out"),
+            Self::Refundable => localized_copy("Refund available"),
+            Self::RefundPending => localized_copy("Refund pending"),
+            Self::WaitingFeeAcceptance => localized_copy("Review fee"),
+            Self::Unconfirmed => localized_copy("Unconfirmed"),
+            Self::ReviewRequired => localized_copy("Review required"),
         }
     }
 }

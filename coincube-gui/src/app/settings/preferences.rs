@@ -33,6 +33,7 @@ impl From<ThemeMode> for ThemePreference {
     }
 }
 
+pub use coincube_ui::locale::Language;
 pub use coincube_ui::theme::{ArtworkStyle, WorldviewMode};
 
 /// Save one choice per worldview using stable, named fields.
@@ -211,6 +212,7 @@ impl From<Zoom> for u16 {
 pub struct DevicePreferences {
     pub theme: ThemePreference,
     pub worldview: WorldviewMode,
+    pub language: Language,
     pub artwork: ArtworkChoices,
     pub launcher_style: LauncherStyle,
     pub hide_balances: bool,
@@ -228,6 +230,7 @@ impl Default for DevicePreferences {
         Self {
             theme: ThemePreference::System,
             worldview: WorldviewMode::default(),
+            language: Language::default(),
             artwork: ArtworkChoices::default(),
             launcher_style: LauncherStyle::Cubes,
             hide_balances: false,
@@ -277,6 +280,7 @@ impl DevicePreferences {
 pub enum PreferenceChange {
     Theme(ThemePreference),
     Worldview(WorldviewMode),
+    Language(Language),
     Artwork(WorldviewMode, ArtworkStyle),
     LauncherStyle(LauncherStyle),
     HideBalances(bool),

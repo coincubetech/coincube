@@ -1,12 +1,13 @@
 name: Connect Integration Tests
 
-# Targets the Connect dev API: stream lifecycle, RegisterDevice idempotency,
+# Targets the Connect API (production, test account): stream lifecycle, RegisterDevice idempotency,
 # and ResolveSigners against fixture vaults. Gated behind the
 # `integration-tests` Cargo feature so the standard PR CI matrix stays
 # hermetic. Runs nightly + on manual dispatch.
 #
 # Required repository secrets (set under Settings → Secrets and variables → Actions):
-#   - COINCUBE_INTEGRATION_API_URL   The dev API base URL.
+#   - COINCUBE_INTEGRATION_API_URL   The API base URL: production (there is no
+#                                    dev server since 2026-11-09).
 #   - COINCUBE_INTEGRATION_TOKEN     A long-lived JWT for the test account.
 #   - COINCUBE_INTEGRATION_VAULT_ID  (optional) Vault id with known Keychain
 #                                    members for the resolve_signers test.

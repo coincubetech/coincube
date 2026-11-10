@@ -103,7 +103,10 @@ fn friendly_quote_error(msg: &str) -> String {
     } else if msg.contains("minimum") || msg.contains("too low") || msg.contains("below") {
         "Amount is below the swap minimum. Try a larger amount.".to_string()
     } else {
-        format!("Couldn't fetch a quote: {msg}")
+        coincube_ui::localized_format!(
+            "Couldn't fetch a quote: {msg}",
+            "No se pudo obtener una cotización: {msg}"
+        )
     }
 }
 
@@ -610,7 +613,11 @@ impl LiquidSwap {
             Some(id) => id.to_string(),
             None => {
                 self.quoting = false;
-                self.error = Some(format!("{} unavailable on this network", to_kind.ticker()));
+                self.error = Some(coincube_ui::localized_format!(
+                    "{} unavailable on this network",
+                    "{} no está disponible en esta red",
+                    to_kind.ticker()
+                ));
                 return Task::none();
             }
         };
@@ -618,8 +625,9 @@ impl LiquidSwap {
             Some(id) => id.to_string(),
             None => {
                 self.quoting = false;
-                self.error = Some(format!(
+                self.error = Some(coincube_ui::localized_format!(
                     "{} unavailable on this network",
+                    "{} no está disponible en esta red",
                     from_kind.ticker()
                 ));
                 return Task::none();
@@ -922,7 +930,10 @@ impl State for LiquidSwap {
                     Err(e) => {
                         self.pending_quote = false;
                         self.quoting = false;
-                        self.error = Some(format!("Couldn't prepare swap address: {e}"));
+                        self.error = Some(coincube_ui::localized_format!(
+                            "Couldn't prepare swap address: {e}",
+                            "No se pudo preparar la dirección del intercambio: {e}"
+                        ));
                     }
                 },
                 view::LiquidSwapMessage::RateProbeReady(seq, result) => {
@@ -1162,7 +1173,7 @@ impl State for LiquidSwap {
                                 },
                             )),
                             Err(e) => Message::View(view::Message::LiquidSwap(
-                                view::LiquidSwapMessage::SwapFailed(format!("Swap failed: {e}")),
+                                view::LiquidSwapMessage::SwapFailed(e),
                             )),
                         },
                     );
@@ -1227,7 +1238,10 @@ impl State for LiquidSwap {
                     });
                 }
                 view::LiquidSwapMessage::SwapFailed(msg) => {
-                    self.mark_swap_failed(msg.clone());
+                    self.mark_swap_failed(coincube_ui::localized_format!(
+                        "Swap failed: {msg}",
+                        "Error en el intercambio: {msg}"
+                    ));
                     // The committed quote is stale now (price has moved and the
                     // SideSwap order is gone). On the review screen, fetch a
                     // fresh quote so the user can retry against a current price.

@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -129,7 +131,7 @@ pub fn spend_view<'a>(
             .push(if saved {
                 Row::new()
                     .push(
-                        button::secondary(None, "Delete")
+                        button::secondary(None, localized_copy("Delete"))
                             .width(Length::Fixed(200.0))
                             .on_press_maybe(if currently_signing {
                                 None
@@ -151,22 +153,29 @@ pub fn spend_view<'a>(
                     )
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        button::secondary(None, if mcp_review { "Sign in Tenshu" } else { "Save" })
-                            .width(Length::Fixed(if mcp_review { 180.0 } else { 150.0 }))
-                            .on_press_maybe(if currently_signing {
-                                None
-                            } else if mcp_review {
-                                #[cfg(feature = "mcp-transactions")]
-                                {
-                                    Some(Message::Spend(SpendTxMessage::ContinueNativeSigning))
-                                }
-                                #[cfg(not(feature = "mcp-transactions"))]
-                                {
-                                    None
-                                }
+                        button::secondary(
+                            None,
+                            if mcp_review {
+                                localized_copy("Sign in Tenshu")
                             } else {
-                                Some(Message::Spend(SpendTxMessage::Save))
-                            }),
+                                localized_copy("Save")
+                            },
+                        )
+                        .width(Length::Fixed(if mcp_review { 180.0 } else { 150.0 }))
+                        .on_press_maybe(if currently_signing {
+                            None
+                        } else if mcp_review {
+                            #[cfg(feature = "mcp-transactions")]
+                            {
+                                Some(Message::Spend(SpendTxMessage::ContinueNativeSigning))
+                            }
+                            #[cfg(not(feature = "mcp-transactions"))]
+                            {
+                                None
+                            }
+                        } else {
+                            Some(Message::Spend(SpendTxMessage::Save))
+                        }),
                     )
                     .width(Length::Fill)
             }),
@@ -205,11 +214,13 @@ const FEERATE_CUSTOM_ID: &str = "tenshu.vault.send.feerate-custom";
 /// The fourth segment after the presets (W4, master §3 decision 6): it
 /// reveals the feerate field, which the presets fill and hide.
 fn feerate_custom_button<'a>(selected: bool) -> Element<'a, Message> {
-    let label = text("Custom").size(P2_SIZE).font(if selected {
-        font::SEMIBOLD
-    } else {
-        font::MEDIUM
-    });
+    let label = text(localized_copy("Custom"))
+        .size(P2_SIZE)
+        .font(if selected {
+            font::SEMIBOLD
+        } else {
+            font::MEDIUM
+        });
     Action::new(Id::new(FEERATE_CUSTOM_ID), label, Message::FocusAction)
         .padding([4, 12])
         .style(move |theme, status| preset_style(theme, status, selected))
@@ -272,20 +283,20 @@ where
         .spacing(10)
         .padding(20)
         .width(Length::Fill)
-        .push(iced::widget::text("Prepared transaction review").size(24))
+        .push(iced::widget::text(localized_copy("Prepared transaction review")).size(24))
         .push(
             iced::widget::text(if unsigned {
-                "Unsigned transaction. Your signature is required."
+                localized_copy("Unsigned transaction. Your signature is required.")
             } else {
-                "Signatures present. Review signing status in Tenshu."
+                localized_copy("Signatures present. Review signing status in Tenshu.")
             })
             .size(20),
         )
         .push(iced::widget::text(
-            "This screen cannot sign or broadcast yet. Choose Sign in Tenshu to open the ordinary signing controls. A successful preparation may already have reserved a change address.",
+            localized_copy("This screen cannot sign or broadcast yet. Choose Sign in Tenshu to open the ordinary signing controls. A successful preparation may already have reserved a change address."),
         ))
-        .push(iced::widget::text(format!(
-            "Payment total: {} sats",
+        .push(iced::widget::text(localized_format!(
+            "Payment total: {} sats", "Importe total del pago: {} sats",
             tx.spend_amount.to_sat()
         )));
     let input_total = tx.psbt.inputs.iter().try_fold(0u64, |sum, i| {
@@ -294,7 +305,7 @@ where
     content = content
         .push(iced::widget::text(
             input_total
-                .map(|v| format!("Input total: {v} sats"))
+                .map(|v| localized_format!("Input total: {v} sats", "Total de entrada: {v} sats"))
                 .unwrap_or_else(|| "Input total unavailable".into()),
         ))
         .push(iced::widget::text(
@@ -312,8 +323,13 @@ where
         .map(|(_, output)| output)
         .collect();
     let total: u64 = changes.iter().map(|o| o.value.to_sat()).sum();
-    content = content
-        .push(iced::widget::text(format!("Change returned to this Vault: {total} sats")).size(20));
+    content = content.push(
+        iced::widget::text(localized_format!(
+            "Change returned to this Vault: {total} sats",
+            "Cambio devuelto a este Vault: {total} sats"
+        ))
+        .size(20),
+    );
     for output in changes {
         let address = coincube_core::miniscript::bitcoin::Address::from_script(
             &output.script_pubkey,
@@ -322,11 +338,18 @@ where
         .map(|v| v.to_string())
         .unwrap_or_else(|_| "Address unavailable; do not sign".into());
         content = content
-            .push(iced::widget::text(format!(
+            .push(iced::widget::text(localized_format!(
                 "Change output: {} sats",
+                "Cambio de salida: sats {}",
                 output.value.to_sat()
             )))
-            .push(iced::widget::text(format!("Change address: {address}")).width(Length::Fill));
+            .push(
+                iced::widget::text(localized_format!(
+                    "Change address: {address}",
+                    "Dirección de cambio: {address}"
+                ))
+                .width(Length::Fill),
+            );
     }
     Container::new(content)
         .width(Length::Fill)
@@ -441,7 +464,9 @@ fn quiet_button_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonStyle
 /// can proceed and no generation is already in flight; otherwise it is
 /// disabled, which also removes it from keyboard focus.
 fn prepare_action<'a>(can_proceed: bool, generating: bool) -> Element<'a, Message> {
-    let label = text("Prepare").size(P1_SIZE).font(font::MEDIUM);
+    let label = text(localized_copy("Prepare"))
+        .size(P1_SIZE)
+        .font(font::MEDIUM);
     let content: Element<'a, Message> = if generating {
         Row::new()
             .spacing(2)
@@ -582,18 +607,18 @@ pub fn create_spend_tx<'a>(
     };
 
     let title = if recovery_timelock.is_some() {
-        "Recovery"
+        localized_copy("Recovery")
     } else if is_self_send {
-        "Self-transfer"
+        localized_copy("Self-transfer")
     } else {
-        "Send"
+        localized_copy("Send")
     };
     let balance_context = Column::new()
         .spacing(10)
         .push(balance_header_card(
             Column::new()
                 .spacing(8)
-                .push(h4_bold("Balance"))
+                .push(h4_bold(localized_copy("Balance")))
                 .push(
                     if mask_amounts {
                         Column::new().push(text("••••••").size(H2_SIZE))
@@ -626,15 +651,20 @@ pub fn create_spend_tx<'a>(
                         Row::new()
                             .push(
                                 match sync_status {
-                                    SyncStatus::BlockchainSync(progress) => text(format!(
-                                        "Syncing blockchain ({:.2}%)",
-                                        crate::utils::syncing_percent(*progress)
-                                    )),
-                                    SyncStatus::WalletFullScan { .. } => text("Syncing"),
-                                    SyncStatus::SyncFailing { .. } => text(
+                                    SyncStatus::BlockchainSync(progress) => {
+                                        text(localized_format!(
+                                            "Syncing blockchain ({:.2}%)",
+                                            "Sincing blockchain ({:.2}%)",
+                                            crate::utils::syncing_percent(*progress)
+                                        ))
+                                    }
+                                    SyncStatus::WalletFullScan { .. } => {
+                                        text(localized_copy("Syncing"))
+                                    }
+                                    SyncStatus::SyncFailing { .. } => text(localized_copy(
                                         "Wallet sync is failing; the balance may be out of date",
-                                    ),
-                                    _ => text("Checking for new transactions"),
+                                    )),
+                                    _ => text(localized_copy("Checking for new transactions")),
                                 }
                                 .style(theme::text::secondary),
                             )
@@ -710,10 +740,18 @@ pub fn create_spend_tx<'a>(
                         Column::new()
                             .width(Length::Fill)
                             .push_maybe(is_batch.then(|| {
-                                form::Form::new("Batch label", batch_label, |s| {
-                                    Message::CreateSpend(CreateSpendMessage::BatchLabelEdited(s))
-                                })
-                                .warning("Invalid label length, cannot be superior to 100")
+                                form::Form::new(
+                                    coincube_ui::locale::copy("Batch label"),
+                                    batch_label,
+                                    |s| {
+                                        Message::CreateSpend(CreateSpendMessage::BatchLabelEdited(
+                                            s,
+                                        ))
+                                    },
+                                )
+                                .warning(localized_copy(
+                                    "Invalid label length, cannot be superior to 100",
+                                ))
                                 .size(P1_SIZE)
                                 .padding(10)
                             })),
@@ -725,7 +763,7 @@ pub fn create_spend_tx<'a>(
                             .align_y(Alignment::Center)
                             .push(if duplicate {
                                 Element::from(
-                                    text("Two payment addresses are the same")
+                                    text(localized_copy("Two payment addresses are the same"))
                                         .size(P2_SIZE)
                                         .style(theme::text::warning),
                                 )
@@ -741,7 +779,7 @@ pub fn create_spend_tx<'a>(
                                 quiet_action(
                                     ADD_RECIPIENT_ID,
                                     Some(icon::plus_icon()),
-                                    "Add recipient",
+                                    coincube_ui::locale::copy("Add recipient"),
                                     Message::CreateSpend(CreateSpendMessage::AddRecipient),
                                 )
                             })),
@@ -756,7 +794,10 @@ pub fn create_spend_tx<'a>(
             Row::new()
                 .spacing(12)
                 .align_y(Alignment::Center)
-                .push(section_label("Fee rate (sat/vB)").width(Length::Fill))
+                .push(
+                    section_label(coincube_ui::locale::copy("Fee rate (sat/vB)"))
+                        .width(Length::Fill),
+                )
                 .push(
                     Container::new(
                         Row::with_children(
@@ -792,10 +833,14 @@ pub fn create_spend_tx<'a>(
         .push(if custom_feerate {
             Element::from(
                 Container::new(
-                    form::Form::new_trimmed("42 (in sats/vbyte)", feerate, move |msg| {
-                        Message::CreateSpend(CreateSpendMessage::FeerateEdited(msg))
-                    })
-                    .warning("Feerate must be an integer less than or equal to 1000 sats/vbyte")
+                    form::Form::new_trimmed(
+                        localized_copy("42 (in sats/vbyte)"),
+                        feerate,
+                        move |msg| Message::CreateSpend(CreateSpendMessage::FeerateEdited(msg)),
+                    )
+                    .warning(localized_copy(
+                        "Feerate must be an integer less than or equal to 1000 sats/vbyte",
+                    ))
                     .size(P1_SIZE)
                     .padding(10),
                 )
@@ -817,7 +862,10 @@ pub fn create_spend_tx<'a>(
             Row::new()
                 .spacing(10)
                 .align_y(Alignment::Center)
-                .push(p2_regular("Fee for this transaction").style(theme::text::secondary))
+                .push(
+                    p2_regular(localized_copy("Fee for this transaction"))
+                        .style(theme::text::secondary),
+                )
                 .push(amount_with_size(fee, P1_SIZE))
                 .push(fiat_converter.map(|conv| {
                     conv.convert(*fee)
@@ -836,11 +884,11 @@ pub fn create_spend_tx<'a>(
             Row::new()
                 .spacing(12)
                 .align_y(Alignment::Center)
-                .push(section_label("Coins").width(Length::Fill))
+                .push(section_label(coincube_ui::locale::copy("Coins")).width(Length::Fill))
                 .push(quiet_action(
                     CHOOSE_COINS_ID,
                     None,
-                    "Choose coins",
+                    coincube_ui::locale::copy("Choose coins"),
                     Message::CreateSpend(CreateSpendMessage::ChooseCoins),
                 )),
         )
@@ -855,7 +903,9 @@ pub fn create_spend_tx<'a>(
             Row::new()
                 .spacing(12)
                 .align_y(Alignment::Center)
-                .push(section_label("Coin selection").width(Length::Fill))
+                .push(
+                    section_label(coincube_ui::locale::copy("Coin selection")).width(Length::Fill),
+                )
                 .push(if is_self_send || recovery_timelock.is_some() {
                     Row::new()
                         .spacing(5)
@@ -884,12 +934,13 @@ pub fn create_spend_tx<'a>(
                             // This can happen if we have a single recipient
                             // and it has the max selected.
                             Row::new().push(
-                                text("Select at least one coin.").style(theme::text::secondary),
+                                text(localized_copy("Select at least one coin."))
+                                    .style(theme::text::secondary),
                             )
                         } else {
                             // There must be a recipient with max selected and value 0.
                             Row::new().push(
-                                text("Check max amount for recipient.")
+                                text(localized_copy("Check max amount for recipient."))
                                     .style(theme::text::secondary),
                             )
                         }
@@ -897,16 +948,19 @@ pub fn create_spend_tx<'a>(
                         Row::new()
                             .spacing(5)
                             .push(amount_with_size(amount_left, P2_SIZE))
-                            .push(p2_regular("left to select").style(theme::text::secondary))
+                            .push(
+                                p2_regular(localized_copy("left to select"))
+                                    .style(theme::text::secondary),
+                            )
                     }
                 } else {
                     Row::new().push(
                         text(if feerate.value.is_empty() || !feerate.valid {
-                            "Feerate needs to be set."
+                            localized_copy("Feerate needs to be set.")
                         } else if !max_under_dust {
-                            "Add recipient details."
+                            localized_copy("Add recipient details.")
                         } else {
-                            "Select or add more funds."
+                            localized_copy("Select or add more funds.")
                         })
                         .style(theme::text::secondary),
                     )
@@ -949,15 +1003,19 @@ pub fn create_spend_tx<'a>(
                     .size(P2_SIZE)
                     .style(theme::text::warning),
             )
-            .push(text(hint).size(P2_SIZE).style(theme::text::warning))
+            .push(
+                text(coincube_ui::locale::notice(hint))
+                    .size(P2_SIZE)
+                    .style(theme::text::warning),
+            )
             .into()
     } else if generating {
-        text("Preparing the unsigned transaction.")
+        text(localized_copy("Preparing the unsigned transaction."))
             .size(P2_SIZE)
             .style(theme::text::secondary)
             .into()
     } else {
-        text("Builds an unsigned transaction to review.")
+        text(localized_copy("Builds an unsigned transaction to review."))
             .size(P2_SIZE)
             .style(theme::text::secondary)
             .into()
@@ -975,7 +1033,7 @@ pub fn create_spend_tx<'a>(
                         quiet_action(
                             BACK_ID,
                             Some(icon::previous_icon()),
-                            "Back",
+                            coincube_ui::locale::copy("Back"),
                             Message::Previous,
                         )
                     }))
@@ -983,7 +1041,7 @@ pub fn create_spend_tx<'a>(
                     .push(quiet_action(
                         CLEAR_ID,
                         None,
-                        "Clear",
+                        coincube_ui::locale::copy("Clear"),
                         Message::CreateSpend(CreateSpendMessage::Clear),
                     ))
                     .push(prepare_action(can_proceed, generating)),
@@ -1000,11 +1058,11 @@ pub fn create_spend_tx<'a>(
             .push(
                 Container::new(
                     text(if recovery_timelock.is_some() {
-                        "Recovery details"
+                        localized_copy("Recovery details")
                     } else if is_self_send {
-                        "Transfer details"
+                        localized_copy("Transfer details")
                     } else {
-                        "Payment details"
+                        localized_copy("Payment details")
                     })
                     .size(H5_SIZE)
                     .font(font::SEMIBOLD),
@@ -1097,9 +1155,9 @@ pub fn recipient_view<'a>(
                         Row::new()
                             .spacing(12)
                             .align_y(Alignment::Center)
-                            .push(p1_bold("Address"))
+                            .push(p1_bold(localized_copy("Address")))
                             .push(
-                                text(format!("Recipient {}", index + 1))
+                                text(localized_format!("Recipient {}", "Destinatario {}", index + 1))
                                     .size(P2_SIZE)
                                     .font(font::SEMIBOLD)
                                     .style(theme::text::secondary),
@@ -1107,17 +1165,17 @@ pub fn recipient_view<'a>(
                             .push(Space::new().width(Length::Fill))
                             // Recipient for recovery cannot be deleted.
                             .push_maybe((!is_recovery).then(|| {
-                                Button::new(text("Remove").size(P2_SIZE))
+                                Button::new(text(localized_copy("Remove")).size(P2_SIZE))
                                     .style(theme::button::transparent)
                                     .on_press(CreateSpendMessage::DeleteRecipient(index))
                                     .width(Length::Shrink)
                             })),
                     )
                     .push(
-                        form::Form::new_trimmed("Address", address, move |msg| {
+                        form::Form::new_trimmed(localized_copy("Address"), address, move |msg| {
                             CreateSpendMessage::RecipientEdited(index, "address", msg)
                         })
-                        .warning("Invalid address (maybe it is for another network?)")
+                        .warning(localized_copy("Invalid address (maybe it is for another network?)"))
                         .size(P1_SIZE)
                         .padding(10),
                     ),
@@ -1125,12 +1183,12 @@ pub fn recipient_view<'a>(
             .push(
                 Column::new()
                     .spacing(4)
-                    .push(p1_bold("Description"))
+                    .push(p1_bold(localized_copy("Description")))
                     .push(
-                        form::Form::new("Payment label", label, move |msg| {
+                        form::Form::new(coincube_ui::locale::copy("Payment label"), label, move |msg| {
                             CreateSpendMessage::RecipientEdited(index, "label", msg)
                         })
-                        .warning("Label length is too long (> 100 char)")
+                        .warning(localized_copy("Label length is too long (> 100 char)"))
                         .size(P1_SIZE)
                         .padding(10),
                     ),
@@ -1138,8 +1196,8 @@ pub fn recipient_view<'a>(
             .push(
                 Column::new().spacing(4)
                     .push(p1_bold(match bitcoin_unit {
-                        BitcoinDisplayUnit::BTC => "Amount BTC",
-                        BitcoinDisplayUnit::Sats => "Amount (sats)",
+                        BitcoinDisplayUnit::BTC => localized_copy("Amount BTC"),
+                        BitcoinDisplayUnit::Sats => localized_copy("Amount (sats)"),
                     }))
                     .push(
                 Row::new()
@@ -1161,16 +1219,16 @@ pub fn recipient_view<'a>(
 
                                 let form = match bitcoin_unit {
                                     BitcoinDisplayUnit::BTC => {
-                                        form::Form::new_amount_btc("0.001 (in BTC)", amount, move |msg| {
+                                        form::Form::new_amount_btc(coincube_ui::locale::copy("0.001 (in BTC)"), amount, move |msg| {
                                             CreateSpendMessage::RecipientEdited(index, "amount", msg)
                                         })
-                                        .warning("Invalid amount. (Note amounts lower than 0.000005 BTC are invalid.)")
+                                        .warning(localized_copy("Invalid amount. (Note amounts lower than 0.000005 BTC are invalid.)"))
                                     }
                                     BitcoinDisplayUnit::Sats => {
-                                        form::Form::new_amount_sats("100 000 (in sats)", amount, move |msg| {
+                                        form::Form::new_amount_sats(coincube_ui::locale::copy("100 000 (in sats)"), amount, move |msg| {
                                             CreateSpendMessage::RecipientEdited(index, "amount", msg)
                                         })
-                                        .warning("Invalid amount. (Note amounts lower than 500 sats are invalid.)")
+                                        .warning(localized_copy("Invalid amount. (Note amounts lower than 500 sats are invalid.)"))
                                     }
                                 };
 
@@ -1218,7 +1276,7 @@ pub fn recipient_view<'a>(
                                         };
                                         Some(
                                             form::Form::new_trimmed(
-                                                &format!("Enter amount in {}", conv.currency()),
+                                                &localized_format!("Enter amount in {}", "Introduce el importe en {}", conv.currency()),
                                                 fiat_form,
                                                 move |msg| {
                                                     CreateSpendMessage::RecipientFiatAmountEdited(
@@ -1281,7 +1339,7 @@ fn coin_list_view<'a>(
                 // It is not possible to know if a coin is a
                 // change coin or not so for now, From is
                 // enough
-                p1_regular("From").style(theme::text::secondary),
+                p1_regular(localized_copy("From")).style(theme::text::secondary),
             )
             .push(p1_regular(label).wrapping(iced::widget::text::Wrapping::WordOrGlyph))
             .into()

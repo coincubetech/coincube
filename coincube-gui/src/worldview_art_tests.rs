@@ -89,6 +89,9 @@ fn check_worldview_art(artwork: ArtworkStyle, art_label: &str) {
             );
             assert!(history.contains("Your Spark wallet is ready"));
 
+            use coincube_ui::worldview_copy::{self, VoiceLine};
+            let sent_line = VoiceLine::PaymentSent.for_mode(mode);
+            let received_line = VoiceLine::PaymentReceived.for_mode(mode);
             for (screen, view, heading) in [
                 (
                     "sent",
@@ -98,20 +101,23 @@ fn check_worldview_art(artwork: ArtworkStyle, art_label: &str) {
                         &sent_quote,
                         &sent_image,
                         "sent",
+                        sent_line,
                         (),
                     ),
                     "Transaction complete!",
                 ),
                 (
                     "received",
-                    received_celebration_page(
-                        "spark-receive",
-                        "50,000 sats",
-                        &received_quote,
-                        &received_image,
-                        "received",
-                        (),
-                    ),
+                    worldview_copy::render_in(mode, || {
+                        received_celebration_page(
+                            "spark-receive",
+                            "50,000 sats",
+                            &received_quote,
+                            &received_image,
+                            "received",
+                            (),
+                        )
+                    }),
                     "Payment received!",
                 ),
                 ("restored", done_art(appearance == "light"), ""),
@@ -159,7 +165,63 @@ fn check_worldview_art(artwork: ArtworkStyle, art_label: &str) {
                 if !heading.is_empty() {
                     assert!(rendered.contains(heading));
                 }
+                if let Some(line) = match screen {
+                    "sent" => sent_line,
+                    "received" => received_line,
+                    _ => None,
+                } {
+                    assert!(rendered.contains(line));
+                }
             }
         }
     }
+}
+
+#[test]
+fn spanish_samurai_wallet_actions_and_errors_render_together() {
+    use coincube_ui::component::notification;
+    use coincube_ui::locale::{render_in, Language};
+
+    let quote = quote_display::random_quote("empty-wallet");
+    let image = quote_display::image_handle_for_context("empty-wallet");
+    let error = crate::user_error::UserError::new(
+        "That fee rate isn't valid",
+        "Enter a whole number of sats per vByte greater than zero.",
+        "CC-XFER-INPUT",
+        false,
+    );
+    let view = render_in(Language::Spanish, || {
+        SparkTransactionsView {
+            status: SparkTransactionsStatus::Loaded(vec![]),
+            recent_transactions: &[],
+            fiat_converter: None,
+            bitcoin_unit: BitcoinDisplayUnit::Sats,
+            show_direction_badges: false,
+            empty_state_quote: &quote,
+            empty_state_image_handle: &image,
+            current_page: 0,
+            is_last_page: true,
+            processing: false,
+            mask_amounts: true,
+        }
+        .render()
+    });
+    let activity = capture::inspect("spark-history-es", view, (1024, 768), "dark", Theme::dark());
+    assert!(activity.contains("Tu cartera Spark está lista"));
+    assert!(activity.contains("Enviar"));
+    assert!(activity.contains("Recibir sats"));
+
+    let error_card: coincube_ui::widget::Element<'_, ()> = render_in(Language::Spanish, || {
+        notification::error_card(error.title, error.guidance, error.reference, None).into()
+    });
+    let rendered = capture::inspect(
+        "transfer-error-es",
+        error_card,
+        (1024, 768),
+        "dark",
+        Theme::dark(),
+    );
+    assert!(rendered.contains("La tasa de comisión no es válida"));
+    assert!(rendered.contains("Ingresa un número entero de sats"));
+    assert!(rendered.contains("CC-XFER-INPUT"));
 }

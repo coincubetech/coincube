@@ -1,5 +1,8 @@
 //! View renderer for [`crate::app::state::spark::receive::SparkReceive`].
 
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
+use coincube_ui::localized_format;
 use std::collections::HashMap;
 
 use coincube_core::miniscript::bitcoin::Network;
@@ -83,19 +86,19 @@ impl<'a> SparkReceiveView<'a> {
         if !self.backend_available {
             return Column::new()
                 .spacing(20)
-                .push(p1_regular(
+                .push(p1_regular(localized_copy(
                     "Spark is not available for this cube. Set up a Spark \
                      signer to receive payments.",
-                ))
+                )))
                 .into();
         }
 
         // ── Full-screen celebration for received payments ─────────────
         if let SparkReceivePhase::Received { count, .. } = self.phase {
             let verb_phrase = if *count > 1 {
-                "have arrived."
+                CopyText::HaveArrived.get()
             } else {
-                "has arrived."
+                CopyText::HasArrived.get()
             };
             return coincube_ui::component::received_celebration_page(
                 self.received_celebration_context,
@@ -116,12 +119,14 @@ impl<'a> SparkReceiveView<'a> {
             Container::new(
                 Column::new()
                     .spacing(8)
-                    .push(h4_bold("Payment details"))
+                    .push(h4_bold(localized_copy("Payment details")))
                     .push(arrival_note(self.network))
                     .push_maybe((!supported_on(self.network)).then(|| {
-                        p2_regular("Stablecoin deposits require Bitcoin mainnet.")
-                            .small()
-                            .style(theme::text::secondary)
+                        p2_regular(localized_copy(
+                            "Stablecoin deposits require Bitcoin mainnet.",
+                        ))
+                        .small()
+                        .style(theme::text::secondary)
                     })),
             )
             .padding([16, 24]),
@@ -186,7 +191,7 @@ impl<'a> SparkReceiveView<'a> {
                     Container::new(
                         Column::new()
                             .spacing(10)
-                            .push(h4_bold("Invoice details"))
+                            .push(h4_bold(localized_copy("Invoice details")))
                             .push(amount)
                             .push(Space::new().height(Length::Fixed(6.0)))
                             .push(description),
@@ -200,9 +205,9 @@ impl<'a> SparkReceiveView<'a> {
                     Container::new(
                         Column::new()
                             .spacing(8)
-                            .push(h4_bold("Spark on-chain receive"))
-                            .push(p2_regular(format!(
-                                "Deposits become spendable after {} on-chain confirmations.",
+                            .push(h4_bold(localized_copy("Spark on-chain receive")))
+                            .push(p2_regular(localized_format!(
+                                "Deposits become spendable after {} on-chain confirmations.", "Puedes gastar los depósitos después de {} confirmaciones en la cadena.",
                                 DEPOSIT_MATURITY_CONFIRMATIONS,
                             ))),
                     )
@@ -215,10 +220,10 @@ impl<'a> SparkReceiveView<'a> {
                     Container::new(
                         Column::new()
                             .spacing(8)
-                            .push(h4_bold("Spark address"))
-                            .push(p2_regular(
+                            .push(h4_bold(localized_copy("Spark address")))
+                            .push(p2_regular(localized_copy(
                                 "Share this reusable address to receive Bitcoin on Spark.",
-                            )),
+                            ))),
                     )
                     .padding(16)
                     .style(theme::card::simple)
@@ -249,11 +254,11 @@ impl<'a> SparkReceiveView<'a> {
             .push(self.balances.view())
             .push(iced::widget::rule::horizontal(1))
             .push(
-                button::transparent_border(None, "See all in Activity").on_press(Message::Menu(
-                    crate::app::menu::Menu::Spark(crate::app::menu::SparkSubMenu::Transactions(
-                        None,
+                button::transparent_border(None, localized_copy("See all in Activity")).on_press(
+                    Message::Menu(crate::app::menu::Menu::Spark(
+                        crate::app::menu::SparkSubMenu::Transactions(None),
                     )),
-                )),
+                ),
             );
         let mut content = Column::new()
             .spacing(20)
@@ -391,7 +396,7 @@ pub fn head_action(
             segment(
                 "spark-receive-kind-stablecoin",
                 true,
-                "Stablecoin (cross-chain)",
+                localized_copy("Stablecoin (cross-chain)"),
             )
             .enabled(supported_on(network)),
         ],
@@ -430,22 +435,22 @@ fn bitcoin_method_selector(current: SparkReceiveMethod) -> Element<'static, Mess
             segment(
                 "spark-receive-method-lightning",
                 MethodChoice::Invoice,
-                "Lightning invoice",
+                localized_copy("Lightning invoice"),
             ),
             segment(
                 "spark-receive-method-lightning-address",
                 MethodChoice::LightningAddress,
-                "Lightning address",
+                localized_copy("Lightning address"),
             ),
             segment(
                 "spark-receive-method-spark",
                 MethodChoice::SparkAddress,
-                "Spark address",
+                localized_copy("Spark address"),
             ),
             segment(
                 "spark-receive-method-deposit",
                 MethodChoice::BitcoinDeposit,
-                "Bitcoin address · deposit",
+                localized_copy("Bitcoin address · deposit"),
             ),
         ],
         Some(selected),
@@ -467,7 +472,7 @@ fn bitcoin_method_selector(current: SparkReceiveMethod) -> Element<'static, Mess
     });
     Column::new()
         .spacing(8)
-        .push(p1_bold("Method"))
+        .push(p1_bold(localized_copy("Method")))
         .push(row)
         .into()
 }
@@ -491,38 +496,43 @@ fn lightning_address_body<'a>(
             .push(crate::app::view::connect::sign_in_prompt::sign_in_prompt(
                 "use your Lightning address",
             ))
-            .push(p2_regular("Other methods work signed out."))
+            .push(p2_regular(localized_copy("Other methods work signed out.")))
             .into();
     }
     let Some(address) = address else {
         return Column::new()
             .spacing(12)
-            .push(h4_bold("Claim your Lightning address"))
-            .push(p2_regular("Receive Bitcoin with a readable address."))
-            .push(button::primary(None, "Claim in Settings").on_press(lightning_address_settings()))
+            .push(h4_bold(localized_copy("Claim your Lightning address")))
+            .push(p2_regular(localized_copy(
+                "Receive Bitcoin with a readable address.",
+            )))
+            .push(
+                button::primary(None, localized_copy("Claim in Settings"))
+                    .on_press(lightning_address_settings()),
+            )
             .into();
     };
     let copy = Message::SparkReceive(SparkReceiveMessage::CopyPaymentRequest(address.to_owned()));
     let details = Column::new()
         .spacing(10)
         .width(Length::Fill)
-        .push(p1_bold("Lightning address"))
+        .push(p1_bold(localized_copy("Lightning address")))
         .push(
             Row::new()
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(text_input("", address).padding(10).width(Length::Fill))
                 .push(
-                    button::primary(None, "Copy")
+                    button::primary(None, localized_copy("Copy"))
                         .on_press(copy)
                         .width(Length::Fixed(80.0)),
                 ),
         )
-        .push(p2_regular(
+        .push(p2_regular(localized_copy(
             "Anyone with a Lightning wallet can pay this address, even while Tenshu is closed.",
-        ))
+        )))
         .push(
-            button::transparent_border(None, "Change in Settings")
+            button::transparent_border(None, localized_copy("Change in Settings"))
                 .on_press(lightning_address_settings()),
         );
     let ready: Element<'a, Message> = if let Some(qr) = qr {
@@ -536,7 +546,9 @@ fn lightning_address_body<'a>(
     } else {
         Column::new()
             .spacing(10)
-            .push(p2_regular("QR unavailable · copy the address instead."))
+            .push(p2_regular(localized_copy(
+                "QR unavailable · copy the address instead.",
+            )))
             .push(details)
             .into()
     };
@@ -566,16 +578,20 @@ fn pending_deposits_card<'a>(
 ) -> Element<'a, Message> {
     let mut card = Column::new()
         .spacing(12)
-        .push(h4_bold("Pending deposits"))
-        .push(p2_regular(format!(
+        .push(h4_bold(localized_copy("Pending deposits")))
+        .push(p2_regular(localized_format!(
             "Spark notices incoming on-chain transactions automatically. \
              Each deposit becomes claimable after {} on-chain confirmations, \
-             at which point the SDK claims it into your wallet.",
+             at which point the SDK claims it into your wallet.", "Spark nota la entrada de transacciones en cadena automáticamente. Cada depósito se hace reclamable después de las confirmaciones de {} en cadena, en cuyo punto el SDK lo reclama en su cartera.",
             DEPOSIT_MATURITY_CONFIRMATIONS,
         )));
 
     if let Some(err) = claim_error {
-        card = card.push(p2_regular(format!("Claim failed: {}", err)));
+        card = card.push(p2_regular(localized_format!(
+            "Claim failed: {}",
+            "Fallo de la reclamación: {}",
+            err
+        )));
     }
 
     for deposit in deposits {
@@ -624,7 +640,7 @@ fn deposit_row<'a>(
     let action: Element<'_, Message> = if is_being_claimed {
         // Disabled button — `on_press_maybe(None)` keeps the visual
         // weight without firing on click.
-        button::primary(None, "Claiming…")
+        button::primary(None, localized_copy("Claiming…"))
             .on_press_maybe(None)
             .width(Length::Fixed(140.0))
             .into()
@@ -637,8 +653,9 @@ fn deposit_row<'a>(
             Some(c) if network == Network::Bitcoin => {
                 format!("{} / {} confirmations", c, DEPOSIT_MATURITY_CONFIRMATIONS)
             }
-            _ => format!(
+            _ => localized_format!(
                 "Waiting for confirmations ({} required)",
+                "Esperando las confirmaciones ({} requerida)",
                 DEPOSIT_MATURITY_CONFIRMATIONS
             ),
         };
@@ -651,7 +668,7 @@ fn deposit_row<'a>(
             .align_y(Alignment::Center)
             .push(p2_regular(format!("Error: {}", short_error(err))))
             .push(
-                button::secondary(None, "Retry")
+                button::secondary(None, CopyText::Retry.get())
                     .on_press(Message::SparkReceive(
                         crate::app::view::SparkReceiveMessage::ClaimDepositRequested {
                             txid: deposit.txid.clone(),
@@ -662,7 +679,7 @@ fn deposit_row<'a>(
             )
             .into()
     } else {
-        button::primary(None, "Claim")
+        button::primary(None, localized_copy("Claim"))
             .on_press(Message::SparkReceive(
                 crate::app::view::SparkReceiveMessage::ClaimDepositRequested {
                     txid: deposit.txid.clone(),
@@ -760,7 +777,7 @@ fn spark_receive_cards<'a>(
         Column::new()
             .spacing(6)
             .push(
-                text("YOU RECEIVE")
+                text(localized_copy("YOU RECEIVE"))
                     .size(P2_SIZE)
                     .style(theme::text::secondary),
             )
@@ -777,7 +794,7 @@ fn spark_receive_cards<'a>(
                     ),
             )
             .push(
-                text("Any amount")
+                text(localized_copy("Any amount"))
                     .size(P2_SIZE)
                     .style(theme::text::secondary),
             )
@@ -810,7 +827,7 @@ fn spark_receive_cards<'a>(
             Column::new()
                 .spacing(6)
                 .push(
-                    text("THEY SEND")
+                    text(localized_copy("THEY SEND"))
                         .size(P2_SIZE)
                         .style(theme::text::secondary),
                 )
@@ -984,7 +1001,7 @@ pub fn sender_picker_modal<'a>(
 
     if is_mainnet {
         list = list.push(Space::new().height(Length::Fixed(6.0))).push(
-            text("From another network")
+            text(localized_copy("From another network"))
                 .size(P2_SIZE)
                 .style(theme::text::secondary),
         );
@@ -1014,7 +1031,7 @@ pub fn sender_picker_modal<'a>(
         list.into()
     };
 
-    picker_modal_card("Stablecoin · they send", body)
+    picker_modal_card(coincube_ui::locale::copy("Stablecoin · they send"), body)
 }
 
 fn phase_body<'a>(
@@ -1029,7 +1046,7 @@ fn phase_body<'a>(
     match phase {
         SparkReceivePhase::Idle => Container::new(
             Column::new().spacing(10).push(
-                button::primary(None, "Generate")
+                button::primary(None, localized_copy("Generate"))
                     .on_press(Message::SparkReceive(
                         SparkReceiveMessage::GenerateRequested,
                     ))
@@ -1040,12 +1057,14 @@ fn phase_body<'a>(
         .style(theme::card::simple)
         .into(),
 
-        SparkReceivePhase::Generating => Container::new(Column::new().spacing(10).push(
-            p1_regular("Generating… asking the Spark bridge for a payment request."),
-        ))
-        .padding(16)
-        .style(theme::card::simple)
-        .into(),
+        SparkReceivePhase::Generating => {
+            Container::new(Column::new().spacing(10).push(p1_regular(localized_copy(
+                "Generating… asking the Spark bridge for a payment request.",
+            ))))
+            .padding(16)
+            .style(theme::card::simple)
+            .into()
+        }
 
         SparkReceivePhase::Generated(ok) => {
             // QR code block — rendered only if we successfully
@@ -1058,26 +1077,26 @@ fn phase_body<'a>(
                     .align_x(iced::alignment::Horizontal::Center)
                     .into()
             } else {
-                p2_regular("QR code unavailable for this payload.").into()
+                p2_regular(localized_copy("QR code unavailable for this payload.")).into()
             };
 
             let payment_request = ok.payment_request.clone();
             let (label, guidance) = match method {
                 SparkReceiveMethod::Bolt11 => (
-                    "Lightning invoice",
-                    "Share this invoice to receive sats via Lightning.",
+                    localized_copy("Lightning invoice"),
+                    localized_copy("Share this invoice to receive sats via Lightning."),
                 ),
                 SparkReceiveMethod::LightningAddress => (
-                    "Lightning address",
-                    "Anyone with a Lightning wallet can pay this address, even while Tenshu is closed.",
+                    localized_copy("Lightning address"),
+                    localized_copy("Anyone with a Lightning wallet can pay this address, even while Tenshu is closed."),
                 ),
                 SparkReceiveMethod::Spark => (
-                    "Spark address",
-                    "Share this address to receive Bitcoin from another Spark wallet.",
+                    localized_copy("Spark address"),
+                    localized_copy("Share this address to receive Bitcoin from another Spark wallet."),
                 ),
                 SparkReceiveMethod::OnchainBitcoin => (
-                    "Bitcoin deposit address",
-                    "Deposits arrive in Spark after on-chain confirmation.",
+                    localized_copy("Bitcoin deposit address"),
+                    localized_copy("Deposits arrive in Spark after on-chain confirmation."),
                 ),
             };
             let mut details = Column::new()
@@ -1094,7 +1113,7 @@ fn phase_body<'a>(
                                 .width(Length::Fill),
                         )
                         .push(
-                            button::primary(None, "Copy")
+                            button::primary(None, localized_copy("Copy"))
                                 .on_press(Message::SparkReceive(
                                     SparkReceiveMessage::CopyPaymentRequest(payment_request),
                                 ))
@@ -1104,7 +1123,7 @@ fn phase_body<'a>(
                 .push(p2_regular(guidance).style(theme::text::secondary));
             if method == SparkReceiveMethod::Bolt11 {
                 details = details.push(kv_row(
-                    "Amount",
+                    localized_copy("Amount"),
                     if amount_input.trim().is_empty() {
                         "Any amount".to_owned()
                     } else {
@@ -1112,11 +1131,17 @@ fn phase_body<'a>(
                     },
                 ));
                 if !description_input.is_empty() {
-                    details = details.push(kv_row("Description", description_input.to_owned()));
+                    details = details.push(kv_row(
+                        localized_copy("Description"),
+                        description_input.to_owned(),
+                    ));
                 }
             }
             if ok.fee_sat > 0 {
-                details = details.push(kv_row("Fee", format!("{} sats", ok.fee_sat)));
+                details = details.push(kv_row(
+                    localized_copy("Fee"),
+                    format!("{} sats", ok.fee_sat),
+                ));
             }
             let ready_body: Element<'_, Message> = if qr_data.is_some() {
                 Row::new()
@@ -1135,7 +1160,7 @@ fn phase_body<'a>(
             };
             Container::new(
                 Column::new().spacing(16).push(ready_body).push(
-                    button::transparent_border(None, "Generate another")
+                    button::transparent_border(None, localized_copy("Generate another"))
                         .on_press(Message::SparkReceive(SparkReceiveMessage::Reset)),
                 ),
             )
@@ -1152,11 +1177,11 @@ fn phase_body<'a>(
         SparkReceivePhase::Error(err) => Container::new(
             Column::new()
                 .spacing(10)
-                .push(h4_bold("Error"))
-                .push(p1_regular(err.clone()))
+                .push(h4_bold(localized_copy("Error")))
+                .push(p1_regular(coincube_ui::locale::notice(err.clone())))
                 .push(Space::new().height(Length::Fixed(8.0)))
                 .push(
-                    button::primary(None, "Try again")
+                    button::primary(None, localized_copy("Try again"))
                         .on_press(Message::SparkReceive(SparkReceiveMessage::Reset))
                         .width(Length::Fixed(140.0)),
                 ),

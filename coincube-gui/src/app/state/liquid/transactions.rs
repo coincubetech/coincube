@@ -370,15 +370,24 @@ impl State for LiquidTransactions {
                 let modal_content = match state {
                     ImportExportState::Ended => Column::new()
                         .spacing(20)
-                        .push(text("Export successful!").size(20).bold())
                         .push(
-                            coincube_ui::component::button::primary(None, "Close")
-                                .width(150)
-                                .on_press(ViewMessage::ImportExport(ImportExportMessage::Close)),
+                            text(coincube_ui::locale::copy("Export successful!"))
+                                .size(20)
+                                .bold(),
+                        )
+                        .push(
+                            coincube_ui::component::button::primary(
+                                None,
+                                coincube_ui::locale::copy("Close"),
+                            )
+                            .width(150)
+                            .on_press(ViewMessage::ImportExport(ImportExportMessage::Close)),
                         ),
-                    _ => Column::new()
-                        .spacing(20)
-                        .push(text("Exporting payments...").size(20).bold()),
+                    _ => Column::new().spacing(20).push(
+                        text(coincube_ui::locale::copy("Exporting payments..."))
+                            .size(20)
+                            .bold(),
+                    ),
                 };
 
                 Modal::new(content, modal_content)
@@ -865,7 +874,11 @@ impl State for LiquidTransactions {
                 // back to the transactions list on the next render.
                 Task::done(Message::View(view::Message::ShowToast(
                     log::Level::Info,
-                    format!("Refund broadcast · {}", txid.get(..10).unwrap_or(&txid)),
+                    coincube_ui::localized_format!(
+                        "Refund broadcast · {}",
+                        "Reembolso publicado · {}",
+                        txid.get(..10).unwrap_or(&txid)
+                    ),
                 )))
             }
             Message::RefundCompleted {

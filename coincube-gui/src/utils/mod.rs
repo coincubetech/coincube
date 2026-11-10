@@ -56,11 +56,15 @@ pub fn format_timestamp(timestamp: u64) -> Option<String> {
 
     let dt = DateTime::<Utc>::from_timestamp(timestamp as i64, 0)?;
 
-    Some(
-        dt.with_timezone(&Local)
-            .format("%b. %d, %Y - %T")
-            .to_string(),
-    )
+    Some({
+        let local = dt.with_timezone(&Local);
+        local
+            .format(&coincube_ui::locale::date_pattern(
+                "%b. %d, %Y - %T",
+                &local,
+            ))
+            .to_string()
+    })
 }
 
 pub fn format_time_ago(timestamp: i64) -> String {

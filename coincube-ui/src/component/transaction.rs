@@ -150,12 +150,12 @@ impl<'a, T> TransactionListItem<'a, T> {
         let mut has_status = false;
         if let Some(timestamp) = self.timestamp {
             status_row = status_row.push(
-                text::p2_regular(
-                    timestamp
-                        .with_timezone(&Local)
-                        .format("%b. %d, %Y - %T")
-                        .to_string(),
-                )
+                text::p2_regular({
+                    let local = timestamp.with_timezone(&Local);
+                    local
+                        .format(&crate::locale::date_pattern("%b. %d, %Y - %T", &local))
+                        .to_string()
+                })
                 .style(theme::text::secondary),
             );
             has_status = true;

@@ -10,6 +10,7 @@
 //! duress cleared does the screen exit into the normal flow.
 
 use coincube_core::miniscript::bitcoin::Network;
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     color,
     component::{button, text},
@@ -79,16 +80,18 @@ impl DuressActiveScreen {
             .spacing(16)
             .align_x(Alignment::Center)
             .push(iced::widget::Space::new().height(Length::Fill))
-            .push(text::h3("Duress Mode Activated"))
+            .push(text::h3(localized_copy("Duress Mode Activated")))
             .push(
-                text::p1_regular("Use the Tenshu app on a trusted device to manage your account.")
-                    .color(color::GREY_3),
+                text::p1_regular(localized_copy(
+                    "Use the Tenshu app on a trusted device to manage your account.",
+                ))
+                .color(color::GREY_3),
             );
 
         let sign_in = if self.checking {
-            button::primary(None, "Checking…").width(Length::Fixed(220.0))
+            button::primary(None, localized_copy("Checking…")).width(Length::Fixed(220.0))
         } else {
-            button::primary(None, "Sign in to Connect")
+            button::primary(None, localized_copy("Sign in to Connect"))
                 .width(Length::Fixed(220.0))
                 .on_press(Message::SignInPressed)
         };

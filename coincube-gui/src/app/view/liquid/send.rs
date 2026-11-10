@@ -1,5 +1,8 @@
 use breez_sdk_liquid::InputType;
 use coincube_core::miniscript::bitcoin::Amount;
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
+use coincube_ui::localized_format;
 use coincube_ui::{
     color,
     component::{
@@ -260,7 +263,8 @@ pub fn liquid_send_with_flow<'a>(config: LiquidSendFlowConfig<'a>) -> Element<'a
                 config.sent_amount_display,
                 config.sent_quote,
                 config.sent_image_handle,
-                "has been sent successfully.",
+                CopyText::HasBeenSentSuccessfully.get(),
+                coincube_ui::worldview_copy::VoiceLine::PaymentSent.get(),
                 LiquidSendMessage::BackToHome,
             )
             .map(Message::LiquidSend);
@@ -311,18 +315,26 @@ fn send_page<'a>(
                 crate::app::menu::LiquidSubMenu::Overview,
             ))),
         )
-        .push(h3("Send").bold())
+        .push(h3(localized_copy("Send")).bold())
         .push(
             p2_regular(format!("{} · {}", cache.cube_name, network_name))
                 .style(theme::text::secondary),
         );
     let aside = Column::new()
         .spacing(12)
-        .push(liquid_send_step("1", "Details", true))
-        .push(liquid_send_step("2", "Review", false))
-        .push(liquid_send_step("3", "Sent", false))
+        .push(liquid_send_step(
+            "1",
+            coincube_ui::locale::copy("Details"),
+            true,
+        ))
+        .push(liquid_send_step("2", CopyText::Review.get(), false))
+        .push(liquid_send_step(
+            "3",
+            coincube_ui::locale::copy("Sent"),
+            false,
+        ))
         .push(iced::widget::rule::horizontal(1))
-        .push(p2_regular("Available in Liquid").style(theme::text::secondary))
+        .push(p2_regular(localized_copy("Available in Liquid")).style(theme::text::secondary))
         .push(p1_bold(balance));
     let page = Column::new().spacing(20).push(header).push(
         Row::new()
@@ -422,7 +434,11 @@ pub fn liquid_send_view<'a>(
 
         let card_content = Column::new()
             .spacing(6)
-            .push(text("You send").size(P2_SIZE).style(theme::text::secondary))
+            .push(
+                text(localized_copy("You send"))
+                    .size(P2_SIZE)
+                    .style(theme::text::secondary),
+            )
             .push(
                 Row::new()
                     .spacing(8)
@@ -440,7 +456,7 @@ pub fn liquid_send_view<'a>(
                     .size(P2_SIZE)
                     .style(theme::text::secondary),
             )
-            .push(p2_regular("Liquid network").style(theme::text::secondary));
+            .push(p2_regular(localized_copy("Liquid network")).style(theme::text::secondary));
 
         Action::new(
             SEND_ROUTE_ACTION_ID,
@@ -482,7 +498,7 @@ pub fn liquid_send_view<'a>(
         let card_content = Column::new()
             .spacing(6)
             .push(
-                text("They receive")
+                text(localized_copy("They receive"))
                     .size(P2_SIZE)
                     .style(theme::text::secondary),
             )
@@ -551,7 +567,7 @@ pub fn liquid_send_view<'a>(
     // label and places it after the destination in keyboard order.
     let prepare = Action::new(
         CONTINUE_ACTION_ID,
-        text("Continue to amount").size(P1_SIZE),
+        text(localized_copy("Continue to amount")).size(P1_SIZE),
         LiquidSendMessage::FocusAction,
     )
     .padding([10, 16])
@@ -565,7 +581,7 @@ pub fn liquid_send_view<'a>(
                     Row::new()
                         .spacing(12)
                         .align_y(Alignment::Center)
-                        .push(h4_bold("Payment details").width(Length::Fill))
+                        .push(h4_bold(localized_copy("Payment details")).width(Length::Fill))
                         .push(
                             segmented(
                                 [
@@ -590,11 +606,14 @@ pub fn liquid_send_view<'a>(
             .push(iced::widget::rule::horizontal(1))
             .push(
                 Container::new(
-                    Column::new().spacing(10).push(p1_bold("Destination")).push(
-                        form::Form::new(hint_text, input, LiquidSendMessage::InputEdited)
-                            .size(16)
-                            .padding(12),
-                    ),
+                    Column::new()
+                        .spacing(10)
+                        .push(p1_bold(localized_copy("Destination")))
+                        .push(
+                            form::Form::new(hint_text, input, LiquidSendMessage::InputEdited)
+                                .size(16)
+                                .padding(12),
+                        ),
                 )
                 .padding([20, 24])
                 .width(Length::Fill),
@@ -607,11 +626,11 @@ pub fn liquid_send_view<'a>(
                         .align_y(Alignment::Center)
                         .push(
                             p2_regular(if input.value.trim().is_empty() {
-                                "Enter a destination to continue."
+                                localized_copy("Enter a destination to continue.")
                             } else if can_proceed {
-                                "Next, review the amount and fees."
+                                localized_copy("Next, review the amount and fees.")
                             } else {
-                                "Check the destination before continuing."
+                                localized_copy("Check the destination before continuing.")
                             })
                             .style(theme::text::secondary)
                             .width(Length::Fill),
@@ -628,7 +647,11 @@ pub fn liquid_send_view<'a>(
     content = content.push(payment_card);
 
     // ── Last transactions ────────────────────────────────────────────────────
-    content = content.push(Column::new().spacing(10).push(h4_bold("Last transactions")));
+    content = content.push(
+        Column::new()
+            .spacing(10)
+            .push(h4_bold(localized_copy("Last transactions"))),
+    );
 
     if !recent_transaction.is_empty() {
         for (idx, tx) in recent_transaction.iter().enumerate() {
@@ -694,7 +717,7 @@ pub fn liquid_send_view<'a>(
                                 .style(move |_| iced::widget::text::Style { color: Some(fg) }),
                         )
                         .push(
-                            text("Pending")
+                            text(localized_copy("Pending"))
                                 .bold()
                                 .size(14)
                                 .style(move |_| iced::widget::text::Style { color: Some(fg) }),
@@ -722,8 +745,10 @@ pub fn liquid_send_view<'a>(
     } else {
         content = content.push(coincube_ui::component::empty_placeholder(
             receipt_icon().size(80),
-            "No transactions yet",
-            "Your transaction history will appear here once you send or receive coins.",
+            coincube_ui::locale::copy("No transactions yet"),
+            coincube_ui::locale::copy(
+                "Your transaction history will appear here once you send or receive coins.",
+            ),
         ));
     }
 
@@ -734,7 +759,7 @@ pub fn liquid_send_view<'a>(
                 color: Some(color::ORANGE),
             });
 
-        let label = text("View All Transactions")
+        let label = text(localized_copy("View All Transactions"))
             .size(15)
             .style(|_theme: &theme::Theme| iced::widget::text::Style {
                 color: Some(color::ORANGE),
@@ -854,7 +879,7 @@ pub fn send_picker_modal<'a>(
     bitcoin_unit: BitcoinDisplayUnit,
     mask_amounts: bool,
 ) -> Element<'a, LiquidSendMessage> {
-    let title = text("YOU SEND").size(H4_SIZE).bold();
+    let title = text(localized_copy("YOU SEND")).size(H4_SIZE).bold();
 
     let lbtc_balance = if mask_amounts {
         "••••••".into()
@@ -904,7 +929,7 @@ pub fn receive_picker_modal<'a>(
     current_network: ReceiveNetwork,
     cross_asset_supported: bool,
 ) -> Element<'a, LiquidSendMessage> {
-    let title = text("THEY RECEIVE").size(H4_SIZE).bold();
+    let title = text(localized_copy("THEY RECEIVE")).size(H4_SIZE).bold();
 
     let options = ReceiveNetwork::options_for_send_asset(from_asset, cross_asset_supported);
 
@@ -1030,7 +1055,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
     // Show inline error banner if present
     if let Some(err) = config.error {
         content = content.push(
-            container(p1_regular(err).color(color::WHITE))
+            container(p1_regular(coincube_ui::locale::notice(err.to_owned())).color(color::WHITE))
                 .width(Length::Fill)
                 .padding(12)
                 .style(|_| {
@@ -1063,7 +1088,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
 
     let header = Row::new()
         .push(iced::widget::Space::new().width(Length::Fill))
-        .push(text("BALANCE: ").size(16))
+        .push(text(localized_copy("BALANCE: ")).size(16))
         .push(text(balance_text).size(16).bold().color(color::ORANGE))
         .width(Length::Fill)
         .align_y(Alignment::Center);
@@ -1160,7 +1185,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
                 .spacing(5)
                 .push(
                     Row::new()
-                        .push(text("Amount (USDt)").size(16))
+                        .push(text(localized_copy("Amount (USDt)")).size(16))
                         .push(Space::new().width(Length::Fill))
                         .push(max_button(config.max_loading))
                         .align_y(Alignment::Center),
@@ -1175,7 +1200,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
                         .padding(10),
                 );
             if let Some(warn) = config.usdt_amount_input.warning {
-                usdt_col = usdt_col.push(text(warn).size(12).color(color::ORANGE));
+                usdt_col = usdt_col.push(text(localized_copy(warn)).size(12).color(color::ORANGE));
             }
 
             // Fee asset toggle (USDt vs L-BTC) — only for same-asset sends
@@ -1229,7 +1254,14 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
 
             let amount_row = Row::new()
                 .spacing(10)
-                .push(text(format!("Amount ({})", config.bitcoin_unit)).size(16))
+                .push(
+                    text(localized_format!(
+                        "Amount ({})",
+                        "Importe ({})",
+                        config.bitcoin_unit
+                    ))
+                    .size(16),
+                )
                 .push(iced::widget::Space::new().width(Length::Fill))
                 .align_y(Alignment::Center);
 
@@ -1252,14 +1284,24 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
             let mut amount_input_section = Column::new().spacing(5);
             amount_input_section = amount_input_section.push(
                 if matches!(config.bitcoin_unit, BitcoinDisplayUnit::BTC) {
-                    form::Form::new_amount_btc("Enter amount", config.amount, |v| {
-                        LiquidSendMessage::PopupMessage(view::SendPopupMessage::AmountEdited(v))
-                    })
+                    form::Form::new_amount_btc(
+                        coincube_ui::locale::copy("Enter amount"),
+                        config.amount,
+                        |v| {
+                            LiquidSendMessage::PopupMessage(view::SendPopupMessage::AmountEdited(v))
+                        },
+                    )
+                    .maybe_warning(config.amount.warning.map(coincube_ui::locale::copy))
                     .padding(10)
                 } else {
-                    form::Form::new_amount_sats("Enter amount", config.amount, |v| {
-                        LiquidSendMessage::PopupMessage(view::SendPopupMessage::AmountEdited(v))
-                    })
+                    form::Form::new_amount_sats(
+                        coincube_ui::locale::copy("Enter amount"),
+                        config.amount,
+                        |v| {
+                            LiquidSendMessage::PopupMessage(view::SendPopupMessage::AmountEdited(v))
+                        },
+                    )
+                    .maybe_warning(config.amount.warning.map(coincube_ui::locale::copy))
                     .padding(10)
                 },
             );
@@ -1270,8 +1312,9 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
                         let min_btc = Amount::from_sat(min_sat);
                         let max_btc = Amount::from_sat(max_sat);
                         amount_input_section = amount_input_section.push(
-                            text(format!(
+                            text(localized_format!(
                                 "Enter an amount between {} and {} {}",
+                                "Introduce un importe entre {} y {} {}",
                                 min_btc.to_formatted_string_with_unit(config.bitcoin_unit),
                                 max_btc.to_formatted_string_with_unit(config.bitcoin_unit),
                                 config.bitcoin_unit,
@@ -1283,8 +1326,9 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
                     let min_btc = Amount::from_sat(min_sat);
                     let max_btc = Amount::from_sat(max_sat);
                     amount_input_section = amount_input_section.push(
-                        text(format!(
+                        text(localized_format!(
                             "Enter an amount between {} and {} {}",
+                            "Introduce un importe entre {} y {} {}",
                             min_btc.to_formatted_string_with_unit(config.bitcoin_unit),
                             max_btc.to_formatted_string_with_unit(config.bitcoin_unit),
                             config.bitcoin_unit,
@@ -1302,7 +1346,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
     content = content.push(iced::widget::Space::new().height(Length::Fixed(5.0)));
 
     let mut comment_section = Column::new().spacing(5);
-    comment_section = comment_section.push(text("Comment").size(16));
+    comment_section = comment_section.push(text(localized_copy("Comment")).size(16));
     comment_section = comment_section.push(
         iced::widget::text_input("Comment (Optional)", &config.comment)
             .on_input(|v| LiquidSendMessage::PopupMessage(view::SendPopupMessage::CommentEdited(v)))
@@ -1328,7 +1372,7 @@ pub fn amount_input_model<'a>(config: AmountInputConfig<'a>) -> Element<'a, Liqu
             _ => config.amount.valid && !config.amount.value.trim().is_empty(),
         };
 
-    let next_button = button::primary(None, "Next").width(Length::Fill);
+    let next_button = button::primary(None, localized_copy("Next")).width(Length::Fill);
     let next_button = if !is_next_enabled {
         next_button
     } else {
@@ -1362,7 +1406,11 @@ pub fn fiat_input_model<'a>(
         .align_x(Alignment::Center);
 
     let header = Row::new()
-        .push(text("Select Fiat Currency:").size(20).bold())
+        .push(
+            text(localized_copy("Select Fiat Currency:"))
+                .size(20)
+                .bold(),
+        )
         .push(iced::widget::Space::new().width(Length::Fill))
         .push(
             button::transparent(Some(cross_icon()), "")
@@ -1432,15 +1480,20 @@ pub fn fiat_input_model<'a>(
     );
 
     content = content.push(
-        text(format!("Amount in {}", selected_currency))
-            .size(16)
-            .width(Length::Fill),
+        text(localized_format!(
+            "Amount in {}",
+            "Importe en {}",
+            selected_currency
+        ))
+        .size(16)
+        .width(Length::Fill),
     );
 
     content = content.push(
         form::Form::new_amount_numeric(&format!("{} amount", selected_currency), fiat_input, |v| {
             LiquidSendMessage::PopupMessage(view::SendPopupMessage::FiatInputEdited(v))
         })
+        .maybe_warning(fiat_input.warning.map(coincube_ui::locale::copy))
         .padding(10),
     );
 
@@ -1517,7 +1570,7 @@ pub fn fiat_input_model<'a>(
 
     content = content.push(iced::widget::Space::new().height(Length::Fixed(5.0)));
 
-    let done_button = button::primary(None, "Done").width(Length::Fill);
+    let done_button = button::primary(None, CopyText::Done.get()).width(Length::Fill);
     let done_button = if !fiat_input.valid || fiat_input.value.is_empty() {
         done_button
     } else {
@@ -1556,7 +1609,7 @@ pub fn final_check_page<'a>(
     let description = intent.description();
     let header = Row::new()
         .push(
-            button::secondary(Some(icon::previous_icon()), "Back")
+            button::secondary(Some(icon::previous_icon()), CopyText::Back.get())
                 .width(Length::Fixed(150.0))
                 .on_press(LiquidSendMessage::PopupMessage(
                     view::SendPopupMessage::Close,
@@ -1574,7 +1627,9 @@ pub fn final_check_page<'a>(
             breez_sdk_liquid::prelude::SendDestination::LiquidAddress { .. } => "Liquid".to_owned(),
             breez_sdk_liquid::prelude::SendDestination::Bolt11 { .. }
             | breez_sdk_liquid::prelude::SendDestination::Bolt12 { .. } => {
-                format!("Lightning on {network}")
+                CopyText::LightningNetwork
+                    .get()
+                    .replacen("{network}", network, 1)
             }
         },
     };
@@ -1584,8 +1639,12 @@ pub fn final_check_page<'a>(
         .width(Length::Fill)
         .max_width(600)
         .align_x(Alignment::Center)
-        .push(p2_regular("Source network · Liquid"))
-        .push(p2_regular(format!("Destination network · {destination}")));
+        .push(p2_regular(CopyText::SourceLiquidNetwork.get()))
+        .push(p2_regular(CopyText::DestinationNetwork.get().replacen(
+            "{network}",
+            &destination,
+            1,
+        )));
 
     if let Some(desc) = description {
         content = content.push(
@@ -1607,9 +1666,11 @@ pub fn final_check_page<'a>(
         };
         content = content.push(
             Container::new(
-                text(format!(
+                text(localized_format!(
                     "Cross-asset swap: paying with {} → receiver gets {}",
-                    paying_with, receiving
+                    "Intercambio entre activos: pagas {} → el destinatario recibe {}",
+                    paying_with,
+                    receiving
                 ))
                 .size(14)
                 .color(color::ORANGE),
@@ -1648,7 +1709,7 @@ pub fn final_check_page<'a>(
 
         details_box = details_box.push(
             Row::new()
-                .push(text("Send amount:").size(16))
+                .push(text(localized_copy("Send amount:")).size(16))
                 .push(Space::new().width(Length::Fill))
                 .push(text(format!("{} USDt", usdt_send_amount)).size(16).bold())
                 .width(Length::Fill)
@@ -1673,7 +1734,7 @@ pub fn final_check_page<'a>(
                 .ceil() as u64;
             details_box = details_box.push(
                 Row::new()
-                    .push(text("Fees (USDt):").size(16))
+                    .push(text(localized_copy("Fees (USDt):")).size(16))
                     .push(Space::new().width(Length::Fill))
                     .push(
                         text(format!(
@@ -1690,7 +1751,7 @@ pub fn final_check_page<'a>(
             // Fees paid in L-BTC
             details_box = details_box.push(
                 Row::new()
-                    .push(text("Fees (L-BTC):").size(16))
+                    .push(text(localized_copy("Fees (L-BTC):")).size(16))
                     .push(Space::new().width(Length::Fill))
                     .push(
                         text(format!(
@@ -1723,7 +1784,7 @@ pub fn final_check_page<'a>(
             );
             details_box = details_box.push(
                 Row::new()
-                    .push(text("Comment:").size(16))
+                    .push(text(localized_copy("Comment:")).size(16))
                     .push(Space::new().width(Length::Fill))
                     .push(text(comment.clone()).size(16).bold())
                     .width(Length::Fill)
@@ -1746,7 +1807,7 @@ pub fn final_check_page<'a>(
 
         content = content.push(Space::new().height(Length::Fixed(30.0)));
 
-        let send_button = button::primary(None, "Send").width(Length::Fill);
+        let send_button = button::primary(None, localized_copy("Send")).width(Length::Fill);
         content = content.push(if is_sending {
             send_button
         } else {
@@ -1804,7 +1865,7 @@ pub fn final_check_page<'a>(
 
     details_box = details_box.push(
         Row::new()
-            .push(text("Amount:").size(16))
+            .push(text(localized_copy("Amount:")).size(16))
             .push(Space::new().width(Length::Fill))
             .push(
                 text(format!(
@@ -1836,7 +1897,7 @@ pub fn final_check_page<'a>(
 
     details_box = details_box.push(
         Row::new()
-            .push(text("Fees:").size(16))
+            .push(text(localized_copy("Fees:")).size(16))
             .push(Space::new().width(Length::Fill))
             .push(
                 text(format!(
@@ -1868,7 +1929,7 @@ pub fn final_check_page<'a>(
 
     details_box = details_box.push(
         Row::new()
-            .push(text("Total:").size(18).bold())
+            .push(text(localized_copy("Total:")).size(18).bold())
             .push(Space::new().width(Length::Fill))
             .push(
                 text(format!(
@@ -1902,7 +1963,7 @@ pub fn final_check_page<'a>(
 
         details_box = details_box.push(
             Row::new()
-                .push(text("Comment:").size(16))
+                .push(text(localized_copy("Comment:")).size(16))
                 .push(Space::new().width(Length::Fill))
                 .push(text(comment).size(16).bold())
                 .width(Length::Fill)
@@ -1925,7 +1986,7 @@ pub fn final_check_page<'a>(
 
     content = content.push(Space::new().height(Length::Fixed(30.0)));
 
-    let send_button = button::primary(None, "Send").width(Length::Fill);
+    let send_button = button::primary(None, localized_copy("Send")).width(Length::Fill);
     content = content.push(if is_sending {
         send_button
     } else {

@@ -1,9 +1,13 @@
 //! v113 Launcher List and Opening presentation. The catalog, unlock and
 //! loader remain the authorities for rows, actions and startup state.
 
+use crate::app::view::responsive;
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
+use coincube_ui::localized_format;
 use iced::{
     advanced::widget::Id,
-    widget::{button as iced_button, container, responsive, rule, text::Wrapping, Space, Stack},
+    widget::{button as iced_button, container, rule, text::Wrapping, Space, Stack},
     Alignment, Length, Size,
 };
 
@@ -13,7 +17,7 @@ use coincube_ui::{
         tenshu::{self, top_bar, ActionButton, ActionKind},
     },
     icon, theme,
-    widget::{action::Action, text_input, Column, Container, Element, Row, TextInput},
+    widget::{action::Action, text_input, Column, ColumnExt, Container, Element, Row, TextInput},
 };
 
 use super::{
@@ -238,7 +242,7 @@ pub(super) fn backup_mark(cube: &crate::app::settings::CubeSettings) -> BackupMa
 
 pub(super) fn backup(cube: &crate::app::settings::CubeSettings) -> (&'static str, tenshu::Tone) {
     match backup_mark(cube) {
-        BackupMark::Confirmed => ("Confirmed", tenshu::Tone::Good),
+        BackupMark::Confirmed => (CopyText::Confirmed.get(), tenshu::Tone::Good),
         BackupMark::NotConfirmed => ("Not confirmed", tenshu::Tone::Warn),
         BackupMark::Unknown => ("Status unknown", tenshu::Tone::Muted),
     }
@@ -379,7 +383,7 @@ fn local_row<'a>(
     );
     let open: Element<'a, ViewMessage> = ActionButton::new(
         launcher_catalog::open_id(&row.key),
-        "Open",
+        localized_copy("Open"),
         ActionKind::Quiet,
         focus,
     )
@@ -430,7 +434,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
                 .push(
                     ActionButton::new(
                         launcher_catalog::close_details_id(),
-                        "Back",
+                        CopyText::Back.get(),
                         ActionKind::Quiet,
                         focus,
                     )
@@ -439,7 +443,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
                 ),
         )
         .push(detail_line(
-            "Network",
+            CopyText::Network.get(),
             network_label(
                 row.key.chain,
                 crate::chain::canonical_network_name(row.key.chain),
@@ -448,11 +452,11 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
             ),
         ))
         .push(detail_line(
-            "Lock",
+            localized_copy("Lock"),
             tenshu::body(lock_state(row.open)).into(),
         ))
         .push(detail_line(
-            "Seed phrase",
+            localized_copy("Seed phrase"),
             tenshu::body(backup_text)
                 .style(text_tone(backup_tone))
                 .into(),
@@ -464,29 +468,29 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
                 .into(),
         ))
         .push(detail_line(
-            "Wallets",
+            localized_copy("Wallets"),
             tenshu::body(row.wallets.clone()).into(),
         ))
         .push(detail_line(
-            "Recovery Kit",
+            localized_copy("Recovery Kit"),
             tenshu::body(row.connect.1.clone())
                 .wrapping(Wrapping::WordOrGlyph)
                 .into(),
         ));
     content = content.push(detail_line(
-        "Next step",
+        localized_copy("Next step"),
         tenshu::body(unlock_prompt(row.cube)).into(),
     ));
-    content = content.push(tenshu::caption(
+    content = content.push(tenshu::caption(localized_copy(
         "The next screen checks access before this Cube opens.",
-    ));
+    )));
     content = content.push(
         Row::new()
             .spacing(8)
             .push(
                 ActionButton::new(
                     launcher_catalog::details_open_id(&row.key),
-                    "Open",
+                    localized_copy("Open"),
                     ActionKind::Primary,
                     focus,
                 )
@@ -506,7 +510,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a,
             .push(
                 ActionButton::new(
                     launcher_catalog::delete_id(&row.key),
-                    "Delete…",
+                    localized_copy("Delete…"),
                     ActionKind::Destructive,
                     focus,
                 )
@@ -562,7 +566,7 @@ fn filtered_out<'a>(hidden: usize) -> Element<'a, ViewMessage> {
         .spacing(8)
         .align_x(Alignment::Center)
         .push(face_words(
-            "No Cubes match these filters",
+            localized_copy("No Cubes match these filters"),
             20.0,
             font::SEMIBOLD,
             false,
@@ -584,7 +588,7 @@ fn filtered_out<'a>(hidden: usize) -> Element<'a, ViewMessage> {
                 .push(
                     Action::new(
                         launcher_catalog::clear_filters_empty_id(),
-                        face_link_label("Clear filters"),
+                        face_link_label(localized_copy("Clear filters")),
                         focus,
                     )
                     .padding([2.0, 4.0])
@@ -632,7 +636,7 @@ pub(crate) fn face_link_style(
 }
 
 fn face_link<'a>(id: Id, label: &'static str, message: ViewMessage) -> Element<'a, ViewMessage> {
-    Action::new(id, face_link_label(label), focus)
+    Action::new(id, face_link_label(localized_copy(label)), focus)
         .padding([2.0, 4.0])
         .style(face_link_style)
         .on_press(message)
@@ -758,7 +762,7 @@ fn floor_details<'a>(
         ))
         .push(face_link(
             launcher_catalog::close_details_id(),
-            "Back",
+            CopyText::Back.get(),
             ViewMessage::Catalog(CatalogMessage::ClearSelection),
         ))
         .push(face_link(
@@ -800,7 +804,11 @@ fn floor_details<'a>(
             .push(actions)
             .push(Space::new().height(Length::Fixed(10.0)))
             .push(face_words(
-                format!("Next step · {}", unlock_prompt(row.cube)),
+                localized_format!(
+                    "Next step · {}",
+                    "Siguiente paso · {}",
+                    unlock_prompt(row.cube)
+                ),
                 12.0,
                 font::REGULAR,
                 true,
@@ -853,22 +861,22 @@ fn ghost_copy(cube: &super::RemoteCube) -> (&'static str, tenshu::Tone, &'static
         Some((ViewMessage::RestoreWithPhone { .. }, _)) => (
             restore.status,
             tenshu::Tone::Good,
-            "Restore brings this Cube onto this device with your phone. You'll set a PIN for it here.",
+            localized_copy("Restore brings this Cube onto this device with your phone. You'll set a PIN for it here."),
         ),
         Some(_) => (
             restore.status,
             tenshu::Tone::Good,
-            "Restore brings this Cube onto this device from its Recovery Kit. You'll set a PIN for it here.",
+            localized_copy("Restore brings this Cube onto this device from its Recovery Kit. You'll set a PIN for it here."),
         ),
         None if cube.has_recovery_kit => (
-            "Recovery Kit has no Master Seed",
+            localized_copy("Recovery Kit has no Master Seed"),
             tenshu::Tone::Warn,
-            "Its Recovery Kit holds no Master Seed, so it can't be restored from here. Restore it on the device where it was backed up, or import it with its recovery phrase.",
+            localized_copy("Its Recovery Kit holds no Master Seed, so it can't be restored from here. Restore it on the device where it was backed up, or import it with its recovery phrase."),
         ),
         None => (
-            "No Recovery Kit in Connect",
+            localized_copy("No Recovery Kit in Connect"),
             tenshu::Tone::Warn,
-            "Connect has this Cube's registration but not its keys, so it can't be restored from here. If another device still has this Cube, open it there and add a Recovery Kit, or import it with its recovery phrase.",
+            localized_copy("Connect has this Cube's registration but not its keys, so it can't be restored from here. If another device still has this Cube, open it there and add a Recovery Kit, or import it with its recovery phrase."),
         ),
     }
 }
@@ -888,7 +896,13 @@ fn ghost_details<'a>(
         .spacing(10)
         .push(face_fact(
             "Where",
-            face_words("In Connect, not on this device", 14.0, font::REGULAR, true).into(),
+            face_words(
+                localized_copy("In Connect, not on this device"),
+                14.0,
+                font::REGULAR,
+                true,
+            )
+            .into(),
         ))
         .push(face_fact(
             "Recovery",
@@ -921,7 +935,7 @@ fn ghost_details<'a>(
         .push(primary)
         .push(face_link(
             launcher_catalog::close_details_id(),
-            "Back",
+            CopyText::Back.get(),
             ViewMessage::Catalog(CatalogMessage::ClearSelection),
         ));
     // Three actions overrun the 364px face, so Delete takes its own line,
@@ -935,7 +949,7 @@ fn ghost_details<'a>(
             ViewMessage::DeleteCube(DeleteCubeMessage::ShowRemoteModal(cube.uuid.clone())),
         ))
         .push(face_words(
-            "Removes the registration only; no funds are touched.",
+            localized_copy("Removes the registration only; no funds are touched."),
             12.0,
             font::REGULAR,
             true,
@@ -1096,7 +1110,7 @@ fn remote_row<'a>(cube: &super::RemoteCube) -> Element<'a, ViewMessage> {
         .push(
             ActionButton::new(
                 launcher_catalog::remote_delete_id(&cube.uuid),
-                "Delete…",
+                localized_copy("Delete…"),
                 ActionKind::Destructive,
                 focus,
             )
@@ -1123,9 +1137,9 @@ fn table_header<'a>() -> Element<'a, ViewMessage> {
         .align_y(Alignment::Center)
         .push(Space::new().width(Length::Fixed(AVATAR_WIDTH)))
         .push(tenshu::caption("Cube").width(Length::Fill))
-        .push(tenshu::caption("Network").width(Length::Fixed(NETWORK_WIDTH)))
-        .push(tenshu::caption("Wallets").width(Length::Fixed(WALLETS_WIDTH)))
-        .push(tenshu::caption("Seed phrase").width(Length::Fixed(BACKUP_WIDTH)))
+        .push(tenshu::caption(CopyText::Network.get()).width(Length::Fixed(NETWORK_WIDTH)))
+        .push(tenshu::caption(localized_copy("Wallets")).width(Length::Fixed(WALLETS_WIDTH)))
+        .push(tenshu::caption(localized_copy("Seed phrase")).width(Length::Fixed(BACKUP_WIDTH)))
         .push(Space::new().width(Length::Fixed(ACTION_WIDTH)))
         .into()
 }
@@ -1148,16 +1162,21 @@ fn list_layout<'a>(
         .spacing(8)
         .align_y(Alignment::Center)
         .push(
-            TextInput::new("Search Cubes by name", &scene.query)
+            TextInput::new(localized_copy("Search Cubes by name"), &scene.query)
                 .id(search_id())
                 .on_input(|query| ViewMessage::Catalog(CatalogMessage::Query(query)))
                 .padding(10)
                 .width(Length::Fill),
         )
         .push((!scene.query.is_empty()).then(|| {
-            ActionButton::new(clear_id(), "Clear", ActionKind::Quiet, focus)
-                .compact()
-                .on_press(ViewMessage::Catalog(CatalogMessage::ClearQuery))
+            ActionButton::new(
+                clear_id(),
+                localized_copy("Clear"),
+                ActionKind::Quiet,
+                focus,
+            )
+            .compact()
+            .on_press(ViewMessage::Catalog(CatalogMessage::ClearQuery))
         }));
     let mut list = Column::new().spacing(8).width(Length::Fill).push(search);
     if projection.no_matches() && projection.query.trim().is_empty() {
@@ -1166,14 +1185,20 @@ fn list_layout<'a>(
         list = list.push(tenshu::card(
             Column::new()
                 .spacing(8)
-                .push(tenshu::body(format!(
+                .push(tenshu::body(localized_format!(
                     "No Cubes match “{}”.",
+                    "No Cubes coinciden con “{}”.",
                     scene.query.trim()
                 )))
                 .push(
-                    ActionButton::new(clear_empty_id(), "Clear search", ActionKind::Quiet, focus)
-                        .compact()
-                        .on_press(ViewMessage::Catalog(CatalogMessage::ClearQuery)),
+                    ActionButton::new(
+                        clear_empty_id(),
+                        localized_copy("Clear search"),
+                        ActionKind::Quiet,
+                        focus,
+                    )
+                    .compact()
+                    .on_press(ViewMessage::Catalog(CatalogMessage::ClearQuery)),
                 ),
         ));
     }
@@ -1202,7 +1227,9 @@ fn list_layout<'a>(
         }
     }
     if scene.local_total + scene.remote_total == 0 && !projection.no_matches() {
-        list = list.push(tenshu::card(tenshu::body("No Cubes on this network.")));
+        list = list.push(tenshu::card(tenshu::body(localized_copy(
+            "No Cubes on this network.",
+        ))));
     }
     let details = scene
         .selected
@@ -1267,7 +1294,7 @@ fn floor_slot<'a>(
         if row.actionable {
             unlock_prompt(row.cube)
         } else {
-            "Unavailable on this network"
+            localized_copy("Unavailable on this network")
         },
         dimmed,
     ))
@@ -1484,8 +1511,8 @@ fn resting_arrow<'a, M: 'a>(previous: bool, enabled: bool) -> Element<'a, M> {
 fn page_caption<'a, M: 'a>(page: usize, pages: usize) -> Element<'a, M> {
     Row::new()
         .push(Space::new().width(Length::Fixed(14.0)))
-        .push(tenshu::caption(format!(
-            "Page {} of {} · swipe, scroll sideways or use the arrow keys",
+        .push(tenshu::caption(localized_format!(
+            "Page {} of {} · swipe, scroll sideways or use the arrow keys", "Página {} de {} · deslizamiento, desplazamiento laterales o utilizar las teclas de flecha",
             page + 1,
             pages
         )))
@@ -1624,21 +1651,28 @@ fn empty_floor<'a>(home: &'a Home, width: f32, available: f32) -> Element<'a, Vi
     let lift = home.catalog.lift(&key, now);
     let words = Column::new()
         .push(face_words(
-            "Create Cube",
+            localized_copy("Create Cube"),
             20.0,
             coincube_ui::font::SEMIBOLD,
             false,
         ))
         .push(face_words(
             if at_limit {
-                "Cube limit reached"
+                localized_copy("Cube limit reached")
             } else {
-                "Click to get started"
+                localized_copy("Click to get started")
             },
             14.0,
             coincube_ui::font::REGULAR,
             true,
         ));
+    let welcome = if at_limit {
+        None
+    } else {
+        coincube_ui::worldview_copy::VoiceLine::Welcome.get()
+    };
+    let words = words
+        .push_maybe(welcome.map(|line| face_words(line, 14.0, coincube_ui::font::REGULAR, true)));
     // The plus sits beside the words, below the Cube, so nothing covers
     // the wireframe (Robert, 2026-11-03).
     let content = Column::new()
@@ -2188,7 +2222,7 @@ fn unlock_controls<'a, M: 'a>(
     // `.pn`: "Open <name>" at 20px semibold, then ` · <network>` muted.
     let heading = Row::new()
         .push(face_words(
-            format!("Open {}", crate::cube_display::name(&cube.name)),
+            localized_format!("Open {}", "Abrir {}", crate::cube_display::name(&cube.name)),
             20.0,
             coincube_ui::font::SEMIBOLD,
             false,
@@ -2438,6 +2472,9 @@ pub(crate) fn unlock_turn_with_floor_controls<'a, M: 'a + 'static>(
 pub(crate) struct OpeningFace<'a, M> {
     pub cube: &'a crate::app::settings::CubeSettings,
     pub quote: &'a Quote,
+    /// The previous quote while it crossfades into `quote`, and the
+    /// crossfade's progress from 0 to 1.
+    pub outgoing: Option<(&'a Quote, f32)>,
     pub stage: super::launcher_opening::Stage,
     pub stalled: bool,
     pub cancel: fn() -> M,
@@ -2475,6 +2512,62 @@ fn opening_words<'a>(
         })
 }
 
+/// A loading quote and its attribution.
+fn opening_quote<'a, M: 'a>(quote: &Quote, alpha: f32, quote_width: f32) -> Column<'a, M> {
+    use coincube_ui::font;
+    Column::new()
+        .align_x(Alignment::Center)
+        .push(
+            Container::new(
+                opening_words(
+                    quote.localized_text().to_owned(),
+                    22.0,
+                    font::REGULAR,
+                    Tone::Ink,
+                    alpha,
+                )
+                .line_height(1.5)
+                .align_x(iced::alignment::Horizontal::Center),
+            )
+            .max_width(quote_width),
+        )
+        .push(Space::new().height(Length::Fixed(12.0)))
+        .push(
+            opening_words(
+                format!("— {}, {}", quote.author, quote.source),
+                13.0,
+                font::REGULAR,
+                Tone::Muted,
+                alpha,
+            )
+            .align_x(iced::alignment::Horizontal::Center),
+        )
+}
+
+/// The current quote, crossfading from the last one while `outgoing` is set.
+fn opening_quotes<'a, M: 'a>(
+    face: &OpeningFace<'a, M>,
+    alpha: f32,
+    quote_width: f32,
+) -> Element<'a, M> {
+    let Some((last, t)) = face.outgoing else {
+        return opening_quote(face.quote, alpha, quote_width).into();
+    };
+    let incoming = opening_quote(face.quote, alpha * t, quote_width);
+    let outgoing = opening_quote(last, alpha * (1.0 - t), quote_width);
+    // The longer quote sizes the stack, and the shorter is centred over it,
+    // so neither is cut off mid-fade.
+    let (base, over) = if last.localized_text().len() > face.quote.localized_text().len() {
+        (outgoing, incoming)
+    } else {
+        (incoming, outgoing)
+    };
+    Stack::new()
+        .push(base)
+        .push(Container::new(over).center(Length::Fill))
+        .into()
+}
+
 /// `.lhead`, `.lquote`, `.lstage` and `.lslow`: the loading face's content.
 fn opening_content<'a, M: 'a>(
     face: &OpeningFace<'a, M>,
@@ -2489,7 +2582,7 @@ fn opening_content<'a, M: 'a>(
         .spacing(8)
         .align_y(Alignment::Center)
         .push(opening_words(
-            "Opening",
+            CopyText::Opening.get(),
             14.0,
             font::REGULAR,
             Tone::Muted,
@@ -2519,31 +2612,7 @@ fn opening_content<'a, M: 'a>(
             alpha,
         ))
         .push(Space::new().height(Length::Fixed(16.0)))
-        .push(
-            Container::new(
-                opening_words(
-                    face.quote.text.clone(),
-                    22.0,
-                    font::REGULAR,
-                    Tone::Ink,
-                    alpha,
-                )
-                .line_height(1.5)
-                .align_x(iced::alignment::Horizontal::Center),
-            )
-            .max_width(quote_width),
-        )
-        .push(Space::new().height(Length::Fixed(12.0)))
-        .push(
-            opening_words(
-                format!("— {}, {}", face.quote.author, face.quote.source),
-                13.0,
-                font::REGULAR,
-                Tone::Muted,
-                alpha,
-            )
-            .align_x(iced::alignment::Horizontal::Center),
-        )
+        .push(opening_quotes(face, alpha, quote_width))
         .push(Space::new().height(Length::Fixed(40.0)))
         .push(
             opening_words(
@@ -2555,15 +2624,30 @@ fn opening_content<'a, M: 'a>(
             )
             .line_height(iced::widget::text::LineHeight::Absolute(22.0.into())),
         );
+    use super::launcher_opening::Stage;
+    if !face.stalled
+        && matches!(
+            face.stage,
+            Stage::Scanning | Stage::Syncing | Stage::AlmostThere
+        )
+    {
+        if let Some(line) = coincube_ui::worldview_copy::VoiceLine::Syncing.get() {
+            body = body.push(opening_words(line, 13.0, font::REGULAR, Tone::Muted, alpha));
+        }
+    }
     if face.stalled {
         let (note, label, action) = if face.stage == super::launcher_opening::Stage::Spark {
             (
-                "Spark is taking longer than usual.",
-                "Continue without Spark",
+                CopyText::SparkOpeningSlow.get(),
+                CopyText::ContinueWithoutSpark.get(),
                 face.without_spark,
             )
         } else {
-            ("Taking longer than usual.", "Cancel", face.cancel)
+            (
+                CopyText::OpeningSlow.get(),
+                CopyText::Cancel.get(),
+                face.cancel,
+            )
         };
         body = body.push(Space::new().height(Length::Fixed(18.0))).push(
             Row::new()
@@ -2744,7 +2828,12 @@ fn opening_rail<'a, M: 'a>(scene: &OpeningScene) -> Element<'a, M> {
     // split the row with it and strand the network mid-bar.
     .lead(
         Container::new(
-            tenshu::body(format!("Opening {}", scene.cube_name)).wrapping(Wrapping::WordOrGlyph),
+            tenshu::body(
+                CopyText::OpeningCube
+                    .get()
+                    .replacen("{cube_name}", &scene.cube_name, 1),
+            )
+            .wrapping(Wrapping::WordOrGlyph),
         )
         .max_width(OPENING_RAIL_NAME),
     )
@@ -2798,6 +2887,97 @@ mod tests {
     use iced::Rectangle;
     use launcher_catalog::LauncherMode;
     use std::path::PathBuf;
+
+    #[test]
+    fn worldview_voice_survives_deferred_opening_layout_and_yields_to_stall_guidance() {
+        use super::super::launcher_opening::{Opening, Stage};
+        use coincube_ui::{theme::WorldviewMode, worldview_copy};
+
+        let cube = crate::app::settings::CubeSettings::new_with_raw_id(
+            "voice-opening".into(),
+            "Everyday".into(),
+            ChainId::Bitcoin,
+        );
+        let floor = floor_context(&cube);
+        let quote = coincube_ui::component::quote_display::random_quote("loading");
+        let now = std::time::Instant::now();
+        let opening = Opening::new(Some(floor.clone()), true, Stage::Syncing, now);
+        for stalled in [false, true] {
+            let view = worldview_copy::render_in(WorldviewMode::Luke, || {
+                opening_on_floor(
+                    &floor,
+                    OpeningFace {
+                        cube: &cube,
+                        quote: &quote,
+                        outgoing: None,
+                        stage: Stage::Syncing,
+                        stalled,
+                        cancel: || (),
+                        without_spark: || (),
+                    },
+                    coincube_ui::theme::palette::ThemeMode::Dark,
+                    &opening,
+                    now,
+                )
+            });
+            let mounted = capture::inspect_filled(
+                "worldview-voice-sync",
+                view,
+                (1024, 768),
+                "dark",
+                theme::Theme::dark().with_worldview(WorldviewMode::Luke),
+                (1024, 768),
+            );
+            assert!(mounted.contains(CopyText::SyncingBlockchain.get()));
+            assert_eq!(mounted.contains("Consulting the ancient rules…"), !stalled);
+        }
+    }
+
+    #[test]
+    fn spanish_cube_opening_survives_deferred_layout() {
+        use crate::home::launcher_opening::{Opening, Stage};
+        use coincube_ui::locale::{language, render_in, Language};
+
+        let cube = crate::app::settings::CubeSettings::new_with_raw_id(
+            "spanish-opening".into(),
+            "Everyday".into(),
+            ChainId::Bitcoin,
+        );
+        let floor = floor_context(&cube);
+        let quote = coincube_ui::component::quote_display::random_quote("loading");
+        let spanish_quote = render_in(Language::Spanish, || quote.localized_text().to_owned());
+        let now = std::time::Instant::now();
+        let opening = Opening::new(Some(floor.clone()), true, Stage::Connecting, now);
+        let view = render_in(Language::Spanish, || {
+            opening_on_floor(
+                &floor,
+                OpeningFace {
+                    cube: &cube,
+                    quote: &quote,
+                    outgoing: None,
+                    stage: Stage::Connecting,
+                    stalled: false,
+                    cancel: || (),
+                    without_spark: || (),
+                },
+                coincube_ui::theme::palette::ThemeMode::Dark,
+                &opening,
+                now,
+            )
+        });
+        assert_eq!(language(), Language::English);
+        let result = capture::inspect_filled(
+            "spanish-cube-opening",
+            view,
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+            (1024, 768),
+        );
+        assert!(result.contains("Conectando con el servicio de la cartera"));
+        assert!(result.contains(&spanish_quote));
+        assert_eq!(language(), Language::English);
+    }
 
     fn floor_context(
         cube: &crate::app::settings::CubeSettings,
@@ -4530,6 +4710,7 @@ mod tests {
                     let face = OpeningFace {
                         cube: &cube,
                         quote: &quote,
+                        outgoing: None,
                         stage: opening.stage(),
                         stalled: true,
                         cancel: || (),

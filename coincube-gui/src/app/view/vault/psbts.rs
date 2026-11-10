@@ -1,3 +1,4 @@
+use coincube_ui::locale::copy as localized_copy;
 use iced::{
     widget::{rule, text::Wrapping},
     Alignment, Length,
@@ -32,7 +33,7 @@ pub fn import_psbt_success_view<'a>() -> Element<'a, Message> {
     Column::new()
         .push(
             card::simple(Container::new(
-                text("PSBT is imported").style(theme::text::success),
+                text(localized_copy("PSBT is imported")).style(theme::text::success),
             ))
             .padding(50),
         )
@@ -51,21 +52,21 @@ pub fn psbts_view(
             Row::new()
                 .align_y(Alignment::Center)
                 .spacing(10)
-                .push(Container::new(h3("PSBT proposals").bold()).width(Length::Fill))
+                .push(Container::new(h3(localized_copy("PSBT proposals")).bold()).width(Length::Fill))
                 .push(
-                    button::secondary(Some(icon::restore_icon()), "Import PSBT")
+                    button::secondary(Some(icon::restore_icon()), localized_copy("Import PSBT"))
                         .on_press(Message::ImportPsbt),
                 )
                 .push(
-                    button::primary(Some(icon::plus_icon()), "Create PSBT")
+                    button::primary(Some(icon::plus_icon()), localized_copy("Create PSBT"))
                         .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Send))),
                 ),
         )
         .push(spend_txs.is_empty().then(|| {
             placeholder(
                 receipt_icon().size(80),
-                "No PSBTs yet",
-                "Create a proposal or import a PSBT from another signer. Imported signatures are checked before they can be broadcast.",
+                coincube_ui::locale::copy("No PSBTs yet"),
+                coincube_ui::locale::copy("Create a proposal or import a PSBT from another signer. Imported signatures are checked before they can be broadcast."),
             )
         }))
         .push((!spend_txs.is_empty()).then(|| {
@@ -93,17 +94,26 @@ fn table_header<'a>() -> Container<'a, Message> {
         Row::new()
             .align_y(Alignment::Center)
             .spacing(12)
-            .push(header_cell("Proposal", Length::FillPortion(PROPOSAL_SHARE)))
-            .push(header_cell("Amount", Length::FillPortion(AMOUNT_SHARE)))
             .push(header_cell(
-                "Recipients",
+                coincube_ui::locale::copy("Proposal"),
+                Length::FillPortion(PROPOSAL_SHARE),
+            ))
+            .push(header_cell(
+                coincube_ui::locale::copy("Amount"),
+                Length::FillPortion(AMOUNT_SHARE),
+            ))
+            .push(header_cell(
+                coincube_ui::locale::copy("Recipients"),
                 Length::FillPortion(RECIPIENTS_SHARE),
             ))
             .push(header_cell(
-                "Signatures",
+                coincube_ui::locale::copy("Signatures"),
                 Length::FillPortion(SIGNATURES_SHARE),
             ))
-            .push(header_cell("Status", Length::FillPortion(STATUS_SHARE))),
+            .push(header_cell(
+                coincube_ui::locale::copy("Status"),
+                Length::FillPortion(STATUS_SHARE),
+            )),
     )
     .padding(14)
     .width(Length::Fill)
@@ -140,13 +150,15 @@ fn spend_tx_list_view(
         &'static str,
         fn(&theme::Theme) -> iced::widget::container::Style,
     ) = match tx.status {
-        SpendStatus::Pending if tx.path_ready().is_some() => ("Fully signed", theme::pill::success),
-        SpendStatus::Pending if !tx.signers().is_empty() => {
-            ("Partially signed", theme::pill::warning)
+        SpendStatus::Pending if tx.path_ready().is_some() => {
+            (localized_copy("Fully signed"), theme::pill::success)
         }
-        SpendStatus::Pending => ("Not signed", theme::pill::simple),
-        SpendStatus::Broadcast => ("Unconfirmed", theme::pill::warning),
-        SpendStatus::Spent => ("Spent", theme::pill::success),
+        SpendStatus::Pending if !tx.signers().is_empty() => {
+            (localized_copy("Partially signed"), theme::pill::warning)
+        }
+        SpendStatus::Pending => (localized_copy("Not signed"), theme::pill::simple),
+        SpendStatus::Broadcast => (localized_copy("Unconfirmed"), theme::pill::warning),
+        SpendStatus::Spent => (localized_copy("Spent"), theme::pill::success),
         SpendStatus::Deprecated => ("Deprecated", theme::pill::simple),
     };
     spend_tx_list_view_with_status(i, tx, bitcoin_unit, mask_amounts, status)
@@ -172,7 +184,7 @@ pub(crate) fn spend_tx_list_view_with_status<'a>(
         .cloned()
         .unwrap_or_else(|| format!("PSBT {}…", &txid[..8]));
     let amount: Element<'_, Message> = if tx.is_send_to_self() {
-        p2_regular("Self-transfer").into()
+        p2_regular(localized_copy("Self-transfer")).into()
     } else if mask_amounts {
         p2_regular("••••••").into()
     } else {
@@ -186,7 +198,7 @@ pub(crate) fn spend_tx_list_view_with_status<'a>(
         };
         Row::new()
             .spacing(4)
-            .push(p2_regular("Fee").style(theme::text::secondary))
+            .push(p2_regular(localized_copy("Fee")).style(theme::text::secondary))
             .push(fee_amount)
             .into()
     });

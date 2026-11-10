@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use std::convert::TryFrom;
 use std::num::ParseFloatError;
 
@@ -204,20 +206,28 @@ impl FiatAmountConverter {
     pub fn to_container_summary<'a, M: 'a>(&self) -> Container<'a, M> {
         Container::new(
             Column::new()
-                .push(text(format!(
+                .push(text(localized_format!(
                     "Exchange rate: 1 BTC ~ {} {}",
+                    "Tipo de cambio: 1 BTC ≈ {} {}",
                     self.to_fiat_amount().to_formatted_string(),
                     self.currency()
                 )))
-                .push(text(format!("Source: {}", self.source())))
-                .push(text(format!(
-                    "Last updated at source: {}",
-                    self.updated_at()
-                        .map(|t| format!("{} seconds ago", now().as_secs().saturating_sub(t)))
-                        .unwrap_or("N/A".to_string())
+                .push(text(localized_format!(
+                    "Source: {}",
+                    "Fuente: {}",
+                    self.source()
                 )))
-                .push(text(format!(
+                .push(text(match self.updated_at() {
+                    Some(t) => localized_format!(
+                        "Last updated at source: {} seconds ago",
+                        "Última actualización en la fuente: hace {} segundos",
+                        now().as_secs().saturating_sub(t)
+                    ),
+                    None => localized_copy("Last updated at source: N/A").to_string(),
+                }))
+                .push(text(localized_format!(
                     "Last requested: {} seconds ago",
+                    "Última solicitud: hace {} segundos",
                     self.requested_at().elapsed().as_secs()
                 ))),
         )

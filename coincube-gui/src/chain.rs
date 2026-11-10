@@ -19,6 +19,7 @@
 //! required before daemon writes. The isolated managed local path instead uses
 //! the anonymous global flag and saved beta preference, with exact local-chain
 //! admission. Neither path enables generic startup.
+use coincube_ui::locale::Text as CopyText;
 
 pub use coincube_core::chain::{ChainId, UnknownChainId};
 
@@ -280,8 +281,8 @@ impl ChainIdExt for ChainId {
 /// Stable technical identity for transaction, signing, and address review.
 pub(crate) fn canonical_network_name(chain: ChainId) -> &'static str {
     match chain {
-        ChainId::Bitcoin => "Bitcoin SHA-256 · Mainnet",
-        ChainId::BitcoinBlake2b => "Bitcoin BLAKE2b · Mainnet",
+        ChainId::Bitcoin => CopyText::BitcoinSha256Mainnet.get(),
+        ChainId::BitcoinBlake2b => CopyText::BitcoinBlake2bMainnet.get(),
         ChainId::Testnet => "Bitcoin SHA-256 · Testnet",
         ChainId::Testnet4 => "Bitcoin SHA-256 · Testnet4",
         ChainId::Signet => "Bitcoin SHA-256 · Signet",

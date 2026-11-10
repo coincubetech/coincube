@@ -45,7 +45,7 @@ fn vault_display_name(wallet: &Wallet) -> &str {
         .alias
         .as_deref()
         .filter(|alias| !alias.trim().is_empty())
-        .unwrap_or("Unnamed Vault")
+        .unwrap_or_else(|| coincube_ui::locale::copy("Unnamed Vault"))
 }
 
 fn zero_balance_known(status: &SyncStatus, rescan_pending: bool) -> bool {
@@ -120,7 +120,7 @@ fn balance_label(
             unit.label()
         )
     } else {
-        "Check balance on Vault Overview".to_string()
+        coincube_ui::locale::copy("Check balance on Vault Overview").to_string()
     }
 }
 

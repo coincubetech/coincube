@@ -1,3 +1,5 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 use iced::{
     widget::{pick_list, text_input, Space},
     Alignment, Length,
@@ -138,7 +140,7 @@ impl BuySellPanel {
     ) -> iced::Element<'a, ViewMessage, theme::Theme> {
         Container::new(
             Column::new()
-                .push(text::h2("Buy/Sell").style(theme::text::primary))
+                .push(text::h2(localized_copy("Buy/Sell")).style(theme::text::primary))
                 .push(content)
                 .spacing(16)
                 .width(Length::Fill),
@@ -164,7 +166,7 @@ impl BuySellPanel {
             _ => unreachable!("entry presenter only accepts entry states"),
         };
         let mut column = Column::new()
-            .push(text::h2("Buy/Sell").style(theme::text::primary))
+            .push(text::h2(localized_copy("Buy/Sell")).style(theme::text::primary))
             .push(Self::entry_progress(step))
             .push(
                 Container::new(content)
@@ -184,12 +186,19 @@ impl BuySellPanel {
             column = column.push(
                 Row::new()
                     .push(
-                        text::p2_regular(format!("Country  {}", country.name))
-                            .style(theme::text::secondary),
+                        text::p2_regular(localized_format!(
+                            "Country  {}",
+                            "País  {}",
+                            country.name
+                        ))
+                        .style(theme::text::secondary),
                     )
                     .push(
-                        text::p2_regular(format!("Provider  {provider}"))
-                            .style(theme::text::secondary),
+                        text::p2_regular(localized_format!(
+                            "Provider  {provider}",
+                            "Proveedor  {provider}"
+                        ))
+                        .style(theme::text::secondary),
                     )
                     .spacing(24),
             );
@@ -216,10 +225,11 @@ impl BuySellPanel {
 
         let mut row = Row::new().spacing(12).width(Length::Fill);
         for (index, label) in ["Location", "Sign in", "Buy or sell"].iter().enumerate() {
+            let label = localized_copy(label);
             let step: iced::Element<'a, ViewMessage, theme::Theme> = if index < current {
                 Row::new()
                     .push(check_icon().style(theme::text::success))
-                    .push(text::p2_regular(*label).style(theme::text::secondary))
+                    .push(text::p2_regular(label).style(theme::text::secondary))
                     .spacing(4)
                     .align_y(Alignment::Center)
                     .into()
@@ -256,7 +266,7 @@ impl BuySellPanel {
                     Row::new()
                         .spacing(5)
                         .align_y(Alignment::Center)
-                        .push(text::text("Signing In").size(16))
+                        .push(text::text(localized_copy("Signing In")).size(16))
                         .push(
                             Container::new(spinner::typing_text_carousel(
                                 "...",
@@ -274,22 +284,22 @@ impl BuySellPanel {
             .height(Length::Fixed(44.0))
             .style(theme::button::primary)
         } else {
-            button::primary(None, "Continue")
+            button::primary(None, localized_copy("Continue"))
                 .on_press_maybe(valid_email.then_some(BuySellMessage::SubmitLogin))
                 .width(Length::Fill)
         };
 
         let col = iced::widget::column![
-            text::h3("Sign in to your account").style(theme::text::primary),
-            text::p2_medium("Email").style(theme::text::primary),
-            text_input("Email", email)
+            text::h3(localized_copy("Sign in to your account")).style(theme::text::primary),
+            text::p2_medium(localized_copy("Email")).style(theme::text::primary),
+            text_input(localized_copy("Email"), email)
                 .on_input(BuySellMessage::EmailChanged)
                 .on_submit_maybe((!*loading && valid_email).then_some(BuySellMessage::SubmitLogin))
                 .size(16)
                 .padding(15),
             submit_button,
             iced::widget::button(
-                text::p2_regular("Don't have an account? Sign up")
+                text::p2_regular(localized_copy("Don't have an account? Sign up"))
                     .style(theme::tenshu::text::accent),
             )
             .style(theme::button::link)
@@ -321,7 +331,7 @@ impl BuySellPanel {
                     Row::new()
                         .spacing(5)
                         .align_y(Alignment::Center)
-                        .push(text::text("Signing up").size(16))
+                        .push(text::text(localized_copy("Signing up")).size(16))
                         .push(
                             Container::new(spinner::typing_text_carousel(
                                 "...",
@@ -340,7 +350,7 @@ impl BuySellPanel {
             .style(theme::button::primary)
             .into()
         } else {
-            button::primary(None, "Continue")
+            button::primary(None, localized_copy("Continue"))
                 .on_press_maybe(
                     valid_email.then_some(ViewMessage::BuySell(BuySellMessage::SubmitRegistration)),
                 )
@@ -349,16 +359,18 @@ impl BuySellPanel {
         };
 
         iced::widget::column![
-            button::secondary(Some(previous_icon()), "Back")
+            button::secondary(Some(previous_icon()), localized_copy("Back"))
                 .width(Length::Fixed(150.0))
                 .on_press_maybe(
                     (!*loading).then_some(ViewMessage::BuySell(BuySellMessage::ResetWidget))
                 ),
-            text::h3("Create an Account").style(theme::text::primary),
-            text::p2_regular("Create a COINCUBE account to access Buy/Sell and other features")
-                .style(theme::text::secondary),
-            text::p2_medium("Email Address").style(theme::text::primary),
-            text_input("Email Address", email)
+            text::h3(localized_copy("Create an Account")).style(theme::text::primary),
+            text::p2_regular(localized_copy(
+                "Create a COINCUBE account to access Buy/Sell and other features",
+            ))
+            .style(theme::text::secondary),
+            text::p2_medium(localized_copy("Email Address")).style(theme::text::primary),
+            text_input(localized_copy("Email Address"), email)
                 .on_input(|i| ViewMessage::BuySell(BuySellMessage::EmailChanged(i)))
                 .on_submit_maybe(
                     (!*loading && valid_email)
@@ -393,13 +405,13 @@ impl BuySellPanel {
 
         let top_bar = Row::new()
             .push(
-                button::secondary(Some(previous_icon()), "Back")
+                button::secondary(Some(previous_icon()), localized_copy("Back"))
                     .width(Length::Fixed(150.0))
                     .on_press_maybe((!*sending).then_some(BuySellMessage::ResetWidget)),
             )
             .align_y(Alignment::Center);
 
-        let otp_input = text_input("Enter OTP code", otp)
+        let otp_input = text_input(localized_copy("Enter OTP code"), otp)
             .on_input(BuySellMessage::OtpChanged)
             .on_submit_maybe((!otp.is_empty() && !*sending).then_some(BuySellMessage::VerifyOtp))
             .size(16)
@@ -412,7 +424,7 @@ impl BuySellPanel {
                     Row::new()
                         .spacing(5)
                         .align_y(Alignment::Center)
-                        .push(text::text("Verifying").size(16))
+                        .push(text::text(localized_copy("Verifying")).size(16))
                         .push(
                             Container::new(spinner::typing_text_carousel(
                                 "...",
@@ -431,7 +443,7 @@ impl BuySellPanel {
             .style(theme::button::primary)
             .into()
         } else {
-            button::primary(None, "Verify OTP")
+            button::primary(None, localized_copy("Verify OTP"))
                 .on_press_maybe((!otp.is_empty()).then_some(BuySellMessage::VerifyOtp))
                 .width(Length::FillPortion(1))
                 .into()
@@ -440,7 +452,7 @@ impl BuySellPanel {
         // Action buttons
         let resend_enabled = !*sending && *cooldown == 0;
         let resend_button: iced::Element<BuySellMessage, theme::Theme> = if *cooldown > 0 {
-            let label = format!("Resend in {}s", cooldown);
+            let label = localized_format!("Resend in {}s", "Reenviar en {} s", cooldown);
             iced::widget::button(
                 Container::new(
                     Row::new()
@@ -457,7 +469,7 @@ impl BuySellPanel {
             .height(Length::Fixed(44.0))
             .into()
         } else {
-            button::secondary(Some(email_icon()), "Resend OTP")
+            button::secondary(Some(email_icon()), localized_copy("Resend OTP"))
                 .on_press_maybe(resend_enabled.then_some(BuySellMessage::SendOtp))
                 .width(Length::FillPortion(1))
                 .into()
@@ -472,9 +484,10 @@ impl BuySellPanel {
 
         let col = iced::widget::column![
             top_bar,
-            text::h3("Enter the OTP sent to your email").style(theme::text::primary),
+            text::h3(localized_copy("Enter the OTP sent to your email"))
+                .style(theme::text::primary),
             text::p2_regular(email).style(theme::text::secondary),
-            text::p2_medium("OTP code").style(theme::text::primary),
+            text::p2_medium(localized_copy("OTP code")).style(theme::text::primary),
             otp_input,
             action_buttons,
         ]
@@ -495,42 +508,48 @@ impl BuySellPanel {
         };
 
         iced::widget::column![
-            text::h3("Buy or sell").style(theme::text::primary),
-            button::secondary(Some(bitcoin_icon()), "Buy Bitcoin using Fiat Currencies")
-                .on_press(ViewMessage::BuySell(BuySellMessage::SelectBuyOrSell(
-                    BuyOrSell::Buy
-                )))
-                .style(if *buy_or_sell == Some(BuyOrSell::Buy) {
-                    theme::button::primary
-                } else {
-                    theme::button::secondary
-                })
-                .padding(18)
-                .width(Length::Fill),
-            button::secondary(Some(dollar_icon()), "Sell Bitcoin to a Fiat Currency")
-                .on_press(ViewMessage::BuySell(BuySellMessage::SelectBuyOrSell(
-                    BuyOrSell::Sell
-                )))
-                .style(if *buy_or_sell == Some(BuyOrSell::Sell) {
-                    theme::button::primary
-                } else {
-                    theme::button::secondary
-                })
-                .padding(18)
-                .width(Length::Fill),
+            text::h3(localized_copy("Buy or sell")).style(theme::text::primary),
+            button::secondary(
+                Some(bitcoin_icon()),
+                localized_copy("Buy Bitcoin using Fiat Currencies"),
+            )
+            .on_press(ViewMessage::BuySell(BuySellMessage::SelectBuyOrSell(
+                BuyOrSell::Buy
+            )))
+            .style(if *buy_or_sell == Some(BuyOrSell::Buy) {
+                theme::button::primary
+            } else {
+                theme::button::secondary
+            })
+            .padding(18)
+            .width(Length::Fill),
+            button::secondary(
+                Some(dollar_icon()),
+                localized_copy("Sell Bitcoin to a Fiat Currency"),
+            )
+            .on_press(ViewMessage::BuySell(BuySellMessage::SelectBuyOrSell(
+                BuyOrSell::Sell
+            )))
+            .style(if *buy_or_sell == Some(BuyOrSell::Sell) {
+                theme::button::primary
+            } else {
+                theme::button::secondary
+            })
+            .padding(18)
+            .width(Length::Fill),
             buy_or_sell.is_none().then(|| {
                 iced::widget::row![
-                    button::secondary(Some(history_icon()), "View Order History")
+                    button::secondary(Some(history_icon()), localized_copy("View Order History"))
                         .on_press(ViewMessage::BuySell(BuySellMessage::ViewHistory))
                         .width(Length::Shrink),
-                    button::secondary(Some(escape_icon()), "Log Out")
+                    button::secondary(Some(escape_icon()), localized_copy("Log Out"))
                         .on_press(ViewMessage::BuySell(BuySellMessage::LogOut))
                         .width(Length::Shrink)
                 ]
                 .spacing(10)
             }),
             buy_or_sell.is_some().then(|| {
-                button::primary(Some(globe_icon()), "Continue")
+                button::primary(Some(globe_icon()), localized_copy("Continue"))
                     .on_press_maybe(
                         detected_country
                             .is_some()
@@ -555,12 +574,16 @@ impl BuySellPanel {
 
         let col = match *manual {
             true => Column::new()
-                .push(text::h3("Location").style(theme::text::primary))
+                .push(text::h3(localized_copy("Location")).style(theme::text::primary))
                 .push(
-                    text::p2_regular("Choose your country to find an available provider.")
-                        .style(theme::text::secondary),
+                    text::p2_regular(localized_copy(
+                        "Choose your country to find an available provider.",
+                    ))
+                    .style(theme::text::secondary),
                 )
-                .push(text::p2_medium("Select Country:").style(theme::text::primary))
+                .push(
+                    text::p2_medium(localized_copy("Select Country:")).style(theme::text::primary),
+                )
                 .push(
                     pick_list(
                         crate::services::coincube::get_countries(),
@@ -574,16 +597,19 @@ impl BuySellPanel {
                         },
                     )
                     .padding(10)
-                    .placeholder("Select Country: "),
+                    .placeholder(localized_copy("Select Country: ")),
                 )
                 .align_x(Alignment::Start)
                 .spacing(16)
                 .width(Length::Fill),
             false => Column::new()
-                .push(text::h3("Location").style(theme::text::primary))
-                .push(text::p1_bold("Detecting your location...").style(theme::text::primary))
+                .push(text::h3(localized_copy("Location")).style(theme::text::primary))
                 .push(
-                    text::text("Please wait...")
+                    text::p1_bold(localized_copy("Detecting your location..."))
+                        .style(theme::text::primary),
+                )
+                .push(
+                    text::text(localized_copy("Please wait..."))
                         .size(14)
                         .style(theme::text::secondary),
                 )
@@ -660,6 +686,18 @@ mod entry_presenter_tests {
         ];
 
         for (name, step, detected_country, current) in &scenarios {
+            let spanish =
+                coincube_ui::locale::render_in(coincube_ui::locale::Language::Spanish, || {
+                    BuySellPanel::entry_view(step, *detected_country)
+                });
+            capture::inspect(
+                &format!("r19-buysell-{name}-es"),
+                spanish,
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+            )
+            .assert_spanish(&format!("Buy/Sell entry ({name})"));
             for (appearance, theme) in [
                 ("dark", theme::Theme::dark()),
                 ("light", theme::Theme::light()),

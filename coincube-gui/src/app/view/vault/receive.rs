@@ -1,5 +1,7 @@
+use coincube_ui::locale::copy as localized_copy;
 use std::collections::{HashMap, HashSet};
 
+use coincube_ui::locale::Text as CopyText;
 use iced::{
     advanced::widget::Id,
     widget::{
@@ -97,12 +99,12 @@ pub fn address_card<'a>(
             .push(
                 Row::new()
                     .push(
-                        button::secondary(None, "Verify on hardware device")
+                        button::secondary(None, localized_copy("Verify on hardware device"))
                             .on_press(Message::Select(row_index)),
                     )
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        button::secondary(None, "Show QR Code")
+                        button::secondary(None, localized_copy("Show QR Code"))
                             .on_press(Message::ShowQrCode(row_index)),
                     ),
             )
@@ -331,7 +333,7 @@ fn address_field<'a>(copy_id: Id, address: String) -> Element<'a, Message> {
         )
         .push(action(
             copy_id,
-            "Copy",
+            coincube_ui::locale::copy("Copy"),
             Some(icon::clipboard_icon()),
             Some(Message::VaultReceive(VaultReceiveMessage::Copy(address))),
             landing_subtle_button_style,
@@ -350,8 +352,8 @@ fn label_block<'a>(
         .push(
             Row::new()
                 .align_y(Alignment::Center)
-                .push(p2_bold("Label").width(Length::Fill))
-                .push(p2_regular("Optional").style(theme::text::secondary)),
+                .push(p2_bold(localized_copy("Label")).width(Length::Fill))
+                .push(p2_regular(localized_copy("Optional")).style(theme::text::secondary)),
         )
         .push(if let Some(label) = labels_editing.get(address) {
             label::label_editing(vec![address.to_string()], label, text::P1_SIZE)
@@ -372,14 +374,14 @@ fn address_actions<'a>(scope: Scope, row_index: usize, address: &str) -> Element
         .spacing(8)
         .push(action(
             address_control_id(scope, Control::Qr, address),
-            "Show QR code",
+            coincube_ui::locale::copy("Show QR code"),
             Some(icon::qr_code_icon()),
             Some(Message::ShowQrCode(row_index)),
             landing_subtle_button_style,
         ))
         .push(action(
             address_control_id(scope, Control::Verify, address),
-            "Verify on hardware device",
+            coincube_ui::locale::copy("Verify on hardware device"),
             Some(icon::usb_icon()),
             Some(Message::Select(row_index)),
             landing_subtle_button_style,
@@ -427,19 +429,21 @@ fn current_address<'a>(
         .push(
             Column::new()
                 .spacing(8)
-                .push(p2_bold("Bitcoin address"))
+                .push(p2_bold(localized_copy("Bitcoin address")))
                 .push(address_field(
                     address_control_id(Scope::Generated, Control::Copy, &addr),
                     addr.clone(),
                 ))
                 .push(
-                    p2_regular("Addresses are single-use. Generate a new one for each deposit.")
-                        .style(theme::text::secondary),
+                    p2_regular(localized_copy(
+                        "Addresses are single-use. Generate a new one for each deposit.",
+                    ))
+                    .style(theme::text::secondary),
                 ),
         )
         .push(action(
             address_control_id(Scope::Generated, Control::Verify, &addr),
-            "Verify on hardware device",
+            coincube_ui::locale::copy("Verify on hardware device"),
             Some(icon::usb_icon()),
             Some(Message::Select(row_index)),
             landing_subtle_button_style,
@@ -460,7 +464,10 @@ fn current_address<'a>(
     } else {
         Column::new()
             .spacing(12)
-            .push(p2_regular("QR code unavailable for this address.").style(theme::text::secondary))
+            .push(
+                p2_regular(localized_copy("QR code unavailable for this address."))
+                    .style(theme::text::secondary),
+            )
             .push(details)
             .into()
     }
@@ -478,7 +485,7 @@ fn route_tile<'a>(caption: &'static str, rail: &'static str) -> Element<'a, Mess
                     .push(icon::bitcoin_icon().style(accent_text))
                     .push(p1_bold("Bitcoin")),
             )
-            .push(p2_regular("Any amount").style(theme::text::secondary))
+            .push(p2_regular(localized_copy("Any amount")).style(theme::text::secondary))
             .push(
                 Container::new(
                     text(rail)
@@ -597,7 +604,7 @@ pub fn receive<'a>(
         current_address(i, address, current_qr, labels, labels_editing)
     } else if !prev_addresses.is_empty() {
         p2_regular(
-            "Generate a new address for this deposit. Earlier addresses still awaiting a deposit are listed below.",
+            localized_copy("Generate a new address for this deposit. Earlier addresses still awaiting a deposit are listed below."),
         )
         .style(theme::text::secondary)
         .into()
@@ -606,20 +613,26 @@ pub fn receive<'a>(
     } else {
         placeholder(
             icon::receive_icon().size(56),
-            "No addresses yet",
-            "Generate a new address to receive bitcoin. Always generate a new address for each deposit.",
+            coincube_ui::locale::copy("No addresses yet"),
+            coincube_ui::locale::copy("Generate a new address to receive bitcoin. Always generate a new address for each deposit."),
         )
     };
 
     let generate = {
         let style = generate_style(!addresses.is_empty());
         let label = if addresses.is_empty() {
-            "Generate address"
+            localized_copy("Generate address")
         } else {
-            "New address"
+            localized_copy("New address")
         };
         if generating {
-            action(generate_id(), "Generating address…", None, None, style)
+            action(
+                generate_id(),
+                coincube_ui::locale::copy("Generating address…"),
+                None,
+                None,
+                style,
+            )
         } else {
             action(
                 generate_id(),
@@ -645,9 +658,15 @@ pub fn receive<'a>(
                 Row::new()
                     .spacing(12)
                     .align_y(Alignment::Center)
-                    .push(route_tile("They send", "ON-CHAIN"))
+                    .push(route_tile(
+                        coincube_ui::locale::copy("They send"),
+                        coincube_ui::locale::copy("ON-CHAIN"),
+                    ))
                     .push(text("→").style(theme::text::secondary))
-                    .push(route_tile("You receive", "ON-CHAIN")),
+                    .push(route_tile(
+                        coincube_ui::locale::copy("You receive"),
+                        coincube_ui::locale::copy("ON-CHAIN"),
+                    )),
             ))
             .push(iced::widget::rule::horizontal(1))
             .push(card_section(body))
@@ -669,7 +688,7 @@ pub fn receive<'a>(
     let earlier = (addresses.len() > 1).then(|| -> Element<'a, Message> {
         Column::new()
             .spacing(12)
-            .push(p1_bold("Generated earlier in this session"))
+            .push(p1_bold(localized_copy("Generated earlier in this session")))
             .push(addresses.iter().enumerate().rev().skip(1).fold(
                 Column::new().spacing(12),
                 |col, (i, address)| {
@@ -694,8 +713,10 @@ pub fn receive<'a>(
                         .spacing(12)
                         .align_y(Alignment::Center)
                         .push(
-                            p1_bold("Previously generated addresses still awaiting deposit")
-                                .width(Length::Fill),
+                            p1_bold(localized_copy(
+                                "Previously generated addresses still awaiting deposit",
+                            ))
+                            .width(Length::Fill),
                         )
                         .push(if show_prev_addresses {
                             icon::collapsed_icon()
@@ -734,9 +755,9 @@ pub fn receive<'a>(
                     Action::new(
                         see_more_id(),
                         Container::new(p2_medium(if processing {
-                            "Fetching…"
+                            localized_copy("Fetching…")
                         } else {
-                            "See more"
+                            localized_copy("See more")
                         }))
                         .width(Length::Fill)
                         .align_x(iced::alignment::Horizontal::Center),
@@ -753,18 +774,20 @@ pub fn receive<'a>(
 
     let aside = Column::new()
         .spacing(8)
-        .push(p2_regular("Receiving into").style(theme::text::secondary))
+        .push(p2_regular(localized_copy("Receiving into")).style(theme::text::secondary))
         .push(p1_bold(format!("Vault · {vault_name}")))
         .push(p2_bold(balance_display))
         .push(iced::widget::rule::horizontal(1))
         .push(
-            p2_regular("On-chain deposits appear after the Vault syncs.")
-                .style(theme::text::secondary),
+            p2_regular(localized_copy(
+                "On-chain deposits appear after the Vault syncs.",
+            ))
+            .style(theme::text::secondary),
         )
         .push(
             Action::new(
                 control_id("activity"),
-                p2_medium("See all in Activity"),
+                p2_medium(localized_copy("See all in Activity")),
                 Message::FocusAction,
             )
             .padding([8, 0])
@@ -803,7 +826,7 @@ pub fn verify_address_modal<'a>(
     let addr = address.to_string();
     let devices: Element<'a, Message> = if hws.is_empty() {
         p2_regular(
-            "No hardware device detected. Connect and unlock a device that holds a key to this Vault.",
+            localized_copy("No hardware device detected. Connect and unlock a device that holds a key to this Vault."),
         )
         .style(theme::text::secondary)
         .into()
@@ -830,10 +853,10 @@ pub fn verify_address_modal<'a>(
                 Row::new()
                     .spacing(12)
                     .align_y(Alignment::Center)
-                    .push(h4_bold("Verify address on a device").width(Length::Fill))
+                    .push(h4_bold(localized_copy("Verify address on a device")).width(Length::Fill))
                     .push(action(
                         verify_close_id(),
-                        "Close",
+                        CopyText::Close.get(),
                         Some(icon::cross_icon()),
                         Some(Message::Close),
                         landing_subtle_button_style,
@@ -841,14 +864,14 @@ pub fn verify_address_modal<'a>(
             )
             .push(
                 p2_regular(
-                    "Select a device, then check that the address it shows matches this one exactly.",
+                    localized_copy("Select a device, then check that the address it shows matches this one exactly."),
                 )
                 .style(theme::text::secondary),
             )
             .push(
                 Column::new()
                     .spacing(8)
-                    .push(p2_bold("Address"))
+                    .push(p2_bold(CopyText::Address.get()))
                     .push(p2_regular(crate::chain::canonical_network_name(chain)))
                     .push(address_field(
                         address_control_id(Scope::VerifyModal, Control::Copy, &addr),
@@ -858,13 +881,13 @@ pub fn verify_address_modal<'a>(
             .push(
                 Row::new()
                     .align_y(Alignment::Center)
-                    .push(p2_bold("Derivation index").width(Length::Fill))
+                    .push(p2_bold(localized_copy("Derivation index")).width(Length::Fill))
                     .push(p2_regular(derivation_index.to_string()).font(font::MONO_REGULAR)),
             )
             .push(
                 Column::new()
                     .spacing(10)
-                    .push(p2_bold("Devices"))
+                    .push(p2_bold(localized_copy("Devices")))
                     .push(devices),
             ),
     )
@@ -884,10 +907,10 @@ pub fn qr_modal<'a>(qr: &'a qr_code::Data, _address: &'a String) -> Element<'a, 
                 Row::new()
                     .spacing(12)
                     .align_y(Alignment::Center)
-                    .push(p1_bold("Scan to pay this address").width(Length::Fill))
+                    .push(p1_bold(localized_copy("Scan to pay this address")).width(Length::Fill))
                     .push(action(
                         qr_close_id(),
-                        "Close",
+                        CopyText::Close.get(),
                         Some(icon::cross_icon()),
                         Some(Message::Close),
                         landing_subtle_button_style,
@@ -1709,6 +1732,33 @@ mod tests {
                 ),
                 Message::Close
             ));
+        }
+    }
+
+    #[test]
+    fn spanish_vault_address_review_preserves_address_network_and_index() {
+        use coincube_ui::locale::{render_in, Language};
+
+        let address = addr(3);
+        let index = ChildNumber::from_normal_idx(7).unwrap();
+        let chosen = HashSet::new();
+        for (appearance, theme) in themes() {
+            let view = render_in(Language::Spanish, || {
+                verify_address_modal(
+                    crate::chain::ChainId::Bitcoin,
+                    &[],
+                    &chosen,
+                    &address,
+                    &index,
+                )
+            });
+            let rendered =
+                capture::inspect("vault-address-review-es", view, COMPACT, appearance, theme);
+            assert!(rendered.contains("Bitcoin SHA-256 · Red principal"));
+            assert!(rendered.contains("Dirección"));
+            assert!(rendered.contains("No se detectó ningún dispositivo de firma"));
+            assert!(rendered.contains(&address.to_string()));
+            assert!(rendered.text.iter().any(|(value, _)| value == "7"));
         }
     }
 
