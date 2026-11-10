@@ -298,6 +298,42 @@ fn served_at_measures_age_on_the_connect_clock() {
     // A negative wire stamp is refused rather than converted into a valid one.
     assert_eq!(skewed(-5, 0), Err(Error::InvalidResponse));
 }
+
+#[test]
+fn a_slow_connect_clock_does_not_make_a_fresh_preflight_stale() {
+    // The desktop sent and judges at 10_000. `served_at` is Connect's clock.
+    let at = |observed_at: i64, served_at: i64| {
+        let mut body = response(ChainId::BitcoinBlake2b, observed_at);
+        body["data"]["served_at"] = json!(served_at);
+        parse(
+            StatusCode::OK,
+            &headers(),
+            &serde_json::to_vec(&body).unwrap(),
+            ChainId::BitcoinBlake2b,
+            &tx(),
+            tip(),
+            7,
+            policy(),
+            10_000,
+            10_000,
+        )
+    };
+    // Connect is two hours behind and served the observation at the same
+    // moment it took it, so server-side age is zero. Translation must land on
+    // the send time. Keeping 2_800 would be 7_200 s old and the 60 s policy
+    // would reject a usable proof.
+    assert_eq!(at(2_800, 2_800).unwrap().observed_at(), 10_000);
+    // Five seconds of server-side age still counts after the same skew.
+    assert_eq!(at(2_795, 2_800).unwrap().observed_at(), 9_995);
+    // An older API with no served_at keeps the server stamp, so this one is stale.
+    assert_eq!(
+        parse_value(StatusCode::OK, response(ChainId::BitcoinBlake2b, 2_800)),
+        Err(Error::Stale)
+    );
+    // A served_at that underflows the age subtraction must not be rewritten
+    // into the send time. The saturated stamp is in the future and is refused.
+    assert_eq!(at(10_000, i64::MIN), Err(Error::Stale));
+}
 #[test]
 fn rejection_is_evidence_but_arbitrary_diagnostics_are_refused() {
     let mut body = response(ChainId::BitcoinBlake2b, 10000);
