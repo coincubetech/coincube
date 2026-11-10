@@ -320,7 +320,7 @@ fn payment_checks_section<'a>(
             page::rows(rows),
         ))
         .push(page::caption(
-            "A check never guarantees who the recipient is. Unverifiable recipients show as \u{201c}Not verified\u{201d}.",
+            "A check never guarantees who the recipient is. Unverifiable recipients show as \u{201c}Not identified\u{201d}.",
         ))
         .push(page::saved_line(saved));
     dashboard(menu, cache, content)

@@ -8,7 +8,8 @@ Bitcoin addresses, BOLT12, LNURL or Lightning addresses. Ark and silent-payment
 support in the SDK does not enable those payment routes in Tenshu.
 
 The setting is local `global_settings.json:recipient_identity_checks`, exposed
-in Cube Settings / General. New and older installations default on. Turning it
+in Cube Settings / Payment checks ("Recipient checks"). It is device-wide: it
+applies to every Cube on this device. New and older installations default on. Turning it
 off invalidates outstanding privacy tickets, cancels their asynchronous work and
 hides old identity results across tabs. No lookup or logo client starts while
 disabled. Turning it on enables future preparation only. No account synchronization,
@@ -21,6 +22,24 @@ can observe lookup timing and the connecting network address. Only an explicit
 "View with Branta" click opens the SDK verification URL; the secret-bearing URL
 is neither displayed nor logged. Opening Branta's privacy link is also an explicit
 user action, not a lookup or prefetch.
+
+## Where identity appears
+
+- **Spark send**: the review shows a "Recipient identity (Branta)" status row.
+  It reads "Identified · {platform}" when a current identity is bound to the
+  prepared payment, "Not identified" when checks are on but nothing was
+  identified (including every silent failure), and "Checks off" with a
+  "Turn on in Settings" link to Payment checks when the setting is disabled.
+  "Identified" names who posted the request; it is not a safety verdict.
+- **VAULT PSBT review**: when a pending, broadcast-ready PSBT has exactly one
+  external (non-change) output with a current identity, a single "Recipient
+  identity" summary card shows that output's address and amount with its
+  identity card(s). Multi-recipient PSBTs keep the per-output cards instead, so
+  each identity stays next to its own output.
+- **Broadcast modal**: the identity card for each output appears again before
+  broadcast.
+- Each identity card reads "Recipient identified" with platform, optional logo
+  and description, and a "View with Branta" button.
 
 ## Payment correctness
 
