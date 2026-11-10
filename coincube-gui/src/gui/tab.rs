@@ -1163,6 +1163,32 @@ impl Tab {
     /// for the afternoon.
     const IDLE_LOCK_AFTER: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+    /// Admit the proposal or discard the rejected builder and show a locked launcher.
+    #[cfg(feature = "mcp-proposals")]
+    fn open_mcp_proposal_handoff(
+        &mut self,
+        mut install: Installer,
+        settings: app::local_mcp::Settings,
+        proposal: installer::proposal::Session,
+    ) -> Task<Message> {
+        match install.use_mcp_proposal(settings, proposal) {
+            Ok(task) => {
+                self.state = State::Installer(Box::new(install));
+                task.map(Message::Install)
+            }
+            Err(error) => {
+                let root = install.datadir.clone();
+                let chain = install.context.bitcoin_config.chain;
+                install.stop();
+                drop(install);
+                let (mut home, task) = Home::new_for_chain(root, Some(chain));
+                home.set_error(error);
+                self.state = State::Home(home);
+                task.map(Message::Launch)
+            }
+        }
+    }
+
     /// Emit the pending migration warning once the tab is actually in `App`.
     ///
     /// Open a Bitcoin Blake2b Cube that has no Vault yet. It lands where a
@@ -3366,7 +3392,7 @@ impl Tab {
                             false,
                             app.authenticated_coincube_client(),
                         ) {
-                            Ok((mut install, _)) => {
+                            Ok((install, _)) => {
                                 let client = match review {
                                     app::local_mcp::Message::ReviewPairedProposal(id) => {
                                         Some(id.as_str())
@@ -3377,9 +3403,7 @@ impl Tab {
                                 else {
                                     return Task::none();
                                 };
-                                let task = install.use_mcp_proposal(settings, session);
-                                self.state = State::Installer(Box::new(install));
-                                task.map(Message::Install)
+                                self.open_mcp_proposal_handoff(install, settings, session)
                             }
                             Err(error) => Task::done(Message::Run(app::Message::View(
                                 app::view::Message::ShowError(error.to_string()),
@@ -8011,6 +8035,50 @@ mod mcp_proposal_routing_tests {
             )));
             assert!(matches!(tab.state, State::Home(_)));
             assert!(!proposal.active());
+            assert!(!crate::app::session::is_open());
+        }
+    }
+    #[test]
+    fn rejected_proposal_handoff_returns_to_the_native_chain_with_an_error() {
+        use crate::chain::ChainId;
+        let _guard = crate::app::session::test_guard();
+        for (target, proposed) in [
+            (ChainId::Bitcoin, ChainId::BitcoinBlake2b),
+            (ChainId::BitcoinBlake2b, ChainId::Bitcoin),
+        ] {
+            let root = TestDir::new();
+            let (prepared, original) = proposal_tab_on_chain(root.path(), target);
+            let State::Installer(mut install) = prepared.state else {
+                panic!()
+            };
+            install.context.mcp_proposal = None;
+            drop(original);
+
+            let foreign = TestDir::new();
+            let (mut context, session) =
+                crate::installer::proposal::tests::fixture_for_chain(foreign.path(), proposed);
+            context.mcp_proposal = None;
+            drop(context);
+            let session = Arc::try_unwrap(session).ok().unwrap();
+            assert!(session.active());
+            let (home, startup) = Home::new_for_chain(
+                CoincubeDirectory::new(root.path().to_path_buf()),
+                Some(target),
+            );
+            drop(startup);
+            let mut tab = Tab::new(1, State::Home(home));
+            drop(tab.open_mcp_proposal_handoff(
+                *install,
+                app::local_mcp::Settings::default(),
+                session,
+            ));
+            let State::Home(home) = &tab.state else {
+                panic!("a refused handoff must discard the ordinary installer")
+            };
+            assert_eq!(home.chain_for_test(), target);
+            assert_eq!(home.error(), Some(
+                "This proposal belongs to a different network than this Cube. Reopen the Cube and prepare a new proposal."
+            ));
             assert!(!crate::app::session::is_open());
         }
     }
