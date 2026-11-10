@@ -212,7 +212,7 @@ class Phone:
     def refresh(self):
         self.driver.execute_script("mobile: swipe", {"direction": "down"})
 
-    def click_card(self, title):
+    def click_card(self, title, timeout=15):
         """A known card title may be the first line of a merged AX label."""
         from appium.webdriver.common.appiumby import AppiumBy
         if not title or title.isdigit() or "\n" in title:
@@ -221,10 +221,18 @@ class Phone:
         predicate = ('visible == true AND enabled == true AND '
                      '(type == "XCUIElementTypeStaticText" OR type == "XCUIElementTypeButton") AND '
                      f'(label == {exact} OR name == {exact} OR label BEGINSWITH {prefix} OR name BEGINSWITH {prefix})')
-        elements = self.driver.find_elements(AppiumBy.IOS_PREDICATE, predicate)
-        if len(elements) != 1:
-            raise Blocked("PHONE_SELECTOR", "Expected exactly one visible, enabled card with the intended title line.")
-        elements[0].click()
+        until = time.monotonic() + timeout
+        while True:
+            elements = self.driver.find_elements(AppiumBy.IOS_PREDICATE, predicate)
+            if len(elements) == 1:
+                elements[0].click()
+                return
+            # The chooser can expose its title before hardware capability
+            # checks enable the card. Wait only for absence, never ambiguity,
+            # and never retry a click whose result could be uncertain.
+            if len(elements) > 1 or time.monotonic() >= until:
+                raise Blocked("PHONE_SELECTOR", "Expected exactly one visible, enabled card with the intended title line.")
+            time.sleep(.25)
 
     def restore_navigation(self):
         # noReset preserves the route left by a previous attempt. Only dismiss

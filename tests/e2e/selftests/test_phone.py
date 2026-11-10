@@ -189,3 +189,36 @@ def test_merged_card_selector_refuses_ambiguous_ancestors():
     with pytest.raises(Blocked) as error:
         phone.click_card('Use a PIN')
     assert error.value.code == 'PHONE_SELECTOR'
+
+
+def test_setup_card_waits_for_readiness_without_broadening_predicate(monkeypatch):
+    waits, clicks, queries = [], [], []
+    results = iter([[], [], [SimpleNamespace(click=lambda: clicks.append(True))]])
+    def find(by, predicate):
+        queries.append((by, predicate))
+        return next(results)
+    monkeypatch.setattr('harness.phone.time.sleep', waits.append)
+    phone = Phone(SimpleNamespace(find_elements=find), 37)
+    phone.click_card('Use a PIN')
+    assert waits == [.25, .25]
+    assert clicks == [True]
+    assert len(set(queries)) == 1
+
+
+def test_setup_card_absence_is_bounded_and_never_clicks():
+    phone = Phone(SimpleNamespace(find_elements=lambda *args: []), 37)
+    with pytest.raises(Blocked) as error:
+        phone.click_card('Use a PIN', timeout=0)
+    assert error.value.code == 'PHONE_SELECTOR'
+
+
+def test_setup_card_never_retries_an_uncertain_click(monkeypatch):
+    clicks = []
+    def click():
+        clicks.append(True)
+        raise RuntimeError('Synthetic lost click response')
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: pytest.fail('must not retry'))
+    phone = Phone(SimpleNamespace(find_elements=lambda *args: [SimpleNamespace(click=click)]), 37)
+    with pytest.raises(RuntimeError):
+        phone.click_card('Use a PIN')
+    assert clicks == [True]
