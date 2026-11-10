@@ -362,7 +362,7 @@ dependencies = [
 [[package]]
 name = "breez-sdk-common"
 version = "0.1.0"
-source = "git+https://github.com/coincubetech/spark-sdk?rev=4610640b019ef960aa59493cb4f43076d1a4073f#4610640b019ef960aa59493cb4f43076d1a4073f"
+source = "git+https://github.com/breez/spark-sdk?tag=0.28.1#a296fb0cfe5d9759e911a282c043698341b66025"
 dependencies = [
  "aes",
  "anyhow",
@@ -398,7 +398,7 @@ dependencies = [
 [[package]]
 name = "breez-sdk-spark"
 version = "0.1.0"
-source = "git+https://github.com/coincubetech/spark-sdk?rev=4610640b019ef960aa59493cb4f43076d1a4073f#4610640b019ef960aa59493cb4f43076d1a4073f"
+source = "git+https://github.com/breez/spark-sdk?tag=0.28.1#a296fb0cfe5d9759e911a282c043698341b66025"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -957,7 +957,7 @@ checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 [[package]]
 name = "flashnet"
 version = "0.1.0"
-source = "git+https://github.com/coincubetech/spark-sdk?rev=4610640b019ef960aa59493cb4f43076d1a4073f#4610640b019ef960aa59493cb4f43076d1a4073f"
+source = "git+https://github.com/breez/spark-sdk?tag=0.28.1#a296fb0cfe5d9759e911a282c043698341b66025"
 dependencies = [
  "async-trait",
  "base64",
@@ -1820,7 +1820,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "lnurl-models"
 version = "0.1.0"
-source = "git+https://github.com/coincubetech/spark-sdk?rev=4610640b019ef960aa59493cb4f43076d1a4073f#4610640b019ef960aa59493cb4f43076d1a4073f"
+source = "git+https://github.com/breez/spark-sdk?tag=0.28.1#a296fb0cfe5d9759e911a282c043698341b66025"
 dependencies = [
  "serde",
  "sha2",
@@ -1883,7 +1883,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "macros"
 version = "0.1.0"
-source = "git+https://github.com/coincubetech/spark-sdk?rev=4610640b019ef960aa59493cb4f43076d1a4073f#4610640b019ef960aa59493cb4f43076d1a4073f"
+source = "git+https://github.com/breez/spark-sdk?tag=0.28.1#a296fb0cfe5d9759e911a282c043698341b66025"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2043,7 +2043,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 [[package]]
 name = "platform-utils"
 version = "0.1.0"
-source = "git+https://github.com/coincubetech/spark-sdk?rev=4610640b019ef960aa59493cb4f43076d1a4073f#4610640b019ef960aa59493cb4f43076d1a4073f"
+source = "git+https://github.com/breez/spark-sdk?tag=0.28.1#a296fb0cfe5d9759e911a282c043698341b66025"
 dependencies = [
  "async-trait",
  "base64",
@@ -2887,7 +2887,7 @@ dependencies = [
 [[package]]
 name = "spark"
 version = "0.1.0"
-source = "git+https://github.com/coincubetech/spark-sdk?rev=4610640b019ef960aa59493cb4f43076d1a4073f#4610640b019ef960aa59493cb4f43076d1a4073f"
+source = "git+https://github.com/breez/spark-sdk?tag=0.28.1#a296fb0cfe5d9759e911a282c043698341b66025"
 dependencies = [
  "async-trait",
  "base64",
@@ -2950,7 +2950,7 @@ dependencies = [
 [[package]]
 name = "spark-sqlite"
 version = "0.1.0"
-source = "git+https://github.com/coincubetech/spark-sdk?rev=4610640b019ef960aa59493cb4f43076d1a4073f#4610640b019ef960aa59493cb4f43076d1a4073f"
+source = "git+https://github.com/breez/spark-sdk?tag=0.28.1#a296fb0cfe5d9759e911a282c043698341b66025"
 dependencies = [
  "async-trait",
  "macros",
@@ -2965,7 +2965,7 @@ dependencies = [
 [[package]]
 name = "spark-wallet"
 version = "0.1.0"
-source = "git+https://github.com/coincubetech/spark-sdk?rev=4610640b019ef960aa59493cb4f43076d1a4073f#4610640b019ef960aa59493cb4f43076d1a4073f"
+source = "git+https://github.com/breez/spark-sdk?tag=0.28.1#a296fb0cfe5d9759e911a282c043698341b66025"
 dependencies = [
  "bitcoin",
  "frost-secp256k1-tr",
@@ -3592,7 +3592,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "utils"
 version = "0.1.0"
-source = "git+https://github.com/coincubetech/spark-sdk?rev=4610640b019ef960aa59493cb4f43076d1a4073f#4610640b019ef960aa59493cb4f43076d1a4073f"
+source = "git+https://github.com/breez/spark-sdk?tag=0.28.1#a296fb0cfe5d9759e911a282c043698341b66025"
 dependencies = [
  "aes-gcm",
  "getrandom 0.2.17",

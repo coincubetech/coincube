@@ -56,16 +56,21 @@ coincube-spark-protocol = { path = "../coincube-spark-protocol" }
 # Upstream commit 7ba9363a ("Flashnet: validate pool data and swap responses")
 # fixed it; never pin below that.
 #
-# Pinned to the coincubetech fork: upstream tag 0.28.1 plus one commit,
-# branch `coincube/0.28.1-pool-outlier-filter` (proposed to Breez): drop
-# pools priced more than 2x from the deepest pool's before scoring. Upstream
-# validates each pool against itself only, so a pool funded with a few sats
-# at an absurd, tick-corroborated price can still win on fee efficiency.
-# The rest of the old 0.25.0 hardening series (per-pool listing parse with a
-# null host, conversion backoff, `StableBalanceConversionFailed`) is upstream
-# as of 0.28.0. Drop back to an upstream tag once a release carries the
-# filter. Keep `rev` pinned — the fork branch is not otherwise frozen.
-breez-sdk-spark = { git = "https://github.com/coincubetech/spark-sdk", rev = "4610640b019ef960aa59493cb4f43076d1a4073f", features = [
+# 0.28.0+ is required: 0.25.0 fails the whole Flashnet pool listing when any
+# pool has a field its model can't take (`"hostName": null` appeared on
+# mainnet BTC/USDB on 2026-09-11), so every conversion reports
+# `NoPoolsAvailable`. Upstream commit a781273b fixed it. 0.28.0 also brings
+# the backoff for failed Stable Balance conversions and
+# `SdkEvent::StableBalanceConversionFailed`, which until then came from the
+# coincubetech fork (`coincube/0.25.0-stable-balance-hardening`).
+#
+# That fork's fourth commit, dropping pools priced far from the deepest
+# pool's, is deliberately not carried: Breez declined it (breez/spark-sdk#1114)
+# with fake pools that slip past it or even make the real pool the one
+# dropped. A pool can still win selection on a price it has almost no
+# liquidity behind; the conversion then fails at the AMM, and the bridge's
+# circuit breaker pauses auto-convert. See docs/SPARK_WALLET.md.
+breez-sdk-spark = { git = "https://github.com/breez/spark-sdk", tag = "0.28.1", features = [
     "sqlite",
 ] }
 async-trait = "0.1"
