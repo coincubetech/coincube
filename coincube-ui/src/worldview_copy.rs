@@ -56,8 +56,8 @@ impl VoiceLine {
 
         let (english, spanish) = match (self, mode) {
             (Profile, Samurai) => (
-                "Quiet discipline. Elegant simplicity. No ideological baggage.",
-                "Disciplina serena. Sencillez elegante. Sin carga ideológica.",
+                "Quiet discipline. Elegant simplicity. Tend to what is yours to control.",
+                "Disciplina serena. Sencillez elegante. Ocúpate de lo que está en tu control.",
             ),
             (Profile, Suitcoiner) => (
                 "Institutions are here. Number go up. Everything is fine.",

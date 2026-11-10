@@ -61,53 +61,303 @@ fn language_row<'a>(selected: Language, enabled: bool) -> Element<'a, Message> {
     .description(CopyText::LanguageDescription.get())
     .into()
 }
-fn worldview_row<'a>(selected: WorldviewMode, enabled: bool) -> Element<'a, Message> {
-    let tagline = match selected {
-        WorldviewMode::Samurai => CopyText::TheWayOfTheBitcoin.get(),
-        WorldviewMode::Suitcoiner => CopyText::TheMarketHasSpoken.get(),
-        WorldviewMode::Luke => CopyText::NoSpamShallPass.get(),
+/// Bitcoin Worldview spans the reading width instead of a two-column row:
+/// the label, a choice per mode with its tagline, then what the selected
+/// mode changes (network names and example wording), so the choice is made
+/// on facts rather than on a tagline alone.
+fn worldview_row<'a>(saved: DevicePreferences, enabled: bool) -> Element<'a, Message> {
+    use coincube_ui::theme::tenshu::{control, space, type_size};
+    use iced::widget::Space;
+
+    let selected = saved.worldview;
+    let muted = |content: String, size: f32| {
+        tenshu_text::body(content)
+            .size(size)
+            .style(theme::text::secondary)
     };
+    let tag = container(tenshu_text::caption(CopyText::ThisDevice.get()))
+        .padding([0.0, 6.0])
+        .style(control::tag);
+    let heading = Row::new()
+        .spacing(24)
+        .align_y(Alignment::Start)
+        .push(
+            Column::new()
+                .spacing(2)
+                .width(Length::Fill)
+                .push(tenshu_text::label(CopyText::BitcoinWorldview.get()))
+                .push(muted(
+                    CopyText::WorldviewDescription.get().to_owned(),
+                    type_size::CHIP,
+                )),
+        )
+        .push(
+            container(tag)
+                .width(Length::Fixed(TAG_COLUMN))
+                .align_x(iced::alignment::Horizontal::Right),
+        );
+
+    let modes = [
+        (
+            WorldviewMode::Samurai,
+            "Samurai",
+            CopyText::TheWayOfTheBitcoin.get(),
+            "tenshu.preferences.worldview.samurai",
+        ),
+        (
+            WorldviewMode::Suitcoiner,
+            "Suitcoiner",
+            CopyText::TheMarketHasSpoken.get(),
+            "tenshu.preferences.worldview.suitcoiner",
+        ),
+        (
+            WorldviewMode::Luke,
+            "Luke",
+            CopyText::NoSpamShallPass.get(),
+            "tenshu.preferences.worldview.luke",
+        ),
+    ];
+    let mode_name = modes
+        .iter()
+        .find(|(mode, ..)| *mode == selected)
+        .map_or("Samurai", |(_, name, ..)| *name);
+    let choices = IntoIterator::into_iter(modes).fold(
+        Row::new().spacing(space::S),
+        |row, (mode, name, tagline, id)| {
+            let is_selected = mode == selected;
+            let title = Row::new()
+                .spacing(space::S)
+                .align_y(Alignment::Center)
+                .push(
+                    tenshu_text::label(name)
+                        .font(font::SEMIBOLD)
+                        .width(Length::Fill),
+                )
+                .push(is_selected.then(|| {
+                    check_circle_icon()
+                        .size(16)
+                        .style(theme::tenshu::text::accent)
+                }));
+            let tagline = tenshu_text::body(tagline)
+                .size(type_size::CHIP)
+                .style(if is_selected {
+                    theme::text::primary
+                } else {
+                    theme::text::secondary
+                });
+            row.push(
+                FocusableAction::new(
+                    id,
+                    Column::new().spacing(2).push(title).push(tagline),
+                    Message::FocusAction,
+                )
+                .width(Length::Fill)
+                .padding([10, 14])
+                .style(move |theme, status| control::choice_chip(theme, status, is_selected))
+                .on_press_maybe(
+                    enabled.then_some(Message::Change(PreferenceChange::Worldview(mode))),
+                ),
+            )
+        },
+    );
+
+    let section_title = |content: String| {
+        tenshu_text::body(content)
+            .size(type_size::CHIP)
+            .font(font::SEMIBOLD)
+            .style(theme::text::secondary)
+    };
+
+    // Names come from the same registry the passive labels use; the
+    // BLAKE2b row appears only where that network is switched on.
+    let mut chains = vec![crate::chain::ChainId::Bitcoin];
+    if saved.bitcoin_blake2b_beta {
+        chains.push(crate::chain::ChainId::BitcoinBlake2b);
+    }
+    let names = chains.into_iter().enumerate().fold(
+        Column::new()
+            .spacing(space::M)
+            .push(section_title(coincube_ui::localized_format!(
+                "Network names in {mode_name}",
+                "Nombres de red en {mode_name}"
+            ))),
+        |column, (index, chain)| {
+            let display = crate::chain::worldview_chain_label(chain, selected);
+            let unchanged =
+                display == crate::chain::worldview_chain_label(chain, WorldviewMode::Samurai);
+            let name = Row::new()
+                .spacing(space::S)
+                .align_y(Alignment::Center)
+                .push(
+                    tenshu_text::body(display)
+                        .size(17)
+                        .font(font::SEMIBOLD)
+                        .style(if unchanged {
+                            theme::text::primary
+                        } else {
+                            theme::tenshu::text::accent
+                        }),
+                )
+                .push(unchanged.then(|| {
+                    tenshu_text::caption(coincube_ui::localized_format!("Unchanged", "Sin cambios"))
+                }));
+            column.push((index > 0).then(horizontal_rule)).push(
+                Column::new()
+                    .spacing(2)
+                    .push(tenshu_text::caption(crate::chain::canonical_network_name(
+                        chain,
+                    )))
+                    .push(name),
+            )
+        },
+    );
 
     use coincube_ui::worldview_copy::VoiceLine;
     let profile = VoiceLine::Profile.for_mode(selected).unwrap_or_default();
-    let note = match VoiceLine::Consensus.for_mode(selected) {
-        Some(consensus) => format!("{tagline}\n{profile}\n{consensus}"),
-        None => format!("{tagline}\n{profile}"),
+    let mut wording = Column::new()
+        .spacing(space::XS)
+        .push(section_title(coincube_ui::localized_format!(
+            "Example wording",
+            "Texto de ejemplo"
+        )))
+        .push(Space::new().height(space::XS))
+        .push(tenshu_text::body(profile).size(15).font(font::MEDIUM))
+        .push(
+            VoiceLine::Consensus
+                .for_mode(selected)
+                .map(|line| muted(line.to_owned(), type_size::CHIP)),
+        );
+    // Samurai has no voice lines, so it shows the wording those screens
+    // use in every mode instead of inventing any.
+    let amount = format!("[{}]", localized_copy("Amount"));
+    let examples: [(String, String); 4] = if selected == WorldviewMode::Samurai {
+        [
+            (
+                coincube_ui::localized_format!("Welcome", "Bienvenida"),
+                localized_copy("Click to get started").to_owned(),
+            ),
+            (
+                coincube_ui::localized_format!("Empty activity", "Actividad vacía"),
+                localized_copy("No transactions yet").to_owned(),
+            ),
+            (
+                coincube_ui::localized_format!("Payment sent", "Pago enviado"),
+                format!("{amount} {}", CopyText::HasBeenSentSuccessfully.get()),
+            ),
+            (
+                localized_copy("Syncing").to_owned(),
+                CopyText::ScanningTheBlockchain.get().to_owned(),
+            ),
+        ]
+    } else {
+        let line = |voice: VoiceLine| voice.for_mode(selected).unwrap_or_default().to_owned();
+        [
+            (
+                coincube_ui::localized_format!("Welcome", "Bienvenida"),
+                line(VoiceLine::Welcome),
+            ),
+            (
+                coincube_ui::localized_format!("Empty Vault", "Vault vacío"),
+                line(VoiceLine::EmptySha256Vault),
+            ),
+            (
+                coincube_ui::localized_format!("Payment sent", "Pago enviado"),
+                line(VoiceLine::PaymentSent),
+            ),
+            (
+                localized_copy("Syncing").to_owned(),
+                line(VoiceLine::Syncing),
+            ),
+        ]
     };
+    wording = wording
+        .push(Space::new().height(space::S))
+        .push(horizontal_rule());
+    if selected == WorldviewMode::Samurai {
+        wording = wording.push(muted(
+            coincube_ui::localized_format!(
+                "Samurai adds no lines of its own. These screens show their standard wording:",
+                "Samurai no añade frases propias. Estas pantallas muestran su texto habitual:"
+            ),
+            type_size::CHIP,
+        ));
+    }
+    let samurai = selected == WorldviewMode::Samurai;
+    let wording = IntoIterator::into_iter(examples).fold(
+        wording.push(Space::new().height(space::XS)),
+        |column, (place, text)| {
+            column.push(
+                Row::new()
+                    .spacing(space::M)
+                    .push(muted(place, type_size::CHIP).width(Length::Fixed(112.0)))
+                    .push(
+                        tenshu_text::body(text)
+                            .size(type_size::CHIP)
+                            .width(Length::Fill)
+                            .style(if samurai {
+                                theme::text::secondary
+                            } else {
+                                theme::text::primary
+                            }),
+                    ),
+            )
+        },
+    );
 
-    setting_row(
-        CopyText::BitcoinWorldview.get(),
-        segmented(
-            [
-                segment(
-                    "tenshu.preferences.worldview.samurai",
-                    WorldviewMode::Samurai,
-                    "Samurai",
-                ),
-                segment(
-                    "tenshu.preferences.worldview.suitcoiner",
-                    WorldviewMode::Suitcoiner,
-                    "Suitcoiner",
-                ),
-                segment(
-                    "tenshu.preferences.worldview.luke",
-                    WorldviewMode::Luke,
-                    "Luke",
-                ),
-            ],
-            Some(selected),
-            Message::FocusAction,
-        )
-        .size(SegmentSize::Compact)
-        .on_select_maybe(
-            enabled.then_some(|mode| Message::Change(PreferenceChange::Worldview(mode))),
-        ),
+    let panel = container(
+        Row::new()
+            .push(
+                container(names)
+                    .padding([16, 18])
+                    .width(Length::FillPortion(5)),
+            )
+            .push(vertical_rule())
+            .push(
+                container(wording)
+                    .padding([16, 18])
+                    .width(Length::FillPortion(6)),
+            )
+            .height(Length::Shrink),
     )
-    .tag(CopyText::ThisDevice.get())
-    .trailing_tag()
-    .description(CopyText::WorldviewDescription.get())
-    .note(note, Tone::Muted)
-    .into()
+    .width(Length::Fill)
+    .style(worldview_panel_style);
+
+    let footnote = Row::new()
+        .spacing(space::S)
+        .push(tooltip_icon().size(14).style(theme::text::secondary))
+        .push(tenshu_text::caption(coincube_ui::localized_format!(
+            "Signing, addresses, fees, errors and recovery steps always use plain wording and the technical network name, such as {name}.",
+            "La firma, las direcciones, las comisiones, los errores y los pasos de recuperación siempre usan un lenguaje sencillo y el nombre técnico de la red, como {name}.",
+            name = crate::chain::canonical_network_name(crate::chain::ChainId::Bitcoin)
+        )));
+
+    Column::new()
+        .width(Length::Fill)
+        .push(
+            Column::new()
+                .spacing(space::M)
+                .padding([18.0, 0.0])
+                .push(heading)
+                .push(choices)
+                .push(panel)
+                .push(footnote),
+        )
+        .push(horizontal_rule())
+        .into()
+}
+
+/// The inset well under the Worldview choices: rail fill, 1px line, 10px radius.
+fn worldview_panel_style(theme: &theme::Theme) -> container::Style {
+    let shell = &theme.colors.shell;
+    container::Style {
+        background: Some(iced::Background::Color(shell.rail)),
+        border: iced::Border {
+            color: shell.line,
+            width: 1.0,
+            radius: coincube_ui::theme::tenshu::radius::MENU.into(),
+        },
+        ..container::Style::default()
+    }
 }
 
 fn artwork_row<'a>(saved: DevicePreferences, enabled: bool) -> Element<'a, Message> {
@@ -528,7 +778,7 @@ fn section_content<'a>(
                 .into(),
             );
             rows.push(language_row(saved.language, enabled));
-            rows.push(worldview_row(saved.worldview, enabled));
+            rows.push(worldview_row(saved, enabled));
             rows.push(artwork_row(saved, enabled));
             let max_zoom = model.max_zoom.unwrap_or(Zoom::LARGEST);
             let (zoom_selected, zoom_note) = zoom_choice(saved.zoom, max_zoom);
@@ -1652,6 +1902,96 @@ mod tests {
                 shown.contains("Your wallets, networks, and security settings remain unchanged.")
             );
         }
+    }
+
+    #[test]
+    fn worldview_panel_shows_names_and_real_wording_for_the_selected_mode() {
+        use crate::app::view::shared::landing::capture;
+
+        let page = PreferencesPageState {
+            section: Section::Appearance,
+            ..Default::default()
+        };
+        for (mode, shown_lines, hidden) in [
+            (
+                WorldviewMode::Samurai,
+                vec![
+                    "Network names in Samurai",
+                    "Tend to what is yours to control.",
+                    "Samurai adds no lines of its own.",
+                    "Click to get started",
+                    "No transactions yet",
+                    "Scanning the blockchain...",
+                    "Unchanged",
+                ],
+                "No ideological baggage",
+            ),
+            (
+                WorldviewMode::Suitcoiner,
+                vec![
+                    "Network names in Suitcoiner",
+                    "LukeCoin (BTCB2)",
+                    "Welcome, institutional-grade HODLer.",
+                    "Time to stack some sats.",
+                    "The free market thanks you.",
+                ],
+                "Samurai adds no lines of its own.",
+            ),
+            (
+                WorldviewMode::Luke,
+                vec![
+                    "Network names in Luke",
+                    "Spamcoin (BTC)",
+                    "Bitcoin (XBT)",
+                    "No Spamcoin detected. Excellent.",
+                    "No JPEGs were required.",
+                    "Consulting the ancient rules…",
+                ],
+                "Unchanged",
+            ),
+        ] {
+            let model = ViewModel {
+                saved: Some(DevicePreferences {
+                    worldview: mode,
+                    bitcoin_blake2b_beta: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let shown = capture::inspect_filled(
+                &format!("worldview-panel-{mode:?}"),
+                view(&page, model),
+                (1024, 1100),
+                "dark",
+                theme::Theme::dark(),
+                (1024, 1100),
+            );
+            for line in shown_lines {
+                assert!(shown.contains(line), "{:?} is missing {:?}", mode, line);
+            }
+            assert!(!shown.contains(hidden), "{:?} shows {:?}", mode, hidden);
+            assert!(shown.contains("Example wording"));
+            assert!(shown.contains("Bitcoin SHA-256 · Mainnet"));
+        }
+
+        // Without the BLAKE2b beta the panel names only the network in use.
+        let model = ViewModel {
+            saved: Some(DevicePreferences {
+                worldview: WorldviewMode::Luke,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let shown = capture::inspect_filled(
+            "worldview-panel-no-blake2b",
+            view(&page, model),
+            (1024, 1100),
+            "dark",
+            theme::Theme::dark(),
+            (1024, 1100),
+        );
+        assert!(shown.contains("Spamcoin (BTC)"));
+        assert!(!shown.contains("Bitcoin (XBT)"));
     }
 
     #[test]
