@@ -19,9 +19,10 @@ struct HealthClient {
     after: GetInfoResult,
     data_reads: Arc<AtomicUsize>,
 }
+#[async_trait::async_trait]
 impl Client for HealthClient {
     type Error = DaemonError;
-    fn request<S: Serialize + Debug, D: DeserializeOwned + Debug>(
+    async fn request<S: Serialize + Debug + Send, D: DeserializeOwned + Debug + Send>(
         &self,
         method: &str,
         _: Option<S>,

@@ -4594,10 +4594,15 @@ mod tests {
     #[derive(Debug)]
     struct NoRpcClient;
 
+    #[async_trait::async_trait]
+
     impl crate::daemon::client::Client for NoRpcClient {
         type Error = crate::daemon::DaemonError;
 
-        fn request<S: Serialize + std::fmt::Debug, D: DeserializeOwned + std::fmt::Debug>(
+        async fn request<
+            S: Serialize + std::fmt::Debug + Send,
+            D: DeserializeOwned + std::fmt::Debug + Send,
+        >(
             &self,
             _method: &str,
             _params: Option<S>,

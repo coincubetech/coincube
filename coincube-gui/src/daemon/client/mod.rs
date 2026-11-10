@@ -24,9 +24,10 @@ use coincubed::{
 use super::{model::*, Daemon, DaemonBackend, DaemonError};
 use crate::dir::CoincubeDirectory;
 
-pub trait Client {
+#[async_trait]
+pub trait Client: Send + Sync {
     type Error: Into<DaemonError> + Debug;
-    fn request<S: Serialize + Debug, D: DeserializeOwned + Debug>(
+    async fn request<S: Serialize + Debug + Send, D: DeserializeOwned + Debug + Send>(
         &self,
         method: &str,
         params: Option<S>,
@@ -44,13 +45,13 @@ impl<C: Client> Coincubed<C> {
     }
 
     /// Generic call function for RPC calls.
-    fn call<T: Serialize + Debug, U: DeserializeOwned + Debug>(
+    async fn call<T: Serialize + Debug + Send, U: DeserializeOwned + Debug + Send>(
         &self,
         method: &str,
         input: Option<T>,
     ) -> Result<U, DaemonError> {
         info!("{}", method);
-        self.client.request(method, input).map_err(|e| {
+        self.client.request(method, input).await.map_err(|e| {
             // Logged at debug because the loader's initial external-daemon
             // probe is expected to fail with NotFound/ConnectionRefused on the
             // socket path, and the error is returned to callers who log it at
@@ -86,18 +87,18 @@ impl<C: Client + Send + Sync + Debug> Daemon for Coincubed<C> {
     }
 
     async fn get_info(&self) -> Result<GetInfoResult, DaemonError> {
-        self.call("getinfo", Option::<Request>::None)
+        self.call("getinfo", Option::<Request>::None).await
     }
 
     async fn request_sync(&self) -> Result<(), DaemonError> {
         // The daemon returns `{}`; we don't need the payload, so
         // deserialise into a unit value and discard.
-        let _: serde_json::Value = self.call("requestsync", Option::<Request>::None)?;
+        let _: serde_json::Value = self.call("requestsync", Option::<Request>::None).await?;
         Ok(())
     }
 
     async fn get_new_address(&self) -> Result<GetAddressResult, DaemonError> {
-        self.call("getnewaddress", Option::<Request>::None)
+        self.call("getnewaddress", Option::<Request>::None).await
     }
 
     async fn list_revealed_addresses(
@@ -116,6 +117,7 @@ impl<C: Client + Send + Sync + Debug> Daemon for Coincubed<C> {
                 json!(start_index), // a `null` argument is parsed as `None` by the command
             ]),
         )
+        .await
     }
 
     async fn update_deriv_indexes(
@@ -124,6 +126,7 @@ impl<C: Client + Send + Sync + Debug> Daemon for Coincubed<C> {
         change: Option<u32>,
     ) -> Result<UpdateDerivIndexesResult, DaemonError> {
         self.call("updatederivationindexes", Some(vec![receive, change]))
+            .await
     }
 
     async fn list_coins(
@@ -138,10 +141,11 @@ impl<C: Client + Send + Sync + Debug> Daemon for Coincubed<C> {
                 json!(outpoints),
             ]),
         )
+        .await
     }
 
     async fn list_spend_txs(&self) -> Result<ListSpendResult, DaemonError> {
-        self.call("listspendtxs", Option::<Request>::None)
+        self.call("listspendtxs", Option::<Request>::None).await
     }
 
     async fn create_spend_tx(
@@ -159,7 +163,7 @@ impl<C: Client + Send + Sync + Debug> Daemon for Coincubed<C> {
         if let Some(change_address) = change_address {
             input.push(json!(change_address));
         }
-        self.call("createspend", Some(input))
+        self.call("createspend", Some(input)).await
     }
 
     async fn rbf_psbt(
@@ -172,29 +176,31 @@ impl<C: Client + Send + Sync + Debug> Daemon for Coincubed<C> {
         if let Some(feerate_vb) = feerate_vb {
             input.push(json!(feerate_vb));
         }
-        self.call("rbfpsbt", Some(input))
+        self.call("rbfpsbt", Some(input)).await
     }
 
     async fn update_spend_tx(&self, psbt: &Psbt) -> Result<(), DaemonError> {
         let spend_tx = psbt.to_string();
-        let _res: serde_json::value::Value = self.call("updatespend", Some(vec![spend_tx]))?;
+        let _res: serde_json::value::Value = self.call("updatespend", Some(vec![spend_tx])).await?;
         Ok(())
     }
 
     async fn delete_spend_tx(&self, txid: &Txid) -> Result<(), DaemonError> {
-        let _res: serde_json::value::Value =
-            self.call("delspendtx", Some(vec![txid.to_string()]))?;
+        let _res: serde_json::value::Value = self
+            .call("delspendtx", Some(vec![txid.to_string()]))
+            .await?;
         Ok(())
     }
 
     async fn broadcast_spend_tx(&self, txid: &Txid) -> Result<(), DaemonError> {
-        let _res: serde_json::value::Value =
-            self.call("broadcastspend", Some(vec![txid.to_string()]))?;
+        let _res: serde_json::value::Value = self
+            .call("broadcastspend", Some(vec![txid.to_string()]))
+            .await?;
         Ok(())
     }
 
     async fn start_rescan(&self, t: u32) -> Result<(), DaemonError> {
-        let _res: serde_json::value::Value = self.call("startrescan", Some(vec![t]))?;
+        let _res: serde_json::value::Value = self.call("startrescan", Some(vec![t])).await?;
         Ok(())
     }
 
@@ -208,10 +214,11 @@ impl<C: Client + Send + Sync + Debug> Daemon for Coincubed<C> {
             "listconfirmed",
             Some(vec![json!(start), json!(end), json!(limit)]),
         )
+        .await
     }
 
     async fn list_txs(&self, txids: &[Txid]) -> Result<ListTransactionsResult, DaemonError> {
-        self.call("listtransactions", Some(vec![txids]))
+        self.call("listtransactions", Some(vec![txids])).await
     }
 
     async fn create_recovery(
@@ -228,7 +235,7 @@ impl<C: Client + Send + Sync + Debug> Daemon for Coincubed<C> {
         if let Some(sequence) = sequence {
             params.insert("timelock".to_string(), json!(sequence));
         }
-        let res: CreateRecoveryResult = self.call("createrecovery", Some(params))?;
+        let res: CreateRecoveryResult = self.call("createrecovery", Some(params)).await?;
         Ok(res.psbt)
     }
 
@@ -242,7 +249,7 @@ impl<C: Client + Send + Sync + Debug> Daemon for Coincubed<C> {
         #[cfg(test)]
         items.sort();
 
-        let res: GetLabelsResult = self.call("getlabels", Some(vec![items]))?;
+        let res: GetLabelsResult = self.call("getlabels", Some(vec![items])).await?;
         Ok(res.labels)
     }
 
@@ -252,13 +259,14 @@ impl<C: Client + Send + Sync + Debug> Daemon for Coincubed<C> {
     ) -> Result<(), DaemonError> {
         let labels: HashMap<String, Option<String>> =
             HashMap::from_iter(items.iter().map(|(a, l)| (a.to_string(), l.clone())));
-        let _res: serde_json::value::Value = self.call("updatelabels", Some(vec![labels]))?;
+        let _res: serde_json::value::Value = self.call("updatelabels", Some(vec![labels])).await?;
         Ok(())
     }
 
     async fn get_labels_bip329(&self, offset: u32, limit: u32) -> Result<Labels, DaemonError> {
-        let res: GetLabelsBip329Result =
-            self.call("getlabelsbip329", Some(vec![json!(offset), json!(limit)]))?;
+        let res: GetLabelsBip329Result = self
+            .call("getlabelsbip329", Some(vec![json!(offset), json!(limit)]))
+            .await?;
         Ok(res.labels)
     }
 }
