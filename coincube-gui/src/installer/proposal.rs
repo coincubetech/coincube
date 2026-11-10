@@ -611,8 +611,8 @@ pub(crate) mod tests {
         );
         crate::app::session::open_without_pin(&cube.id);
         let generation = crate::app::session::generation_for(&cube.id).unwrap();
-        let mut ctx = Context::new(
-            chain.bitcoin_network(),
+        let mut ctx = Context::new_for_chain(
+            chain,
             crate::dir::CoincubeDirectory::new(root.to_owned()),
             Some(&cube),
             None,
