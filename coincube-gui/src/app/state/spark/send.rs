@@ -1134,6 +1134,7 @@ impl State for SparkSend {
                 | SparkSendMessage::AmountInputChanged(_)
                 | SparkSendMessage::SetReceiveTarget(_)
                 | SparkSendMessage::SelectPayFrom(_)
+                | SparkSendMessage::StartFrom(_)
                 | SparkSendMessage::PrepareRequested
                 | SparkSendMessage::EditDetails
                 | SparkSendMessage::Reset
@@ -1215,6 +1216,18 @@ impl State for SparkSend {
                     self.phase = SparkSendPhase::Idle;
                     self.abandon_payment_intent();
                 }
+                Task::none()
+            }
+            SparkSendMessage::StartFrom(asset) => {
+                // A stablecoin send is BTC-funded cross-chain and a US Dollar
+                // send moves US Dollar: no choice.
+                if self.receive_target.fixed_pay_from().is_some() || asset == self.pay_from {
+                    return Task::none();
+                }
+                self.pay_from_picker_open = false;
+                self.pay_from = asset;
+                self.phase = SparkSendPhase::Idle;
+                self.abandon_payment_intent();
                 Task::none()
             }
             SparkSendMessage::SetReceiveTarget(target) => {
@@ -3407,6 +3420,48 @@ mod tests {
         assert_eq!(panel.pay_from, WalletAsset::Bitcoin);
         drop(send_priced(&mut panel, SparkSendMessage::OpenPayFromPicker));
         assert!(!panel.pay_from_picker_open);
+    }
+
+    /// The Overview's US Dollar Send opens Send paying from US Dollar before
+    /// any amount is typed; Prepare checks coverage then.
+    #[test]
+    fn starting_send_from_a_balance() {
+        let mut panel = SparkSend::new(None);
+        panel.phase = SparkSendPhase::Prepared(plain_prepare("bitcoin-preview"));
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::StartFrom(WalletAsset::Usdb),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Usdb);
+        assert!(matches!(panel.phase, SparkSendPhase::Idle));
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::StartFrom(WalletAsset::Bitcoin),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Bitcoin);
+        // A stablecoin target stays paid from bitcoin.
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::Usdc),
+        ));
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::StartFrom(WalletAsset::Usdb),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Bitcoin);
+        // A US Dollar target stays paid from US Dollar, keeping its preview.
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::SparkUsd),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Usdb);
+        panel.phase = SparkSendPhase::Prepared(plain_prepare("usd-preview"));
+        drop(send_priced(
+            &mut panel,
+            SparkSendMessage::StartFrom(WalletAsset::Bitcoin),
+        ));
+        assert_eq!(panel.pay_from, WalletAsset::Usdb);
+        assert!(matches!(panel.phase, SparkSendPhase::Prepared(_)));
     }
 
     /// Review shows what pays and the conversion funding it.

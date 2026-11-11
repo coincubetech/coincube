@@ -344,7 +344,10 @@ impl State for SparkOverview {
                     }
                 }
                 view::SparkOverviewMessage::SendBtc => {
-                    return redirect(Menu::Spark(SparkSubMenu::Send));
+                    return send_from(coincube_spark_protocol::WalletAsset::Bitcoin);
+                }
+                view::SparkOverviewMessage::SendUsdb => {
+                    return send_from(coincube_spark_protocol::WalletAsset::Usdb);
                 }
                 view::SparkOverviewMessage::ReceiveBtc => {
                     return redirect(Menu::Spark(SparkSubMenu::Receive));
@@ -412,6 +415,16 @@ impl State for SparkOverview {
         self.lightning_share = None;
         Task::none()
     }
+}
+
+/// Spark's Send, paying from `asset` — each Overview balance row's Send.
+fn send_from(asset: coincube_spark_protocol::WalletAsset) -> Task<Message> {
+    Task::batch(vec![
+        redirect(Menu::Spark(SparkSubMenu::Send)),
+        Task::done(Message::View(view::Message::SparkSend(
+            view::SparkSendMessage::StartFrom(asset),
+        ))),
+    ])
 }
 
 /// What the Spark page shows for the Cube's Lightning address. Signed out, it

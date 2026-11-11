@@ -217,6 +217,8 @@ pub enum SparkOverviewMessage {
     StableBalanceLoaded(bool),
     /// Sidebar / card actions that navigate to sibling Spark panels.
     SendBtc,
+    /// The US Dollar row's Send: Spark's Send, paying from US Dollar.
+    SendUsdb,
     ReceiveBtc,
     History,
     SelectTransaction(String),
@@ -340,6 +342,10 @@ pub enum SparkSendMessage {
     ClosePayFromPicker,
     /// Pay this send from Bitcoin or US Dollar.
     SelectPayFrom(coincube_spark_protocol::WalletAsset),
+    /// Open Send already paying from this balance (the Overview row's Send).
+    /// Unlike [`Self::SelectPayFrom`] it doesn't wait for an amount: the
+    /// coverage check runs again at Prepare.
+    StartFrom(coincube_spark_protocol::WalletAsset),
     ConfirmRequested,
     /// Review's Back: leave the quote for the form, keeping what was typed.
     EditDetails,
