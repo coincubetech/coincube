@@ -109,12 +109,25 @@ impl GUI {
     fn worldview_binding(&self) -> Option<Binding> {
         let mut origin = self.overlay_origin(None)?;
         origin.focus = None;
+        self.worldview_binding_for(&origin)
+    }
+
+    fn worldview_binding_for(&self, origin: &OverlayOrigin) -> Option<Binding> {
+        let tab = self
+            .panes
+            .get(origin.pane)?
+            .tabs
+            .iter()
+            .find(|tab| tab.id == origin.tab_id)?;
+        if tab.preferences_source() != Some(origin.source) {
+            return None;
+        }
         let account = self.connect_panel(&origin)?;
         if !account.is_authenticated() {
             return None;
         }
         Some(Binding {
-            origin,
+            origin: origin.clone(),
             context: (
                 account.user.as_ref()?.id,
                 account.session_generation(),
@@ -185,7 +198,7 @@ impl GUI {
         };
         if !applied
             || intent.epoch != self.worldview_sharing.epoch
-            || self.worldview_binding().as_ref() != Some(&intent.binding)
+            || self.worldview_binding_for(&intent.binding.origin).as_ref() != Some(&intent.binding)
         {
             return;
         }
@@ -315,7 +328,7 @@ impl GUI {
         let Some(binding) = sharing.binding.clone() else {
             return Task::none();
         };
-        if self.worldview_binding().as_ref() != Some(&binding) {
+        if self.worldview_binding_for(&binding.origin).as_ref() != Some(&binding) {
             self.worldview_sharing.invalidate_intents();
             return Task::none();
         }
@@ -361,8 +374,8 @@ impl GUI {
         if self.worldview_sharing.binding.as_ref() != Some(&binding) {
             return Task::none();
         }
-        if self.worldview_binding().as_ref() != Some(&binding) {
-            // Navigation must not strand this request when its origin returns.
+        if self.worldview_binding_for(&binding.origin).as_ref() != Some(&binding) {
+            // A removed/locked origin must not strand its request on return.
             // Never clear a newer request or adopt the departed account's reply.
             if self.worldview_sharing.pending == Some(request) {
                 self.worldview_sharing.invalidate_intents();
@@ -789,14 +802,13 @@ mod tests {
     }
 
     #[test]
-    fn departed_origins_release_their_request_without_clearing_a_replacement() {
+    fn navigation_during_save_and_network_updates_keeps_the_original_account() {
         with_gui(|gui| {
             use crate::app::settings::preferences::WorldviewMode::*;
             shared(gui);
-            edit(gui, PreferenceChange::Worldview(Luke));
-            let departed = gui.worldview_sharing.binding.clone().unwrap();
-            let old = gui.worldview_sharing.pending.unwrap();
-            // Navigate to another Home tab while the original GET completes.
+            let original = selected(gui);
+            drop(gui.change_preference(PreferenceChange::Worldview(Luke)));
+            let save = gui.worldview_sharing.save.as_ref().unwrap().0.clone();
             let pane = gui.focus.unwrap();
             let home = super::super::home::Home::new_for_chain(
                 gui.config.coincube_directory.clone(),
@@ -812,6 +824,40 @@ mod tests {
                     super::super::tab::State::Home(home),
                 ));
             gui.panes.get_mut(pane).unwrap().focused_tab = 1;
+            assert!(gui.worldview_binding().is_none()); // The visible tab is signed out.
+            finish_save(gui, save);
+            remote(gui, Ok(snapshot(Some(original))));
+            let luke = selected(gui);
+            assert!(
+                matches!(gui.worldview_sharing.operation, Some(Request::Publish(value)) if value == luke)
+            );
+            remote(gui, Ok(snapshot(Some(luke))));
+            assert!(gui.worldview_sharing.pending.is_none());
+            gui.panes.get_mut(pane).unwrap().focused_tab = 0;
+            edit(gui, PreferenceChange::Worldview(Suitcoiner));
+            gui.panes.get_mut(pane).unwrap().focused_tab = 1;
+            remote(gui, Ok(snapshot(Some(luke))));
+            let suitcoiner = selected(gui);
+            assert!(
+                matches!(gui.worldview_sharing.operation, Some(Request::Publish(value)) if value == suitcoiner)
+            );
+            remote(gui, Ok(snapshot(Some(suitcoiner))));
+            assert!(gui.worldview_sharing.pending.is_none());
+            assert_eq!(gui.worldview_sharing.binding.as_ref().unwrap().context.0, 7);
+            gui.panes.get_mut(pane).unwrap().focused_tab = 0;
+            assert!(gui.worldview_view().can_refresh);
+        });
+    }
+
+    #[test]
+    fn departed_origins_release_their_request_without_clearing_a_replacement() {
+        with_gui(|gui| {
+            use crate::app::settings::preferences::WorldviewMode::*;
+            shared(gui);
+            edit(gui, PreferenceChange::Worldview(Luke));
+            let departed = gui.worldview_sharing.binding.clone().unwrap();
+            let old = gui.worldview_sharing.pending.unwrap();
+            set_account(gui, 8);
             drop(gui.worldview_complete(
                 departed.origin.clone(),
                 departed.context,
@@ -820,7 +866,7 @@ mod tests {
             ));
             assert!(gui.worldview_sharing.pending.is_none());
             assert!(gui.worldview_sharing.snapshot.is_none());
-            gui.panes.get_mut(pane).unwrap().focused_tab = 0;
+            set_account(gui, 7);
             assert!(gui.worldview_view().can_refresh);
             edit(gui, PreferenceChange::Worldview(Suitcoiner));
             assert!(gui.worldview_sharing.pending.is_some());
