@@ -14,17 +14,17 @@ MAY_HAVE_ITEM=0
 cleanup() {
     local phase_status=$?
     trap - EXIT
-    if [ "$MAY_HAVE_ITEM" -eq 1 ]; then
+    if [[ "$MAY_HAVE_ITEM" -eq 1 ]]; then
         if ! "$BUNDLE/Contents/MacOS/Probe" delete "$RUN_ID" "$REPOSITORY"; then
             echo "failed to remove the synthetic imported-anchor Keychain item" >&2
-            if [ "$phase_status" -eq 0 ]; then
+            if [[ "$phase_status" -eq 0 ]]; then
                 phase_status=1
             fi
         fi
     fi
     if ! rm -rf "$WORK"; then
         echo "failed to remove imported-anchor probe bundle" >&2
-        if [ "$phase_status" -eq 0 ]; then
+        if [[ "$phase_status" -eq 0 ]]; then
             phase_status=1
         fi
     fi
@@ -32,9 +32,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-test -f "$PROFILE" || { echo "missing embedded profile" >&2; exit 1; }
-test -f "$ENTITLEMENTS" || { echo "missing release entitlements" >&2; exit 1; }
-test -n "${SIGN_IDENTITY:-}" || { echo "set SIGN_IDENTITY to the profile-authorised signing identity" >&2; exit 1; }
+[[ -f "$PROFILE" ]] || { echo "missing embedded profile" >&2; exit 1; }
+[[ -f "$ENTITLEMENTS" ]] || { echo "missing release entitlements" >&2; exit 1; }
+[[ -n "${SIGN_IDENTITY:-}" ]] || { echo "set SIGN_IDENTITY to the profile-authorised signing identity" >&2; exit 1; }
 
 "$REPO_ROOT/contrib/release/macos/check-profile-authorises-cert.sh" \
     "$PROFILE" --identity "$SIGN_IDENTITY"
