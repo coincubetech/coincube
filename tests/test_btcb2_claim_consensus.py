@@ -50,8 +50,9 @@ def test_owned_claim_poison_and_fork_sweep_consensus(two_chain, record_property)
     assert verdict_b["reject-reason"] == "scriptpubkey", verdict_b
     record_property("fork_poison_policy_reject_reason", verdict_b["reject-reason"])
     fork_tip = b.rpc.getbestblockhash()
+    destination_address = b.rpc.getnewaddress()
     with pytest.raises(JSONRPCException) as rejected_block:
-        b.rpc.generateblock(b.rpc.getnewaddress(), [step1])
+        b.rpc.generateblock(destination_address, [step1])
     block_error = rejected_block.value.error
     assert block_error["code"] == -25, block_error
     assert block_error["message"].startswith(

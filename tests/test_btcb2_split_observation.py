@@ -117,7 +117,8 @@ def regtest_public_keys(descriptor):
 
     def convert(match):
         payload = base58.b58decode_check(match.group())
-        assert len(payload) == 78 and payload[:4] == bytes.fromhex("0488b21e")
+        assert len(payload) == 78
+        assert payload[:4] == bytes.fromhex('0488b21e')
         return base58.b58encode_check(bytes.fromhex("043587cf") + payload[4:]).decode()
 
     return re.sub(r"xpub[1-9A-HJ-NP-Za-km-z]+", convert, descriptor.split("#")[0])
@@ -247,7 +248,9 @@ class Bridge:
                 deployments = node.getdeploymentinfo(tip)
                 fork = deployments["blake2b"]
                 rdts = deployments["deployments"]["reduced_data"]
-                assert fork["active"] and rdts["active"] and rdts["type"] == "flagday"
+                assert fork['active']
+                assert rdts['active']
+                assert rdts['type'] == 'flagday'
                 assert len(node.getblockheader(tip, False)) == 328
                 assert node.getbestblockhash() == tip
                 flagday = {k: rdts[k] for k in ("height", "expiry_time", "active")}
@@ -547,7 +550,8 @@ class Split:
         assert self.step1 in a.rpc.getblock(recorded["hash"])["tx"]
         assert eligible["journal"].get("inclusion_history", []) == []
         minted = self.child.command("check_signing")
-        assert minted["minted"] and minted["tracked_txid"] == self.step1, minted
+        assert minted['minted'], minted
+        assert minted['tracked_txid'] == self.step1, minted
         assert self.step1 not in self.harness.blake2b.rpc.getrawmempool()
         return recorded
 
@@ -657,7 +661,8 @@ def test_split_observation_reorg_before_step2(tmp_path, record_property):
         a.generate_block(MIN_CONFIRMATIONS - 1)
         split.wait_bitcoin([split.step1])
         minted = split.child.command("check_signing")
-        assert minted["minted"] and minted["tracked_txid"] == split.step1, minted
+        assert minted['minted'], minted
+        assert minted['tracked_txid'] == split.step1, minted
         assert minted["journal"]["plan"]["previous_confirmation"] == moved
         assert minted["journal"]["inclusion_history"] == journal["inclusion_history"]
 
@@ -702,10 +707,8 @@ def test_split_observation_reorg_after_step2(tmp_path, record_property):
         split.wait_fork([step2_txid])
         step2_block = b.rpc.getblockhash(b.rpc.getblockcount() - MIN_CONFIRMATIONS + 1)
         mined = b.rpc.getrawtransaction(step2_txid, True, step2_block)
-        assert (
-            mined["hex"] == step2["step2_raw"]
-            and mined["confirmations"] == MIN_CONFIRMATIONS
-        )
+        assert mined['hex'] == step2['step2_raw']
+        assert mined['confirmations'] == MIN_CONFIRMATIONS
         record_property("step2_txid", step2_txid)
 
         # The step-1 coordinator never reopens a journal with a recorded

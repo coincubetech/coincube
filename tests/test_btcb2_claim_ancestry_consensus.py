@@ -67,10 +67,12 @@ def test_ancestry_input_maturity_and_excluded_fork_sweep(two_chain, record_prope
     assert a.rpc.gettxout(root_id, vout)["confirmations"] == 100
     assert a.rpc.testmempoolaccept([raw])[0]["allowed"]
     rejected = b.rpc.testmempoolaccept([raw])[0]
-    assert not rejected["allowed"] and rejected["reject-reason"] == "missing-inputs", rejected
+    assert not rejected['allowed'], rejected
+    assert rejected['reject-reason'] == 'missing-inputs', rejected
     fork_tip = b.rpc.getbestblockhash()
+    destination_address = b.rpc.getnewaddress()
     with pytest.raises(JSONRPCException) as failed_block:
-        b.rpc.generateblock(b.rpc.getnewaddress(), [raw])
+        b.rpc.generateblock(destination_address, [raw])
     assert failed_block.value.error["code"] == -25
     assert "bad-txns-inputs-missingorspent" in failed_block.value.error["message"]
     assert b.rpc.getbestblockhash() == fork_tip
@@ -87,7 +89,8 @@ def test_ancestry_input_maturity_and_excluded_fork_sweep(two_chain, record_prope
     assert (root_id, vout) not in inputs
     assert b.rpc.testmempoolaccept([sweep])[0]["allowed"]
     rejected = a.rpc.testmempoolaccept([sweep])[0]
-    assert not rejected["allowed"] and rejected["reject-reason"] == "missing-inputs", rejected
+    assert not rejected['allowed'], rejected
+    assert rejected['reject-reason'] == 'missing-inputs', rejected
     assert b.rpc.sendrawtransaction(sweep) == sweep_id
     b.generate_block(1, wait_for_mempool=sweep_id)
     assert b.rpc.gettxout(sweep_id, 0) is not None

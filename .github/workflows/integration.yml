@@ -80,7 +80,13 @@ jobs:
           components: rustfmt, clippy
 
       - name: Setup Python dependencies
-        run: pip install --break-system-packages -r tests/requirements.txt
+        # pytest tests/ also collects the node-free E2E harness self-tests.
+        # The immutable bip380 archive and legacy coincurve/port-reserve packages
+        # require source builds; every resolved package is pinned and hashed.
+        run: >-
+          pip install --break-system-packages --require-hashes --only-binary=:all:
+          --no-binary=bip380,coincurve,ephemeral-port-reserve
+          -r tests/ci-requirements.txt
 
       - name: Add local bin to PATH
         run: echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -96,7 +102,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('tests/requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/ci-requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
       - name: Build coincubed and taproot_signer
@@ -175,7 +181,9 @@ jobs:
             # RPC mid-reorg and the call times out). Keep the broad suite
             # parallel, then exercise every simple_reorg-driven test
             # deterministically on its own with a higher timeout.
-            pytest tests/ -vvv -n 8 \
+            # Real USB/production-Connect cases are explicitly opt-in; retain
+            # their node-free self-tests in this generic regtest collection.
+            pytest tests/ -m 'not testnet4_live' -vvv -n 8 \
               --deselect tests/test_chain.py::test_reorg_detection \
               --deselect tests/test_chain.py::test_reorg_exclusion \
               --deselect tests/test_chain.py::test_reorg_status_recovery \
@@ -186,7 +194,7 @@ jobs:
               tests/test_chain.py::test_reorg_status_recovery \
               tests/test_chain.py::test_rescan_edge_cases -vvv
           else
-            pytest tests/ -vvv -n 8
+            pytest tests/ -m 'not testnet4_live' -vvv -n 8
           fi
 
       # A failed functional test is close to undiagnosable from the pytest output

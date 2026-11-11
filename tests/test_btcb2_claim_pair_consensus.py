@@ -129,7 +129,8 @@ def test_claim_pair_uses_distinct_chain_specific_inputs(two_chain, record_proper
         verdict = own.rpc.testmempoolaccept([raw])[0]
         rejected = other.rpc.testmempoolaccept([raw])[0]
         assert verdict["allowed"], verdict
-        assert not rejected["allowed"] and rejected["reject-reason"] == "missing-inputs", rejected
+        assert not rejected['allowed'], rejected
+        assert rejected['reject-reason'] == 'missing-inputs', rejected
 
     # Reversed order is safe: the BTCB2 transaction can confirm first because
     # its own marker input exists only there, even while Bitcoin is unconfirmed.

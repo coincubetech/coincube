@@ -36,7 +36,8 @@ def regtest_address(mainnet):
     exists solely because the GUI's logical chain identity is mainnet while
     the disposable Knots indexers enforce regtest address encoding.
     """
-    assert mainnet == mainnet.lower() and mainnet.startswith("bc1q")
+    assert mainnet == mainnet.lower()
+    assert mainnet.startswith('bc1q')
     values = [BECH32_ALPHABET.index(char) for char in mainnet[3:]]
 
     def expand(hrp):
@@ -54,7 +55,8 @@ def regtest_address(mainnet):
                     checksum ^= generator
         return checksum
 
-    assert len(values) >= 7 and polymod(expand("bc") + values) == 1
+    assert len(values) >= 7
+    assert polymod(expand('bc') + values) == 1
     payload = values[:-6]
     checksum = polymod(expand("bcrt") + payload + [0] * 6) ^ 1
     digits = payload + [(checksum >> (5 * (5 - index))) & 31 for index in range(6)]
@@ -190,7 +192,9 @@ class Bridge:
                         deployments = node.getdeploymentinfo(tip)
                         fork = deployments["blake2b"]
                         rdts = deployments["deployments"]["reduced_data"]
-                        assert fork["active"] and rdts["active"] and rdts["type"] == "flagday"
+                        assert fork['active']
+                        assert rdts['active']
+                        assert rdts['type'] == 'flagday'
                         # The extended header is direct post-fork activation evidence.
                         assert len(node.getblockheader(tip, False)) == 328
                         assert node.getbestblockhash() == tip
@@ -375,7 +379,8 @@ def test_retired_claim_routes_refuse_before_construction(tmp_path, ancestry):
         # funded script against its own independently derived script exactly.
         def testnet_public_key(match):
             payload = base58.b58decode_check(match.group())
-            assert len(payload) == 78 and payload[:4] == bytes.fromhex("0488b21e")
+            assert len(payload) == 78
+            assert payload[:4] == bytes.fromhex('0488b21e')
             return base58.b58encode_check(bytes.fromhex("043587cf") + payload[4:]).decode()
         public_descriptor = re.sub(r"xpub[1-9A-HJ-NP-Za-km-z]+", testnet_public_key,
                                    descriptor["descriptor"].split("#")[0])
@@ -414,7 +419,8 @@ def test_retired_claim_routes_refuse_before_construction(tmp_path, ancestry):
             })
         ready = child.send(initial)
         assert ready == {"event": "legacy-claim-refused"}, ready
-        assert not bridge.preflights and not bridge.submissions
+        assert not bridge.preflights
+        assert not bridge.submissions
         assert not bridge.errors
         assert set(node.rpc.getrawmempool()) == initial_legacy_mempool
         assert child.proc.wait(timeout=10) == 0
@@ -450,7 +456,8 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
 
         def testnet_public_key(match):
             payload = base58.b58decode_check(match.group())
-            assert len(payload) == 78 and payload[:4] == bytes.fromhex("0488b21e")
+            assert len(payload) == 78
+            assert payload[:4] == bytes.fromhex('0488b21e')
             return base58.b58encode_check(bytes.fromhex("043587cf") + payload[4:]).decode()
 
         public_descriptor = re.sub(
@@ -496,9 +503,11 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         }
         result = child.send(initial, timeout=180)
         assert result["event"] == "paired-deposit-addresses", result
-        assert result["bitcoin"].startswith("bc1") and result["btcb2"].startswith("bc1")
+        assert result['bitcoin'].startswith('bc1')
+        assert result['btcb2'].startswith('bc1')
         assert result["bitcoin"] != result["btcb2"]
-        assert result["bitcoin_minimum"] > 0 and result["btcb2_minimum"] > 0
+        assert result['bitcoin_minimum'] > 0
+        assert result['btcb2_minimum'] > 0
         assert result["bitcoin_index"] != result["btcb2_index"]
 
         def fund(node, mainnet_address, index):
@@ -542,12 +551,15 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         checked = child.send({"action": "deposited", "bitcoin": bitcoin_funding,
                               "btcb2": fork_funding}, timeout=180)
         assert checked["event"] == "paired-deposits-checked", checked
-        assert checked["verified"] and checked["error"] is None, checked
+        assert checked['verified'], checked
+        assert checked['error'] is None, checked
         bridge.stale_outspend = True
         refused = child.send({"action": "sign_pair_stale"}, timeout=180)
         assert refused["event"] == "paired-signing-refused-stale", refused
-        assert refused["error"] and bridge.stale_outspend_hits > 0, refused
-        assert not bridge.submissions and not bridge.errors
+        assert refused['error'], refused
+        assert bridge.stale_outspend_hits > 0, refused
+        assert not bridge.submissions
+        assert not bridge.errors
         bridge.stale_outspend = False
         checked = child.send({"action": "deposited"}, timeout=180)
         assert checked["event"] == "paired-deposits-checked-after-stale", checked
@@ -562,7 +574,8 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         }, timeout=180)
         assert recorded["event"] == "paired-signatures-recorded", recorded
         assert len(recorded["bitcoin_txid"]) == len(recorded["btcb2_txid"]) == 64
-        assert not bridge.submissions and not bridge.errors
+        assert not bridge.submissions
+        assert not bridge.errors
         funding_txid = node.rpc.decoderawtransaction(bitcoin_funding["previous"])["txid"]
         bridge.spent_outspend = (
             "mainnet", f"tx/{funding_txid}/outspend/{bitcoin_funding['vout']}"
@@ -570,13 +583,16 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         spent = child.send({"action": "recheck_spent"}, timeout=180)
         assert spent["event"] == "paired-review-refused-spent", spent
         assert bridge.spent_outspend_hits > 0
-        assert spent["reason"] and not bridge.submissions and not bridge.errors
+        assert spent['reason']
+        assert not bridge.submissions
+        assert not bridge.errors
         bridge.spent_outspend = None
         bridge.stale_outspend = True
         stale = child.send({"action": "recheck_stale"}, timeout=180)
         assert stale["event"] == "paired-review-refused-stale", stale
         assert stale["reason"], stale
-        assert not bridge.submissions and not bridge.errors
+        assert not bridge.submissions
+        assert not bridge.errors
         bridge.stale_outspend = False
         child.proc.stdin.write('{"action":"quit"}\n')
         child.proc.stdin.flush()
@@ -596,7 +612,8 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         }, timeout=180)
         assert reopened["event"] == "paired-signed-pair-reopened", reopened
         assert reopened["bitcoin_unattempted"], reopened
-        assert not bridge.submissions and not bridge.errors
+        assert not bridge.submissions
+        assert not bridge.errors
         for own, other, raw_name in (
             (harness.legacy, harness.blake2b, "bitcoin_raw"),
             (harness.blake2b, harness.legacy, "btcb2_raw"),
@@ -619,7 +636,8 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         }, timeout=180)
         assert first_broadcast["event"] == "claim-bitcoin-broadcast-recorded", first_broadcast
         assert first_broadcast["bitcoin_txid"] == recorded["bitcoin_txid"]
-        assert len(bridge.submissions) == 1 and not bridge.errors
+        assert len(bridge.submissions) == 1
+        assert not bridge.errors
         assert bridge.submissions[0] == {
             "network": "mainnet", "raw": reopened["bitcoin_raw"],
             "txid": recorded["bitcoin_txid"],
@@ -658,7 +676,8 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         replacement = reorg_bitcoin_confirmation(harness, recorded["bitcoin_txid"])
         refused = child.send({"action": "confirm_after_reorg"}, timeout=180)
         assert refused["event"] == "claim-btcb2-reorg-refused", refused
-        assert refused["reason"] and len(bridge.submissions) == 1
+        assert refused['reason']
+        assert len(bridge.submissions) == 1
         assert child.proc.wait(timeout=10) == 0
         first_transcript.extend(child.transcript)
         child.close()
@@ -680,7 +699,8 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         }, timeout=180)
         assert second_broadcast["event"] == "claim-btcb2-broadcast-recorded", second_broadcast
         assert second_broadcast["btcb2_txid"] == recorded["btcb2_txid"]
-        assert len(bridge.submissions) == 2 and not bridge.errors
+        assert len(bridge.submissions) == 2
+        assert not bridge.errors
         assert bridge.submissions[1] == {
             "network": "bitcoin-blake2b", "raw": reopened["btcb2_raw"],
             "txid": recorded["btcb2_txid"],
@@ -718,7 +738,8 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
 
         def testnet_public_key(match):
             payload = base58.b58decode_check(match.group())
-            assert len(payload) == 78 and payload[:4] == bytes.fromhex("0488b21e")
+            assert len(payload) == 78
+            assert payload[:4] == bytes.fromhex('0488b21e')
             return base58.b58encode_check(bytes.fromhex("043587cf") + payload[4:]).decode()
 
         public_descriptor = re.sub(
@@ -747,7 +768,8 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
         assert first["bitcoin"].startswith("bc1q")
         assert first["btcb2"].startswith("bc1q")
         assert first["bitcoin"] != first["btcb2"]
-        assert first["bitcoin_minimum"] > 0 and first["btcb2_minimum"] > 0
+        assert first['bitcoin_minimum'] > 0
+        assert first['btcb2_minimum'] > 0
 
         funding_outpoints = {}
         for chain, node, address in (
@@ -784,22 +806,28 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
 
         checked = child.send({"action": "deposited"}, timeout=180)
         assert checked["event"] == "split-deposits-checked", checked
-        assert checked["verified"] and checked["notice"] is None, checked
+        assert checked['verified'], checked
+        assert checked['notice'] is None, checked
         txid, vout = funding_outpoints["bitcoin"]
         bridge.spent_outspend = ("mainnet", f"tx/{txid}/outspend/{vout}")
         refused = child.send({"action": "sign_pair_spent"}, timeout=180)
         assert refused["event"] == "split-signing-refused-spent", refused
-        assert refused["notice"] and bridge.spent_outspend_hits > 0, refused
-        assert not bridge.submissions and not bridge.errors
+        assert refused['notice'], refused
+        assert bridge.spent_outspend_hits > 0, refused
+        assert not bridge.submissions
+        assert not bridge.errors
         bridge.spent_outspend = None
         checked = child.send({"action": "deposited"}, timeout=180)
         assert checked["event"] == "split-deposits-checked-again", checked
-        assert checked["verified"] and checked["notice"] is None, checked
+        assert checked['verified'], checked
+        assert checked['notice'] is None, checked
         bridge.stale_outspend = True
         refused = child.send({"action": "sign_pair_stale"}, timeout=180)
         assert refused["event"] == "split-signing-refused-stale", refused
-        assert refused["notice"] and bridge.stale_outspend_hits > 0, refused
-        assert not bridge.submissions and not bridge.errors
+        assert refused['notice'], refused
+        assert bridge.stale_outspend_hits > 0, refused
+        assert not bridge.submissions
+        assert not bridge.errors
         bridge.stale_outspend = False
         checked = child.send({"action": "deposited"}, timeout=180)
         assert checked["event"] == "split-deposits-checked-after-stale", checked
@@ -807,7 +835,8 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
         assert recorded["event"] == "split-signed-pair-recorded", recorded
         assert len(recorded["bitcoin_txid"]) == len(recorded["btcb2_txid"]) == 64
         assert recorded["bitcoin_unattempted"]
-        assert not bridge.submissions and not bridge.errors
+        assert not bridge.submissions
+        assert not bridge.errors
         assert child.proc.wait(timeout=10) == 0
         first_transcript = child.transcript[:]
         child.close()
@@ -819,7 +848,8 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
             "btcb2_txid": recorded["btcb2_txid"],
         }, timeout=180)
         assert reopened["event"] == "split-signed-pair-reopened", reopened
-        assert reopened["bitcoin_unattempted"] and not bridge.submissions
+        assert reopened['bitcoin_unattempted']
+        assert not bridge.submissions
         for own, other, raw_name in (
             (harness.legacy, harness.blake2b, "bitcoin_raw"),
             (harness.blake2b, harness.legacy, "btcb2_raw"),
@@ -839,7 +869,8 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
         }, timeout=180)
         assert first_broadcast["event"] == "split-bitcoin-broadcast-recorded", first_broadcast
         assert first_broadcast["bitcoin_txid"] == recorded["bitcoin_txid"]
-        assert len(bridge.submissions) == 1 and not bridge.errors
+        assert len(bridge.submissions) == 1
+        assert not bridge.errors
         assert bridge.submissions[0] == {
             "network": "mainnet", "raw": reopened["bitcoin_raw"],
             "txid": recorded["bitcoin_txid"],
@@ -873,7 +904,8 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
         replacement = reorg_bitcoin_confirmation(harness, recorded["bitcoin_txid"])
         refused = child.send({"action": "confirm_after_reorg"}, timeout=180)
         assert refused["event"] == "split-btcb2-reorg-refused", refused
-        assert refused["reason"] and len(bridge.submissions) == 1
+        assert refused['reason']
+        assert len(bridge.submissions) == 1
         assert child.proc.wait(timeout=10) == 0
         first_transcript.extend(child.transcript)
         child.close()
@@ -894,7 +926,8 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
         }, timeout=180)
         assert second_broadcast["event"] == "split-btcb2-broadcast-recorded", second_broadcast
         assert second_broadcast["btcb2_txid"] == recorded["btcb2_txid"]
-        assert len(bridge.submissions) == 2 and not bridge.errors
+        assert len(bridge.submissions) == 2
+        assert not bridge.errors
         assert bridge.submissions[1] == {
             "network": "bitcoin-blake2b", "raw": reopened["btcb2_raw"],
             "txid": recorded["btcb2_txid"],
@@ -935,7 +968,8 @@ def test_live_paired_funding_proof_expires_after_marker_change(tmp_path, mutatio
 
         def testnet_public_key(match):
             payload = base58.b58decode_check(match.group())
-            assert len(payload) == 78 and payload[:4] == bytes.fromhex("0488b21e")
+            assert len(payload) == 78
+            assert payload[:4] == bytes.fromhex('0488b21e')
             return base58.b58encode_check(bytes.fromhex("043587cf") + payload[4:]).decode()
 
         public_descriptor = re.sub(
@@ -1105,7 +1139,8 @@ def test_live_paired_funding_proof_expires_after_marker_change(tmp_path, mutatio
         assert changed_node.rpc.gettxout(changed_marker["txid"], changed_marker["vout"]) is None
         assert other_node.rpc.gettxout(other_marker["txid"], other_marker["vout"]) is not None
         after_spend = child.send(command)
-        assert after_spend["event"] == "paired-funding-proof" and not after_spend["valid"], after_spend
+        assert after_spend['event'] == 'paired-funding-proof', after_spend
+        assert not after_spend['valid'], after_spend
         assert (after_spend["failure"] == "Changed" or
                 after_spend["failure"].startswith("AncestryRootChanged")), after_spend
         assert not bridge.errors

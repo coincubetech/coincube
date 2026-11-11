@@ -97,6 +97,46 @@ fn present(path: &Path) -> Result<bool> {
     }
 }
 
+/// Load a validated cached account or initialize it from the selected desktop session.
+fn load_bootstrap_cache(
+    cache_path: &Path,
+    previous: Option<&Binding>,
+    backend: &impl Backend,
+    email: &str,
+    namespace: &str,
+) -> Result<(ConnectCache, Option<u32>)> {
+    let mut expected_id = previous.as_ref().map(|binding| binding.user_id);
+    let cache = if present(cache_path)? {
+        let cache: ConnectCache = serde_json::from_str(&private_read(cache_path)?)
+            .map_err(|_| "connect_cache_invalid")?;
+        check(
+            cache.accounts.len() == 1 && cache.active_account().is_some_and(|a| a.email == email),
+            "connect_account_mismatch",
+        )?;
+        cache
+    } else {
+        check(
+            previous
+                .as_ref()
+                .is_none_or(|b| b.transport_pubkey.is_none() && b.device_id.is_none()),
+            "bootstrap_cache_missing",
+        )?;
+        let login = backend.session(namespace)?;
+        validate_user(&login.user, email, expected_id)?;
+        expected_id = Some(login.user.id);
+        ConnectCache {
+            active_email: Some(email.to_owned()),
+            accounts: vec![Account {
+                email: email.to_owned(),
+                tokens: tokens(login)?,
+                device_id: None,
+                last_seen_event_seq: None,
+            }],
+        }
+    };
+    Ok((cache, expected_id))
+}
+
 pub(super) async fn bootstrap(input: &Input, backend: &impl Backend) -> Result<Value> {
     let email = input
         .expected_email
@@ -134,35 +174,9 @@ pub(super) async fn bootstrap(input: &Input, backend: &impl Backend) -> Result<V
             "bootstrap_binding_mismatch",
         )?;
     }
-    let mut expected_id = previous.as_ref().map(|binding| binding.user_id);
-    let mut cache = if present(&cache_path)? {
-        let cache: ConnectCache = serde_json::from_str(&private_read(&cache_path)?)
-            .map_err(|_| "connect_cache_invalid")?;
-        check(
-            cache.accounts.len() == 1 && cache.active_account().is_some_and(|a| a.email == email),
-            "connect_account_mismatch",
-        )?;
-        cache
-    } else {
-        check(
-            previous
-                .as_ref()
-                .is_none_or(|b| b.transport_pubkey.is_none() && b.device_id.is_none()),
-            "bootstrap_cache_missing",
-        )?;
-        let login = backend.session(namespace)?;
-        validate_user(&login.user, email, expected_id)?;
-        expected_id = Some(login.user.id);
-        ConnectCache {
-            active_email: Some(email.to_owned()),
-            accounts: vec![Account {
-                email: email.to_owned(),
-                tokens: tokens(login)?,
-                device_id: None,
-                last_seen_event_seq: None,
-            }],
-        }
-    };
+    let (mut cache, mut expected_id) = load_bootstrap_cache(
+        &cache_path, previous.as_ref(), backend, email, namespace,
+    )?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "clock_error")?
