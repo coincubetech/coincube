@@ -11,6 +11,7 @@ pub mod psbt_unified;
 pub mod public_wallet_pair;
 pub mod public_wallet_source;
 pub mod random;
+mod retained_witness;
 pub mod seed_crypt;
 pub mod signer;
 pub mod spend;
