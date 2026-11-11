@@ -129,6 +129,13 @@ null, false and unsupported versions are rejected. The configuration and mode
 are journal-bound, so an old or completed run cannot be relabeled strict.
 
 Strict mode attaches to the already foreground app without activating it. It
+sets Appium's `defaultActiveApplication` to Keychain before binding the process,
+so WDA's automatic SpringBoard selection cannot masquerade as a PID change.
+Independent app-state checks still require foreground state around each identity
+read. The read-only system-alert endpoint separately rejects detected system
+Alert/Sheet surfaces and any uncertain alert-query result; alert text is discarded,
+and no alert is accepted or dismissed. This guard does not guarantee detection
+of transient system overlays that are neither Alert nor Sheet surfaces. Strict mode
 pins the device, build and process, rejects every restart/upgrade/key-recovery
 allowance, and rechecks the process on resume, during delivery, before PIN input
 and during signature collection. After setup and before request creation, it

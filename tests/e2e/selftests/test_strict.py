@@ -43,7 +43,15 @@ class Control:
             self.onclick()
 
 
+class NoSystemAlert:
+    @property
+    def alert(self):
+        from selenium.common.exceptions import NoAlertPresentException
+        raise NoAlertPresentException()
+
+
 class Driver:
+    switch_to = NoSystemAlert()
     state = 4
     pid = 123
     controls = ()

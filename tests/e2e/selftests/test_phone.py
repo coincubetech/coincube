@@ -378,7 +378,7 @@ def test_line_selector_cannot_be_used_for_pin_digits():
 def bound_phone():
     calls = []
     driver = SimpleNamespace(execute_script=lambda *args: {'bundleId': 'io.coincube.keychainApp', 'pid': 123},
-        terminate_app=lambda bundle: calls.append('terminate'), activate_app=lambda bundle: calls.append('activate'))
+        query_app_state=lambda _: 4, terminate_app=lambda bundle: calls.append('terminate'), activate_app=lambda bundle: calls.append('activate'))
     phone = Phone(driver, 38)
     phone.device_digest = 'synthetic-device'
     phone.matching_controls = lambda label: [object()]
@@ -502,7 +502,7 @@ def test_upgrade_boundary_requires_verified_stop_before_activation(tmp_path, sto
     journal = bound_journal(tmp_path, phone)
     receipt = {'original_build': 37, 'current_build': 38, 'phase': 'planned'}
     states = iter([1 if stopped else 4, 4])
-    phone.driver.query_app_state = lambda bundle: next(states)
+    phone.driver.query_app_state = lambda bundle: next(states, 4)
     def activate(bundle):
         assert journal.data['artifacts']['approval_upgrade_recovery']['phase'] == 'process_stopped'
         calls.append('activate')
@@ -590,7 +590,7 @@ def test_new_generation_boundary_cannot_repeat_after_creation_dispatch(tmp_path)
     journal = bound_journal(tmp_path, phone)
     receipt = {'phase': 'planned', 'creation_started': False, 'pin_entered': False}
     states = iter([1, 4])
-    phone.driver.query_app_state = lambda _: next(states)
+    phone.driver.query_app_state = lambda _: next(states, 4)
     try:
         phone.restart_for_key_generation(journal, receipt)
         assert receipt['phase'] == 'ready_for_reconciliation'
@@ -1084,3 +1084,149 @@ def test_next_run_verified_onboarding_cannot_relaunch_unsupported_queue(monkeypa
     assert lifecycle == []
     assert clicks == (['Not now'] if incoming else [])
     assert state['verified'] is True
+
+
+@pytest.mark.parametrize('state', [0, 1, 2, 3])
+def test_process_identity_rejects_background_even_if_preferred_info_would_match(state):
+    calls = []
+    phone = Phone(SimpleNamespace(query_app_state=lambda _: state,
+        execute_script=lambda *args: calls.append('identity') or {'bundleId': 'io.coincube.keychainApp', 'pid': 4022}), 39)
+    with pytest.raises(Blocked) as error:
+        phone.process_identity()
+    assert error.value.code == 'PHONE_PROCESS'
+    assert calls == []
+
+
+def test_process_identity_rejects_foreground_loss_during_preferred_identity_read():
+    states = iter([4, 3])
+    phone = Phone(SimpleNamespace(query_app_state=lambda _: next(states),
+        execute_script=lambda *args: {'bundleId': 'io.coincube.keychainApp', 'pid': 4022}), 39)
+    with pytest.raises(Blocked) as error:
+        phone.process_identity()
+    assert error.value.code == 'PHONE_PROCESS'
+
+
+class NoSystemAlert:
+    @property
+    def alert(self):
+        from selenium.common.exceptions import NoAlertPresentException
+        raise NoAlertPresentException()
+
+
+@pytest.mark.parametrize('state', [3, 4])
+@pytest.mark.parametrize('setting_failure', [False, True])
+def test_strict_attach_selects_observation_target_before_binding_without_lifecycle(tmp_path, monkeypatch, state, setting_failure):
+    import json
+    from appium import webdriver
+    from harness import phone as module
+    from harness.strict import StrictPolicy
+    events, selected = [], []
+    def update(settings):
+        events.append('settings')
+        assert settings == {'defaultActiveApplication': module.BUNDLE}
+        if setting_failure:
+            raise RuntimeError('synthetic-sensitive-settings-error')
+        selected.append(settings)
+    def app_state(bundle):
+        assert bundle == module.BUNDLE
+        events.append('state')
+        return state
+    def identity(command):
+        assert command == 'mobile: activeAppInfo'
+        events.append('identity')
+        return {'bundleId': module.BUNDLE, 'pid': 4022} if selected else {'bundleId': 'com.apple.springboard', 'pid': 35}
+    driver = SimpleNamespace(update_settings=update, query_app_state=app_state, switch_to=NoSystemAlert(),
+                             execute_script=identity, quit=lambda: events.append('quit'))
+    def remote(*, options, client_config):
+        events.append('remote')
+        caps = options.to_capabilities()
+        assert caps['appium:autoLaunch'] is False and caps['appium:forceAppLaunch'] is False
+        assert caps['appium:shouldTerminateApp'] is False
+        return driver  # No activate/launch/terminate methods: any call fails the test.
+    monkeypatch.setattr(webdriver, 'Remote', remote)
+    monkeypatch.setattr(module, 'wired_device', lambda _: ({'hardwareProperties': {'udid': 'synthetic-usb-device'}}, 39))
+    monkeypatch.setattr(module.tempfile, 'gettempdir', lambda: str(tmp_path))
+    monkeypatch.setattr(module.usb, 'wired_phone', lambda: object())
+    monkeypatch.setattr(module.usb, 'wda_get', lambda *args: {'ready': True})
+    proxy = SimpleNamespace(server_address=('127.0.0.1', 12345), serve_forever=lambda: None,
+                            shutdown=lambda: None, server_close=lambda: None)
+    monkeypatch.setattr(module, 'USBProxy', lambda _: proxy)
+    monkeypatch.setattr(module.threading, 'Thread', lambda **kwargs: SimpleNamespace(start=lambda: None))
+    class Socket:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def bind(self, address): pass
+        def getsockname(self): return ('127.0.0.1', 12346)
+    monkeypatch.setattr(module.socket, 'socket', Socket)
+    monkeypatch.setattr(module.subprocess, 'run', lambda args, **kwargs: SimpleNamespace(
+        stdout=b'3.9.0' if '--version' in args else json.dumps({'xcuitest': {'version': '12.22.8'}}).encode()))
+    monkeypatch.setattr(module.subprocess, 'Popen', lambda *args, **kwargs: SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(module, 'stop_owned', lambda _: None)
+    monkeypatch.setattr(module, 'http', lambda *args, **kwargs: b'{"value":{"ready":true}}')
+    journal = Journal(tmp_path / 'strict-run', {'strict_acceptance': {'version': 1}})
+    policy = StrictPolicy(journal)
+    bind = policy.bind_phone
+    def ordered_bind(phone):
+        events.append('bind')
+        return bind(phone)
+    policy.bind_phone = ordered_bind
+    try:
+        if setting_failure:
+            with pytest.raises(Blocked) as error:
+                with module.attach({'minimum_build': 39}, strict=policy):
+                    pytest.fail('Failed preferred-app selection must not bind or fall back')
+            assert error.value.code == 'APPIUM_USB'
+            assert 'synthetic-sensitive-settings-error' not in str(error.value)
+            assert 'strict_process' not in journal.data['artifacts']
+        elif state == 4:
+            with module.attach({'minimum_build': 39}, strict=policy) as attached:
+                assert attached is policy.phone
+                assert journal.data['artifacts']['strict_process']['process']['pid'] == 4022
+        else:
+            with pytest.raises(Blocked) as error:
+                with module.attach({'minimum_build': 39}, strict=policy):
+                    pytest.fail('Background Keychain must not bind')
+            assert error.value.code == 'STRICT_PROCESS'
+            assert 'strict_process' not in journal.data['artifacts']
+        if setting_failure:
+            assert events == ['remote', 'settings', 'quit']
+        else:
+            assert events[:3] == ['remote', 'settings', 'bind']
+            assert events[-1] == 'quit'
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize('method', ['labels', 'process_identity'])
+@pytest.mark.parametrize('alert', ['present', 'empty', 'transport-error', 'missing'])
+def test_strict_observation_checks_system_alerts_independently_of_preferred_bundle(method, alert):
+    from selenium.common.exceptions import NoAlertPresentException
+    events = []
+    secret = 'synthetic-sensitive-system-prompt'
+    class Alert:
+        @property
+        def text(self):
+            events.append('alert-text')
+            if alert == 'transport-error': raise RuntimeError(secret)
+            return '' if alert == 'empty' else secret
+    class Switch:
+        @property
+        def alert(self):
+            events.append('alert')
+            if alert == 'missing': raise NoAlertPresentException(secret)
+            return Alert()
+    driver = SimpleNamespace(query_app_state=lambda _: 4, switch_to=Switch(),
+        execute_script=lambda *args: {'bundleId': 'io.coincube.keychainApp', 'pid': 4022},
+        page_source='<root><node visible="true" label="Home"/></root>')
+    phone = Phone(driver, 39)
+    phone.strict = SimpleNamespace(observe=phone.process_identity)
+    if alert == 'missing':
+        result = getattr(phone, method)()
+        assert result == ({'Home'} if method == 'labels' else {'pid': 4022, 'bundle_id': 'io.coincube.keychainApp'})
+        assert events == ['alert']
+    else:
+        with pytest.raises(Blocked) as error:
+            getattr(phone, method)()
+        assert error.value.code == 'PHONE_AUTH'
+        assert secret not in str(error.value)
+        assert events == ['alert', 'alert-text']
