@@ -83,6 +83,7 @@ repository's. Internal refactors, test-only work and CI are collapsed at the end
 Sources: `coincube-gui/src/services/branta.rs`, `vendor/branta/`
 - Addresses you send to are checked against Branta's Strict recipient list before you confirm, for both Vault and Spark sends, so a substituted address in a pasted invoice or a compromised clipboard shows as an unknown recipient rather than going out silently (#368).
 - Recipient logos and Lightning URI handling were corrected shortly after, and the vendored SDK is pinned and hash-checked so a tampered drop fails the build (#371, #373).
+- The Branta SDK moved to 4.0.0. Vault sends check only the address being paid, so an extra payment leg in a pasted request can no longer hide a substituted address, and conflicting on-chain addresses block the send. Every returned payment's logo origin is checked, and lookups no longer follow redirects or read unbounded responses. Some older Branta registrations now show their platform without a description.
 
 **Spark: stablecoin send and SideShift receive**
 - Spark can send stablecoin balances, and receiving into Spark now goes through SideShift, which replaced the Liquid swap path (#276).

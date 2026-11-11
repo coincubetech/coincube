@@ -1,7 +1,5 @@
 //! Fluent builder for constructing a [`Payment`] to post.
 
-use uuid::Uuid;
-
 use crate::enums::DestinationType;
 use crate::models::{Destination, Payment, Platform};
 
@@ -15,7 +13,7 @@ impl PaymentBuilder {
         Self::default()
     }
 
-    /// Adds a new destination. Call [`Self::set_zk`] immediately after to mark it as ZK.
+    /// Adds a destination. `add_payment` encrypts every destination it can.
     pub fn add_destination(
         mut self,
         address: impl Into<String>,
@@ -24,15 +22,6 @@ impl PaymentBuilder {
         self.payment
             .destinations
             .push(Destination::new(address, r#type));
-        self
-    }
-
-    /// Marks the most-recently-added destination as ZK and assigns it a fresh `zk_id`.
-    pub fn set_zk(mut self) -> Self {
-        if let Some(destination) = self.payment.destinations.last_mut() {
-            destination.is_zk = true;
-            destination.zk_id = Some(Uuid::new_v4().to_string());
-        }
         self
     }
 
@@ -97,7 +86,7 @@ mod tests {
         assert_eq!(payment.destinations.len(), 1);
         assert_eq!(payment.destinations[0].value, "addr1");
         assert_eq!(payment.destinations[0].r#type, None);
-        assert!(!payment.destinations[0].is_zk);
+        assert!(!payment.destinations[0].is_encrypted);
     }
 
     #[test]
@@ -109,30 +98,6 @@ mod tests {
             payment.destinations[0].r#type,
             Some(DestinationType::BitcoinAddress)
         );
-    }
-
-    #[test]
-    fn set_zk_marks_only_the_last_added_destination() {
-        let payment = PaymentBuilder::new()
-            .add_destination("addr1", None)
-            .add_destination("addr2", None)
-            .set_zk()
-            .build();
-        assert!(!payment.destinations[0].is_zk);
-        assert!(payment.destinations[0].zk_id.is_none());
-        assert!(payment.destinations[1].is_zk);
-        assert!(payment.destinations[1].zk_id.is_some());
-    }
-
-    #[test]
-    fn set_zk_assigns_a_fresh_zk_id_each_call() {
-        let payment = PaymentBuilder::new()
-            .add_destination("addr1", None)
-            .set_zk()
-            .add_destination("addr2", None)
-            .set_zk()
-            .build();
-        assert_ne!(payment.destinations[0].zk_id, payment.destinations[1].zk_id);
     }
 
     #[test]
@@ -210,11 +175,13 @@ mod tests {
                 "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
                 Some(DestinationType::BitcoinAddress),
             )
-            .set_zk()
             .set_ttl(600)
             .build();
         assert_eq!(payment.description.as_deref(), Some("Testing description"));
         assert_eq!(payment.ttl, 600);
-        assert!(payment.destinations[0].is_zk);
+        assert_eq!(
+            payment.destinations[0].value,
+            "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+        );
     }
 }

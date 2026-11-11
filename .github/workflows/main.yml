@@ -125,6 +125,33 @@ jobs:
       - name: Test
         run: cargo test --manifest-path coincube-spark-bridge/Cargo.toml
 
+  # vendor/branta is also excluded from the root workspace, so the bare
+  # `cargo test` never runs the vendored Branta SDK's own suite or the Tenshu
+  # client.rs patch tests. The wallet relies on that suite for decrypt-and-bind
+  # behavior. All of it is offline (local mock servers); the SDK's live
+  # integration tests are under tests/, which is not vendored, and --lib keeps
+  # examples out. The crate has no lockfile of its own: seed it from the root
+  # Cargo.lock so shared dependencies resolve to the reviewed versions. Its
+  # test-only dependencies the root lock lacks (wiremock, tokio-test) still
+  # resolve to the newest compatible release; they never ship in the wallet.
+  branta_vendor_tests:
+    needs: linter
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.97.1
+      - name: Test
+        run: |
+          cp Cargo.lock vendor/branta/Cargo.lock
+          cargo test --manifest-path vendor/branta/Cargo.toml --lib
+
   # Run Linux, macOS and Windows on every PR and push so platform-specific
   # failures are caught before merge (#475). Linux also runs advisory canaries.
   #
