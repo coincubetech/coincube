@@ -130,8 +130,9 @@ Official Branta 4.0.0 source is vendored from reviewed commit
 `6292bbd0c6a720e5c9273a4f4e8b827097db6e5e` (tag `v4.0.0`), with version requirement
 `=4.0.0`. Two documented adapters are applied, both hash-pinned in
 `vendor/branta/UPSTREAM_SHA256.json` and enforced by the `vendor_integrity` test:
-the manifest reuses reqwest `0.12.18` with `rustls-tls`, and `src/v2/client.rs`
-disables redirects and caps lookup response bodies. No other SDK source was changed.
+the manifest reuses reqwest `0.12.18` with `rustls-tls` (a resolution fix; see
+below for the runtime TLS backend), and `src/v2/client.rs` disables redirects and
+caps lookup response bodies. No other SDK source was changed.
 See [provenance](../vendor/branta/TENSHU_PROVENANCE.md).
 
 4.0.0 returns one of `match`, `unknown`, `tampered` or `incomplete` from `verify`.
@@ -142,8 +143,18 @@ platform without a description.
 
 Upstream reqwest 0.13 uses platform-verifier, whose Apple dependency conflicts
 with Breez's exact iOS build-dependency pin even on desktop because Cargo resolves
-across targets. No Liquid file or dependency pin was changed. The adjustment uses
-the wallet's webpki/Mozilla roots (including logos), not OS-added private roots.
+across targets. No Liquid file or dependency pin was changed.
+
+Declaring `rustls-tls` does not select rustls at runtime. Cargo unifies reqwest
+`0.12.18` features across the workspace, and Breez (`breez-sdk-liquid`,
+`sdk-common`, `esplora-client` defaults) also enables `default-tls` (native-tls)
+and `system-proxy`. With `default-tls` present, reqwest's `TlsBackend::default()`
+is native-tls, and neither the SDK lookup client (`reqwest::Client::builder()`,
+patched only to disable redirects) nor the logo client calls `use_rustls_tls()`.
+Both therefore use the OS TLS stack and trust store (Security.framework on macOS,
+including admin/user-added roots; OpenSSL system roots on Linux; SChannel on
+Windows), and both honour `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` and the macOS/Windows system proxy
+settings. Confirm with `cargo tree -e features -i reqwest@0.12.18`.
 
 The lookup client follows no redirects: a 3xx response is treated as `incomplete`,
 so a redirect target never receives the lookup token. Lookup response bodies are
