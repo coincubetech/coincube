@@ -65,6 +65,7 @@ mod launcher_gpu;
 pub(crate) mod launcher_opening;
 pub(crate) mod launcher_presenter;
 pub(crate) mod launcher_scene;
+mod remote_catalog;
 pub(crate) mod restore_frame;
 pub(crate) use launcher_catalog::LauncherSceneContext;
 
@@ -867,31 +868,6 @@ impl Home {
         )
     }
 
-    /// The signed-in Connect account, when its user record is loaded.
-    fn connect_account_id(&self) -> Option<u32> {
-        self.connect_account
-            .authenticated_client()
-            .and(self.connect_account.user.as_ref())
-            .map(|user| user.id)
-    }
-
-    /// A ghost import goes ahead only while the account that listed the
-    /// ghost is signed in and still lists it, on the same network.
-    fn ghost_still_registered(&self, ghost: &GhostImport) -> Result<(), String> {
-        let listed = self.remote_cubes.iter().any(|cube| {
-            cube.uuid == ghost.uuid && launcher_catalog::ghost_chain(cube) == Some(ghost.network)
-        });
-        if listed && ghost.account == self.connect_account_id() {
-            Ok(())
-        } else {
-            Err(coincube_ui::localized_format!(
-                "Connect no longer lists {} for this account. Cancel, then pick it again from the Launcher.",
-                "Connect ya no muestra {} en esta cuenta. Cancela y vuelve a elegirlo desde el Launcher.",
-                catalog_display_name(&ghost.name)
-            ))
-        }
-    }
-
     fn catalog_index(&self, key: &CubeCatalogKey) -> Option<usize> {
         let State::Cubes { cubes, source, .. } = &self.state else {
             return None;
@@ -905,130 +881,6 @@ impl Home {
             .filter(|(_, cube)| cube.id == key.cube_id && cube.network == key.chain);
         let (index, _) = matches.next()?;
         matches.next().is_none().then_some(index)
-    }
-
-    /// Fetch the full server cube list and keep the ones with no local
-    /// counterpart — the "restore from Connect" rows on the Cubes page. Both
-    /// the API call and the local settings reads run off the UI thread.
-    /// `Task::none()` when signed out; the list is Connect-only.
-    ///
-    /// Must be re-run whenever the *local* set changes, not just at sign-in.
-    /// `Message::Checked` can only prune this list (drop rows that became
-    /// local); a Cube deleted locally while its Connect copy was kept becomes
-    /// remote-only at that instant, and nothing but a re-fetch can discover it.
-    /// Without this it stayed invisible — and so unrestorable — until the next
-    /// sign-in.
-    ///
-    /// Claims a fresh [`remote_cubes_request`](Self::remote_cubes_request)
-    /// generation and carries it through to `RemoteCubesLoaded`, so a result
-    /// that lands after a newer fetch (or after logout) is discarded rather
-    /// than applied. Takes `&mut self` for that reason.
-    fn fetch_remote_cubes(&mut self) -> Task<Message> {
-        // Bump unconditionally, before the signed-out bail: a fetch starting
-        // while signed out still means "anything older is superseded", and
-        // leaving the generation untouched here would let an in-flight result
-        // from a prior session land afterwards.
-        let request_id = self.invalidate_remote_cubes();
-        let Some(rc_client) = self.connect_account.authenticated_client() else {
-            return Task::none();
-        };
-        let datadir = self.datadir_path.clone();
-        Task::perform(
-            async move {
-                let server_cubes = rc_client.list_cubes().await.map_err(|e| e.to_string())?;
-
-                // Collect local cube UUIDs across all networks
-                let mut local_uuids = std::collections::HashSet::new();
-                for cube in locally_stored_cubes(&datadir) {
-                    local_uuids.insert(cube.id);
-                }
-
-                // Keep only server cubes with no local counterpart
-                let remote_source: Vec<CubeResponse> = server_cubes
-                    .into_iter()
-                    .filter(|sc| !local_uuids.contains(&sc.uuid))
-                    .collect();
-
-                // Determine restorability per cube. `has_recovery_kit`
-                // comes free from `list_cubes()`, but both the seed half
-                // (what a password restore needs) and the owner-keychain
-                // "phone" envelope summary live on `/recovery-kit/status`,
-                // so probe it for *every* remote cube — a phone-only cube
-                // has `has_recovery_kit == false` yet is still recoverable
-                // via its envelope, so gating the probe on the password
-                // kit would hide it. Probes run concurrently (`join_all`)
-                // so latency is one round-trip, not N. A flaky probe must
-                // not blank the whole list — on any error we log and treat
-                // every method as absent (the row still shows, just
-                // without a restore icon). `join_all` preserves input
-                // order.
-                //
-                // Duress note: phone availability is read from the
-                // `ownerSelf` *status* summary (presence/tier, no
-                // ciphertext); the duress gate fires later, at the actual
-                // recovery attempt (`OwnerKeychainRestoreStep` →
-                // `fetch_owner_recovery_envelope`), which returns neutral
-                // "unavailable, try later" copy on a 423 (invariant I3).
-                let client_ref = &rc_client;
-                let remote_only: Vec<RemoteCube> = iced::futures::future::join_all(
-                    remote_source.into_iter().map(|sc| async move {
-                        let (has_encrypted_seed, phone_recoverable, phone_full_cube) =
-                            match client_ref.get_recovery_kit_status(sc.id).await {
-                                Ok(status) => {
-                                    let (phone_recoverable, phone_full_cube) =
-                                        derive_phone_recovery(status.owner_self.as_ref());
-                                    (
-                                        status.has_encrypted_seed,
-                                        phone_recoverable,
-                                        phone_full_cube,
-                                    )
-                                }
-                                // No kit/status yet → nothing recoverable.
-                                Err(CoincubeError::NotFound) => (false, false, false),
-                                Err(e) => {
-                                    log::warn!(
-                                        "[LAUNCHER] Recovery Kit status probe \
-                                         failed for \"{}\": {}",
-                                        sc.name,
-                                        e
-                                    );
-                                    (false, false, false)
-                                }
-                            };
-                        RemoteCube {
-                            id: sc.id,
-                            uuid: sc.uuid,
-                            name: sc.name,
-                            network: sc.network,
-                            has_recovery_kit: sc.has_recovery_kit,
-                            has_encrypted_seed,
-                            phone_recoverable,
-                            phone_full_cube,
-                            encryption_pubkey: sc.encryption_pubkey,
-                            has_vault: sc.has_vault,
-                        }
-                    }),
-                )
-                .await;
-
-                Ok(remote_only)
-            },
-            move |result| Message::RemoteCubesLoaded { request_id, result },
-        )
-    }
-
-    /// Supersede every in-flight remote-cube fetch and return the new
-    /// generation. Callers that are *starting* a fetch keep the returned id;
-    /// callers that only need to discard (logout) ignore it.
-    ///
-    /// Logout must do this. It clears `remote_cubes`, but a fetch issued for
-    /// the previous account is still running and its `RemoteCubesLoaded` would
-    /// otherwise repopulate the list — putting the prior account's Cubes back
-    /// on screen after sign-out. The neighbouring `recover_vault` reset and
-    /// `recovery_method_modal` drop guard the same hazard for their surfaces.
-    fn invalidate_remote_cubes(&mut self) -> u64 {
-        self.remote_cubes_request = self.remote_cubes_request.wrapping_add(1);
-        self.remote_cubes_request
     }
 
     /// Returns the effective per-network cube limit, preferring the
@@ -2789,26 +2641,7 @@ impl Home {
                 Task::none()
             }
             Message::RemoteCubesLoaded { request_id, result } => {
-                // Superseded by a newer fetch, or invalidated by logout. Drop
-                // it: applying it would either roll the list back to an older
-                // server view or restore the previous account's Cubes.
-                if request_id != self.remote_cubes_request {
-                    log::debug!(
-                        "[LAUNCHER] Discarding stale remote-cube fetch #{} (current #{})",
-                        request_id,
-                        self.remote_cubes_request
-                    );
-                    return Task::none();
-                }
-                match result {
-                    Ok(remote_only) => {
-                        self.remote_cubes = remote_only;
-                    }
-                    Err(e) => {
-                        log::warn!("[LAUNCHER] Failed to fetch remote cubes: {e}");
-                    }
-                }
-                Task::none()
+                self.apply_remote_cubes(request_id, result)
             }
             Message::CubeRemoteUpdated {
                 cube_id,
