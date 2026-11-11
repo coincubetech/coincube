@@ -405,7 +405,8 @@ def target_script(kind):
 def bridge_refuses(tool, request, reason):
     rejected = subprocess.run([tool], input=json.dumps(request), text=True,
                               capture_output=True, timeout=30)
-    assert rejected.returncode != 0 and reason in rejected.stderr, rejected.stderr
+    assert rejected.returncode != 0, rejected.stderr
+    assert reason in rejected.stderr, rejected.stderr
 
 
 def sign_and_finalize(tool, wallet, request, built):
@@ -1226,7 +1227,8 @@ def test_split_ancestry_pair_consensus(split_chains, shape, record_property):
         a.rpc.invalidateblock(block)
         assert a.rpc.gettxout(bitcoin_marker["txid"], bitcoin_marker["vout"], False)
         rejected = a.rpc.testmempoolaccept([signed["btcb2_raw"]])[0]
-        assert not rejected["allowed"] and rejected["reject-reason"] == "missing-inputs", rejected
+        assert not rejected['allowed'], rejected
+        assert rejected['reject-reason'] == 'missing-inputs', rejected
         a.rpc.reconsiderblock(block)
         assert a.rpc.getbestblockhash() == block
     # A six-block reorg on either side cannot make the exact other-chain
@@ -1241,7 +1243,8 @@ def test_split_ancestry_pair_consensus(split_chains, shape, record_property):
         first_confirmation = own.rpc.getblockhash(own.rpc.getblockcount() - 5)
         own.rpc.invalidateblock(first_confirmation)
         rejected = own.rpc.testmempoolaccept([other_raw])[0]
-        assert not rejected["allowed"] and rejected["reject-reason"] == "missing-inputs", rejected
+        assert not rejected['allowed'], rejected
+        assert rejected['reject-reason'] == 'missing-inputs', rejected
         own.rpc.reconsiderblock(first_confirmation)
         assert own.rpc.getbestblockhash() == tip
 
@@ -1305,8 +1308,9 @@ def test_split_step1_consensus(split_chains, shape, record_property):
     assert not verdict_b["allowed"], verdict_b
     assert verdict_b["reject-reason"] == "scriptpubkey", verdict_b
     fork_tip = b.rpc.getbestblockhash()
+    destination_address = b.rpc.getnewaddress()
     with pytest.raises(JSONRPCException) as rejected_block:
-        b.rpc.generateblock(b.rpc.getnewaddress(), [step1])
+        b.rpc.generateblock(destination_address, [step1])
     block_error = rejected_block.value.error
     assert block_error["code"] == -25, block_error
     assert block_error["message"].startswith(
@@ -1359,7 +1363,8 @@ def test_split_step2_consensus(split_chains, shape, record_property):
     # Step 1 has at least six confirmations on Bitcoin, and the claimed
     # outpoints are spent there and unspent on BTCB2.
     status = a.rpc.getrawtransaction(step1_id, True, step1_block)
-    assert status["in_active_chain"] and status["confirmations"] >= 6, status
+    assert status['in_active_chain'], status
+    assert status['confirmations'] >= 6, status
     for txid, vout in prevouts:
         assert a.rpc.gettxout(txid, vout, False) is None
         assert b.rpc.gettxout(txid, vout, False) is not None
@@ -1395,8 +1400,9 @@ def test_split_step2_consensus(split_chains, shape, record_property):
     assert not verdict_a["allowed"], verdict_a
     assert verdict_a["reject-reason"] == "missing-inputs", verdict_a
     bitcoin_tip = a.rpc.getbestblockhash()
+    destination_address = a.rpc.getnewaddress()
     with pytest.raises(JSONRPCException) as rejected_block:
-        a.rpc.generateblock(a.rpc.getnewaddress(), [step2])
+        a.rpc.generateblock(destination_address, [step2])
     block_error = rejected_block.value.error
     assert block_error["code"] == -25, block_error
     assert block_error["message"].startswith(
@@ -1474,8 +1480,9 @@ def test_split_step2_replay_after_step1_reorg(split_chains, shape, record_proper
 
     # Counterfactual: with step 1 in the active chain, consensus refuses the
     # replay (the step-2 test shows the mempool does too).
+    destination_address = a.rpc.getnewaddress()
     with pytest.raises(JSONRPCException) as refused:
-        a.rpc.generateblock(a.rpc.getnewaddress(), [step2])
+        a.rpc.generateblock(destination_address, [step2])
     assert refused.value.error["code"] == -25, refused.value.error
     assert refused.value.error["message"].startswith(
         "TestBlockValidity failed: bad-txns-inputs-missingorspent,"
@@ -1511,7 +1518,8 @@ def test_split_step2_replay_after_step1_reorg(split_chains, shape, record_proper
     replay_block = a.rpc.generateblock(a.rpc.getnewaddress(), [step2])["hash"]
     record_property(f"{shape}_replay_block", replay_block)
     replayed = a.rpc.getrawtransaction(step2_id, True, replay_block)
-    assert replayed["in_active_chain"] and replayed["hex"] == step2, replayed
+    assert replayed['in_active_chain'], replayed
+    assert replayed['hex'] == step2, replayed
     assert step1_id not in a.rpc.getrawmempool()
     assert a.rpc.gettxout(step2_id, 0, False) is not None
     for txid, vout in prevouts:
@@ -1526,7 +1534,8 @@ def test_split_step2_replay_after_step1_reorg(split_chains, shape, record_proper
     assert not a.rpc.getrawtransaction(step2_id, True, replay_block)["in_active_chain"]
     assert step2_id not in a.rpc.getrawmempool()
     verdict = a.rpc.testmempoolaccept([step2])[0]
-    assert not verdict["allowed"] and verdict["reject-reason"] == "missing-inputs", verdict
+    assert not verdict['allowed'], verdict
+    assert verdict['reject-reason'] == 'missing-inputs', verdict
     for txid, vout in prevouts:
         assert a.rpc.gettxout(txid, vout, False) is None
     # BTCB2 saw none of it.
@@ -1606,8 +1615,9 @@ def test_split_unified_fallback_consensus(split_chains, shape, record_property):
         f"{shape}_bitcoin_unified_mempool_reject", verdict_a["reject-reason"]
     )
     bitcoin_tip = a.rpc.getbestblockhash()
+    destination_address = a.rpc.getnewaddress()
     with pytest.raises(JSONRPCException) as rejected_block:
-        a.rpc.generateblock(a.rpc.getnewaddress(), [sweep])
+        a.rpc.generateblock(destination_address, [sweep])
     block_error = rejected_block.value.error
     assert block_error["code"] == -25, block_error
     # Consensus has no hash-type policy: the signature simply does not

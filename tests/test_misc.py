@@ -72,9 +72,9 @@ def receive_and_send(coincubed, bitcoind):
     psbt = PSBT.from_base64(res["psbt"])
     txid = psbt.tx.txid().hex()
     # If we sign only with two keys it won't be able to finalize
-    with pytest.raises(RpcError, match="ould not satisfy.* at index 0"):
-        signed_psbt = coincubed.signer.sign_psbt(psbt, range(2))
-        coincubed.rpc.updatespend(signed_psbt.to_base64())
+    signed_psbt = coincubed.signer.sign_psbt(psbt, range(2))
+    coincubed.rpc.updatespend(signed_psbt.to_base64())
+    with pytest.raises(RpcError, match='ould not satisfy.* at index 0'):
         coincubed.rpc.broadcastspend(txid)
     # We can sign with different keys as long as there are 3 sigs
     signed_psbt = coincubed.signer.sign_psbt(psbt, range(1, 4))
@@ -119,11 +119,9 @@ def test_multipath(coincubed_multipath, bitcoind):
 
     # We can't create a recovery tx for the second recovery path, as all coins were confirmed
     # within the last 19 blocks.
-    with pytest.raises(
-        RpcError,
-        match="No coin currently spendable through this timelocked recovery path",
-    ):
-        coincubed_multipath.rpc.createrecovery(bitcoind.rpc.getnewaddress(), 2, 20)
+    destination_address = bitcoind.rpc.getnewaddress()
+    with pytest.raises(RpcError, match='No coin currently spendable through this timelocked recovery path'):
+        coincubed_multipath.rpc.createrecovery(destination_address, 2, 20)
 
     # Sweep all coins through the first recovery path (that is available after 10 blocks).
     # It needs 3 signatures out of 5 keys.
@@ -215,23 +213,19 @@ def test_coinbase_deposit(coincubed, bitcoind):
     bitcoind.rpc.generatetoaddress(1, addr)
     wait_for_sync()
     coins = coincubed.rpc.listcoins()["coins"]
-    assert (
-        len(coins) == 1
-        and coins[0]["is_immature"]
-        and coins[0]["spend_info"] is None
-        and not coins[0]["is_from_self"]
-    )
+    assert len(coins) == 1
+    assert coins[0]['is_immature']
+    assert coins[0]['spend_info'] is None
+    assert not coins[0]['is_from_self']
 
     # Generate 100 blocks to make the coinbase mature. We should detect it as such.
     # It remains as not from self.
     bitcoind.generate_block(100)
     wait_for_sync()
     coin = coincubed.rpc.listcoins()["coins"][0]
-    assert (
-        not coin["is_immature"]
-        and coin["block_height"] is not None
-        and not coins[0]["is_from_self"]
-    )
+    assert not coin['is_immature']
+    assert coin['block_height'] is not None
+    assert not coins[0]['is_from_self']
 
     # We must be able to spend the mature coin.
     destinations = {bitcoind.rpc.getnewaddress(): int(0.999999 * COIN)}
@@ -246,11 +240,9 @@ def test_coinbase_deposit(coincubed, bitcoind):
     coin = next(
         c for c in coincubed.rpc.listcoins()["coins"] if c["outpoint"] == coin["outpoint"]
     )
-    assert (
-        not coin["is_immature"]
-        and coin["block_height"] is not None
-        and coin["spend_info"] is not None
-    )
+    assert not coin['is_immature']
+    assert coin['block_height'] is not None
+    assert coin['spend_info'] is not None
 
     # We must also properly detect coinbase deposits to a change address. We used to have
     # an assertion that a coin cannot both be change and a coinbase deposit. Since change
@@ -260,17 +252,16 @@ def test_coinbase_deposit(coincubed, bitcoind):
     bitcoind.rpc.generatetoaddress(1, change_addr)
     wait_for(lambda: any(c["is_immature"] for c in coincubed.rpc.listcoins()["coins"]))
     coin = next(c for c in coincubed.rpc.listcoins()["coins"] if c["is_immature"])
-    assert coin["is_change"] and not coin["is_from_self"]
+    assert coin['is_change']
+    assert not coin['is_from_self']
     bitcoind.generate_block(100)
     wait_for_sync()
     coin = next(
         c for c in coincubed.rpc.listcoins()["coins"] if c["outpoint"] == coin["outpoint"]
     )
-    assert (
-        not coin["is_immature"]
-        and coin["block_height"] is not None
-        and not coin["is_from_self"]
-    )
+    assert not coin['is_immature']
+    assert coin['block_height'] is not None
+    assert not coin['is_from_self']
 
 
 @pytest.mark.skipif(
@@ -308,7 +299,8 @@ def test_migration(coincubed_multisig_legacy_datadir, bitcoind):
     # the "updated_at" field on tx drafts.
     receive_and_send(coincubed, bitcoind)
     spend_txs = coincubed.rpc.listspendtxs()["spend_txs"]
-    assert len(spend_txs) == 2 and all(s["updated_at"] is not None for s in spend_txs)
+    assert len(spend_txs) == 2
+    assert all((s['updated_at'] is not None for s in spend_txs))
 
 
 @pytest.mark.skipif(

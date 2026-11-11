@@ -99,8 +99,9 @@ def test_wrong_environment_rejected(configured, field, value):
 def test_core_rpc_never_sends_cookie_off_loopback(configured, url):
     config, path = configured
     config["core"]["url"] = url
-    with pytest.raises(Failed, match="loopback"):
-        load_config(private(path / "config.json", json.dumps(config)))
+    config_path = private(path / 'config.json', json.dumps(config))
+    with pytest.raises(Failed, match='loopback'):
+        load_config(config_path)
 
 
 def test_valid_config_and_satoshi_precision(configured):

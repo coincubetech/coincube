@@ -42,14 +42,16 @@ def test_recovery_column_order_uses_explicit_indices():
 
 
 def test_partial_recovery_is_never_accepted():
+    recovery_xml = xml([f'{i + 1} {v}' for (i, v) in enumerate(WORDS[:-1])])
     with pytest.raises(Blocked) as error:
-        recovery_words(xml([f'{i+1} {v}' for i, v in enumerate(WORDS[:-1])]))
+        recovery_words(recovery_xml)
     assert error.value.code == 'RECOVERY_WORDS'
 
 
 def test_conflicting_recovery_indices_fail():
+    recovery_xml = xml(['1 abandon', '1 ability'])
     with pytest.raises(Failed) as error:
-        recovery_words(xml(['1 abandon', '1 ability']))
+        recovery_words(recovery_xml)
     assert error.value.code == 'RECOVERY_INDEX'
 
 
@@ -176,8 +178,9 @@ def test_chooser_cannot_restart_partial_committed_or_repeated_setup(change):
     state = uncommitted_state() | change
     store = Store(state)
     flow = controller(store, CHOOSER)
+    saved_state = store.load()
     with pytest.raises(Blocked) as error:
-        flow.resume_uncommitted_setup(store.load(), CHOOSER)
+        flow.resume_uncommitted_setup(saved_state, CHOOSER)
     assert error.value.code == 'SETUP_PIN_UNCERTAIN'
     assert store.writes == []
 
@@ -272,8 +275,9 @@ def test_hidden_or_disabled_descendant_does_not_make_wrapper_editable():
     # Only the wrapper passed the top-level visible+enabled filter; its hidden
     # input still identifies it as a container and must exclude it.
     wrapper = InputField('XCUIElementTypeSecureTextField', [InputField()])
+    flow = field_controller([wrapper])
     with pytest.raises(Blocked) as error:
-        field_controller([wrapper]).fill_one('123456')
+        flow.fill_one('123456')
     assert error.value.code == 'PHONE_FIELD'
     assert wrapper.actions == []
 
@@ -281,8 +285,9 @@ def test_hidden_or_disabled_descendant_does_not_make_wrapper_editable():
 def test_multiple_real_fields_never_fall_back_to_first_input():
     children = [InputField(), InputField('XCUIElementTypeSecureTextField')]
     wrapper = InputField('XCUIElementTypeSecureTextField', children)
+    flow = field_controller([wrapper, *children])
     with pytest.raises(Blocked) as error:
-        field_controller([wrapper, *children]).fill_one('123456')
+        flow.fill_one('123456')
     assert error.value.code == 'PHONE_FIELD'
     assert all(not field.actions for field in [wrapper, *children])
 
@@ -361,8 +366,9 @@ def test_home_without_saved_recovery_submission_cannot_adopt_master():
 
 def test_success_screen_without_saved_submission_cannot_verify_setup():
     store = Store(uncommitted_state() | {'words': WORDS})
+    flow = controller(store, {'Go to home'})
     with pytest.raises(Blocked) as error:
-        controller(store, {'Go to home'}).setup()
+        flow.setup()
     assert error.value.code == 'RECOVERY_UNVERIFIED'
     assert store.writes == []
 
@@ -442,8 +448,9 @@ def test_lost_recovery_click_response_preserves_intent_and_never_replays():
     flow.reveal = lambda _: SimpleNamespace(click=click)
     with pytest.raises(RuntimeError):
         flow.setup()
+    flow = controller(store, {'Check what you wrote down'})
     with pytest.raises(Blocked) as error:
-        controller(store, {'Check what you wrote down'}).setup()
+        flow.setup()
     assert error.value.code == 'RECOVERY_SUBMISSION_UNCERTAIN'
     assert clicks == [True]
 
@@ -502,7 +509,8 @@ def test_attach_uses_phone_flow_and_persists_intent_before_cube_selection():
         actions.append('cube-selected')
     def find(title, **kw):
         assert not journal.data['artifacts'].get('phone_key_attachment_started')
-        assert title == 'QA synthetic cube' and kw == {}
+        assert title == 'QA synthetic cube'
+        assert kw == {}
         return SimpleNamespace(click=select)
     flow.phone.card_control = find
     flow.attach_key('QA synthetic key', 'QA synthetic cube', journal)
@@ -539,7 +547,8 @@ def test_quarantine_cas_preserves_history_and_never_makes_credential_globally_id
     assert len(store.writes) == 1
     state = store.value
     assert 'pending_attempt' not in state
-    assert state['pin'] == '123456' and state['words'] == WORDS
+    assert state['pin'] == '123456'
+    assert state['words'] == WORDS
     assert state['quarantined_attempts'][0]['purpose'] == 'key:old'
     assert state['quarantined_attempts'][0]['disposition'] == 'outcome_unresolved'
     assert state['key_generation_reservation']['status'] == 'reserved'
@@ -563,7 +572,8 @@ def test_quarantine_requires_original_revision_identity_authorization_and_bounda
     before = deepcopy(store.value)
     with pytest.raises((Blocked, Failed)):
         flow.reserve_key_generation(receipt)
-    assert store.value == before and store.writes == []
+    assert store.value == before
+    assert store.writes == []
 
 
 def test_reservation_consumption_is_once_only_and_idempotent_recovery_never_clears_new_pending():
@@ -709,7 +719,8 @@ def test_generation_continuation_never_replays_or_recreates(tmp_path, mutation):
     try:
         with pytest.raises((Blocked, Failed)):
             flow.resume_recovery_key_pin(journal, receipt, before_pin=lambda: None)
-        assert 'restore' not in calls and 'Create signer key' not in calls
+        assert 'restore' not in calls
+        assert 'Create signer key' not in calls
         assert calls.count('pin-dispatch') == (1 if mutation == 'lost-input' else 0)
         if mutation == 'lost-input':
             with pytest.raises(Blocked):

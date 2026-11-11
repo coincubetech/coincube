@@ -1270,31 +1270,21 @@ def test_create_recovery(coincubed, bitcoind):
     first_outpoints = [c["outpoint"] for c in coincubed.rpc.listcoins()["coins"]]
 
     # There's nothing to sweep
-    with pytest.raises(
-        RpcError,
-        match="No coin currently spendable through this timelocked recovery path",
-    ):
-        coincubed.rpc.createrecovery(bitcoind.rpc.getnewaddress(), 2)
+    destination_address = bitcoind.rpc.getnewaddress()
+    with pytest.raises(RpcError, match='No coin currently spendable through this timelocked recovery path'):
+        coincubed.rpc.createrecovery(destination_address, 2)
     # Same if we specify timelock:
-    with pytest.raises(
-        RpcError,
-        match="No coin currently spendable through this timelocked recovery path",
-    ):
-        coincubed.rpc.createrecovery(bitcoind.rpc.getnewaddress(), 2, 10)
+    destination_address = bitcoind.rpc.getnewaddress()
+    with pytest.raises(RpcError, match='No coin currently spendable through this timelocked recovery path'):
+        coincubed.rpc.createrecovery(destination_address, 2, 10)
     # And if we use empty array for outpoints:
-    with pytest.raises(
-        RpcError,
-        match="No coin currently spendable through this timelocked recovery path",
-    ):
-        coincubed.rpc.createrecovery(bitcoind.rpc.getnewaddress(), 2, 10, [])
+    destination_address = bitcoind.rpc.getnewaddress()
+    with pytest.raises(RpcError, match='No coin currently spendable through this timelocked recovery path'):
+        coincubed.rpc.createrecovery(destination_address, 2, 10, [])
     # If we specify a coin, the error will be different:
-    with pytest.raises(
-        RpcError,
-        match=f"Coin at '{first_outpoints[0]}' is not recoverable with timelock '10'",
-    ):
-        coincubed.rpc.createrecovery(
-            bitcoind.rpc.getnewaddress(), 2, 10, [f"{first_outpoints[0]}"]
-        )
+    destination_address = bitcoind.rpc.getnewaddress()
+    with pytest.raises(RpcError, match=f"Coin at '{first_outpoints[0]}' is not recoverable with timelock '10'"):
+        coincubed.rpc.createrecovery(destination_address, 2, 10, [f'{first_outpoints[0]}'])
 
     # Receive another coin, it will be one block after the others
     txid = bitcoind.rpc.sendtoaddress(coincubed.rpc.getnewaddress()["address"], 0.4)
@@ -1344,13 +1334,9 @@ def test_create_recovery(coincubed, bitcoind):
     ) == sorted(first_outpoints[:2])
 
     # If we try to include the newest coin, an error will be returned:
-    with pytest.raises(
-        RpcError,
-        match=f"Coin at '{new_outpoint}' is not recoverable with timelock '10'",
-    ):
-        coincubed.rpc.createrecovery(
-            bitcoind.rpc.getnewaddress(), 2, 10, [first_outpoints[0], new_outpoint]
-        )
+    destination_address = bitcoind.rpc.getnewaddress()
+    with pytest.raises(RpcError, match=f"Coin at '{new_outpoint}' is not recoverable with timelock '10'"):
+        coincubed.rpc.createrecovery(destination_address, 2, 10, [first_outpoints[0], new_outpoint])
 
     txid = sign_and_broadcast(coincubed, bitcoind, reco_psbt, recovery=True)
 
@@ -1377,8 +1363,9 @@ def test_labels(coincubed, bitcoind):
     coincubed.rpc.updatelabels({addr: "first-addr-1"})
     assert coincubed.rpc.getlabels([addr])["labels"] == {addr: "first-addr-1"}
     # But we can't set a label larger than 100 characters
-    with pytest.raises(RpcError, match=".*must be less or equal than 100 characters"):
-        coincubed.rpc.updatelabels({addr: "".join("a" for _ in range(101))})
+    overlong_labels = {addr: ''.join(('a' for _ in range(101)))}
+    with pytest.raises(RpcError, match='.*must be less or equal than 100 characters'):
+        coincubed.rpc.updatelabels(overlong_labels)
 
     # We can set a label for a coin.
     sec_addr = coincubed.rpc.getnewaddress()["address"]
@@ -1616,11 +1603,9 @@ def test_rbfpsbt_bump_fee(coincubed, bitcoind):
     )
     # The change output is from self as its parent is confirmed.
     lc_res = coincubed.rpc.listcoins(["unconfirmed"], [])["coins"]
-    assert (
-        len(lc_res) == 1
-        and first_txid in lc_res[0]["outpoint"]
-        and lc_res[0]["is_from_self"] is True
-    )
+    assert len(lc_res) == 1
+    assert first_txid in lc_res[0]['outpoint']
+    assert lc_res[0]['is_from_self'] is True
     # We can now use RBF, but the feerate must be higher than that of the first transaction.
     with pytest.raises(RpcError, match=f"Feerate 1 too low for minimum feerate 2."):
         coincubed.rpc.rbfpsbt(first_txid, False, 1)
@@ -1660,11 +1645,9 @@ def test_rbfpsbt_bump_fee(coincubed, bitcoind):
     )
     # The change output of the replacement is also from self as its parent is confirmed.
     lc_res = coincubed.rpc.listcoins(["unconfirmed"], [])["coins"]
-    assert (
-        len(lc_res) == 1
-        and rbf_1_txid in lc_res[0]["outpoint"]
-        and lc_res[0]["is_from_self"] is True
-    )
+    assert len(lc_res) == 1
+    assert rbf_1_txid in lc_res[0]['outpoint']
+    assert lc_res[0]['is_from_self'] is True
     mempool_rbf_1 = bitcoind.rpc.getmempoolentry(rbf_1_txid)
     # Note that in the mempool entry, "ancestor" includes rbf_1_txid itself.
     rbf_1_feerate = (
@@ -1704,11 +1687,9 @@ def test_rbfpsbt_bump_fee(coincubed, bitcoind):
         )
     )
     lc_res = [c for c in coincubed.rpc.listcoins(["unconfirmed"], [])["coins"]]
-    assert (
-        len(lc_res) == 1
-        and desc_1_txid in lc_res[0]["outpoint"]
-        and lc_res[0]["is_from_self"] is True
-    )
+    assert len(lc_res) == 1
+    assert desc_1_txid in lc_res[0]['outpoint']
+    assert lc_res[0]['is_from_self'] is True
     # Add a new transaction spending the change from the first descendant.
     desc_2_destinations = {
         bitcoind.rpc.getnewaddress(): 25_000,
@@ -1726,11 +1707,9 @@ def test_rbfpsbt_bump_fee(coincubed, bitcoind):
         )
     )
     lc_res = [c for c in coincubed.rpc.listcoins(["unconfirmed"], [])["coins"]]
-    assert (
-        len(lc_res) == 1
-        and desc_2_txid in lc_res[0]["outpoint"]
-        and lc_res[0]["is_from_self"] is True
-    )
+    assert len(lc_res) == 1
+    assert desc_2_txid in lc_res[0]['outpoint']
+    assert lc_res[0]['is_from_self'] is True
     # Now replace the first RBF, which will also remove its descendants.
     rbf_2_res = coincubed.rpc.rbfpsbt(rbf_1_txid, False, feerate)
     rbf_2_psbt = PSBT.from_base64(rbf_2_res["psbt"])
@@ -1754,11 +1733,9 @@ def test_rbfpsbt_bump_fee(coincubed, bitcoind):
         )
     )
     lc_res = [c for c in coincubed.rpc.listcoins(["unconfirmed"], [])["coins"]]
-    assert (
-        len(lc_res) == 1
-        and rbf_2_txid in lc_res[0]["outpoint"]
-        and lc_res[0]["is_from_self"] is True
-    )
+    assert len(lc_res) == 1
+    assert rbf_2_txid in lc_res[0]['outpoint']
+    assert lc_res[0]['is_from_self'] is True
     # The unconfirmed coins used in the descendant transactions have been removed so that
     # only one of the input coins remains, and its spend info has been wiped so that it is as before.
     assert coincubed.rpc.listcoins([], desc_1_outpoints + desc_2_outpoints)["coins"] == [

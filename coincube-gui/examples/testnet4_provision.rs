@@ -371,6 +371,37 @@ mod run {
         }
     }
 
+    /// Generate the private backup for a new run before writing it to protected storage.
+    fn generate_run_secrets(input: &Input) -> Result<Secrets> {
+        let master = MasterSigner::generate(NETWORK).map_err(|_| "random_generation_failed")?;
+        let recipient = MasterSigner::generate(NETWORK).map_err(|_| "random_generation_failed")?;
+        let grid_phrase = GridRecoveryPhrase::generate().map_err(|_| "random_generation_failed")?;
+        let mut pattern = OrderedPattern::new();
+        while !pattern.is_complete() {
+            use rand::Rng;
+            let cell = CellRef::new(
+                rand::thread_rng().gen_range(0..WordGrid::ROWS) as u16,
+                rand::thread_rng().gen_range(0..WordGrid::COLS) as u8,
+            );
+            if !pattern.cells().contains(&cell) {
+                pattern.add(cell).map_err(|_| "border_generation_failed")?;
+            }
+        }
+        let (_, checksum) = build_mnemonic(&grid_phrase.generate_grid(), &pattern)
+            .map_err(|_| "border_generation_failed")?;
+        let value = Secrets {
+            run_id: input.run_id.clone(),
+            profile_dir: input.profile_dir.clone(),
+            master_phrase: master.words().join(" "),
+            cube_pin: format!("{:04}", rand::random::<u16>() % 10_000),
+            grid_phrase: grid_phrase.as_str().to_owned(),
+            pattern: pattern.cells().iter().map(|c| (c.row, c.col)).collect(),
+            checksum_word: checksum.to_owned(),
+            recipient_phrase: recipient.words().join(" "),
+        };
+        Ok(value)
+    }
+
     fn load_or_create(
         input: &Input,
         store: &dyn secret_store::Backend,
@@ -419,34 +450,7 @@ mod run {
                 input.action == "cube" && !state_path(input).exists(),
                 "run_not_provisioned",
             )?;
-            let master = MasterSigner::generate(NETWORK).map_err(|_| "random_generation_failed")?;
-            let recipient =
-                MasterSigner::generate(NETWORK).map_err(|_| "random_generation_failed")?;
-            let grid_phrase =
-                GridRecoveryPhrase::generate().map_err(|_| "random_generation_failed")?;
-            let mut pattern = OrderedPattern::new();
-            while !pattern.is_complete() {
-                use rand::Rng;
-                let cell = CellRef::new(
-                    rand::thread_rng().gen_range(0..WordGrid::ROWS) as u16,
-                    rand::thread_rng().gen_range(0..WordGrid::COLS) as u8,
-                );
-                if !pattern.cells().contains(&cell) {
-                    pattern.add(cell).map_err(|_| "border_generation_failed")?;
-                }
-            }
-            let (_, checksum) = build_mnemonic(&grid_phrase.generate_grid(), &pattern)
-                .map_err(|_| "border_generation_failed")?;
-            let value = Secrets {
-                run_id: input.run_id.clone(),
-                profile_dir: input.profile_dir.clone(),
-                master_phrase: master.words().join(" "),
-                cube_pin: format!("{:04}", rand::random::<u16>() % 10_000),
-                grid_phrase: grid_phrase.as_str().to_owned(),
-                pattern: pattern.cells().iter().map(|c| (c.row, c.col)).collect(),
-                checksum_word: checksum.to_owned(),
-                recipient_phrase: recipient.words().join(" "),
-            };
+            let value = generate_run_secrets(input)?;
             let value = serde_json::to_value(&value).map_err(|_| "invalid_run_backup")?;
             secret_store::put(store, &locator, &value, None)?;
             // Verify the durable copy, not the in-memory value used to write it.

@@ -86,7 +86,8 @@ def test_i2_one_machine_two_cubes_keep_every_path_and_port_apart(two_chain):
     assert da.rpc.socket_path != db.rpc.socket_path
 
     # Both are live and each answers for its own chain.
-    assert a.rpc.getblockcount() > 0 and b.rpc.getblockcount() > 0
+    assert a.rpc.getblockcount() > 0
+    assert b.rpc.getblockcount() > 0
     assert a.rpc.getbestblockhash() != b.rpc.getbestblockhash()
 
 

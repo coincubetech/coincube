@@ -388,6 +388,72 @@ mod run {
             "submitted_signature_count":session.submitted_signatures.len()}))
     }
 
+    /// Validate and merge the encrypted signatures returned for this exact request.
+    fn merge_returned_signatures(
+        input: &Input,
+        session: &SigningSession,
+        device: &str,
+        key: &DeviceTransportKey,
+        psbt: &Psbt,
+        fingerprint: Fingerprint,
+    ) -> Result<Psbt> {
+        let mut merged = psbt.clone();
+        for signature in &session.submitted_signatures {
+            check(
+                signature.signed_psbt.is_empty()
+                    && signature.device_id == session.targets[0].device_id
+                    && signature
+                        .signed_key_ids
+                        .iter()
+                        .any(|id| id == &input.target_key_id),
+                "signature_target_mismatch",
+            )?;
+            let envelope = signature
+                .signature_envelope
+                .as_ref()
+                .ok_or("unencrypted_signature_refused")?;
+            check(
+                envelope.device_id.is_empty() || envelope.device_id == device,
+                "signature_target_mismatch",
+            )?;
+            let bytes = key
+                .open(
+                    &envelope.ephemeral_pubkey,
+                    &envelope.nonce,
+                    &envelope.ciphertext,
+                    &input.request_id,
+                )
+                .map_err(|_| "signature_open_failed")?;
+            let delta = Psbt::deserialize(&bytes).map_err(|_| "invalid_returned_psbt")?;
+            check(
+                delta.unsigned_tx == psbt.unsigned_tx && delta.inputs.len() == psbt.inputs.len(),
+                "returned_transaction_mismatch",
+            )?;
+            for (local, remote) in psbt.inputs.iter().zip(&delta.inputs) {
+                check(
+                    remote.tap_script_sigs.is_empty() && remote.tap_key_sig.is_none(),
+                    "unexpected_signature_kind",
+                )?;
+                for (pubkey, sig) in &remote.partial_sigs {
+                    if let Some(existing) = local.partial_sigs.get(pubkey) {
+                        check(existing == sig, "signature_conflict")?;
+                    } else {
+                        check(
+                            local
+                                .bip32_derivation
+                                .get(&pubkey.inner)
+                                .is_some_and(|(fp, _)| fp == &fingerprint),
+                            "unexpected_signing_key",
+                        )?;
+                    }
+                }
+            }
+            merge_testnet4_integration_signatures(&mut merged, &delta)
+                .map_err(|_| "signature_merge_failed")?;
+        }
+        Ok(merged)
+    }
+
     async fn execute(input: Input) -> Result<Value> {
         validate_input(&input)?;
         let (descriptor, psbt, fingerprint) = fixture(&input)?;
@@ -520,60 +586,7 @@ mod run {
             )?;
             return Ok(output);
         }
-        let mut merged = psbt.clone();
-        for signature in &session.submitted_signatures {
-            check(
-                signature.signed_psbt.is_empty()
-                    && signature.device_id == session.targets[0].device_id
-                    && signature
-                        .signed_key_ids
-                        .iter()
-                        .any(|id| id == &input.target_key_id),
-                "signature_target_mismatch",
-            )?;
-            let envelope = signature
-                .signature_envelope
-                .as_ref()
-                .ok_or("unencrypted_signature_refused")?;
-            check(
-                envelope.device_id.is_empty() || envelope.device_id == *device,
-                "signature_target_mismatch",
-            )?;
-            let bytes = key
-                .open(
-                    &envelope.ephemeral_pubkey,
-                    &envelope.nonce,
-                    &envelope.ciphertext,
-                    &input.request_id,
-                )
-                .map_err(|_| "signature_open_failed")?;
-            let delta = Psbt::deserialize(&bytes).map_err(|_| "invalid_returned_psbt")?;
-            check(
-                delta.unsigned_tx == psbt.unsigned_tx && delta.inputs.len() == psbt.inputs.len(),
-                "returned_transaction_mismatch",
-            )?;
-            for (local, remote) in psbt.inputs.iter().zip(&delta.inputs) {
-                check(
-                    remote.tap_script_sigs.is_empty() && remote.tap_key_sig.is_none(),
-                    "unexpected_signature_kind",
-                )?;
-                for (pubkey, sig) in &remote.partial_sigs {
-                    if let Some(existing) = local.partial_sigs.get(pubkey) {
-                        check(existing == sig, "signature_conflict")?;
-                    } else {
-                        check(
-                            local
-                                .bip32_derivation
-                                .get(&pubkey.inner)
-                                .is_some_and(|(fp, _)| fp == &fingerprint),
-                            "unexpected_signing_key",
-                        )?;
-                    }
-                }
-            }
-            merge_testnet4_integration_signatures(&mut merged, &delta)
-                .map_err(|_| "signature_merge_failed")?;
-        }
+        let merged = merge_returned_signatures(&input, &session, device, &key, &psbt, fingerprint)?;
         let secp = secp256k1::Secp256k1::verification_only();
         let mut finalized = merged.clone();
         finalized

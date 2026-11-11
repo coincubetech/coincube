@@ -91,7 +91,7 @@ def directory(request, test_base_dir, test_name):
 
 @pytest.fixture
 def test_name(request):
-    yield request.function.__name__
+    return request.function.__name__
 
 
 @pytest.fixture
