@@ -546,12 +546,11 @@ mod run {
             check(user.id == binding.owner_user_id, "abort_account_mismatch")?;
             let creator = serde_json::to_vec(device).map_err(|_| "abort_creator_mismatch")?;
             check(
-                format!("{:x}", Sha256::digest(&creator)) == binding.creator_identity,
+                hex::encode(Sha256::digest(&creator)) == binding.creator_identity,
                 "abort_creator_mismatch",
             )?;
             check(
-                format!("{:x}", Sha256::digest(private_read(&input.psbt_file)?))
-                    == binding.psbt_sha256,
+                hex::encode(Sha256::digest(private_read(&input.psbt_file)?)) == binding.psbt_sha256,
                 "abort_psbt_mismatch",
             )?;
         }
