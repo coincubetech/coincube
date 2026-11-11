@@ -527,13 +527,21 @@ mod graph_tests {
     use std::sync::Arc;
 
     fn spend(previous_output: OutPoint, value: u64) -> Arc<Transaction> {
+        spend_inputs(&[previous_output], value)
+    }
+
+    fn spend_inputs(inputs: &[OutPoint], value: u64) -> Arc<Transaction> {
         Arc::new(Transaction {
             version: Version::TWO,
             lock_time: absolute::LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output,
-                ..TxIn::default()
-            }],
+            input: inputs
+                .iter()
+                .copied()
+                .map(|previous_output| TxIn {
+                    previous_output,
+                    ..TxIn::default()
+                })
+                .collect(),
             output: vec![TxOut {
                 value: Amount::from_sat(value),
                 script_pubkey: bitcoin::ScriptBuf::new(),
@@ -587,6 +595,96 @@ mod graph_tests {
             matches!(mempool_entry_from_graph(tx.clone(), &graph, &chain),
             Err(Error::IncompleteMempoolGraph(txid, _)) if txid == tx.compute_txid())
         );
+    }
+
+    #[test]
+    fn ancestor_discovery_follows_only_unconfirmed_transactions() {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let (chain, _) = LocalChain::from_genesis_hash(genesis.block_hash());
+        let funding = genesis.txdata[0].compute_txid();
+        // These parents are named by the candidate transactions and are not
+        // themselves inserted, so the walk's result is exactly their ids.
+        let confirmed_parent = spend(OutPoint::new(funding, 0), 100_000).compute_txid();
+        let shared_parent = spend(OutPoint::new(funding, 1), 100_000).compute_txid();
+        let other_parent = spend(OutPoint::new(funding, 2), 100_000).compute_txid();
+        let unknown = spend(OutPoint::new(funding, 4), 100_000).compute_txid();
+        let confirmed = spend(OutPoint::new(confirmed_parent, 0), 90_000);
+        // Two inputs share one parent. The next fetch must name that parent once.
+        let unconfirmed = spend_inputs(
+            &[
+                OutPoint::new(shared_parent, 0),
+                OutPoint::new(shared_parent, 1),
+                OutPoint::new(other_parent, 0),
+            ],
+            80_000,
+        );
+        let also_unconfirmed = spend(OutPoint::new(shared_parent, 2), 70_000);
+        let mut graph = TxGraph::default();
+        for transaction in [&confirmed, &unconfirmed, &also_unconfirmed] {
+            let _ = graph.insert_tx(transaction.clone());
+        }
+        // A full transaction with no anchor is unconfirmed. `seen_at` is not
+        // what stops the walk; an anchor in the best chain is.
+        let _ = graph.insert_seen_at(unconfirmed.compute_txid(), 1);
+        let anchor = ConfirmationHeightAnchor {
+            anchor_block: chain.tip().block_id(),
+            confirmation_height: 0,
+        };
+        let _ = graph.insert_anchor(confirmed.compute_txid(), anchor);
+
+        let mut candidates = HashSet::new();
+        candidates.insert(confirmed.compute_txid());
+        candidates.insert(unconfirmed.compute_txid());
+        candidates.insert(also_unconfirmed.compute_txid());
+        candidates.insert(unknown);
+
+        let next = unconfirmed_ancestor_txids(&candidates, &graph, &chain);
+        assert_eq!(
+            next,
+            HashSet::from([shared_parent, other_parent]),
+            "an anchored transaction and an unknown txid must not extend the walk"
+        );
+
+        let mut confirmed_only = HashSet::new();
+        confirmed_only.insert(confirmed.compute_txid());
+        assert!(
+            unconfirmed_ancestor_txids(&confirmed_only, &graph, &chain).is_empty(),
+            "a confirmed ancestor is where the fetch stops"
+        );
+        assert!(unconfirmed_ancestor_txids(&HashSet::new(), &graph, &chain).is_empty());
+    }
+
+    #[test]
+    fn mempool_fee_missing_descendant_input_names_that_descendant() {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let (chain, _) = LocalChain::from_genesis_hash(genesis.block_hash());
+        let funding = Arc::new(genesis.txdata[0].clone());
+        let tx = spend(OutPoint::new(funding.compute_txid(), 0), 80_000);
+        let missing = spend(OutPoint::new(funding.compute_txid(), 1), 50_000).compute_txid();
+        let descendant = spend_inputs(
+            &[
+                OutPoint::new(tx.compute_txid(), 0),
+                OutPoint::new(missing, 0),
+            ],
+            70_000,
+        );
+        let mut graph = TxGraph::default();
+        for transaction in [&funding, &tx, &descendant] {
+            let _ = graph.insert_tx(transaction.clone());
+            let _ = graph.insert_seen_at(transaction.compute_txid(), 1);
+        }
+        let anchor = ConfirmationHeightAnchor {
+            anchor_block: chain.tip().block_id(),
+            confirmation_height: 0,
+        };
+        let _ = graph.insert_anchor(funding.compute_txid(), anchor);
+
+        match mempool_entry_from_graph(tx, &graph, &chain) {
+            Err(Error::IncompleteMempoolGraph(txid, _)) => {
+                assert_eq!(txid, descendant.compute_txid());
+            }
+            other => panic!("expected the descendant's missing input, got {:?}", other),
+        }
     }
 
     #[test]
