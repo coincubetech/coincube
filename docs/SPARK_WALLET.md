@@ -86,7 +86,7 @@ Spark uses a deposit-address model: the user sends BTC to a static address, the 
 
 - The Receive panel shows a "Pending deposits" card below the main body, listing every unclaimed deposit the SDK is aware of.
 - Each row renders one of four actions: **Claim** (mature), **Claiming…** (in-flight), **Waiting for confirmation** (immature), or **Retry** + error hint (previous claim failed).
-- A **Claim** that the SDK defers (0.28.0+) leaves a neutral "Not claimed yet" note on the card naming why; see Troubleshooting.
+- A **Claim** that the SDK defers (0.28.0+) leaves a neutral "Not claimed yet" note on that deposit's row naming why; it goes once that deposit is claimed. See Troubleshooting.
 - The list refreshes automatically on `Event::DepositsChanged` events from the bridge (emitted for `SdkEvent::UnclaimedDeposits`, `ClaimedDeposits`, and `NewDeposits`), so the card appears the moment the SDK observes an incoming deposit without manual refresh.
 
 ### Lightning Address routing (Phase 5)
