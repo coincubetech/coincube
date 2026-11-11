@@ -1,10 +1,17 @@
 name: CI
 
 on:
-  push:
+  pull_request:
     branches:
       - master
-  pull_request:
+      - redesign
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+      - converted_to_draft
   workflow_dispatch:
     inputs:
       source_sha:
@@ -17,8 +24,8 @@ on:
 # included — per commit, and only the last result is ever looked at.
 # Manual validation runs are independent and must not be superseded by pushes.
 concurrency:
-  group: ci-${{ github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  group: batch-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_id) || github.ref }}-${{ github.event.action == 'edited' && github.event.changes.base == null && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Build-time passkey flags, same repo-level Actions variables the release
 # workflow uses. CI has to compile the *shipping* configuration: without these,
@@ -34,6 +41,7 @@ env:
 
 jobs:
   linter:
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -65,6 +73,7 @@ jobs:
           cargo clippy -p coincube-gui --no-default-features --all-targets --locked -- -D warnings
 
   mcp_tests:
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -97,6 +106,7 @@ jobs:
   # its 15 tests had never run in CI. Its Cargo.lock is its own, hence the
   # distinct cache key — sharing the root's would thrash both.
   bridge_tests:
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     needs: linter
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -161,6 +171,7 @@ jobs:
   # inputs are), so `if: matrix.os == ... || ...` is silently false on every
   # PR and skips the Linux legs too. `strategy.matrix` does see `needs`.
   unit_tests_matrix:
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     name: Select unit_tests matrix
     needs: linter
     runs-on: ubuntu-latest
@@ -177,6 +188,7 @@ jobs:
           echo "include=$include" >> "$GITHUB_OUTPUT"
 
   unit_tests:
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     needs: [linter, unit_tests_matrix]
     strategy:
       # Don't cancel the whole matrix when one leg fails: a flaky Windows job

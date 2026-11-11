@@ -505,33 +505,7 @@ impl Client {
                 log::debug!("Esplora skipping {} (cooling down)", provider.name,);
                 continue;
             }
-            let before = self
-                .admission
-                .as_ref()
-                .map(|guard| {
-                    guard.validate(|height| {
-                        admission_hash_at(provider, &self.abort, height, transport_backoff)
-                    })
-                })
-                .transpose()
-                .map_err(|error| admission_error(provider, error))?;
-            if self.admission.is_some() && self.abort.load(Ordering::Relaxed) {
-                return Err(Error::Aborted);
-            }
-            let result = op(&provider.client);
-            // A successful broadcast must not be retrospectively reported failed.
-            if self.admission.is_some() && check_after && self.abort.load(Ordering::Relaxed) {
-                return Err(Error::Aborted);
-            }
-            if result.is_ok() && check_after {
-                if let (Some(guard), Some(before)) = (&self.admission, before.as_ref()) {
-                    guard
-                        .revalidate(before, |height| {
-                            admission_hash_at(provider, &self.abort, height, transport_backoff)
-                        })
-                        .map_err(|error| admission_error(provider, error))?;
-                }
-            }
+            let result = self.call_admitted(provider, &mut op, check_after, transport_backoff)?;
             let retryable = should_fall_back(&result);
             let throttled = is_throttled(&result);
             let transport_failure = is_transport_failure(&result);
@@ -551,30 +525,13 @@ impl Client {
             if !retryable {
                 return Err(Error::Client(Box::new(error)));
             }
-            if throttled {
-                provider.enter_cooldown(RATE_LIMIT_COOLDOWN);
-                log::warn!(
-                    "Esplora {} throttled ({}); cooling for {:?} and trying next provider",
-                    provider.name,
-                    error,
-                    RATE_LIMIT_COOLDOWN,
-                );
-            } else if transport_failure {
-                // Reachability errors cool down; 5xx responses do not.
-                provider.enter_cooldown(transport_backoff);
-                log::warn!(
-                    "Esplora {} unreachable ({}); cooling for {:?} and trying next provider",
-                    provider.name,
-                    error,
-                    transport_backoff,
-                );
-            } else {
-                log::warn!(
-                    "Esplora {} failed ({}); trying next provider",
-                    provider.name,
-                    error
-                );
-            }
+            Self::cool_failed_provider(
+                provider,
+                &error,
+                throttled,
+                transport_failure,
+                transport_backoff,
+            );
             last_error = Some(Error::Client(Box::new(error)));
         }
 
@@ -585,6 +542,81 @@ impl Client {
         // level and back off longer than its normal 2s retry, since
         // a cooldown won't lift for minutes.
         Err(last_error.unwrap_or(Error::AllCooling))
+    }
+
+    /// Preserve admission checks around one operation, including the broadcast exception.
+    fn call_admitted<T, F>(
+        &self,
+        provider: &Provider,
+        op: &mut F,
+        check_after: bool,
+        transport_backoff: Duration,
+    ) -> Result<Result<T, esplora_client::Error>, Error>
+    where
+        F: FnMut(&esplora_client::blocking::BlockingClient) -> Result<T, esplora_client::Error>,
+    {
+        let before = self
+            .admission
+            .as_ref()
+            .map(|guard| {
+                guard.validate(|height| {
+                    admission_hash_at(provider, &self.abort, height, transport_backoff)
+                })
+            })
+            .transpose()
+            .map_err(|error| admission_error(provider, error))?;
+        if self.admission.is_some() && self.abort.load(Ordering::Relaxed) {
+            return Err(Error::Aborted);
+        }
+        let result = op(&provider.client);
+        // A successful broadcast must not be retrospectively reported failed.
+        if self.admission.is_some() && check_after && self.abort.load(Ordering::Relaxed) {
+            return Err(Error::Aborted);
+        }
+        if result.is_ok() && check_after {
+            if let (Some(guard), Some(before)) = (&self.admission, before.as_ref()) {
+                guard
+                    .revalidate(before, |height| {
+                        admission_hash_at(provider, &self.abort, height, transport_backoff)
+                    })
+                    .map_err(|error| admission_error(provider, error))?;
+            }
+        }
+        Ok(result)
+    }
+
+    /// Only throttling and transport failures cool a provider; server errors remain retryable.
+    fn cool_failed_provider(
+        provider: &Provider,
+        error: &esplora_client::Error,
+        throttled: bool,
+        transport_failure: bool,
+        transport_backoff: Duration,
+    ) {
+        if throttled {
+            provider.enter_cooldown(RATE_LIMIT_COOLDOWN);
+            log::warn!(
+                "Esplora {} throttled ({}); cooling for {:?} and trying next provider",
+                provider.name,
+                error,
+                RATE_LIMIT_COOLDOWN,
+            );
+        } else if transport_failure {
+            // Reachability errors cool down; 5xx responses do not.
+            provider.enter_cooldown(transport_backoff);
+            log::warn!(
+                "Esplora {} unreachable ({}); cooling for {:?} and trying next provider",
+                provider.name,
+                error,
+                transport_backoff,
+            );
+        } else {
+            log::warn!(
+                "Esplora {} failed ({}); trying next provider",
+                provider.name,
+                error
+            );
+        }
     }
 
     /// Get the genesis block hash (block at height 0).

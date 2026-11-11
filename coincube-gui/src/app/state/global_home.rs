@@ -6079,6 +6079,86 @@ mod tests {
             assert!(!home.is_sending);
         }
 
+        /// `has_vault` is a cache flag. An imported wallet does not support
+        /// inheritance, so a stale `true` must not let a Vault picker choice,
+        /// a feerate preview, or a prepared Spark→Vault send through.
+        #[test]
+        fn a_stale_vault_flag_cannot_spend_an_imported_wallet() {
+            use coincube_core::miniscript::bitcoin::{
+                bip32::{DerivationPath, Xpriv, Xpub},
+                secp256k1::Secp256k1,
+            };
+            use coincube_core::wallet_descriptor::ImportedWalletDescriptor;
+
+            let secp = Secp256k1::new();
+            let master = Xpriv::new_master(Network::Bitcoin, &[44; 32]).unwrap();
+            let account = master
+                .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+                .unwrap();
+            let key = format!(
+                "[{}/84h/0h/0h]{}",
+                master.fingerprint(&secp),
+                Xpub::from_priv(&secp, &account)
+            );
+            let descriptor = ImportedWalletDescriptor::parse(
+                &format!("wpkh({key}/0/*)"),
+                Some(&format!("wpkh({key}/1/*)")),
+                coincube_core::chain::ChainId::Bitcoin,
+            )
+            .unwrap();
+            let (mut home, _) = home_on_transfer_screen();
+            home.wallet = Some(Arc::new(Wallet::new(
+                coincube_core::wallet_descriptor::WalletDescriptor::Imported(descriptor),
+            )));
+            assert!(!home.wallet.as_ref().unwrap().supports_inheritance());
+
+            let daemon = Arc::new(RecordingDaemon::default());
+            let as_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
+            let cache = Cache {
+                has_vault: true,
+                ..Cache::default()
+            };
+
+            // The fixture already pairs Vault -> Liquid; the refused choice
+            // must leave the picker open and the pair untouched.
+            let pair_before = (home.transfer_from, home.transfer_to);
+            home.wallet_picker = Some(PickerSide::From);
+            drain(home.update(
+                Some(as_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SelectWalletInPicker(
+                    WalletKind::Vault,
+                ))),
+            ));
+            assert_eq!(home.wallet_picker, Some(PickerSide::From));
+            assert_eq!((home.transfer_from, home.transfer_to), pair_before);
+
+            drain(home.update(
+                Some(as_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SetTransferFeerate(
+                    "25".to_string(),
+                ))),
+            ));
+            drain(home.update(
+                Some(as_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SignVaultToLiquidTx)),
+            ));
+            assert!(daemon.calls.lock().unwrap().is_empty());
+            assert!(!home.is_sending);
+
+            home.transfer_direction = Some(TransferDirection::SparkToVault);
+            home.spark_send_handle = Some("prepared-handle".to_string());
+            drain(home.update(
+                Some(as_daemon),
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::ConfirmSparkSend)),
+            ));
+            assert_eq!(home.spark_send_handle.as_deref(), Some("prepared-handle"));
+            assert!(daemon.calls.lock().unwrap().is_empty());
+        }
+
         #[test]
         fn back_and_destination_switch_reject_old_address_until_new_request_completes() {
             let (mut home, wallet) = home_on_transfer_screen();

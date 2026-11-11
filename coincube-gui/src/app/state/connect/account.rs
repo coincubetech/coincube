@@ -75,6 +75,27 @@ fn refresh_trouble(
     }
 }
 
+/// Read an existing ordinary desktop login without changing the global session.
+/// The namespace selects local credential storage, never the API environment.
+#[cfg(feature = "integration-tests")]
+pub fn read_session_for_integration(namespace: &str) -> Result<LoginResponse, &'static str> {
+    let service = match namespace {
+        "development" => "dev.coincube.Connect",
+        "production" => "io.coincube.Connect",
+        _ => return Err("invalid_session_namespace"),
+    };
+    let entry = keyring::Entry::new(service, CONNECT_KEYRING_USER)
+        .map_err(|_| "desktop_session_unavailable")?;
+    let bytes = zeroize::Zeroizing::new(
+        entry
+            .get_secret()
+            .map_err(|_| "desktop_session_unavailable")?,
+    );
+    serde_json::from_slice::<StoredSession>(&bytes)
+        .map(|session| session.login)
+        .map_err(|_| "desktop_session_invalid")
+}
+
 // ── Checkout state machine ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]

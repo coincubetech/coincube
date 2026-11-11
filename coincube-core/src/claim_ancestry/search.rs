@@ -105,6 +105,22 @@ impl Search {
         }
         result
     }
+    fn ready_candidate(&mut self) -> Result<Option<Step>, Error> {
+        if let Some(txid) = self.ready.take() {
+            let node = &self.nodes[&txid];
+            Self::validate_output(node, node.outpoint)?;
+            if !node.pre_fork {
+                if node.transaction.is_coinbase() {
+                    return self.candidate(txid).map(Step::Candidate).map(Some);
+                }
+                if node.transaction.input.is_empty() {
+                    return Err(Error::InvalidInput);
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Lazily expand fetched nodes in FIFO order and validate every referenced
     /// output, including references whose transaction was already fetched.
     fn step_inner(&mut self) -> Result<Step, Error> {
@@ -114,17 +130,8 @@ impl Search {
                 max_bytes: pending.max_bytes,
             });
         }
-        if let Some(txid) = self.ready.take() {
-            let node = &self.nodes[&txid];
-            Self::validate_output(node, node.outpoint)?;
-            if !node.pre_fork {
-                if node.transaction.is_coinbase() {
-                    return self.candidate(txid).map(Step::Candidate);
-                }
-                if node.transaction.input.is_empty() {
-                    return Err(Error::InvalidInput);
-                }
-            }
+        if let Some(candidate) = self.ready_candidate()? {
+            return Ok(candidate);
         }
         if self.nodes.is_empty() {
             return self.request(self.selected, None);

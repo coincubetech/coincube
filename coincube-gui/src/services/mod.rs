@@ -62,18 +62,22 @@ pub mod unlock;
 /// Any trailing slashes are trimmed so callers can safely use
 /// `format!("{}/api/v1/...", base)` without producing double-slash paths.
 pub fn coincube_api_base_url() -> String {
-    let raw: String = if let Ok(v) = std::env::var("COINCUBE_API_URL") {
-        if !v.is_empty() {
-            v
-        } else if let Some(v) = option_env!("COINCUBE_API_URL") {
-            v.to_string()
-        } else {
-            default_base_url()
-        }
-    } else if let Some(v) = option_env!("COINCUBE_API_URL") {
-        v.to_string()
-    } else {
-        default_base_url()
+    let runtime = std::env::var("COINCUBE_API_URL").ok();
+    resolve_api_base_url(
+        runtime.as_deref(),
+        option_env!("COINCUBE_API_URL"),
+        &default_base_url(),
+    )
+}
+
+/// `runtime` is `Some` when `COINCUBE_API_URL` is set, including to an empty
+/// string. An empty runtime value is ignored so a blank shell override cannot
+/// erase the baked or production base. A non-empty one wins, then trailing
+/// slashes are removed so `format!("{base}/api/v1/...")` cannot double-slash.
+fn resolve_api_base_url(runtime: Option<&str>, compiled: Option<&str>, fallback: &str) -> String {
+    let raw = match runtime {
+        Some(value) if !value.is_empty() => value,
+        _ => compiled.unwrap_or(fallback),
     };
     let url = raw.trim_end_matches('/').to_string();
     // A release binary must not follow COINCUBE_API_URL onto cleartext HTTP.
@@ -94,5 +98,73 @@ fn default_base_url() -> String {
     {
         // Release builds must have COINCUBE_API_URL set at build time.
         env!("COINCUBE_API_URL").to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_api_base_url;
+
+    const PRODUCTION: &str = "https://api.coincube.io";
+    const BAKED: &str = "https://baked.example";
+
+    fn service_config(base: &str) -> String {
+        format!("{base}/api/v1/connect/service-config")
+    }
+
+    #[test]
+    fn runtime_override_wins_and_trailing_slashes_do_not_double_the_api_path() {
+        let base = resolve_api_base_url(
+            Some("https://local.example:8080///"),
+            Some(BAKED),
+            PRODUCTION,
+        );
+        assert_eq!(base, "https://local.example:8080");
+        assert_eq!(
+            service_config(&base),
+            "https://local.example:8080/api/v1/connect/service-config"
+        );
+        // A path prefix is kept; only the trailing slash is removed.
+        assert_eq!(
+            resolve_api_base_url(Some("https://local.example/prefix/"), None, PRODUCTION),
+            "https://local.example/prefix"
+        );
+    }
+
+    #[test]
+    fn an_empty_runtime_override_falls_through_instead_of_becoming_the_base() {
+        let baked = format!("{BAKED}/");
+        assert_eq!(
+            resolve_api_base_url(Some(""), Some(baked.as_str()), PRODUCTION),
+            BAKED
+        );
+        assert_eq!(resolve_api_base_url(Some(""), None, PRODUCTION), PRODUCTION);
+        assert_eq!(resolve_api_base_url(None, Some(BAKED), PRODUCTION), BAKED);
+        // A baked empty string is present, so it is not replaced by production.
+        assert_eq!(resolve_api_base_url(None, Some(""), PRODUCTION), "");
+        assert_eq!(
+            resolve_api_base_url(Some(""), Some(""), "https://fallback.example/"),
+            ""
+        );
+    }
+
+    #[test]
+    fn missing_runtime_and_baked_values_use_the_supplied_fallback() {
+        let base = resolve_api_base_url(None, None, "https://fallback.example/");
+        assert_eq!(base, "https://fallback.example");
+        assert_eq!(
+            service_config(&base),
+            "https://fallback.example/api/v1/connect/service-config"
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_builds_fall_back_to_the_production_api() {
+        assert_eq!(super::default_base_url(), PRODUCTION);
+        assert_eq!(
+            resolve_api_base_url(None, None, &super::default_base_url()),
+            PRODUCTION
+        );
     }
 }

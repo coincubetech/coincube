@@ -165,6 +165,37 @@ impl Electrum {
         self.full_scan = true;
     }
 
+    /// Build the full scan and attach progress accounting to each address iterator.
+    fn full_scan_request(&self, tip: CheckPoint) -> FullScanRequest<wallet::KeychainType> {
+        let mut request = FullScanRequest::from_chain_tip(tip);
+
+        let spk_iters = self.bdk_wallet.index().all_unbounded_spk_iters();
+        if let Some(cache) = &self.history_sync {
+            cache.begin_full_scan(crate::bitcoin::expected_full_scan_addresses(
+                spk_iters.len(),
+                self.bdk_wallet
+                    .index()
+                    .last_revealed_indices()
+                    .into_values(),
+                self.full_scan_gap,
+            ));
+        }
+        for (k, spks) in spk_iters {
+            let change = matches!(k, wallet::KeychainType::Change);
+            request = match &self.history_sync {
+                Some(cache) => {
+                    let cache = cache.clone();
+                    request.set_spks_for_keychain(
+                        k,
+                        spks.inspect(move |_| cache.branch_address_checked(change)),
+                    )
+                }
+                None => request.set_spks_for_keychain(k, spks),
+            };
+        }
+        request
+    }
+
     /// Sync the wallet with the Electrum server. If there was any reorg since the last poll, this
     /// returns the first common ancestor between the previous and the new chain.
     pub fn sync_wallet(
@@ -212,32 +243,7 @@ impl Electrum {
         } else {
             log::info!("Performing full scan.");
             // Either local_chain has height 0 or we want to trigger a full scan.
-            let mut request = FullScanRequest::from_chain_tip(local_chain_tip.clone());
-
-            let spk_iters = self.bdk_wallet.index().all_unbounded_spk_iters();
-            if let Some(cache) = &self.history_sync {
-                cache.begin_full_scan(crate::bitcoin::expected_full_scan_addresses(
-                    spk_iters.len(),
-                    self.bdk_wallet
-                        .index()
-                        .last_revealed_indices()
-                        .into_values(),
-                    self.full_scan_gap,
-                ));
-            }
-            for (k, spks) in spk_iters {
-                let change = matches!(k, wallet::KeychainType::Change);
-                request = match &self.history_sync {
-                    Some(cache) => {
-                        let cache = cache.clone();
-                        request.set_spks_for_keychain(
-                            k,
-                            spks.inspect(move |_| cache.branch_address_checked(change)),
-                        )
-                    }
-                    None => request.set_spks_for_keychain(k, spks),
-                };
-            }
+            let request = self.full_scan_request(local_chain_tip.clone());
             let scan_result = self
                 .client
                 .full_scan_with_confirmation_time_height_anchor(

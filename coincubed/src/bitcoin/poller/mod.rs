@@ -142,6 +142,27 @@ impl Poller {
         }
     }
 
+    fn time_before_poll(
+        last_poll: Option<time::Instant>,
+        synced: bool,
+        poll_interval: time::Duration,
+    ) -> time::Duration {
+        if let Some(last_poll) = last_poll {
+            let time_since_poll = time::Instant::now().duration_since(last_poll);
+            // Until we are synced we poll less often to avoid harassing bitcoind and impeding
+            // the sync. As a function since it's mocked for the tests.
+            let poll_interval = if synced {
+                poll_interval
+            } else {
+                looper::sync_poll_interval()
+            };
+            poll_interval.saturating_sub(time_since_poll)
+        } else {
+            // Don't wait before doing the first poll.
+            time::Duration::ZERO
+        }
+    }
+
     /// Continuously update our state from the Bitcoin backend.
     /// - `poll_interval`: how frequently to perform an update.
     /// - `shutdown`: set to true to stop continuously updating and make this function return.
@@ -157,21 +178,7 @@ impl Poller {
         let mut synced = false;
 
         loop {
-            // How long to wait before the next poll.
-            let time_before_poll = if let Some(last_poll) = last_poll {
-                let time_since_poll = time::Instant::now().duration_since(last_poll);
-                // Until we are synced we poll less often to avoid harassing bitcoind and impeding
-                // the sync. As a function since it's mocked for the tests.
-                let poll_interval = if synced {
-                    poll_interval
-                } else {
-                    looper::sync_poll_interval()
-                };
-                poll_interval.saturating_sub(time_since_poll)
-            } else {
-                // Don't wait before doing the first poll.
-                time::Duration::ZERO
-            };
+            let time_before_poll = Self::time_before_poll(last_poll, synced, poll_interval);
 
             // Wait for the duration of the interval between polls, but listen to messages in the
             // meantime.
@@ -212,25 +219,8 @@ impl Poller {
             }
 
             // Don't poll until the Bitcoin backend is fully synced.
-            if !synced {
-                let progress = match self.bit.try_sync_progress() {
-                    Ok(progress) => progress,
-                    Err(error) => {
-                        log::debug!("Sync progress unavailable: {}", error);
-                        continue;
-                    }
-                };
-                self.sync_cache.store(&progress);
-                log::info!(
-                    "Block chain synchronization progress: {:.2}% ({} blocks / {} headers)",
-                    progress.rounded_up_progress() * 100.0,
-                    progress.blocks,
-                    progress.headers
-                );
-                synced = progress.is_complete();
-                if !synced {
-                    continue;
-                }
+            if !synced && !self.scheduled_backend_ready(&mut synced) {
+                continue;
             }
 
             self.apply_eager_request();
@@ -243,6 +233,25 @@ impl Poller {
                 &self.history_sync,
             );
         }
+    }
+
+    fn scheduled_backend_ready(&mut self, synced: &mut bool) -> bool {
+        let progress = match self.bit.try_sync_progress() {
+            Ok(progress) => progress,
+            Err(error) => {
+                log::debug!("Sync progress unavailable: {}", error);
+                return false;
+            }
+        };
+        self.sync_cache.store(&progress);
+        log::info!(
+            "Block chain synchronization progress: {:.2}% ({} blocks / {} headers)",
+            progress.rounded_up_progress() * 100.0,
+            progress.blocks,
+            progress.headers
+        );
+        *synced = progress.is_complete();
+        *synced
     }
 
     /// Whether to skip this tick because the shared managed node is being rewound.

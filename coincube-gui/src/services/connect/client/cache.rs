@@ -220,6 +220,18 @@ pub struct Account {
 }
 
 impl Account {
+    /// A fresh account record for the opt-in Testnet4 provisioning runner.
+    #[cfg(feature = "integration-tests")]
+    pub fn new_for_integration(email: String, tokens: AccessTokenResponse) -> Self {
+        Self {
+            email,
+            tokens,
+            device_id: None,
+            last_seen_event_seq: None,
+            reregister_claim: None,
+        }
+    }
+
     pub fn from_cache(
         network_dir: &NetworkDirectory,
         email: &str,

@@ -131,9 +131,11 @@ No command in this document starts or changes a server service.
 
 ## Limits, rollback and launch record
 
-Future server timestamps are rejected; the current anchor contract allows
-90 seconds of past age and no positive clock skew. Check client/server clocks
-when admission reports stale. Do not fix it by locally restamping observations.
+After Connect's `served_at` is applied, anchor admission allows 90 seconds of
+past age and no positive skew on this desktop's clock. A response without
+`served_at` still compares the server stamp directly, so unsynchronized clocks
+fail that path. The stale message asks the operator to check both clocks and
+retry. Do not fix it by locally restamping observations.
 Status and anchor share a per-IP API rate-limit bucket; multiple clients behind
 one NAT can throttle. Authority throttling can also put the daemon provider in
 its existing cooldown. Record these availability limits in dev acceptance.

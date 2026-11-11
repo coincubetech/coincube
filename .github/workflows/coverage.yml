@@ -10,16 +10,27 @@ on:
       - "contrib/coverage.sh"
       - "contrib/coverage-bridge.sh"
       - ".github/workflows/coverage.yml"
+    branches:
+      - master
+      - redesign
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+      - converted_to_draft
   workflow_dispatch:
 
 # Match main.yml: a new push supersedes the previous coverage run for the same
 # PR instead of holding a runner for up to the full job limit.
 concurrency:
-  group: coverage-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: batch-${{ github.workflow }}-${{ github.ref }}-${{ github.event.action == 'edited' && github.event.changes.base == null && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   rust-coverage:
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     runs-on: ubuntu-latest
     # The full instrumented workspace run reached 75 minutes on #1157:
     # tests and doctests passed, but the job timed out during the final report.
@@ -99,6 +110,7 @@ jobs:
             target/coverage/summary.json
 
   spark-bridge-coverage:
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:

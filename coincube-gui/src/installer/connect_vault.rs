@@ -272,99 +272,12 @@ pub async fn create_connect_vault(
     //    back and bail; on a transient failure, retry the same member before
     //    giving up.
     let mut members_added = members_added_at_create;
-    'members: for payload in &members {
+    for payload in &members {
         if already_attached.contains(&payload.key_id) {
             continue;
         }
-        let mut attempt = 1u32;
-        loop {
-            let req = AddVaultMemberRequest {
-                contact_id: payload.contact_id,
-                key_id: Some(payload.key_id),
-                role: VaultMemberRole::Keyholder,
-            };
-            match client.add_vault_member(cube.id, req).await {
-                Ok(_) => {
-                    members_added += 1;
-                    continue 'members;
-                }
-                // The row exists, which is all the caller wanted. Reachable
-                // from the retry below: an attempt whose write landed but whose
-                // response was lost comes back here on the next try, and
-                // failing the whole install over a member that IS attached
-                // would be the retry causing the outage it exists to prevent.
-                Err(e) if e.is_duplicate_member() => {
-                    tracing::info!(
-                        "add_vault_member (key {}) reports the member already exists — \
-                         counting it as attached",
-                        payload.key_id
-                    );
-                    members_added += 1;
-                    continue 'members;
-                }
-                Err(e) if e.is_key_already_used_in_vault() => {
-                    // Roll back the vault we just created so the user can
-                    // restart the Vault Builder with a clean slate. The
-                    // delete is best-effort — a failure to roll back just
-                    // means the user will see a "vault already exists" on
-                    // their next attempt and the backend's `delete_connect_vault`
-                    // can be retried.
-                    if let Err(rollback_err) = client.delete_connect_vault(cube.id).await {
-                        tracing::warn!(
-                            "W9 rollback failed to delete vault {}: {}",
-                            vault.id,
-                            rollback_err
-                        );
-                    }
-                    return Err(ConnectVaultError::KeyAlreadyUsedInVault {
-                        key_id: payload.key_id,
-                    });
-                }
-                Err(e) if e.is_key_is_recovery_recipient() => {
-                    // I2 backstop: the descriptor was sealed with a recovery
-                    // key, which can never fan out into a signer. Unlike W9,
-                    // retrying is hopeless — the sealed descriptor still
-                    // contains the recovery key — so we roll the partial
-                    // vault back (same best-effort delete as W9) and surface a
-                    // distinct "rebuild the descriptor" error. PR 2 should make
-                    // this unreachable from a current build, but stale desktops
-                    // and future pickers keep it worth having.
-                    if let Err(rollback_err) = client.delete_connect_vault(cube.id).await {
-                        tracing::warn!(
-                            "I2 rollback failed to delete vault {}: {}",
-                            vault.id,
-                            rollback_err
-                        );
-                    }
-                    return Err(ConnectVaultError::KeyIsRecoveryRecipient {
-                        key_id: payload.key_id,
-                    });
-                }
-                Err(e) if e.is_transient() && attempt < MEMBER_ATTACH_ATTEMPTS => {
-                    // A dropped connection or a 5xx here is the exact failure that
-                    // strands a Vault one member row short — and that row is what
-                    // the Keychain app resolves a key's vault from, so the phone
-                    // then reports "no vault" for a key the descriptor genuinely
-                    // commits to. Retrying the same request costs a few hundred
-                    // milliseconds inside a step the user is already waiting on.
-                    tracing::warn!(
-                        "add_vault_member (key {}) attempt {}/{} failed, retrying: {}",
-                        payload.key_id,
-                        attempt,
-                        MEMBER_ATTACH_ATTEMPTS,
-                        e
-                    );
-                    tokio::time::sleep(MEMBER_ATTACH_RETRY_BACKOFF * attempt).await;
-                    attempt += 1;
-                }
-                Err(e) => {
-                    return Err(ConnectVaultError::Other(format!(
-                        "Failed to add vault member (key {}): {}",
-                        payload.key_id, e
-                    )));
-                }
-            }
-        }
+        attach_legacy_member(&client, cube.id, vault.id, payload).await?;
+        members_added += 1;
     }
 
     Ok(ConnectVaultOutcome {
@@ -374,6 +287,101 @@ pub async fn create_connect_vault(
         members_added,
         members_skipped_non_keychain: 0, // already filtered upstream
     })
+}
+
+async fn attach_legacy_member(
+    client: &CoincubeClient,
+    cube_id: u64,
+    vault_id: u64,
+    payload: &ConnectVaultMemberPayload,
+) -> Result<(), ConnectVaultError> {
+    let mut attempt = 1u32;
+    loop {
+        let req = AddVaultMemberRequest {
+            contact_id: payload.contact_id,
+            key_id: Some(payload.key_id),
+            role: VaultMemberRole::Keyholder,
+        };
+        match client.add_vault_member(cube_id, req).await {
+            Ok(_) => {
+                return Ok(());
+            }
+            // The row exists, which is all the caller wanted. Reachable
+            // from the retry below: an attempt whose write landed but whose
+            // response was lost comes back here on the next try, and
+            // failing the whole install over a member that IS attached
+            // would be the retry causing the outage it exists to prevent.
+            Err(e) if e.is_duplicate_member() => {
+                tracing::info!(
+                    "add_vault_member (key {}) reports the member already exists — \
+                         counting it as attached",
+                    payload.key_id
+                );
+                return Ok(());
+            }
+            Err(e) if e.is_key_already_used_in_vault() => {
+                // Roll back the vault we just created so the user can
+                // restart the Vault Builder with a clean slate. The
+                // delete is best-effort — a failure to roll back just
+                // means the user will see a "vault already exists" on
+                // their next attempt and the backend's `delete_connect_vault`
+                // can be retried.
+                if let Err(rollback_err) = client.delete_connect_vault(cube_id).await {
+                    tracing::warn!(
+                        "W9 rollback failed to delete vault {}: {}",
+                        vault_id,
+                        rollback_err
+                    );
+                }
+                return Err(ConnectVaultError::KeyAlreadyUsedInVault {
+                    key_id: payload.key_id,
+                });
+            }
+            Err(e) if e.is_key_is_recovery_recipient() => {
+                // I2 backstop: the descriptor was sealed with a recovery
+                // key, which can never fan out into a signer. Unlike W9,
+                // retrying is hopeless — the sealed descriptor still
+                // contains the recovery key — so we roll the partial
+                // vault back (same best-effort delete as W9) and surface a
+                // distinct "rebuild the descriptor" error. PR 2 should make
+                // this unreachable from a current build, but stale desktops
+                // and future pickers keep it worth having.
+                if let Err(rollback_err) = client.delete_connect_vault(cube_id).await {
+                    tracing::warn!(
+                        "I2 rollback failed to delete vault {}: {}",
+                        vault_id,
+                        rollback_err
+                    );
+                }
+                return Err(ConnectVaultError::KeyIsRecoveryRecipient {
+                    key_id: payload.key_id,
+                });
+            }
+            Err(e) if e.is_transient() && attempt < MEMBER_ATTACH_ATTEMPTS => {
+                // A dropped connection or a 5xx here is the exact failure that
+                // strands a Vault one member row short — and that row is what
+                // the Keychain app resolves a key's vault from, so the phone
+                // then reports "no vault" for a key the descriptor genuinely
+                // commits to. Retrying the same request costs a few hundred
+                // milliseconds inside a step the user is already waiting on.
+                tracing::warn!(
+                    "add_vault_member (key {}) attempt {}/{} failed, retrying: {}",
+                    payload.key_id,
+                    attempt,
+                    MEMBER_ATTACH_ATTEMPTS,
+                    e
+                );
+                tokio::time::sleep(MEMBER_ATTACH_RETRY_BACKOFF * attempt).await;
+                attempt += 1;
+            }
+            Err(e) => {
+                return Err(ConnectVaultError::Other(format!(
+                    "Failed to add vault member (key {}): {}",
+                    payload.key_id, e
+                )));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

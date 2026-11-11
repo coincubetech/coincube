@@ -26,6 +26,29 @@
 #[cfg(target_os = "macos")]
 mod apple;
 
+/// Opt-in integration secrets use the same device-only data-protection
+/// Keychain implementation as Cube device secrets, under a separate service.
+#[cfg(all(feature = "integration-tests", target_os = "macos"))]
+pub mod integration {
+    const SERVICE: &str = "io.coincube.testnet4-integration.v1";
+    pub fn load(account: &str) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, super::UnlockError> {
+        super::apple::load(SERVICE, account)
+    }
+    pub fn add(account: &str, bytes: &[u8]) -> Result<bool, super::UnlockError> {
+        super::apple::add_if_absent(SERVICE, account, bytes)
+    }
+    pub fn update(account: &str, bytes: &[u8]) -> Result<(), super::UnlockError> {
+        super::apple::update_for_integration(SERVICE, account, bytes)
+    }
+    pub fn verify(account: &str) -> Result<(), super::UnlockError> {
+        super::apple::verify_attributes(SERVICE, account)
+    }
+    /// Used only to remove the disposable record made by signed offline tests.
+    pub fn delete_test_item(account: &str) -> Result<(), super::UnlockError> {
+        super::apple::delete(SERVICE, account)
+    }
+}
+
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 

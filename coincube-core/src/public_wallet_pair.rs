@@ -141,21 +141,7 @@ pub fn canonical_pair(
         }
         Shape::Pkh | Shape::Wpkh | Shape::ShWpkh => {}
     }
-    for (a, b) in outer.iter_mut().zip(inner.iter_mut()) {
-        if material(a) != material(b) {
-            return Err(if branch_in_xpub(a, b) {
-                PairError::BranchInXpub
-            } else {
-                PairError::Unrelated
-            });
-        }
-        match (origin(a).clone(), origin(b).clone()) {
-            (Some(x), None) => set_origin(b, Some(x)),
-            (None, Some(y)) => set_origin(a, Some(y)),
-            (Some(x), Some(y)) if x != y => return Err(PairError::ConflictingOrigin),
-            _ => {}
-        }
-    }
+    reconcile_key_origins(&mut outer, &mut inner)?;
     let canonical_external = rebuild(outer_shape, &outer)?;
     let canonical_internal = rebuild(inner_shape, &inner)?;
     if !same_scripts(external, &canonical_external) || !same_scripts(internal, &canonical_internal)
@@ -212,4 +198,26 @@ pub fn same_scripts(
                 _ => false,
             }
         })
+}
+
+fn reconcile_key_origins(
+    outer: &mut [DescriptorPublicKey],
+    inner: &mut [DescriptorPublicKey],
+) -> Result<(), PairError> {
+    for (a, b) in outer.iter_mut().zip(inner.iter_mut()) {
+        if material(a) != material(b) {
+            return Err(if branch_in_xpub(a, b) {
+                PairError::BranchInXpub
+            } else {
+                PairError::Unrelated
+            });
+        }
+        match (origin(a).clone(), origin(b).clone()) {
+            (Some(x), None) => set_origin(b, Some(x)),
+            (None, Some(y)) => set_origin(a, Some(y)),
+            (Some(x), Some(y)) if x != y => return Err(PairError::ConflictingOrigin),
+            _ => {}
+        }
+    }
+    Ok(())
 }
