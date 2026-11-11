@@ -192,6 +192,18 @@ fn detach_import_settings(
     }
 }
 
+fn check_import_destination(
+    final_from_attachment: Option<&std::path::PathBuf>,
+    destination: Option<&std::path::PathBuf>,
+) -> Result<(), String> {
+    if let (Some(expected_path), Some(actual_path)) = (final_from_attachment, destination) {
+        if expected_path != actual_path {
+            return Err("The import destination differs from this Cube's wallet.".into());
+        }
+    }
+    Ok(())
+}
+
 /// Delete the selected Cube's imported wallet and its exact operation record.
 /// All present storage is checked against the journal and owner marker before
 /// mutation. Settings are changed last so an interrupted cleanup remains
@@ -264,13 +276,7 @@ pub async fn remove_cube_import(
         expected_attachment,
     )?;
     let destination = journal.map(|owner| owner.final_path(directory));
-    if let (Some(expected_path), Some(actual_path)) =
-        (final_from_attachment.as_ref(), destination.as_ref())
-    {
-        if expected_path != actual_path {
-            return Err("The import destination differs from this Cube's wallet.".into());
-        }
-    }
+    check_import_destination(final_from_attachment.as_ref(), destination.as_ref())?;
     let stage_present = match journal {
         Some(owner) => checked_owner_directory(&stage, owner)?,
         None => {

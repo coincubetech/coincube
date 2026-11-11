@@ -102,14 +102,7 @@ pub(crate) fn refuse_conflicting_claim(
         }
         let data = network.coincubed_data_directory(&wallet);
         if data.path() == intended.path() {
-            if saved.cubes.iter().any(|cube| {
-                cube_wallet(cube).is_some_and(|id| {
-                    network.coincubed_data_directory(id).path() == intended.path()
-                        && cube.id != target_cube
-                })
-            }) {
-                return refused();
-            }
+            check_current_target_owner(&saved, &network, &intended, target_cube)?;
             continue;
         }
         let directory = data.path().join("split").join(source.digest().to_string());
@@ -123,6 +116,22 @@ pub(crate) fn refuse_conflicting_claim(
             return refused();
         }
         check_existing_claim_record(&saved, source, &wallet, &directory)?;
+    }
+    Ok(())
+}
+
+fn check_current_target_owner(
+    saved: &Settings,
+    network: &crate::dir::NetworkDirectory,
+    intended: &coincubed::datadir::DataDirectory,
+    target_cube: &str,
+) -> Result<(), String> {
+    if saved.cubes.iter().any(|cube| {
+        cube_wallet(cube).is_some_and(|id| {
+            network.coincubed_data_directory(id).path() == intended.path() && cube.id != target_cube
+        })
+    }) {
+        return refused();
     }
     Ok(())
 }
