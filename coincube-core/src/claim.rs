@@ -345,15 +345,8 @@ pub fn assess(
     if let Err(refused) = assess_deployment(&fork, &deployment, policy) {
         return refused;
     }
-    let confirmations =
-        match bitcoin_confirmation(plan.step1_txid(), plan.previous_confirmation, bitcoin) {
-            BitcoinConfirmation::Unknown => return Assessment::Unknown,
-            BitcoinConfirmation::Unconfirmed => return Assessment::WaitingForConfirmation,
-            BitcoinConfirmation::Reorged => return Assessment::Reorged,
-            BitcoinConfirmation::Confirmed { confirmations } => confirmations,
-        };
-    if confirmations < MIN_CONFIRMATIONS {
-        return Assessment::WaitingForDepth { confirmations };
+    if let Err(refused) = assess_bitcoin_confirmation(plan, bitcoin) {
+        return refused;
     }
     if !preflight.is_some_and(|tips| tips.bitcoin == bitcoin.tip && tips.fork == fork.tip) {
         return Assessment::NeedsPreflightRecheck;
@@ -402,6 +395,23 @@ fn wrong_chain(
     ) || bitcoin_chain != plan.bitcoin_chain
         || fork_chain != plan.fork_chain
         || deployment_chain != plan.fork_chain
+}
+
+fn assess_bitcoin_confirmation(
+    plan: &ClaimPlan,
+    bitcoin: BitcoinObservation,
+) -> Result<(), Assessment> {
+    let confirmations =
+        match bitcoin_confirmation(plan.step1_txid(), plan.previous_confirmation, bitcoin) {
+            BitcoinConfirmation::Unknown => return Err(Assessment::Unknown),
+            BitcoinConfirmation::Unconfirmed => return Err(Assessment::WaitingForConfirmation),
+            BitcoinConfirmation::Reorged => return Err(Assessment::Reorged),
+            BitcoinConfirmation::Confirmed { confirmations } => confirmations,
+        };
+    if confirmations < MIN_CONFIRMATIONS {
+        return Err(Assessment::WaitingForDepth { confirmations });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
