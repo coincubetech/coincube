@@ -575,8 +575,7 @@ async fn local(root: &CoincubeDirectory, chain: ChainId) -> Result<Snapshot, Str
         .get(&network)
         .ok_or("No managed node for this network")?
         .rpc_port;
-    // A few bytes on local disk, read on the blocking pool (tokio's `fs`
-    // feature is not enabled here).
+    // A few bytes on local disk, read on the blocking pool.
     let cookie_path = internal_bitcoind_cookie_path(&dir, &network);
     let cookie = tokio::task::spawn_blocking(move || std::fs::read_to_string(cookie_path))
         .await

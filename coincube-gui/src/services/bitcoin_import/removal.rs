@@ -99,6 +99,11 @@ fn remove_owned_directory(path: &Path, parent: &Path) -> Result<(), String> {
     }
 }
 
+/// Whether anything (file, directory or dangling link) exists at `path`.
+fn storage_present(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
 /// Delete the selected Cube's imported wallet and its exact operation record.
 /// All present storage is checked against the journal and owner marker before
 /// mutation. Settings are changed last so an interrupted cleanup remains
@@ -171,7 +176,7 @@ async fn remove_cube_import_within(
         .or(final_owner.as_ref());
     if journal.is_none() {
         if let Some(path) = final_from_attachment.clone() {
-            if super::blocking_fs(move || Ok(fs::symlink_metadata(path).is_ok())).await? {
+            if super::blocking_fs(move || Ok(storage_present(&path))).await? {
                 return Err(
                     "Imported wallet storage lacks an owner; no files were removed.".into(),
                 );
