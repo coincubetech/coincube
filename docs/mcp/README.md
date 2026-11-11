@@ -52,23 +52,33 @@ already signed application bundle.
 ## Pair a client until revoked
 
 1. Open and unlock the desired Cube normally. Go to **Cube → Settings → AI access**.
-2. Enable AI access for this Cube. Read the financial-data disclosure.
-3. Enter a client label, explicitly select this Cube's Vault, and select each read
-   capability you want to grant. The label is for your reference, not an authenticated
-   application identity.
-4. Choose **Pair client until revoked**. Enabling the toggle alone grants no access.
-   Tenshu saves the exact client scope and a random bearer credential in a
-   device-keystore-protected encrypted registry.
+   The page shows this Cube's switch and Vault (with its exact chain tag), the paired
+   clients, and what each kind of access allows. If the Cube has no supported Vault
+   loaded, the switch reads **Unavailable for this Cube** and names the supported scope.
+2. Turn **Allow AI clients** on. This Cube-wide switch grants nothing by itself; turning
+   it off later pauses every paired client without forgetting them.
+3. Choose **Pair a client**. Enter a **Client name**, explicitly select **This Cube's
+   Vault**, then choose one kind of **Access**: **Read wallet information** (then switch
+   on each part you allow: Balances, Confirmed history, Spending-policy summary) or
+   **Prepare unsigned transactions**. Each kind is its own pairing; a client that
+   should do both needs two. The name is for your reference, not an authenticated
+   application identity. Read the financial-data caution beside the pair action.
+4. Choose **Pair client until revoked**. Tenshu saves the exact client scope and a
+   random bearer credential in a device-keystore-protected encrypted registry. The
+   form closes and the new client's row opens.
 5. Choose **Copy private client configuration** and paste it into your trusted MCP
-   host's local configuration. It contains a credential: never paste it into a chat,
-   issue, shared document or repository. Clear your clipboard after setup.
+   host's local configuration. Tenshu confirms **Copied** beside the action. The
+   configuration contains a credential: never paste it into a chat, issue, shared
+   document or repository. Clear your clipboard after setup.
 6. Restart/reconnect the MCP host. Discover tools, then call `tenshu_list_wallets`
    and use the returned opaque `wallet_id` for subsequent calls.
 
 The copied command is derived from the running desktop executable's directory.
-The adapter must be installed beside it. The GUI shows the authorized client and
-successful-read count; this is not a verified host identity or a persistent-connection
-indicator (IPC connections are per request).
+The adapter must be installed beside it. Each client row shows its status
+(**Available**, **Paused** or **Suspended**) with the reason, its access, and, under
+**Manage**, the requests answered this session. **Available** means Tenshu will answer
+that client while the Cube is unlocked; neither the status nor the count is a verified
+host identity or a persistent-connection indicator (IPC connections are per request).
 
 Up to 16 independently revocable clients can be paired per Cube. Give separate
 clients and Cubes separate host entries. Anyone holding a copied configuration
@@ -85,7 +95,7 @@ pauses stored clients; it does not forget them. Draft permission fields configur
 a new pairing; they never silently expand an existing client's scope. To change
 a client's permissions in this slice, revoke its row and pair it again explicitly.
 
-**Revoke this client** removes that client's durable authorization and stops its
+**Revoke access** (under the client's **Manage**, then confirmed) removes that client's durable authorization and stops its
 runtime immediately. Revoking cannot erase information already given to the AI
 provider. Pairing files are also removed on Cube deletion and duress wipe; the
 keystore wrapping item can remain inert. Storage/authentication failures restore
@@ -351,8 +361,8 @@ omit these features explicitly with `--no-default-features`.
    primary signers. Choose the recovery quorum and positive relative block delay
    explicitly. Block time varies; possession/control of keys and recovery
    eligibility are separate from a descriptor's mathematical validity.
-2. In an empty Cube on the intended chain, enable AI access and approve the separate
-   proposal permission. Existing wallet-read grants cannot prepare a proposal.
+2. In an empty Cube on the intended chain, turn on **Allow AI clients**, choose **Pair
+   a client** and select the separate **Propose a wallet policy** access. Existing wallet-read grants cannot prepare a proposal.
    Save the private client configuration only in the trusted client's local file.
 3. The client prepares one topology draft with `network` matching the paired
    Cube. It receives `needs_keys` with no public/private keys or descriptor. In Tenshu, click **Review proposal and
@@ -410,9 +420,9 @@ descriptor using the existing wallet engine and fills the native builder. It doe
 not create a wallet or assert that devices, independent custody or backups were
 verified.
 
-In an unlocked empty Cube on a supported chain, open AI access, select the
-public-account-key wallet preparation permission, and choose **Pair setup
-client until revoked**. This is a distinct durable scope. Existing balance/history/
+In an unlocked empty Cube on a supported chain, open AI access, turn on **Allow AI
+clients**, choose **Pair a client**, select the **Prepare a wallet from public keys**
+access, and choose **Pair setup client until revoked**. This is a distinct durable scope. Existing balance/history/
 policy and topology-only clients do not gain this permission. Each client still
 needs the user's ordinary Cube unlock; drafts and approval do not survive lock.
 
@@ -476,8 +486,9 @@ daemon on all five supported chains. Bitcoin Blake2b retains the existing native
 backend/feature admission. Liquid/Spark, imported policies and external daemons
 remain excluded. MCP cannot sign or broadcast.
 
-In **Cube → Settings → AI access**, select the Vault and **Prepare unsigned
-transactions**, then explicitly pair the new client. This is separate
+In **Cube → Settings → AI access**, choose **Pair a client**, select **This Cube's
+Vault**, choose the **Prepare unsigned transactions** access, then explicitly pair the
+new client. This is separate
 from all read and wallet-setup scopes: existing clients are not upgraded, and a
 transaction client cannot read balances/history/policy. It can list only its
 paired Vault to obtain its opaque wallet ID. Pairing persists until revoked;
@@ -531,7 +542,9 @@ construction attempts (including failures) are retained per client/unlock. Use `
 returned draft ID and same opaque wallet ID to reread the summary; foreign IDs
 and other scopes are denied.
 
-The paired client's native row offers **Review prepared transaction in Tenshu**.
+Under the paired client's **Manage**, each draft shows as a **Prepared transaction**
+summary with its chain tag and status (**Unsigned · ready for your review**, or **Out of
+date** with a request to prepare it again), and offers **Review prepared transaction**.
 It opens the exact unsigned construction in the existing review/signing screen,
 without saving a spend or requesting a signature. Check every recipient address,
 amount, total fee, change and recipient verification status there. Hardware, PIN,
