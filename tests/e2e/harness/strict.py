@@ -8,7 +8,7 @@ from .state import Blocked, Failed, digest
 BUNDLE = "io.coincube.keychainApp"
 IDLE_SECONDS = 90
 MAX_OBSERVATION_GAP = 5
-RECOVERIES = ("request_discovery_restart", "approval_upgrade_recovery", "key_generation_recovery")
+RECOVERIES = ("request_discovery_back", "request_discovery_restart", "approval_upgrade_recovery", "key_generation_recovery")
 
 
 def validate_mode(config):

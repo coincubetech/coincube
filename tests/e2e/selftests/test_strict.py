@@ -563,8 +563,12 @@ def test_request_mutation_only_after_idle_and_full_phone_validation(policy):
     assert mutations == ["request"]
 
 
-def test_restore_navigation_cannot_restart_even_before_request(policy):
-    policy.phone.labels = lambda: {"Pending Requests"}
+@pytest.mark.parametrize("labels,code", [
+    ({"Pending Requests"}, "REQUEST_DISCOVERY_NAVIGATION_UNSUPPORTED"),
+    ({"Signer key", "Back"}, "STRICT_RESTART"),
+])
+def test_restore_navigation_cannot_restart_even_before_request(policy, labels, code):
+    policy.phone.labels = lambda: labels
     with pytest.raises(Blocked) as error:
         policy.phone.restore_navigation()
-    assert error.value.code == "STRICT_RESTART"
+    assert error.value.code == code
