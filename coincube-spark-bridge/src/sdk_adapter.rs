@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use breez_sdk_spark::{
-    default_config, default_server_config, BreezSdk, CrossChainConfig, MaxFee,
+    default_config, default_server_config, BreezSdk, CrossChainConfig, MaxFee, MaxOnchainFee,
     Network as SparkNetwork, SdkBuilder, Seed,
 };
 
@@ -87,8 +87,11 @@ pub fn mainnet_config(api_key: String) -> breez_sdk_spark::Config {
     // deposits claim themselves: `NetworkRecommended` tracks the mempool's
     // fastest-fee estimate plus a small leeway, which comfortably covers the
     // few-sat/vbyte a static-deposit claim actually needs.
-    config.max_deposit_claim_fee = Some(MaxFee::NetworkRecommended {
-        leeway_sat_per_vbyte: 5,
+    config.max_deposit_claim_fee = Some(MaxFee {
+        onchain: MaxOnchainFee::NetworkRecommended {
+            leeway_sat_per_vbyte: 5,
+        },
+        proportional_ppm: None,
     });
     config
 }
@@ -170,8 +173,11 @@ mod tests {
 
         assert!(matches!(
             config.max_deposit_claim_fee,
-            Some(MaxFee::NetworkRecommended {
-                leeway_sat_per_vbyte: 5
+            Some(MaxFee {
+                onchain: MaxOnchainFee::NetworkRecommended {
+                    leeway_sat_per_vbyte: 5
+                },
+                proportional_ppm: None,
             })
         ));
     }
