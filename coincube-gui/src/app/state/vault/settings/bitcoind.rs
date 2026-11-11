@@ -1137,10 +1137,10 @@ impl BitcoindSettingsState {
 
         Task::none()
     }
-    fn apply_node_message(
+    fn apply_recovery_message(
         &mut self,
-        daemon: Arc<dyn Daemon + Sync + Send>,
-        cache: &Cache,
+        _daemon: Arc<dyn Daemon + Sync + Send>,
+        _cache: &Cache,
         msg: view::NodeSettingsMessage,
     ) -> Task<Message> {
         use view::NodeSettingsMessage;
@@ -1193,11 +1193,6 @@ impl BitcoindSettingsState {
                     ));
                 }
             }
-            NodeSettingsMessage::ImportConnectHistory => {
-                return Task::done(Message::NodeHistory(
-                    crate::app::node_history::Action::Import,
-                ))
-            }
             NodeSettingsMessage::RecoveryResume => {
                 return Task::done(Message::NodeHistory(
                     crate::app::node_history::Action::Resume,
@@ -1217,19 +1212,19 @@ impl BitcoindSettingsState {
             NodeSettingsMessage::RetentionApply => {
                 return self.apply_retention();
             }
-            NodeSettingsMessage::RetryBackgroundNodeSetup => {
-                // The App owns the background install and handles this
-                // before it reaches the panel.
-            }
-            NodeSettingsMessage::SwitchToConnect => {
-                // The App-level dispatcher always rewrites this into
-                // either `SwitchToConnectFastPath(jwt)` (if a Connect
-                // session is already live) or a navigation to the
-                // Connect tab to sign in. We never land here directly.
-            }
-            NodeSettingsMessage::SwitchToConnectFastPath(jwt) => {
-                return self.apply_connect_jwt(&daemon, cache, jwt.into_string());
-            }
+            _ => {}
+        }
+        Task::none()
+    }
+
+    fn apply_local_setup_message(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: &Cache,
+        msg: view::NodeSettingsMessage,
+    ) -> Task<Message> {
+        use view::NodeSettingsMessage;
+        match msg {
             NodeSettingsMessage::SetupLocalNode => {
                 let default_addr = match cache.network {
                     Network::Bitcoin => "127.0.0.1:8332",
@@ -1314,6 +1309,68 @@ impl BitcoindSettingsState {
             NodeSettingsMessage::SetupLocalNodeConfirm => {
                 return self.confirm_local_node(daemon);
             }
+            _ => {}
+        }
+        Task::none()
+    }
+
+    fn apply_node_message(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: &Cache,
+        msg: view::NodeSettingsMessage,
+    ) -> Task<Message> {
+        use view::NodeSettingsMessage;
+        match msg {
+            msg @ (NodeSettingsMessage::RecoveryAdvancedToggled
+            | NodeSettingsMessage::NodeAdvancedToggled
+            | NodeSettingsMessage::RecoveryDismiss
+            | NodeSettingsMessage::RecoveryStartEdited(..)
+            | NodeSettingsMessage::RecoveryDateOpen
+            | NodeSettingsMessage::RecoveryDateCancel
+            | NodeSettingsMessage::RecoveryDateSelected(..)
+            | NodeSettingsMessage::RetentionDaysEdited(..)
+            | NodeSettingsMessage::RecoveryStart
+            | NodeSettingsMessage::RecoveryResume
+            | NodeSettingsMessage::RecoveryPause
+            | NodeSettingsMessage::RecoveryCancel
+            | NodeSettingsMessage::RetentionApply) => {
+                return self.apply_recovery_message(daemon, cache, msg)
+            }
+
+            NodeSettingsMessage::ImportConnectHistory => {
+                return Task::done(Message::NodeHistory(
+                    crate::app::node_history::Action::Import,
+                ))
+            }
+
+            NodeSettingsMessage::RetryBackgroundNodeSetup => {
+                // The App owns the background install and handles this
+                // before it reaches the panel.
+            }
+            NodeSettingsMessage::SwitchToConnect => {
+                // The App-level dispatcher always rewrites this into
+                // either `SwitchToConnectFastPath(jwt)` (if a Connect
+                // session is already live) or a navigation to the
+                // Connect tab to sign in. We never land here directly.
+            }
+            NodeSettingsMessage::SwitchToConnectFastPath(jwt) => {
+                return self.apply_connect_jwt(&daemon, cache, jwt.into_string());
+            }
+            msg @ (NodeSettingsMessage::SetupLocalNode
+            | NodeSettingsMessage::SetupLocalNodeManagedFlavor(..)
+            | NodeSettingsMessage::SetupLocalNodeModeSelected(..)
+            | NodeSettingsMessage::SetupLocalNodeDownloadProgress(..)
+            | NodeSettingsMessage::SetupLocalNodeDownloadComplete(..)
+            | NodeSettingsMessage::SetupLocalNodeStartResult(..)
+            | NodeSettingsMessage::SetupLocalNodeCancel
+            | NodeSettingsMessage::SetupLocalNodeAddrChanged(..)
+            | NodeSettingsMessage::SetupLocalNodeAuthTypeSelected(..)
+            | NodeSettingsMessage::SetupLocalNodeFieldEdited(..)
+            | NodeSettingsMessage::SetupLocalNodeConfirm) => {
+                return self.apply_local_setup_message(daemon, cache, msg)
+            }
+
             NodeSettingsMessage::SwitchToBitcoind => {
                 return self.request_local_node_switch(daemon, cache);
             }
@@ -1623,6 +1680,40 @@ impl BitcoindSettingsState {
             self.append_active_backend_panels(cache, setting_panels, recovery_in_progress);
         }
     }
+    fn append_recovery_history_panels<'a>(
+        &'a self,
+        cache: &'a Cache,
+        setting_panels: &mut Vec<Element<'a, view::Message>>,
+    ) {
+        let map_node_msg = |msg| view::Message::Settings(view::SettingsMessage::NodeSettings(msg));
+        let recovery_active = cache.node_history.job.as_ref().is_some_and(|job| {
+            !matches!(
+                job.phase,
+                crate::node::history::Phase::Complete | crate::node::history::Phase::Cancelled
+            )
+        });
+        if self.recovery_requested || recovery_active || cache.node_history.busy {
+            setting_panels.push(
+                view::vault::settings::wallet_history_section(
+                    &self.recovery_start,
+                    &cache.node_history,
+                    self.recovery_advanced,
+                    self.recovery_date_picker_open,
+                )
+                .map(map_node_msg),
+            );
+            if self.recovery_advanced {
+                setting_panels.push(
+                    view::vault::settings::rolling_retention_section(
+                        &self.retention_days,
+                        &cache.node_history,
+                    )
+                    .map(map_node_msg),
+                );
+            }
+        }
+    }
+
     fn append_history_panels<'a>(
         &'a self,
         cache: &'a Cache,
@@ -1645,32 +1736,7 @@ impl BitcoindSettingsState {
                     )
                 })
         {
-            let recovery_active = cache.node_history.job.as_ref().is_some_and(|job| {
-                !matches!(
-                    job.phase,
-                    crate::node::history::Phase::Complete | crate::node::history::Phase::Cancelled
-                )
-            });
-            if self.recovery_requested || recovery_active || cache.node_history.busy {
-                setting_panels.push(
-                    view::vault::settings::wallet_history_section(
-                        &self.recovery_start,
-                        &cache.node_history,
-                        self.recovery_advanced,
-                        self.recovery_date_picker_open,
-                    )
-                    .map(map_node_msg),
-                );
-                if self.recovery_advanced {
-                    setting_panels.push(
-                        view::vault::settings::rolling_retention_section(
-                            &self.retention_days,
-                            &cache.node_history,
-                        )
-                        .map(map_node_msg),
-                    );
-                }
-            }
+            self.append_recovery_history_panels(cache, setting_panels);
             if self
                 .full_config
                 .as_ref()
@@ -2626,66 +2692,22 @@ impl RescanSetting {
 }
 
 fn rescan_timestamp_for_network(date: i64, network: Network) -> i64 {
-    match network {
-        Network::Bitcoin => {
-            if date < MAINNET_GENESIS_BLOCK_TIMESTAMP {
-                info!(
-                    "Date {} prior to genesis block, using genesis block timestamp {}",
-                    date, MAINNET_GENESIS_BLOCK_TIMESTAMP
-                );
-
-                MAINNET_GENESIS_BLOCK_TIMESTAMP
-            } else {
-                date
-            }
-        }
-        Network::Testnet => {
-            if date < TESTNET3_GENESIS_BLOCK_TIMESTAMP {
-                info!(
-                    "Date {} prior to genesis block, using genesis block timestamp {}",
-                    date, TESTNET3_GENESIS_BLOCK_TIMESTAMP
-                );
-                TESTNET3_GENESIS_BLOCK_TIMESTAMP
-            } else {
-                date
-            }
-        }
-        Network::Testnet4 => {
-            if date < TESTNET4_GENESIS_BLOCK_TIMESTAMP {
-                info!(
-                    "Date {} prior to genesis block, using genesis block timestamp {}",
-                    date, TESTNET4_GENESIS_BLOCK_TIMESTAMP
-                );
-                TESTNET4_GENESIS_BLOCK_TIMESTAMP
-            } else {
-                date
-            }
-        }
-        Network::Signet => {
-            if date < SIGNET_GENESIS_BLOCK_TIMESTAMP {
-                info!(
-                    "Date {} prior to genesis block, using genesis block timestamp {}",
-                    date, SIGNET_GENESIS_BLOCK_TIMESTAMP
-                );
-                SIGNET_GENESIS_BLOCK_TIMESTAMP
-            } else {
-                date
-            }
-        }
-        // We expect regtest user to not use genesis block timestamp inferior to
-        // the mainnet one.
-        // Network is a non exhaustive enum, that is why the _.
-        _ => {
-            if date < MAINNET_GENESIS_BLOCK_TIMESTAMP {
-                info!(
-                    "Date {} prior to genesis block, using genesis block timestamp {}",
-                    date, MAINNET_GENESIS_BLOCK_TIMESTAMP
-                );
-                MAINNET_GENESIS_BLOCK_TIMESTAMP
-            } else {
-                date
-            }
-        }
+    let genesis = match network {
+        Network::Bitcoin => MAINNET_GENESIS_BLOCK_TIMESTAMP,
+        Network::Testnet => TESTNET3_GENESIS_BLOCK_TIMESTAMP,
+        Network::Testnet4 => TESTNET4_GENESIS_BLOCK_TIMESTAMP,
+        Network::Signet => SIGNET_GENESIS_BLOCK_TIMESTAMP,
+        // Regtest and unknown networks retain the mainnet lower bound.
+        _ => MAINNET_GENESIS_BLOCK_TIMESTAMP,
+    };
+    if date < genesis {
+        info!(
+            "Date {} prior to genesis block, using genesis block timestamp {}",
+            date, genesis
+        );
+        genesis
+    } else {
+        date
     }
 }
 

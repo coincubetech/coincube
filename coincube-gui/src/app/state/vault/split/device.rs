@@ -239,6 +239,14 @@ fn devices_message(message: HardwareWalletMessage) -> SplitMessage {
     SplitMessage::Device(DeviceMessage::Devices(message))
 }
 
+fn paired_device_step(chain: ChainId) -> Option<DeviceStep> {
+    match chain {
+        ChainId::Bitcoin => Some(DeviceStep::PairedBitcoin),
+        ChainId::BitcoinBlake2b => Some(DeviceStep::PairedFork),
+        _ => None,
+    }
+}
+
 impl SplitPanel {
     /// The App's datadir, for the device listing (#568 B4b-3b). Set once,
     /// at discovery, with the panel.
@@ -323,6 +331,18 @@ impl SplitPanel {
         };
     }
 
+    fn update_device_listing(&mut self, message: HardwareWalletMessage) -> Task<Message> {
+        let Some(listing) = self.device.listing.as_mut() else {
+            return Task::none();
+        };
+        match listing.devices.update(message) {
+            Ok(task) => {
+                task.map(|message| Message::View(view::Message::Split(devices_message(message))))
+            }
+            Err(_) => Task::none(),
+        }
+    }
+
     pub(super) fn update_device(&mut self, message: DeviceMessage) -> Task<Message> {
         if !self.can_sign_or_submit()
             && !matches!(
@@ -336,10 +356,8 @@ impl SplitPanel {
         }
         match message {
             DeviceMessage::OpenPaired(chain) => {
-                let step = match chain {
-                    ChainId::Bitcoin => DeviceStep::PairedBitcoin,
-                    ChainId::BitcoinBlake2b => DeviceStep::PairedFork,
-                    _ => return Task::none(),
+                let Some(step) = paired_device_step(chain) else {
+                    return Task::none();
                 };
                 if !self.can_open_paired_device(step) {
                     return Task::none();
@@ -383,17 +401,7 @@ impl SplitPanel {
                     SplitEvent::DeviceListed,
                 )
             }
-            DeviceMessage::Devices(message) => {
-                let Some(listing) = self.device.listing.as_mut() else {
-                    return Task::none();
-                };
-                match listing.devices.update(message) {
-                    Ok(task) => task.map(|message| {
-                        Message::View(view::Message::Split(devices_message(message)))
-                    }),
-                    Err(_) => Task::none(),
-                }
-            }
+            DeviceMessage::Devices(message) => self.update_device_listing(message),
             DeviceMessage::Sign(id) => {
                 let Some((step, psbt, signing)) = self.prepare_device_signing(id) else {
                     return Task::none();

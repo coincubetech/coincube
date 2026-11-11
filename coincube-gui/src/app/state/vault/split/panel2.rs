@@ -629,64 +629,9 @@ impl SplitPanel {
                     |seq, (recon, result)| SplitEvent::Step2CompletionRechecked(seq, recon, result),
                 )
             }
-            SplitMessage::CheckAbandon if self.can_check_close() => {
-                let (Some(connect), Some(dead_end)) = (self.connect.clone(), self.dead_end.clone())
-                else {
-                    return Task::none();
-                };
-                self.abandon_checked = false;
-                let work = if dead_end.conflict.is_some() {
-                    Work::CheckingConflictClose
-                } else {
-                    Work::CheckingClose
-                };
-                let back = std::mem::replace(&mut self.stage, Stage::Working(work));
-                self.resume_stage = Some(back);
-                self.spawn(
-                    async move { step2::check_close(&*connect, &dead_end).await },
-                    SplitEvent::AbandonChecked,
-                )
-            }
+            SplitMessage::CheckAbandon if self.can_check_close() => self.step2_action_check_close(),
             SplitMessage::ConfirmAbandon if self.can_confirm_close() => {
-                let (Some(connect), Some(dead_end), Some((digest, directory))) = (
-                    self.connect.clone(),
-                    self.dead_end.clone(),
-                    self.journal.clone(),
-                ) else {
-                    return Task::none();
-                };
-                // Release the reconciler and its journal lock first.
-                if let Some(revoke) = self.step2_revoke.take() {
-                    revoke();
-                }
-                self.recon = None;
-                self.coord = None;
-                self.abandon_checked = false;
-                let target = self.target_cube.clone();
-                let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                self.ending = Some(ended.clone());
-                self.stage = Stage::Working(if dead_end.conflict.is_some() {
-                    Work::ClosingConflict
-                } else {
-                    Work::Closing
-                });
-                self.spawn(
-                    async move {
-                        step2::check_close(&*connect, &dead_end)
-                            .await
-                            .map_err(|refusal| refusal.reason)?;
-                        let context = connect.context();
-                        let closed_at = connect.evidence().now();
-                        tokio::task::spawn_blocking(move || {
-                            step2::close(
-                                &directory, &target, digest, context, &dead_end, closed_at, &ended,
-                            )
-                        })
-                        .await
-                        .map_err(|_| "Abandoning was interrupted.".to_string())?
-                    },
-                    SplitEvent::Closed,
-                )
+                self.step2_action_confirm_close()
             }
             _ => Task::none(),
         }
@@ -997,6 +942,66 @@ impl SplitPanel {
             |seq, (recon, result)| SplitEvent::Step2Completed(seq, recon, result),
         )
     }
+    fn step2_action_check_close(&mut self) -> Task<Message> {
+        let (Some(connect), Some(dead_end)) = (self.connect.clone(), self.dead_end.clone()) else {
+            return Task::none();
+        };
+        self.abandon_checked = false;
+        let work = if dead_end.conflict.is_some() {
+            Work::CheckingConflictClose
+        } else {
+            Work::CheckingClose
+        };
+        let back = std::mem::replace(&mut self.stage, Stage::Working(work));
+        self.resume_stage = Some(back);
+        self.spawn(
+            async move { step2::check_close(&*connect, &dead_end).await },
+            SplitEvent::AbandonChecked,
+        )
+    }
+
+    fn step2_action_confirm_close(&mut self) -> Task<Message> {
+        let (Some(connect), Some(dead_end), Some((digest, directory))) = (
+            self.connect.clone(),
+            self.dead_end.clone(),
+            self.journal.clone(),
+        ) else {
+            return Task::none();
+        };
+        // Release the reconciler and its journal lock first.
+        if let Some(revoke) = self.step2_revoke.take() {
+            revoke();
+        }
+        self.recon = None;
+        self.coord = None;
+        self.abandon_checked = false;
+        let target = self.target_cube.clone();
+        let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.ending = Some(ended.clone());
+        self.stage = Stage::Working(if dead_end.conflict.is_some() {
+            Work::ClosingConflict
+        } else {
+            Work::Closing
+        });
+        self.spawn(
+            async move {
+                step2::check_close(&*connect, &dead_end)
+                    .await
+                    .map_err(|refusal| refusal.reason)?;
+                let context = connect.context();
+                let closed_at = connect.evidence().now();
+                tokio::task::spawn_blocking(move || {
+                    step2::close(
+                        &directory, &target, digest, context, &dead_end, closed_at, &ended,
+                    )
+                })
+                .await
+                .map_err(|_| "Abandoning was interrupted.".to_string())?
+            },
+            SplitEvent::Closed,
+        )
+    }
+
     pub fn step2_export_to(&mut self, path: PathBuf, encoding: Encoding) -> Task<Message> {
         let Some(psbt) = self.step2_psbt.clone() else {
             return Task::none();

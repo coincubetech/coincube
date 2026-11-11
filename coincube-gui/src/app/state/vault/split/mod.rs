@@ -784,6 +784,16 @@ struct SplitFundingAllocation<'a> {
     imported_minimum: Option<u32>,
 }
 
+fn paired_split_export_name(chain: ChainId, encoding: Encoding) -> Option<&'static str> {
+    match (chain, encoding) {
+        (ChainId::Bitcoin, Encoding::Binary) => Some("split-bitcoin.psbt"),
+        (ChainId::Bitcoin, Encoding::Base64) => Some("split-bitcoin.txt"),
+        (ChainId::BitcoinBlake2b, Encoding::Binary) => Some("split-btcb2.psbt"),
+        (ChainId::BitcoinBlake2b, Encoding::Base64) => Some("split-btcb2.txt"),
+        _ => None,
+    }
+}
+
 impl SplitFundingAllocation<'_> {
     fn reserve<T>(
         self,
@@ -1758,12 +1768,8 @@ impl SplitPanel {
             SplitMessage::ExportPairedUnsigned(chain, encoding)
                 if self.stage == Stage::PairedSign && self.paired_signing.is_some() =>
             {
-                let name = match (chain, encoding) {
-                    (ChainId::Bitcoin, Encoding::Binary) => "split-bitcoin.psbt",
-                    (ChainId::Bitcoin, Encoding::Base64) => "split-bitcoin.txt",
-                    (ChainId::BitcoinBlake2b, Encoding::Binary) => "split-btcb2.psbt",
-                    (ChainId::BitcoinBlake2b, Encoding::Base64) => "split-btcb2.txt",
-                    _ => return Task::none(),
+                let Some(name) = paired_split_export_name(chain, encoding) else {
+                    return Task::none();
                 };
                 Task::perform(
                     async move {
@@ -1805,12 +1811,7 @@ impl SplitPanel {
             SplitMessage::CheckDeposits if self.stage == Stage::FundingDeposits => {
                 self.split_action_check_deposits()
             }
-            SplitMessage::Retry => {
-                if matches!(self.stage, Stage::Refused(Refusal { retry: true, .. })) {
-                    self.stage = Stage::NeedsSession;
-                }
-                self.begin()
-            }
+            SplitMessage::Retry => self.retry_split(),
             SplitMessage::ExportUnsigned(encoding) if self.stage == Stage::Sign => {
                 let name = match encoding {
                     Encoding::Binary => "split-step1.psbt",
@@ -1937,6 +1938,13 @@ impl SplitPanel {
 
     /// Apply a task's result. A result from an older request is dropped; a
     /// coordinator it carries is released (it was revoked with that request).
+    fn retry_split(&mut self) -> Task<Message> {
+        if matches!(self.stage, Stage::Refused(Refusal { retry: true, .. })) {
+            self.stage = Stage::NeedsSession;
+        }
+        self.begin()
+    }
+
     fn split_action_review_paired_bitcoin(&mut self) -> Task<Message> {
         if crate::services::claim_ancestry_gate::authorization().is_none() {
             return Task::none();

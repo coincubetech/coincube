@@ -953,20 +953,11 @@ fn unified_production_sources(
     }
 }
 
-#[test]
-fn split_unified_holds_seeds_only_zeroized() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let read = |path: &str| std::fs::read_to_string(src.join(path)).unwrap();
-    let unified = read("app/state/vault/split/unified.rs");
-    let unified = &unified[..unified
-        .find("\n#[cfg(all(test, unix))]\nmod tests;")
-        .unwrap()];
-    let view = read("app/view/vault/split.rs");
-    let seed_text = read("app/state/vault/split/unified/seed_text.rs");
+fn assert_unified_source_is_memory_only(unified: &str, seed_text: &str, view: &str) {
     for (file, text) in [
         ("unified.rs", unified),
-        ("seed_text.rs", seed_text.as_str()),
-        ("view", view.as_str()),
+        ("seed_text.rs", seed_text),
+        ("view", view),
     ] {
         for token in [
             "fs::",
@@ -979,6 +970,19 @@ fn split_unified_holds_seeds_only_zeroized() {
             assert!(!text.contains(token), "{} names {}", file, token);
         }
     }
+}
+
+#[test]
+fn split_unified_holds_seeds_only_zeroized() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let read = |path: &str| std::fs::read_to_string(src.join(path)).unwrap();
+    let unified = read("app/state/vault/split/unified.rs");
+    let unified = &unified[..unified
+        .find("\n#[cfg(all(test, unix))]\nmod tests;")
+        .unwrap()];
+    let view = read("app/view/vault/split.rs");
+    let seed_text = read("app/state/vault/split/unified/seed_text.rs");
+    assert_unified_source_is_memory_only(unified, &seed_text, &view);
     // Reviewer-660661e D2 (structural): `SeedText` lives in a private module
     // of `unified`, with a private field, so nothing outside its impl can
     // read the buffer (`.0`): the compiler refuses it. Its module exports

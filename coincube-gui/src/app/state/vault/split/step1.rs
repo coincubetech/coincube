@@ -912,6 +912,58 @@ pub struct ProductionConnect {
     claim_root: Option<CoincubeDirectory>,
 }
 
+fn validate_split_deposit_target(
+    reservation: &claim_workflow::SplitFundingReservation,
+    target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
+    inventory: &foreign_split_inventory::SplitInventory,
+) -> Result<(), String> {
+    if let Some(binding) = &reservation.target_binding {
+        let Some((wallet_id, descriptor)) = target_vault else {
+            return Err("The target Vault is unavailable for this deposit check.".into());
+        };
+        if !binding.matches_vault(wallet_id, descriptor) || !binding.target_fresh_in(inventory) {
+            return Err(
+                "The target wallet changed or its reserved address was used since the deposit addresses were reserved.".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn require_eligible_split_deposits(
+    eligible: &foreign_split_inventory::SplitInventory,
+    quote: &SplitFundingQuote,
+) -> Result<(), String> {
+    if eligible.funding_candidates(ChainId::Bitcoin).is_empty() {
+        return Err(format!(
+            "No Bitcoin deposit candidate at the reserved address covers the current minimum of {} sats. A separate eligible deposit may be sent to that same address.",
+            quote.bitcoin_minimum_sats
+        ));
+    }
+    if eligible
+        .funding_candidates(ChainId::BitcoinBlake2b)
+        .is_empty()
+    {
+        return Err(format!(
+            "No BTCB2 deposit candidate at the reserved address covers the current minimum of {} sats. A separate eligible deposit may be sent to that same address.",
+            quote.btcb2_minimum_sats
+        ));
+    }
+
+    Ok(())
+}
+
+fn split_deposit_discovery_refusal(error: claim_workflow::SplitFundingDiscoveryError) -> String {
+    match error {
+        claim_workflow::SplitFundingDiscoveryError::Discovery(error) =>
+            crate::app::state::vault::claim::funding_proof_refusal(error).to_string(),
+        claim_workflow::SplitFundingDiscoveryError::Changed =>
+            "The saved deposit addresses, source wallet or Connect session changed. Reopen this split and check again.".to_string(),
+        claim_workflow::SplitFundingDiscoveryError::InvalidReservation(_) =>
+            "The saved deposit reservation no longer matches this source and target Cube.".to_string(),
+    }
+}
+
 type SplitDepositPreviewResult = (
     Option<crate::app::view::vault::ancestry_coins::VerifiedCoinPairReview>,
     Option<Box<PreparedSplitPair>>,
@@ -1887,18 +1939,7 @@ impl SplitConnect for ProductionConnect {
         if !reservation.is_released() {
             return Err("The deposit addresses were not checked before release.".into());
         }
-        if let Some(binding) = &reservation.target_binding {
-            let Some((wallet_id, descriptor)) = target_vault else {
-                return Err("The target Vault is unavailable for this deposit check.".into());
-            };
-            if !binding.matches_vault(wallet_id, descriptor)
-                || !binding.target_fresh_in(&scan.inventory)
-            {
-                return Err(
-                    "The target wallet changed or its reserved address was used since the deposit addresses were reserved.".into(),
-                );
-            }
-        }
+        validate_split_deposit_target(&reservation, target_vault, &scan.inventory)?;
         let reserved = scan
             .inventory
             .funding_at_reserved_addresses(reservation.indices);
@@ -1937,21 +1978,7 @@ impl SplitConnect for ProductionConnect {
                 quote.bitcoin_minimum_sats,
                 quote.btcb2_minimum_sats,
             );
-            if eligible.funding_candidates(ChainId::Bitcoin).is_empty() {
-                return Err(format!(
-                    "No Bitcoin deposit candidate at the reserved address covers the current minimum of {} sats. A separate eligible deposit may be sent to that same address.",
-                    quote.bitcoin_minimum_sats
-                ));
-            }
-            if eligible
-                .funding_candidates(ChainId::BitcoinBlake2b)
-                .is_empty()
-            {
-                return Err(format!(
-                    "No BTCB2 deposit candidate at the reserved address covers the current minimum of {} sats. A separate eligible deposit may be sent to that same address.",
-                    quote.btcb2_minimum_sats
-                ));
-            }
+            require_eligible_split_deposits(&eligible, &quote)?;
             let found = reservation
                 .discover_reserved_funding(
                     directory,
@@ -1963,14 +1990,7 @@ impl SplitConnect for ProductionConnect {
                     (quote.bitcoin_minimum_sats, quote.btcb2_minimum_sats),
                 )
                 .await
-                .map_err(|error| match error {
-                    claim_workflow::SplitFundingDiscoveryError::Discovery(error) =>
-                        crate::app::state::vault::claim::funding_proof_refusal(error).to_string(),
-                    claim_workflow::SplitFundingDiscoveryError::Changed =>
-                        "The saved deposit addresses, source wallet or Connect session changed. Reopen this split and check again.".to_string(),
-                    claim_workflow::SplitFundingDiscoveryError::InvalidReservation(_) =>
-                        "The saved deposit reservation no longer matches this source and target Cube.".to_string(),
-                })?;
+                .map_err(split_deposit_discovery_refusal)?;
             if let Some(found) = found {
                 self.prepare_split_deposit_preview(
                     found,

@@ -229,18 +229,7 @@ impl State for VaultTransactionsPanel {
                 return self.reload(Some(daemon), Some(self.wallet.clone()));
             }
             Message::View(view::Message::Select(i)) => {
-                self.selected_tx = self.displayed_txs.get(i).cloned();
-                // Clear modal if it's for a different tx.
-                if let VaultTransactionsModal::CreateRbf(modal) = &self.modal {
-                    if Some(modal.tx.tx.compute_txid())
-                        != self
-                            .selected_tx
-                            .as_ref()
-                            .map(|selected| selected.tx.compute_txid())
-                    {
-                        self.modal = VaultTransactionsModal::None;
-                    }
-                }
+                self.select_history_transaction(i);
             }
             Message::View(view::Message::CreateRbf(view::CreateRbfMessage::Cancel)) => {
                 self.modal = VaultTransactionsModal::None;
@@ -249,34 +238,7 @@ impl State for VaultTransactionsPanel {
                 return self.request_rbf_modal(daemon, is_cancel);
             }
             Message::View(view::Message::Label(_, _)) | Message::LabelsUpdated(_) => {
-                match self.labels_edited.update(
-                    daemon,
-                    message,
-                    self.pending_txs
-                        .iter_mut()
-                        .chain(self.page_cache.iter_mut().flat_map(|p| p.iter_mut()))
-                        .map(|tx| tx as &mut dyn LabelsLoader)
-                        .chain(
-                            self.selected_tx
-                                .iter_mut()
-                                .map(|tx| tx as &mut dyn LabelsLoader),
-                        ),
-                ) {
-                    Ok(cmd) => {
-                        // `labels_edited.update` mutates labels in-place on
-                        // `pending_txs` / `page_cache`, but the view renders
-                        // the `displayed_txs` clone — rematerialise it so the
-                        // edited label is visible immediately rather than only
-                        // after a page change or reload.
-                        self.refresh_displayed();
-                        return cmd;
-                    }
-                    Err(e) => {
-                        let err_msg = crate::user_error::report(&e);
-                        self.warning = Some(e);
-                        return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                    }
-                };
+                return self.update_history_labels(daemon, message);
             }
             Message::View(view::Message::VaultPrevPage) => {
                 if self.current_page > 0 && !self.processing {
@@ -288,15 +250,7 @@ impl State for VaultTransactionsPanel {
                 return self.next_page(daemon);
             }
             Message::View(view::Message::ImportExport(ImportExportMessage::Open)) => {
-                if let VaultTransactionsModal::None = &self.modal {
-                    self.modal = VaultTransactionsModal::Export(VaultExportModal::new(
-                        Some(daemon),
-                        ImportExportType::Transactions,
-                    ));
-                    if let VaultTransactionsModal::Export(m) = &self.modal {
-                        return m.launch(true);
-                    }
-                }
+                return self.open_transaction_export(daemon);
             }
             Message::View(view::Message::ImportExport(ImportExportMessage::Close)) => {
                 if let VaultTransactionsModal::Export(_) = &self.modal {
@@ -384,6 +338,69 @@ impl State for VaultTransactionsPanel {
 }
 
 impl VaultTransactionsPanel {
+    fn select_history_transaction(&mut self, i: usize) {
+        self.selected_tx = self.displayed_txs.get(i).cloned();
+        // Clear modal if it's for a different tx.
+        if let VaultTransactionsModal::CreateRbf(modal) = &self.modal {
+            if Some(modal.tx.tx.compute_txid())
+                != self
+                    .selected_tx
+                    .as_ref()
+                    .map(|selected| selected.tx.compute_txid())
+            {
+                self.modal = VaultTransactionsModal::None;
+            }
+        }
+    }
+
+    fn open_transaction_export(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        if let VaultTransactionsModal::None = &self.modal {
+            self.modal = VaultTransactionsModal::Export(VaultExportModal::new(
+                Some(daemon),
+                ImportExportType::Transactions,
+            ));
+            if let VaultTransactionsModal::Export(m) = &self.modal {
+                return m.launch(true);
+            }
+        }
+        Task::none()
+    }
+
+    fn update_history_labels(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        message: Message,
+    ) -> Task<Message> {
+        match self.labels_edited.update(
+            daemon,
+            message,
+            self.pending_txs
+                .iter_mut()
+                .chain(self.page_cache.iter_mut().flat_map(|p| p.iter_mut()))
+                .map(|tx| tx as &mut dyn LabelsLoader)
+                .chain(
+                    self.selected_tx
+                        .iter_mut()
+                        .map(|tx| tx as &mut dyn LabelsLoader),
+                ),
+        ) {
+            Ok(cmd) => {
+                // `labels_edited.update` mutates labels in-place on
+                // `pending_txs` / `page_cache`, but the view renders
+                // the `displayed_txs` clone — rematerialise it so the
+                // edited label is visible immediately rather than only
+                // after a page change or reload.
+                self.refresh_displayed();
+                cmd
+            }
+            Err(e) => {
+                let err_msg = crate::user_error::report(&e);
+                self.warning = Some(e);
+                Task::done(Message::View(view::Message::ShowError(err_msg)))
+            }
+        }
+    }
+
     fn apply_history_transactions(
         &mut self,
         token: u64,

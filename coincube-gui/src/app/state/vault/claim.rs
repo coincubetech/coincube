@@ -4223,6 +4223,50 @@ impl ClaimStep1Panel {
         }
         Task::none()
     }
+    fn install_ready_claim(
+        &mut self,
+        mut session: Box<ClaimSession>,
+        authorized: bool,
+    ) -> Task<Message> {
+        if !authorized {
+            if let Some(coordinator) = &mut session.coordinator {
+                coordinator.invalidate();
+            }
+        }
+        self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
+        self.revoked = !authorized;
+        let ended = self.ended_copy();
+        if let Some(outcome) = session
+            .coordinator
+            .as_ref()
+            .and_then(|c| c.recorded_outcome())
+        {
+            self.stage = Stage::Track {
+                session: Some(session),
+                outcome,
+                status: None,
+                busy: false,
+                error: (!authorized).then_some(ended),
+            };
+            return if authorized {
+                self.reconcile()
+            } else {
+                Task::none()
+            };
+        }
+        self.stage = Stage::Review {
+            session: Some(session),
+            snapshot: None,
+            busy: false,
+            error: (!authorized).then_some(ended),
+        };
+        if authorized {
+            self.prepare_review()
+        } else {
+            Task::none()
+        }
+    }
+
     fn apply_ready(
         &mut self,
         id: u64,
@@ -4236,50 +4280,14 @@ impl ClaimStep1Panel {
             _ => None,
         };
         match result {
-            Ok(mut session) => {
+            Ok(session) => {
                 // The intent is journaled, so from here the session
                 // is the record whether or not it may be driven: a
                 // result whose context ended in flight is installed
                 // revoked, to be re-bound, never reviewed.
                 let authorized =
                     attempt.is_some_and(|a| self.authorized(a.generation, a.revocations));
-                if !authorized {
-                    if let Some(coordinator) = &mut session.coordinator {
-                        coordinator.invalidate();
-                    }
-                }
-                self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
-                self.revoked = !authorized;
-                let ended = self.ended_copy();
-                if let Some(outcome) = session
-                    .coordinator
-                    .as_ref()
-                    .and_then(|c| c.recorded_outcome())
-                {
-                    self.stage = Stage::Track {
-                        session: Some(session),
-                        outcome,
-                        status: None,
-                        busy: false,
-                        error: (!authorized).then_some(ended),
-                    };
-                    return if authorized {
-                        self.reconcile()
-                    } else {
-                        Task::none()
-                    };
-                }
-                self.stage = Stage::Review {
-                    session: Some(session),
-                    snapshot: None,
-                    busy: false,
-                    error: (!authorized).then_some(ended),
-                };
-                if authorized {
-                    self.prepare_review()
-                } else {
-                    Task::none()
-                }
+                self.install_ready_claim(session, authorized)
             }
             Err((built, reason)) => {
                 // A refusal for a superseded attempt has nothing to
@@ -5460,6 +5468,14 @@ pub fn journal_directory(datadir: &CoincubeDirectory, wallet: &Wallet) -> PathBu
         .join("claim")
 }
 
+fn check_claim_generation(generation: &watch::Receiver<u64>, expected: u64) -> Result<(), String> {
+    if !crate::services::claim_observation::session_current(generation, expected) {
+        Err(SESSION_ENDED.to_string())
+    } else {
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn restore_recorded_claim(
     daemon: Arc<dyn Daemon + Sync + Send>,
@@ -5534,13 +5550,7 @@ async fn restore_recorded_claim(
     let phase = controller.phase();
     let txid = controller.signed_txid();
     let stored_transaction = controller.recorded_bitcoin_transaction().cloned();
-    let check = || {
-        if !crate::services::claim_observation::session_current(&generation, expected) {
-            Err(SESSION_ENDED.to_string())
-        } else {
-            Ok(())
-        }
-    };
+    let check = || check_claim_generation(&generation, expected);
     check()?;
     // An unavailable recorded submission must remain a hold even when its inputs
     // have already disappeared from the wallet's unspent set.

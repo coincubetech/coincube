@@ -634,6 +634,36 @@ impl DefineSpend {
             }
         }
     }
+    fn apply_max_dust_redraft(&mut self, i: usize, missing: u64, all_selected: bool) {
+        // An output has MAX selected, but the available amount is lower than
+        // the dust limit. Rather than showing a confusing near-zero amount,
+        // surface an explicit under-dust message and clear the amount field.
+        self.amount_left_to_select = None;
+        let total_recipients = self.recipients.len();
+        // Derive the threshold string from DUST_OUTPUT_SATS so the message
+        // can never drift out of sync with the constant.
+        let min_amount = format_btc_string(Amount::from_sat(DUST_OUTPUT_SATS).to_btc());
+        if let Some(recipient) = self.recipients.get_mut(i) {
+            recipient.dust_warning = Some(if all_selected {
+                format!("Minimum amount is {min_amount} BTC. Add funds to your wallet to spend the coin(s).")
+            } else {
+                format!("Minimum amount is {min_amount} BTC. Select more coins to continue.")
+            });
+            recipient.update(
+                self.network,
+                self.bitcoin_unit,
+                view::CreateSpendMessage::RecipientEdited(i, "amount", String::new()),
+            );
+            if total_recipients > 1 {
+                recipient.estimated_max = None;
+            } else if missing > DUST_OUTPUT_SATS {
+                // NOTE: Not reachable in theory.
+            } else {
+                recipient.estimated_max = Some(Amount::from_sat(DUST_OUTPUT_SATS - missing));
+            }
+        }
+    }
+
     fn apply_insufficient_redraft(&mut self, recipient_with_max: Option<usize>, missing: u64) {
         self.fee_amount = None;
         // To be sure, we exclude recovery transactions here, although they
@@ -650,33 +680,7 @@ impl DefineSpend {
         // where the auto-selection branch above is skipped.
         let all_selected = self.coins.iter().all(|(_, selected)| *selected);
         if let Some(i) = recipient_with_max {
-            // An output has MAX selected, but the available amount is lower than
-            // the dust limit. Rather than showing a confusing near-zero amount,
-            // surface an explicit under-dust message and clear the amount field.
-            self.amount_left_to_select = None;
-            let total_recipients = self.recipients.len();
-            // Derive the threshold string from DUST_OUTPUT_SATS so the message
-            // can never drift out of sync with the constant.
-            let min_amount = format_btc_string(Amount::from_sat(DUST_OUTPUT_SATS).to_btc());
-            if let Some(recipient) = self.recipients.get_mut(i) {
-                recipient.dust_warning = Some(if all_selected {
-                    format!("Minimum amount is {min_amount} BTC. Add funds to your wallet to spend the coin(s).")
-                } else {
-                    format!("Minimum amount is {min_amount} BTC. Select more coins to continue.")
-                });
-                recipient.update(
-                    self.network,
-                    self.bitcoin_unit,
-                    view::CreateSpendMessage::RecipientEdited(i, "amount", String::new()),
-                );
-                if total_recipients > 1 {
-                    recipient.estimated_max = None;
-                } else if missing > DUST_OUTPUT_SATS {
-                    // NOTE: Not reachable in theory.
-                } else {
-                    recipient.estimated_max = Some(Amount::from_sat(DUST_OUTPUT_SATS - missing));
-                }
-            }
+            self.apply_max_dust_redraft(i, missing, all_selected);
         } else {
             self.warning = None;
             self.amount_left_to_select = Some(Amount::from_sat(missing));
@@ -775,6 +779,18 @@ impl DefineSpend {
         self.check_valid();
         redraft_task
     }
+    fn retain_tampered_destinations(&mut self, identities: &[(usize, LookupResult)]) {
+        for (row, result) in identities {
+            if matches!(result, LookupResult::Tampered) {
+                if let Some(recipient) = self.recipients.get(*row) {
+                    if let Some(destination) = destination_binding(&recipient.address.value) {
+                        self.tampered_destinations.insert(destination);
+                    }
+                }
+            }
+        }
+    }
+
     fn apply_prepared_spend(
         &mut self,
         generation: u64,
@@ -799,15 +815,7 @@ impl DefineSpend {
             .any(|(_, result)| matches!(result, LookupResult::Tampered))
         {
             self.tampered = true;
-            for (row, result) in &identities {
-                if matches!(result, LookupResult::Tampered) {
-                    if let Some(recipient) = self.recipients.get(*row) {
-                        if let Some(destination) = destination_binding(&recipient.address.value) {
-                            self.tampered_destinations.insert(destination);
-                        }
-                    }
-                }
-            }
+            self.retain_tampered_destinations(&identities);
             self.generated = None;
             self.warning = Some(Error::Unexpected(TAMPER_WARNING.to_string()));
             self.check_valid();

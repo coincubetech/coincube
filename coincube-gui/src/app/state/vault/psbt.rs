@@ -690,6 +690,21 @@ impl PsbtState {
         Task::batch([task, recheck, dialog])
     }
 
+    fn confirm_current_broadcast(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: &Cache,
+        message: Message,
+    ) -> Task<Message> {
+        if !self.broadcast_ready(cache) {
+            return self.close_broadcast_dialog_if_not_ready(cache);
+        }
+        if let Some(modal) = self.modal.as_mut() {
+            return modal.as_mut().update(daemon.clone(), message, &mut self.tx);
+        }
+        Task::none()
+    }
+
     fn update_inner(
         &mut self,
         daemon: Arc<dyn Daemon + Sync + Send>,
@@ -821,12 +836,7 @@ impl PsbtState {
             Message::View(view::Message::Spend(view::SpendTxMessage::Confirm))
                 if matches!(self.modal, Some(PsbtModal::Broadcast(_))) =>
             {
-                if !self.broadcast_ready(cache) {
-                    return self.close_broadcast_dialog_if_not_ready(cache);
-                }
-                if let Some(modal) = self.modal.as_mut() {
-                    return modal.as_mut().update(daemon.clone(), message, &mut self.tx);
-                }
+                return self.confirm_current_broadcast(daemon, cache, message);
             }
             _ => {
                 if let Some(modal) = self.modal.as_mut() {
@@ -2560,6 +2570,67 @@ impl Drop for SignModal {
 }
 
 impl SignModal {
+    fn select_hardware_position(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        tx: &mut SpendTx,
+        i: usize,
+    ) -> Task<Message> {
+        if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+            return refused;
+        }
+        if let Some(fingerprint) = self.hws.list.get(i).and_then(HardwareWallet::fingerprint) {
+            return self.update(
+                daemon,
+                Message::View(view::Message::SelectPsbtHardwareWallet(fingerprint)),
+                tx,
+            );
+        }
+        let reason =
+            "This signing device is no longer ready. Reconnect or unlock it, then try again.";
+        self.signer_notice = Some(reason.to_string());
+        Task::done(Message::View(view::Message::ShowError(reason.to_string())))
+    }
+
+    fn select_master_signer(&mut self, tx: &mut SpendTx) -> Task<Message> {
+        if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+            return refused;
+        }
+        if let Some(fingerprint) = self.wallet.signer.as_ref().map(|s| s.fingerprint()) {
+            self.signing.insert(fingerprint);
+        }
+        Task::perform(
+            sign_psbt_with_master_signer(self.wallet.clone(), tx.psbt.clone()),
+            |(fg, res)| Message::Signed(fg, res),
+        )
+    }
+
+    fn dispatch_keychain_message(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        message: Message,
+        tx: &mut SpendTx,
+    ) -> Task<Message> {
+        let requests_signature = matches!(
+            message,
+            Message::View(view::Message::Spend(
+                view::SpendTxMessage::SelectKeychainSigner(_)
+                    | view::SpendTxMessage::RequestFromEveryone
+                    | view::SpendTxMessage::RetryKeychainSigner(_),
+            ))
+        );
+        if requests_signature {
+            if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+                return refused;
+            }
+        }
+        if let Some(k) = self.keychain.as_mut() {
+            return k.update(daemon, message, tx);
+        }
+
+        Task::none()
+    }
+
     fn select_signing_device(
         &mut self,
         tx: &mut SpendTx,
@@ -2835,36 +2906,13 @@ impl Modal for SignModal {
     ) -> Task<Message> {
         match message {
             Message::View(view::Message::SelectHardwareWallet(i)) => {
-                if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
-                    return refused;
-                }
-                if let Some(fingerprint) =
-                    self.hws.list.get(i).and_then(HardwareWallet::fingerprint)
-                {
-                    return self.update(
-                        daemon,
-                        Message::View(view::Message::SelectPsbtHardwareWallet(fingerprint)),
-                        tx,
-                    );
-                }
-                let reason = "This signing device is no longer ready. Reconnect or unlock it, then try again.";
-                self.signer_notice = Some(reason.to_string());
-                return Task::done(Message::View(view::Message::ShowError(reason.to_string())));
+                return self.select_hardware_position(daemon, tx, i);
             }
             Message::View(view::Message::SelectPsbtHardwareWallet(requested_fp)) => {
                 return self.select_signing_device(tx, requested_fp);
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::SelectMasterSigner)) => {
-                if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
-                    return refused;
-                }
-                if let Some(fingerprint) = self.wallet.signer.as_ref().map(|s| s.fingerprint()) {
-                    self.signing.insert(fingerprint);
-                }
-                return Task::perform(
-                    sign_psbt_with_master_signer(self.wallet.clone(), tx.psbt.clone()),
-                    |(fg, res)| Message::Signed(fg, res),
-                );
+                return self.select_master_signer(tx);
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::SelectBorderWallet(fg))) => {
                 if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
@@ -2920,22 +2968,7 @@ impl Modal for SignModal {
                 | view::SpendTxMessage::RetryKeychainSigner(_)
                 | view::SpendTxMessage::CancelKeychainSign,
             )) => {
-                let requests_signature = matches!(
-                    message,
-                    Message::View(view::Message::Spend(
-                        view::SpendTxMessage::SelectKeychainSigner(_)
-                            | view::SpendTxMessage::RequestFromEveryone
-                            | view::SpendTxMessage::RetryKeychainSigner(_),
-                    ))
-                );
-                if requests_signature {
-                    if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
-                        return refused;
-                    }
-                }
-                if let Some(k) = self.keychain.as_mut() {
-                    return k.update(daemon, message, tx);
-                }
+                return self.dispatch_keychain_message(daemon, message, tx);
             }
             _ => {}
         }

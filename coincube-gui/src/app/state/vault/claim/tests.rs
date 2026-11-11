@@ -5629,6 +5629,24 @@ mod flow {
         routed
     }
 
+    fn reviewer_auth_message(otp: bool) -> view::ConnectAccountMessage {
+        if otp {
+            view::ConnectAccountMessage::VerifyOtp
+        } else {
+            view::ConnectAccountMessage::RefreshSession {
+                refresh_token: "fixture-refresh".into(),
+            }
+        }
+    }
+
+    fn reviewer_auth_endpoint(otp: bool) -> &'static str {
+        if otp {
+            "/api/v1/auth/login/verify-otp"
+        } else {
+            "/api/v1/auth/token/refresh"
+        }
+    }
+
     #[tokio::test]
     async fn round4_real_refresh_and_otp_capture_spawn_epoch_across_two_holds() {
         use crate::app::state::connect::account::ConnectFlowStep;
@@ -5640,11 +5658,7 @@ mod flow {
             let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
             f._server
                 .mock_async(|when, then| {
-                    when.method(POST).path(if otp {
-                        "/api/v1/auth/login/verify-otp"
-                    } else {
-                        "/api/v1/auth/token/refresh"
-                    });
+                    when.method(POST).path(reviewer_auth_endpoint(otp));
                     then.status(200).json_body(serde_json::json!({
                         "requires_2fa":false,"token":"flow-token","refresh_token":"fixture-refresh",
                         "user":{"id":7,"email":"fixture@example.invalid","email_verified":true}
@@ -5663,16 +5677,7 @@ mod flow {
                             cooldown: 0,
                         };
                 }
-                let task = gui.reviewer_account(
-                    1,
-                    if otp {
-                        view::ConnectAccountMessage::VerifyOtp
-                    } else {
-                        view::ConnectAccountMessage::RefreshSession {
-                            refresh_token: "fixture-refresh".into(),
-                        }
-                    },
-                );
+                let task = gui.reviewer_account(1, reviewer_auth_message(otp));
                 drop(gui.reviewer_account(2, view::ConnectAccountMessage::LogOut));
                 let completions = gui_outputs(task).await;
                 let routed = route_held_auth_completions(&mut gui, completions).await;
@@ -5704,16 +5709,7 @@ mod flow {
                         cooldown: 0,
                     };
             }
-            let task = gui.reviewer_account(
-                1,
-                if otp {
-                    view::ConnectAccountMessage::VerifyOtp
-                } else {
-                    view::ConnectAccountMessage::RefreshSession {
-                        refresh_token: "fixture-refresh".into(),
-                    }
-                },
-            );
+            let task = gui.reviewer_account(1, reviewer_auth_message(otp));
             let routed = route_fresh_auth_completions(&mut gui, gui_outputs(task).await).await;
             assert_eq!(routed, 1);
             assert!(
@@ -6486,9 +6482,189 @@ fn assert_funded_scenario_labels(
     }
 }
 
+fn set_funded_wizard_status(p: &mut ClaimStep1Panel, scenario: &str, expanded: bool) {
+    if expanded {
+        drop(p.apply(ClaimEvent::FundingProofExpired(p.check_seq, 1, 0)));
+        assert!(p.funding_status().unwrap().contains("expired"));
+    } else {
+        p.funding_status = Some(if scenario == "deposits" {
+            "Verifying both deposits and their ancestry…".into()
+        } else {
+            "Bitcoin deposit: post-fork candidate found. Bitcoin Blake2b deposit: no confirmed candidate at the reserved address.".into()
+        });
+    }
+}
+
+async fn funded_wizard_case(
+    p: &mut ClaimStep1Panel,
+    cache: &Cache,
+    menu: &crate::app::menu::Menu,
+    addresses: &claim_workflow::CheckedClaimFundingAddresses,
+    paired: (
+        &Arc<dyn Daemon + Send + Sync>,
+        &Arc<Wallet>,
+        &watch::Receiver<u64>,
+    ),
+    case: (u32, bool, &str),
+) {
+    use iced::advanced::{layout, renderer::Headless, widget::Tree, Layout};
+    let (width, expanded, scenario) = case;
+    configure_funded_wizard_case(p, scenario, expanded, addresses, paired);
+    set_funded_wizard_status(p, scenario, expanded);
+    let mut renderer = <iced::Renderer as Headless>::new(
+        coincube_ui::font::REGULAR,
+        iced::Pixels(16.0),
+        Some("tiny-skia"),
+    )
+    .await
+    .unwrap();
+    let mut element = crate::app::view::vault::claim::view(menu, cache, p);
+    let mut tree = Tree::new(element.as_widget());
+    let size = iced::Size::new(width as f32, 1500.0);
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(iced::Size::ZERO, size),
+    );
+    let mut labels = FundedWizardLabels::default();
+    element
+        .as_widget_mut()
+        .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+    for expected in [
+        "1. Deposits",
+        "2. Review and sign",
+        "3. Broadcast and confirm",
+    ] {
+        assert!(
+            labels.0.iter().any(|label| label == expected),
+            "Missing {expected}: {:?}",
+            labels.0
+        );
+    }
+    assert_eq!(
+        labels
+            .0
+            .iter()
+            .filter(|label| label.as_str() == "Claim Bitcoin Blake2b")
+            .count(),
+        1
+    );
+    assert!(!labels.0.iter().any(|label| label == "Continue split"));
+    assert!(!labels
+        .0
+        .iter()
+        .any(|label| label.contains("post-fork candidate")));
+    assert_funded_scenario_labels(p, &labels, scenario, expanded);
+    if [
+        "signed-out",
+        "switching",
+        "unavailable",
+        "unknown",
+        "recorded",
+        "unchecked",
+    ]
+    .contains(&scenario)
+    {
+        if scenario != "unchecked" {
+            let refusal = p.funding_setup_refusal().expect("setup blocker");
+            assert!(
+                labels.0.contains(&refusal.reason),
+                "Hidden blocker for {}",
+                scenario
+            );
+            assert!(!labels
+                .0
+                .iter()
+                .any(|label| label.starts_with("Load your deposit")));
+        }
+        let cursor = iced::mouse::Cursor::Available(labels.1.expect("visible Check again action"));
+        let mut messages = Vec::new();
+        for event in [
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Mouse(event),
+                Layout::new(&node),
+                cursor,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &iced::Rectangle::with_size(size),
+            );
+        }
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [crate::app::view::Message::Claim(
+                    crate::app::view::ClaimMessage::Recheck
+                )]
+            ),
+            "Missing recovery action for {}: {:?}",
+            scenario,
+            messages
+        );
+    } else if scenario == "ready" {
+        assert!(p.funding_setup_refusal().is_none());
+        assert!(labels.0.iter().any(|label| label == "Load deposits"));
+        assert!(!labels
+            .0
+            .iter()
+            .any(|label| label == crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE));
+    }
+    assert!(p.funding_review().is_none());
+    assert!(crate::services::claim_ancestry_gate::authorization().is_none());
+    if let Ok(directory) = std::env::var("CLAIM_PREVIEW_DIR") {
+        let mut messages = Vec::new();
+        element.as_widget_mut().update(
+            &mut tree,
+            &iced::Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            Layout::new(&node),
+            iced::mouse::Cursor::Unavailable,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut iced::advanced::Shell::new(&mut messages),
+            &iced::Rectangle::with_size(size),
+        );
+        let preview_theme = if width == 900 {
+            coincube_ui::theme::Theme::light()
+        } else {
+            coincube_ui::theme::Theme::dark()
+        };
+        element.as_widget().draw(
+            &tree,
+            &mut renderer,
+            &preview_theme,
+            &iced::advanced::renderer::Style {
+                text_color: preview_theme.colors.text.primary,
+            },
+            Layout::new(&node),
+            iced::mouse::Cursor::Unavailable,
+            &iced::Rectangle::with_size(size),
+        );
+        let pixels = renderer.screenshot(
+            iced::Size::new(width, 1500),
+            1.0,
+            if width == 900 {
+                iced::Color::WHITE
+            } else {
+                iced::Color::from_rgb8(22, 22, 22)
+            },
+        );
+        image::save_buffer(
+            std::path::Path::new(&directory).join(format!("claim-{scenario}-{width}.png")),
+            &pixels,
+            width,
+            1500,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded() {
-    use iced::advanced::{layout, renderer::Headless, widget::Tree, Layout};
     for bytes in [
         coincube_ui::font::REGULAR_BYTES,
         coincube_ui::font::BOLD_BYTES,
@@ -6561,173 +6737,14 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
         (1400, false, "unchecked"),
         (1400, false, "ready"),
     ] {
-        configure_funded_wizard_case(
+        funded_wizard_case(
             &mut p,
-            scenario,
-            expanded,
+            &cache,
+            &menu,
             &addresses,
             (&paired_daemon, &paired_wallet, &paired_generation),
-        );
-        if expanded {
-            drop(p.apply(ClaimEvent::FundingProofExpired(p.check_seq, 1, 0)));
-            assert!(p.funding_status().unwrap().contains("expired"));
-        } else {
-            p.funding_status = Some(if scenario == "deposits" {
-                "Verifying both deposits and their ancestry…".into()
-            } else {
-                "Bitcoin deposit: post-fork candidate found. Bitcoin Blake2b deposit: no confirmed candidate at the reserved address.".into()
-            });
-        }
-        let mut renderer = <iced::Renderer as Headless>::new(
-            coincube_ui::font::REGULAR,
-            iced::Pixels(16.0),
-            Some("tiny-skia"),
+            (width, expanded, scenario),
         )
-        .await
-        .unwrap();
-        let mut element = crate::app::view::vault::claim::view(&menu, &cache, &p);
-        let mut tree = Tree::new(element.as_widget());
-        let size = iced::Size::new(width as f32, 1500.0);
-        let node = element.as_widget_mut().layout(
-            &mut tree,
-            &renderer,
-            &layout::Limits::new(iced::Size::ZERO, size),
-        );
-        let mut labels = FundedWizardLabels::default();
-        element
-            .as_widget_mut()
-            .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
-        for expected in [
-            "1. Deposits",
-            "2. Review and sign",
-            "3. Broadcast and confirm",
-        ] {
-            assert!(
-                labels.0.iter().any(|label| label == expected),
-                "Missing {expected}: {:?}",
-                labels.0
-            );
-        }
-        assert_eq!(
-            labels
-                .0
-                .iter()
-                .filter(|label| label.as_str() == "Claim Bitcoin Blake2b")
-                .count(),
-            1
-        );
-        assert!(!labels.0.iter().any(|label| label == "Continue split"));
-        assert!(!labels
-            .0
-            .iter()
-            .any(|label| label.contains("post-fork candidate")));
-        assert_funded_scenario_labels(&p, &labels, scenario, expanded);
-        if [
-            "signed-out",
-            "switching",
-            "unavailable",
-            "unknown",
-            "recorded",
-            "unchecked",
-        ]
-        .contains(&scenario)
-        {
-            if scenario != "unchecked" {
-                let refusal = p.funding_setup_refusal().expect("setup blocker");
-                assert!(
-                    labels.0.contains(&refusal.reason),
-                    "Hidden blocker for {}",
-                    scenario
-                );
-                assert!(!labels
-                    .0
-                    .iter()
-                    .any(|label| label.starts_with("Load your deposit")));
-            }
-            let cursor =
-                iced::mouse::Cursor::Available(labels.1.expect("visible Check again action"));
-            let mut messages = Vec::new();
-            for event in [
-                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
-                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
-            ] {
-                element.as_widget_mut().update(
-                    &mut tree,
-                    &iced::Event::Mouse(event),
-                    Layout::new(&node),
-                    cursor,
-                    &renderer,
-                    &mut iced::advanced::clipboard::Null,
-                    &mut iced::advanced::Shell::new(&mut messages),
-                    &iced::Rectangle::with_size(size),
-                );
-            }
-            assert!(
-                matches!(
-                    messages.as_slice(),
-                    [crate::app::view::Message::Claim(
-                        crate::app::view::ClaimMessage::Recheck
-                    )]
-                ),
-                "Missing recovery action for {}: {:?}",
-                scenario,
-                messages
-            );
-        } else if scenario == "ready" {
-            assert!(p.funding_setup_refusal().is_none());
-            assert!(labels.0.iter().any(|label| label == "Load deposits"));
-            assert!(!labels
-                .0
-                .iter()
-                .any(|label| label == crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE));
-        }
-        assert!(p.funding_review().is_none());
-        assert!(crate::services::claim_ancestry_gate::authorization().is_none());
-        if let Ok(directory) = std::env::var("CLAIM_PREVIEW_DIR") {
-            let mut messages = Vec::new();
-            element.as_widget_mut().update(
-                &mut tree,
-                &iced::Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
-                Layout::new(&node),
-                iced::mouse::Cursor::Unavailable,
-                &renderer,
-                &mut iced::advanced::clipboard::Null,
-                &mut iced::advanced::Shell::new(&mut messages),
-                &iced::Rectangle::with_size(size),
-            );
-            let preview_theme = if width == 900 {
-                coincube_ui::theme::Theme::light()
-            } else {
-                coincube_ui::theme::Theme::dark()
-            };
-            element.as_widget().draw(
-                &tree,
-                &mut renderer,
-                &preview_theme,
-                &iced::advanced::renderer::Style {
-                    text_color: preview_theme.colors.text.primary,
-                },
-                Layout::new(&node),
-                iced::mouse::Cursor::Unavailable,
-                &iced::Rectangle::with_size(size),
-            );
-            let pixels = renderer.screenshot(
-                iced::Size::new(width, 1500),
-                1.0,
-                if width == 900 {
-                    iced::Color::WHITE
-                } else {
-                    iced::Color::from_rgb8(22, 22, 22)
-                },
-            );
-            image::save_buffer(
-                std::path::Path::new(&directory).join(format!("claim-{scenario}-{width}.png")),
-                &pixels,
-                width,
-                1500,
-                image::ColorType::Rgba8,
-            )
-            .unwrap();
-        }
+        .await;
     }
 }
