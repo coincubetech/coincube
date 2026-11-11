@@ -947,6 +947,8 @@ pub enum SparkSideshiftReceiveMessage {
     CopyShiftId,
     /// Copy the refund address the user gave.
     CopyRefundAddress,
+    /// Flip the in-progress step's pulse phase.
+    PulseTick,
     Back,
     Reset,
 }

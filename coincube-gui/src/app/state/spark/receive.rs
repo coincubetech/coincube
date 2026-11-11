@@ -37,6 +37,7 @@ use crate::app::view::spark::SparkRecentTransaction;
 use crate::app::view::FiatAmountConverter;
 use crate::app::wallets::SparkBackend;
 
+use super::esplora::DEPOSIT_MATURITY_CONFIRMATIONS;
 use super::sideshift_receive::SparkSideshiftReceiveFlow;
 
 /// Which receive flow the user has picked.
@@ -240,6 +241,13 @@ impl State for SparkReceive {
                         flow,
                         cache.bitcoin_unit,
                         cache.balance_amounts_masked(),
+                        settle_confirmations(
+                            flow.settle_hash(),
+                            flow.settle_amount_sat(),
+                            &self.pending_deposits,
+                            &self.pending_deposit_confirmations,
+                        ),
+                        cache.reduce_motion,
                     )
                     .map(crate::app::view::Message::SparkSideshiftReceive),
                 ),
@@ -296,6 +304,17 @@ impl State for SparkReceive {
                 mask_amounts: cache.balance_amounts_masked(),
                 sideshift_body,
                 cross_network_selected,
+                swap_deposit: self
+                    .sideshift_flow
+                    .as_ref()
+                    .and_then(|flow| {
+                        settle_deposit(
+                            flow.settle_hash(),
+                            flow.settle_amount_sat(),
+                            &self.pending_deposits,
+                        )
+                    })
+                    .map(|d| (d.txid.as_str(), d.vout)),
             }
             .render(),
         );
@@ -1004,6 +1023,47 @@ pub(crate) fn claim_deferral_notice(deferral: &coincube_spark_protocol::ClaimDef
     }
 }
 
+/// The wallet's pending (unclaimed) deposit that is a cross-network swap's
+/// settle output: by SideShift's settle txid when it has reported one, else by
+/// an amount that matches exactly one deposit — never a guess between two.
+fn settle_deposit<'d>(
+    settle_hash: Option<&str>,
+    settle_amount_sat: Option<u64>,
+    deposits: &'d [DepositInfo],
+) -> Option<&'d DepositInfo> {
+    match settle_hash {
+        Some(hash) => deposits.iter().find(|d| d.txid.eq_ignore_ascii_case(hash)),
+        None => {
+            let sats = settle_amount_sat?;
+            let mut matches = deposits.iter().filter(|d| d.amount_sat == sats);
+            match (matches.next(), matches.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Confirmations on a cross-network swap's settle transaction (see
+/// [`settle_deposit`]). A matured deposit counts as fully confirmed even if its
+/// exact count hasn't been fetched. `None` until the settle shows up.
+fn settle_confirmations(
+    settle_hash: Option<&str>,
+    settle_amount_sat: Option<u64>,
+    deposits: &[DepositInfo],
+    confirmations: &HashMap<(String, u32), u32>,
+) -> Option<u32> {
+    let deposit = settle_deposit(settle_hash, settle_amount_sat, deposits)?;
+    let fetched = confirmations
+        .get(&(deposit.txid.clone(), deposit.vout))
+        .copied();
+    if deposit.is_mature {
+        Some(fetched.unwrap_or(0).max(DEPOSIT_MATURITY_CONFIRMATIONS))
+    } else {
+        Some(fetched.unwrap_or(0))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1018,6 +1078,55 @@ mod tests {
             payment_request: payment_request.to_string(),
             fee_sat: 7,
         }
+    }
+
+    #[test]
+    fn settle_confirmations_find_the_swap_deposit_by_txid_then_by_unique_amount() {
+        let mut a = deposit("aa11", 0, false);
+        a.amount_sat = 31_250;
+        let mut b = deposit("bb22", 1, false);
+        b.amount_sat = 50_000;
+        let deposits = vec![a, b];
+        let confs: HashMap<(String, u32), u32> =
+            [(("aa11".to_string(), 0), 1), (("bb22".to_string(), 1), 2)].into();
+
+        // The settle txid wins, whatever the amount says.
+        assert_eq!(
+            settle_confirmations(Some("BB22"), Some(31_250), &deposits, &confs),
+            Some(2)
+        );
+        // A txid that isn't (yet) a pending deposit: nothing to show.
+        assert_eq!(
+            settle_confirmations(Some("cc33"), Some(31_250), &deposits, &confs),
+            None
+        );
+        // No txid: a unique exact amount match.
+        assert_eq!(
+            settle_confirmations(None, Some(31_250), &deposits, &confs),
+            Some(1)
+        );
+        assert_eq!(settle_confirmations(None, None, &deposits, &confs), None);
+
+        // Two deposits of the same amount: refuse to guess.
+        let mut twin = deposit("dd44", 0, false);
+        twin.amount_sat = 31_250;
+        let ambiguous = vec![deposits[0].clone(), twin];
+        assert_eq!(
+            settle_confirmations(None, Some(31_250), &ambiguous, &confs),
+            None
+        );
+
+        // Found but not yet counted reads 0; matured reads at least the threshold.
+        assert_eq!(
+            settle_confirmations(Some("aa11"), None, &deposits, &HashMap::new()),
+            Some(0)
+        );
+        let mut mature = deposit("ee55", 0, true);
+        mature.amount_sat = 1;
+        assert_eq!(
+            settle_confirmations(Some("ee55"), None, &[mature], &HashMap::new()),
+            Some(DEPOSIT_MATURITY_CONFIRMATIONS)
+        );
     }
 
     fn deposit(txid: &str, vout: u32, is_mature: bool) -> DepositInfo {
