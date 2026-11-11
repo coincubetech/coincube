@@ -10311,6 +10311,12 @@ impl App {
                 ) {
                     tasks.push(self.panels.spark_transactions.reload(None, None));
                 }
+                // `PaymentUpdated` is late metadata on a payment that is
+                // already listed: refresh the page in view (and any open
+                // detail pane) without sending the user back to page 0.
+                if matches!(event, SparkEvent::PaymentUpdated { .. }) {
+                    tasks.push(self.panels.spark_transactions.refresh_in_place());
+                }
                 // The Spark page's rows follow its own reload (`DataLoaded`).
                 if matches!(self.panels.current, Menu::Cube(menu::CubeSubMenu::Overview))
                     && overview_activity_spark_event(&event)
@@ -12193,6 +12199,7 @@ fn overview_activity_spark_event(event: &coincube_spark_protocol::Event) -> bool
             | SparkEvent::PaymentSucceeded { .. }
             | SparkEvent::PaymentPending { .. }
             | SparkEvent::PaymentFailed { .. }
+            | SparkEvent::PaymentUpdated { .. }
     )
 }
 

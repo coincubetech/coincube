@@ -34,12 +34,12 @@ use breez_sdk_spark::{
 };
 use coincube_spark_protocol::{
     AmountAdjustment, AssetAmount, AutoConvertState, CheckLightningAddressAvailableOk,
-    ClaimDepositOk, ConversionQuote, DepositInfo, ErrorKind, Event as ProtocolEvent, Frame,
-    GetConversionLimitsParams, GetInfoOk, GetInfoParams, GetLightningAddressOk, GetUserSettingsOk,
-    LightningAddressInfo as ProtocolLightningAddressInfo, ListPaymentsOk, ListUnclaimedDepositsOk,
-    Method, OkPayload, ParseInputKind, ParseInputOk, PaymentDetailSummary, PaymentSummary,
-    PrepareLnurlPayFromParams, PrepareSendFromOk, PrepareSendFromParams, PrepareSendOk,
-    PrepareSwapOk, PrepareSwapParams, PrepareUsdbSendParams, ReceivePaymentOk,
+    ClaimDeferral, ClaimDepositOk, ConversionQuote, DepositInfo, ErrorKind, Event as ProtocolEvent,
+    Frame, GetConversionLimitsParams, GetInfoOk, GetInfoParams, GetLightningAddressOk,
+    GetUserSettingsOk, LightningAddressInfo as ProtocolLightningAddressInfo, ListPaymentsOk,
+    ListUnclaimedDepositsOk, Method, OkPayload, ParseInputKind, ParseInputOk, PaymentDetailSummary,
+    PaymentSummary, PrepareLnurlPayFromParams, PrepareSendFromOk, PrepareSendFromParams,
+    PrepareSendOk, PrepareSwapOk, PrepareSwapParams, PrepareUsdbSendParams, ReceivePaymentOk,
     RegisterLightningAddressOk, Request, Response, SendPaymentOk, SetAutoConvertParams,
     SetStableBalanceParams, StableBalanceSnapshot, SwapOk, SwapParams, TokenPayment,
     UsdbBalanceSnapshot, WalletAsset, CONVERSION_MAX_SLIPPAGE_BPS,
@@ -530,12 +530,14 @@ impl EventListener for BridgeEventListener {
             SdkEvent::UnilateralExitStateChanged => None,
             // 0.28.0: a stored payment's details changed after it settled
             // (e.g. a cross-chain receive's conversion info arriving late).
-            // Its status already reached the gui, and the history re-reads
-            // details on its next `list_payments`.
-            SdkEvent::PaymentMetadataUpdated { .. } => None,
+            // Its status already reached the gui; this only re-reads lists.
+            SdkEvent::PaymentMetadataUpdated { payment } => {
+                Some(ProtocolEvent::PaymentUpdated { id: payment.id })
+            }
             // 0.28.0: sync found funds that left the balance and wait to be
-            // recovered on-chain with `recover_funds`. Nothing in the gui
-            // drives a recovery yet.
+            // recovered on-chain with `recover_funds`. The gui reads the
+            // total from `get_info` (refreshed on the `Synced` that follows);
+            // nothing in it drives a recovery yet.
             SdkEvent::RecoverableFunds {
                 recoverable_funds_sats,
             } => {
@@ -633,6 +635,7 @@ fn get_info_ok(info: GetInfoResponse) -> GetInfoOk {
         identity_pubkey: info.identity_pubkey,
         stable_balance,
         usdb_balance: usdb_balance(&info.token_balances),
+        recoverable_funds_sats: info.recoverable_funds_sats,
     }
 }
 
@@ -2991,47 +2994,45 @@ async fn handle_claim_deposit(
             // transfer settles asynchronously and there is no Payment yet —
             // the gui hears about it through `PaymentSucceeded` /
             // `DepositsChanged` like any other incoming transfer.
-            let (payment_id, amount_sat) = match resp.outcome {
-                ClaimDepositOutcome::Settled { payment } => {
-                    (Some(payment.id), Some(clamp_u128_to_u64(payment.amount)))
-                }
-                ClaimDepositOutcome::Submitted => (None, None),
-                // 0.28.0: nothing was claimed, and the SDK keeps trying on its
-                // own. Answered as an error so the deposit row keeps its
-                // Retry and shows why, rather than looking claimed.
-                ClaimDepositOutcome::Deferred { reason } => {
-                    return Response::err(id, ErrorKind::Sdk, claim_deferred_message(&reason));
-                }
-            };
-            Response::ok(
-                id,
-                OkPayload::ClaimDeposit(ClaimDepositOk {
-                    payment_id,
-                    amount_sat,
-                }),
-            )
+            Response::ok(id, OkPayload::ClaimDeposit(claim_deposit_ok(resp.outcome)))
         }
         Err(e) => Response::err(id, ErrorKind::Sdk, format!("claim_deposit failed: {e}")),
     }
 }
 
-/// Why a claim was deferred, for the deposit row's error hint.
-fn claim_deferred_message(reason: &ClaimDeferredReason) -> String {
-    let why = match reason {
+fn claim_deposit_ok(outcome: ClaimDepositOutcome) -> ClaimDepositOk {
+    let (payment_id, amount_sat, deferred) = match outcome {
+        ClaimDepositOutcome::Settled { payment } => (
+            Some(payment.id),
+            Some(clamp_u128_to_u64(payment.amount)),
+            None,
+        ),
+        ClaimDepositOutcome::Submitted => (None, None, None),
+        // 0.28.0: nothing was claimed yet, and the SDK keeps trying on its
+        // own. Not a failure, so it is an Ok carrying the reason.
+        ClaimDepositOutcome::Deferred { reason } => (None, None, Some(claim_deferral(reason))),
+    };
+    ClaimDepositOk {
+        payment_id,
+        amount_sat,
+        deferred,
+    }
+}
+
+fn claim_deferral(reason: ClaimDeferredReason) -> ClaimDeferral {
+    match reason {
         ClaimDeferredReason::MaxFeeExceeded {
             required_fee_sats,
             max_fee_sats,
-        } => format!(
-            "claiming now costs {required_fee_sats} sats, over the {max_fee_sats}-sat fee ceiling"
-        ),
-        ClaimDeferredReason::NoEarlyClaimAvailable => {
-            "no early claim is offered at this depth yet".to_string()
-        }
+        } => ClaimDeferral::MaxFeeExceeded {
+            required_fee_sats,
+            max_fee_sats,
+        },
+        ClaimDeferredReason::NoEarlyClaimAvailable => ClaimDeferral::NoEarlyClaimAvailable,
         ClaimDeferredReason::ProviderDeclined { message } => {
-            format!("the claim provider declined: {message}")
+            ClaimDeferral::ProviderDeclined { message }
         }
-    };
-    format!("Deposit not claimed yet ({why}). It will be claimed automatically.")
+    }
 }
 
 async fn handle_get_user_settings(id: u64, state: Arc<ServerState>) -> Response {
@@ -4712,28 +4713,44 @@ mod detail_summary_tests {
         assert!(!format!("{summary:?}").contains("preimage-stays-in-the-bridge"));
     }
 
-    /// 0.28.0: a deferred claim is answered as an error naming why, so the
-    /// deposit row keeps its Retry instead of looking claimed.
+    /// 0.28.0: each claim outcome maps onto the wire, a deferral as an Ok
+    /// carrying its reason rather than an error.
     #[test]
-    fn a_deferred_claim_says_why_and_that_it_will_be_claimed() {
-        let message = claim_deferred_message(&ClaimDeferredReason::MaxFeeExceeded {
-            required_fee_sats: 1_200,
-            max_fee_sats: 800,
-        });
+    fn claim_outcomes_map_and_a_deferral_is_not_an_error() {
+        let submitted = claim_deposit_ok(ClaimDepositOutcome::Submitted);
         assert_eq!(
-            message,
-            "Deposit not claimed yet (claiming now costs 1200 sats, over the 800-sat fee \
-             ceiling). It will be claimed automatically."
+            (
+                submitted.payment_id,
+                submitted.amount_sat,
+                submitted.deferred
+            ),
+            (None, None, None)
         );
-        assert!(
-            claim_deferred_message(&ClaimDeferredReason::NoEarlyClaimAvailable)
-                .contains("no early claim is offered at this depth yet")
-        );
-        assert!(
-            claim_deferred_message(&ClaimDeferredReason::ProviderDeclined {
-                message: "busy".to_string(),
+        let deferred = claim_deposit_ok(ClaimDepositOutcome::Deferred {
+            reason: ClaimDeferredReason::MaxFeeExceeded {
+                required_fee_sats: 1_200,
+                max_fee_sats: 800,
+            },
+        });
+        assert_eq!(deferred.payment_id, None);
+        assert_eq!(
+            deferred.deferred,
+            Some(ClaimDeferral::MaxFeeExceeded {
+                required_fee_sats: 1_200,
+                max_fee_sats: 800
             })
-            .contains("the claim provider declined: busy")
+        );
+        assert_eq!(
+            claim_deferral(ClaimDeferredReason::NoEarlyClaimAvailable),
+            ClaimDeferral::NoEarlyClaimAvailable
+        );
+        assert_eq!(
+            claim_deferral(ClaimDeferredReason::ProviderDeclined {
+                message: "busy".into()
+            }),
+            ClaimDeferral::ProviderDeclined {
+                message: "busy".into()
+            }
         );
     }
 
@@ -5191,6 +5208,25 @@ mod auto_convert_handler_tests {
         assert!(matches!(
             frames.try_recv(),
             Ok(Frame::Event(ProtocolEvent::Synced))
+        ));
+    }
+
+    /// 0.28.0: a settled payment's late details reach the gui as an update
+    /// only: not counted as a receive and not waking the worker.
+    #[tokio::test]
+    async fn metadata_updates_are_forwarded_as_updates_only() {
+        let dir = TempDir::new();
+        let (listener, ac, mut frames, mut wakes) = listener(&dir);
+        ac.lock().await.set_enabled(true).unwrap();
+        listener
+            .on_event(SdkEvent::PaymentMetadataUpdated {
+                payment: received("late", 4_000),
+            })
+            .await;
+        assert!(wakes.try_recv().is_err());
+        assert!(matches!(
+            frames.try_recv(),
+            Ok(Frame::Event(ProtocolEvent::PaymentUpdated { id })) if id == "late"
         ));
     }
 

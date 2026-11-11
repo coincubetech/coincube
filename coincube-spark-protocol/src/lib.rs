@@ -873,6 +873,16 @@ pub struct GetInfoOk {
     /// against the token's metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usdb_balance: Option<UsdbBalanceSnapshot>,
+    /// Sats that left [`Self::balance_sats`] and wait to be recovered
+    /// on-chain (SDK 0.28.0+). The gui shows the figure; it can't drive the
+    /// recovery yet. `0` from a bridge before 0.28.0, and left off the wire
+    /// when `0`, so an older gui sees the frame it always did.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub recoverable_funds_sats: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// The wallet's USDB holding at the SDK's full `u128` precision.
@@ -1471,6 +1481,30 @@ pub struct ClaimDepositOk {
     /// above; the caller still knows the deposit's own amount.
     #[serde(default)]
     pub amount_sat: Option<u64>,
+    /// Set when nothing was claimed yet (SDK 0.28.0+). Not a failure: the
+    /// SDK keeps claiming the deposit on its own, early as confirmations
+    /// accrue or else at maturity. `payment_id` and `amount_sat` are `None`
+    /// with it. A bridge before 0.28.0 never sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<ClaimDeferral>,
+}
+
+/// Why a deposit claim was deferred rather than made. Mirrors the SDK's
+/// `ClaimDeferredReason`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum ClaimDeferral {
+    /// Claiming now costs more than the fee ceiling allows. Unlike depth,
+    /// this does not clear on its own: the deposit is claimed at maturity.
+    MaxFeeExceeded {
+        required_fee_sats: u64,
+        max_fee_sats: u64,
+    },
+    /// The provider offers no early claim at the deposit's current depth.
+    /// The next confirmation may bring one within reach.
+    NoEarlyClaimAvailable,
+    /// The provider refused the early claim or could not be reached.
+    ProviderDeclined { message: String },
 }
 
 /// Phase 6: boolean-flattened view of the SDK's `UserSettings`. The
@@ -1655,6 +1689,12 @@ pub enum Event {
     /// In a rare race it can arrive just before the [`SwapOk`] it follows.
     /// The same caution as [`Event::AutoConvertStateChanged`] applies.
     SwapStatusChanged { swap_id: String, status: SwapStatus },
+    /// Details of an already stored payment changed after it settled, e.g.
+    /// a cross-chain receive's conversion info arriving late (SDK 0.28.0+).
+    /// The gui re-reads its payment lists; nothing is announced, since the
+    /// payment's own state event already was. The same caution as
+    /// [`Event::AutoConvertStateChanged`] applies.
+    PaymentUpdated { id: String },
 }
 
 /// How many consecutive failed auto-convert conversions the bridge
@@ -2486,6 +2526,7 @@ mod tests {
             identity_pubkey: "02ab".into(),
             stable_balance: None,
             usdb_balance: None,
+            recoverable_funds_sats: 0,
         };
         assert_eq!(
             response_json(1, OkPayload::GetInfo(none)),
@@ -2509,6 +2550,7 @@ mod tests {
             identity_pubkey: "02ab".into(),
             stable_balance: None,
             usdb_balance: Some(snapshot.clone()),
+            recoverable_funds_sats: 0,
         };
         assert_eq!(
             response_json(1, OkPayload::GetInfo(some.clone()))["ok"]["data"]["usdb_balance"],
@@ -2521,6 +2563,67 @@ mod tests {
             panic!("expected get_info");
         };
         assert_eq!(back.usdb_balance, Some(snapshot));
+    }
+
+    /// 0.28.0: recoverable funds travel only when there are some, and an
+    /// older bridge's frame reads as none.
+    #[test]
+    fn get_info_recoverable_funds_are_additive() {
+        let info = |recoverable_funds_sats| GetInfoOk {
+            balance_sats: 21,
+            identity_pubkey: "02ab".into(),
+            stable_balance: None,
+            usdb_balance: None,
+            recoverable_funds_sats,
+        };
+        let data = |ok| response_json(1, OkPayload::GetInfo(ok))["ok"]["data"].clone();
+        assert!(data(info(0)).get("recoverable_funds_sats").is_none());
+        assert_eq!(data(info(330))["recoverable_funds_sats"], 330);
+        let OkPayload::GetInfo(back) = ok_round_trip(OkPayload::GetInfo(info(330))) else {
+            panic!("expected get_info");
+        };
+        assert_eq!(back.recoverable_funds_sats, 330);
+    }
+
+    /// 0.28.0: a deferred claim names its reason; a settled claim's frame is
+    /// what it always was, and an older bridge's frame reads as not deferred.
+    #[test]
+    fn claim_deposit_deferral_is_additive_and_tagged() {
+        let settled = ClaimDepositOk {
+            payment_id: Some("p".into()),
+            amount_sat: Some(5_000),
+            deferred: None,
+        };
+        assert_eq!(
+            response_json(1, OkPayload::ClaimDeposit(settled))["ok"]["data"],
+            json!({ "payment_id": "p", "amount_sat": 5000 })
+        );
+        let deferred = ClaimDepositOk {
+            payment_id: None,
+            amount_sat: None,
+            deferred: Some(ClaimDeferral::MaxFeeExceeded {
+                required_fee_sats: 1_200,
+                max_fee_sats: 800,
+            }),
+        };
+        assert_eq!(
+            response_json(1, OkPayload::ClaimDeposit(deferred.clone()))["ok"]["data"]["deferred"],
+            json!({ "reason": "max_fee_exceeded", "required_fee_sats": 1200, "max_fee_sats": 800 })
+        );
+        let OkPayload::ClaimDeposit(back) = ok_round_trip(OkPayload::ClaimDeposit(deferred)) else {
+            panic!("expected claim_deposit");
+        };
+        assert_eq!(
+            back.deferred,
+            Some(ClaimDeferral::MaxFeeExceeded {
+                required_fee_sats: 1_200,
+                max_fee_sats: 800
+            })
+        );
+        let old: ClaimDepositOk =
+            serde_json::from_value(json!({ "payment_id": null, "amount_sat": null }))
+                .expect("old claim_deposit parses");
+        assert_eq!(old.deferred, None);
     }
 
     #[test]

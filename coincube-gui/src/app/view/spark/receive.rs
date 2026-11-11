@@ -3,7 +3,7 @@
 use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::locale::Text as CopyText;
 use coincube_ui::localized_format;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use coincube_core::miniscript::bitcoin::Network;
 use coincube_ui::{
@@ -48,11 +48,14 @@ pub struct SparkReceiveView<'a> {
     /// SDK's `list_unclaimed_deposits` RPC. Rendered as a dedicated
     /// card below the main phase body.
     pub pending_deposits: &'a [DepositInfo],
-    /// Phase 4f: which deposit is currently being claimed (in-flight
-    /// RPC). Used to disable the row's button while waiting.
-    pub claiming: Option<&'a (String, u32)>,
+    /// Phase 4f: which deposits are currently being claimed (in-flight
+    /// RPCs). Used to disable each row's button while waiting.
+    pub claiming: &'a HashSet<(String, u32)>,
     /// Phase 4f: transient error from the most recent claim attempt.
     pub claim_error: Option<&'a str>,
+    /// The most recent claim was deferred (SDK 0.28.0+): which deposit, and
+    /// why it waits. Shown on that deposit's row.
+    pub claim_notice: Option<(&'a (String, u32), &'a str)>,
     /// Live on-chain confirmation count per pending deposit, keyed by
     /// `(txid, vout)`. Sourced from a public Esplora and refreshed on a
     /// 30s tick; missing keys render the SDK's plain fallback text.
@@ -288,6 +291,7 @@ impl<'a> SparkReceiveView<'a> {
                 self.pending_deposits,
                 self.claiming,
                 self.claim_error,
+                self.claim_notice,
                 self.pending_deposit_confirmations,
                 self.network,
                 self.mask_amounts,
@@ -570,8 +574,9 @@ fn payment_card_style(theme: &theme::Theme) -> container::Style {
 
 fn pending_deposits_card<'a>(
     deposits: &'a [DepositInfo],
-    claiming: Option<&'a (String, u32)>,
+    claiming: &'a HashSet<(String, u32)>,
     claim_error: Option<&'a str>,
+    claim_notice: Option<(&'a (String, u32), &'a str)>,
     confirmations: &'a HashMap<(String, u32), u32>,
     network: Network,
     mask_amounts: bool,
@@ -593,12 +598,21 @@ fn pending_deposits_card<'a>(
             err
         )));
     }
-
     for deposit in deposits {
         let confs = confirmations
             .get(&(deposit.txid.clone(), deposit.vout))
             .copied();
-        card = card.push(deposit_row(deposit, claiming, confs, network, mask_amounts));
+        let notice = claim_notice
+            .filter(|((txid, vout), _)| txid == &deposit.txid && *vout == deposit.vout)
+            .map(|(_, notice)| notice);
+        card = card.push(deposit_row(
+            deposit,
+            claiming,
+            notice,
+            confs,
+            network,
+            mask_amounts,
+        ));
     }
 
     Container::new(card)
@@ -609,14 +623,13 @@ fn pending_deposits_card<'a>(
 
 fn deposit_row<'a>(
     deposit: &'a DepositInfo,
-    claiming: Option<&'a (String, u32)>,
+    claiming: &'a HashSet<(String, u32)>,
+    claim_notice: Option<&'a str>,
     confirmations: Option<u32>,
     network: Network,
     mask_amounts: bool,
 ) -> Element<'a, Message> {
-    let is_being_claimed = claiming
-        .map(|(txid, vout)| txid == &deposit.txid && *vout == deposit.vout)
-        .unwrap_or(false);
+    let is_being_claimed = claiming.contains(&(deposit.txid.clone(), deposit.vout));
 
     let amount_label = if mask_amounts {
         "•••••• sats".to_string()
@@ -699,7 +712,8 @@ fn deposit_row<'a>(
                     .spacing(4)
                     .width(Length::Fill)
                     .push(p1_regular(amount_label))
-                    .push(p2_regular(txid_label)),
+                    .push(p2_regular(txid_label))
+                    .push_maybe(claim_notice.map(p2_regular)),
             )
             .push(action),
     )
@@ -1473,6 +1487,7 @@ mod tests {
     fn receive_payment_hierarchy_and_focus_hold_at_compact_and_wide_sizes() {
         let deposits = Vec::new();
         let confirmations = HashMap::new();
+        let claiming = HashSet::new();
         let transactions = Vec::new();
         let quote = coincube_ui::component::quote_display::random_quote("spark-receive");
         let image =
@@ -1495,8 +1510,9 @@ mod tests {
                         lightning_address: None,
                         lightning_address_qr: None,
                         pending_deposits: &deposits,
-                        claiming: None,
+                        claiming: &claiming,
                         claim_error: None,
+                        claim_notice: None,
                         pending_deposit_confirmations: &confirmations,
                         network: Network::Bitcoin,
                         cube_name: "Everyday",
@@ -1597,6 +1613,7 @@ mod tests {
             claim_error: None,
         }];
         let confirmations = HashMap::new();
+        let claiming = HashSet::new();
         for privacy in [
             None,
             Some(BalancePrivacy::Unresolved),
@@ -1612,6 +1629,7 @@ mod tests {
                 "spark-pending-deposit-privacy",
                 pending_deposits_card(
                     &deposits,
+                    &claiming,
                     None,
                     None,
                     &confirmations,
@@ -1642,6 +1660,7 @@ mod tests {
         };
         let deposits = Vec::new();
         let confirmations = HashMap::new();
+        let claiming = HashSet::new();
         let transactions = Vec::new();
         let quote = coincube_ui::component::quote_display::random_quote("spark-receive");
         let image =
@@ -1670,8 +1689,9 @@ mod tests {
                     lightning_address: None,
                     lightning_address_qr: None,
                     pending_deposits: &deposits,
-                    claiming: None,
+                    claiming: &claiming,
                     claim_error: None,
+                    claim_notice: None,
                     pending_deposit_confirmations: &confirmations,
                     network: Network::Bitcoin,
                     cube_name: "Everyday",
