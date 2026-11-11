@@ -369,6 +369,15 @@ class Phone:
                 self.click("Back to home")
             elif "Go to home" in labels:
                 self.click("Go to home")
+            elif "Pending Requests" in labels:
+                # QA build 39 exposes this Back tooltip. Earlier builds have
+                # no supported control: never relaunch to escape this route.
+                from appium.webdriver.common.appiumby import AppiumBy
+                controls = self.driver.find_elements(AppiumBy.IOS_PREDICATE,
+                    'visible == true AND enabled == true AND type == "XCUIElementTypeButton" AND (label == "Back" OR name == "Back")')
+                if len(controls) != 1:
+                    raise Blocked("REQUEST_DISCOVERY_NAVIGATION_UNSUPPORTED", "Pending Requests needs one accessible Back button; this route cannot be recovered by restarting.")
+                controls[0].click()
             elif {"Signer key", "Back"} <= labels and not self.matching_controls("Back") and not restarted:
                 # Key details exposes its decorative Back child as disabled
                 # through XCTest. This persisted route has no pending ceremony;
@@ -378,14 +387,6 @@ class Phone:
                 restarted = True
             elif "Back" in labels:
                 self.click("Back")
-            elif "Pending Requests" in labels and not restarted:
-                # This page uses an unlabeled IconButton for back. Restart
-                # only this known route instead of guessing coordinates or
-                # tapping an unrelated control. Flutter starts at '/', and
-                # persisted login/keys are retained (noReset).
-                self.driver.terminate_app(BUNDLE)
-                self.driver.activate_app(BUNDLE)
-                restarted = True
             time.sleep(.5)
         raise Blocked("PHONE_NAVIGATION", "Keychain could not safely return to its main navigation; no approval or PIN was retried.")
 

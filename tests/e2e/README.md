@@ -165,8 +165,10 @@ that exact route with one visible, enabled **Back** button (exposed by QA build
 and native modals, rechecks the idle credential and exact session before one
 journaled Back, and requires genuine Home in the same process before completing
 that navigation. A missing/ambiguous Back is explicitly unsupported; generic
-navigation recovery and its unjournaled restart fallback are never used by this
-recovery helper. An uncertain Back blocks resume before setup navigation, even
+navigation recovery is never used by this recovery helper. The obsolete pending
+queue restart fallback is also removed from ordinary approval and setup/resume
+navigation: those paths require the accessible Back control too. An uncertain
+Back blocks resume before setup navigation, even
 across a build change. A completed Back still requires the existing final Home,
 process and native eligibility checks before the separate journaled restart.
 If the exact session advances to DELIVERED or VIEWED with zero submissions,

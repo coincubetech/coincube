@@ -50,7 +50,7 @@ def test_unknown_restored_screen_never_guesses_navigation(monkeypatch):
     assert clicks == []
 
 
-def test_result_then_unlabeled_pending_page_restarts_without_reset(monkeypatch):
+def test_result_then_unlabeled_pending_page_blocks_without_restart(monkeypatch):
     monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)
     phone, clicks = scripted_phone([
         {"Signature Submitted", "Done"}, {"Pending Requests"}, set(),
@@ -59,21 +59,25 @@ def test_result_then_unlabeled_pending_page_restarts_without_reset(monkeypatch):
     lifecycle = []
     phone.driver.terminate_app = lambda bundle: lifecycle.append(("terminate", bundle))
     phone.driver.activate_app = lambda bundle: lifecycle.append(("activate", bundle))
-    phone.check_fixture("Disposable QA Cube")
-    assert clicks == ["Done", "Settings", "Cubes", "Home"]
-    assert lifecycle == [("terminate", "io.coincube.keychainApp"), ("activate", "io.coincube.keychainApp")]
+    phone.driver.find_elements = lambda *args: []
+    with pytest.raises(Blocked) as error:
+        phone.check_fixture("Disposable QA Cube")
+    assert error.value.code == "REQUEST_DISCOVERY_NAVIGATION_UNSUPPORTED"
+    assert clicks == ["Done"]
+    assert lifecycle == []
 
 
-def test_pending_page_restart_is_bounded(monkeypatch):
+def test_pending_page_never_uses_a_restart_fallback(monkeypatch):
     monkeypatch.setattr("harness.phone.time.sleep", lambda _: None)
     phone, clicks = scripted_phone([{"Pending Requests"}] * 16)
     lifecycle = []
     phone.driver.terminate_app = lambda _: lifecycle.append("terminate")
     phone.driver.activate_app = lambda _: lifecycle.append("activate")
+    phone.driver.find_elements = lambda *args: []
     with pytest.raises(Blocked) as error:
         phone.restore_navigation()
-    assert error.value.code == "PHONE_NAVIGATION"
-    assert lifecycle == ["terminate", "activate"]
+    assert error.value.code == "REQUEST_DISCOVERY_NAVIGATION_UNSUPPORTED"
+    assert lifecycle == []
     assert clicks == []
 
 
@@ -988,3 +992,95 @@ def test_null_back_receipt_cannot_be_bypassed_when_home_is_already_visible():
         phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: pytest.fail('Malformed Back blocks first'))
     assert error.value.code == 'REQUEST_DISCOVERY_BACK_UNCERTAIN'
     assert calls == []
+
+
+@pytest.mark.parametrize('entry', ['restore', 'fixture', 'approve'])
+@pytest.mark.parametrize('back_count', [0, 2])
+@pytest.mark.parametrize('incoming', [False, True])
+def test_actual_pending_queue_entrypoints_never_relaunch_without_unique_back(tmp_path, monkeypatch, entry, back_count, incoming):
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    pending = {'Pending Requests', 'Testnet4 QA fixture'}
+    if back_count: pending.add('Back')
+    phone, clicks = scripted_phone(([INCOMING] if incoming else []) + [pending])
+    phone.build = 38 if not back_count else 39
+    lifecycle = []
+    phone.driver.terminate_app = lambda _: lifecycle.append('terminate')
+    phone.driver.activate_app = lambda _: lifecycle.append('activate')
+    phone.driver.find_elements = lambda *args: [SimpleNamespace(click=lambda: clicks.append('Back'))] * back_count
+    journal = Journal(tmp_path / 'run', {})
+    try:
+        with pytest.raises(Blocked) as error:
+            if entry == 'restore': phone.restore_navigation()
+            elif entry == 'fixture': phone.check_fixture('Disposable QA Cube')
+            else: phone.approve('fixture', INTENT, 612, None, journal, timeout=1)
+        assert error.value.code == 'REQUEST_DISCOVERY_NAVIGATION_UNSUPPORTED'
+        assert lifecycle == []
+        assert clicks == (['Not now'] if incoming else [])
+        assert 'approval_started' not in journal.data['artifacts']
+    finally:
+        journal.close()
+
+
+def test_actual_approve_after_exact_note_ready_cannot_take_legacy_queue_restart(tmp_path):
+    phone, _, receipt, lifecycle, view = pending_discovery_phone()
+    phone.build = receipt['binding']['build'] = 38
+    view.update(labels={'Pending Requests', 'Testnet4 QA fixture'}, back_count=0)
+    receipt['binding']['approval_binding']['request_id'] = 'fixture'
+    journal = Journal(tmp_path / 'run', {})
+    try:
+        with pytest.raises(Blocked) as error:
+            phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: pytest.fail('Exact arrival must precede native restart guard'))
+        assert error.value.code == 'REQUEST_DISCOVERY_READY'
+        with pytest.raises(Blocked) as error:
+            phone.approve('fixture', INTENT, 612, None, journal, timeout=1)
+        assert error.value.code == 'REQUEST_DISCOVERY_NAVIGATION_UNSUPPORTED'
+        assert lifecycle == [] and journal.data['artifacts'] == {}
+    finally:
+        journal.close()
+
+
+def test_actual_approve_from_supported_queue_still_reviews_and_approves_without_lifecycle(tmp_path, monkeypatch):
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    phone, clicks = scripted_phone([
+        {'Pending Requests', 'Back', 'Testnet4 QA fixture'}, HOME,
+        {'Testnet4 QA fixture'}, REVIEW, {'Signature Submitted'}])
+    phone.build = 39
+    lifecycle = []
+    phone.driver.terminate_app = lambda _: lifecycle.append('terminate')
+    phone.driver.activate_app = lambda _: lifecycle.append('activate')
+    def find(_, predicate):
+        assert 'visible == true' in predicate and 'enabled == true' in predicate
+        assert 'XCUIElementTypeButton' in predicate
+        return [SimpleNamespace(click=lambda: clicks.append('Back'))]
+    phone.driver.find_elements = find
+    journal = Journal(tmp_path / 'run', {})
+    try:
+        phone.approve('fixture', INTENT, 612, None, journal, timeout=1)
+        assert clicks == ['Back', 'Home', 'Testnet4 QA fixture', 'Approve']
+        assert journal.data['artifacts']['approval_started'] is True
+        assert lifecycle == []
+    finally:
+        journal.close()
+
+
+@pytest.mark.parametrize('incoming', [False, True])
+def test_next_run_verified_onboarding_cannot_relaunch_unsupported_queue(monkeypatch, incoming):
+    from harness.onboarding import Onboarding
+    monkeypatch.setattr('harness.phone.time.sleep', lambda _: None)
+    queue = {'Pending Requests'}
+    phone, clicks = scripted_phone([queue] + ([INCOMING] if incoming else []) + [queue])
+    phone.device_digest = 'synthetic-device'
+    phone.build = 38
+    lifecycle = []
+    phone.driver.terminate_app = lambda _: lifecycle.append('terminate')
+    phone.driver.activate_app = lambda _: lifecycle.append('activate')
+    phone.driver.find_elements = lambda *args: []
+    state = {'identity': 'synthetic-account:synthetic-device', 'verified': True, 'pin': '123456'}
+    store = SimpleNamespace(load=lambda: dict(state))
+    onboarding = Onboarding(phone, store, 'synthetic-account', 1)
+    with pytest.raises(Blocked) as error:
+        onboarding.setup()
+    assert error.value.code == 'REQUEST_DISCOVERY_NAVIGATION_UNSUPPORTED'
+    assert lifecycle == []
+    assert clicks == (['Not now'] if incoming else [])
+    assert state['verified'] is True
