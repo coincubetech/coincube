@@ -170,8 +170,8 @@ async fn remove_cube_import_within(
         .or(staged_owner.as_ref())
         .or(final_owner.as_ref());
     if journal.is_none() {
-        if let Some(path) = final_from_attachment.as_ref() {
-            if fs::symlink_metadata(path).is_ok() {
+        if let Some(path) = final_from_attachment.clone() {
+            if super::blocking_fs(move || Ok(fs::symlink_metadata(path).is_ok())).await? {
                 return Err(
                     "Imported wallet storage lacks an owner; no files were removed.".into(),
                 );

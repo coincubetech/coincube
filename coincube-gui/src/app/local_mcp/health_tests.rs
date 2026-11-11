@@ -75,7 +75,10 @@ async fn healthy_info() -> GetInfoResult {
     daemon.stop().await.unwrap();
     drop(daemon);
     drop(wallet);
-    std::fs::remove_dir_all(root).unwrap();
+    tokio::task::spawn_blocking(move || std::fs::remove_dir_all(root))
+        .await
+        .unwrap()
+        .unwrap();
     info.sync = 1.0;
     info.block_height = 10;
     info.last_poll_timestamp = Some(2);
