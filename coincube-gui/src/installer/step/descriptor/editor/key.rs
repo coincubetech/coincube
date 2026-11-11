@@ -843,10 +843,13 @@ impl SelectKeySource {
         }
         // If two keys have the same fingerprint, they must both have the same provider key kind (which could be `None`).
         // Note that this checks all keys regardless of whether they are currently being used in a path.
-        else if self.keys.iter().any(|(fg, (_, key))| {
-            *fg == key.fingerprint
-                && key.source.provider_key_kind() != key.source.provider_key_kind()
-        }) {
+        else if self
+            .keys
+            .get(&k.fingerprint)
+            .is_some_and(|(_, existing_key)| {
+                existing_key.source.provider_key_kind() != Some(key_kind)
+            })
+        {
             Some("Fetched key has already been added to the wallet.")
         } else {
             None
@@ -4075,5 +4078,169 @@ mod tests {
 
         assert!(resolved.my_keys.is_empty());
         assert!(resolved.contact_keys.is_empty());
+    }
+
+    fn provider_contract_key(fingerprint: Fingerprint, kind: Option<KeyKind>) -> Key {
+        let mut key = manual_key(fingerprint);
+        if let Some(kind) = kind {
+            key.source = KeySource::Token(
+                kind,
+                ProviderKey {
+                    uuid: "synthetic-key-id".into(),
+                    token: "synthetic-provider-token".into(),
+                    provider: crate::app::settings::Provider {
+                        uuid: "synthetic-provider-id".into(),
+                        name: "Synthetic provider".into(),
+                    },
+                },
+            );
+        }
+        key
+    }
+
+    fn provider_contract_picker(kind: KeyKind) -> SelectKeySource {
+        let mut picker = empty_picker();
+        picker.actual_path.token_kind = vec![KeyKind::SafetyNet, KeyKind::Cosigner];
+        picker.focus = match kind {
+            KeyKind::SafetyNet => Focus::EnterSafetyNetToken,
+            KeyKind::Cosigner => Focus::EnterCosignerToken,
+        };
+        picker.processing = true;
+        picker
+    }
+
+    fn assert_provider_contract_case(
+        incoming: KeyKind,
+        existing: Option<KeyKind>,
+        same_fingerprint: bool,
+        coordinates: Vec<(usize, usize)>,
+    ) {
+        let fingerprint = Fingerprint::from_str("01020304").unwrap();
+        let registered_fingerprint = if same_fingerprint {
+            fingerprint
+        } else {
+            Fingerprint::from_str("05060708").unwrap()
+        };
+        let mut picker = provider_contract_picker(incoming);
+        picker.keys.insert(
+            registered_fingerprint,
+            (
+                coordinates,
+                provider_contract_key(registered_fingerprint, existing),
+            ),
+        );
+        picker.form_alias.value = "Existing alias".into();
+        picker.selected_key = SelectedKey::Existing(registered_fingerprint);
+        let focus_before = picker.focus;
+        let key = provider_contract_key(fingerprint, Some(incoming));
+        let task = picker.on_provider_key(Ok(key.clone()));
+        assert_eq!(task.units(), 0);
+        assert!(!picker.processing);
+        assert_eq!(picker.focus, focus_before);
+        let form = match incoming {
+            KeyKind::SafetyNet => &picker.form_safety_net_token,
+            KeyKind::Cosigner => &picker.form_cosigner_token,
+        };
+        let refused = same_fingerprint && existing != Some(incoming);
+        assert_eq!(
+            form.valid, !refused,
+            "incoming={incoming:?}, existing={existing:?}, same_fingerprint={same_fingerprint}"
+        );
+        if refused {
+            assert_eq!(
+                form.warning,
+                Some("Fetched key has already been added to the wallet.")
+            );
+            assert!(
+                matches!(picker.selected_key, SelectedKey::Existing(fp) if fp == registered_fingerprint)
+            );
+            assert_eq!(picker.step, Step::Grid);
+            assert_eq!(picker.form_alias.value, "Existing alias");
+        } else {
+            assert!(form.warning.is_none());
+            assert!(
+                matches!(&picker.selected_key, SelectedKey::New(selected) if **selected == key)
+            );
+            assert_eq!(picker.step, Step::Details);
+            assert_eq!(picker.form_alias.value, format!("{incoming:?}"));
+        }
+    }
+
+    #[test]
+    fn provider_contract_rejects_fingerprint_kind_conflicts_in_unused_and_placed_keys() {
+        for coordinates in [vec![], vec![(1, 0)]] {
+            for (incoming, existing) in [
+                (KeyKind::SafetyNet, None),
+                (KeyKind::SafetyNet, Some(KeyKind::Cosigner)),
+                (KeyKind::Cosigner, None),
+                (KeyKind::Cosigner, Some(KeyKind::SafetyNet)),
+            ] {
+                assert_provider_contract_case(incoming, existing, true, coordinates.clone());
+            }
+        }
+    }
+
+    #[test]
+    fn provider_contract_allows_matching_kinds_and_unrelated_fingerprints() {
+        for coordinates in [vec![], vec![(1, 0)]] {
+            for (incoming, existing, same_fingerprint) in [
+                (KeyKind::SafetyNet, Some(KeyKind::SafetyNet), true),
+                (KeyKind::Cosigner, Some(KeyKind::Cosigner), true),
+                (KeyKind::SafetyNet, None, false),
+                (KeyKind::SafetyNet, Some(KeyKind::Cosigner), false),
+                (KeyKind::SafetyNet, Some(KeyKind::SafetyNet), false),
+                (KeyKind::Cosigner, None, false),
+                (KeyKind::Cosigner, Some(KeyKind::SafetyNet), false),
+                (KeyKind::Cosigner, Some(KeyKind::Cosigner), false),
+            ] {
+                assert_provider_contract_case(
+                    incoming,
+                    existing,
+                    same_fingerprint,
+                    coordinates.clone(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn provider_contract_keeps_network_and_path_checks_ahead_of_kind_conflicts() {
+        let fingerprint = Fingerprint::from_str("01020304").unwrap();
+        for kind in [KeyKind::SafetyNet, KeyKind::Cosigner] {
+            let mut picker = provider_contract_picker(kind);
+            picker
+                .keys
+                .insert(fingerprint, (vec![], manual_key(fingerprint)));
+            picker.actual_path.token_kind.clear();
+            let mut key = provider_contract_key(fingerprint, Some(kind));
+            key.key = DescriptorPublicKey::from_str(MAINNET_DESCRIPTOR_KEY).unwrap();
+            let task = picker.on_provider_key(Ok(key));
+            assert_eq!(task.units(), 0);
+            let form = match kind {
+                KeyKind::SafetyNet => &picker.form_safety_net_token,
+                KeyKind::Cosigner => &picker.form_cosigner_token,
+            };
+            assert_eq!(
+                form.warning,
+                Some("Fetched key does not have the correct network")
+            );
+            assert!(!form.valid);
+            assert!(matches!(picker.selected_key, SelectedKey::None));
+            assert_eq!(picker.step, Step::Grid);
+            let task = picker.on_provider_key(Ok(provider_contract_key(fingerprint, Some(kind))));
+            assert_eq!(task.units(), 0);
+            let form = match kind {
+                KeyKind::SafetyNet => &picker.form_safety_net_token,
+                KeyKind::Cosigner => &picker.form_cosigner_token,
+            };
+            let warning = match kind {
+                KeyKind::SafetyNet => "SafetyNet kind of token is not allowed for this path",
+                KeyKind::Cosigner => "Cosigner kind of token is not allowed for this path",
+            };
+            assert_eq!(form.warning, Some(warning));
+            assert!(!form.valid);
+            assert!(matches!(picker.selected_key, SelectedKey::None));
+            assert_eq!(picker.step, Step::Grid);
+        }
     }
 }
