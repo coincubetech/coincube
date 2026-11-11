@@ -167,22 +167,7 @@ fn independent_check(spend: &FinalizedSpend, spent: &[TxOut]) -> Vec<usize> {
         .unwrap();
         let message = secp256k1::Message::from_digest(digest);
 
-        for element in txin
-            .witness
-            .iter()
-            .chain(
-                txin.script_sig
-                    .instructions()
-                    .filter_map(|i| match i.unwrap() {
-                        Instruction::PushBytes(p) => Some(p.as_bytes()),
-                        _ => None,
-                    }),
-            )
-        {
-            if element.len() > 8 && element[0] == 0x30 {
-                assert_eq!(element.last(), Some(&0x21), "every signature is unified");
-            }
-        }
+        assert_unified_signature_flags(txin);
         let script_sig = Builder::new();
         let script_sig = txin
             .script_sig
@@ -527,5 +512,22 @@ fn verifier_refuses_a_record_not_ending_in_unified_all() {
                 public_key: record.public_key
             })
         );
+    }
+}
+
+fn assert_unified_signature_flags(txin: &miniscript::bitcoin::TxIn) {
+    for element in
+        txin.witness.iter().chain(
+            txin.script_sig
+                .instructions()
+                .filter_map(|i| match i.unwrap() {
+                    Instruction::PushBytes(p) => Some(p.as_bytes()),
+                    _ => None,
+                }),
+        )
+    {
+        if element.len() > 8 && element[0] == 0x30 {
+            assert_eq!(element.last(), Some(&0x21), "every signature is unified");
+        }
     }
 }

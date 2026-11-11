@@ -209,40 +209,7 @@ pub fn create_imported_spend(
                 .map_err(|_| invalid("owned output descriptor does not match"))?;
         }
     }
-    for (i, coin) in selected.iter().enumerate() {
-        let definite = branch(
-            wallet,
-            AddrInfo {
-                index: coin.deriv_index,
-                is_change: coin.is_change,
-            },
-        )?;
-        let previous = tx_getter.get_tx(&coin.outpoint.txid);
-        let authenticated =
-            spend::authenticate_previous_output(&coin.outpoint, previous.as_ref(), None)
-                .map_err(|e| SpendCreationError::InputAuthentication(coin.outpoint, e))?;
-        if authenticated.value != coin.amount {
-            return Err(SpendCreationError::InputAuthentication(
-                coin.outpoint,
-                InputAuthError::AmountMismatch {
-                    expected: coin.amount,
-                    actual: authenticated.value,
-                },
-            ));
-        }
-        if authenticated.script_pubkey != definite.script_pubkey() {
-            return Err(SpendCreationError::InputAuthentication(
-                coin.outpoint,
-                InputAuthError::ScriptMismatch,
-            ));
-        }
-        psbt.inputs[i].non_witness_utxo = previous;
-        if is_segwit {
-            psbt.inputs[i].witness_utxo = Some(authenticated);
-        }
-        psbt.update_input_with_descriptor(i, &definite)
-            .map_err(|_| invalid("input descriptor metadata is invalid"))?;
-    }
+    populate_selected_inputs(wallet, tx_getter, &selected, is_segwit, &mut psbt)?;
     verify_imported_spend_before_broadcast(wallet, &psbt)?;
     Ok(CreateSpendRes {
         psbt,
@@ -525,6 +492,50 @@ pub fn finalize_imported_spend<C: secp256k1::Verification>(
         fee: Amount::from_sat(fee),
         signatures_per_input,
     })
+}
+
+fn populate_selected_inputs(
+    wallet: &ImportedWalletDescriptor,
+    tx_getter: &mut impl TxGetter,
+    selected: &[CandidateCoin],
+    is_segwit: bool,
+    psbt: &mut Psbt,
+) -> Result<(), SpendCreationError> {
+    for (i, coin) in selected.iter().enumerate() {
+        let definite = branch(
+            wallet,
+            AddrInfo {
+                index: coin.deriv_index,
+                is_change: coin.is_change,
+            },
+        )?;
+        let previous = tx_getter.get_tx(&coin.outpoint.txid);
+        let authenticated =
+            spend::authenticate_previous_output(&coin.outpoint, previous.as_ref(), None)
+                .map_err(|e| SpendCreationError::InputAuthentication(coin.outpoint, e))?;
+        if authenticated.value != coin.amount {
+            return Err(SpendCreationError::InputAuthentication(
+                coin.outpoint,
+                InputAuthError::AmountMismatch {
+                    expected: coin.amount,
+                    actual: authenticated.value,
+                },
+            ));
+        }
+        if authenticated.script_pubkey != definite.script_pubkey() {
+            return Err(SpendCreationError::InputAuthentication(
+                coin.outpoint,
+                InputAuthError::ScriptMismatch,
+            ));
+        }
+        psbt.inputs[i].non_witness_utxo = previous;
+        if is_segwit {
+            psbt.inputs[i].witness_utxo = Some(authenticated);
+        }
+        psbt.update_input_with_descriptor(i, &definite)
+            .map_err(|_| invalid("input descriptor metadata is invalid"))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

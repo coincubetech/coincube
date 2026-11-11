@@ -12,10 +12,9 @@ use miniscript::{
         hashes::Hash,
         psbt::Psbt,
         secp256k1,
-        sighash::{EcdsaSighashType, Prevouts, SighashCache},
+        sighash::{EcdsaSighashType, SighashCache},
         Amount, Transaction, Txid,
     },
-    interpreter::{Interpreter, KeySigPair, SatisfiedConstraint},
     psbt::PsbtExt,
 };
 
@@ -504,43 +503,8 @@ fn verify_retained_witness<C: secp256k1::Verification>(
     if unsigned != original.unsigned_tx {
         return Err(FinalizeError::ConstructionChanged);
     }
-    let mut counts = Vec::with_capacity(transaction.input.len());
-    for (index, input) in transaction.input.iter().enumerate() {
-        let interpreter = Interpreter::from_txdata(
-            &prevouts[index].script_pubkey,
-            &input.script_sig,
-            &input.witness,
-            input.sequence,
-            transaction.lock_time,
-        )
-        .map_err(|_| FinalizeError::InvalidWitness)?;
-        let mut signatures = 0;
-        for constraint in interpreter.iter(secp, transaction, index, &Prevouts::All(prevouts)) {
-            let pair = match constraint.map_err(|_| FinalizeError::InvalidWitness)? {
-                SatisfiedConstraint::PublicKey { key_sig }
-                | SatisfiedConstraint::PublicKeyHash { key_sig, .. } => Some(key_sig),
-                _ => None,
-            };
-            if let Some(pair) = pair {
-                match pair {
-                    KeySigPair::Ecdsa(key, sig)
-                        if sig.sighash_type == EcdsaSighashType::All
-                            && original.inputs[index]
-                                .bip32_derivation
-                                .contains_key(&key.inner) =>
-                    {
-                        signatures += 1
-                    }
-                    _ => return Err(FinalizeError::InvalidWitness),
-                }
-            }
-        }
-        if signatures == 0 {
-            return Err(FinalizeError::InvalidWitness);
-        }
-        counts.push(signatures);
-    }
-    Ok(counts)
+    crate::retained_witness::verify_all(transaction, original, prevouts, secp)
+        .map_err(|_| FinalizeError::InvalidWitness)
 }
 
 mod ancestry;

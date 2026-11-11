@@ -219,13 +219,12 @@ pub fn assess_deployment(
                 return Err(Assessment::Deployment(DeploymentState::Malformed));
             }
             if !active {
-                return Err(if fork.median_time_past >= expiry_time {
-                    Assessment::RdtsExpired
-                } else if next_height < height {
-                    Assessment::RdtsScheduled
-                } else {
-                    Assessment::RdtsInactive
-                });
+                return Err(inactive_deployment(
+                    fork.median_time_past,
+                    expiry_time,
+                    next_height,
+                    height,
+                ));
             }
             if expiry_time
                 .checked_sub(fork.median_time_past)
@@ -305,27 +304,10 @@ pub fn assess(
     now: i64,
     preflight: Option<PreflightTips>,
 ) -> Assessment {
-    if !matches!(
-        (plan.bitcoin_chain, plan.fork_chain),
-        (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
-            | (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4)
-    ) || bitcoin.chain != plan.bitcoin_chain
-        || fork.chain != plan.fork_chain
-        || deployment.chain != plan.fork_chain
-    {
+    if wrong_chain(plan, bitcoin.chain, fork.chain, deployment.chain) {
         return Assessment::WrongChain;
     }
-    let claimed: BTreeSet<_> = plan.claimed_prevouts.iter().copied().collect();
-    let actual: BTreeSet<_> = plan.step1.input.iter().map(|i| i.previous_output).collect();
-    if claimed.is_empty()
-        || claimed.len() != plan.claimed_prevouts.len()
-        || actual.len() != plan.step1.input.len()
-        || !claimed.is_subset(&actual)
-        || plan.step1.input.iter().any(|i| i.previous_output.is_null())
-        || plan.step1.output.is_empty()
-        || policy.max_observation_age_seconds <= 0
-        || (plan.poison != Poison::InputAncestry && policy.expiry_margin_seconds <= 0)
-    {
+    if invalid_plan(plan, policy) {
         return Assessment::InvalidPlan;
     }
     if !fresh(bitcoin.observed_at, now, policy.max_observation_age_seconds)
@@ -363,20 +345,73 @@ pub fn assess(
     if let Err(refused) = assess_deployment(&fork, &deployment, policy) {
         return refused;
     }
-    let confirmations =
-        match bitcoin_confirmation(plan.step1_txid(), plan.previous_confirmation, bitcoin) {
-            BitcoinConfirmation::Unknown => return Assessment::Unknown,
-            BitcoinConfirmation::Unconfirmed => return Assessment::WaitingForConfirmation,
-            BitcoinConfirmation::Reorged => return Assessment::Reorged,
-            BitcoinConfirmation::Confirmed { confirmations } => confirmations,
-        };
-    if confirmations < MIN_CONFIRMATIONS {
-        return Assessment::WaitingForDepth { confirmations };
+    if let Err(refused) = assess_bitcoin_confirmation(plan, bitcoin) {
+        return refused;
     }
     if !preflight.is_some_and(|tips| tips.bitcoin == bitcoin.tip && tips.fork == fork.tip) {
         return Assessment::NeedsPreflightRecheck;
     }
     Assessment::ObservationsEligibleForPreflight
+}
+
+fn inactive_deployment(
+    median_time_past: i64,
+    expiry_time: i64,
+    next_height: u64,
+    height: u64,
+) -> Assessment {
+    if median_time_past >= expiry_time {
+        Assessment::RdtsExpired
+    } else if next_height < height {
+        Assessment::RdtsScheduled
+    } else {
+        Assessment::RdtsInactive
+    }
+}
+
+fn invalid_plan(plan: &ClaimPlan, policy: Policy) -> bool {
+    let claimed: BTreeSet<_> = plan.claimed_prevouts.iter().copied().collect();
+    let actual: BTreeSet<_> = plan.step1.input.iter().map(|i| i.previous_output).collect();
+    claimed.is_empty()
+        || claimed.len() != plan.claimed_prevouts.len()
+        || actual.len() != plan.step1.input.len()
+        || !claimed.is_subset(&actual)
+        || plan.step1.input.iter().any(|i| i.previous_output.is_null())
+        || plan.step1.output.is_empty()
+        || policy.max_observation_age_seconds <= 0
+        || (plan.poison != Poison::InputAncestry && policy.expiry_margin_seconds <= 0)
+}
+
+fn wrong_chain(
+    plan: &ClaimPlan,
+    bitcoin_chain: ChainId,
+    fork_chain: ChainId,
+    deployment_chain: ChainId,
+) -> bool {
+    !matches!(
+        (plan.bitcoin_chain, plan.fork_chain),
+        (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
+            | (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4)
+    ) || bitcoin_chain != plan.bitcoin_chain
+        || fork_chain != plan.fork_chain
+        || deployment_chain != plan.fork_chain
+}
+
+fn assess_bitcoin_confirmation(
+    plan: &ClaimPlan,
+    bitcoin: BitcoinObservation,
+) -> Result<(), Assessment> {
+    let confirmations =
+        match bitcoin_confirmation(plan.step1_txid(), plan.previous_confirmation, bitcoin) {
+            BitcoinConfirmation::Unknown => return Err(Assessment::Unknown),
+            BitcoinConfirmation::Unconfirmed => return Err(Assessment::WaitingForConfirmation),
+            BitcoinConfirmation::Reorged => return Err(Assessment::Reorged),
+            BitcoinConfirmation::Confirmed { confirmations } => confirmations,
+        };
+    if confirmations < MIN_CONFIRMATIONS {
+        return Err(Assessment::WaitingForDepth { confirmations });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

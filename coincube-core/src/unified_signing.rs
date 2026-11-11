@@ -406,43 +406,7 @@ fn sign_p2wsh_all_unified_inner(
     let contexts = validate_inputs(psbt, prevout_policy)?;
     verify_with_contexts(psbt, secp, &contexts)?;
 
-    let fingerprint = signer.fingerprint(secp);
-    let mut signatures = Vec::new();
-    for (input_index, input) in psbt.psbt().inputs.iter().enumerate() {
-        let context = &contexts[input_index];
-        for (raw_public_key, (origin, path)) in &input.bip32_derivation {
-            if *origin != fingerprint {
-                continue;
-            }
-            if target.is_some_and(|target| !target.authorizes(path, raw_public_key, secp)) {
-                continue;
-            }
-            let public_key = PublicKey::new(*raw_public_key);
-            if path.len() > usize::from(u8::MAX) {
-                return Err(UnifiedSigningError::DerivationPathTooDeep {
-                    input: input_index,
-                    public_key,
-                    depth: path.len(),
-                });
-            }
-            let derived = signer.xpriv_at(path, secp).to_priv().public_key(secp);
-            if derived != public_key {
-                return Err(UnifiedSigningError::DerivedPublicKeyMismatch {
-                    input: input_index,
-                    public_key,
-                });
-            }
-            if !script_uses_key(&context.miniscript, &public_key) {
-                return Err(UnifiedSigningError::KeyNotInWitnessScript {
-                    input: input_index,
-                    public_key,
-                });
-            }
-            require_compatible_sighash(input_index, input.sighash_type)?;
-            signatures.push((input_index, public_key, path.clone()));
-        }
-    }
-
+    let signatures = signing_keys(signer, target, psbt, &contexts, secp)?;
     if signatures.is_empty() {
         return Ok(psbt.clone());
     }
@@ -708,3 +672,63 @@ fn empty_signature_delta(psbt: &UnifiedPsbt) -> Result<UnifiedPsbt, UnifiedSigni
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+fn signing_keys(
+    signer: &MasterSigner,
+    target: Option<&UnifiedSignerTarget>,
+    psbt: &UnifiedPsbt,
+    contexts: &[InputContext],
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+) -> Result<Vec<(usize, PublicKey, miniscript::bitcoin::bip32::DerivationPath)>, UnifiedSigningError>
+{
+    let fingerprint = signer.fingerprint(secp);
+    let mut signatures = Vec::new();
+    for (input_index, input) in psbt.psbt().inputs.iter().enumerate() {
+        let context = &contexts[input_index];
+        for (raw_public_key, (origin, path)) in &input.bip32_derivation {
+            if *origin != fingerprint {
+                continue;
+            }
+            if target.is_some_and(|target| !target.authorizes(path, raw_public_key, secp)) {
+                continue;
+            }
+            let public_key = PublicKey::new(*raw_public_key);
+            validate_signing_key(signer, secp, input_index, public_key, path, context)?;
+            require_compatible_sighash(input_index, input.sighash_type)?;
+            signatures.push((input_index, public_key, path.clone()));
+        }
+    }
+
+    Ok(signatures)
+}
+
+fn validate_signing_key(
+    signer: &MasterSigner,
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+    input_index: usize,
+    public_key: PublicKey,
+    path: &miniscript::bitcoin::bip32::DerivationPath,
+    context: &InputContext,
+) -> Result<(), UnifiedSigningError> {
+    if path.len() > usize::from(u8::MAX) {
+        return Err(UnifiedSigningError::DerivationPathTooDeep {
+            input: input_index,
+            public_key,
+            depth: path.len(),
+        });
+    }
+    let derived = signer.xpriv_at(path, secp).to_priv().public_key(secp);
+    if derived != public_key {
+        return Err(UnifiedSigningError::DerivedPublicKeyMismatch {
+            input: input_index,
+            public_key,
+        });
+    }
+    if !script_uses_key(&context.miniscript, &public_key) {
+        return Err(UnifiedSigningError::KeyNotInWitnessScript {
+            input: input_index,
+            public_key,
+        });
+    }
+    Ok(())
+}
