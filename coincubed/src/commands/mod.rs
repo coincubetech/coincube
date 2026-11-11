@@ -56,6 +56,24 @@ use miniscript::{
 };
 use serde::{Deserialize, Serialize};
 
+fn merge_imported_partial_signatures(stored: &mut Psbt, psbt: &Psbt) -> Result<(), CommandError> {
+    for (old, incoming) in stored.inputs.iter_mut().zip(&psbt.inputs) {
+        for (key, signature) in &incoming.partial_sigs {
+            if old
+                .partial_sigs
+                .get(key)
+                .is_some_and(|existing| existing != signature)
+            {
+                return Err(CommandError::ImportedSpendValidation(
+                    "conflicting signature for the same signer".into(),
+                ));
+            }
+            old.partial_sigs.insert(*key, *signature);
+        }
+    }
+    Ok(())
+}
+
 const CHANGE_COMMIT_CONFLICT_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -749,6 +767,36 @@ impl DaemonControl {
             .transpose()
     }
 
+    fn recorded_conflict_transaction(
+        &self,
+        tx_getter: &mut DbTxGetter<'_>,
+        conflict: &bitcoin::Txid,
+        txid: &bitcoin::Txid,
+        prev_tx: &bitcoin::Transaction,
+        prev_psbt: Option<&Psbt>,
+    ) -> Option<bitcoin::Transaction> {
+        if conflict == txid {
+            // Sized as relayed, with its witnesses: the copy the poller stored, else the
+            // stored PSBT finalized, for a broadcast the poller has not caught up with. Short
+            // of both, the unsigned transaction understates its size and so overstates its
+            // feerate: the replacement then pays more than it must, never less.
+            tx_getter
+                .get_tx(txid)
+                .or_else(|| {
+                    // Only finalized to be sized, by the plain finalizer: the Bitcoin Blake2b
+                    // one logs replay warnings that are only meant for a broadcast.
+                    let mut psbt = prev_psbt
+                        .filter(|_| !self.config.bitcoin_config.chain.is_blake2b())?
+                        .clone();
+                    psbt.finalize_mut(&self.secp).ok()?;
+                    Some(psbt.extract_tx_unchecked_fee_rate())
+                })
+                .or_else(|| Some(prev_tx.clone()))
+        } else {
+            tx_getter.get_tx(conflict)
+        }
+    }
+
     /// The minimum feerate and the replaced fees for a replacement of `txid`, worked out from our
     /// own records, for a backend that cannot see the mempool
     /// ([`BitcoinInterface::sees_mempool`]).
@@ -821,26 +869,8 @@ impl DaemonControl {
         let mut min_feerate_vb = 1;
         let mut replaced_fee = bitcoin::Amount::ZERO;
         for conflict in &conflicts {
-            let tx = if conflict == txid {
-                // Sized as relayed, with its witnesses: the copy the poller stored, else the
-                // stored PSBT finalized, for a broadcast the poller has not caught up with. Short
-                // of both, the unsigned transaction understates its size and so overstates its
-                // feerate: the replacement then pays more than it must, never less.
-                tx_getter
-                    .get_tx(txid)
-                    .or_else(|| {
-                        // Only finalized to be sized, by the plain finalizer: the Bitcoin Blake2b
-                        // one logs replay warnings that are only meant for a broadcast.
-                        let mut psbt = prev_psbt
-                            .filter(|_| !self.config.bitcoin_config.chain.is_blake2b())?
-                            .clone();
-                        psbt.finalize_mut(&self.secp).ok()?;
-                        Some(psbt.extract_tx_unchecked_fee_rate())
-                    })
-                    .or_else(|| Some(prev_tx.clone()))
-            } else {
-                tx_getter.get_tx(conflict)
-            };
+            let tx =
+                self.recorded_conflict_transaction(tx_getter, conflict, txid, prev_tx, prev_psbt);
             match tx.as_ref().map(&price) {
                 Some(Some((fee, vsize))) => {
                     // The feerate is rounded down, so one more is strictly above it.
@@ -1336,6 +1366,165 @@ impl DaemonControl {
         ListCoinsResult { coins }
     }
 
+    fn reserve_spend_change(
+        &self,
+        has_change: bool,
+        fresh_change: bool,
+        change_info: &Option<AddrInfo>,
+        conflicts: &mut usize,
+    ) -> Result<bool, CommandError> {
+        if has_change && fresh_change && !self.commit_change_if_next(change_info)? {
+            *conflicts += 1;
+            if *conflicts >= CHANGE_COMMIT_CONFLICT_LIMIT {
+                return Err(CommandError::ChangeReservationContended);
+            }
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn record_spend_outputs(
+        &self,
+        db_conn: &mut Box<dyn DatabaseConnection>,
+        destinations: &[(SpendOutputAddress, bitcoin::Amount)],
+        has_change: bool,
+        change_info: &Option<AddrInfo>,
+        psbt: &Psbt,
+    ) -> Result<(), CommandError> {
+        for (addr, _) in destinations {
+            self.maybe_increase_last_deriv_index(db_conn, &addr.info);
+        }
+        if has_change {
+            self.maybe_increase_last_deriv_index(db_conn, change_info);
+        }
+
+        // The imported spend's exact unsigned construction must exist
+        // before any externally signed PSBT can be accepted against it.
+        if self.config.main_descriptor.as_imported().is_some() {
+            db_conn
+                .store_imported_construction(psbt)
+                .map_err(CommandError::ImportedSpendValidation)?;
+        }
+
+        Ok(())
+    }
+
+    fn build_spend(
+        &self,
+        tx_getter: &mut DbTxGetter<'_>,
+        destinations: &[(SpendOutputAddress, bitcoin::Amount)],
+        candidate_coins: &[CandidateCoin],
+        fees: SpendTxFees,
+        change_address: SpendOutputAddress,
+        locktime: LockTime,
+    ) -> Result<CreateSpendRes, SpendCreationError> {
+        match &self.config.main_descriptor {
+            WalletDescriptor::Vault(vault) => create_spend(
+                vault,
+                &self.secp,
+                tx_getter,
+                destinations,
+                candidate_coins,
+                fees,
+                change_address,
+                locktime,
+            ),
+            WalletDescriptor::Imported(imported) => imported_spend::create_imported_spend(
+                imported,
+                &self.secp,
+                tx_getter,
+                destinations,
+                candidate_coins,
+                fees,
+                change_address,
+                locktime,
+            ),
+        }
+    }
+
+    fn spend_candidates(
+        &self,
+        db_conn: &mut Box<dyn DatabaseConnection>,
+        coins_outpoints: &[bitcoin::OutPoint],
+    ) -> Result<Vec<CandidateCoin>, CommandError> {
+        if coins_outpoints.is_empty() {
+            self.automatic_spend_candidates(db_conn)
+        } else {
+            self.selected_spend_candidates(db_conn, coins_outpoints)
+        }
+    }
+
+    fn automatic_spend_candidates(
+        &self,
+        db_conn: &mut Box<dyn DatabaseConnection>,
+    ) -> Result<Vec<CandidateCoin>, CommandError> {
+        // From our unconfirmed coins, we only include those that are from self
+        // since unconfirmed external deposits are more at risk of being dropped
+        // unexpectedly from the mempool as they are beyond the user's control.
+        db_conn
+            .coins(&[CoinStatus::Unconfirmed, CoinStatus::Confirmed], &[])
+            .into_iter()
+            .filter_map(|(op, c)| {
+                if c.block_info.is_some() {
+                    Some(Ok((c, None))) // confirmed coins have no ancestor info
+                } else if c.is_from_self {
+                    // In case the mempool_entry is None, the coin will be included without
+                    // any ancestor info.
+                    Some(self.ancestor_info(&op.txid).map(|info| (c, info)))
+                } else {
+                    None
+                }
+            })
+            .map(|res| {
+                res.map(|(c, ancestor_info)| {
+                    coin_to_candidate(
+                        &c,
+                        /*must_select=*/ false,
+                        /*sequence=*/ None,
+                        ancestor_info,
+                    )
+                })
+            })
+            .collect::<Result<_, _>>()
+    }
+
+    fn selected_spend_candidates(
+        &self,
+        db_conn: &mut Box<dyn DatabaseConnection>,
+        coins_outpoints: &[bitcoin::OutPoint],
+    ) -> Result<Vec<CandidateCoin>, CommandError> {
+        // Query from DB and sanity check the provided coins to spend.
+        let coins = db_conn.coins(&[], coins_outpoints);
+        for op in coins_outpoints {
+            let coin = coins.get(op).ok_or(CommandError::UnknownOutpoint(*op))?;
+            if coin.is_spent() {
+                return Err(CommandError::AlreadySpent(*op));
+            }
+            if coin.is_immature {
+                return Err(CommandError::ImmatureCoinbase(*op));
+            }
+        }
+        coins
+            .into_iter()
+            .map(|(op, c)| {
+                let ancestor_info = if c.block_info.is_none() {
+                    // We include any non-change coins here as they have been selected by the caller.
+                    // If the unconfirmed coin's transaction is no longer in the mempool, keep the
+                    // coin as a candidate but without any ancestor info (same as confirmed candidate).
+                    self.ancestor_info(&op.txid)?
+                } else {
+                    None
+                };
+                Ok(coin_to_candidate(
+                    &c,
+                    /*must_select=*/ true,
+                    /*sequence=*/ None,
+                    ancestor_info,
+                ))
+            })
+            .collect::<Result<_, CommandError>>()
+    }
+
     pub fn create_spend(
         &self,
         destinations: &HashMap<bitcoin::Address<bitcoin::address::NetworkUnchecked>, u64>,
@@ -1378,67 +1567,7 @@ impl DaemonControl {
         // If no coins have been specified, then coins will be selected automatically for
         // the spend from a set of optional candidates.
         // Otherwise, only the specified coins will be used, all as mandatory candidates.
-        let candidate_coins: Vec<CandidateCoin> = if coins_outpoints.is_empty() {
-            // From our unconfirmed coins, we only include those that are from self
-            // since unconfirmed external deposits are more at risk of being dropped
-            // unexpectedly from the mempool as they are beyond the user's control.
-            db_conn
-                .coins(&[CoinStatus::Unconfirmed, CoinStatus::Confirmed], &[])
-                .into_iter()
-                .filter_map(|(op, c)| {
-                    if c.block_info.is_some() {
-                        Some(Ok((c, None))) // confirmed coins have no ancestor info
-                    } else if c.is_from_self {
-                        // In case the mempool_entry is None, the coin will be included without
-                        // any ancestor info.
-                        Some(self.ancestor_info(&op.txid).map(|info| (c, info)))
-                    } else {
-                        None
-                    }
-                })
-                .map(|res| {
-                    res.map(|(c, ancestor_info)| {
-                        coin_to_candidate(
-                            &c,
-                            /*must_select=*/ false,
-                            /*sequence=*/ None,
-                            ancestor_info,
-                        )
-                    })
-                })
-                .collect::<Result<_, _>>()?
-        } else {
-            // Query from DB and sanity check the provided coins to spend.
-            let coins = db_conn.coins(&[], coins_outpoints);
-            for op in coins_outpoints {
-                let coin = coins.get(op).ok_or(CommandError::UnknownOutpoint(*op))?;
-                if coin.is_spent() {
-                    return Err(CommandError::AlreadySpent(*op));
-                }
-                if coin.is_immature {
-                    return Err(CommandError::ImmatureCoinbase(*op));
-                }
-            }
-            coins
-                .into_iter()
-                .map(|(op, c)| {
-                    let ancestor_info = if c.block_info.is_none() {
-                        // We include any non-change coins here as they have been selected by the caller.
-                        // If the unconfirmed coin's transaction is no longer in the mempool, keep the
-                        // coin as a candidate but without any ancestor info (same as confirmed candidate).
-                        self.ancestor_info(&op.txid)?
-                    } else {
-                        None
-                    };
-                    Ok(coin_to_candidate(
-                        &c,
-                        /*must_select=*/ true,
-                        /*sequence=*/ None,
-                        ancestor_info,
-                    ))
-                })
-                .collect::<Result<_, CommandError>>()?
-        };
+        let candidate_coins = self.spend_candidates(&mut db_conn, coins_outpoints)?;
 
         // Create the PSBT. A concurrent Claim or ordinary spend may reserve the address
         // we peeked. In that case retry with the new next address; the compare-and-commit
@@ -1451,28 +1580,14 @@ impl DaemonControl {
                 psbt,
                 has_change,
                 warnings,
-            } = match match &self.config.main_descriptor {
-                WalletDescriptor::Vault(vault) => create_spend(
-                    vault,
-                    &self.secp,
-                    &mut tx_getter,
-                    &destinations_checked,
-                    &candidate_coins,
-                    SpendTxFees::Regular(feerate_vb),
-                    change_address,
-                    locktime,
-                ),
-                WalletDescriptor::Imported(imported) => imported_spend::create_imported_spend(
-                    imported,
-                    &self.secp,
-                    &mut tx_getter,
-                    &destinations_checked,
-                    &candidate_coins,
-                    SpendTxFees::Regular(feerate_vb),
-                    change_address,
-                    locktime,
-                ),
-            } {
+            } = match self.build_spend(
+                &mut tx_getter,
+                &destinations_checked,
+                &candidate_coins,
+                SpendTxFees::Regular(feerate_vb),
+                change_address,
+                locktime,
+            ) {
                 Ok(res) => res,
                 Err(SpendCreationError::CoinSelection(e)) => {
                     return Ok(CreateSpendResult::InsufficientFunds { missing: e.missing });
@@ -1481,28 +1596,22 @@ impl DaemonControl {
                     return Err(e.into());
                 }
             };
-            if has_change && fresh_change && !self.commit_change_if_next(&change_info)? {
-                change_commit_conflicts += 1;
-                if change_commit_conflicts >= CHANGE_COMMIT_CONFLICT_LIMIT {
-                    return Err(CommandError::ChangeReservationContended);
-                }
+            if !self.reserve_spend_change(
+                has_change,
+                fresh_change,
+                &change_info,
+                &mut change_commit_conflicts,
+            )? {
                 change_address = self.next_change_addr(&mut db_conn)?;
                 continue;
             }
-            for (addr, _) in destinations_checked {
-                self.maybe_increase_last_deriv_index(&mut db_conn, &addr.info);
-            }
-            if has_change {
-                self.maybe_increase_last_deriv_index(&mut db_conn, &change_info);
-            }
-
-            // The imported spend's exact unsigned construction must exist
-            // before any externally signed PSBT can be accepted against it.
-            if self.config.main_descriptor.as_imported().is_some() {
-                db_conn
-                    .store_imported_construction(&psbt)
-                    .map_err(CommandError::ImportedSpendValidation)?;
-            }
+            self.record_spend_outputs(
+                &mut db_conn,
+                &destinations_checked,
+                has_change,
+                &change_info,
+                &psbt,
+            )?;
 
             return Ok(CreateSpendResult::Success {
                 psbt,
@@ -1511,59 +1620,54 @@ impl DaemonControl {
         }
     }
 
+    fn update_imported_spend(
+        &self,
+        mut psbt: Psbt,
+        imported: &coincube_core::wallet_descriptor::ImportedWalletDescriptor,
+    ) -> Result<(), CommandError> {
+        backfill_previous_transactions(&mut psbt, &mut DbTxGetter::new(&self.db))?;
+        let mut db_conn = self.db.connection();
+        let txid = psbt.unsigned_tx.compute_txid();
+        let stored = db_conn.spend_tx(&txid).ok_or_else(|| {
+            CommandError::ImportedSpendValidation(
+                "spend was not created and saved by this imported wallet".into(),
+            )
+        })?;
+        let construction = imported_construction(&stored);
+        imported_spend::verify_imported_signatures(imported, &construction, &psbt, &self.secp)
+            .map_err(|error| CommandError::ImportedSpendValidation(error.to_string()))?;
+        let merged = {
+            let mut stored = stored.clone();
+            merge_imported_partial_signatures(&mut stored, &psbt)?;
+            imported_spend::verify_imported_signatures(
+                imported,
+                &construction,
+                &stored,
+                &self.secp,
+            )
+            .map_err(|error| CommandError::ImportedSpendValidation(error.to_string()))?;
+            stored
+        };
+        if db_conn
+            .spend_broadcast_txid(&txid)
+            .map_err(CommandError::ImportedSpendValidation)?
+            .is_some()
+        {
+            if merged == stored {
+                return Ok(());
+            }
+            return Err(CommandError::ImportedSpendValidation(
+                "a broadcast spend cannot accept more signatures".into(),
+            ));
+        }
+        db_conn.store_spend(&merged);
+        Ok(())
+    }
+
     pub fn update_spend(&self, mut psbt: Psbt) -> Result<(), CommandError> {
         self.require_ordinary_imported_spend_support()?;
         if let Some(imported) = self.config.main_descriptor.as_imported() {
-            backfill_previous_transactions(&mut psbt, &mut DbTxGetter::new(&self.db))?;
-            let mut db_conn = self.db.connection();
-            let txid = psbt.unsigned_tx.compute_txid();
-            let stored = db_conn.spend_tx(&txid).ok_or_else(|| {
-                CommandError::ImportedSpendValidation(
-                    "spend was not created and saved by this imported wallet".into(),
-                )
-            })?;
-            let construction = imported_construction(&stored);
-            imported_spend::verify_imported_signatures(imported, &construction, &psbt, &self.secp)
-                .map_err(|error| CommandError::ImportedSpendValidation(error.to_string()))?;
-            let merged = {
-                let mut stored = stored.clone();
-                for (old, incoming) in stored.inputs.iter_mut().zip(&psbt.inputs) {
-                    for (key, signature) in &incoming.partial_sigs {
-                        if old
-                            .partial_sigs
-                            .get(key)
-                            .is_some_and(|existing| existing != signature)
-                        {
-                            return Err(CommandError::ImportedSpendValidation(
-                                "conflicting signature for the same signer".into(),
-                            ));
-                        }
-                        old.partial_sigs.insert(*key, *signature);
-                    }
-                }
-                imported_spend::verify_imported_signatures(
-                    imported,
-                    &construction,
-                    &stored,
-                    &self.secp,
-                )
-                .map_err(|error| CommandError::ImportedSpendValidation(error.to_string()))?;
-                stored
-            };
-            if db_conn
-                .spend_broadcast_txid(&txid)
-                .map_err(CommandError::ImportedSpendValidation)?
-                .is_some()
-            {
-                if merged == stored {
-                    return Ok(());
-                }
-                return Err(CommandError::ImportedSpendValidation(
-                    "a broadcast spend cannot accept more signatures".into(),
-                ));
-            }
-            db_conn.store_spend(&merged);
-            return Ok(());
+            return self.update_imported_spend(psbt, imported);
         }
         // On Bitcoin Blake2b the value verified is the value stored. The
         // verifier authenticates every prevout through `non_witness_utxo`,
@@ -1742,6 +1846,186 @@ impl DaemonControl {
         Ok(())
     }
 
+    fn replacement_outputs(
+        &self,
+        db_conn: &mut Box<dyn DatabaseConnection>,
+        prev_tx: &bitcoin::Transaction,
+        is_cancel: bool,
+    ) -> (
+        Option<bitcoin::Address>,
+        Vec<(SpendOutputAddress, bitcoin::Amount)>,
+    ) {
+        let prev_derivs: Vec<_> = prev_tx
+            .output
+            .iter()
+            .map(|txo| {
+                let address = bitcoin::Address::from_script(
+                    &txo.script_pubkey,
+                    self.config.bitcoin_config.network,
+                )
+                .expect("address already used in finalized transaction");
+                (
+                    address.clone(),
+                    txo.value,
+                    db_conn.derivation_index_by_address(&address),
+                )
+            })
+            .collect();
+        // Set the previous change address to that of the change output with the largest value
+        // and then largest index.
+        let prev_change_address = prev_derivs
+            .iter()
+            .filter_map(|(addr, amt, deriv)| {
+                if let Some((ind, true)) = &deriv {
+                    Some((addr, amt, ind))
+                } else {
+                    None
+                }
+            })
+            .max_by(|(_, amt_1, ind_1), (_, amt_2, ind_2)| amt_1.cmp(amt_2).then(ind_1.cmp(ind_2)))
+            .map(|(addr, _, _)| addr)
+            .cloned();
+        // If not cancel, use all previous outputs as destinations, except for
+        // the output corresponding to the change address we found above.
+        // If cancel, the replacement will not have any destinations, only a change output.
+        let destinations = if !is_cancel {
+            prev_derivs
+                .into_iter()
+                .filter_map(|(addr, amt, _)| {
+                    if prev_change_address.as_ref() != Some(&addr) {
+                        Some((self.spend_addr(db_conn, addr), amt))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (prev_change_address, destinations)
+    }
+
+    fn replacement_minimums(
+        &self,
+        db_conn: &mut Box<dyn DatabaseConnection>,
+        tx_getter: &mut DbTxGetter<'_>,
+        txid: &bitcoin::Txid,
+        prev_tx: &bitcoin::Transaction,
+        prev_psbt: Option<&Psbt>,
+        prev_coins: &HashMap<bitcoin::OutPoint, Coin>,
+    ) -> Result<(u64, bitcoin::Amount), CommandError> {
+        let prev_outpoints: Vec<_> = prev_tx
+            .input
+            .iter()
+            .map(|txin| txin.previous_output)
+            .collect();
+        Ok(if self.bitcoin.sees_mempool() {
+            self.bitcoin
+                .mempool_spenders_result(&prev_outpoints)
+                // An unreachable node is not "the replaced transaction left the
+                // mempool": that would drop the RBF minimums (#594).
+                .map_err(CommandError::MempoolUnavailable)?
+                .into_iter()
+                .try_fold(
+                    (1, bitcoin::Amount::from_sat(0)),
+                    |(min_feerate, descendant_fee), entry| {
+                        // A zero size or an overflowing fee is an unusable backend
+                        // answer: an error, not a panic under the backend lock (#597).
+                        let unusable = || {
+                            CommandError::MempoolUnavailable(format!(
+                                "unusable mempool entry while replacing {}: {:?}",
+                                txid, entry
+                            ))
+                        };
+                        let entry_feerate = entry
+                            .fees
+                            .base
+                            .checked_div(entry.vsize)
+                            .and_then(|feerate| feerate.to_sat().checked_add(1))
+                            .ok_or_else(unusable)?;
+                        let descendant_fee = descendant_fee
+                            .checked_add(entry.fees.descendant)
+                            .ok_or_else(unusable)?;
+                        Ok::<_, CommandError>((
+                            std::cmp::max(min_feerate, entry_feerate),
+                            descendant_fee,
+                        ))
+                    },
+                )?
+        } else {
+            // This backend's mempool always reads empty, which would pass for "dropped" and price
+            // the replacement at 1 sat/vb, below the transaction it replaces: the network would
+            // refuse it. Price it from what our own records show spending these coins instead.
+            self.replacement_minimums_from_records(
+                db_conn, tx_getter, txid, prev_tx, prev_psbt, prev_coins,
+            )?
+        })
+    }
+
+    fn validate_replacement_coins(
+        prev_outpoints: &[bitcoin::OutPoint],
+        prev_coins: &HashMap<bitcoin::OutPoint, Coin>,
+    ) -> Result<(), CommandError> {
+        // Make sure all prev outpoints are coins in our DB.
+        if let Some(op) = prev_outpoints
+            .iter()
+            .find(|op| !prev_coins.contains_key(op))
+        {
+            return Err(CommandError::UnknownOutpoint(*op));
+        }
+        if let Some(op) = prev_coins.iter().find_map(|(_, coin)| {
+            if coin.spend_block.is_some() {
+                Some(coin.outpoint)
+            } else {
+                None
+            }
+        }) {
+            return Err(CommandError::AlreadySpent(op));
+        }
+        Ok(())
+    }
+
+    fn replacement_candidates(
+        &self,
+        db_conn: &mut Box<dyn DatabaseConnection>,
+        prev_coins: &HashMap<bitcoin::OutPoint, Coin>,
+        is_cancel: bool,
+    ) -> (Vec<CandidateCoin>, Vec<CandidateCoin>) {
+        let mut candidate_coins: Vec<CandidateCoin> = prev_coins
+            .values()
+            .map(|c| {
+                // In case any previous coins are unconfirmed, we don't include their ancestor info
+                // in the candidate as the replacement fee and feerate will be higher and any
+                // additional fee to pay for ancestors should already have been taken into account
+                // when including these coins in the previous transaction.
+                coin_to_candidate(
+                    c, /*must_select=*/ !is_cancel, /*sequence=*/ None,
+                    /*ancestor_info=*/ None,
+                )
+            })
+            .collect();
+        let confirmed_cands: Vec<CandidateCoin> = db_conn
+            .coins(&[CoinStatus::Confirmed], &[])
+            .into_values()
+            .filter_map(|c| {
+                // Make sure we don't have duplicate candidates in case any of the coins are not
+                // currently set as spending in the DB (and are therefore still confirmed).
+                if !prev_coins.contains_key(&c.outpoint) {
+                    Some(coin_to_candidate(
+                        &c, /*must_select=*/ false, /*sequence=*/ None,
+                        /*ancestor_info=*/ None,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !is_cancel {
+            candidate_coins.extend(&confirmed_cands);
+        }
+        (candidate_coins, confirmed_cands)
+    }
+
     /// Create PSBT to replace the given transaction using RBF.
     ///
     /// `txid` must either point to a PSBT in our database (not necessarily broadcast) or an
@@ -1798,73 +2082,20 @@ impl DaemonControl {
             .map(|txin| txin.previous_output)
             .collect();
         let prev_coins = db_conn.coins_by_outpoints(&prev_outpoints);
-        // Make sure all prev outpoints are coins in our DB.
-        if let Some(op) = prev_outpoints
-            .iter()
-            .find(|op| !prev_coins.contains_key(op))
-        {
-            return Err(CommandError::UnknownOutpoint(*op));
-        }
-        if let Some(op) = prev_coins.iter().find_map(|(_, coin)| {
-            if coin.spend_block.is_some() {
-                Some(coin.outpoint)
-            } else {
-                None
-            }
-        }) {
-            return Err(CommandError::AlreadySpent(op));
-        }
+        Self::validate_replacement_coins(&prev_outpoints, &prev_coins)?;
         // Compute the minimal feerate and fee the replacement transaction must have to satisfy RBF
         // rules #3, #4 and #6 (see
         // https://github.com/bitcoin/bitcoin/blob/master/doc/policy/mempool-replacements.md). By
         // default (ie if the transaction we are replacing was dropped from the mempool) there is
         // no minimum absolute fee and the minimum feerate is 1, the minimum relay feerate.
-        let (min_feerate_vb, descendant_fees) = if self.bitcoin.sees_mempool() {
-            self.bitcoin
-                .mempool_spenders_result(&prev_outpoints)
-                // An unreachable node is not "the replaced transaction left the
-                // mempool": that would drop the RBF minimums (#594).
-                .map_err(CommandError::MempoolUnavailable)?
-                .into_iter()
-                .try_fold(
-                    (1, bitcoin::Amount::from_sat(0)),
-                    |(min_feerate, descendant_fee), entry| {
-                        // A zero size or an overflowing fee is an unusable backend
-                        // answer: an error, not a panic under the backend lock (#597).
-                        let unusable = || {
-                            CommandError::MempoolUnavailable(format!(
-                                "unusable mempool entry while replacing {}: {:?}",
-                                txid, entry
-                            ))
-                        };
-                        let entry_feerate = entry
-                            .fees
-                            .base
-                            .checked_div(entry.vsize)
-                            .and_then(|feerate| feerate.to_sat().checked_add(1))
-                            .ok_or_else(unusable)?;
-                        let descendant_fee = descendant_fee
-                            .checked_add(entry.fees.descendant)
-                            .ok_or_else(unusable)?;
-                        Ok::<_, CommandError>((
-                            std::cmp::max(min_feerate, entry_feerate),
-                            descendant_fee,
-                        ))
-                    },
-                )?
-        } else {
-            // This backend's mempool always reads empty, which would pass for "dropped" and price
-            // the replacement at 1 sat/vb, below the transaction it replaces: the network would
-            // refuse it. Price it from what our own records show spending these coins instead.
-            self.replacement_minimums_from_records(
-                &mut db_conn,
-                &mut tx_getter,
-                txid,
-                &prev_tx,
-                prev_psbt.as_ref(),
-                &prev_coins,
-            )?
-        };
+        let (min_feerate_vb, descendant_fees) = self.replacement_minimums(
+            &mut db_conn,
+            &mut tx_getter,
+            txid,
+            &prev_tx,
+            prev_psbt.as_ref(),
+            &prev_coins,
+        )?;
         // Check replacement transaction's target feerate, if set, is high enough,
         // and otherwise set it to the min feerate found above.
         let feerate_vb = if is_cancel {
@@ -1879,53 +2110,8 @@ impl DaemonControl {
             )));
         }
         // Get info about prev outputs to determine replacement outputs.
-        let prev_derivs: Vec<_> = prev_tx
-            .output
-            .iter()
-            .map(|txo| {
-                let address = bitcoin::Address::from_script(
-                    &txo.script_pubkey,
-                    self.config.bitcoin_config.network,
-                )
-                .expect("address already used in finalized transaction");
-                (
-                    address.clone(),
-                    txo.value,
-                    db_conn.derivation_index_by_address(&address),
-                )
-            })
-            .collect();
-        // Set the previous change address to that of the change output with the largest value
-        // and then largest index.
-        let prev_change_address = prev_derivs
-            .iter()
-            .filter_map(|(addr, amt, deriv)| {
-                if let Some((ind, true)) = &deriv {
-                    Some((addr, amt, ind))
-                } else {
-                    None
-                }
-            })
-            .max_by(|(_, amt_1, ind_1), (_, amt_2, ind_2)| amt_1.cmp(amt_2).then(ind_1.cmp(ind_2)))
-            .map(|(addr, _, _)| addr)
-            .cloned();
-        // If not cancel, use all previous outputs as destinations, except for
-        // the output corresponding to the change address we found above.
-        // If cancel, the replacement will not have any destinations, only a change output.
-        let destinations = if !is_cancel {
-            prev_derivs
-                .into_iter()
-                .filter_map(|(addr, amt, _)| {
-                    if prev_change_address.as_ref() != Some(&addr) {
-                        Some((self.spend_addr(&mut db_conn, addr), amt))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let (prev_change_address, destinations) =
+            self.replacement_outputs(&mut db_conn, &prev_tx, is_cancel);
 
         // If there was no previous change address, peek at the next address for the
         // replacement. It is committed only after a successful replacement actually
@@ -1939,38 +2125,8 @@ impl DaemonControl {
         // Otherwise, we take the previous coins as optional candidates and let coin selection find the
         // best solution that includes at least one of these. If there are insufficient funds to create the replacement
         // transaction in this way, then we set candidates in the same way as for the `!is_cancel` case.
-        let mut candidate_coins: Vec<CandidateCoin> = prev_coins
-            .values()
-            .map(|c| {
-                // In case any previous coins are unconfirmed, we don't include their ancestor info
-                // in the candidate as the replacement fee and feerate will be higher and any
-                // additional fee to pay for ancestors should already have been taken into account
-                // when including these coins in the previous transaction.
-                coin_to_candidate(
-                    c, /*must_select=*/ !is_cancel, /*sequence=*/ None,
-                    /*ancestor_info=*/ None,
-                )
-            })
-            .collect();
-        let confirmed_cands: Vec<CandidateCoin> = db_conn
-            .coins(&[CoinStatus::Confirmed], &[])
-            .into_values()
-            .filter_map(|c| {
-                // Make sure we don't have duplicate candidates in case any of the coins are not
-                // currently set as spending in the DB (and are therefore still confirmed).
-                if !prev_coins.contains_key(&c.outpoint) {
-                    Some(coin_to_candidate(
-                        &c, /*must_select=*/ false, /*sequence=*/ None,
-                        /*ancestor_info=*/ None,
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if !is_cancel {
-            candidate_coins.extend(&confirmed_cands);
-        }
+        let (mut candidate_coins, confirmed_cands) =
+            self.replacement_candidates(&mut db_conn, &prev_coins, is_cancel);
         // The replaced fee is the fee of the transaction being replaced and its descendants. Coin selection
         // will ensure that the replacement transaction additionally pays for its own weight as per
         // RBF rule 4.
@@ -1980,55 +2136,36 @@ impl DaemonControl {
         // have their own finite budget so a reservation stream cannot starve this RPC.
         let mut change_commit_conflicts = 0;
         loop {
-            match match &self.config.main_descriptor {
-                WalletDescriptor::Vault(vault) => create_spend(
-                    vault,
-                    &self.secp,
-                    &mut tx_getter,
-                    &destinations,
-                    &candidate_coins,
-                    SpendTxFees::Rbf(feerate_vb, replaced_fee),
-                    change_address.clone(),
-                    locktime,
-                ),
-                WalletDescriptor::Imported(imported) => imported_spend::create_imported_spend(
-                    imported,
-                    &self.secp,
-                    &mut tx_getter,
-                    &destinations,
-                    &candidate_coins,
-                    SpendTxFees::Rbf(feerate_vb, replaced_fee),
-                    change_address.clone(),
-                    locktime,
-                ),
-            } {
+            match self.build_spend(
+                &mut tx_getter,
+                &destinations,
+                &candidate_coins,
+                SpendTxFees::Rbf(feerate_vb, replaced_fee),
+                change_address.clone(),
+                locktime,
+            ) {
                 Ok(CreateSpendRes {
                     psbt,
                     has_change,
                     warnings,
                 }) => {
                     let change_info = change_address.info;
-                    if has_change && fresh_change && !self.commit_change_if_next(&change_info)? {
-                        change_commit_conflicts += 1;
-                        if change_commit_conflicts >= CHANGE_COMMIT_CONFLICT_LIMIT {
-                            return Err(CommandError::ChangeReservationContended);
-                        }
+                    if !self.reserve_spend_change(
+                        has_change,
+                        fresh_change,
+                        &change_info,
+                        &mut change_commit_conflicts,
+                    )? {
                         change_address = self.next_change_addr(&mut db_conn)?;
                         continue;
                     }
-                    // In case of success, make sure to update our next derivation index if any address
-                    // used in the transaction outputs was from the future.
-                    for (addr, _) in destinations {
-                        self.maybe_increase_last_deriv_index(&mut db_conn, &addr.info);
-                    }
-                    if has_change {
-                        self.maybe_increase_last_deriv_index(&mut db_conn, &change_info);
-                    }
-                    if self.config.main_descriptor.as_imported().is_some() {
-                        db_conn
-                            .store_imported_construction(&psbt)
-                            .map_err(CommandError::ImportedSpendValidation)?;
-                    }
+                    self.record_spend_outputs(
+                        &mut db_conn,
+                        &destinations,
+                        has_change,
+                        &change_info,
+                        &psbt,
+                    )?;
 
                     return Ok(CreateSpendResult::Success {
                         psbt,
@@ -3324,6 +3461,13 @@ mod tests {
         assert_eq!(db_conn.change_index(), before.increment().unwrap());
     }
 
+    fn expect_spend_success(result: CreateSpendResult) -> (Psbt, Vec<String>) {
+        match result {
+            CreateSpendResult::Success { psbt, warnings } => (psbt, warnings),
+            _ => panic!("expect successful spend creation"),
+        }
+    }
+
     #[test]
     fn create_spend() {
         const COIN_VALUE: u64 = 100_000;
@@ -3392,14 +3536,11 @@ mod tests {
             control.create_spend(&destinations, &[], 1, None),
             Ok(CreateSpendResult::InsufficientFunds { .. }),
         ));
-        let (psbt, warnings) = if let CreateSpendResult::Success { psbt, warnings } = control
-            .create_spend(&destinations, &[dummy_op], 1, None)
-            .unwrap()
-        {
-            (psbt, warnings)
-        } else {
-            panic!("expect successful spend creation")
-        };
+        let (psbt, warnings) = expect_spend_success(
+            control
+                .create_spend(&destinations, &[dummy_op], 1, None)
+                .unwrap(),
+        );
         // The input carries the complete, authenticated previous transaction and a
         // witness_utxo equal to its spent output.
         assert_eq!(psbt.inputs[0].non_witness_utxo.as_ref(), Some(&dummy_tx));
@@ -3428,14 +3569,12 @@ mod tests {
         // Transaction is 1 in (P2WSH satisfaction), 2 outs. At 1sat/vb, it's 161 sats fees.
         // At 2sats/vb, it's twice that.
         assert_eq!(tx.output[1].value.to_sat(), 89_839);
-        let psbt = if let CreateSpendResult::Success { psbt, .. } = control
-            .create_spend(&destinations, &[dummy_op], 2, None)
-            .unwrap()
-        {
-            psbt
-        } else {
-            panic!("expect successful spend creation")
-        };
+        let psbt = expect_spend_success(
+            control
+                .create_spend(&destinations, &[dummy_op], 2, None)
+                .unwrap(),
+        )
+        .0;
         let tx = psbt.unsigned_tx;
         assert_eq!(tx.output[1].value.to_sat(), 89_678);
 
@@ -3478,14 +3617,11 @@ mod tests {
         // If we ask for a large, but valid, output we won't get a change output. 99_500 because we
         // won't create an output lower than 500 sats.
         *destinations.get_mut(&dummy_addr).unwrap() = COIN_VALUE - DUST;
-        let (psbt, warnings) = if let CreateSpendResult::Success { psbt, warnings } = control
-            .create_spend(&destinations, &[dummy_op], 1, None)
-            .unwrap()
-        {
-            (psbt, warnings)
-        } else {
-            panic!("expect successful spend creation")
-        };
+        let (psbt, warnings) = expect_spend_success(
+            control
+                .create_spend(&destinations, &[dummy_op], 1, None)
+                .unwrap(),
+        );
         let tx = psbt.unsigned_tx;
         assert_eq!(tx.input.len(), 1);
         assert_eq!(tx.input[0].previous_output, dummy_op);
@@ -3507,14 +3643,11 @@ mod tests {
 
         // Increase the target value by the change amount and the warning will disappear.
         *destinations.get_mut(&dummy_addr).unwrap() = (COIN_VALUE - DUST) + 339;
-        let (psbt, warnings) = if let CreateSpendResult::Success { psbt, warnings } = control
-            .create_spend(&destinations, &[dummy_op], 1, None)
-            .unwrap()
-        {
-            (psbt, warnings)
-        } else {
-            panic!("expect successful spend creation")
-        };
+        let (psbt, warnings) = expect_spend_success(
+            control
+                .create_spend(&destinations, &[dummy_op], 1, None)
+                .unwrap(),
+        );
         let tx = psbt.unsigned_tx;
         assert_eq!(tx.output.len(), 1);
         assert!(warnings.is_empty());
@@ -3522,14 +3655,11 @@ mod tests {
         // Now increase target also by the extra fee that was paying for change and we can still create the spend.
         *destinations.get_mut(&dummy_addr).unwrap() =
             (COIN_VALUE - DUST) + 330 + /* fee for change output */ 43;
-        let (psbt, warnings) = if let CreateSpendResult::Success { psbt, warnings } = control
-            .create_spend(&destinations, &[dummy_op], 1, None)
-            .unwrap()
-        {
-            (psbt, warnings)
-        } else {
-            panic!("expect successful spend creation")
-        };
+        let (psbt, warnings) = expect_spend_success(
+            control
+                .create_spend(&destinations, &[dummy_op], 1, None)
+                .unwrap(),
+        );
         let tx = psbt.unsigned_tx;
         assert_eq!(tx.output.len(), 1);
         assert!(warnings.is_empty());
@@ -3545,14 +3675,12 @@ mod tests {
         // Now decrease the target so that the lost change is just 1 sat.
         *destinations.get_mut(&dummy_addr).unwrap() =
             COIN_VALUE - /* fee without change */ 118 - /* extra fee for change output */ 43 - 1;
-        let warnings = if let CreateSpendResult::Success { warnings, .. } = control
-            .create_spend(&destinations, &[dummy_op], 1, None)
-            .unwrap()
-        {
-            warnings
-        } else {
-            panic!("expect successful spend creation")
-        };
+        let warnings = expect_spend_success(
+            control
+                .create_spend(&destinations, &[dummy_op], 1, None)
+                .unwrap(),
+        )
+        .1;
         // Message uses "sat" instead of "sats" when value is 1.
         assert_eq!(
             warnings,
@@ -3565,14 +3693,11 @@ mod tests {
 
         // Now decrease the target value so that we have enough for a change output.
         *destinations.get_mut(&dummy_addr).unwrap() = (COIN_VALUE - DUST) - /* fee without change */ 118 - /* extra fee for change output */ 43;
-        let (psbt, warnings) = if let CreateSpendResult::Success { psbt, warnings } = control
-            .create_spend(&destinations, &[dummy_op], 1, None)
-            .unwrap()
-        {
-            (psbt, warnings)
-        } else {
-            panic!("expect successful spend creation")
-        };
+        let (psbt, warnings) = expect_spend_success(
+            control
+                .create_spend(&destinations, &[dummy_op], 1, None)
+                .unwrap(),
+        );
         let tx = psbt.unsigned_tx;
         assert_eq!(tx.output.len(), 2);
         assert_eq!(tx.output[1].value.to_sat(), DUST);
@@ -3581,14 +3706,12 @@ mod tests {
         // Now increase the target by 1 and we'll get a warning again, this time for 1 less than the dust threshold.
         *destinations.get_mut(&dummy_addr).unwrap() = (COIN_VALUE - DUST) - /* fee without change */ 118 - /* extra fee for change output */ 43
             + 1;
-        let warnings = if let CreateSpendResult::Success { warnings, .. } = control
-            .create_spend(&destinations, &[dummy_op], 1, None)
-            .unwrap()
-        {
-            warnings
-        } else {
-            panic!("expect successful spend creation")
-        };
+        let warnings = expect_spend_success(
+            control
+                .create_spend(&destinations, &[dummy_op], 1, None)
+                .unwrap(),
+        )
+        .1;
         assert_eq!(
             warnings,
             vec![
@@ -3690,13 +3813,8 @@ mod tests {
             is_from_self: false,
         }]);
         // First, create a transaction using auto coin selection.
-        let psbt = if let CreateSpendResult::Success { psbt, .. } =
-            control.create_spend(&destinations, &[], 1, None).unwrap()
-        {
-            psbt
-        } else {
-            panic!("expect successful spend creation")
-        };
+        let psbt =
+            expect_spend_success(control.create_spend(&destinations, &[], 1, None).unwrap()).0;
         let tx_auto = psbt.unsigned_tx;
         let mut tx_prev_outpoints = tx_auto
             .input
@@ -3715,14 +3833,12 @@ mod tests {
         assert_eq!(tx_auto.output[0].value, Amount::from_sat(80_000));
 
         // Create a second transaction using manual coin selection.
-        let psbt = if let CreateSpendResult::Success { psbt, .. } = control
-            .create_spend(&destinations, &[confirmed_op_1, confirmed_op_2], 1, None)
-            .unwrap()
-        {
-            psbt
-        } else {
-            panic!("expect successful spend creation")
-        };
+        let psbt = expect_spend_success(
+            control
+                .create_spend(&destinations, &[confirmed_op_1, confirmed_op_2], 1, None)
+                .unwrap(),
+        )
+        .0;
         let tx_manual = psbt.unsigned_tx;
         // Check that manual and auto selection give same outputs (except change address).
         assert_ne!(tx_auto.output, tx_manual.output);
@@ -3773,19 +3889,17 @@ mod tests {
             bitcoin::Network::Bitcoin,
         )
         .unwrap();
-        let psbt = if let CreateSpendResult::Success { psbt, .. } = control
-            .create_spend(
-                &destinations,
-                &[confirmed_op_1, confirmed_op_2],
-                1,
-                Some(change_address.as_unchecked().clone()),
-            )
-            .unwrap()
-        {
-            psbt
-        } else {
-            panic!("expect successful spend creation")
-        };
+        let psbt = expect_spend_success(
+            control
+                .create_spend(
+                    &destinations,
+                    &[confirmed_op_1, confirmed_op_2],
+                    1,
+                    Some(change_address.as_unchecked().clone()),
+                )
+                .unwrap(),
+        )
+        .0;
         let tx_manual = psbt.unsigned_tx;
         // Now the outputs of each transaction are the same.
         assert_eq!(tx_auto.output, tx_manual.output);
@@ -3822,14 +3936,12 @@ mod tests {
             Ok(CreateSpendResult::InsufficientFunds { missing: 150 },)
         );
         // If we use a lower fee, the self-send will succeed.
-        let psbt = if let CreateSpendResult::Success { psbt, .. } = control
-            .create_spend(empty_dest, &[confirmed_op_3], 1, None)
-            .unwrap()
-        {
-            psbt
-        } else {
-            panic!("expect successful spend creation")
-        };
+        let psbt = expect_spend_success(
+            control
+                .create_spend(empty_dest, &[confirmed_op_3], 1, None)
+                .unwrap(),
+        )
+        .0;
         let tx = psbt.unsigned_tx;
         let tx_prev_outpoints = tx
             .input

@@ -1283,20 +1283,11 @@ impl DaemonHandle {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn start_inner(
-        config: Config,
-        bitcoin: Option<impl BitcoinInterface + 'static>,
-        db: Option<impl DatabaseInterface + 'static>,
-        with_rpc_server: bool,
-        connect: Option<connect::ConnectBackend>,
-        local_fork: bool,
-        // Generic startup refuses forks. Authenticated embedded startup has its
-        // own narrow capability checks before entering this shared sequence.
-        runtime_gate: fn(ChainId) -> Result<(), StartupError>,
-    ) -> Result<Self, StartupError> {
-        let secp = secp256k1::Secp256k1::verification_only();
-
+    fn validate_startup_config(
+        config: &Config,
+        has_bitcoin: bool,
+        connect: Option<&connect::ConnectBackend>,
+    ) -> Result<(), StartupError> {
         // Before touching anything: the configuration must be self-consistent, and this build
         // must be able to run the chain it names. Neither check does any I/O.
         config
@@ -1318,7 +1309,7 @@ impl DaemonHandle {
         }
         if let Some(backend) = connect.as_ref() {
             if backend.chain() != config.bitcoin_config.chain
-                || bitcoin.is_some()
+                || has_bitcoin
                 || !matches!(
                     config.bitcoin_backend.as_ref(),
                     Some(config::BitcoinBackend::Esplora(selection)) if backend.matches_selection(selection)
@@ -1329,6 +1320,24 @@ impl DaemonHandle {
                 ));
             }
         }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_inner(
+        config: Config,
+        bitcoin: Option<impl BitcoinInterface + 'static>,
+        db: Option<impl DatabaseInterface + 'static>,
+        with_rpc_server: bool,
+        connect: Option<connect::ConnectBackend>,
+        local_fork: bool,
+        // Generic startup refuses forks. Authenticated embedded startup has its
+        // own narrow capability checks before entering this shared sequence.
+        runtime_gate: fn(ChainId) -> Result<(), StartupError>,
+    ) -> Result<Self, StartupError> {
+        let secp = secp256k1::Secp256k1::verification_only();
+
+        Self::validate_startup_config(&config, bitcoin.is_some(), connect.as_ref())?;
         runtime_gate(config.bitcoin_config.chain)?;
         // Authenticated admission precedes every filesystem/database/node write.
         let scan_abort = sync::Arc::new(sync::atomic::AtomicBool::new(false));
@@ -2780,9 +2789,32 @@ mod tests {
             fs::remove_dir_all(tmp).unwrap();
         }
 
+        fn read_synthetic_request_head(stream: &mut net::TcpStream) -> Vec<u8> {
+            use std::io::Read;
+            let deadline = time::Instant::now() + time::Duration::from_secs(1);
+            let mut head = Vec::new();
+            while head.len() < 8192
+                && time::Instant::now() < deadline
+                && !head.windows(4).any(|x| x == b"\r\n\r\n")
+            {
+                let mut chunk = [0; 1024];
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => head.extend_from_slice(&chunk[..n]),
+                    // A read slice elapsed with nothing new: keep
+                    // waiting until the deadline, do not give up.
+                    Err(e)
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            || e.kind() == io::ErrorKind::TimedOut => {}
+                    Err(_) => break,
+                }
+            }
+            head
+        }
+
         #[test]
         fn authenticated_fork_creates_and_reopens_a_synthetic_wallet() {
-            use std::io::{Read, Write};
+            use std::io::Write;
             use std::sync::atomic::{AtomicBool, Ordering};
             struct Authority(connect::TrustedChainAnchor);
             impl connect::ConnectAnchorAuthority for Authority {
@@ -2832,24 +2864,7 @@ mod tests {
                     stream
                         .set_write_timeout(Some(time::Duration::from_secs(1)))
                         .unwrap();
-                    let deadline = time::Instant::now() + time::Duration::from_secs(1);
-                    let mut head = Vec::new();
-                    while head.len() < 8192
-                        && time::Instant::now() < deadline
-                        && !head.windows(4).any(|x| x == b"\r\n\r\n")
-                    {
-                        let mut chunk = [0; 1024];
-                        match stream.read(&mut chunk) {
-                            Ok(0) => break,
-                            Ok(n) => head.extend_from_slice(&chunk[..n]),
-                            // A read slice elapsed with nothing new: keep
-                            // waiting until the deadline, do not give up.
-                            Err(e)
-                                if e.kind() == io::ErrorKind::WouldBlock
-                                    || e.kind() == io::ErrorKind::TimedOut => {}
-                            Err(_) => break,
-                        }
-                    }
+                    let head = read_synthetic_request_head(&mut stream);
                     let head = String::from_utf8_lossy(&head);
                     if !head.ends_with("\r\n\r\n") {
                         continue;
