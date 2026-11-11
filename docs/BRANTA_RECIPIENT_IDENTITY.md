@@ -85,7 +85,9 @@ pays only the path address, so Tenshu passes the SDK only the path address,
 `branta_id`, `branta_secret` and any `bc=`/`tb=`. Other legs (`pay=`, `lno=`,
 `lightning=`, `bolt12`, ...) are dropped first: the SDK would otherwise return
 `unknown` for an unbindable leg before decrypting `branta_id`, which would hide a
-swapped path address. Identity therefore covers exactly the address being paid. `unknown`, `incomplete`
+swapped path address. Tab, CR and LF are removed first, as the wallet's parser and
+the SDK both do, and only the path and the forwarded parameters are checked for
+spaces, controls or bad encoding, so noise in a `label=` cannot skip the lookup. Identity therefore covers exactly the address being paid. `unknown`, `incomplete`
 (Branta unreachable, 5xx or 429), wrong secrets and ordinary failures are silent,
 so absence of a block is not a safety claim. The known bad destination stays blocked for the current form despite preference
 changes, metadata/encoding changes, or edits to another recipient. Replace or

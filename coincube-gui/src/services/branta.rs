@@ -81,8 +81,8 @@ fn is_bolt11(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.starts_with("lnbc") || lower.starts_with("lntb") || lower.starts_with("lnbcrt")
 }
-/// The SDK strips interior tab, CR and LF before parsing, so a request containing them
-/// could parse differently there than in these pre-filters. Reject all controls and spaces.
+/// Rejects any control byte or space. Applied to what Tenshu hands the SDK (a BOLT11
+/// request, or a BIP21 path plus the forwarded parameters), never to ignored parameters.
 fn has_control_or_space(raw: &str) -> bool {
     raw.bytes().any(|b| b <= 0x20 || b == 0x7f)
 }
@@ -129,11 +129,14 @@ impl LookupRequest {
         })
     }
     pub fn bitcoin(raw: &str, address: &Address) -> Option<Self> {
-        let raw = raw.trim();
-        if !raw.is_ascii()
-            || has_control_or_space(raw)
-            || !safe_percent_encoding(raw)
-            || raw.len() > MAX_REQUEST_BYTES
+        // Both the wallet's URL parser and the SDK drop interior tab, CR and LF, so do the
+        // same first: all three then agree on every key and on the path being paid.
+        let raw: String = raw
+            .trim()
+            .chars()
+            .filter(|c| !matches!(c, '\t' | '\r' | '\n'))
+            .collect();
+        if raw.len() > MAX_REQUEST_BYTES
             || !raw.get(..8)?.eq_ignore_ascii_case("bitcoin:")
             || raw.contains('#')
         {
@@ -141,19 +144,44 @@ impl LookupRequest {
         }
         // Same split as the SDK's parser: path address, then the query.
         let (path, query) = raw[8..].split_once('?')?;
+        if !path.is_ascii() || has_control_or_space(path) {
+            return None;
+        }
         let parsed: Address<coincube_core::miniscript::bitcoin::address::NetworkUnchecked> =
             path.parse().ok()?;
         if parsed.assume_checked().script_pubkey() != address.script_pubkey() {
             return None;
         }
-        // Reject ambiguous parameters before the SDK's first-value-wins parser sees them.
+        // VAULT pays only the path address, so the SDK sees only what identifies it: the
+        // Branta pair and on-chain alternates (which must agree with the path or the
+        // request is tampered). Other legs (`pay`, `lno`, `lightning`, ...) would make
+        // the SDK return `unknown` before it decrypts and compares the address, hiding
+        // a swapped path address. Parameters that are not forwarded are not inspected, so
+        // an unencoded space or other noise in a `label` cannot switch the check off.
+        let forwarded_key = |key: &str| matches!(key, "branta_id" | "branta_secret" | "bc" | "tb");
         let mut keys = std::collections::HashSet::new();
         let (mut id, mut secret) = (None, None);
         let mut forwarded = Vec::new();
         for pair in query.split('&') {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
             let key = key.to_ascii_lowercase();
-            if key.contains('%') || !keys.insert(key.clone()) {
+            if key.contains('%') {
+                // A percent-encoded spelling of an identifying key is ambiguous: reject it.
+                if forwarded_key(&percent_decode(&key).to_ascii_lowercase()) {
+                    return None;
+                }
+                continue;
+            }
+            if !forwarded_key(&key) {
+                continue;
+            }
+            // Reject ambiguous or malformed identifying parameters before the SDK's
+            // first-value-wins parser sees them.
+            if !keys.insert(key.clone())
+                || !pair.is_ascii()
+                || has_control_or_space(pair)
+                || !safe_percent_encoding(pair)
+            {
                 return None;
             }
             match key.as_str() {
@@ -161,14 +189,7 @@ impl LookupRequest {
                 "branta_secret" => secret = Some(percent_decode(value)),
                 _ => (),
             }
-            // VAULT pays only the path address, so the SDK sees only what identifies it: the
-            // Branta pair and on-chain alternates (which must agree with the path or the
-            // request is tampered). Other legs (`pay`, `lno`, `lightning`, ...) would make
-            // the SDK return `unknown` before it decrypts and compares the address, hiding
-            // a swapped path address.
-            if matches!(key.as_str(), "branta_id" | "branta_secret" | "bc" | "tb") {
-                forwarded.push(pair);
-            }
+            forwarded.push(pair);
         }
         if secret?.is_empty() {
             return None;
@@ -1117,19 +1138,55 @@ mod sdk_contract_tests {
             &address
         )
         .is_none());
-        assert!(
-            LookupRequest::bitcoin(&format!("{raw}&lightning=%F0%9F%98%80"), &address).is_none()
-        );
+        assert!(LookupRequest::bitcoin(&format!("{raw}&tb=%F0%9F%98%80"), &address).is_none());
         assert!(!safe_percent_encoding("x%z0"));
         // The SDK would strip the tab, see two branta_id keys and send the first (plain) one.
         let smuggled = format!(
             "bitcoin:{ADDRESS}?bran\tta_id={ADDRESS}&branta_id={encrypted}&branta_secret=key"
         );
         assert!(LookupRequest::bitcoin(&smuggled, &address).is_none());
-        for control in ["\n", "\r", " ", "\u{7f}"] {
+        // Inside an identifying parameter, spaces and other controls are rejected.
+        for control in [" ", "\u{7f}", "\u{1}"] {
             let raw = raw.replace("&branta_secret", &format!("{control}&branta_secret"));
             assert!(LookupRequest::bitcoin(&raw, &address).is_none());
         }
+        // Tab, CR and LF are dropped first, as the wallet's parser and the SDK both do.
+        for control in ["\t", "\r", "\n"] {
+            let raw = raw.replace("&branta_secret", &format!("{control}&branta_secret"));
+            let request = LookupRequest::bitcoin(&raw, &address).expect("normalized like the SDK");
+            assert!(!request.raw.contains(['\t', '\r', '\n']));
+        }
+        let split_path = format!(
+            "bitcoin:{}\n{}?{}",
+            &ADDRESS[..10],
+            &ADDRESS[10..],
+            raw.split_once('?').unwrap().1
+        );
+        assert!(LookupRequest::bitcoin(&split_path, &address).is_some());
+        // Noise in a parameter that is not forwarded must not switch the check off.
+        for noise in [
+            "label=Coffee Shop",
+            "message=caf\u{e9}",
+            "label=50%",
+            "x%20y=1",
+            "note=\u{7f}",
+        ] {
+            let request = LookupRequest::bitcoin(&format!("{raw}&{noise}"), &address)
+                .unwrap_or_else(|| panic!("ignored parameter blocked the lookup: {:?}", noise));
+            assert!(!request.raw.contains(noise), "{}", noise);
+        }
+        // A swapped path with a noisy label still reaches the SDK, which flags the mismatch.
+        let swapped = format!(
+            "bitcoin:{OTHER}?{}&label=x y",
+            raw.split_once('?').unwrap().1
+        );
+        let other: Address = OTHER
+            .parse::<Address<coincube_core::miniscript::bitcoin::address::NetworkUnchecked>>()
+            .unwrap()
+            .assume_checked();
+        assert!(LookupRequest::bitcoin(&swapped, &other).is_some());
+        // A percent-encoded spelling of an identifying key is ambiguous.
+        assert!(LookupRequest::bitcoin(&format!("{raw}&branta%5Fid=x"), &address).is_none());
         assert!(LookupRequest::bolt11("lnbc1te\tst").is_none());
         assert!(LookupRequest::bolt11(" lnbc1test\n").is_some());
     }
