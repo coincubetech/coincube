@@ -219,7 +219,7 @@ fn ai_access_state_gallery() {
     );
     let choosing = leak(choosing);
     let form = render("04-pair-form-read", || view_for_cube(choosing, true));
-    assert!(form.contains("Choose one. A client that should do both needs two pairings."));
+    assert!(form.contains("One per client."));
     assert_eq!(chosen_access(choosing), Some(Access::Read));
 
     // 5. Pair form with the transaction-preparation scope chosen.
@@ -239,7 +239,7 @@ fn ai_access_state_gallery() {
     let form = render("05-pair-form-transactions", || {
         view_for_cube(preparing, true)
     });
-    assert!(form.contains("Read permissions don't apply to this client."));
+    assert!(form.contains("Up to eight drafts per unlock"));
     assert_eq!(chosen_access(preparing), Some(Access::Transactions));
 
     // 6. Two paired clients, available, the first opened.
@@ -264,11 +264,11 @@ fn ai_access_state_gallery() {
     let page = render("06-paired-available", || view_for_cube(paired, true));
     for label in [
         "Available",
-        "Read wallet information · Balances, Confirmed history",
-        "Prepare unsigned transactions",
+        "Read · Balances, Confirmed history",
+        "Prepare transactions",
         "Copied",
-        "This count doesn't show whether the app is connected now.",
-        "Tenshu can't verify which app uses this pairing.",
+        "not a connection status",
+        "Unverified label",
     ] {
         assert!(page.contains(label), "{}", label);
     }
@@ -279,7 +279,7 @@ fn ai_access_state_gallery() {
     fx.restore("gallery-07", &mut paused);
     let paused = leak(paused);
     let page = render("07-paired-paused-off", || view_for_cube(paused, true));
-    assert!(page.contains("Paused") && page.contains("AI access is off for this Cube."));
+    assert!(page.contains("Paused") && page.contains("AI access is off"));
     assert!(!page.contains("Available"));
 
     // 8. Paired and on, but no runtime: the Vault is not loaded right now.
@@ -287,7 +287,7 @@ fn ai_access_state_gallery() {
     unloaded.paired.clear();
     let unloaded = leak(unloaded);
     let page = render("08-paired-unavailable", || view_for_cube(unloaded, true));
-    assert!(page.contains("isn't loaded right now"));
+    assert!(page.contains("Vault not loaded or changed"));
 
     // 9. Durable revocation could not be confirmed.
     let mut failed = fx.paired("gallery-09");
@@ -299,8 +299,8 @@ fn ai_access_state_gallery() {
     // leads, every client reads Suspended, and nothing new can be paired.
     let page = render("09-revocation-unconfirmed", || view_for_cube(failed, true));
     assert!(page.contains("Pairing problem"));
-    assert!(page.contains("Every paired client is suspended"));
-    assert!(page.contains("Copying is unavailable after a pairing storage error."));
+    assert!(page.contains("Clients are suspended after a storage error."));
+    assert!(page.contains("Copy is unavailable after a storage error."));
     assert!(page.contains("durable revocation is NOT confirmed"));
     assert!(page.contains("Suspended") && !page.contains("Available"));
     assert!(!page.has_focus(iced::advanced::widget::Id::new(PAIR_OPEN_ID)));

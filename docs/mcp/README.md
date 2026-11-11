@@ -53,7 +53,7 @@ already signed application bundle.
 
 1. Open and unlock the desired Cube normally. Go to **Cube → Settings → AI access**.
    The page shows this Cube's switch and Vault (with its exact chain tag), the paired
-   clients, and what each kind of access allows. If the Cube has no supported Vault
+   clients, and an **Access** section summarizing each kind of access. If the Cube has no supported Vault
    loaded, the switch reads **Unavailable for this Cube** and names the supported scope.
 2. Turn **Allow AI clients** on. This Cube-wide switch grants no new access by itself:
    it resumes existing clients with their stored scope, and turning it off later pauses

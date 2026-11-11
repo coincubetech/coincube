@@ -129,35 +129,31 @@ const PAIR_ID: &str = "tenshu.ai-access.pair";
 const CANCEL_ID: &str = "tenshu.ai-access.cancel";
 pub(super) const FORM_ENABLE_ID: &str = "tenshu.ai-access.form.enable";
 const PERMISSIONS: [(&str, &str, &str); 3] = [
-    (
-        "tenshu.ai-access.permission.balances",
-        "Balances",
-        "Confirmed, unconfirmed and available amounts, with sync state.",
-    ),
+    ("tenshu.ai-access.permission.balances", "Balances", ""),
     (
         "tenshu.ai-access.permission.history",
         "Confirmed history",
-        "Up to 50 recent confirmed activities: direction and order only, no amounts or dates.",
+        "Direction and order only.",
     ),
     (
         "tenshu.ai-access.permission.policy",
         "Spending-policy summary",
-        "Script type, signing thresholds, key counts and recovery delays.",
+        "",
     ),
 ];
 
-const INTRO: &str = "Let an AI app on this computer work with this Cube's Vault through Tenshu's local connection. Each client gets only the access you choose. Unlocking, creating a Vault, signing and sending stay with you in Tenshu.";
+const INTRO: &str =
+    "Let AI apps on this computer use this Cube's Vault, with only the access you choose.";
 #[cfg(feature = "mcp-proposals")]
-const SETUP_INTRO: &str = "In an empty Cube, an AI app can help plan a new Vault. You select real keys, check devices and create the Vault in Tenshu.";
-const ENABLE_ON: &str =
-    "Paired clients can use their access while this Cube is unlocked. Turning this off pauses them without forgetting them.";
-const ENABLE_SUSPENDED: &str =
-    "Every paired client is suspended after a pairing storage error. See the message above.";
-const ENABLE_OFF: &str = "Paired clients are paused. Turning this on resumes them with their existing access; it grants no new access, and new clients still need their own pairing.";
-const UNSUPPORTED: &str = "AI access needs a Vault on Bitcoin (mainnet, Testnet4 or Regtest) or Bitcoin Blake2b (mainnet or Testnet4) run by Tenshu's built-in daemon. This Cube has no such Vault loaded right now, so no client can be paired. Spark, Liquid, imported wallets that aren't Vaults and external daemons aren't supported.";
-const PAIR_HINT: &str =
-    "A client keeps exactly the access you choose until you revoke it. Locking this Cube pauses every client.";
-pub(super) const CAUTION: &str = "Local is not private. Anything a client reads can be sent to its AI provider. Less metadata is not anonymity. Pair only clients you trust, and never paste a client's private configuration into a chat.";
+const SETUP_INTRO: &str =
+    "Let an AI app help plan a new Vault. You choose the keys and create it in Tenshu.";
+const ENABLE_ON: &str = "Clients work while this Cube is unlocked.";
+const ENABLE_SUSPENDED: &str = "Clients are suspended after a storage error.";
+const ENABLE_OFF: &str = "Clients are paused. Turning on grants no new access.";
+const UNSUPPORTED: &str = "Needs a Vault run by Tenshu on Bitcoin (mainnet, Testnet4 or Regtest) or Bitcoin Blake2b (mainnet or Testnet4). Spark, Liquid, imported wallets and external daemons aren't supported.";
+const PAIR_HINT: &str = "Access lasts until you revoke it.";
+pub(super) const CAUTION: &str =
+    "Local isn't private. What a client reads can reach its AI provider.";
 
 /// The Cube-wide switch. Turning it on is allowed only where a client could
 /// be paired; turning it off (pausing every client) is always allowed.
@@ -197,9 +193,6 @@ fn vault_row(settings: &Settings) -> Option<Ui<'_>> {
     Some(
         page::row(localized_copy("Vault"))
             .scope_tag(chain_tag(Some(chain)))
-            .description(localized_copy(
-                "The only wallet in this Cube that AI clients can use. Other Cubes need their own pairings.",
-            ))
             .into(),
     )
 }
@@ -263,11 +256,7 @@ fn page_frame<'a>(
             page::rows(cube),
         ))
         .push(page::group(localized_copy("Paired clients"), None, clients))
-        .push(page::group(
-            localized_copy("What each kind of access allows"),
-            None,
-            kinds,
-        ))
+        .push(page::group(localized_copy("Access"), None, kinds))
         .into()
 }
 
@@ -279,38 +268,42 @@ fn kinds_of_access<'a>(setup: bool) -> Ui<'a> {
         rows.push(
             page::row(localized_copy("Propose a wallet policy"))
                 .description(localized_copy(
-                    "A 3-of-5 primary with a recovery path you choose. No keys are involved.",
+                    "3-of-5 with a recovery path you choose. No keys.",
                 ))
                 .into(),
         );
         rows.push(
             page::row(localized_copy("Prepare a wallet from public keys"))
-                .description(localized_copy("The client also supplies public account keys. Tenshu builds the descriptor; you verify each key on its device and create the Vault here."))
+                .description(localized_copy(
+                    "You verify each key and create the Vault in Tenshu.",
+                ))
                 .into(),
         );
     } else {
         rows.push(
             page::row(localized_copy("Read wallet information"))
-                .description(localized_copy("Only the parts you switch on: balances, confirmed history, the spending-policy summary. No addresses, labels or per-transaction amounts."))
+                .description(localized_copy("Only the parts you allow."))
                 .into(),
         );
         rows.push(
             page::row(localized_copy("Prepare unsigned transactions"))
-                .description(localized_copy("Drafts a payment to addresses and exact satoshi amounts the client supplies. It can't read balances or history. You review and sign in Tenshu."))
+                .description(localized_copy(
+                    "Drafts payments. You review and sign in Tenshu.",
+                ))
                 .into(),
         );
     }
     rows.push(
         page::row(localized_copy("Never shared"))
             .description(localized_copy(
-                "Seeds, private keys, PINs, passwords and passkeys; descriptors, xpubs and labels.",
+                "Seeds, keys, PINs, passwords, passkeys, descriptors, labels.",
             ))
             .into(),
     );
     rows.push(
         page::row(localized_copy("Changing access"))
             .description(localized_copy(
-                "Existing clients never gain access. To change one, revoke it and pair it again.",
+                "Revoke and pair again. Clients never gain access.",
             ))
             .into(),
     );
@@ -331,14 +324,10 @@ fn scope_line(scope: &pairings::Scope) -> String {
                 .filter(|(enabled, _)| **enabled)
                 .map(|(_, (_, label, _))| localized_copy(label))
                 .collect();
-            format!(
-                "{} · {}",
-                localized_copy("Read wallet information"),
-                granted.join(", ")
-            )
+            format!("{} · {}", localized_copy("Read"), granted.join(", "))
         }
         pairings::Scope::TransactionPreparation { .. } => {
-            localized_copy("Prepare unsigned transactions").to_owned()
+            localized_copy("Prepare transactions").to_owned()
         }
         pairings::Scope::Proposal => localized_copy("Propose a wallet policy").to_owned(),
         pairings::Scope::WalletCreation => {
@@ -354,29 +343,13 @@ fn client_status(
     available: bool,
 ) -> (page::Status, &'static str, &'static str) {
     if settings.pairing_poisoned {
-        (
-            page::Status::Bad,
-            "Suspended",
-            "Suspended after a pairing storage error. See the message above.",
-        )
+        (page::Status::Bad, "Suspended", "Storage error")
     } else if !settings.enabled {
-        (
-            page::Status::Off,
-            "Paused",
-            "AI access is off for this Cube.",
-        )
+        (page::Status::Off, "Paused", "AI access is off")
     } else if available {
-        (
-            page::Status::Ok,
-            "Available",
-            "Tenshu answers this client while this Cube is unlocked.",
-        )
+        (page::Status::Ok, "Available", "")
     } else {
-        (
-            page::Status::Off,
-            "Paused",
-            "This Cube's Vault isn't loaded right now, or it changed since pairing.",
-        )
+        (page::Status::Off, "Paused", "Vault not loaded or changed")
     }
 }
 
@@ -403,8 +376,11 @@ fn client_rows(settings: &Settings, available: bool, setup: bool) -> Vec<Ui<'_>>
         rows.push(
             page::row(client.name.clone())
                 .accessory(page::status(status, localized_copy(word)))
-                .description(scope_line(&client.scope))
-                .description(localized_copy(reason))
+                .description(if reason.is_empty() {
+                    scope_line(&client.scope)
+                } else {
+                    format!("{} · {}", scope_line(&client.scope), localized_copy(reason))
+                })
                 .control(page::button(
                     format!("tenshu.ai-access.client.{}.manage", client.id),
                     localized_copy(if open { "Close" } else { "Manage" }),
@@ -426,20 +402,19 @@ fn client_rows(settings: &Settings, available: bool, setup: bool) -> Vec<Ui<'_>>
             (available && !settings.pairing_poisoned).then(|| message(Message::TogglePairing)),
         )
     });
-    rows.push(
-        page::row(localized_copy(if empty {
-            "No clients paired"
-        } else {
-            "Pair another client"
-        }))
-        .description(localized_copy(if setup {
-            "A setup client keeps its access until you revoke it. Each draft ends when this Cube locks or the Vault is created."
+    let mut last = page::row(localized_copy(if empty {
+        "No clients paired"
+    } else {
+        "Pair another client"
+    }));
+    if empty {
+        last = last.description(localized_copy(if setup {
+            "Access lasts until you revoke it. Drafts end when this Cube locks."
         } else {
             PAIR_HINT
-        }))
-        .control_maybe(pair)
-        .into(),
-    );
+        }));
+    }
+    rows.push(last.control_maybe(pair).into());
     rows
 }
 
@@ -464,12 +439,9 @@ fn client_controls<'a>(
     let mut body = Column::new()
         .spacing(10)
         .width(Length::Fill)
-        .push(muted(localized_copy(
-            "The name is your label. Tenshu can't verify which app uses this pairing.",
-        )))
         .push(muted(localized_format!(
-            "Requests answered this session: {}. This count doesn't show whether the app is connected now.",
-            "Solicitudes respondidas en esta sesión: {}. Este recuento no indica si la app está conectada ahora.",
+            "Unverified label · {} requests this session (not a connection status)",
+            "Etiqueta no verificada · {} solicitudes en esta sesión (no indica conexión)",
             calls
         )))
         .push(
@@ -493,19 +465,23 @@ fn client_controls<'a>(
         .push(if copied && available {
             column![
                 page::status(page::Status::Ok, localized_copy("Copied")),
-                muted(localized_copy("Paste it only into this app's local MCP settings, then clear your clipboard.")),
+                muted(localized_copy(
+                    "Paste into this app's MCP settings, then clear your clipboard."
+                )),
             ]
             .spacing(4)
             .into()
         } else if settings.pairing_poisoned {
             Ui::from(muted(localized_copy(
-                "Copying is unavailable after a pairing storage error.",
+                "Copy is unavailable after a storage error.",
             )))
         } else if available {
-            Ui::from(muted(localized_copy("The configuration works like a password for this client. Keep it out of chats, issues and shared files.")))
+            Ui::from(muted(localized_copy(
+                "It works like a password. Keep it out of chats.",
+            )))
         } else {
             Ui::from(muted(localized_copy(
-                "You can copy the configuration while this client is available.",
+                "Copy works while the client is available.",
             )))
         });
 
@@ -584,9 +560,9 @@ fn proposal_card<'a>(
                 page::status(page::Status::Warn, localized_copy("Keys not selected yet"))
             })
             .push(muted(localized_copy(if keys_ready {
-                "A valid descriptor doesn't prove separate owners, devices or backups. Check each key on its device before you create the Vault."
+                "A valid descriptor doesn't prove separate owners or backups. Check each key on its device."
             } else {
-                "Select real keys in Tenshu. The client never receives private keys."
+                "Select real keys in Tenshu."
             })))
             .push(action(
                 id,
@@ -732,7 +708,9 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
             .spacing(8)
             .align_y(iced::Alignment::Center),
         )
-        .push(muted(localized_copy("Drafted at this client's request. Tenshu chose the coins and the fee. Nothing is sent until you review and sign it in Tenshu; the client can't sign or send.")))
+        .push(muted(localized_copy(
+            "Drafted by this client. Nothing is sent until you sign in Tenshu.",
+        )))
         .push(page::status(status, localized_copy(status_text)))
         .push(details)
         .push(action(
@@ -741,7 +719,9 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
             review_message,
             theme::tenshu::button::ActionKind::Primary,
         ))
-        .push(muted(localized_copy("Check every address and amount in the review. This summary doesn't change after you review or sign it.")));
+        .push(muted(localized_copy(
+            "Check every address and amount in the review.",
+        )));
     card(content)
 }
 
@@ -1251,7 +1231,7 @@ fn access_off_note<'a>() -> Ui<'a> {
     page::note(
         Tone::Warn,
         muted(localized_copy(
-            "AI access is off for this Cube. Turn it on to pair a client. That resumes existing clients with their access and grants no new access.",
+            "AI access is off. Turning it on resumes existing clients and grants no new access.",
         )),
         Some(page::button(
             FORM_ENABLE_ID,
@@ -1270,9 +1250,7 @@ fn name_field(settings: &Settings) -> Ui<'_> {
             view::Message::FocusAction,
         )
         .placeholder("Claude Desktop")
-        .hint(localized_copy(
-            "For your reference only. Tenshu can't verify which app uses the pairing.",
-        ))
+        .hint(localized_copy("A label only; Tenshu can't verify the app."))
         .on_input(|value| message(Message::ClientName(value))),
     )
     .max_width(480)
@@ -1284,7 +1262,13 @@ fn pair_actions<'a>(label: &'static str, can_pair: bool) -> Ui<'a> {
     let mut actions = Column::new()
         .width(Length::Fill)
         .spacing(10)
-        .push(page::note(Tone::Warn, muted(localized_copy("Anything this client receives can be sent to its AI provider, even over a local connection.")), None))
+        .push(page::note(
+            Tone::Warn,
+            muted(localized_copy(
+                "What this client receives can reach its AI provider.",
+            )),
+            None,
+        ))
         .push(
             row![
                 action(
@@ -1304,7 +1288,7 @@ fn pair_actions<'a>(label: &'static str, can_pair: bool) -> Ui<'a> {
         );
     if !can_pair {
         actions = actions.push(muted(localized_copy(
-            "To pair, name the client and choose its access.",
+            "Name the client and choose its access.",
         )));
     }
     actions.into()
@@ -1325,9 +1309,6 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
             .push(subheading(localized_copy("Wallet")))
             .push(page::rows([page::row(localized_copy("This Cube's Vault"))
                 .scope_tag(chain_tag(chain))
-                .description(localized_copy(
-                    "Select it explicitly for this client. Nothing is selected for you.",
-                ))
                 .control(
                     toggle(
                         WALLET_ID,
@@ -1346,10 +1327,7 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
             READ_ID,
             Access::Read,
             localized_copy("Read wallet information"),
-        )
-        .description(localized_copy(
-            "Balances, confirmed history or the spending policy: only the parts you switch on below.",
-        ))],
+        )],
         chosen,
         view::Message::FocusAction,
     )
@@ -1359,20 +1337,22 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
         .iter()
         .enumerate()
         .map(|(index, (id, label, detail))| {
-            page::row(localized_copy(label))
-                .description(localized_copy(detail))
-                .control(
-                    toggle(
-                        *id,
-                        settings.capabilities[index],
-                        view::Message::FocusAction,
-                    )
-                    .state_words(localized_copy("Allowed"), localized_copy("Not allowed"))
-                    .on_toggle_maybe(
-                        read.then_some(move |on| message(Message::Capability(index, on))),
-                    ),
+            let row = page::row(localized_copy(label));
+            let row = if detail.is_empty() {
+                row
+            } else {
+                row.description(localized_copy(detail))
+            };
+            row.control(
+                toggle(
+                    *id,
+                    settings.capabilities[index],
+                    view::Message::FocusAction,
                 )
-                .into()
+                .state_words(localized_copy("Allowed"), localized_copy("Not allowed"))
+                .on_toggle_maybe(read.then_some(move |on| message(Message::Capability(index, on)))),
+            )
+            .into()
         })
         .collect::<Vec<Ui<'_>>>();
     #[allow(unused_mut)]
@@ -1380,9 +1360,7 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
         .width(Length::Fill)
         .push(subheading(localized_copy("Access")))
         .push(Space::new().height(Length::Fixed(4.0)))
-        .push(muted(localized_copy(
-            "Choose one. A client that should do both needs two pairings.",
-        )))
+        .push(muted(localized_copy("One per client.")))
         .push(Space::new().height(Length::Fixed(8.0)))
         .push(read_choice)
         // The read parts sit under their own choice, inset like a disclosure.
@@ -1400,7 +1378,9 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
                     Access::Transactions,
                     localized_copy("Prepare unsigned transactions"),
                 )
-                .description(localized_copy("Drafts payments to addresses and exact satoshi amounts the client supplies, within a fee limit. It can't read balances or history; you review and sign in Tenshu."))],
+                .description(localized_copy(
+                    "No balances or history. You sign in Tenshu.",
+                ))],
                 chosen,
                 view::Message::FocusAction,
             )
@@ -1409,9 +1389,11 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
     }
     #[cfg(feature = "mcp-transactions")]
     if chosen == Some(Access::Transactions) {
-        access = access.push(Space::new().height(Length::Fixed(8.0))).push(muted(
-            localized_copy("Read permissions don't apply to this client. Up to eight drafts per unlock; no fiat amounts, self-sends or recovery paths."),
-        ));
+        access = access
+            .push(Space::new().height(Length::Fixed(8.0)))
+            .push(muted(localized_copy(
+                "Up to eight drafts per unlock, in exact sats.",
+            )));
     }
     body = body.push(access);
 
@@ -1547,14 +1529,16 @@ fn setup_card(settings: &Settings) -> Ui<'_> {
             localized_copy("Propose a wallet policy"),
         )
         .description(localized_copy(
-            "A 3-of-5 primary with a recovery path you choose. No keys are involved.",
+            "3-of-5 with a recovery path you choose. No keys.",
         )),
         segment(
             "tenshu.ai-access.access.creation",
             Access::Creation,
             localized_copy("Prepare a wallet from public keys"),
         )
-        .description(localized_copy("The client also supplies public account keys, which its AI provider may receive. You verify every key and device in Tenshu.")),
+        .description(localized_copy(
+            "Its AI provider may see the public keys. You verify each in Tenshu.",
+        )),
     ];
     body = body.push(name_field(settings)).push(
         Column::new()
@@ -1602,15 +1586,15 @@ mod ai_access_tests {
             "Paired clients",
             "No clients paired",
             "Pair a client",
-            "Locking this Cube pauses every client.",
+            "Access lasts until you revoke it.",
             "Allow AI clients",
-            "it grants no new access",
+            "Turning on grants no new access.",
             "Read wallet information",
             "Prepare unsigned transactions",
             "Never shared",
-            "Seeds, private keys, PINs, passwords and passkeys",
-            "Existing clients never gain access.",
-            "Local is not private.",
+            "Seeds, keys, PINs, passwords, passkeys",
+            "Clients never gain access.",
+            "Local isn't private.",
         ] {
             assert!(probe.contains(label), "{}", label);
         }

@@ -1867,8 +1867,8 @@ mod tests {
                     palette,
                 );
                 assert!(inspection.contains("Paired clients"));
-                assert!(inspection.contains("Local is not private."));
-                assert!(inspection.contains("What each kind of access allows"));
+                assert!(inspection.contains("Local isn't private."));
+                assert!(inspection.contains("Only the parts you allow."));
                 assert!(inspection.contains("Never shared"));
                 assert!(!inspection.contains("Your AI provider may receive financial information"));
                 assert!(!inspection.contains("TENSHU_MCP_CREDENTIAL"));
