@@ -172,6 +172,10 @@ def attach(config, *, strict=None):
         phone = Phone(driver, build)
         phone.device_digest = hashlib.sha256(device["hardwareProperties"]["udid"].encode()).hexdigest()
         if strict:
+            # WDA's automatic active-app selection can report SpringBoard even
+            # while Keychain is foreground. Select its observation target only;
+            # this setting does not activate, launch or restart the application.
+            driver.update_settings({"defaultActiveApplication": BUNDLE})
             strict.bind_phone(phone)
         else:
             driver.activate_app(BUNDLE)
@@ -419,11 +423,30 @@ class Phone:
         self.click("Home")
         return {"build": self.build, "network": "testnet4", "cube_visible": True}
 
+    def reject_system_alert(self):
+        # WDA's alert endpoint checks system Alert/Sheet surfaces independently
+        # of defaultActiveApplication. Never accept, dismiss or retain the text.
+        from selenium.common.exceptions import NoAlertPresentException
+        try:
+            self.driver.switch_to.alert.text
+        except NoAlertPresentException:
+            return
+        except Exception:
+            raise Blocked("PHONE_AUTH", "System-alert absence could not be verified; no input is allowed.") from None
+        raise Blocked("PHONE_AUTH", "A system alert is present; unattended input cannot proceed.")
+
     def process_identity(self):
+        # Preferred active-app selection is not evidence of foreground state.
+        # Check independently on both sides of the identity observation.
+        if int(self.driver.query_app_state(BUNDLE)) != 4:
+            raise Blocked("PHONE_PROCESS", "Keychain is not running in the foreground.")
         info = self.driver.execute_script("mobile: activeAppInfo")
         pid = info.get("pid")
-        if info.get("bundleId") != BUNDLE or type(pid) is not int or pid <= 0:
+        if (int(self.driver.query_app_state(BUNDLE)) != 4
+                or info.get("bundleId") != BUNDLE or type(pid) is not int or pid <= 0):
             raise Blocked("PHONE_PROCESS", "The foreground Keychain process cannot be verified.")
+        if self.strict:
+            self.reject_system_alert()
         return {"pid": pid, "bundle_id": BUNDLE}
 
     def observe_key_limit(self):
