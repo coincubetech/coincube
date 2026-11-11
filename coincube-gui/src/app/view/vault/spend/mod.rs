@@ -548,6 +548,7 @@ pub fn create_spend_tx<'a>(
     batch_label: &form::Value<String>,
     amount_left: Option<&Amount>,
     draft_warning: Option<String>,
+    tamper_warning: Option<String>,
     feerate: &form::Value<String>,
     fee_amount: Option<&Amount>,
     sync_status: &SyncStatus,
@@ -574,12 +575,17 @@ pub fn create_spend_tx<'a>(
     };
 
     let can_proceed = is_valid
+        && tamper_warning.is_none()
         && !duplicate
         && (is_self_send
             || recovery_timelock.is_some()
             || Some(&Amount::from_sat(0)) == amount_left);
 
-    let disabled_hint: Option<String> = if can_proceed {
+    // A Branta tamper result blocks the send with the draft fully selected
+    // (`amount_left == Some(0)`), so it must win over every other hint.
+    let disabled_hint: Option<String> = if tamper_warning.is_some() {
+        tamper_warning
+    } else if can_proceed {
         None
     } else if feerate.value.is_empty() {
         Some("Please set a feerate.".to_string())
@@ -1504,6 +1510,7 @@ mod tests {
         recovery: bool,
         amount_left: Option<u64>,
         draft_warning: Option<&'static str>,
+        tamper_warning: Option<&'static str>,
         feerate: (&'static str, bool),
         fee: bool,
         first_step: bool,
@@ -1533,6 +1540,7 @@ mod tests {
                 recovery: false,
                 amount_left: Some(0),
                 draft_warning: None,
+                tamper_warning: None,
                 feerate: ("5", true),
                 fee: false,
                 first_step: true,
@@ -1601,6 +1609,7 @@ mod tests {
             &fixture.batch_label,
             amount_left.as_ref(),
             s.draft_warning.map(String::from),
+            s.tamper_warning.map(String::from),
             &feerate,
             s.fee.then_some(&fixture.fee),
             &fixture.sync_status,
@@ -2520,6 +2529,31 @@ mod tests {
                 probe.contains("This Vault needs 2 of 3 keys."),
                 shown,
                 "{threshold:?}"
+            );
+        }
+    }
+
+    /// A Branta tamper result leaves the draft fully selected
+    /// (`amount_left == Some(0)`) but blocks the send. Its warning must be
+    /// the hint shown, in a normal send and in recovery alike.
+    #[test]
+    fn a_tampered_recipient_shows_its_warning_and_blocks_prepare() {
+        const TAMPER: &str = "Synthetic tamper warning. Do not send.";
+        let fixture = Fixture::new(ThemeMode::Dark, 3);
+        for recovery in [false, true] {
+            let scenario = Scenario {
+                is_valid: false,
+                recovery,
+                amount_left: Some(0),
+                tamper_warning: Some(TAMPER),
+                ..Scenario::valid_send()
+            };
+            let probe = Harness::new(compose(&fixture, &scenario), TALL).probe();
+            assert!(probe.contains(TAMPER), "recovery {}", recovery);
+            assert!(
+                !probe.has_focus(&Id::new(PREPARE_ID)),
+                "recovery {}",
+                recovery
             );
         }
     }

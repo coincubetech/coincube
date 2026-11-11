@@ -341,6 +341,8 @@ pub enum SparkSendMessage {
     /// Pay this send from Bitcoin or US Dollar.
     SelectPayFrom(coincube_spark_protocol::WalletAsset),
     ConfirmRequested,
+    /// Review's Back: leave the quote for the form, keeping what was typed.
+    EditDetails,
     SendSucceeded(coincube_spark_protocol::SendPaymentOk),
     SendFailed(String),
     /// Reset back to the `Idle` phase, clearing inputs and any

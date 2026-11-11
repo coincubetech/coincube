@@ -1327,10 +1327,11 @@ impl Step for DefineSpend {
             &self.batch_label,
             self.amount_left_to_select.as_ref(),
             if self.tampered {
-                Some(TAMPER_WARNING.to_string())
+                None
             } else {
                 self.warning.as_ref().map(|e| e.to_string())
             },
+            self.tampered.then(|| TAMPER_WARNING.to_string()),
             &self.feerate,
             self.fee_amount.as_ref(),
             &self.sync_status,

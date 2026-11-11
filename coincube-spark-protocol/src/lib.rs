@@ -360,6 +360,20 @@ pub enum Method {
     /// [`OkPayload::PrepareSendFrom`]; the handle executes through the
     /// ordinary [`Method::SendPayment`].
     PrepareLnurlPayFrom(PrepareLnurlPayFromParams),
+    /// Send USDB from the USDB balance to a plain Spark address, for an
+    /// amount in USDB base units: the address-shaped twin of the USDB
+    /// invoice that [`Method::PrepareSendFrom`] pays. Returns
+    /// [`OkPayload::PrepareSendFrom`] shaped as that one is, with
+    /// [`PrepareSendFromOk::token_payment`] carrying the amount and fee and
+    /// `pay_from` [`WalletAsset::Usdb`]; the handle executes through the
+    /// ordinary [`Method::SendPayment`].
+    ///
+    /// Refuses, with [`ErrorKind::BadRequest`], an input that isn't a Spark
+    /// address and a zero amount. A separate method because the amount is
+    /// not sats: a bridge that predates it can't parse the request and drops
+    /// it, where a field on [`PrepareSendFromParams`] would be ignored and the
+    /// base units sent as sats.
+    PrepareUsdbSend(PrepareUsdbSendParams),
     /// Gracefully disconnect and exit the bridge.
     Shutdown,
 }
@@ -777,6 +791,16 @@ pub struct PrepareLnurlPayFromParams {
     pub pay_from: WalletAsset,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrepareUsdbSendParams {
+    /// A Spark address. Anything else is refused.
+    pub input: String,
+    /// What the recipient gets, in USDB base units. A decimal string on the
+    /// wire.
+    #[serde(with = "u128_dec")]
+    pub amount: u128,
+}
+
 /// A response envelope. Exactly one of `ok` / `err` is populated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
@@ -1055,7 +1079,8 @@ pub struct SwapOk {
     pub status: SwapStatus,
 }
 
-/// Result of [`Method::PrepareSendFrom`] and [`Method::PrepareLnurlPayFrom`].
+/// Result of [`Method::PrepareSendFrom`], [`Method::PrepareLnurlPayFrom`] and
+/// [`Method::PrepareUsdbSend`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareSendFromOk {
     /// The ordinary send preview. Its handle executes through
@@ -1084,8 +1109,9 @@ pub struct PrepareSendFromOk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversion: Option<Box<ConversionQuote>>,
     /// The token the send itself moves, when it is not bitcoin: a Spark
-    /// invoice that asks for USDB ([`ParseInputOk::usdb_invoice`]), paid
-    /// straight from the USDB balance with no conversion.
+    /// invoice that asks for USDB ([`ParseInputOk::usdb_invoice`]), or a
+    /// [`Method::PrepareUsdbSend`] to a Spark address, paid straight from the
+    /// USDB balance with no conversion.
     ///
     /// For such a send `prepare.amount_sat` and `prepare.fee_sat` are `0`:
     /// the SDK's figures are token base units, and this carries them with
@@ -1100,7 +1126,8 @@ pub struct PrepareSendFromOk {
 /// reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenPayment {
-    /// What the recipient is paid: the invoice's own amount.
+    /// What the recipient is paid: the invoice's own amount, or the one
+    /// asked for when sending to a Spark address.
     pub amount: AssetAmount,
     /// The SDK's fee for the transfer, in the same token.
     pub fee: AssetAmount,
@@ -2276,6 +2303,19 @@ mod tests {
                 }
             })
         );
+        assert_eq!(
+            request_json(
+                11,
+                Method::PrepareUsdbSend(PrepareUsdbSendParams {
+                    input: "spark1".into(),
+                    amount: 12_500_000,
+                })
+            ),
+            json!({
+                "type": "request", "id": 11, "method": "prepare_usdb_send",
+                "params": { "input": "spark1", "amount": "12500000" }
+            })
+        );
     }
 
     #[test]
@@ -2327,6 +2367,17 @@ mod tests {
         assert_eq!(p.amount_sat, 21);
         assert_eq!(p.comment, None);
         assert_eq!(p.pay_from, WalletAsset::Bitcoin);
+
+        let Method::PrepareUsdbSend(p) =
+            method_round_trip(Method::PrepareUsdbSend(PrepareUsdbSendParams {
+                input: "spark1".into(),
+                amount: BIG,
+            }))
+        else {
+            panic!("expected prepare_usdb_send");
+        };
+        assert_eq!(p.input, "spark1");
+        assert_eq!(p.amount, BIG);
 
         let Method::PrepareSendFrom(p) =
             method_round_trip(Method::PrepareSendFrom(PrepareSendFromParams {

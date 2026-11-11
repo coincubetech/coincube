@@ -3177,5 +3177,17 @@
   "▾  Advanced options": "▾  Opciones avanzadas",
   "⚠ Your password and phone descriptors are out of sync with your Vault.": "⚠ Los descriptores de tu contraseña y tu teléfono no coinciden con tu Vault.",
   "⚠ Your password descriptor is out of sync with your Vault.": "⚠ El descriptor de tu contraseña no coincide con tu Vault.",
-  "⚠ Your phone descriptor is out of sync with your Vault.": "⚠ El descriptor de tu teléfono no coincide con tu Vault."
+  "⚠ Your phone descriptor is out of sync with your Vault.": "⚠ El descriptor de tu teléfono no coincide con tu Vault.",
+  "Sign in to Connect to share with Keychain.": "Inicia sesión en Connect para compartir con Keychain.",
+  "Checking or updating the shared selection…": "Consultando o actualizando la selección compartida…",
+  "The shared selection changed. Refresh, then choose Share or Stop sharing again.": "La selección compartida ha cambiado. Actualiza y vuelve a elegir Compartir o Dejar de compartir.",
+  "Sharing changes are unavailable while Connect is locked.": "No se puede cambiar la selección compartida mientras Connect esté bloqueado.",
+  "Couldn’t confirm the shared selection. Refresh before trying again.": "No se pudo confirmar la selección compartida. Actualiza antes de volver a intentarlo.",
+  "Shared with Keychain": "Compartido con Keychain",
+  "No Worldview selection is shared with Keychain.": "No se ha compartido ninguna Visión de Bitcoin con Keychain.",
+  "Refresh to check the selection shared with Keychain.": "Actualiza para consultar la selección compartida con Keychain.",
+  "Share saved selection": "Compartir selección guardada",
+  "Stop sharing": "Dejar de compartir",
+  "Share with Keychain": "Compartir con Keychain",
+  "Share this device’s saved Worldview and artwork with Keychain on your Connect account.": "Comparte la Visión de Bitcoin y las ilustraciones guardadas en este dispositivo con Keychain en tu cuenta de Connect."
 }

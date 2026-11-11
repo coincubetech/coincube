@@ -91,6 +91,18 @@ def test_update_derivation_indexes(coincubed):
     assert ret["receive"] == 5
     assert ret["change"] == 6
 
+    # GUI Option<u32> arguments serialize absent updates as explicit nulls.
+    for receive, change in [(None, None), (None, 0), (0, None)]:
+        ret = coincubed.rpc.updatederivationindexes(receive, change)
+        assert ret["receive"] == 5
+        assert ret["change"] == 6
+        ret = coincubed.rpc.updatederivationindexes(receive=receive, change=change)
+        assert ret["receive"] == 5
+        assert ret["change"] == 6
+        info = coincubed.rpc.getinfo()
+        assert info["receive_index"] == 5
+        assert info["change_index"] == 6
+
     # Will explicitly error on invalid indexes
     with pytest.raises(
         RpcError,

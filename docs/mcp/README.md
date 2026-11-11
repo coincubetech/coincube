@@ -288,7 +288,32 @@ runs explicitly in the pinned platform CI jobs after building the companion bina
 ```sh
 cargo build -p coincube-mcp --features adapter --locked
 TENSHU_MCP_TEST_ADAPTER="$PWD/target/debug/tenshu-mcp" BREEZ_API_KEY=DUMMY_BREEZ_API_KEY cargo test -p coincube-gui --lib stdio_client_reads_real_wallet_and_observes_revocation -- --ignored
+TENSHU_MCP_TEST_ADAPTER="$PWD/target/debug/tenshu-mcp" BREEZ_API_KEY=DUMMY_BREEZ_API_KEY cargo test -p coincube-gui --lib stdio_acceptance_tests --locked -- --ignored --test-threads=1
 ```
+
+The preparation acceptance tests launch the actual companion with native
+Settings-issued persistent pairing configuration on every supported exact chain.
+Public-key creation crosses STDIO, native IPC, descriptor compilation, installer
+handoff and native review/admission. Unsigned transactions cross the same client
+and IPC boundaries, use the embedded SQLite wallet engine, and execute the native
+Review action into the Send panel. Both cover cross-chain/scope rejection,
+immutable retries, retrieval, locking and revocation. The blockchain backend and
+pairing wrapping key are synthetic. Creation stops before wallet installation;
+transaction review never saves a spend, signs or broadcasts. These automated
+client tests do not establish Maple/Claude UI, OS-keystore, hardware, real-node
+or signed-package acceptance. Pinned Linux, macOS and Windows CI run them explicitly.
+
+The shared test-only STDIO driver bounds initialization to ten seconds, replies
+to fifteen seconds (the native IPC deadline is ten), and EOF shutdown to five.
+It checks response identity and frame size, drains stderr, and reports the failed
+phase/request ID, child exit status, stderr byte count and a recognized fixed
+startup diagnostic without printing credentials or arbitrary process output.
+Set `TENSHU_MCP_TEST_TRACE=1` for per-request phase timing without tool arguments.
+The earlier three-second proposal response timeout was observed once in a smoke
+run and passed unchanged in isolated and complete-suite reruns; its cause was
+not established. The bounded driver adds diagnostic evidence and allows native
+preparation to finish within its existing deadline; it does not alter production
+transport timeouts or retry a failed operation automatically.
 
 ```sh
 BREEZ_API_KEY=DUMMY_BREEZ_API_KEY cargo test -p coincube-gui --lib app::local_mcp::tests

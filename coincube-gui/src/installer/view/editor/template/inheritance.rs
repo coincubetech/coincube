@@ -1,11 +1,11 @@
 use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::localized_format;
-use iced::{Alignment, Length};
+use iced::Alignment;
 
 use coincube_ui::{
     color,
     component::{
-        button, collapse,
+        collapse,
         text::{text, Text},
     },
     icon, theme,
@@ -13,7 +13,6 @@ use coincube_ui::{
 };
 
 use crate::installer::{
-    context,
     descriptor::{Path, PathKind, PathSequence},
     message::{self, Message},
     view::{
@@ -233,29 +232,7 @@ pub fn two_of_three_inheritance_template<'a>(
             .spacing(20),
         true,
         Some(Message::Previous),
-        Row::new()
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push(
-                button::secondary(None, localized_copy("Clear All"))
-                    .width(Length::Shrink)
-                    .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
-            )
-            .push(
-                button::secondary(None, localized_copy("Customize"))
-                    .width(Length::Shrink)
-                    .on_press(Message::DefineDescriptor(
-                        message::DefineDescriptor::ChangeTemplate(
-                            context::DescriptorTemplate::Custom,
-                        ),
-                    )),
-            )
-            .push(
-                button::primary(None, localized_copy("Continue"))
-                    .width(Length::Shrink)
-                    .on_press_maybe(if valid { Some(Message::Next) } else { None }),
-            )
-            .into(),
+        super::template_actions(valid, true),
     )
 }
 
@@ -358,28 +335,6 @@ pub fn inheritance_template<'a>(
             .spacing(20),
         true,
         Some(Message::Previous),
-        Row::new()
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .push(
-                button::secondary(None, localized_copy("Clear All"))
-                    .width(Length::Shrink)
-                    .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
-            )
-            .push(
-                button::secondary(None, localized_copy("Customize"))
-                    .width(Length::Shrink)
-                    .on_press(Message::DefineDescriptor(
-                        message::DefineDescriptor::ChangeTemplate(
-                            context::DescriptorTemplate::Custom,
-                        ),
-                    )),
-            )
-            .push(
-                button::primary(None, localized_copy("Continue"))
-                    .width(Length::Shrink)
-                    .on_press_maybe(if valid { Some(Message::Next) } else { None }),
-            )
-            .into(),
+        super::template_actions(valid, true),
     )
 }
