@@ -144,186 +144,12 @@ impl Step for RemoteBackendLogin {
     }
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
         match &mut self.step {
-            ConnectionStep::EnterEmail { email } => match message {
-                Message::SelectBackend(message::SelectBackend::EmailEdited(value)) => {
-                    email.valid = value.is_empty()
-                        || email_address::EmailAddress::parse_with_options(
-                            &value,
-                            email_address::Options::default().with_required_tld(),
-                        )
-                        .is_ok();
-                    email.value = value;
-                }
-                Message::SelectBackend(message::SelectBackend::ExistingConnectAccounts(
-                    accounts,
-                )) => {
-                    self.connect_accounts = accounts;
-                }
-                Message::SelectBackend(message::SelectBackend::SelectConnectAccount(email)) => {
-                    return Task::perform(
-                        connect_with_existing_account(
-                            email,
-                            self.network,
-                            self.network_dir.clone(),
-                        ),
-                        |msg| Message::SelectBackend(message::SelectBackend::Connected(msg)),
-                    )
-                }
-                Message::SelectBackend(message::SelectBackend::RequestOTP) => {
-                    if email.value.is_empty() {
-                        email.valid = false;
-                    } else if email.valid {
-                        let email = email.value.clone();
-                        let network = self.network;
-                        self.processing = true;
-                        self.connection_error = None;
-                        self.auth_error = None;
-                        return Task::perform(
-                            async move {
-                                let config =
-                                    client::get_service_config(network).await.map_err(|e| {
-                                        if e.status() == Some(reqwest::StatusCode::NOT_FOUND) {
-                                            Error::Unexpected(
-                                                "Remote servers are unresponsive".to_string(),
-                                            )
-                                        } else {
-                                            Error::Unexpected(e.to_string())
-                                        }
-                                    })?;
-                                let client = AuthClient::new(
-                                    config.auth_api_url,
-                                    config.auth_api_public_key,
-                                    email,
-                                );
-                                client.sign_in_otp().await?;
-                                Ok((client, config.backend_api_url))
-                            },
-                            |res| Message::SelectBackend(message::SelectBackend::OTPRequested(res)),
-                        );
-                    }
-                }
-                Message::SelectBackend(message::SelectBackend::OTPRequested(res)) => {
-                    self.processing = false;
-                    match res {
-                        Ok((client, backend_api_url)) => {
-                            self.step = ConnectionStep::EnterOtp {
-                                email: email.value.to_owned(),
-                                otp: form::Value::default(),
-                                client,
-                                backend_api_url,
-                            };
-                        }
-                        Err(e) => {
-                            self.connection_error = Some(e);
-                        }
-                    }
-                }
-                Message::SelectBackend(message::SelectBackend::Connected(res)) => {
-                    self.processing = false;
-                    match res {
-                        Ok(remote_backend) => {
-                            self.step = ConnectionStep::Connected {
-                                email: remote_backend
-                                    .user_email()
-                                    .expect("Gui connected to Coincube backend")
-                                    .to_string(),
-                                remote_backend,
-                            };
-                            return Task::perform(async move {}, |_| Message::Next);
-                        }
-                        Err(e) => {
-                            if let Error::Auth(AuthError { http_status, .. }) = e {
-                                if http_status == Some(403) {
-                                    self.auth_error = Some("Token has expired or is invalid")
-                                } else {
-                                    self.connection_error = Some(e);
-                                }
-                            } else {
-                                self.connection_error = Some(e);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            },
-            ConnectionStep::EnterOtp {
-                client,
-                email,
-                otp,
-                backend_api_url,
-            } => match message {
-                Message::SelectBackend(message::SelectBackend::EditEmail) => {
-                    self.step = ConnectionStep::EnterEmail {
-                        email: form::Value {
-                            value: email.clone(),
-                            warning: None,
-                            valid: true,
-                        },
-                    };
-                }
-                Message::SelectBackend(message::SelectBackend::RequestOTP) => {
-                    *otp = form::Value::default();
-                    let client = client.clone();
-                    self.processing = true;
-                    self.connection_error = None;
-                    self.auth_error = None;
-                    return Task::perform(
-                        async move {
-                            client.resend_otp().await?;
-                            Ok(())
-                        },
-                        message::SelectBackend::OTPResent,
-                    )
-                    .map(Message::SelectBackend);
-                }
-                Message::SelectBackend(message::SelectBackend::OTPResent(res)) => {
-                    self.processing = false;
-                    if let Err(e) = res {
-                        self.connection_error = Some(e);
-                    }
-                }
-                Message::SelectBackend(message::SelectBackend::OTPEdited(value)) => {
-                    otp.value = value.trim().to_string();
-                    if otp.value.len() == 6 {
-                        let client = client.clone();
-                        let otp = otp.value.clone();
-                        let backend_api_url = backend_api_url.clone();
-                        self.processing = true;
-                        self.connection_error = None;
-                        self.auth_error = None;
-                        let network = self.network;
-                        return Task::perform(
-                            async move { connect(client, otp, backend_api_url, network).await },
-                            message::SelectBackend::Connected,
-                        )
-                        .map(Message::SelectBackend);
-                    }
-                }
-                Message::SelectBackend(message::SelectBackend::Connected(res)) => {
-                    self.processing = false;
-                    match res {
-                        Ok(remote_backend) => {
-                            self.step = ConnectionStep::Connected {
-                                email: email.clone(),
-                                remote_backend,
-                            };
-                            return Task::perform(async move {}, |_| Message::Next);
-                        }
-                        Err(e) => {
-                            if let Error::Auth(AuthError { http_status, .. }) = e {
-                                if http_status == Some(403) {
-                                    self.auth_error = Some("Token has expired or is invalid")
-                                } else {
-                                    self.connection_error = Some(e);
-                                }
-                            } else {
-                                self.connection_error = Some(e);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            },
+            ConnectionStep::EnterEmail { .. } => {
+                return self.update_login_email(message);
+            }
+            ConnectionStep::EnterOtp { .. } => {
+                return self.update_login_otp(message);
+            }
             ConnectionStep::Connected { .. } => {
                 if let Message::SelectBackend(message::SelectBackend::EditEmail) = message {
                     self.step = ConnectionStep::EnterEmail {
@@ -544,38 +370,8 @@ impl Step for ImportRemoteWallet {
                     self.modal = ImportDescriptorModal::None;
                 }
             }
-            Message::Decrypt(Decrypt::Backup(mut backup)) => {
-                if !matches!(backup.chain_identity(), Ok(chain) if !chain.is_blake2b()) {
-                    self.modal = ImportDescriptorModal::None;
-                    self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
-                    return Task::none();
-                }
-                let descriptor = backup.accounts.first().map(|acc| acc.descriptor.clone());
-                if let Some(desc) = descriptor {
-                    let network_matches = if self.network == Network::Bitcoin {
-                        backup.network == Network::Bitcoin
-                    } else {
-                        backup.network != Network::Bitcoin
-                    };
-                    if network_matches {
-                        // NOTE: we need to overwrite w/ correct network for testnets
-                        // as non Mainnet keys / descriptor are parsed as Signet
-                        backup.network = self.network;
-
-                        // NOTE: a check that the descriptor is a valid CoincubeDescriptor have
-                        // already been processed at backup import.
-                        self.descriptor = CoincubeDescriptor::from_str(&desc).ok();
-                        self.imported_descriptor.value = desc;
-                        self.modal = ImportDescriptorModal::None;
-                        return Task::perform(async {}, |_| Message::Next);
-                    } else {
-                        self.modal = ImportDescriptorModal::None;
-                        self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
-                    }
-                } else {
-                    self.modal = ImportDescriptorModal::None;
-                    self.error = Some("Backup imported but descriptor missing!".into());
-                }
+            Message::Decrypt(Decrypt::Backup(backup)) => {
+                return self.import_decrypted_backup(backup);
             }
             Message::Decrypt(m) => {
                 if let ImportDescriptorModal::Decrypt(modal) = &mut self.modal {
@@ -583,41 +379,10 @@ impl Step for ImportRemoteWallet {
                 }
             }
             Message::ImportRemoteWallet(message::ImportRemoteWallet::ImportDescriptor(desc)) => {
-                self.imported_descriptor.value = desc;
-                if !self.imported_descriptor.value.is_empty() {
-                    if let Ok(desc) = CoincubeDescriptor::from_str(&self.imported_descriptor.value)
-                    {
-                        if self.network == Network::Bitcoin {
-                            self.imported_descriptor.valid = desc.all_xpubs_net_is(self.network);
-                        } else {
-                            self.imported_descriptor.valid =
-                                desc.all_xpubs_net_is(Network::Testnet);
-                        }
-                    } else {
-                        self.imported_descriptor.valid = false;
-                    }
-                } else {
-                    self.imported_descriptor.valid = false;
-                }
+                return self.edit_imported_descriptor(desc);
             }
             Message::ImportRemoteWallet(message::ImportRemoteWallet::ConfirmDescriptor) => {
-                if let Ok(desc) = CoincubeDescriptor::from_str(&self.imported_descriptor.value) {
-                    if self.network == Network::Bitcoin {
-                        self.imported_descriptor.valid = desc.all_xpubs_net_is(self.network);
-                    } else {
-                        self.imported_descriptor.valid = desc.all_xpubs_net_is(Network::Testnet);
-                    }
-                    if self.imported_descriptor.valid {
-                        if let context::RemoteBackend::WithWallet(backend) = self.backend.clone() {
-                            self.backend =
-                                context::RemoteBackend::WithoutWallet(backend.into_inner());
-                        }
-                        self.descriptor = Some(desc);
-                        return Task::perform(async {}, |_| Message::Next);
-                    }
-                } else {
-                    self.imported_descriptor.valid = false;
-                }
+                return self.confirm_imported_descriptor();
             }
             Message::ImportRemoteWallet(message::ImportRemoteWallet::RemoteWallets(res)) => {
                 match res {
@@ -631,24 +396,7 @@ impl Step for ImportRemoteWallet {
                 self.invitation_token.value = token;
             }
             Message::ImportRemoteWallet(message::ImportRemoteWallet::FetchInvitation) => {
-                let backend = match self.backend.clone() {
-                    context::RemoteBackend::WithoutWallet(b) => b,
-                    context::RemoteBackend::WithWallet(b) => b.into_inner(),
-                    _ => unreachable!("Must be a remote backend at this point"),
-                };
-                let token = self.invitation_token.value.clone();
-                self.error = None;
-                return Task::perform(
-                    async move {
-                        let invitation = backend.get_wallet_invitation(&token).await?;
-                        Ok(invitation)
-                    },
-                    |res| {
-                        Message::ImportRemoteWallet(message::ImportRemoteWallet::InvitationFetched(
-                            res,
-                        ))
-                    },
-                );
+                return self.fetch_invitation();
             }
             Message::ImportRemoteWallet(message::ImportRemoteWallet::InvitationFetched(res)) => {
                 match res {
@@ -657,33 +405,7 @@ impl Step for ImportRemoteWallet {
                 }
             }
             Message::ImportRemoteWallet(message::ImportRemoteWallet::AcceptInvitation) => {
-                let backend = match self.backend.clone() {
-                    context::RemoteBackend::WithoutWallet(b) => b,
-                    context::RemoteBackend::WithWallet(b) => b.into_inner(),
-                    _ => unreachable!("Must be a remote backend defined"),
-                };
-                let invitation = self.invitation.clone().expect("Invitation was fetched");
-                self.error = None;
-                return Task::perform(
-                    async move {
-                        backend.accept_wallet_invitation(&invitation.id).await?;
-                        let wallets = backend.list_wallets().await?;
-                        wallets
-                            .into_iter()
-                            .find(|w| w.id == invitation.wallet_id)
-                            .ok_or(
-                                DaemonError::Unexpected(
-                                    "Wallet of accepted invitation not found".to_string(),
-                                )
-                                .into(),
-                            )
-                    },
-                    |res| {
-                        Message::ImportRemoteWallet(
-                            message::ImportRemoteWallet::InvitationAccepted(res),
-                        )
-                    },
-                );
+                return self.accept_invitation();
             }
             Message::ImportRemoteWallet(message::ImportRemoteWallet::InvitationAccepted(res)) => {
                 match res {
@@ -696,27 +418,7 @@ impl Step for ImportRemoteWallet {
                 }
             }
             Message::Select(i) => {
-                if let Some(wallet) = self.wallets.get(i).cloned() {
-                    self.wallet_alias = wallet.metadata.wallet_alias.clone();
-                    self.backend = match self.backend.clone() {
-                        context::RemoteBackend::WithoutWallet(backend) => {
-                            context::RemoteBackend::WithWallet(
-                                backend.connect_wallet(wallet.clone()).0,
-                            )
-                        }
-                        context::RemoteBackend::WithWallet(backend) => {
-                            context::RemoteBackend::WithWallet(
-                                backend.into_inner().connect_wallet(wallet.clone()).0,
-                            )
-                        }
-                        context::RemoteBackend::None => context::RemoteBackend::None,
-                        context::RemoteBackend::Undefined => context::RemoteBackend::Undefined,
-                    };
-                    // ensure that no descriptor is imported.
-                    self.imported_descriptor = form::Value::default();
-                    self.descriptor = Some(wallet.descriptor);
-                    return Task::perform(async {}, |_| Message::Next);
-                }
+                return self.select_remote_wallet(i);
             }
             _ => {}
         }
@@ -768,6 +470,341 @@ impl Step for ImportRemoteWallet {
 impl From<ImportRemoteWallet> for Box<dyn Step> {
     fn from(s: ImportRemoteWallet) -> Box<dyn Step> {
         Box::new(s)
+    }
+}
+
+impl ImportRemoteWallet {
+    fn import_decrypted_backup(&mut self, mut backup: crate::backup::Backup) -> Task<Message> {
+        if !matches!(backup.chain_identity(), Ok(chain) if !chain.is_blake2b()) {
+            self.modal = ImportDescriptorModal::None;
+            self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
+            return Task::none();
+        }
+        let descriptor = backup.accounts.first().map(|acc| acc.descriptor.clone());
+        if let Some(desc) = descriptor {
+            let network_matches = if self.network == Network::Bitcoin {
+                backup.network == Network::Bitcoin
+            } else {
+                backup.network != Network::Bitcoin
+            };
+            if network_matches {
+                // NOTE: we need to overwrite w/ correct network for testnets
+                // as non Mainnet keys / descriptor are parsed as Signet
+                backup.network = self.network;
+
+                // NOTE: a check that the descriptor is a valid CoincubeDescriptor have
+                // already been processed at backup import.
+                self.descriptor = CoincubeDescriptor::from_str(&desc).ok();
+                self.imported_descriptor.value = desc;
+                self.modal = ImportDescriptorModal::None;
+                return Task::perform(async {}, |_| Message::Next);
+            } else {
+                self.modal = ImportDescriptorModal::None;
+                self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
+            }
+        } else {
+            self.modal = ImportDescriptorModal::None;
+            self.error = Some("Backup imported but descriptor missing!".into());
+        }
+
+        Task::none()
+    }
+    fn edit_imported_descriptor(&mut self, desc: String) -> Task<Message> {
+        self.imported_descriptor.value = desc;
+        if !self.imported_descriptor.value.is_empty() {
+            if let Ok(desc) = CoincubeDescriptor::from_str(&self.imported_descriptor.value) {
+                if self.network == Network::Bitcoin {
+                    self.imported_descriptor.valid = desc.all_xpubs_net_is(self.network);
+                } else {
+                    self.imported_descriptor.valid = desc.all_xpubs_net_is(Network::Testnet);
+                }
+            } else {
+                self.imported_descriptor.valid = false;
+            }
+        } else {
+            self.imported_descriptor.valid = false;
+        }
+
+        Task::none()
+    }
+    fn confirm_imported_descriptor(&mut self) -> Task<Message> {
+        if let Ok(desc) = CoincubeDescriptor::from_str(&self.imported_descriptor.value) {
+            if self.network == Network::Bitcoin {
+                self.imported_descriptor.valid = desc.all_xpubs_net_is(self.network);
+            } else {
+                self.imported_descriptor.valid = desc.all_xpubs_net_is(Network::Testnet);
+            }
+            if self.imported_descriptor.valid {
+                if let context::RemoteBackend::WithWallet(backend) = self.backend.clone() {
+                    self.backend = context::RemoteBackend::WithoutWallet(backend.into_inner());
+                }
+                self.descriptor = Some(desc);
+                return Task::perform(async {}, |_| Message::Next);
+            }
+        } else {
+            self.imported_descriptor.valid = false;
+        }
+
+        Task::none()
+    }
+}
+
+impl RemoteBackendLogin {
+    fn request_login_otp(&mut self) -> Task<Message> {
+        let ConnectionStep::EnterEmail { email } = &mut self.step else {
+            return Task::none();
+        };
+
+        if email.value.is_empty() {
+            email.valid = false;
+        } else if email.valid {
+            let email = email.value.clone();
+            let network = self.network;
+            self.processing = true;
+            self.connection_error = None;
+            self.auth_error = None;
+            return Task::perform(
+                async move {
+                    let config = client::get_service_config(network).await.map_err(|e| {
+                        if e.status() == Some(reqwest::StatusCode::NOT_FOUND) {
+                            Error::Unexpected("Remote servers are unresponsive".to_string())
+                        } else {
+                            Error::Unexpected(e.to_string())
+                        }
+                    })?;
+                    let client =
+                        AuthClient::new(config.auth_api_url, config.auth_api_public_key, email);
+                    client.sign_in_otp().await?;
+                    Ok((client, config.backend_api_url))
+                },
+                |res| Message::SelectBackend(message::SelectBackend::OTPRequested(res)),
+            );
+        }
+
+        Task::none()
+    }
+    fn record_connection_error(&mut self, e: Error) {
+        if let Error::Auth(AuthError { http_status, .. }) = e {
+            if http_status == Some(403) {
+                self.auth_error = Some("Token has expired or is invalid")
+            } else {
+                self.connection_error = Some(e);
+            }
+        } else {
+            self.connection_error = Some(e);
+        }
+    }
+    fn update_login_email(&mut self, message: Message) -> Task<Message> {
+        let ConnectionStep::EnterEmail { email } = &mut self.step else {
+            return Task::none();
+        };
+        match message {
+            Message::SelectBackend(message::SelectBackend::EmailEdited(value)) => {
+                email.valid = value.is_empty()
+                    || email_address::EmailAddress::parse_with_options(
+                        &value,
+                        email_address::Options::default().with_required_tld(),
+                    )
+                    .is_ok();
+                email.value = value;
+            }
+            Message::SelectBackend(message::SelectBackend::ExistingConnectAccounts(accounts)) => {
+                self.connect_accounts = accounts;
+            }
+            Message::SelectBackend(message::SelectBackend::SelectConnectAccount(email)) => {
+                return Task::perform(
+                    connect_with_existing_account(email, self.network, self.network_dir.clone()),
+                    |msg| Message::SelectBackend(message::SelectBackend::Connected(msg)),
+                )
+            }
+            Message::SelectBackend(message::SelectBackend::RequestOTP) => {
+                return self.request_login_otp();
+            }
+            Message::SelectBackend(message::SelectBackend::OTPRequested(res)) => {
+                self.processing = false;
+                match res {
+                    Ok((client, backend_api_url)) => {
+                        self.step = ConnectionStep::EnterOtp {
+                            email: email.value.to_owned(),
+                            otp: form::Value::default(),
+                            client,
+                            backend_api_url,
+                        };
+                    }
+                    Err(e) => {
+                        self.connection_error = Some(e);
+                    }
+                }
+            }
+            Message::SelectBackend(message::SelectBackend::Connected(res)) => {
+                self.processing = false;
+                match res {
+                    Ok(remote_backend) => {
+                        self.step = ConnectionStep::Connected {
+                            email: remote_backend
+                                .user_email()
+                                .expect("Gui connected to Coincube backend")
+                                .to_string(),
+                            remote_backend,
+                        };
+                        return Task::perform(async move {}, |_| Message::Next);
+                    }
+                    Err(e) => {
+                        self.record_connection_error(e);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Task::none()
+    }
+    fn update_login_otp(&mut self, message: Message) -> Task<Message> {
+        let ConnectionStep::EnterOtp {
+            client,
+            email,
+            otp,
+            backend_api_url,
+        } = &mut self.step
+        else {
+            return Task::none();
+        };
+        match message {
+            Message::SelectBackend(message::SelectBackend::EditEmail) => {
+                self.step = ConnectionStep::EnterEmail {
+                    email: form::Value {
+                        value: email.clone(),
+                        warning: None,
+                        valid: true,
+                    },
+                };
+            }
+            Message::SelectBackend(message::SelectBackend::RequestOTP) => {
+                *otp = form::Value::default();
+                let client = client.clone();
+                self.processing = true;
+                self.connection_error = None;
+                self.auth_error = None;
+                return Task::perform(
+                    async move {
+                        client.resend_otp().await?;
+                        Ok(())
+                    },
+                    message::SelectBackend::OTPResent,
+                )
+                .map(Message::SelectBackend);
+            }
+            Message::SelectBackend(message::SelectBackend::OTPResent(res)) => {
+                self.processing = false;
+                if let Err(e) = res {
+                    self.connection_error = Some(e);
+                }
+            }
+            Message::SelectBackend(message::SelectBackend::OTPEdited(value)) => {
+                otp.value = value.trim().to_string();
+                if otp.value.len() == 6 {
+                    let client = client.clone();
+                    let otp = otp.value.clone();
+                    let backend_api_url = backend_api_url.clone();
+                    self.processing = true;
+                    self.connection_error = None;
+                    self.auth_error = None;
+                    let network = self.network;
+                    return Task::perform(
+                        async move { connect(client, otp, backend_api_url, network).await },
+                        message::SelectBackend::Connected,
+                    )
+                    .map(Message::SelectBackend);
+                }
+            }
+            Message::SelectBackend(message::SelectBackend::Connected(res)) => {
+                self.processing = false;
+                match res {
+                    Ok(remote_backend) => {
+                        self.step = ConnectionStep::Connected {
+                            email: email.clone(),
+                            remote_backend,
+                        };
+                        return Task::perform(async move {}, |_| Message::Next);
+                    }
+                    Err(e) => {
+                        self.record_connection_error(e);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Task::none()
+    }
+}
+
+impl ImportRemoteWallet {
+    fn select_remote_wallet(&mut self, i: usize) -> Task<Message> {
+        if let Some(wallet) = self.wallets.get(i).cloned() {
+            self.wallet_alias = wallet.metadata.wallet_alias.clone();
+            self.backend = match self.backend.clone() {
+                context::RemoteBackend::WithoutWallet(backend) => {
+                    context::RemoteBackend::WithWallet(backend.connect_wallet(wallet.clone()).0)
+                }
+                context::RemoteBackend::WithWallet(backend) => context::RemoteBackend::WithWallet(
+                    backend.into_inner().connect_wallet(wallet.clone()).0,
+                ),
+                context::RemoteBackend::None => context::RemoteBackend::None,
+                context::RemoteBackend::Undefined => context::RemoteBackend::Undefined,
+            };
+            // ensure that no descriptor is imported.
+            self.imported_descriptor = form::Value::default();
+            self.descriptor = Some(wallet.descriptor);
+            return Task::perform(async {}, |_| Message::Next);
+        }
+
+        Task::none()
+    }
+}
+
+impl ImportRemoteWallet {
+    fn fetch_invitation(&mut self) -> Task<Message> {
+        let backend = match self.backend.clone() {
+            context::RemoteBackend::WithoutWallet(b) => b,
+            context::RemoteBackend::WithWallet(b) => b.into_inner(),
+            _ => unreachable!("Must be a remote backend at this point"),
+        };
+        let token = self.invitation_token.value.clone();
+        self.error = None;
+        Task::perform(
+            async move {
+                let invitation = backend.get_wallet_invitation(&token).await?;
+                Ok(invitation)
+            },
+            |res| Message::ImportRemoteWallet(message::ImportRemoteWallet::InvitationFetched(res)),
+        )
+    }
+}
+
+impl ImportRemoteWallet {
+    fn accept_invitation(&mut self) -> Task<Message> {
+        let backend = match self.backend.clone() {
+            context::RemoteBackend::WithoutWallet(b) => b,
+            context::RemoteBackend::WithWallet(b) => b.into_inner(),
+            _ => unreachable!("Must be a remote backend defined"),
+        };
+        let invitation = self.invitation.clone().expect("Invitation was fetched");
+        self.error = None;
+        Task::perform(
+            async move {
+                backend.accept_wallet_invitation(&invitation.id).await?;
+                let wallets = backend.list_wallets().await?;
+                wallets
+                    .into_iter()
+                    .find(|w| w.id == invitation.wallet_id)
+                    .ok_or(
+                        DaemonError::Unexpected(
+                            "Wallet of accepted invitation not found".to_string(),
+                        )
+                        .into(),
+                    )
+            },
+            |res| Message::ImportRemoteWallet(message::ImportRemoteWallet::InvitationAccepted(res)),
+        )
     }
 }
 

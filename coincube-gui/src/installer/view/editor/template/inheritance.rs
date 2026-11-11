@@ -199,27 +199,12 @@ pub fn two_of_three_inheritance_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(i, primary_key)| {
-                            if let Some(key) = primary_key {
-                                defined_key(
-                                    &key.name,
-                                    color::GREEN,
-                                    format!("Primary key #{}", i + 1),
-                                    if use_taproot && !key.source.is_compatible_taproot() {
-                                        Some("This device does not support Taproot")
-                                    } else {
-                                        None
-                                    },
-                                    true,
-                                )
-                            } else {
-                                undefined_key(
-                                    color::GREEN,
-                                    format!("Primary key #{}", i + 1),
-                                    !primary_path.keys[0..i].iter().any(|k| k.is_none()),
-                                    true,
-                                )
-                            }
-                            .map(move |msg| message::DefinePath::Key(i, msg))
+                            crate::installer::view::editor::template_primary_key(
+                                i,
+                                primary_key,
+                                use_taproot,
+                                primary_path,
+                            )
                         })
                         .collect(),
                     true,
@@ -247,28 +232,13 @@ pub fn two_of_three_inheritance_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(i, inh_key)| {
-                            if let Some(key) = inh_key {
-                                defined_key(
-                                    &key.name,
-                                    color::BLUE,
-                                    "Inheritance key".to_string(),
-                                    if use_taproot && !key.source.is_compatible_taproot() {
-                                        Some("This device does not support Taproot")
-                                    } else {
-                                        None
-                                    },
-                                    true,
-                                )
-                            } else {
-                                undefined_key(
-                                    color::BLUE,
-                                    "Inheritance key",
-                                    !(primary_path.keys.iter().any(|k| k.is_none())
-                                        || inheritance_path.keys[0..i].iter().any(|k| k.is_none())),
-                                    true,
-                                )
-                            }
-                            .map(move |msg| message::DefinePath::Key(i, msg))
+                            two_of_three_inheritance_template_inh_key(
+                                i,
+                                inh_key,
+                                use_taproot,
+                                primary_path,
+                                inheritance_path,
+                            )
                         })
                         .collect(),
                     true,
@@ -371,11 +341,7 @@ pub fn inheritance_template<'a>(
                             &key.name,
                             color::GREEN,
                             "Primary key".to_string(),
-                            if use_taproot && !key.source.is_compatible_taproot() {
-                                Some("This device does not support Taproot")
-                            } else {
-                                None
-                            },
+                            crate::installer::view::editor::template_key_warning(use_taproot, key),
                             true,
                         )
                     } else {
@@ -398,11 +364,7 @@ pub fn inheritance_template<'a>(
                             &key.name,
                             color::BLUE,
                             "Inheritance key".to_string(),
-                            if use_taproot && !key.source.is_compatible_taproot() {
-                                Some("This device does not support Taproot")
-                            } else {
-                                None
-                            },
+                            crate::installer::view::editor::template_key_warning(use_taproot, key),
                             true,
                         )
                     } else {
@@ -442,4 +404,31 @@ pub fn inheritance_template<'a>(
         true,
         Some(Message::Previous),
     )
+}
+
+fn two_of_three_inheritance_template_inh_key<'a>(
+    i: usize,
+    inh_key: &'a Option<crate::installer::descriptor::Key>,
+    use_taproot: bool,
+    primary_path: &'a Path,
+    inheritance_path: &'a Path,
+) -> Element<'a, message::DefinePath> {
+    if let Some(key) = inh_key {
+        defined_key(
+            &key.name,
+            color::BLUE,
+            "Inheritance key".to_string(),
+            crate::installer::view::editor::template_key_warning(use_taproot, key),
+            true,
+        )
+    } else {
+        undefined_key(
+            color::BLUE,
+            "Inheritance key",
+            !(primary_path.keys.iter().any(|k| k.is_none())
+                || inheritance_path.keys[0..i].iter().any(|k| k.is_none())),
+            true,
+        )
+    }
+    .map(move |msg| message::DefinePath::Key(i, msg))
 }

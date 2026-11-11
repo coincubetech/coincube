@@ -94,6 +94,18 @@ pub(crate) fn migrate_esplora_config(path: &Path) -> std::io::Result<bool> {
         return Ok(false);
     };
 
+    if promote_esplora_providers(esplora, network, touched_poll_interval) {
+        write_back(path, &value)
+    } else {
+        Ok(false)
+    }
+}
+
+fn promote_esplora_providers(
+    esplora: &mut toml::Table,
+    network: Network,
+    touched_poll_interval: bool,
+) -> bool {
     let connect = super::connect_url(network);
     let mempool = super::public_esplora_url(network);
 
@@ -166,7 +178,7 @@ pub(crate) fn migrate_esplora_config(path: &Path) -> std::io::Result<bool> {
         // and leave nothing in the middle slot, which is no better
         // than what we started with.
         let Some(blockstream) = public_fallback else {
-            return Ok(false);
+            return false;
         };
         let fallback_token = esplora
             .get("fallback_token")
@@ -194,13 +206,10 @@ pub(crate) fn migrate_esplora_config(path: &Path) -> std::io::Result<bool> {
         // Customised, already three-tier, or some other shape — the
         // provider chain itself doesn't need rewriting. Still flush
         // if we bumped the poll interval up above.
-        if touched_poll_interval {
-            return write_back(path, &value);
-        }
-        return Ok(false);
+        return touched_poll_interval;
     }
 
-    write_back(path, &value)
+    true
 }
 
 /// Bump `bitcoin_config.poll_interval_secs` to

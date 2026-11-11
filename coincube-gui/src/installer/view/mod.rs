@@ -289,6 +289,7 @@ pub fn import_descriptor<'a>(
 ) -> Element<'a, Message> {
     let valid = !imported_descriptor.value.is_empty() && imported_descriptor.valid;
 
+    let can_import_backup = !valid && !imported_backup;
     let col_descriptor = Column::new()
         .push(text("Descriptor:").bold())
         .push(Space::new().height(10))
@@ -311,7 +312,7 @@ pub fn import_descriptor<'a>(
         Some(col_descriptor)
     };
 
-    let or = if !valid && !imported_backup {
+    let or = if can_import_backup {
         Some(
             Row::new()
                 .push(text("or").bold())
@@ -321,7 +322,7 @@ pub fn import_descriptor<'a>(
         None
     };
 
-    let import_backup = if !valid && !imported_backup {
+    let import_backup = if can_import_backup {
         Some(
             Row::new()
                 .push(button::primary(None, "Import backup").on_press(Message::ImportBackup))
@@ -663,32 +664,7 @@ fn display_policy(
             } else {
                 text("by")
             })
-            .push(
-                primary_keys
-                    .iter()
-                    .enumerate()
-                    .fold(Row::new().spacing(5), |row, (i, k)| {
-                        let content = if let Some(key) = keys.get(k) {
-                            Container::new(
-                                iced_tooltip::Tooltip::new(
-                                    text(key.name.clone()).bold(),
-                                    text(k.to_string()),
-                                    iced_tooltip::Position::Bottom,
-                                )
-                                .style(theme::card::simple),
-                            )
-                        } else {
-                            Container::new(text(format!("[{}]", k)).bold())
-                        };
-                        if primary_keys.len() == 1 || i == primary_keys.len() - 1 {
-                            row.push(content)
-                        } else if i <= primary_keys.len() - 2 {
-                            row.push(content).push(text("and"))
-                        } else {
-                            row.push(content).push(text(","))
-                        }
-                    }),
-            )
+            .push(policy_key_row(&primary_keys, keys))
             .push(text("can always spend this wallet's funds (Primary path)")),
     );
     for (i, (sequence, recovery_path)) in recovery_paths.iter().enumerate() {
@@ -712,30 +688,7 @@ fn display_policy(
                 } else {
                     text("by")
                 })
-                .push(recovery_keys.iter().enumerate().fold(
-                    Row::new().spacing(5),
-                    |row, (i, k)| {
-                        let content = if let Some(key) = keys.get(k) {
-                            Container::new(
-                                iced_tooltip::Tooltip::new(
-                                    text(key.name.clone()).bold(),
-                                    text(k.to_string()),
-                                    iced_tooltip::Position::Bottom,
-                                )
-                                .style(theme::card::simple),
-                            )
-                        } else {
-                            Container::new(text(format!("[{}]", k)).bold())
-                        };
-                        if recovery_keys.len() == 1 || i == recovery_keys.len() - 1 {
-                            row.push(content)
-                        } else if i <= recovery_keys.len() - 2 {
-                            row.push(content).push(text("and"))
-                        } else {
-                            row.push(content).push(text(","))
-                        }
-                    },
-                ))
+                .push(policy_key_row(&recovery_keys, keys))
                 .push(text("can spend coins inliquid for"))
                 .push(
                     text(format!(
@@ -846,43 +799,7 @@ pub fn define_bitcoin_node<'a>(
             ),
         )
         .push(node_view)
-        .push(if waiting_for_ping_result {
-            Some(Container::new(
-                Row::new()
-                    .spacing(10)
-                    .align_y(Alignment::Center)
-                    .push(text("Checking connection...")),
-            ))
-        } else if is_running.is_some() {
-            is_running.map(|res| {
-                if res.is_ok() {
-                    Container::new(
-                        Row::new()
-                            .spacing(10)
-                            .align_y(Alignment::Center)
-                            .push(icon::square_check_icon().style(theme::text::success))
-                            .push(text("Connection checked").style(theme::text::success)),
-                    )
-                } else {
-                    let detail = match res {
-                        Ok(_) => String::new(),
-                        Err(e) => e.to_string(),
-                    };
-                    Container::new(
-                        Row::new()
-                            .spacing(10)
-                            .align_y(Alignment::Center)
-                            .push(icon::square_cross_icon().style(theme::text::error))
-                            .push(
-                                text(format!("Connection failed: {detail}"))
-                                    .style(theme::text::error),
-                            ),
-                    )
-                }
-            })
-        } else {
-            Some(Container::new(Space::new().height(Length::Fixed(21.0))))
-        })
+        .push(node_connection_status(waiting_for_ping_result, is_running))
         .push(
             Row::new()
                 .spacing(10)
@@ -1437,35 +1354,13 @@ pub fn select_bitcoind_type<'a>(
     existing_flavor: Option<crate::node::bitcoind::NodeFlavor>,
     local_available: bool,
 ) -> Element<'a, Message> {
-    use crate::chain::ChainIdExt;
     if chain.is_blake2b() {
-        let chain_name = chain.label();
-        let mut choices = Column::new().spacing(20).max_width(620);
-        if connect_authenticated || !local_available {
-            choices = choices
-                .push(text("Use COINCUBE | Connect").bold())
-                .push(text(format!("Use the hosted {chain_name} node while a local node syncs, or use Connect alone.")))
-                .push(checkbox(install_node).label("Also install a pruned node on my device").on_toggle(|_| Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleInstallNode)))
-                .push(button::primary(None, "Use Connect").on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ContinueWithConnect)));
-        }
-        if local_available {
-            choices = choices
-            .push(text("Install a local pruned node").bold())
-            .push(text(format!("Run Bitcoin Knots for {chain_name} in an isolated data directory. No Connect account is required. Your node must finish syncing before the Vault can be created.")))
-            .push(button::secondary(None, "Use a local node").on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseExternal(false))));
-        }
-        let content = Container::new(choices).padding(30);
-        return layout(
+        return select_fork_node_type(
             progress,
-            None,
-            if chain == crate::chain::ChainId::BitcoinBlake2b {
-                "Bitcoin Blake2b node management"
-            } else {
-                "Bitcoin Blake2b Testnet4 node management"
-            },
-            content,
-            true,
-            Some(Message::Previous),
+            chain,
+            install_node,
+            connect_authenticated,
+            local_available,
         );
     }
     let network = chain.bitcoin_network();
@@ -1859,53 +1754,13 @@ pub fn start_internal_bitcoind<'a>(
     // resources (prune target + mempool cap) before the node is configured — the
     // chosen values are threaded into `DefineConfig` (this same step).
     if !flavor_confirmed {
-        let adv_label = if show_advanced {
-            "▾  Advanced options"
-        } else {
-            "▸  Advanced options"
-        };
-        let mut col = Column::new()
-            .spacing(25)
-            .push(node_flavor_selector(flavor, existing_flavor, |flavor| {
-                Message::InternalBitcoind(message::InternalBitcoindMsg::SelectFlavor(flavor))
-            }))
-            .push(
-                button::transparent(None, adv_label).on_press(Message::InternalBitcoind(
-                    message::InternalBitcoindMsg::ToggleAdvanced,
-                )),
-            );
-        if show_advanced {
-            col = col.push(card::simple(node_resources_controls(
-                prune,
-                max_mempool,
-                |v| Message::InternalBitcoind(message::InternalBitcoindMsg::PruneEdited(v)),
-                |v| Message::InternalBitcoind(message::InternalBitcoindMsg::MaxMempoolEdited(v)),
-                Message::InternalBitcoind(message::InternalBitcoindMsg::SmallComputerPreset),
-                Message::InternalBitcoind(message::InternalBitcoindMsg::RegularComputerPreset),
-            )));
-        }
-        col = col.push(
-            Row::new().push(
-                button::secondary(None, "Download & start")
-                    .width(Length::Fixed(220.0))
-                    .on_press(Message::InternalBitcoind(
-                        message::InternalBitcoindMsg::ConfirmFlavor,
-                    )),
-            ),
-        );
-        return layout(
+        return confirm_internal_node_view(
             progress,
-            None,
-            if flavor == crate::node::bitcoind::NodeFlavor::KnotsBlake2b {
-                "Start a pruned Bitcoin Blake2b node"
-            } else {
-                "Start Bitcoin full node"
-            },
-            col,
-            true,
-            Some(message::Message::InternalBitcoind(
-                message::InternalBitcoindMsg::Previous,
-            )),
+            flavor,
+            existing_flavor,
+            show_advanced,
+            prune,
+            max_mempool,
         );
     }
 
@@ -1918,64 +1773,12 @@ pub fn start_internal_bitcoind<'a>(
             "Start Bitcoin full node"
         },
         Column::new()
-            .push(download_state.map(|s| {
-                match s {
-                    DownloadState::Finished(_) => Row::new()
-                        .spacing(10)
-                        .align_y(Alignment::Center)
-                        .push(icon::square_check_icon().style(theme::text::success))
-                        .push(text("Download complete").style(theme::text::success)),
-                    DownloadState::Downloading { progress, .. } => Row::new()
-                        .spacing(10)
-                        .align_y(Alignment::Center)
-                        .push(text(format!(
-                            "Downloading {flavor_name} {version}... {progress:.2}%"
-                        ))),
-                    DownloadState::Errored(e) => Row::new()
-                        .spacing(10)
-                        .align_y(Alignment::Center)
-                        .push(icon::square_cross_icon().style(theme::text::error))
-                        .push(text(format!("Download failed: '{}'.", e)).style(theme::text::error)),
-                    _ => Row::new().spacing(10).align_y(Alignment::Center),
-                }
-            }))
-            .push(Container::new(if let Some(state) = install_state {
-                match state {
-                    InstallState::InProgress => Row::new()
-                        .spacing(10)
-                        .align_y(Alignment::Center)
-                        .push("Installing bitcoind..."),
-                    InstallState::Finished => Row::new()
-                        .spacing(10)
-                        .align_y(Alignment::Center)
-                        .push(icon::square_check_icon().style(theme::text::success))
-                        .push(text("Installation complete").style(theme::text::success)),
-                    InstallState::Errored(e) => Row::new()
-                        .spacing(10)
-                        .align_y(Alignment::Center)
-                        .push(icon::square_cross_icon().style(theme::text::error))
-                        .push(
-                            text(format!("Installation failed: '{}'.", e))
-                                .style(theme::text::error),
-                        ),
-                }
-            } else if exe_path.is_some() {
-                Row::new()
-                    .spacing(10)
-                    .align_y(Alignment::Center)
-                    .push(icon::square_check_icon().style(theme::text::success))
-                    .push(
-                        text("Tenshu-managed bitcoind already installed")
-                            .style(theme::text::success),
-                    )
-            } else if let Some(DownloadState::Downloading { progress, .. }) = download_state {
-                Row::new()
-                    .spacing(10)
-                    .align_y(Alignment::Center)
-                    .push(progress_bar(0.0..=100.0, *progress))
-            } else {
-                Row::new().spacing(10).align_y(Alignment::Center)
-            }))
+            .push(download_state.map(|s| node_download_status(s, flavor_name, version)))
+            .push(Container::new(node_installation_status(
+                install_state,
+                exe_path,
+                download_state,
+            )))
             .push(if started.is_some() {
                 started.map(|res| {
                     if res.is_ok() {
@@ -2266,13 +2069,7 @@ pub fn hw_list_view<'a>(
                     version.as_ref(),
                     fingerprint,
                     alias.as_ref(),
-                    {
-                        if not_tapminiscript {
-                            Some("Device firmware version does not support taproot miniscript")
-                        } else {
-                            None
-                        }
-                    },
+                    taproot_firmware_warning(not_tapminiscript),
                     acc,
                     display_account,
                 )
@@ -2953,59 +2750,7 @@ pub fn recovery_kit_restore<'a>(
             content = content.push(text::text("Loading your Cubes from Connect…"));
         }
         RestorePhase::CubePicker { cubes, .. } => {
-            let mut col = Column::new().spacing(10);
-            if cubes.is_empty() {
-                col = col.push(text::text(
-                    "No Cubes found on this Connect account for the current network.",
-                ));
-            } else {
-                for c in cubes {
-                    // Scope-aware availability: a descriptor-only
-                    // kit can't satisfy a Full restore, and a
-                    // seed-only kit can't satisfy DescriptorOnly.
-                    // Disable the row (and say why) rather than
-                    // let the user click through to a post-decrypt
-                    // "missing half" error.
-                    let available = c.status.has_recovery_kit
-                        && match scope {
-                            crate::installer::step::RestoreScope::Full => {
-                                c.status.has_encrypted_seed
-                            }
-                            crate::installer::step::RestoreScope::DescriptorOnly => {
-                                c.status.has_encrypted_wallet_descriptor
-                            }
-                        };
-                    let label = if available {
-                        format!("{} — kit available", c.name)
-                    } else if !c.status.has_recovery_kit {
-                        format!("{} — no kit (disabled)", c.name)
-                    } else {
-                        match scope {
-                            crate::installer::step::RestoreScope::Full => {
-                                format!("{} — no seed in kit (disabled)", c.name)
-                            }
-                            crate::installer::step::RestoreScope::DescriptorOnly => {
-                                format!("{} — no descriptor in kit (disabled)", c.name)
-                            }
-                        }
-                    };
-                    let id = c.id;
-                    // Raw `iced::widget::Button` because the labels are
-                    // built from dynamic `String`s — `button::secondary`
-                    // requires `&'static str`.
-                    let mut btn = Button::new(text::text(label))
-                        .width(Length::Fixed(360.0))
-                        .padding([8, 16])
-                        .style(theme::button::secondary);
-                    if available {
-                        btn = btn.on_press(Message::RecoveryKitRestore(
-                            RecoveryKitRestoreMsg::SelectCube(id),
-                        ));
-                    }
-                    col = col.push(btn);
-                }
-            }
-            content = content.push(col);
+            content = content.push(recovery_cube_picker(cubes, scope));
         }
         RestorePhase::PasswordEntry { selected, .. } => {
             content = content
@@ -3104,6 +2849,321 @@ pub fn recovery_kit_restore<'a>(
         true,
         Some(Message::Previous),
     )
+}
+
+fn policy_key_row<'a>(
+    fingerprints: &[Fingerprint],
+    keys: &HashMap<Fingerprint, settings::KeySetting>,
+) -> Row<'a, Message> {
+    fingerprints
+        .iter()
+        .enumerate()
+        .fold(Row::new().spacing(5), |row, (i, k)| {
+            let content = if let Some(key) = keys.get(k) {
+                Container::new(
+                    iced_tooltip::Tooltip::new(
+                        text(key.name.clone()).bold(),
+                        text(k.to_string()),
+                        iced_tooltip::Position::Bottom,
+                    )
+                    .style(theme::card::simple),
+                )
+            } else {
+                Container::new(text(format!("[{}]", k)).bold())
+            };
+            if fingerprints.len() == 1 || i == fingerprints.len() - 1 {
+                row.push(content)
+            } else if i <= fingerprints.len() - 2 {
+                row.push(content).push(text("and"))
+            } else {
+                row.push(content).push(text(","))
+            }
+        })
+}
+fn node_connection_status<'a>(
+    waiting_for_ping_result: bool,
+    is_running: Option<&Result<(), Error>>,
+) -> Option<Container<'a, Message>> {
+    if waiting_for_ping_result {
+        Some(Container::new(
+            Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .push(text("Checking connection...")),
+        ))
+    } else if is_running.is_some() {
+        is_running.map(|res| {
+            if res.is_ok() {
+                Container::new(
+                    Row::new()
+                        .spacing(10)
+                        .align_y(Alignment::Center)
+                        .push(icon::square_check_icon().style(theme::text::success))
+                        .push(text("Connection checked").style(theme::text::success)),
+                )
+            } else {
+                let detail = match res {
+                    Ok(_) => String::new(),
+                    Err(e) => e.to_string(),
+                };
+                Container::new(
+                    Row::new()
+                        .spacing(10)
+                        .align_y(Alignment::Center)
+                        .push(icon::square_cross_icon().style(theme::text::error))
+                        .push(
+                            text(format!("Connection failed: {detail}")).style(theme::text::error),
+                        ),
+                )
+            }
+        })
+    } else {
+        Some(Container::new(Space::new().height(Length::Fixed(21.0))))
+    }
+}
+fn select_fork_node_type<'a>(
+    progress: (usize, usize),
+    chain: crate::chain::ChainId,
+    install_node: bool,
+    connect_authenticated: bool,
+    local_available: bool,
+) -> Element<'a, Message> {
+    use crate::chain::ChainIdExt;
+
+    let chain_name = chain.label();
+    let mut choices = Column::new().spacing(20).max_width(620);
+    if connect_authenticated || !local_available {
+        choices = choices
+            .push(text("Use COINCUBE | Connect").bold())
+            .push(text(format!(
+                "Use the hosted {chain_name} node while a local node syncs, or use Connect alone."
+            )))
+            .push(
+                checkbox(install_node)
+                    .label("Also install a pruned node on my device")
+                    .on_toggle(|_| {
+                        Message::SelectBitcoindType(
+                            message::SelectBitcoindTypeMsg::ToggleInstallNode,
+                        )
+                    }),
+            )
+            .push(
+                button::primary(None, "Use Connect").on_press(Message::SelectBitcoindType(
+                    message::SelectBitcoindTypeMsg::ContinueWithConnect,
+                )),
+            );
+    }
+    if local_available {
+        choices = choices
+            .push(text("Install a local pruned node").bold())
+            .push(text(format!("Run Bitcoin Knots for {chain_name} in an isolated data directory. No Connect account is required. Your node must finish syncing before the Vault can be created.")))
+            .push(button::secondary(None, "Use a local node").on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseExternal(false))));
+    }
+    let content = Container::new(choices).padding(30);
+    layout(
+        progress,
+        None,
+        if chain == crate::chain::ChainId::BitcoinBlake2b {
+            "Bitcoin Blake2b node management"
+        } else {
+            "Bitcoin Blake2b Testnet4 node management"
+        },
+        content,
+        true,
+        Some(Message::Previous),
+    )
+}
+fn confirm_internal_node_view<'a>(
+    progress: (usize, usize),
+    flavor: crate::node::bitcoind::NodeFlavor,
+    existing_flavor: Option<crate::node::bitcoind::NodeFlavor>,
+    show_advanced: bool,
+    prune: &'a form::Value<String>,
+    max_mempool: &'a form::Value<String>,
+) -> Element<'a, Message> {
+    let adv_label = if show_advanced {
+        "▾  Advanced options"
+    } else {
+        "▸  Advanced options"
+    };
+    let mut col = Column::new()
+        .spacing(25)
+        .push(node_flavor_selector(flavor, existing_flavor, |flavor| {
+            Message::InternalBitcoind(message::InternalBitcoindMsg::SelectFlavor(flavor))
+        }))
+        .push(
+            button::transparent(None, adv_label).on_press(Message::InternalBitcoind(
+                message::InternalBitcoindMsg::ToggleAdvanced,
+            )),
+        );
+    if show_advanced {
+        col = col.push(card::simple(node_resources_controls(
+            prune,
+            max_mempool,
+            |v| Message::InternalBitcoind(message::InternalBitcoindMsg::PruneEdited(v)),
+            |v| Message::InternalBitcoind(message::InternalBitcoindMsg::MaxMempoolEdited(v)),
+            Message::InternalBitcoind(message::InternalBitcoindMsg::SmallComputerPreset),
+            Message::InternalBitcoind(message::InternalBitcoindMsg::RegularComputerPreset),
+        )));
+    }
+    col = col.push(
+        Row::new().push(
+            button::secondary(None, "Download & start")
+                .width(Length::Fixed(220.0))
+                .on_press(Message::InternalBitcoind(
+                    message::InternalBitcoindMsg::ConfirmFlavor,
+                )),
+        ),
+    );
+    layout(
+        progress,
+        None,
+        if flavor == crate::node::bitcoind::NodeFlavor::KnotsBlake2b {
+            "Start a pruned Bitcoin Blake2b node"
+        } else {
+            "Start Bitcoin full node"
+        },
+        col,
+        true,
+        Some(message::Message::InternalBitcoind(
+            message::InternalBitcoindMsg::Previous,
+        )),
+    )
+}
+fn node_download_status<'a>(
+    s: &DownloadState,
+    flavor_name: &str,
+    version: &str,
+) -> Row<'a, Message> {
+    match s {
+        DownloadState::Finished(_) => Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .push(icon::square_check_icon().style(theme::text::success))
+            .push(text("Download complete").style(theme::text::success)),
+        DownloadState::Downloading { progress, .. } => Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .push(text(format!(
+                "Downloading {flavor_name} {version}... {progress:.2}%"
+            ))),
+        DownloadState::Errored(e) => Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .push(icon::square_cross_icon().style(theme::text::error))
+            .push(text(format!("Download failed: '{}'.", e)).style(theme::text::error)),
+        _ => Row::new().spacing(10).align_y(Alignment::Center),
+    }
+}
+fn recovery_cube_picker<'a>(
+    cubes: &[crate::installer::step::recovery_kit_restore::RestoreCubeCandidate],
+    scope: crate::installer::step::RestoreScope,
+) -> Column<'a, Message> {
+    let mut col = Column::new().spacing(10);
+    if cubes.is_empty() {
+        col = col.push(text::text(
+            "No Cubes found on this Connect account for the current network.",
+        ));
+    } else {
+        for c in cubes {
+            col = col.push(recovery_cube_choice(c, scope));
+        }
+    }
+    col
+}
+
+fn taproot_firmware_warning(not_tapminiscript: bool) -> Option<&'static str> {
+    if not_tapminiscript {
+        Some("Device firmware version does not support taproot miniscript")
+    } else {
+        None
+    }
+}
+fn recovery_cube_choice<'a>(
+    c: &crate::installer::step::recovery_kit_restore::RestoreCubeCandidate,
+    scope: crate::installer::step::RestoreScope,
+) -> coincube_ui::widget::Button<'a, Message> {
+    use crate::installer::message::RecoveryKitRestoreMsg;
+
+    // Scope-aware availability: a descriptor-only
+    // kit can't satisfy a Full restore, and a
+    // seed-only kit can't satisfy DescriptorOnly.
+    // Disable the row (and say why) rather than
+    // let the user click through to a post-decrypt
+    // "missing half" error.
+    let available = c.status.has_recovery_kit
+        && match scope {
+            crate::installer::step::RestoreScope::Full => c.status.has_encrypted_seed,
+            crate::installer::step::RestoreScope::DescriptorOnly => {
+                c.status.has_encrypted_wallet_descriptor
+            }
+        };
+    let label = if available {
+        format!("{} — kit available", c.name)
+    } else if !c.status.has_recovery_kit {
+        format!("{} — no kit (disabled)", c.name)
+    } else {
+        match scope {
+            crate::installer::step::RestoreScope::Full => {
+                format!("{} — no seed in kit (disabled)", c.name)
+            }
+            crate::installer::step::RestoreScope::DescriptorOnly => {
+                format!("{} — no descriptor in kit (disabled)", c.name)
+            }
+        }
+    };
+    let id = c.id;
+    // Raw `iced::widget::Button` because the labels are
+    // built from dynamic `String`s — `button::secondary`
+    // requires `&'static str`.
+    let mut btn = Button::new(text::text(label))
+        .width(Length::Fixed(360.0))
+        .padding([8, 16])
+        .style(theme::button::secondary);
+    if available {
+        btn = btn.on_press(Message::RecoveryKitRestore(
+            RecoveryKitRestoreMsg::SelectCube(id),
+        ));
+    }
+    btn
+}
+
+fn node_installation_status<'a>(
+    install_state: Option<&InstallState>,
+    exe_path: Option<&PathBuf>,
+    download_state: Option<&DownloadState>,
+) -> Row<'a, Message> {
+    if let Some(state) = install_state {
+        match state {
+            InstallState::InProgress => Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .push("Installing bitcoind..."),
+            InstallState::Finished => Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .push(icon::square_check_icon().style(theme::text::success))
+                .push(text("Installation complete").style(theme::text::success)),
+            InstallState::Errored(e) => Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .push(icon::square_cross_icon().style(theme::text::error))
+                .push(text(format!("Installation failed: '{}'.", e)).style(theme::text::error)),
+        }
+    } else if exe_path.is_some() {
+        Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .push(icon::square_check_icon().style(theme::text::success))
+            .push(text("Tenshu-managed bitcoind already installed").style(theme::text::success))
+    } else if let Some(DownloadState::Downloading { progress, .. }) = download_state {
+        Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .push(progress_bar(0.0..=100.0, *progress))
+    } else {
+        Row::new().spacing(10).align_y(Alignment::Center)
+    }
 }
 
 #[cfg(test)]

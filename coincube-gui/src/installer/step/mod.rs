@@ -187,16 +187,7 @@ impl Step for Final {
             Message::AllKeysRedeemed => {
                 self.generating = false;
                 // If any errors occurred redeeming tokens, add a warning to the log.
-                for (pk, res) in &self.key_redemptions {
-                    if let Some(res) = res {
-                        if let Err(e) = res {
-                            warn!("Error redeeming key for token '{}': '{}'.", pk.token, e);
-                        }
-                    } else {
-                        // We expect to have all redemption results by now.
-                        warn!("Missing redemption info for token '{}'.", pk.token);
-                    }
-                }
+                self.log_key_redemption_results();
                 // Now exit the installer whether or not any redemption errors occurred.
                 let internal_bitcoind = self.internal_bitcoind.clone();
                 let settings = self.wallet_settings.clone();
@@ -376,6 +367,21 @@ impl Step for Final {
 impl From<Final> for Box<dyn Step> {
     fn from(s: Final) -> Box<dyn Step> {
         Box::new(s)
+    }
+}
+
+impl Final {
+    fn log_key_redemption_results(&self) {
+        for (pk, res) in &self.key_redemptions {
+            if let Some(res) = res {
+                if let Err(e) = res {
+                    warn!("Error redeeming key for token '{}': '{}'.", pk.token, e);
+                }
+            } else {
+                // We expect to have all redemption results by now.
+                warn!("Missing redemption info for token '{}'.", pk.token);
+            }
+        }
     }
 }
 
