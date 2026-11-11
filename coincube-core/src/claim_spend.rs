@@ -572,38 +572,14 @@ fn create_fork_sweep(
     }
     let descriptor = source.descriptor();
     let destination = descriptor.change_descriptor().derive(change_index, secp);
-    for coin in coins {
-        let source_prevout = if Some(coin.outpoint) == added_input {
-            None
-        } else {
-            let source_index = original
-                .unsigned_tx
-                .input
-                .iter()
-                .position(|input| input.previous_output == coin.outpoint)
-                .ok_or(Error::InvalidRequest("Unclaimed fork input"))?;
-            Some(original.inputs[source_index].witness_utxo.as_ref().ok_or(
-                Error::InvalidRequest("Missing authenticated source prevout"),
-            )?)
-        };
-        if coin.deriv_index.is_hardened() {
-            return Err(Error::InvalidRequest("Hardened fork input index"));
-        }
-        let branch = if coin.is_change {
-            descriptor.change_descriptor()
-        } else {
-            descriptor.receive_descriptor()
-        };
-        let script = branch.derive(coin.deriv_index, secp).script_pubkey();
-        if source_prevout
-            .is_some_and(|prevout| coin.amount != prevout.value || script != prevout.script_pubkey)
-            || destination.script_pubkey() == script
-        {
-            return Err(Error::InvalidRequest(
-                "Fork input ownership or fresh destination mismatch",
-            ));
-        }
-    }
+    validate_fork_coins(
+        original,
+        added_input,
+        descriptor,
+        &destination.script_pubkey(),
+        secp,
+        coins,
+    )?;
     let selected: Vec<_> = coins
         .iter()
         .map(|coin| CandidateCoin {
@@ -873,6 +849,49 @@ pub fn reconstruct_poison_self_transfer(
     }
     spend::reverify_spend_before_broadcast(descriptor, &rebuilt.psbt)?;
     Ok(rebuilt)
+}
+
+fn validate_fork_coins(
+    original: &bitcoin::psbt::Psbt,
+    added_input: Option<bitcoin::OutPoint>,
+    descriptor: &CoincubeDescriptor,
+    destination_script: &bitcoin::ScriptBuf,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    coins: &[CandidateCoin],
+) -> Result<(), Error> {
+    for coin in coins {
+        let source_prevout = if Some(coin.outpoint) == added_input {
+            None
+        } else {
+            let source_index = original
+                .unsigned_tx
+                .input
+                .iter()
+                .position(|input| input.previous_output == coin.outpoint)
+                .ok_or(Error::InvalidRequest("Unclaimed fork input"))?;
+            Some(original.inputs[source_index].witness_utxo.as_ref().ok_or(
+                Error::InvalidRequest("Missing authenticated source prevout"),
+            )?)
+        };
+        if coin.deriv_index.is_hardened() {
+            return Err(Error::InvalidRequest("Hardened fork input index"));
+        }
+        let branch = if coin.is_change {
+            descriptor.change_descriptor()
+        } else {
+            descriptor.receive_descriptor()
+        };
+        let script = branch.derive(coin.deriv_index, secp).script_pubkey();
+        if source_prevout
+            .is_some_and(|prevout| coin.amount != prevout.value || script != prevout.script_pubkey)
+            || *destination_script == script
+        {
+            return Err(Error::InvalidRequest(
+                "Fork input ownership or fresh destination mismatch",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

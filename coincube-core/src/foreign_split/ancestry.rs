@@ -581,26 +581,7 @@ pub fn combine_ancestry_split_pair<C: secp256k1::Verification>(
             if !matches!(checked, Ok(()) | Err(FinalizeError::Unsatisfied)) {
                 return Err(CombineAncestrySplitError::Invalid(checked.unwrap_err()));
             }
-            for (index, (input, supplied)) in aggregate
-                .inputs
-                .iter_mut()
-                .zip(&returned.inputs)
-                .enumerate()
-            {
-                for (key, signature) in &supplied.partial_sigs {
-                    if input
-                        .partial_sigs
-                        .get(key)
-                        .is_some_and(|old| old != signature)
-                    {
-                        return Err(CombineAncestrySplitError::ConflictingSignature {
-                            chain,
-                            input: index,
-                        });
-                    }
-                    input.partial_sigs.insert(*key, *signature);
-                }
-            }
+            merge_returned_signatures(chain, aggregate, returned)?;
         }
     }
     validate_ancestry_split_pair_signing(
@@ -612,17 +593,18 @@ pub fn combine_ancestry_split_pair<C: secp256k1::Verification>(
         &fork_signed,
     )
     .map_err(CombineAncestrySplitError::Invalid)?;
-    let bitcoin_complete =
-        match finalize_ancestry_split_step1(bitcoin, bitcoin_inputs, &bitcoin_signed, secp) {
-            Ok(_) => true,
-            Err(FinalizeError::Unsatisfied) => false,
-            Err(error) => return Err(CombineAncestrySplitError::Invalid(error)),
-        };
-    let fork_complete = match finalize_ancestry_split_step2(fork, fork_inputs, &fork_signed, secp) {
-        Ok(_) => true,
-        Err(FinalizeError::Unsatisfied) => false,
-        Err(error) => return Err(CombineAncestrySplitError::Invalid(error)),
-    };
+    let bitcoin_complete = split_complete(finalize_ancestry_split_step1(
+        bitcoin,
+        bitcoin_inputs,
+        &bitcoin_signed,
+        secp,
+    ))?;
+    let fork_complete = split_complete(finalize_ancestry_split_step2(
+        fork,
+        fork_inputs,
+        &fork_signed,
+        secp,
+    ))?;
     Ok(CombinedAncestrySplitPair {
         bitcoin: bitcoin_signed,
         fork: fork_signed,
@@ -651,5 +633,41 @@ fn check_bound(
         Ok(())
     } else {
         Err(FinalizeError::CoinsChanged)
+    }
+}
+
+fn merge_returned_signatures(
+    chain: ChainId,
+    aggregate: &mut Psbt,
+    returned: &Psbt,
+) -> Result<(), CombineAncestrySplitError> {
+    for (index, (input, supplied)) in aggregate
+        .inputs
+        .iter_mut()
+        .zip(&returned.inputs)
+        .enumerate()
+    {
+        for (key, signature) in &supplied.partial_sigs {
+            if input
+                .partial_sigs
+                .get(key)
+                .is_some_and(|old| old != signature)
+            {
+                return Err(CombineAncestrySplitError::ConflictingSignature {
+                    chain,
+                    input: index,
+                });
+            }
+            input.partial_sigs.insert(*key, *signature);
+        }
+    }
+    Ok(())
+}
+
+fn split_complete<T>(result: Result<T, FinalizeError>) -> Result<bool, CombineAncestrySplitError> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(FinalizeError::Unsatisfied) => Ok(false),
+        Err(error) => Err(CombineAncestrySplitError::Invalid(error)),
     }
 }

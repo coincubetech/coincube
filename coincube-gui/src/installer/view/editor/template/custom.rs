@@ -124,27 +124,13 @@ pub fn custom_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(i, primary_key)| {
-                            if let Some(key) = primary_key {
-                                defined_key(
-                                    &key.name,
-                                    color::GREEN,
-                                    "Primary key".to_string(),
-                                    if use_taproot && !key.source.is_compatible_taproot() {
-                                        Some("This device does not support Taproot")
-                                    } else {
-                                        None
-                                    },
-                                    prim_keys_fixed,
-                                )
-                            } else {
-                                undefined_key(
-                                    color::GREEN,
-                                    "Primary key",
-                                    !primary_path.keys[0..i].iter().any(|k| k.is_none()),
-                                    prim_keys_fixed,
-                                )
-                            }
-                            .map(move |msg| message::DefinePath::Key(i, msg))
+                            custom_template_primary_key(
+                                i,
+                                primary_key,
+                                use_taproot,
+                                primary_path,
+                                prim_keys_fixed,
+                            )
                         })
                         .collect(),
                     false,
@@ -165,31 +151,13 @@ pub fn custom_template<'a>(
                                 .iter()
                                 .enumerate()
                                 .map(|(j, recovery_key)| {
-                                    // We cannot delete a key if doing so would remove all recovery paths,
-                                    // i.e. if there is only 1 recovery path and it contains only 1 key,
-                                    // and there is no safety net path.
-                                    let fixed = num_non_primary_paths < 2 && p.keys.len() < 2;
-                                    if let Some(key) = recovery_key {
-                                        defined_key(
-                                            &key.name,
-                                            color::ORANGE,
-                                            "Recovery key".to_string(),
-                                            if use_taproot && !key.source.is_compatible_taproot() {
-                                                Some("This device does not support Taproot")
-                                            } else {
-                                                None
-                                            },
-                                            fixed,
-                                        )
-                                    } else {
-                                        undefined_key(
-                                            color::ORANGE,
-                                            "Recovery key",
-                                            !p.keys[0..j].iter().any(|k| k.is_none()),
-                                            fixed,
-                                        )
-                                    }
-                                    .map(move |msg| message::DefinePath::Key(j, msg))
+                                    custom_template_recovery_key(
+                                        j,
+                                        recovery_key,
+                                        use_taproot,
+                                        p,
+                                        num_non_primary_paths,
+                                    )
                                 })
                                 .collect(),
                             false,
@@ -241,30 +209,13 @@ pub fn custom_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(i, sn_key)| {
-                            // Cannot delete safety net key if doing so would remove the safety net path
-                            // and there are no other recovery paths.
-                            let fixed = num_non_primary_paths < 2 && sn_path.keys.len() < 2;
-                            if let Some(key) = sn_key {
-                                defined_key(
-                                    &key.name,
-                                    color::WHITE,
-                                    "Safety Net key".to_string(),
-                                    if use_taproot && !key.source.is_compatible_taproot() {
-                                        Some("This key source does not support Taproot")
-                                    } else {
-                                        None
-                                    },
-                                    fixed,
-                                )
-                            } else {
-                                undefined_key(
-                                    color::WHITE,
-                                    "Safety Net key",
-                                    !sn_path.keys[0..i].iter().any(|k| k.is_none()),
-                                    fixed,
-                                )
-                            }
-                            .map(move |msg| message::DefinePath::Key(i, msg))
+                            custom_template_sn_key(
+                                i,
+                                sn_key,
+                                use_taproot,
+                                sn_path,
+                                num_non_primary_paths,
+                            )
                         })
                         .collect(),
                     false,
@@ -294,4 +245,93 @@ pub fn custom_template<'a>(
         true,
         Some(Message::Previous),
     )
+}
+
+fn custom_template_primary_key<'a>(
+    i: usize,
+    primary_key: &'a Option<crate::installer::descriptor::Key>,
+    use_taproot: bool,
+    primary_path: &'a Path,
+    prim_keys_fixed: bool,
+) -> Element<'a, message::DefinePath> {
+    if let Some(key) = primary_key {
+        defined_key(
+            &key.name,
+            color::GREEN,
+            "Primary key".to_string(),
+            crate::installer::view::editor::template_key_warning(use_taproot, key),
+            prim_keys_fixed,
+        )
+    } else {
+        undefined_key(
+            color::GREEN,
+            "Primary key",
+            !primary_path.keys[0..i].iter().any(|k| k.is_none()),
+            prim_keys_fixed,
+        )
+    }
+    .map(move |msg| message::DefinePath::Key(i, msg))
+}
+
+fn custom_template_recovery_key<'a>(
+    j: usize,
+    recovery_key: &'a Option<crate::installer::descriptor::Key>,
+    use_taproot: bool,
+    p: &'a Path,
+    num_non_primary_paths: usize,
+) -> Element<'a, message::DefinePath> {
+    // We cannot delete a key if doing so would remove all recovery paths,
+    // i.e. if there is only 1 recovery path and it contains only 1 key,
+    // and there is no safety net path.
+    let fixed = num_non_primary_paths < 2 && p.keys.len() < 2;
+    if let Some(key) = recovery_key {
+        defined_key(
+            &key.name,
+            color::ORANGE,
+            "Recovery key".to_string(),
+            crate::installer::view::editor::template_key_warning(use_taproot, key),
+            fixed,
+        )
+    } else {
+        undefined_key(
+            color::ORANGE,
+            "Recovery key",
+            !p.keys[0..j].iter().any(|k| k.is_none()),
+            fixed,
+        )
+    }
+    .map(move |msg| message::DefinePath::Key(j, msg))
+}
+
+fn custom_template_sn_key<'a>(
+    i: usize,
+    sn_key: &'a Option<crate::installer::descriptor::Key>,
+    use_taproot: bool,
+    sn_path: &'a Path,
+    num_non_primary_paths: usize,
+) -> Element<'a, message::DefinePath> {
+    // Cannot delete safety net key if doing so would remove the safety net path
+    // and there are no other recovery paths.
+    let fixed = num_non_primary_paths < 2 && sn_path.keys.len() < 2;
+    if let Some(key) = sn_key {
+        defined_key(
+            &key.name,
+            color::WHITE,
+            "Safety Net key".to_string(),
+            if use_taproot && !key.source.is_compatible_taproot() {
+                Some("This key source does not support Taproot")
+            } else {
+                None
+            },
+            fixed,
+        )
+    } else {
+        undefined_key(
+            color::WHITE,
+            "Safety Net key",
+            !sn_path.keys[0..i].iter().any(|k| k.is_none()),
+            fixed,
+        )
+    }
+    .map(move |msg| message::DefinePath::Key(i, msg))
 }

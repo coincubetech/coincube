@@ -1393,6 +1393,55 @@ impl HttpObservationSource {
         .map_err(|_| FailureKind::Deadline)?
     }
 
+    /// Read both chains in the caller's existing order. Canonical pre-fork
+    /// inclusion and the phase-specific spent state are checked only after
+    /// the same metadata, mapping and outspend reads have completed.
+    async fn collect_shared_block(
+        &self,
+        outpoint: OutPoint,
+        chain: ChainId,
+        tip: BlockRef,
+        fork_height: u64,
+        expected_spent: bool,
+        policy: Policy,
+    ) -> Result<(BlockRef, i64), FailureKind> {
+        let (status, status_stamp) = super::super::super::read(
+            self.transaction(chain, outpoint.txid).await?,
+            chain,
+            self,
+            policy,
+            Stage::BitcoinInclusion,
+        )
+        .map_err(|error| error.kind)?;
+        let TransactionObservation::Confirmed { block, .. } = status else {
+            return Err(FailureKind::Changed);
+        };
+        if block.height >= fork_height || block.height > tip.height {
+            return Err(FailureKind::Changed);
+        }
+        let (canonical, canonical_stamp) = super::super::super::read(
+            self.hash_at_height(chain, block.height).await?,
+            chain,
+            self,
+            policy,
+            Stage::BitcoinInclusion,
+        )
+        .map_err(|error| error.kind)?;
+        let (outspend, outspend_stamp) = super::super::super::read(
+            self.outspend(chain, outpoint).await?,
+            chain,
+            self,
+            policy,
+            Stage::Preflight,
+        )
+        .map_err(|error| error.kind)?;
+        if canonical != block.hash || outspend.spent != expected_spent {
+            return Err(FailureKind::Changed);
+        }
+
+        Ok((block, status_stamp.min(canonical_stamp).min(outspend_stamp)))
+    }
+
     /// Refresh both funding proofs and every shared input under the same
     /// provider generation and stable two-chain tips. For each shared coin,
     /// require a confirmed transaction in the same canonical pre-fork block
@@ -1448,43 +1497,10 @@ impl HttpObservationSource {
                     (ChainId::Bitcoin, bitcoin_tip),
                     (ChainId::BitcoinBlake2b, fork_tip),
                 ] {
-                    let (status, status_stamp) = super::super::super::read(
-                        snapshot.transaction(chain, outpoint.txid).await?,
-                        chain,
-                        &snapshot,
-                        policy,
-                        Stage::BitcoinInclusion,
-                    )
-                    .map_err(|error| error.kind)?;
-                    let TransactionObservation::Confirmed { block, .. } = status else {
-                        return Err(FailureKind::Changed);
-                    };
-                    if block.height >= fork_height || block.height > tip.height {
-                        return Err(FailureKind::Changed);
-                    }
-                    let (canonical, canonical_stamp) = super::super::super::read(
-                        snapshot.hash_at_height(chain, block.height).await?,
-                        chain,
-                        &snapshot,
-                        policy,
-                        Stage::BitcoinInclusion,
-                    )
-                    .map_err(|error| error.kind)?;
-                    let (outspend, outspend_stamp) = super::super::super::read(
-                        snapshot.outspend(chain, outpoint).await?,
-                        chain,
-                        &snapshot,
-                        policy,
-                        Stage::Preflight,
-                    )
-                    .map_err(|error| error.kind)?;
-                    if canonical != block.hash || outspend.spent {
-                        return Err(FailureKind::Changed);
-                    }
-                    observed_at = observed_at
-                        .min(status_stamp)
-                        .min(canonical_stamp)
-                        .min(outspend_stamp);
+                    let (block, stamp) = snapshot
+                        .collect_shared_block(outpoint, chain, tip, fork_height, false, policy)
+                        .await?;
+                    observed_at = observed_at.min(stamp);
                     blocks.push(block);
                 }
                 if blocks[0] != blocks[1] {
@@ -1533,7 +1549,118 @@ impl HttpObservationSource {
     }
 }
 
+/// Require one coherent root/provider/session view before observing the
+/// spent marker or the exact confirmed Bitcoin witness.
+fn validate_post_bitcoin_roots(
+    bitcoin_ancestry: &DiscoveredAncestry,
+    fork: &CollectedFundingCoin,
+) -> Result<(), FailureKind> {
+    let roots = bitcoin_ancestry.pair();
+    let fork_roots = fork.ancestry.pair();
+    let anchor_a = roots.anchor();
+    let anchor_b = fork_roots.anchor();
+    if roots.root_chain() != ChainId::Bitcoin
+        || fork_roots.root_chain() != ChainId::BitcoinBlake2b
+        || bitcoin_ancestry.provider != fork.ancestry.provider
+        || roots.generation() != fork_roots.generation()
+        || roots.bitcoin().tip != fork_roots.bitcoin().tip
+        || roots.fork().tip != fork_roots.fork().tip
+        || anchor_a.tip_hash != anchor_b.tip_hash
+        || anchor_a.tip_height != anchor_b.tip_height
+        || anchor_a.tip_median_time_past != anchor_b.tip_median_time_past
+        || anchor_a.observation != anchor_b.observation
+    {
+        return Err(FailureKind::Changed);
+    }
+
+    Ok(())
+}
+
 impl HttpObservationSource {
+    async fn collect_spent_bitcoin_marker(
+        &self,
+        bitcoin_path: &RetainedPath,
+        root: &CanonicalCoinbase,
+        policy: Policy,
+    ) -> Result<(BlockRef, i64), FailureKind> {
+        let (marker_status, marker_stamp) = super::super::super::read(
+            self.transaction(ChainId::Bitcoin, bitcoin_path.selected().txid)
+                .await?,
+            ChainId::Bitcoin,
+            self,
+            policy,
+            Stage::BitcoinInclusion,
+        )
+        .map_err(|error| error.kind)?;
+        let TransactionObservation::Confirmed {
+            block: marker_block,
+            ..
+        } = marker_status
+        else {
+            return Err(FailureKind::Changed);
+        };
+        let (marker_canonical, marker_canonical_stamp) = super::super::super::read(
+            self.hash_at_height(ChainId::Bitcoin, marker_block.height)
+                .await?,
+            ChainId::Bitcoin,
+            self,
+            policy,
+            Stage::BitcoinInclusion,
+        )
+        .map_err(|error| error.kind)?;
+        let (marker_spend, marker_spend_stamp) = super::super::super::read(
+            self.outspend(ChainId::Bitcoin, bitcoin_path.selected())
+                .await?,
+            ChainId::Bitcoin,
+            self,
+            policy,
+            Stage::Preflight,
+        )
+        .map_err(|error| error.kind)?;
+        if !marker_spend.spent {
+            return Err(FailureKind::Changed);
+        }
+        check_funding_position(marker_block, root.block, root.tip, marker_canonical)?;
+        let marker_observed_at = marker_stamp
+            .min(marker_canonical_stamp)
+            .min(marker_spend_stamp);
+
+        Ok((marker_block, marker_observed_at))
+    }
+
+    async fn collect_confirmed_bitcoin_step(
+        &self,
+        signed_bitcoin: &Transaction,
+        bitcoin_tip: BlockRef,
+        policy: Policy,
+    ) -> Result<(BlockRef, i64), FailureKind> {
+        let txid = signed_bitcoin.compute_txid();
+        let (status, status_stamp) = super::super::super::read(
+            self.transaction(ChainId::Bitcoin, txid).await?,
+            ChainId::Bitcoin,
+            self,
+            policy,
+            Stage::BitcoinInclusion,
+        )
+        .map_err(|error| error.kind)?;
+        let TransactionObservation::Confirmed { block, .. } = status else {
+            return Err(FailureKind::Changed);
+        };
+        let (canonical, canonical_stamp) = super::super::super::read(
+            self.hash_at_height(ChainId::Bitcoin, block.height).await?,
+            ChainId::Bitcoin,
+            self,
+            policy,
+            Stage::BitcoinInclusion,
+        )
+        .map_err(|error| error.kind)?;
+        let raw = self.ancestry_transaction(ChainId::Bitcoin, txid).await?;
+        let confirmation =
+            confirmed_bitcoin_step(signed_bitcoin, status, canonical, bitcoin_tip, &raw)?;
+
+        Ok((confirmation, status_stamp.min(canonical_stamp)))
+    }
+
     /// Recollect chain-specific ancestry after the exact Bitcoin half has
     /// confirmed. A canonical Bitcoin transaction spending `S+B` explains why
     /// those outputs are spent on Bitcoin; `S` and `F` must still be unspent on
@@ -1573,101 +1700,16 @@ impl HttpObservationSource {
                 .collect_funding_coin(fork_path, ChainId::BitcoinBlake2b, policy)
                 .await?;
             let roots = bitcoin_ancestry.pair();
-            let fork_roots = fork.ancestry.pair();
-            let anchor_a = roots.anchor();
-            let anchor_b = fork_roots.anchor();
-            if roots.root_chain() != ChainId::Bitcoin
-                || fork_roots.root_chain() != ChainId::BitcoinBlake2b
-                || bitcoin_ancestry.provider != fork.ancestry.provider
-                || roots.generation() != fork_roots.generation()
-                || roots.bitcoin().tip != fork_roots.bitcoin().tip
-                || roots.fork().tip != fork_roots.fork().tip
-                || anchor_a.tip_hash != anchor_b.tip_hash
-                || anchor_a.tip_height != anchor_b.tip_height
-                || anchor_a.tip_median_time_past != anchor_b.tip_median_time_past
-                || anchor_a.observation != anchor_b.observation
-            {
-                return Err(FailureKind::Changed);
-            }
+            validate_post_bitcoin_roots(&bitcoin_ancestry, &fork)?;
             let bitcoin_tip = roots.bitcoin().tip;
             let fork_tip = roots.fork().tip;
-            let (marker_status, marker_stamp) = super::super::super::read(
-                snapshot
-                    .transaction(ChainId::Bitcoin, bitcoin_path.selected().txid)
-                    .await?,
-                ChainId::Bitcoin,
-                &snapshot,
-                policy,
-                Stage::BitcoinInclusion,
-            )
-            .map_err(|error| error.kind)?;
-            let TransactionObservation::Confirmed {
-                block: marker_block,
-                ..
-            } = marker_status
-            else {
-                return Err(FailureKind::Changed);
-            };
-            let (marker_canonical, marker_canonical_stamp) = super::super::super::read(
-                snapshot
-                    .hash_at_height(ChainId::Bitcoin, marker_block.height)
-                    .await?,
-                ChainId::Bitcoin,
-                &snapshot,
-                policy,
-                Stage::BitcoinInclusion,
-            )
-            .map_err(|error| error.kind)?;
-            let (marker_spend, marker_spend_stamp) = super::super::super::read(
-                snapshot
-                    .outspend(ChainId::Bitcoin, bitcoin_path.selected())
-                    .await?,
-                ChainId::Bitcoin,
-                &snapshot,
-                policy,
-                Stage::Preflight,
-            )
-            .map_err(|error| error.kind)?;
-            if !marker_spend.spent {
-                return Err(FailureKind::Changed);
-            }
-            check_funding_position(
-                marker_block,
-                roots.bitcoin().block,
-                bitcoin_tip,
-                marker_canonical,
-            )?;
-            let marker_observed_at = marker_stamp
-                .min(marker_canonical_stamp)
-                .min(marker_spend_stamp);
-
-            let txid = signed_bitcoin.compute_txid();
-            let (status, status_stamp) = super::super::super::read(
-                snapshot.transaction(ChainId::Bitcoin, txid).await?,
-                ChainId::Bitcoin,
-                &snapshot,
-                policy,
-                Stage::BitcoinInclusion,
-            )
-            .map_err(|error| error.kind)?;
-            let TransactionObservation::Confirmed { block, .. } = status else {
-                return Err(FailureKind::Changed);
-            };
-            let (canonical, canonical_stamp) = super::super::super::read(
-                snapshot
-                    .hash_at_height(ChainId::Bitcoin, block.height)
-                    .await?,
-                ChainId::Bitcoin,
-                &snapshot,
-                policy,
-                Stage::BitcoinInclusion,
-            )
-            .map_err(|error| error.kind)?;
-            let raw = snapshot
-                .ancestry_transaction(ChainId::Bitcoin, txid)
+            let (marker_block, marker_observed_at) = snapshot
+                .collect_spent_bitcoin_marker(bitcoin_path, roots.bitcoin(), policy)
                 .await?;
-            let confirmation =
-                confirmed_bitcoin_step(signed_bitcoin, status, canonical, bitcoin_tip, &raw)?;
+
+            let (confirmation, bitcoin_observed_at) = snapshot
+                .collect_confirmed_bitcoin_step(signed_bitcoin, bitcoin_tip, policy)
+                .await?;
 
             let fork_height = roots
                 .anchor()
@@ -1680,8 +1722,7 @@ impl HttpObservationSource {
                 .observed_at()
                 .min(marker_observed_at)
                 .min(fork.observed_at)
-                .min(status_stamp)
-                .min(canonical_stamp);
+                .min(bitcoin_observed_at);
             let mut confirmed_shared = Vec::with_capacity(unique.len());
             let mut shared_outputs = Vec::with_capacity(unique.len());
             for outpoint in unique {
@@ -1703,43 +1744,17 @@ impl HttpObservationSource {
                     (ChainId::Bitcoin, bitcoin_tip, true),
                     (ChainId::BitcoinBlake2b, fork_tip, false),
                 ] {
-                    let (status, status_stamp) = super::super::super::read(
-                        snapshot.transaction(chain, outpoint.txid).await?,
-                        chain,
-                        &snapshot,
-                        policy,
-                        Stage::BitcoinInclusion,
-                    )
-                    .map_err(|error| error.kind)?;
-                    let TransactionObservation::Confirmed { block, .. } = status else {
-                        return Err(FailureKind::Changed);
-                    };
-                    if block.height >= fork_height || block.height > tip.height {
-                        return Err(FailureKind::Changed);
-                    }
-                    let (canonical, canonical_stamp) = super::super::super::read(
-                        snapshot.hash_at_height(chain, block.height).await?,
-                        chain,
-                        &snapshot,
-                        policy,
-                        Stage::BitcoinInclusion,
-                    )
-                    .map_err(|error| error.kind)?;
-                    let (outspend, outspend_stamp) = super::super::super::read(
-                        snapshot.outspend(chain, outpoint).await?,
-                        chain,
-                        &snapshot,
-                        policy,
-                        Stage::Preflight,
-                    )
-                    .map_err(|error| error.kind)?;
-                    if canonical != block.hash || outspend.spent != expected_spent {
-                        return Err(FailureKind::Changed);
-                    }
-                    observed_at = observed_at
-                        .min(status_stamp)
-                        .min(canonical_stamp)
-                        .min(outspend_stamp);
+                    let (block, stamp) = snapshot
+                        .collect_shared_block(
+                            outpoint,
+                            chain,
+                            tip,
+                            fork_height,
+                            expected_spent,
+                            policy,
+                        )
+                        .await?;
+                    observed_at = observed_at.min(stamp);
                     blocks.push(block);
                 }
                 if blocks[0] != blocks[1] {

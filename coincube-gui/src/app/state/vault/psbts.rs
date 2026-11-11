@@ -71,44 +71,9 @@ impl State for PsbtsPanel {
             Message::View(view::Message::Reload) | Message::View(view::Message::Close) => {
                 return self.reload(Some(daemon), Some(self.wallet.clone()));
             }
-            Message::SpendTxs(res) => match res {
-                Err(e) => {
-                    let err_msg = crate::user_error::report(&e);
-                    self.warning = Some(e);
-                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                }
-                Ok(mut txs) => {
-                    self.warning = None;
-                    // Optimistic Pending->Broadcast override for txs
-                    // the user just broadcast locally, until the
-                    // daemon's mempool poller reflects the spend in
-                    // its derived `SpendStatus`.
-                    self.wallet.apply_spend_tx_overrides(&mut txs);
-                    self.spend_txs = txs;
-                    if let Some(tx) = &self.selected_tx {
-                        // Never rebuild the open PSBT panel while a modal is up:
-                        // a `PsbtState::new` here resets `modal` to `None` and
-                        // replaces `tx.psbt` with the daemon's copy, dropping an
-                        // in-progress Sign session (and its in-flight Keychain
-                        // sessions) and re-exposing only the signatures persisted
-                        // so far. The signing flow keeps the merged psbt in
-                        // memory and persists it itself, so a refresh has nothing
-                        // to add here.
-                        if tx.modal.is_some() {
-                            return Task::none();
-                        }
-                        if let Some(tx) = self.spend_txs.iter().find(|spend_tx| {
-                            spend_tx.psbt.unsigned_tx.compute_txid()
-                                == tx.tx.psbt.unsigned_tx.compute_txid()
-                        }) {
-                            let tx = psbt::PsbtState::new(self.wallet.clone(), tx.clone(), true);
-                            let cmd = tx.load(daemon);
-                            self.selected_tx = Some(tx);
-                            return cmd;
-                        }
-                    }
-                }
-            },
+            Message::SpendTxs(res) => {
+                return self.apply_spend_transactions(daemon, res);
+            }
             Message::View(view::Message::ImportPsbt) => {
                 if let Some(tx) = &mut self.selected_tx {
                     return tx.update(daemon, cache, message);
@@ -195,6 +160,54 @@ impl State for PsbtsPanel {
             },
             Message::SpendTxs,
         )
+    }
+}
+
+impl PsbtsPanel {
+    fn apply_spend_transactions(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        res: Result<Vec<SpendTx>, Error>,
+    ) -> Task<Message> {
+        match res {
+            Err(e) => {
+                let err_msg = crate::user_error::report(&e);
+                self.warning = Some(e);
+                return Task::done(Message::View(view::Message::ShowError(err_msg)));
+            }
+            Ok(mut txs) => {
+                self.warning = None;
+                // Optimistic Pending->Broadcast override for txs
+                // the user just broadcast locally, until the
+                // daemon's mempool poller reflects the spend in
+                // its derived `SpendStatus`.
+                self.wallet.apply_spend_tx_overrides(&mut txs);
+                self.spend_txs = txs;
+                if let Some(tx) = &self.selected_tx {
+                    // Never rebuild the open PSBT panel while a modal is up:
+                    // a `PsbtState::new` here resets `modal` to `None` and
+                    // replaces `tx.psbt` with the daemon's copy, dropping an
+                    // in-progress Sign session (and its in-flight Keychain
+                    // sessions) and re-exposing only the signatures persisted
+                    // so far. The signing flow keeps the merged psbt in
+                    // memory and persists it itself, so a refresh has nothing
+                    // to add here.
+                    if tx.modal.is_some() {
+                        return Task::none();
+                    }
+                    if let Some(tx) = self.spend_txs.iter().find(|spend_tx| {
+                        spend_tx.psbt.unsigned_tx.compute_txid()
+                            == tx.tx.psbt.unsigned_tx.compute_txid()
+                    }) {
+                        let tx = psbt::PsbtState::new(self.wallet.clone(), tx.clone(), true);
+                        let cmd = tx.load(daemon);
+                        self.selected_tx = Some(tx);
+                        return cmd;
+                    }
+                }
+            }
+        };
+        Task::none()
     }
 }
 

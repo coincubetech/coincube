@@ -286,6 +286,50 @@ impl HttpObservationSource {
             .await
     }
 
+    /// Preserve paired node reads, raw-error precedence and canonical
+    /// pruning order before advancing the existing graph search.
+    async fn provide_ancestry_node(
+        &self,
+        search: &mut Search,
+        pruning: &mut prune::PruneContext,
+        root_chain: ChainId,
+        txid: Txid,
+        max_bytes: usize,
+        policy: Policy,
+    ) -> Result<(), DiscoveryError> {
+        let observation = DiscoveryError::Observation;
+        let trace = self.ancestry_trace.as_ref().unwrap();
+
+        trace.stage(root_chain, diagnostics::Stage::TransactionReads);
+        // Both reads concern this same node and fit the existing
+        // shared request/byte budget. Keep raw-read error
+        // precedence and perform canonical pruning only after
+        // both bounded reads have finished.
+        let (raw, transaction) = tokio::join!(
+            self.ancestry_transaction_search(root_chain, txid, max_bytes),
+            self.transaction(root_chain, txid)
+        );
+        let raw = raw.map_err(|(error, exceeded_graph_bytes)| {
+            if exceeded_graph_bytes && max_bytes < claim_ancestry::MAX_TRANSACTION_BYTES {
+                DiscoveryError::Structural(claim_ancestry::Error::ByteLimit)
+            } else {
+                DiscoveryError::Observation(error)
+            }
+        })?;
+        let transaction = transaction.map_err(observation)?;
+        trace.stage(root_chain, diagnostics::Stage::PreForkCheck);
+        let pre_fork = pruning
+            .inspect_prefetched(self, txid, policy, transaction)
+            .await
+            .map_err(observation)?;
+        search
+            .provide_with_pruning(raw, pre_fork)
+            .map_err(DiscoveryError::Structural)?;
+        trace.visited(root_chain, pre_fork);
+
+        Ok(())
+    }
+
     async fn discover_ancestry_for(
         &self,
         selected: OutPoint,
@@ -306,34 +350,16 @@ impl HttpObservationSource {
             loop {
                 match search.step().map_err(DiscoveryError::Structural)? {
                     Step::Fetch { txid, max_bytes } => {
-                        trace.stage(root_chain, diagnostics::Stage::TransactionReads);
-                        // Both reads concern this same node and fit the existing
-                        // shared request/byte budget. Keep raw-read error
-                        // precedence and perform canonical pruning only after
-                        // both bounded reads have finished.
-                        let (raw, transaction) = tokio::join!(
-                            snapshot.ancestry_transaction_search(root_chain, txid, max_bytes),
-                            snapshot.transaction(root_chain, txid)
-                        );
-                        let raw = raw.map_err(|(error, exceeded_graph_bytes)| {
-                            if exceeded_graph_bytes
-                                && max_bytes < claim_ancestry::MAX_TRANSACTION_BYTES
-                            {
-                                DiscoveryError::Structural(claim_ancestry::Error::ByteLimit)
-                            } else {
-                                observation(error)
-                            }
-                        })?;
-                        let transaction = transaction.map_err(observation)?;
-                        trace.stage(root_chain, diagnostics::Stage::PreForkCheck);
-                        let pre_fork = pruning
-                            .inspect_prefetched(&snapshot, txid, policy, transaction)
-                            .await
-                            .map_err(observation)?;
-                        search
-                            .provide_with_pruning(raw, pre_fork)
-                            .map_err(DiscoveryError::Structural)?;
-                        trace.visited(root_chain, pre_fork);
+                        snapshot
+                            .provide_ancestry_node(
+                                &mut search,
+                                &mut pruning,
+                                root_chain,
+                                txid,
+                                max_bytes,
+                                policy,
+                            )
+                            .await?;
                     }
                     Step::Candidate(candidate) => {
                         trace.stage(root_chain, diagnostics::Stage::RootQualification);

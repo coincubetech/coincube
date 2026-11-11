@@ -1,3 +1,45 @@
+pub(super) fn read_transport_headers(stream: &mut std::net::TcpStream) -> String {
+    use std::io::Read;
+    let mut headers = Vec::new();
+    let mut byte = [0];
+    while !headers.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).unwrap();
+        headers.push(byte[0]);
+        assert!(headers.len() < 8192);
+    }
+    String::from_utf8(headers).unwrap()
+}
+
+pub(super) fn transport_content_length(headers: &str) -> usize {
+    headers
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().unwrap())
+        })
+        .unwrap()
+}
+
+pub(super) fn accept_transport_request(
+    listener: &std::net::TcpListener,
+    failure: &str,
+) -> std::net::TcpStream {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5))
+            }
+            other => panic!("{}: {:?}", failure, other),
+        }
+    }
+}
+
 use super::*;
 use crate::{
     config::{BitcoinConfig, Config},
@@ -746,6 +788,24 @@ mod regtest_transport_tests {
         stop: Arc<AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
+    fn scripted_node_response(
+        request: &serde_json::Value,
+        txid: Txid,
+        huge: bool,
+        changed: bool,
+    ) -> serde_json::Value {
+        if huge {
+            serde_json::json!({"chain":"regtest", "padding":"x".repeat(1024 * 1024)})
+        } else {
+            match request["method"].as_str().unwrap() {
+                "getblockchaininfo" => {
+                    serde_json::json!({"chain": if changed { "main" } else { "regtest" }})
+                }
+                "sendrawtransaction" => serde_json::json!(txid),
+                method => panic!("unexpected method {}", method),
+            }
+        }
+    }
     impl Server {
         fn new(txid: Txid, redirect: bool) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -774,22 +834,8 @@ mod regtest_transport_tests {
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
-                    let mut headers = Vec::new();
-                    while !headers.ends_with(b"\r\n\r\n") {
-                        let mut byte = [0];
-                        stream.read_exact(&mut byte).unwrap();
-                        headers.push(byte[0]);
-                        assert!(headers.len() < 8192);
-                    }
-                    let headers = String::from_utf8(headers).unwrap();
-                    let length: usize = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse().unwrap())
-                        })
-                        .unwrap();
+                    let headers = read_transport_headers(&mut stream);
+                    let length = transport_content_length(&headers);
                     let mut body = vec![0; length];
                     stream.read_exact(&mut body).unwrap();
                     let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -798,17 +844,12 @@ mod regtest_transport_tests {
                         write!(stream, "HTTP/1.1 302 Found\r\nLocation: http://{}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", addr).unwrap();
                         continue;
                     }
-                    let result = if huge.load(Ordering::SeqCst) {
-                        serde_json::json!({"chain":"regtest", "padding":"x".repeat(1024 * 1024)})
-                    } else {
-                        match request["method"].as_str().unwrap() {
-                            "getblockchaininfo" => {
-                                serde_json::json!({"chain": if changed.load(Ordering::SeqCst) { "main" } else { "regtest" }})
-                            }
-                            "sendrawtransaction" => serde_json::json!(txid),
-                            method => panic!("unexpected method {}", method),
-                        }
-                    };
+                    let result = scripted_node_response(
+                        &request,
+                        txid,
+                        huge.load(Ordering::SeqCst),
+                        changed.load(Ordering::SeqCst),
+                    );
                     let body =
                         serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":result})
                             .to_string();
@@ -1145,10 +1186,97 @@ fn claim_backend_binding_detects_same_address_replacement_and_private_config_cha
     );
 }
 
+fn assert_bound_transport_request(connect: bool, headers: &str, bytes: Vec<u8>, tx: &Transaction) {
+    if connect {
+        assert!(headers.starts_with("POST /api/v1/esplora/bitcoin/mainnet/tx HTTP/1.1\r\n"));
+        assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+        assert_eq!(
+            bytes,
+            bitcoin::consensus::encode::serialize_hex(&tx).as_bytes()
+        );
+    } else {
+        let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            request,
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"sendrawtransaction","params":[bitcoin::consensus::encode::serialize_hex(&tx)]})
+        );
+    }
+}
+
+fn bound_transport_response(connect: bool, case: usize, tx: &Transaction) -> String {
+    if connect {
+        match case {
+            3 => Txid::all_zeros().to_string(),
+            4 => format!("{{\"result\":\"{}\"}}", tx.compute_txid()),
+            5 => "not a transaction id".into(),
+            6 => "x".repeat(16_385),
+            _ => tx.compute_txid().to_string(),
+        }
+    } else {
+        match case {
+            3 => serde_json::json!({"id":1,"result":Txid::all_zeros(),"error":null}).to_string(),
+            4 => serde_json::json!({"id":2,"result":tx.compute_txid(),"error":null}).to_string(),
+            5 => "not JSON".into(),
+            6 => "x".repeat(16_385),
+            _ => serde_json::json!({"id":1,"result":tx.compute_txid(),"error":null}).to_string(),
+        }
+    }
+}
+
+fn serve_bound_transport_case(
+    listener: std::net::TcpListener,
+    tx: Transaction,
+    connect: bool,
+    case: usize,
+) {
+    use std::io::{Read, Write};
+    let address = listener.local_addr().unwrap();
+    let mut stream = accept_transport_request(&listener, "node fixture accept failed");
+    stream.set_nonblocking(false).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let headers = read_transport_headers(&mut stream);
+    let length = transport_content_length(&headers);
+    assert!(length < 16_384);
+    let mut bytes = vec![0; length];
+    stream.read_exact(&mut bytes).unwrap();
+    assert_bound_transport_request(connect, &headers, bytes, &tx);
+    let status = match case {
+        1 => "401 Unauthorized",
+        2 => "307 Temporary Redirect",
+        _ => "200 OK",
+    };
+    let body = bound_transport_response(connect, case, &tx);
+    if case == 7 {
+        // The node has received every transaction byte but sends no
+        // acknowledgement before the client's total timeout.
+        std::thread::sleep(Duration::from_secs(16));
+    } else {
+        let written = write!(stream, "HTTP/1.1 {}\r\nContent-Length: {}\r\nLocation: http://{}/redirected\r\nConnection: close\r\n\r\n{}", status, body.len(), address, body);
+        // An oversized Content-Length may make the client close before
+        // the fixture finishes writing the deliberately rejected body.
+        if case != 6 {
+            written.unwrap();
+        }
+    }
+    drop(stream);
+    let deadline = std::time::Instant::now() + Duration::from_millis(200);
+    while std::time::Instant::now() < deadline {
+        assert!(
+            matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "sender retried or followed a redirect"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn bound_transports_send_exact_bytes_once_and_never_follow_redirects() {
     use crate::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
-    use std::io::{Read, Write};
     use std::net::TcpListener;
     let (built, signers) = fixture(ChainId::Bitcoin, false);
     let verified = finalize_poison_transfer(
@@ -1166,107 +1294,8 @@ fn bound_transports_send_exact_bytes_once_and_never_follow_redirects() {
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
         let tx = verified.transaction().clone();
-        let worker = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(e)
-                        if e.kind() == std::io::ErrorKind::WouldBlock
-                            && std::time::Instant::now() < deadline =>
-                    {
-                        std::thread::sleep(Duration::from_millis(5))
-                    }
-                    other => panic!("node fixture accept failed: {:?}", other),
-                }
-            };
-            stream.set_nonblocking(false).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut headers = Vec::new();
-            let mut byte = [0];
-            while !headers.ends_with(b"\r\n\r\n") {
-                stream.read_exact(&mut byte).unwrap();
-                headers.push(byte[0]);
-                assert!(headers.len() < 8192);
-            }
-            let headers = String::from_utf8(headers).unwrap();
-            let length: usize = headers
-                .lines()
-                .find_map(|line| {
-                    let (key, value) = line.split_once(':')?;
-                    key.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse().unwrap())
-                })
-                .unwrap();
-            assert!(length < 16_384);
-            let mut bytes = vec![0; length];
-            stream.read_exact(&mut bytes).unwrap();
-            if connect {
-                assert!(headers.starts_with("POST /api/v1/esplora/bitcoin/mainnet/tx HTTP/1.1\r\n"));
-                assert!(!headers.to_ascii_lowercase().contains("authorization:"));
-                assert_eq!(
-                    bytes,
-                    bitcoin::consensus::encode::serialize_hex(&tx).as_bytes()
-                );
-            } else {
-                let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                assert_eq!(
-                    request,
-                    serde_json::json!({"jsonrpc":"2.0","id":1,"method":"sendrawtransaction","params":[bitcoin::consensus::encode::serialize_hex(&tx)]})
-                );
-            }
-            let status = match case {
-                1 => "401 Unauthorized",
-                2 => "307 Temporary Redirect",
-                _ => "200 OK",
-            };
-            let body = if connect {
-                match case {
-                    3 => Txid::all_zeros().to_string(),
-                    4 => format!("{{\"result\":\"{}\"}}", tx.compute_txid()),
-                    5 => "not a transaction id".into(),
-                    6 => "x".repeat(16_385),
-                    _ => tx.compute_txid().to_string(),
-                }
-            } else {
-                match case {
-                    3 => serde_json::json!({"id":1,"result":Txid::all_zeros(),"error":null})
-                        .to_string(),
-                    4 => serde_json::json!({"id":2,"result":tx.compute_txid(),"error":null})
-                        .to_string(),
-                    5 => "not JSON".into(),
-                    6 => "x".repeat(16_385),
-                    _ => serde_json::json!({"id":1,"result":tx.compute_txid(),"error":null})
-                        .to_string(),
-                }
-            };
-            if case == 7 {
-                // The node has received every transaction byte but sends no
-                // acknowledgement before the client's total timeout.
-                std::thread::sleep(Duration::from_secs(16));
-            } else {
-                let written = write!(stream, "HTTP/1.1 {}\r\nContent-Length: {}\r\nLocation: http://{}/redirected\r\nConnection: close\r\n\r\n{}", status, body.len(), address, body);
-                // An oversized Content-Length may make the client close before
-                // the fixture finishes writing the deliberately rejected body.
-                if case != 6 {
-                    written.unwrap();
-                }
-            }
-            drop(stream);
-            let deadline = std::time::Instant::now() + Duration::from_millis(200);
-            while std::time::Instant::now() < deadline {
-                assert!(
-                    matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
-                    "sender retried or followed a redirect"
-                );
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        });
+        let worker =
+            std::thread::spawn(move || serve_bound_transport_case(listener, tx, connect, case));
         let mut daemon = control(
             ChainId::Bitcoin,
             built.descriptor().clone(),

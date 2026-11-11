@@ -397,6 +397,45 @@ impl ForkClaimPanel {
             }
         }
     }
+    fn apply_signing_check(
+        &mut self,
+        mut preparation: Box<Preparation>,
+        pending: Box<Message>,
+        result: Result<SigningCheck, String>,
+        daemon: Option<Arc<dyn Daemon + Send + Sync>>,
+        cache: &Cache,
+    ) -> Task<Message> {
+        let dispatch = result.and_then(|check| {
+            let psbt = self
+                .psbt
+                .as_ref()
+                .ok_or_else(|| SESSION_ENDED.to_string())?;
+            let current =
+                UnifiedPsbt::from_psbt(psbt.tx.psbt.clone()).map_err(|e| e.to_string())?;
+            preparation
+                .signing_dispatch(check, &current, &self.context)
+                .map_err(describe)
+        });
+        self.preparation = Some(preparation);
+        match (dispatch, daemon, self.psbt.as_mut()) {
+            (Ok(dispatch), Some(daemon), Some(psbt)) => {
+                if !psbt.set_claim_split_evidence(dispatch.split) {
+                    self.error = Some(SESSION_ENDED.into());
+                    return Task::none();
+                }
+                let task = psbt.update(Arc::new(SigningOnlyDaemon(daemon)), cache, *pending);
+                Self::route_signer(self.epoch, task)
+            }
+            (Err(error), _, _) => {
+                self.error = Some(error);
+                Task::none()
+            }
+            _ => {
+                self.error = Some(SESSION_ENDED.into());
+                Task::none()
+            }
+        }
+    }
     fn apply(
         &mut self,
         event: Event,
@@ -421,42 +460,10 @@ impl ForkClaimPanel {
         match event.result {
             ResultEvent::Signer(message) => self.signer_result(*message, daemon, cache),
             ResultEvent::Signing {
-                mut preparation,
+                preparation,
                 pending,
                 result,
-            } => {
-                let dispatch = result.and_then(|check| {
-                    let psbt = self
-                        .psbt
-                        .as_ref()
-                        .ok_or_else(|| SESSION_ENDED.to_string())?;
-                    let current =
-                        UnifiedPsbt::from_psbt(psbt.tx.psbt.clone()).map_err(|e| e.to_string())?;
-                    preparation
-                        .signing_dispatch(check, &current, &self.context)
-                        .map_err(describe)
-                });
-                self.preparation = Some(preparation);
-                match (dispatch, daemon, self.psbt.as_mut()) {
-                    (Ok(dispatch), Some(daemon), Some(psbt)) => {
-                        if !psbt.set_claim_split_evidence(dispatch.split) {
-                            self.error = Some(SESSION_ENDED.into());
-                            return Task::none();
-                        }
-                        let task =
-                            psbt.update(Arc::new(SigningOnlyDaemon(daemon)), cache, *pending);
-                        Self::route_signer(self.epoch, task)
-                    }
-                    (Err(error), _, _) => {
-                        self.error = Some(error);
-                        Task::none()
-                    }
-                    _ => {
-                        self.error = Some(SESSION_ENDED.into());
-                        Task::none()
-                    }
-                }
-            }
+            } => self.apply_signing_check(preparation, pending, result, daemon, cache),
             ResultEvent::Reviewed {
                 coordinator,
                 result,

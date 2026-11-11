@@ -360,41 +360,41 @@ pub fn edit_sequence_modal<'a>(sequence: &form::Value<String>) -> Element<'a, Me
                 .align_y(alignment::Vertical::Center),
         );
 
-    if sequence.valid {
-        if let Ok(sequence) = u16::from_str(&sequence.value) {
-            col = col
-                .push(format_sequence_duration(sequence, false).iter().fold(
-                    Row::new().spacing(5).push(text("~ ").bold()),
-                    |row, (n, unit)| {
-                        row.push(if *n > 0 {
-                            Some(
-                                text(format!("{} {}{}", n, unit, if *n > 1 { "s" } else { "" }))
-                                    .bold(),
-                            )
-                        } else {
-                            None
-                        })
-                    },
-                ))
-                .push(
-                    Container::new(
-                        slider(1..=u16::MAX, sequence, |v| {
-                            Message::DefineDescriptor(
-                                message::DefineDescriptor::ThresholdSequenceModal(
-                                    message::ThresholdSequenceModal::SequenceEdited(
-                                        // Since slider starts at 1, intermediate values are off by 1 from intended values.
-                                        // Subtract 1 to align with expected sequence values, except for edge cases (1 and u16::MAX)
-                                        (if v > 1 && v != u16::MAX { v - 1 } else { v })
-                                            .to_string(),
-                                    ),
+    if let Some(sequence) = sequence
+        .valid
+        .then(|| u16::from_str(&sequence.value))
+        .and_then(Result::ok)
+    {
+        col = col
+            .push(format_sequence_duration(sequence, false).iter().fold(
+                Row::new().spacing(5).push(text("~ ").bold()),
+                |row, (n, unit)| {
+                    row.push(if *n > 0 {
+                        Some(
+                            text(format!("{} {}{}", n, unit, if *n > 1 { "s" } else { "" })).bold(),
+                        )
+                    } else {
+                        None
+                    })
+                },
+            ))
+            .push(
+                Container::new(
+                    slider(1..=u16::MAX, sequence, |v| {
+                        Message::DefineDescriptor(
+                            message::DefineDescriptor::ThresholdSequenceModal(
+                                message::ThresholdSequenceModal::SequenceEdited(
+                                    // Since slider starts at 1, intermediate values are off by 1 from intended values.
+                                    // Subtract 1 to align with expected sequence values, except for edge cases (1 and u16::MAX)
+                                    (if v > 1 && v != u16::MAX { v - 1 } else { v }).to_string(),
                                 ),
-                            )
-                        })
-                        .step(4383_u16), // 4383 blocks per month
-                    )
-                    .width(Length::Fixed(500.0)),
-                );
-        }
+                            ),
+                        )
+                    })
+                    .step(4383_u16), // 4383 blocks per month
+                )
+                .width(Length::Fixed(500.0)),
+            );
     }
 
     card::modal(col.push(if sequence.valid {
@@ -535,4 +535,40 @@ mod threshsold_input {
             component(numeric_input)
         }
     }
+}
+
+pub(super) fn template_key_warning(
+    use_taproot: bool,
+    key: &crate::installer::descriptor::Key,
+) -> Option<&'static str> {
+    if use_taproot && !key.source.is_compatible_taproot() {
+        Some("This device does not support Taproot")
+    } else {
+        None
+    }
+}
+
+pub(super) fn template_primary_key<'a>(
+    i: usize,
+    primary_key: &'a Option<crate::installer::descriptor::Key>,
+    use_taproot: bool,
+    primary_path: &'a crate::installer::descriptor::Path,
+) -> Element<'a, message::DefinePath> {
+    if let Some(key) = primary_key {
+        defined_key(
+            &key.name,
+            coincube_ui::color::GREEN,
+            format!("Primary key #{}", i + 1),
+            crate::installer::view::editor::template_key_warning(use_taproot, key),
+            true,
+        )
+    } else {
+        undefined_key(
+            coincube_ui::color::GREEN,
+            format!("Primary key #{}", i + 1),
+            !primary_path.keys[0..i].iter().any(|k| k.is_none()),
+            true,
+        )
+    }
+    .map(move |msg| message::DefinePath::Key(i, msg))
 }

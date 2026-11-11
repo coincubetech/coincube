@@ -27,6 +27,40 @@ enum Answer {
     Drop,
 }
 
+fn serve_connection(
+    stream: std::net::TcpStream,
+    answer: impl Fn(&str, &Json) -> Answer,
+    down: &AtomicBool,
+) {
+    let mut writer = stream.try_clone().unwrap();
+    for line in BufReader::new(stream).lines() {
+        let Ok(line) = line else { return };
+        let request: Json = serde_json::from_str(&line).unwrap();
+        let requests = match request {
+            Json::Array(requests) => requests,
+            request => vec![request],
+        };
+        let mut replies = Vec::new();
+        for request in requests {
+            let method = request["method"].as_str().unwrap();
+            let (key, value) = match answer(method, &request["params"]) {
+                Answer::Result(result) => ("result", result),
+                Answer::Error(error) => ("error", error),
+                Answer::Drop => {
+                    down.store(true, Ordering::SeqCst);
+                    return;
+                }
+            };
+            replies.push(serde_json::json!({"jsonrpc": "2.0", "id": request["id"], key: value}));
+        }
+        for reply in replies {
+            if writeln!(writer, "{}", reply).is_err() {
+                return;
+            }
+        }
+    }
+}
+
 /// A regtest Electrum server whose chain is the genesis block alone, answering
 /// every request with `answer(method, params)`.
 fn scripted_server(
@@ -69,35 +103,7 @@ fn scripted_server(
             // One thread per connection: the client keeps it open between
             // requests, and the ping-only probe in `Client::new` has its own.
             thread::spawn(move || {
-                let mut writer = stream.try_clone().unwrap();
-                for line in BufReader::new(stream).lines() {
-                    let Ok(line) = line else { return };
-                    let request: Json = serde_json::from_str(&line).unwrap();
-                    let requests = match request {
-                        Json::Array(requests) => requests,
-                        request => vec![request],
-                    };
-                    let mut replies = Vec::new();
-                    for request in requests {
-                        let method = request["method"].as_str().unwrap();
-                        let (key, value) = match answer(method, &request["params"]) {
-                            Answer::Result(result) => ("result", result),
-                            Answer::Error(error) => ("error", error),
-                            Answer::Drop => {
-                                down.store(true, Ordering::SeqCst);
-                                return;
-                            }
-                        };
-                        replies.push(
-                            serde_json::json!({"jsonrpc": "2.0", "id": request["id"], key: value}),
-                        );
-                    }
-                    for reply in replies {
-                        if writeln!(writer, "{}", reply).is_err() {
-                            return;
-                        }
-                    }
-                }
+                serve_connection(stream, |method, params| answer(method, params), &down);
             });
         }
     })

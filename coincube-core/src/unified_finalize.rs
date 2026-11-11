@@ -561,20 +561,14 @@ fn satisfy_preferring_unified(
                 subset.insert(**key, legacy[*key].clone());
             }
         }
-        if let Ok((w, r)) = satisfy_input(input_index, context, &subset, locks) {
-            if r.unified_used == 0 {
-                continue;
-            }
-            let better = match &best {
-                None => true,
-                Some((bw, br)) => {
-                    r.unified_used > br.unified_used
-                        || (r.unified_used == br.unified_used && w.size() < bw.size())
-                }
-            };
-            if better {
-                best = Some((w, r));
-            }
+        let Ok((w, r)) = satisfy_input(input_index, context, &subset, locks) else {
+            continue;
+        };
+        if r.unified_used == 0 {
+            continue;
+        }
+        if better_unified_witness(&w, &r, best.as_ref()) {
+            best = Some((w, r));
         }
     }
     Ok(best.unwrap_or((witness, report)))
@@ -848,3 +842,17 @@ pub fn spent_amount(psbt: &UnifiedPsbt, input_index: usize) -> Option<Amount> {
 #[cfg(test)]
 #[path = "unified_finalize/tests.rs"]
 mod tests;
+
+fn better_unified_witness(
+    w: &Witness,
+    r: &InputWitnessReport,
+    best: Option<&(Witness, InputWitnessReport)>,
+) -> bool {
+    match best {
+        None => true,
+        Some((bw, br)) => {
+            r.unified_used > br.unified_used
+                || (r.unified_used == br.unified_used && w.size() < bw.size())
+        }
+    }
+}

@@ -215,7 +215,10 @@ impl Step for CoincubeConnectStep {
     }
 
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
-        if let Message::CoincubeConnect(msg) = message {
+        let Message::CoincubeConnect(msg) = message else {
+            return Task::none();
+        };
+        {
             match msg {
                 CoincubeConnectMsg::EmailEdited(value) => {
                     self.email_touched = true;
@@ -256,22 +259,7 @@ impl Step for CoincubeConnectStep {
                     );
                 }
                 CoincubeConnectMsg::OtpRequested { email, result } => {
-                    self.processing = false;
-                    match result {
-                        Ok(()) => {
-                            self.otp_sent = true;
-                            self.otp = form::Value::default();
-                            self.error = None;
-                        }
-                        Err(e) => {
-                            if !self.is_signup && e.contains("Email not verified") {
-                                return Task::done(Message::CoincubeConnect(
-                                    CoincubeConnectMsg::EmailNotVerified { email },
-                                ));
-                            }
-                            self.error = Some(e);
-                        }
-                    }
+                    return self.on_otp_requested(email, result);
                 }
                 CoincubeConnectMsg::OtpResent(res) => {
                     self.processing = false;
@@ -305,36 +293,7 @@ impl Step for CoincubeConnectStep {
                     );
                 }
                 CoincubeConnectMsg::OtpEdited(value) => {
-                    self.otp.value = value.trim().to_string();
-                    self.otp.valid = true;
-                    if self.otp.value.len() == 6 && !self.processing {
-                        let client = self.client.clone();
-                        let email = self.email.value.clone();
-                        let otp = self.otp.value.clone();
-                        let is_signup = self.is_signup;
-                        self.processing = true;
-                        self.error = None;
-                        return Task::perform(
-                            async move {
-                                let req = OtpVerifyRequest { email, otp };
-                                if is_signup {
-                                    client.signup_verify_otp(req).await
-                                } else {
-                                    client.login_verify_otp(req).await
-                                }
-                                // Wrap into `Zeroizing<String>` at the
-                                // async boundary — before the token
-                                // enters the message queue — so every
-                                // in-flight copy of the subsequent
-                                // `OtpVerified` message scrubs its
-                                // heap on drop, not just the copy
-                                // stashed on the step's state.
-                                .map(|resp| Zeroizing::new(resp.token))
-                                .map_err(|e| e.to_string())
-                            },
-                            |res| Message::CoincubeConnect(CoincubeConnectMsg::OtpVerified(res)),
-                        );
-                    }
+                    return self.edit_otp(value);
                 }
                 CoincubeConnectMsg::OtpVerified(res) => {
                     self.processing = false;
@@ -389,6 +348,66 @@ impl Step for CoincubeConnectStep {
             self.error.as_deref(),
             !self.required,
         )
+    }
+}
+
+impl CoincubeConnectStep {
+    fn edit_otp(&mut self, value: String) -> Task<Message> {
+        self.otp.value = value.trim().to_string();
+        self.otp.valid = true;
+        if self.otp.value.len() == 6 && !self.processing {
+            let client = self.client.clone();
+            let email = self.email.value.clone();
+            let otp = self.otp.value.clone();
+            let is_signup = self.is_signup;
+            self.processing = true;
+            self.error = None;
+            return Task::perform(
+                async move {
+                    let req = OtpVerifyRequest { email, otp };
+                    if is_signup {
+                        client.signup_verify_otp(req).await
+                    } else {
+                        client.login_verify_otp(req).await
+                    }
+                    // Wrap into `Zeroizing<String>` at the
+                    // async boundary — before the token
+                    // enters the message queue — so every
+                    // in-flight copy of the subsequent
+                    // `OtpVerified` message scrubs its
+                    // heap on drop, not just the copy
+                    // stashed on the step's state.
+                    .map(|resp| Zeroizing::new(resp.token))
+                    .map_err(|e| e.to_string())
+                },
+                |res| Message::CoincubeConnect(CoincubeConnectMsg::OtpVerified(res)),
+            );
+        }
+
+        Task::none()
+    }
+}
+
+impl CoincubeConnectStep {
+    fn on_otp_requested(&mut self, email: String, result: Result<(), String>) -> Task<Message> {
+        self.processing = false;
+        match result {
+            Ok(()) => {
+                self.otp_sent = true;
+                self.otp = form::Value::default();
+                self.error = None;
+            }
+            Err(e) => {
+                if !self.is_signup && e.contains("Email not verified") {
+                    return Task::done(Message::CoincubeConnect(
+                        CoincubeConnectMsg::EmailNotVerified { email },
+                    ));
+                }
+                self.error = Some(e);
+            }
+        }
+
+        Task::none()
     }
 }
 

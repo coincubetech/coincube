@@ -166,26 +166,7 @@ impl State for WalletSettingsState {
             return Task::none();
         };
         match message {
-            Message::WalletUpdated(res) => {
-                self.processing = false;
-                if let Modal::RegisterWallet(modal) = &mut self.modal {
-                    modal.update(Some(daemon.clone()), cache, Message::WalletUpdated(res))
-                } else {
-                    match res {
-                        Ok(wallet) => {
-                            self.keys_aliases = Self::keys_aliases(&wallet);
-                            self.wallet = wallet;
-                            self.updated = true;
-                            Task::none()
-                        }
-                        Err(e) => {
-                            let err_msg = crate::user_error::report(&e);
-                            self.warning = Some(e);
-                            Task::done(Message::View(view::Message::ShowError(err_msg)))
-                        }
-                    }
-                }
-            }
+            Message::WalletUpdated(res) => self.apply_wallet_update(daemon, cache, res),
             Message::View(view::Message::Settings(view::SettingsMessage::WalletAliasEdited(
                 alias,
             ))) => {
@@ -206,37 +187,7 @@ impl State for WalletSettingsState {
                 Task::none()
             }
             Message::View(view::Message::Settings(view::SettingsMessage::Save)) => {
-                self.modal = Modal::None;
-                self.processing = true;
-                self.updated = false;
-                Task::perform(
-                    update_aliases(
-                        self.data_dir.clone(),
-                        self.wallet.clone(),
-                        match self
-                            .wallet
-                            .alias
-                            .as_ref()
-                            .map(|a| *a == self.wallet_alias.value)
-                        {
-                            Some(true) => None,
-                            Some(false) => Some(self.wallet_alias.value.clone()),
-                            None => {
-                                if self.wallet_alias.value.is_empty() {
-                                    None
-                                } else {
-                                    Some(self.wallet_alias.value.clone())
-                                }
-                            }
-                        },
-                        self.keys_aliases
-                            .iter()
-                            .map(|(fg, name)| (*fg, name.value.to_owned()))
-                            .collect(),
-                        daemon,
-                    ),
-                    Message::WalletUpdated,
-                )
+                self.save_aliases(daemon)
             }
             Message::View(view::Message::Close) => {
                 self.modal = Modal::None;
@@ -331,6 +282,67 @@ impl State for WalletSettingsState {
         Task::perform(
             async move { daemon.get_info().await.map_err(|e| e.into()) },
             Message::Info,
+        )
+    }
+}
+
+impl WalletSettingsState {
+    fn apply_wallet_update(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: &Cache,
+        res: Result<Arc<Wallet>, Error>,
+    ) -> Task<Message> {
+        self.processing = false;
+        if let Modal::RegisterWallet(modal) = &mut self.modal {
+            modal.update(Some(daemon.clone()), cache, Message::WalletUpdated(res))
+        } else {
+            match res {
+                Ok(wallet) => {
+                    self.keys_aliases = Self::keys_aliases(&wallet);
+                    self.wallet = wallet;
+                    self.updated = true;
+                    Task::none()
+                }
+                Err(e) => {
+                    let err_msg = crate::user_error::report(&e);
+                    self.warning = Some(e);
+                    Task::done(Message::View(view::Message::ShowError(err_msg)))
+                }
+            }
+        }
+    }
+    fn save_aliases(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        self.modal = Modal::None;
+        self.processing = true;
+        self.updated = false;
+        Task::perform(
+            update_aliases(
+                self.data_dir.clone(),
+                self.wallet.clone(),
+                match self
+                    .wallet
+                    .alias
+                    .as_ref()
+                    .map(|a| *a == self.wallet_alias.value)
+                {
+                    Some(true) => None,
+                    Some(false) => Some(self.wallet_alias.value.clone()),
+                    None => {
+                        if self.wallet_alias.value.is_empty() {
+                            None
+                        } else {
+                            Some(self.wallet_alias.value.clone())
+                        }
+                    }
+                },
+                self.keys_aliases
+                    .iter()
+                    .map(|(fg, name)| (*fg, name.value.to_owned()))
+                    .collect(),
+                daemon,
+            ),
+            Message::WalletUpdated,
         )
     }
 }
@@ -490,15 +502,10 @@ async fn register_wallet(
                     .iter_mut()
                     .find(|w| w.wallet_id() == wallet_id)
                 {
-                    if let Some(hw_config) = wallet_setting
-                        .hardware_wallets
-                        .iter_mut()
-                        .find(|cfg| cfg.kind == kind && cfg.fingerprint == fingerprint)
-                    {
-                        *hw_config = hw_cfg.clone();
-                    } else {
-                        wallet_setting.hardware_wallets.push(hw_cfg.clone())
-                    }
+                    upsert_registered_hardware(
+                        &mut wallet_setting.hardware_wallets,
+                        hw_cfg.clone(),
+                    );
                 }
 
                 Some(settings)
@@ -507,15 +514,7 @@ async fn register_wallet(
         }
 
         let mut wallet = wallet.as_ref().clone();
-        if let Some(hw_config) = wallet
-            .hardware_wallets
-            .iter_mut()
-            .find(|cfg| cfg.kind == kind && cfg.fingerprint == fingerprint)
-        {
-            *hw_config = hw_cfg.clone();
-        } else {
-            wallet.hardware_wallets.push(hw_cfg)
-        }
+        upsert_registered_hardware(&mut wallet.hardware_wallets, hw_cfg);
         daemon
             .update_wallet_metadata(None, &wallet.keys_aliases, &wallet.hardware_wallets)
             .await?;
@@ -523,6 +522,20 @@ async fn register_wallet(
     }
 
     Ok(wallet)
+}
+
+fn upsert_registered_hardware(
+    configs: &mut Vec<HardwareWalletConfig>,
+    hw_cfg: HardwareWalletConfig,
+) {
+    if let Some(hw_config) = configs
+        .iter_mut()
+        .find(|cfg| cfg.kind == hw_cfg.kind && cfg.fingerprint == hw_cfg.fingerprint)
+    {
+        *hw_config = hw_cfg;
+    } else {
+        configs.push(hw_cfg);
+    }
 }
 
 pub async fn update_aliases(

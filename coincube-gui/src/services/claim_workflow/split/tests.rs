@@ -2417,6 +2417,194 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
     assert!(matches!(full_validate(&next), Err(Error::InvalidPlan)));
 }
 
+fn collect_split_references(
+    file: &str,
+    text: &str,
+    items: &[&str],
+    own: &[&str],
+    unexpected: &mut Vec<(String, String)>,
+) {
+    let mut start = None;
+    for (index, c) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
+        let word = c.is_ascii_alphanumeric() || c == '_';
+        match (word, start) {
+            (true, None) => start = Some(index),
+            (false, Some(from)) => {
+                let ident = &text[from..index];
+                if items.contains(&ident)
+                    && !own.contains(&file)
+                    && !allowed_split_reference(file, ident)
+                {
+                    unexpected.push((file.to_owned(), ident.to_owned()));
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn split_panel_reference(file: &str, ident: &str) -> bool {
+    // B1b: the Split step-1 panel and its tests. It is
+    // started only from the sweep review under the server
+    // flag, or resumed from its journal (B5c-2), so no other
+    // GUI action reaches these.
+    // #568 D19: journal discovery reads whether a journal
+    // is a recorded completion (read only, off the UI
+    // thread), in the panel's step 1 only; the #625 F3
+    // guard names it as blocking work.
+    let discovery = matches!(
+        file,
+        "src/app/state/vault/split/step1.rs" | "src/app/state/vault/split/tests.rs"
+    ) && ident == "peek_split_journal";
+    let panel = discovery
+        || (file.starts_with("src/app/state/vault/split/")
+            && [
+                "create_split",
+                "resume_split",
+                "SplitProduction",
+                "split_identity",
+                "recorded_split",
+                "abandon_split",
+                "revalidate_split_construction",
+                "bind_recovered_split_transaction",
+            ]
+            .contains(&ident));
+    // B3b-2b: the panel's (uncalled) step-2 layer reads the
+    // recorded step 2 at restart; its tests write journals.
+    // P3-3: the restart also reads whether a resend is
+    // allowed, to choose which handle to open (it records
+    // nothing); its tests record a return or a sighting.
+    let panel_step2 = (file.starts_with("src/app/state/vault/split/step2")
+        && [
+            "split_identity",
+            "recorded_split_step2",
+            "create_split",
+            "record_split_broadcast_intent",
+            "record_split_target",
+            "prepare_split_step2",
+            "record_split_step2_broadcast_intent",
+            "split_step2_returned",
+            "split_step2_observed",
+            "split_step2_resubmissions",
+            // #625 F2: the restart reads the dead end.
+            "split_step2_dead_end",
+            // #568 S4b: and O4's, a recorded terminal
+            // step-1 conflict (read only).
+            "Step1Conflict",
+            "split_step1_conflict",
+        ]
+        .contains(&ident))
+        || (file.starts_with("src/app/state/vault/split/step2/tests")
+            && [
+                "record_split_step2_returned",
+                "record_split_step2_observed",
+                // #568 S4: the warning test builds an O4 outcome.
+                "Step1Conflict",
+            ]
+            .contains(&ident));
+    // #568 B4b-3c: restart and the fork-only close read the
+    // record's kind; the single-step panel's tests write
+    // fork-only journals.
+    let panel_unified = ((file.starts_with("src/app/state/vault/split/step2")
+        || file.starts_with("src/app/state/vault/split/unified"))
+        && ["SplitKind", "split_identity"].contains(&ident))
+        || (file.starts_with("src/app/state/vault/split/unified/tests")
+            && ["create_unified_split", "record_unified_broadcast_intent"].contains(&ident));
+    // #625 F2: the close tests make a journal whose resend is
+    // reviewable, which is no dead end. Tests only.
+    let panel_step2_tests = file.starts_with("src/app/state/vault/split/step2/tests")
+        && ident == "record_split_step2_returned";
+    panel || panel_step2 || panel_step2_tests || panel_unified
+}
+
+fn split_gate_reference(file: &str, ident: &str) -> bool {
+    // B2/B3b: the dormant step-2 gate and construction and
+    // their tests reopen a submitted Split journal; no GUI
+    // caller reaches them
+    // (`fork::split::tests::split_step2_gate_has_no_gui_caller`).
+    // Only the tests create a journal (#626 guard nit); B4b-1b's
+    // reconciler tests create and submit a fork-only one.
+    let gate_tests = file.starts_with("src/services/claim_coordinator/fork/split/tests");
+    let gate = file.starts_with("src/services/claim_coordinator/fork/split")
+        && ([
+            "SplitProduction",
+            "split_identity",
+            "recorded_split",
+            "revalidate_split_construction",
+            "bind_recovered_split_transaction",
+            // B5a: the completion evidence deletes them.
+            "forget_split_descriptors",
+            "record_split_target",
+            "replace_used_split_target",
+            "prepare_split_step2",
+            "record_split_step2_broadcast_intent",
+            "recorded_split_step2",
+            "record_split_step2_resubmission",
+            "record_split_step2_observed",
+            "split_step2_resubmissions",
+            "split_step2_observed",
+            "record_split_step2_returned",
+            "split_step2_returned",
+            "hold_split_step2_return",
+            "release_split_step2_return",
+            "Step2ReturnHold",
+            // #568 S4: the step-2 reconciler's step-1 reorg
+            // outcomes refuse a fork-only record and record
+            // a step-1 conflict (O4).
+            "SplitKind",
+            "Step1Conflict",
+            "split_step1_conflict",
+            "record_split_step1_conflict",
+            "confirm_split_step1_conflict",
+            "clear_split_step1_conflict",
+            "disprove_split_step1_conflict",
+        ]
+        .contains(&ident)
+            || (gate_tests
+                && [
+                    "create_split",
+                    "create_unified_split",
+                    "record_unified_broadcast_intent",
+                ]
+                .contains(&ident)));
+    // B4b-3a: the fork-only route's coordinator (dormant,
+    // guarded with the step-2 gate) is the one production
+    // writer of a fork-only record: it creates the journal at
+    // confirmation, revalidates a reopened one and records
+    // the verified sweep's intent.
+    let unified = file == "src/services/claim_coordinator/fork/split/step2/unified.rs"
+        && [
+            "create_unified_split",
+            "revalidate_unified_construction",
+            "record_unified_broadcast_intent",
+        ]
+        .contains(&ident);
+    gate || unified
+}
+
+fn allowed_split_reference(file: &str, ident: &str) -> bool {
+    let reexport = file == "src/services/claim_workflow/mod.rs"
+        && [
+            "split_identity",
+            "RecordedSplit",
+            "Step2ReturnHold",
+            "SplitKind",
+            "Step1Conflict",
+            "peek_split_journal",
+            "SplitJournalSummary",
+        ]
+        .contains(&ident);
+    let dispatch = file == "src/services/claim_coordinator/step1.rs" && ident == "for_split_step1";
+    reexport || dispatch || split_panel_reference(file, ident) || split_gate_reference(file, ident)
+        // The pairing collision guard only reads existing journals.
+        || (file == "src/services/bitcoin_import/pairing/legacy.rs"
+            && ["peek_split_journal", "SplitJournalSummary"].contains(&ident))
+}
+
 /// Layering: no GUI caller. The Split journal API is reached only from its own
 /// module and tests (and re-exported by `claim_workflow`), and from the Split
 /// coordinator (B0b). The coordinator's Split API (`SplitProduction`,
@@ -2510,186 +2698,7 @@ fn split_b0_journal_api_has_no_gui_callers() {
     );
     let mut unexpected = Vec::new();
     for (file, text) in &files {
-        let mut start = None;
-        for (index, c) in text
-            .char_indices()
-            .chain(std::iter::once((text.len(), ' ')))
-        {
-            let word = c.is_ascii_alphanumeric() || c == '_';
-            match (word, start) {
-                (true, None) => start = Some(index),
-                (false, Some(from)) => {
-                    let ident = &text[from..index];
-                    let reexport = file == "src/services/claim_workflow/mod.rs"
-                        && [
-                            "split_identity",
-                            "RecordedSplit",
-                            "Step2ReturnHold",
-                            "SplitKind",
-                            "Step1Conflict",
-                            "peek_split_journal",
-                            "SplitJournalSummary",
-                        ]
-                        .contains(&ident);
-                    let dispatch = file == "src/services/claim_coordinator/step1.rs"
-                        && ident == "for_split_step1";
-                    // B1b: the Split step-1 panel and its tests. It is
-                    // started only from the sweep review under the server
-                    // flag, or resumed from its journal (B5c-2), so no other
-                    // GUI action reaches these.
-                    // #568 D19: journal discovery reads whether a journal
-                    // is a recorded completion (read only, off the UI
-                    // thread), in the panel's step 1 only; the #625 F3
-                    // guard names it as blocking work.
-                    let discovery = matches!(
-                        file.as_str(),
-                        "src/app/state/vault/split/step1.rs" | "src/app/state/vault/split/tests.rs"
-                    ) && ident == "peek_split_journal";
-                    let panel = discovery
-                        || (file.starts_with("src/app/state/vault/split/")
-                            && [
-                                "create_split",
-                                "resume_split",
-                                "SplitProduction",
-                                "split_identity",
-                                "recorded_split",
-                                "abandon_split",
-                                "revalidate_split_construction",
-                                "bind_recovered_split_transaction",
-                            ]
-                            .contains(&ident));
-                    // B2/B3b: the dormant step-2 gate and construction and
-                    // their tests reopen a submitted Split journal; no GUI
-                    // caller reaches them
-                    // (`fork::split::tests::split_step2_gate_has_no_gui_caller`).
-                    // Only the tests create a journal (#626 guard nit); B4b-1b's
-                    // reconciler tests create and submit a fork-only one.
-                    let gate_tests =
-                        file.starts_with("src/services/claim_coordinator/fork/split/tests");
-                    let gate = file.starts_with("src/services/claim_coordinator/fork/split")
-                        && ([
-                            "SplitProduction",
-                            "split_identity",
-                            "recorded_split",
-                            "revalidate_split_construction",
-                            "bind_recovered_split_transaction",
-                            // B5a: the completion evidence deletes them.
-                            "forget_split_descriptors",
-                            "record_split_target",
-                            "replace_used_split_target",
-                            "prepare_split_step2",
-                            "record_split_step2_broadcast_intent",
-                            "recorded_split_step2",
-                            "record_split_step2_resubmission",
-                            "record_split_step2_observed",
-                            "split_step2_resubmissions",
-                            "split_step2_observed",
-                            "record_split_step2_returned",
-                            "split_step2_returned",
-                            "hold_split_step2_return",
-                            "release_split_step2_return",
-                            "Step2ReturnHold",
-                            // #568 S4: the step-2 reconciler's step-1 reorg
-                            // outcomes refuse a fork-only record and record
-                            // a step-1 conflict (O4).
-                            "SplitKind",
-                            "Step1Conflict",
-                            "split_step1_conflict",
-                            "record_split_step1_conflict",
-                            "confirm_split_step1_conflict",
-                            "clear_split_step1_conflict",
-                            "disprove_split_step1_conflict",
-                        ]
-                        .contains(&ident)
-                            || (gate_tests
-                                && [
-                                    "create_split",
-                                    "create_unified_split",
-                                    "record_unified_broadcast_intent",
-                                ]
-                                .contains(&ident)));
-                    // B4b-3a: the fork-only route's coordinator (dormant,
-                    // guarded with the step-2 gate) is the one production
-                    // writer of a fork-only record: it creates the journal at
-                    // confirmation, revalidates a reopened one and records
-                    // the verified sweep's intent.
-                    let unified = file
-                        == "src/services/claim_coordinator/fork/split/step2/unified.rs"
-                        && [
-                            "create_unified_split",
-                            "revalidate_unified_construction",
-                            "record_unified_broadcast_intent",
-                        ]
-                        .contains(&ident);
-                    // B3b-2b: the panel's (uncalled) step-2 layer reads the
-                    // recorded step 2 at restart; its tests write journals.
-                    // P3-3: the restart also reads whether a resend is
-                    // allowed, to choose which handle to open (it records
-                    // nothing); its tests record a return or a sighting.
-                    let panel_step2 = (file.starts_with("src/app/state/vault/split/step2")
-                        && [
-                            "split_identity",
-                            "recorded_split_step2",
-                            "create_split",
-                            "record_split_broadcast_intent",
-                            "record_split_target",
-                            "prepare_split_step2",
-                            "record_split_step2_broadcast_intent",
-                            "split_step2_returned",
-                            "split_step2_observed",
-                            "split_step2_resubmissions",
-                            // #625 F2: the restart reads the dead end.
-                            "split_step2_dead_end",
-                            // #568 S4b: and O4's, a recorded terminal
-                            // step-1 conflict (read only).
-                            "Step1Conflict",
-                            "split_step1_conflict",
-                        ]
-                        .contains(&ident))
-                        || (file.starts_with("src/app/state/vault/split/step2/tests")
-                            && [
-                                "record_split_step2_returned",
-                                "record_split_step2_observed",
-                                // #568 S4: the warning test builds an O4 outcome.
-                                "Step1Conflict",
-                            ]
-                            .contains(&ident));
-                    // #568 B4b-3c: restart and the fork-only close read the
-                    // record's kind; the single-step panel's tests write
-                    // fork-only journals.
-                    let panel_unified = ((file.starts_with("src/app/state/vault/split/step2")
-                        || file.starts_with("src/app/state/vault/split/unified"))
-                        && ["SplitKind", "split_identity"].contains(&ident))
-                        || (file.starts_with("src/app/state/vault/split/unified/tests")
-                            && ["create_unified_split", "record_unified_broadcast_intent"]
-                                .contains(&ident));
-                    // #625 F2: the close tests make a journal whose resend is
-                    // reviewable, which is no dead end. Tests only.
-                    let panel_step2_tests = file
-                        .starts_with("src/app/state/vault/split/step2/tests")
-                        && ident == "record_split_step2_returned";
-                    if ITEMS.contains(&ident)
-                        && !OWN.contains(&file.as_str())
-                        && !reexport
-                        && !dispatch
-                        && !panel
-                        && !panel_step2
-                        && !panel_step2_tests
-                        && !panel_unified
-                        && !gate
-                        && !unified
-                        // The pairing collision guard only reads existing
-                        // journals; it cannot create, sign, or submit them.
-                        && !(file == "src/services/bitcoin_import/pairing/legacy.rs"
-                            && ["peek_split_journal", "SplitJournalSummary"].contains(&ident))
-                    {
-                        unexpected.push((file.clone(), ident.to_owned()));
-                    }
-                    start = None;
-                }
-                _ => {}
-            }
-        }
+        collect_split_references(file, text, &ITEMS, &OWN, &mut unexpected);
     }
     assert!(unexpected.is_empty(), "{:?}", unexpected);
 }

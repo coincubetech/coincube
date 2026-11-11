@@ -688,42 +688,8 @@ impl Step for RecoveryKitRestoreStep {
                 }
                 Task::none()
             }
-            RecoveryKitRestoreMsg::OtpEdited(value) => {
-                // Trim-and-store at the form level. The message-level
-                // Zeroizing wrapper protected the in-flight copies;
-                // the step state holds only the trimmed value briefly
-                // until auto-submit or clear-on-verify.
-                self.otp.value = value.trim().to_string();
-                self.otp.valid = self.otp.value.len() == 6;
-                // Auto-submit when 6 digits — matches
-                // CoincubeConnectStep UX.
-                if self.otp.valid && !self.processing {
-                    self.processing = true;
-                    self.verify_otp_task()
-                } else {
-                    Task::none()
-                }
-            }
-            RecoveryKitRestoreMsg::OtpVerified(res) => {
-                self.processing = false;
-                match res {
-                    Ok(token) => {
-                        // `token` is `Zeroizing<String>` — deref to
-                        // `&str` for `set_token`, then stash the
-                        // Zeroizing wrapper so the JWT heap bytes are
-                        // wiped when the step drops or re-auths.
-                        self.client.set_token(token.as_str());
-                        self.jwt = Some(token);
-                        self.set_phase(Phase::LoadingCubes);
-                        self.list_cubes_task()
-                    }
-                    Err(e) => {
-                        self.otp.valid = false;
-                        self.error = Some(e);
-                        Task::none()
-                    }
-                }
-            }
+            RecoveryKitRestoreMsg::OtpEdited(value) => self.edit_restore_otp(value),
+            RecoveryKitRestoreMsg::OtpVerified(res) => self.on_restore_otp_verified(res),
             RecoveryKitRestoreMsg::CubesLoaded(res) => {
                 match res {
                     Ok(cubes) => self.set_phase(phase_after_cubes_loaded(self.scope, cubes)),
@@ -735,26 +701,7 @@ impl Step for RecoveryKitRestoreStep {
                 }
                 Task::none()
             }
-            RecoveryKitRestoreMsg::SelectCube(id) => {
-                if let Phase::CubePicker { cubes, .. } = &self.phase {
-                    // Re-check `has_required_half` in case the view's
-                    // disabled-row rendering ever falls out of sync
-                    // with the state-machine gate. Defensive — the
-                    // picker's `on_press` is gated on the same
-                    // predicate.
-                    if let Some(c) = cubes
-                        .iter()
-                        .find(|c| c.id == id && has_required_half(self.scope, c))
-                        .cloned()
-                    {
-                        self.set_phase(Phase::PasswordEntry {
-                            selected: c,
-                            attempts: 0,
-                        });
-                    }
-                }
-                Task::none()
-            }
+            RecoveryKitRestoreMsg::SelectCube(id) => self.select_restore_cube(id),
             RecoveryKitRestoreMsg::PasswordEdited(v) => {
                 // Move the `Zeroizing<String>` wrapper straight into
                 // state; the old `self.password` is dropped here
@@ -762,114 +709,8 @@ impl Step for RecoveryKitRestoreStep {
                 self.password = v;
                 Task::none()
             }
-            RecoveryKitRestoreMsg::SubmitPassword => {
-                if self.processing {
-                    return Task::none();
-                }
-                // Do NOT enforce `MIN_PASSWORD_LEN` here. That floor
-                // belongs on the backup side — it's about picking a
-                // strong password. On restore the user enters what
-                // they chose at backup time, which may pre-date this
-                // client's minimum (or come from another client with
-                // different rules). A hardcoded gate here silently
-                // blocks a correct password from ever reaching the
-                // AES-GCM tag check, which is the only authoritative
-                // validator of "is this the right password". The
-                // view disables Submit when the input is empty, so
-                // no input-required guard is needed here either.
-                let Phase::PasswordEntry { selected, attempts } = &self.phase else {
-                    return Task::none();
-                };
-                let cube_id = selected.id;
-                let selected = selected.clone();
-                let _ = attempts; // reserved for future backoff UI
-                self.processing = true;
-                self.set_phase(Phase::Decrypting { selected });
-                self.decrypt_task(cube_id)
-            }
-            RecoveryKitRestoreMsg::DecryptResult(res) => {
-                self.processing = false;
-                let Phase::Decrypting { selected } = &self.phase else {
-                    // Message arrived after the user navigated away —
-                    // drop it.
-                    return Task::none();
-                };
-                let selected = selected.clone();
-                match res {
-                    Ok((seed, descriptor)) => {
-                        // Validate we actually got the half we need.
-                        let missing_half = match self.scope {
-                            RestoreScope::Full => seed.is_none(),
-                            RestoreScope::DescriptorOnly => descriptor.is_none(),
-                        };
-                        if missing_half {
-                            self.set_phase(Phase::Error {
-                                message:
-                                    "This Cube's Recovery Kit doesn't include the data needed \
-                                     for this restore."
-                                        .to_string(),
-                            });
-                            return Task::none();
-                        }
-                        // Cross-check the decrypted blob(s) against the
-                        // cube the user picked: the blob carries its
-                        // own `cube.uuid` + `cube.network` in plaintext,
-                        // and either mismatching those would mean we're
-                        // about to restore data belonging to a different
-                        // Cube/network. AES-GCM authentication already
-                        // ruled out tampering of *our* blob, but a
-                        // backend routing bug (wrong kit served for a
-                        // cube id) could still ship us the wrong payload;
-                        // the defensive identity check costs ~nothing.
-                        if let Err(msg) = validate_wallet_blobs_match_selected(
-                            seed.as_ref(),
-                            descriptor.as_ref(),
-                            &selected,
-                        ) {
-                            self.set_phase(Phase::Error { message: msg });
-                            return Task::none();
-                        }
-                        self.set_phase(Phase::Ready {
-                            selected,
-                            seed,
-                            descriptor,
-                        });
-                        // Auto-advance — the user clicked Submit and the
-                        // decrypt succeeded; no reason to make them
-                        // click Next again.
-                        Task::done(Message::Next)
-                    }
-                    Err(e) => {
-                        if is_retryable_on_password_screen(&e) {
-                            self.set_phase(Phase::PasswordEntry {
-                                selected,
-                                attempts: 1, // TODO wire backoff counter
-                            });
-                            self.error = Some(e.to_string());
-                        } else {
-                            // Approach C (Phase 7): a 423 from the download is a
-                            // terminal, plausibly-deniable cue — not a password
-                            // retry. DURESS_LOCKED acknowledges the activation
-                            // landed; TRUSTED_DEVICE_DELAY shows the wait time.
-                            let message = match &e {
-                                RestoreError::TrustedDeviceDelay {
-                                    available_at: Some(at),
-                                } => format!(
-                                    "Recovery kit download is delayed on new devices. \
-                                     Available at {}.",
-                                    at.with_timezone(&chrono::Local)
-                                        .format("%b %d, %Y %H:%M %Z")
-                                ),
-                                // DURESS_LOCKED and a timeless delay use the
-                                // typed Display message.
-                                _ => e.to_string(),
-                            };
-                            self.set_phase(Phase::Error { message });
-                        }
-                        Task::none()
-                    }
-                }
-            }
+            RecoveryKitRestoreMsg::SubmitPassword => self.submit_restore_password(),
+            RecoveryKitRestoreMsg::DecryptResult(res) => self.on_decrypt_result(res),
             RecoveryKitRestoreMsg::RetryFromStart => {
                 // Full reset: drop JWT, clear transient inputs, back to
                 // email entry.
@@ -1070,6 +911,181 @@ pub use self::Phase as RestorePhase;
 pub fn classify_password(password: &str) -> PasswordStrength {
     let z = Zeroizing::new(password.to_string());
     score_password(&z, &[]).0
+}
+
+impl RecoveryKitRestoreStep {
+    fn select_restore_cube(&mut self, id: u64) -> Task<Message> {
+        if let Phase::CubePicker { cubes, .. } = &self.phase {
+            // Re-check `has_required_half` in case the view's
+            // disabled-row rendering ever falls out of sync
+            // with the state-machine gate. Defensive — the
+            // picker's `on_press` is gated on the same
+            // predicate.
+            if let Some(c) = cubes
+                .iter()
+                .find(|c| c.id == id && has_required_half(self.scope, c))
+                .cloned()
+            {
+                self.set_phase(Phase::PasswordEntry {
+                    selected: c,
+                    attempts: 0,
+                });
+            }
+        }
+        Task::none()
+    }
+    fn on_decrypt_result(
+        &mut self,
+        res: Result<(Option<SeedBlob>, Option<RecoveredWalletBlob>), RestoreError>,
+    ) -> Task<Message> {
+        self.processing = false;
+        let Phase::Decrypting { selected } = &self.phase else {
+            // Message arrived after the user navigated away —
+            // drop it.
+            return Task::none();
+        };
+        let selected = selected.clone();
+        match res {
+            Ok((seed, descriptor)) => {
+                // Validate we actually got the half we need.
+                let missing_half = match self.scope {
+                    RestoreScope::Full => seed.is_none(),
+                    RestoreScope::DescriptorOnly => descriptor.is_none(),
+                };
+                if missing_half {
+                    self.set_phase(Phase::Error {
+                        message: "This Cube's Recovery Kit doesn't include the data needed \
+                                     for this restore."
+                            .to_string(),
+                    });
+                    return Task::none();
+                }
+                // Cross-check the decrypted blob(s) against the
+                // cube the user picked: the blob carries its
+                // own `cube.uuid` + `cube.network` in plaintext,
+                // and either mismatching those would mean we're
+                // about to restore data belonging to a different
+                // Cube/network. AES-GCM authentication already
+                // ruled out tampering of *our* blob, but a
+                // backend routing bug (wrong kit served for a
+                // cube id) could still ship us the wrong payload;
+                // the defensive identity check costs ~nothing.
+                if let Err(msg) = validate_wallet_blobs_match_selected(
+                    seed.as_ref(),
+                    descriptor.as_ref(),
+                    &selected,
+                ) {
+                    self.set_phase(Phase::Error { message: msg });
+                    return Task::none();
+                }
+                self.set_phase(Phase::Ready {
+                    selected,
+                    seed,
+                    descriptor,
+                });
+                // Auto-advance — the user clicked Submit and the
+                // decrypt succeeded; no reason to make them
+                // click Next again.
+                Task::done(Message::Next)
+            }
+            Err(e) => {
+                if is_retryable_on_password_screen(&e) {
+                    self.set_phase(Phase::PasswordEntry {
+                        selected,
+                        attempts: 1, // TODO wire backoff counter
+                    });
+                    self.error = Some(e.to_string());
+                } else {
+                    // Approach C (Phase 7): a 423 from the download is a
+                    // terminal, plausibly-deniable cue — not a password
+                    // retry. DURESS_LOCKED acknowledges the activation
+                    // landed; TRUSTED_DEVICE_DELAY shows the wait time.
+                    let message = match &e {
+                        RestoreError::TrustedDeviceDelay {
+                            available_at: Some(at),
+                        } => format!(
+                            "Recovery kit download is delayed on new devices. \
+                                     Available at {}.",
+                            at.with_timezone(&chrono::Local)
+                                .format("%b %d, %Y %H:%M %Z")
+                        ),
+                        // DURESS_LOCKED and a timeless delay use the
+                        // typed Display message.
+                        _ => e.to_string(),
+                    };
+                    self.set_phase(Phase::Error { message });
+                }
+                Task::none()
+            }
+        }
+    }
+    fn submit_restore_password(&mut self) -> Task<Message> {
+        if self.processing {
+            return Task::none();
+        }
+        // Do NOT enforce `MIN_PASSWORD_LEN` here. That floor
+        // belongs on the backup side — it's about picking a
+        // strong password. On restore the user enters what
+        // they chose at backup time, which may pre-date this
+        // client's minimum (or come from another client with
+        // different rules). A hardcoded gate here silently
+        // blocks a correct password from ever reaching the
+        // AES-GCM tag check, which is the only authoritative
+        // validator of "is this the right password". The
+        // view disables Submit when the input is empty, so
+        // no input-required guard is needed here either.
+        let Phase::PasswordEntry { selected, attempts } = &self.phase else {
+            return Task::none();
+        };
+        let cube_id = selected.id;
+        let selected = selected.clone();
+        let _ = attempts; // reserved for future backoff UI
+        self.processing = true;
+        self.set_phase(Phase::Decrypting { selected });
+        self.decrypt_task(cube_id)
+    }
+}
+
+impl RecoveryKitRestoreStep {
+    fn on_restore_otp_verified(&mut self, res: Result<Zeroizing<String>, String>) -> Task<Message> {
+        self.processing = false;
+        match res {
+            Ok(token) => {
+                // `token` is `Zeroizing<String>` — deref to
+                // `&str` for `set_token`, then stash the
+                // Zeroizing wrapper so the JWT heap bytes are
+                // wiped when the step drops or re-auths.
+                self.client.set_token(token.as_str());
+                self.jwt = Some(token);
+                self.set_phase(Phase::LoadingCubes);
+                self.list_cubes_task()
+            }
+            Err(e) => {
+                self.otp.valid = false;
+                self.error = Some(e);
+                Task::none()
+            }
+        }
+    }
+}
+
+impl RecoveryKitRestoreStep {
+    fn edit_restore_otp(&mut self, value: Zeroizing<String>) -> Task<Message> {
+        // Trim-and-store at the form level. The message-level
+        // Zeroizing wrapper protected the in-flight copies;
+        // the step state holds only the trimmed value briefly
+        // until auto-submit or clear-on-verify.
+        self.otp.value = value.trim().to_string();
+        self.otp.valid = self.otp.value.len() == 6;
+        // Auto-submit when 6 digits — matches
+        // CoincubeConnectStep UX.
+        if self.otp.valid && !self.processing {
+            self.processing = true;
+            self.verify_otp_task()
+        } else {
+            Task::none()
+        }
+    }
 }
 
 #[cfg(test)]

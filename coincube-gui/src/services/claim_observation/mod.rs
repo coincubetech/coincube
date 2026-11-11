@@ -748,6 +748,71 @@ async fn collect_inner(
         .map(|(assessment, _)| assessment)
 }
 
+fn validate_round_transactions(
+    txid: Txid,
+    btx: TransactionObservation,
+    ftx: TransactionObservation,
+    round: usize,
+    prior_btc_tx: Option<TransactionObservation>,
+    prior_fork_tx: Option<TransactionObservation>,
+) -> Result<(), Failure> {
+    for (tx, stage) in [
+        (btx, Stage::BitcoinTransaction),
+        (ftx, Stage::ForkTransaction),
+    ] {
+        if matches!(tx, TransactionObservation::Unconfirmed { txid: id } |
+                TransactionObservation::Confirmed { txid: id, .. } if id != txid)
+        {
+            return Err(failure(stage, FailureKind::Malformed));
+        }
+    }
+    if round == 1 && (prior_btc_tx != Some(btx) || prior_fork_tx != Some(ftx)) {
+        return Err(failure(Stage::Preflight, FailureKind::Changed));
+    }
+
+    Ok(())
+}
+
+async fn observe_bitcoin_location(
+    source: &dyn ObservationSource,
+    btc: ChainId,
+    btx: TransactionObservation,
+    policy: Policy,
+    round: usize,
+    prior_location: TransactionLocation,
+    mut btc_stamp: i64,
+) -> Result<(TransactionLocation, i64), Failure> {
+    let location = match btx {
+        TransactionObservation::Absent | TransactionObservation::Unconfirmed { .. } => {
+            TransactionLocation::Unconfirmed
+        }
+        TransactionObservation::Confirmed { txid, block } => {
+            let (hash, stamp) = read(
+                source
+                    .hash_at_height(btc, block.height)
+                    .await
+                    .map_err(|e| failure(Stage::BitcoinInclusion, e))?,
+                btc,
+                source,
+                policy,
+                Stage::BitcoinInclusion,
+            )?;
+            btc_stamp = btc_stamp.min(stamp);
+            if round == 1
+                && matches!(prior_location, TransactionLocation::Confirmed { best_chain_hash_at_height, .. } if best_chain_hash_at_height != hash)
+            {
+                return Err(failure(Stage::Preflight, FailureKind::Changed));
+            }
+            TransactionLocation::Confirmed {
+                txid,
+                block,
+                best_chain_hash_at_height: hash,
+            }
+        }
+    };
+    Ok((location, btc_stamp))
+}
+
 async fn collect_inner_with_anchor(
     source: &dyn ObservationSource,
     plan: &ClaimPlan,
@@ -827,19 +892,7 @@ async fn collect_inner_with_anchor(
             Stage::ForkTransaction,
         )?;
         fork_stamp = fork_stamp.min(stamp);
-        for (tx, stage) in [
-            (btx, Stage::BitcoinTransaction),
-            (ftx, Stage::ForkTransaction),
-        ] {
-            if matches!(tx, TransactionObservation::Unconfirmed { txid: id } |
-                TransactionObservation::Confirmed { txid: id, .. } if id != txid)
-            {
-                return Err(failure(stage, FailureKind::Malformed));
-            }
-        }
-        if round == 1 && (prior_btc_tx != Some(btx) || prior_fork_tx != Some(ftx)) {
-            return Err(failure(Stage::Preflight, FailureKind::Changed));
-        }
+        validate_round_transactions(txid, btx, ftx, round, prior_btc_tx, prior_fork_tx)?;
         prior_btc_tx = Some(btx);
         prior_fork_tx = Some(ftx);
         presence = if ftx == TransactionObservation::Absent {
@@ -847,34 +900,8 @@ async fn collect_inner_with_anchor(
         } else {
             ForkTransactionPresence::Present
         };
-        location = match btx {
-            TransactionObservation::Absent | TransactionObservation::Unconfirmed { .. } => {
-                TransactionLocation::Unconfirmed
-            }
-            TransactionObservation::Confirmed { txid, block } => {
-                let (hash, stamp) = read(
-                    source
-                        .hash_at_height(btc, block.height)
-                        .await
-                        .map_err(|e| failure(Stage::BitcoinInclusion, e))?,
-                    btc,
-                    source,
-                    policy,
-                    Stage::BitcoinInclusion,
-                )?;
-                btc_stamp = btc_stamp.min(stamp);
-                if round == 1
-                    && matches!(location, TransactionLocation::Confirmed { best_chain_hash_at_height, .. } if best_chain_hash_at_height != hash)
-                {
-                    return Err(failure(Stage::Preflight, FailureKind::Changed));
-                }
-                TransactionLocation::Confirmed {
-                    txid,
-                    block,
-                    best_chain_hash_at_height: hash,
-                }
-            }
-        };
+        (location, btc_stamp) =
+            observe_bitcoin_location(source, btc, btx, policy, round, location, btc_stamp).await?;
     }
     let (after, stamp) = read(
         source

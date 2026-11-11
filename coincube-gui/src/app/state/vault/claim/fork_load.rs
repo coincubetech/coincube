@@ -1,6 +1,6 @@
 //! Reopen the fork side through authenticated services and owned constructions.
 //! This loader never signs, submits, or treats journal observations as current.
-use super::{pairing::Pairing, ConnectSession, TxMap, CHECK_POLICY, SESSION_ENDED};
+use super::{pairing::Pairing, ConnectSession, TxMap, CHECK_POLICY};
 use crate::{
     app::wallet::Wallet,
     daemon::Daemon,
@@ -74,6 +74,79 @@ impl std::fmt::Debug for Loaded {
     }
 }
 
+struct ForkConstruction<'a> {
+    source: &'a Source,
+    chain: ChainId,
+    secp: &'a secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    getter: &'a mut TxMap,
+    candidates: &'a [CandidateCoin],
+}
+
+impl ForkConstruction<'_> {
+    fn restore(
+        self,
+        controller: &mut Controller,
+        context: &Context,
+        index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+        recorded: &coincube_core::miniscript::bitcoin::Transaction,
+    ) -> Result<coincube_core::claim_spend::ClaimForkSweep, String> {
+        let Self {
+            source,
+            chain,
+            secp,
+            getter,
+            candidates,
+        } = self;
+        match source {
+            Source::OpReturn(source) => reconstruct_claim_fork_sweep(
+                source, chain, secp, getter, candidates, index, recorded,
+            )
+            .map_err(|e| e.to_string()),
+            Source::Ancestry(source) => controller
+                .restore_ancestry_fork_sweep(context, source, getter, candidates)
+                .map_err(|e| {
+                    super::describe(crate::services::claim_coordinator::Error::Journal(e))
+                }),
+        }
+    }
+    fn build(
+        self,
+        index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+        feerate_vb: u64,
+    ) -> Result<coincube_core::claim_spend::ClaimForkSweep, String> {
+        let Self {
+            source,
+            chain,
+            secp,
+            getter,
+            candidates,
+        } = self;
+        match source {
+            Source::OpReturn(source) => create_claim_fork_sweep(
+                source,
+                chain,
+                secp,
+                getter,
+                candidates,
+                index,
+                feerate_vb,
+                LockTime::ZERO,
+            ),
+            Source::Ancestry(source) => create_ancestry_fork_sweep(
+                source,
+                chain,
+                secp,
+                getter,
+                candidates,
+                index,
+                feerate_vb,
+                LockTime::ZERO,
+            ),
+        }
+        .map_err(|e| e.to_string())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn load(
     root: &CoincubeDirectory,
@@ -86,13 +159,7 @@ pub async fn load(
     generation: watch::Receiver<u64>,
     feerate_vb: u64,
 ) -> Result<Loaded, String> {
-    let current = || {
-        if !crate::services::claim_observation::session_current(&generation, expected) {
-            Err(SESSION_ENDED.to_string())
-        } else {
-            Ok(())
-        }
-    };
+    let current = || super::check_claim_generation(&generation, expected);
     current()?;
     let descriptor = wallet
         .inheritance_descriptor()
@@ -120,16 +187,7 @@ pub async fn load(
     // A Claim loader: the identity above has a Bitcoin Cube, which no Split
     // journal has, so a tracked (Split) plan cannot reach here. Refuse one
     // anyway rather than rely on that (#622 F3).
-    if plan.bitcoin_chain != ChainId::Bitcoin
-        || plan.fork_chain != wallet.chain
-        || plan.tracked_txid.is_some()
-        || controller.signed_txid() != Some(plan.step1_txid())
-    {
-        return Err("The Bitcoin step must be recorded before continuing this Claim.".into());
-    }
-    let source_index = controller.recorded_bitcoin_change_index().ok_or_else(|| {
-        "Open the Bitcoin Cube and resume this older Claim before continuing here.".to_string()
-    })?;
+    let source_index = recorded_source_index(&controller, &plan, wallet.chain)?;
     let recorded = controller.recorded_fork_sweep().cloned();
     let fork_index = controller.recorded_fork_change_index();
     let submission = controller.recorded_fork_submission();
@@ -141,37 +199,7 @@ pub async fn load(
         .map_err(|e| e.to_string())?
         .coins;
     current()?;
-    if coins.len() != plan.claimed_prevouts.len() {
-        return Err("Some recorded Claim inputs are missing from this fork Vault.".into());
-    }
-    let by_outpoint: HashMap<_, _> = coins.iter().map(|coin| (coin.outpoint, coin)).collect();
-    if by_outpoint.len() != coins.len() {
-        return Err("The fork service returned duplicate Claim inputs.".into());
-    }
-    let candidates = plan
-        .step1
-        .input
-        .iter()
-        .map(|input| &input.previous_output)
-        .filter(|outpoint| plan.claimed_prevouts.contains(outpoint))
-        .map(|outpoint| {
-            let coin = by_outpoint
-                .get(outpoint)
-                .ok_or_else(|| "A recorded Claim input is not owned by this Vault.".to_string())?;
-            if submission.is_none() && (coin.spend_info.is_some() || coin.is_immature) {
-                return Err("A Claim input is spent or not yet mature on Bitcoin Blake2b.".into());
-            }
-            Ok(CandidateCoin {
-                outpoint: coin.outpoint,
-                amount: coin.amount,
-                deriv_index: coin.derivation_index,
-                is_change: coin.is_change,
-                must_select: true,
-                sequence: None,
-                ancestor_info: None,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let candidates = claimed_candidates(&coins, &plan, submission.is_some())?;
     let txids: Vec<_> = plan
         .claimed_prevouts
         .iter()
@@ -194,27 +222,7 @@ pub async fn load(
         .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?
         .is_some()
     {
-        let (selected, transaction) = controller
-            .recorded_ancestry_input(&context, descriptor)
-            .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?
-            .ok_or_else(|| {
-                "Open the Bitcoin Cube to recover this Claim's input metadata.".to_string()
-            })?;
-        let mut bitcoin_inputs = candidates.clone();
-        bitcoin_inputs.push(selected);
-        // This transaction is excluded from the fork. Its only source here is
-        // the journal's reverified retained path, never a fork-node query.
-        let mut bitcoin_getter = TxMap(getter.0.clone());
-        bitcoin_getter
-            .0
-            .insert(transaction.compute_txid(), transaction);
-        let (source, signed) = controller
-            .restore_ancestry(&context, descriptor, &mut bitcoin_getter, &bitcoin_inputs)
-            .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?;
-        if signed.is_none() {
-            return Err("The recorded Bitcoin witness is required to continue this Claim.".into());
-        }
-        Source::Ancestry(source)
+        restore_ancestry_source(&mut controller, &context, descriptor, &candidates, &getter)?
     } else {
         Source::OpReturn(
             reconstruct_poison_self_transfer(
@@ -231,52 +239,28 @@ pub async fn load(
     };
     let construction = if let Some(recorded) = recorded {
         let index = fork_index.ok_or_else(|| "This older fork plan has no change index; return to the Bitcoin Claim to recover it.".to_string())?;
-        match &source {
-            Source::OpReturn(source) => reconstruct_claim_fork_sweep(
-                source,
-                wallet.chain,
-                &secp,
-                &mut getter,
-                &candidates,
-                index,
-                &recorded,
-            )
-            .map_err(|e| e.to_string())?,
-            Source::Ancestry(source) => controller
-                .restore_ancestry_fork_sweep(&context, source, &mut getter, &candidates)
-                .map_err(|e| {
-                    super::describe(crate::services::claim_coordinator::Error::Journal(e))
-                })?,
+        ForkConstruction {
+            source: &source,
+            chain: wallet.chain,
+            secp: &secp,
+            getter: &mut getter,
+            candidates: &candidates,
         }
+        .restore(&mut controller, &context, index, &recorded)?
     } else {
         if feerate_vb == 0 {
             return Err("A current positive fee rate is required to build the fork sweep.".into());
         }
         let index = daemon.reserve_change().await.map_err(|e| e.to_string())?;
         current()?;
-        match &source {
-            Source::OpReturn(source) => create_claim_fork_sweep(
-                source,
-                wallet.chain,
-                &secp,
-                &mut getter,
-                &candidates,
-                index,
-                feerate_vb,
-                LockTime::ZERO,
-            ),
-            Source::Ancestry(source) => create_ancestry_fork_sweep(
-                source,
-                wallet.chain,
-                &secp,
-                &mut getter,
-                &candidates,
-                index,
-                feerate_vb,
-                LockTime::ZERO,
-            ),
+        ForkConstruction {
+            source: &source,
+            chain: wallet.chain,
+            secp: &secp,
+            getter: &mut getter,
+            candidates: &candidates,
         }
-        .map_err(|e| e.to_string())?
+        .build(index, feerate_vb)?
     };
     if let Some(submission) = submission {
         let recovered = daemon.list_txs(&[submission.txid()]).await.map_err(|e| e.to_string())?
@@ -349,4 +333,88 @@ pub async fn load(
             context,
         })
     }
+}
+
+fn recorded_source_index(
+    controller: &Controller,
+    plan: &coincube_core::claim::ClaimPlan,
+    chain: ChainId,
+) -> Result<coincube_core::miniscript::bitcoin::bip32::ChildNumber, String> {
+    if plan.bitcoin_chain != ChainId::Bitcoin
+        || plan.fork_chain != chain
+        || plan.tracked_txid.is_some()
+        || controller.signed_txid() != Some(plan.step1_txid())
+    {
+        return Err("The Bitcoin step must be recorded before continuing this Claim.".into());
+    }
+    controller.recorded_bitcoin_change_index().ok_or_else(|| {
+        "Open the Bitcoin Cube and resume this older Claim before continuing here.".to_string()
+    })
+}
+fn claimed_candidates(
+    coins: &[crate::daemon::model::Coin],
+    plan: &coincube_core::claim::ClaimPlan,
+    submitted: bool,
+) -> Result<Vec<CandidateCoin>, String> {
+    if coins.len() != plan.claimed_prevouts.len() {
+        return Err("Some recorded Claim inputs are missing from this fork Vault.".into());
+    }
+    let by_outpoint: HashMap<_, _> = coins.iter().map(|coin| (coin.outpoint, coin)).collect();
+    if by_outpoint.len() != coins.len() {
+        return Err("The fork service returned duplicate Claim inputs.".into());
+    }
+    let candidates = plan
+        .step1
+        .input
+        .iter()
+        .map(|input| &input.previous_output)
+        .filter(|outpoint| plan.claimed_prevouts.contains(outpoint))
+        .map(|outpoint| {
+            let coin = by_outpoint
+                .get(outpoint)
+                .ok_or_else(|| "A recorded Claim input is not owned by this Vault.".to_string())?;
+            if !submitted && (coin.spend_info.is_some() || coin.is_immature) {
+                return Err("A Claim input is spent or not yet mature on Bitcoin Blake2b.".into());
+            }
+            Ok(CandidateCoin {
+                outpoint: coin.outpoint,
+                amount: coin.amount,
+                deriv_index: coin.derivation_index,
+                is_change: coin.is_change,
+                must_select: true,
+                sequence: None,
+                ancestor_info: None,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(candidates)
+}
+fn restore_ancestry_source(
+    controller: &mut Controller,
+    context: &Context,
+    descriptor: &coincube_core::descriptors::CoincubeDescriptor,
+    candidates: &[CandidateCoin],
+    getter: &TxMap,
+) -> Result<Source, String> {
+    let (selected, transaction) = controller
+        .recorded_ancestry_input(context, descriptor)
+        .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?
+        .ok_or_else(|| {
+            "Open the Bitcoin Cube to recover this Claim's input metadata.".to_string()
+        })?;
+    let mut bitcoin_inputs = candidates.to_vec();
+    bitcoin_inputs.push(selected);
+    // This transaction is excluded from the fork. Its only source here is
+    // the journal's reverified retained path, never a fork-node query.
+    let mut bitcoin_getter = TxMap(getter.0.clone());
+    bitcoin_getter
+        .0
+        .insert(transaction.compute_txid(), transaction);
+    let (source, signed) = controller
+        .restore_ancestry(context, descriptor, &mut bitcoin_getter, &bitcoin_inputs)
+        .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?;
+    if signed.is_none() {
+        return Err("The recorded Bitcoin witness is required to continue this Claim.".into());
+    }
+    Ok(Source::Ancestry(source))
 }

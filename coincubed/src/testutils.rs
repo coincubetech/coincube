@@ -362,6 +362,23 @@ impl DatabaseInterface for DummyDatabase {
     }
 }
 
+fn record_txid_in_range(
+    rows: &mut Vec<(bitcoin::Txid, u32)>,
+    time: Option<u32>,
+    start: u32,
+    end: u32,
+    txid: impl FnOnce() -> bitcoin::Txid,
+) {
+    if let Some(time) = time {
+        if time >= start && time <= end {
+            let row = (txid(), time);
+            if !rows.contains(&row) {
+                rows.push(row);
+            }
+        }
+    }
+}
+
 impl DummyDatabase {
     pub fn new() -> DummyDatabase {
         let now: u32 = SystemTime::now()
@@ -682,22 +699,20 @@ impl DatabaseConnection for DummyDatabase {
         // Get txid and block time of every transactions that happened between start and end
         // timestamps.
         for coin in coins.values() {
-            if let Some(time) = coin.block_info.map(|b| b.time) {
-                if time >= start && time <= end {
-                    let row = (coin.outpoint.txid, time);
-                    if !txids_and_time.contains(&row) {
-                        txids_and_time.push(row);
-                    }
-                }
-            }
-            if let Some(time) = coin.spend_block.map(|b| b.time) {
-                if time >= start && time <= end {
-                    let row = (coin.spend_txid.expect("spent_at is not none"), time);
-                    if !txids_and_time.contains(&row) {
-                        txids_and_time.push(row);
-                    }
-                }
-            }
+            record_txid_in_range(
+                &mut txids_and_time,
+                coin.block_info.map(|b| b.time),
+                start,
+                end,
+                || coin.outpoint.txid,
+            );
+            record_txid_in_range(
+                &mut txids_and_time,
+                coin.spend_block.map(|b| b.time),
+                start,
+                end,
+                || coin.spend_txid.expect("spent_at is not none"),
+            );
         }
         // Apply order and limit
         txids_and_time.sort_by(|(_, t1), (_, t2)| t2.cmp(t1));

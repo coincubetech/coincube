@@ -88,27 +88,7 @@ fn second_recovery_path_section(use_taproot: bool, recovery_path: &Path) -> Elem
             .iter()
             .enumerate()
             .map(|(i, rec_key)| {
-                if let Some(key) = rec_key {
-                    defined_key(
-                        &key.name,
-                        color::ORANGE,
-                        "Recovery key".to_string(),
-                        if use_taproot && !key.source.is_compatible_taproot() {
-                            Some("This device does not support Taproot")
-                        } else {
-                            None
-                        },
-                        true,
-                    )
-                } else {
-                    undefined_key(
-                        color::ORANGE,
-                        "Recovery key",
-                        !recovery_path.keys[0..i].iter().any(|k| k.is_none()),
-                        true,
-                    )
-                }
-                .map(move |msg| message::DefinePath::Key(i, msg))
+                second_recovery_path_section_rec_key(i, rec_key, use_taproot, recovery_path)
             })
             .collect(),
         true,
@@ -299,27 +279,12 @@ pub fn multisig_security_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(i, primary_key)| {
-                            if let Some(key) = primary_key {
-                                defined_key(
-                                    &key.name,
-                                    color::GREEN,
-                                    format!("Primary key #{}", i + 1),
-                                    if use_taproot && !key.source.is_compatible_taproot() {
-                                        Some("This device does not support Taproot")
-                                    } else {
-                                        None
-                                    },
-                                    true,
-                                )
-                            } else {
-                                undefined_key(
-                                    color::GREEN,
-                                    format!("Primary key #{}", i + 1),
-                                    !primary_path.keys[0..i].iter().any(|k| k.is_none()),
-                                    true,
-                                )
-                            }
-                            .map(move |msg| message::DefinePath::Key(i, msg))
+                            crate::installer::view::editor::template_primary_key(
+                                i,
+                                primary_key,
+                                use_taproot,
+                                primary_path,
+                            )
                         })
                         .collect(),
                     true,
@@ -347,45 +312,13 @@ pub fn multisig_security_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(j, recovery_key)| {
-                            if let Some(key) = recovery_key {
-                                if j < 2 {
-                                    uneditable_defined_key(
-                                        &key.name,
-                                        color::GREEN,
-                                        format!("Primary key #{}", j + 1),
-                                        if use_taproot && !key.source.is_compatible_taproot() {
-                                            Some("This device does not support Taproot")
-                                        } else {
-                                            None
-                                        },
-                                    )
-                                } else {
-                                    defined_key(
-                                        &key.name,
-                                        color::ORANGE,
-                                        "Recovery key".to_string(),
-                                        if use_taproot && !key.source.is_compatible_taproot() {
-                                            Some("This device does not support Taproot")
-                                        } else {
-                                            None
-                                        },
-                                        true,
-                                    )
-                                }
-                            } else {
-                                undefined_key(
-                                    if j < 2 { color::GREEN } else { color::ORANGE },
-                                    if j < 2 {
-                                        format!("Primary key #{}", j + 1)
-                                    } else {
-                                        "Recovery key".to_string()
-                                    },
-                                    !(primary_path.keys.iter().any(|k| k.is_none())
-                                        || recovery_path.keys[0..j].iter().any(|k| k.is_none())),
-                                    true,
-                                )
-                            }
-                            .map(move |msg| message::DefinePath::Key(j, msg))
+                            multisig_security_template_recovery_key(
+                                j,
+                                recovery_key,
+                                use_taproot,
+                                primary_path,
+                                recovery_path,
+                            )
                         })
                         .collect(),
                     true,
@@ -567,27 +500,12 @@ pub fn multisig_inheritance_recovery_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(i, primary_key)| {
-                            if let Some(key) = primary_key {
-                                defined_key(
-                                    &key.name,
-                                    color::GREEN,
-                                    format!("Primary key #{}", i + 1),
-                                    if use_taproot && !key.source.is_compatible_taproot() {
-                                        Some("This device does not support Taproot")
-                                    } else {
-                                        None
-                                    },
-                                    true,
-                                )
-                            } else {
-                                undefined_key(
-                                    color::GREEN,
-                                    format!("Primary key #{}", i + 1),
-                                    !primary_path.keys[0..i].iter().any(|k| k.is_none()),
-                                    true,
-                                )
-                            }
-                            .map(move |msg| message::DefinePath::Key(i, msg))
+                            crate::installer::view::editor::template_primary_key(
+                                i,
+                                primary_key,
+                                use_taproot,
+                                primary_path,
+                            )
                         })
                         .collect(),
                     true,
@@ -615,28 +533,13 @@ pub fn multisig_inheritance_recovery_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(j, inh_key)| {
-                            if let Some(key) = inh_key {
-                                defined_key(
-                                    &key.name,
-                                    color::BLUE,
-                                    format!("Inheritance key #{}", j + 1),
-                                    if use_taproot && !key.source.is_compatible_taproot() {
-                                        Some("This device does not support Taproot")
-                                    } else {
-                                        None
-                                    },
-                                    true,
-                                )
-                            } else {
-                                undefined_key(
-                                    color::BLUE,
-                                    format!("Inheritance key #{}", j + 1),
-                                    !(primary_path.keys.iter().any(|k| k.is_none())
-                                        || inheritance_path.keys[0..j].iter().any(|k| k.is_none())),
-                                    true,
-                                )
-                            }
-                            .map(move |msg| message::DefinePath::Key(j, msg))
+                            multisig_inheritance_recovery_template_inh_key(
+                                j,
+                                inh_key,
+                                use_taproot,
+                                primary_path,
+                                inheritance_path,
+                            )
                         })
                         .collect(),
                     true,
@@ -740,27 +643,12 @@ pub fn expanding_multisig_inheritance_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(i, primary_key)| {
-                            if let Some(key) = primary_key {
-                                defined_key(
-                                    &key.name,
-                                    color::GREEN,
-                                    format!("Primary key #{}", i + 1),
-                                    if use_taproot && !key.source.is_compatible_taproot() {
-                                        Some("This device does not support Taproot")
-                                    } else {
-                                        None
-                                    },
-                                    true,
-                                )
-                            } else {
-                                undefined_key(
-                                    color::GREEN,
-                                    format!("Primary key #{}", i + 1),
-                                    !primary_path.keys[0..i].iter().any(|k| k.is_none()),
-                                    true,
-                                )
-                            }
-                            .map(move |msg| message::DefinePath::Key(i, msg))
+                            crate::installer::view::editor::template_primary_key(
+                                i,
+                                primary_key,
+                                use_taproot,
+                                primary_path,
+                            )
                         })
                         .collect(),
                     true,
@@ -790,45 +678,13 @@ pub fn expanding_multisig_inheritance_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(j, inh_key)| {
-                            if let Some(key) = inh_key {
-                                if j < 3 {
-                                    uneditable_defined_key(
-                                        &key.name,
-                                        color::GREEN,
-                                        format!("Primary key #{}", j + 1),
-                                        if use_taproot && !key.source.is_compatible_taproot() {
-                                            Some("This device does not support Taproot")
-                                        } else {
-                                            None
-                                        },
-                                    )
-                                } else {
-                                    defined_key(
-                                        &key.name,
-                                        color::BLUE,
-                                        format!("Inheritance key #{}", j - 2),
-                                        if use_taproot && !key.source.is_compatible_taproot() {
-                                            Some("This device does not support Taproot")
-                                        } else {
-                                            None
-                                        },
-                                        true,
-                                    )
-                                }
-                            } else {
-                                undefined_key(
-                                    if j < 3 { color::GREEN } else { color::BLUE },
-                                    if j < 3 {
-                                        format!("Primary key #{}", j + 1)
-                                    } else {
-                                        format!("Inheritance key #{}", j - 2)
-                                    },
-                                    !(primary_path.keys.iter().any(|k| k.is_none())
-                                        || inheritance_path.keys[0..j].iter().any(|k| k.is_none())),
-                                    true,
-                                )
-                            }
-                            .map(move |msg| message::DefinePath::Key(j, msg))
+                            expanding_multisig_inheritance_template_inh_key(
+                                j,
+                                inh_key,
+                                use_taproot,
+                                primary_path,
+                                inheritance_path,
+                            )
                         })
                         .collect(),
                     true,
@@ -879,4 +735,136 @@ pub fn expanding_multisig_inheritance_template<'a>(
         true,
         Some(Message::Previous),
     )
+}
+
+fn second_recovery_path_section_rec_key<'a>(
+    i: usize,
+    rec_key: &'a Option<crate::installer::descriptor::Key>,
+    use_taproot: bool,
+    recovery_path: &'a Path,
+) -> Element<'a, message::DefinePath> {
+    if let Some(key) = rec_key {
+        defined_key(
+            &key.name,
+            color::ORANGE,
+            "Recovery key".to_string(),
+            crate::installer::view::editor::template_key_warning(use_taproot, key),
+            true,
+        )
+    } else {
+        undefined_key(
+            color::ORANGE,
+            "Recovery key",
+            !recovery_path.keys[0..i].iter().any(|k| k.is_none()),
+            true,
+        )
+    }
+    .map(move |msg| message::DefinePath::Key(i, msg))
+}
+
+fn multisig_security_template_recovery_key<'a>(
+    j: usize,
+    recovery_key: &'a Option<crate::installer::descriptor::Key>,
+    use_taproot: bool,
+    primary_path: &'a Path,
+    recovery_path: &'a Path,
+) -> Element<'a, message::DefinePath> {
+    if let Some(key) = recovery_key {
+        if j < 2 {
+            uneditable_defined_key(
+                &key.name,
+                color::GREEN,
+                format!("Primary key #{}", j + 1),
+                crate::installer::view::editor::template_key_warning(use_taproot, key),
+            )
+        } else {
+            defined_key(
+                &key.name,
+                color::ORANGE,
+                "Recovery key".to_string(),
+                crate::installer::view::editor::template_key_warning(use_taproot, key),
+                true,
+            )
+        }
+    } else {
+        undefined_key(
+            if j < 2 { color::GREEN } else { color::ORANGE },
+            if j < 2 {
+                format!("Primary key #{}", j + 1)
+            } else {
+                "Recovery key".to_string()
+            },
+            !(primary_path.keys.iter().any(|k| k.is_none())
+                || recovery_path.keys[0..j].iter().any(|k| k.is_none())),
+            true,
+        )
+    }
+    .map(move |msg| message::DefinePath::Key(j, msg))
+}
+
+fn multisig_inheritance_recovery_template_inh_key<'a>(
+    j: usize,
+    inh_key: &'a Option<crate::installer::descriptor::Key>,
+    use_taproot: bool,
+    primary_path: &'a Path,
+    inheritance_path: &'a Path,
+) -> Element<'a, message::DefinePath> {
+    if let Some(key) = inh_key {
+        defined_key(
+            &key.name,
+            color::BLUE,
+            format!("Inheritance key #{}", j + 1),
+            crate::installer::view::editor::template_key_warning(use_taproot, key),
+            true,
+        )
+    } else {
+        undefined_key(
+            color::BLUE,
+            format!("Inheritance key #{}", j + 1),
+            !(primary_path.keys.iter().any(|k| k.is_none())
+                || inheritance_path.keys[0..j].iter().any(|k| k.is_none())),
+            true,
+        )
+    }
+    .map(move |msg| message::DefinePath::Key(j, msg))
+}
+
+fn expanding_multisig_inheritance_template_inh_key<'a>(
+    j: usize,
+    inh_key: &'a Option<crate::installer::descriptor::Key>,
+    use_taproot: bool,
+    primary_path: &'a Path,
+    inheritance_path: &'a Path,
+) -> Element<'a, message::DefinePath> {
+    if let Some(key) = inh_key {
+        if j < 3 {
+            uneditable_defined_key(
+                &key.name,
+                color::GREEN,
+                format!("Primary key #{}", j + 1),
+                crate::installer::view::editor::template_key_warning(use_taproot, key),
+            )
+        } else {
+            defined_key(
+                &key.name,
+                color::BLUE,
+                format!("Inheritance key #{}", j - 2),
+                crate::installer::view::editor::template_key_warning(use_taproot, key),
+                true,
+            )
+        }
+    } else {
+        undefined_key(
+            if j < 3 { color::GREEN } else { color::BLUE },
+            if j < 3 {
+                format!("Primary key #{}", j + 1)
+            } else {
+                format!("Inheritance key #{}", j - 2)
+            },
+            !(primary_path.keys.iter().any(|k| k.is_none())
+                || inheritance_path.keys[0..j].iter().any(|k| k.is_none())),
+            true,
+        )
+    }
+    .map(move |msg| message::DefinePath::Key(j, msg))
 }

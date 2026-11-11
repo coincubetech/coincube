@@ -123,6 +123,48 @@ impl QuoteProvider {
         Self::default()
     }
 
+    fn context_pool(&self, context: &str, fallback_context: Option<&str>) -> Vec<&'static Quote> {
+        let by_context = |ctx: &str| -> Vec<&'static Quote> {
+            ALL_QUOTES
+                .iter()
+                .filter(|q| q.contexts.iter().any(|c| c == ctx))
+                .collect()
+        };
+
+        let exact_all = by_context(context);
+        let exact_fresh: Vec<&Quote> = exact_all
+            .iter()
+            .copied()
+            .filter(|q| !self.recent_ids.contains(&q.id))
+            .collect();
+
+        // Preference order:
+        //   1. Exact context, excluding recently shown.
+        //   2. Exact context, including recently shown (recency
+        //      window exhausted).
+        //   3. Fallback context, excluding recently shown.
+        //   4. Fallback context, including recently shown.
+        if !exact_fresh.is_empty() {
+            exact_fresh
+        } else if !exact_all.is_empty() {
+            exact_all
+        } else if let Some(fb) = fallback_context {
+            let fb_all = by_context(fb);
+            let fb_fresh: Vec<&Quote> = fb_all
+                .iter()
+                .copied()
+                .filter(|q| !self.recent_ids.contains(&q.id))
+                .collect();
+            if !fb_fresh.is_empty() {
+                fb_fresh
+            } else {
+                fb_all
+            }
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Select a quote for the given context key.
     ///
     /// Filters by context, excludes recently shown quotes, prefers short
@@ -161,45 +203,7 @@ impl QuoteProvider {
             None
         };
 
-        let by_context = |ctx: &str| -> Vec<&'static Quote> {
-            ALL_QUOTES
-                .iter()
-                .filter(|q| q.contexts.iter().any(|c| c == ctx))
-                .collect()
-        };
-
-        let exact_all = by_context(context);
-        let exact_fresh: Vec<&Quote> = exact_all
-            .iter()
-            .copied()
-            .filter(|q| !self.recent_ids.contains(&q.id))
-            .collect();
-
-        // Preference order:
-        //   1. Exact context, excluding recently shown.
-        //   2. Exact context, including recently shown (recency
-        //      window exhausted).
-        //   3. Fallback context, excluding recently shown.
-        //   4. Fallback context, including recently shown.
-        let pool: Vec<&Quote> = if !exact_fresh.is_empty() {
-            exact_fresh
-        } else if !exact_all.is_empty() {
-            exact_all
-        } else if let Some(fb) = fallback_context {
-            let fb_all = by_context(fb);
-            let fb_fresh: Vec<&Quote> = fb_all
-                .iter()
-                .copied()
-                .filter(|q| !self.recent_ids.contains(&q.id))
-                .collect();
-            if !fb_fresh.is_empty() {
-                fb_fresh
-            } else {
-                fb_all
-            }
-        } else {
-            Vec::new()
-        };
+        let pool = self.context_pool(context, fallback_context);
 
         // Prefer short quotes for brief-duration states
         let final_pool = if prefer_short {

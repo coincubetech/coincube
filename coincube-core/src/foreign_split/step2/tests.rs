@@ -1104,7 +1104,11 @@ fn a_recorded_signed_step2_verifies_only_against_its_exact_construction() {
     assert!(verify_split_step2_transaction(&step, &short_tx, &secp).is_err());
     // Control: the full quorum verifies against the same construction.
     assert!(verify_split_step2_transaction(&step, &full, &secp).is_ok());
+}
 
+#[test]
+fn recorded_step2_requires_all_sighash() {
+    let secp = secp256k1::Secp256k1::verification_only();
     // Genuine signatures of another sighash type, swapped in by key where
     // the ALL ones were (#635 P3-1, step 1's #625 F1 cases): on a restart
     // there is no PSBT-level sighash check, so the in-replay `SIGHASH_ALL`
@@ -1138,7 +1142,11 @@ fn a_recorded_signed_step2_verifies_only_against_its_exact_construction() {
             );
         }
     }
+}
 
+#[test]
+fn recorded_step2_refuses_changed_satisfactions() {
+    let secp = secp256k1::Secp256k1::verification_only();
     // Structurally changed satisfactions refuse.
     let refused = |shape: Shape, change: &dyn Fn(&mut Transaction)| {
         let fixture = Fixture::new(shape);

@@ -774,6 +774,71 @@ impl fmt::Debug for SplitPanel {
     }
 }
 
+// Keep allocation admission and the reservation under the same source lock.
+struct SplitFundingAllocation<'a> {
+    root: Option<crate::dir::CoincubeDirectory>,
+    wallet: Option<crate::app::settings::WalletId>,
+    source: &'a SplitSource,
+    target: &'a str,
+    inventory: &'a crate::services::foreign_split_inventory::SplitInventory,
+    imported_minimum: Option<u32>,
+}
+
+fn paired_split_export_name(chain: ChainId, encoding: Encoding) -> Option<&'static str> {
+    match (chain, encoding) {
+        (ChainId::Bitcoin, Encoding::Binary) => Some("split-bitcoin.psbt"),
+        (ChainId::Bitcoin, Encoding::Base64) => Some("split-bitcoin.txt"),
+        (ChainId::BitcoinBlake2b, Encoding::Binary) => Some("split-btcb2.psbt"),
+        (ChainId::BitcoinBlake2b, Encoding::Base64) => Some("split-btcb2.txt"),
+        _ => None,
+    }
+}
+
+impl SplitFundingAllocation<'_> {
+    fn reserve<T>(
+        self,
+        reserve: impl FnOnce(Option<u32>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let Self {
+            root,
+            wallet,
+            source,
+            target,
+            inventory,
+            imported_minimum,
+        } = self;
+        match (root, wallet) {
+            (Some(root), Some(wallet)) => {
+                crate::services::bitcoin_import::pairing::legacy::with_source_reservation_lock(
+                    &root,
+                    source,
+                    || {
+                        crate::services::bitcoin_import::pairing::legacy::refuse_conflicting_claim(
+                            &root, source, target, &wallet,
+                        )?;
+                        let floor = match imported_minimum {
+                            Some(minimum) => {
+                                let current =
+                                    crate::services::bitcoin_import::pairing::claim_scan_state(
+                                        &root, target, source, minimum,
+                                    )?;
+                                if !inventory.covers_address_window(current.source.address_window) {
+                                    return Err("The imported wallet allocation changed beyond the accepted scan. Scan the source wallet again.".into());
+                                }
+                                Some(current.receive_allocation_floor)
+                            }
+                            None => None,
+                        };
+                        reserve(floor)
+                    },
+                )
+            }
+            _ if cfg!(test) => reserve(None),
+            _ => Err("Reopen this Cube before reserving Claim deposit addresses.".to_string()),
+        }
+    }
+}
+
 impl SplitPanel {
     fn empty(target_cube: String, journal_root: PathBuf) -> Self {
         Self {
@@ -1173,89 +1238,7 @@ impl SplitPanel {
             }
         }
         if let Some((digest, directory)) = self.journal.clone() {
-            // A recorded step-2 submission reopens only the reconciler. The
-            // decision needs only the session, never the Vault daemon, so a
-            // daemon that is unloaded or on an unsupported route can't send
-            // a recorded step 2 back to step 1 (#637 R1). A resend the
-            // journal allows reopens the coordinator through the Vault's
-            // step-2 port when there is one (P3-3).
-            self.stage = Stage::Working(Work::Restarting);
-            let target = self.target_cube.clone();
-            let target_vault = self.target_vault.clone();
-            let (context, recon) = (connect.context(), self.recon_port.clone());
-            let resend = self.step2_port.clone().map(|port| (port, connect.clone()));
-            return self.spawn(
-                async move {
-                    let identity =
-                        crate::services::claim_workflow::split_identity(target.clone(), digest);
-                    let mut controller =
-                        crate::services::claim_workflow::Controller::reopen_settling(
-                            &directory,
-                            &identity,
-                            context.clone(),
-                        )
-                        .await
-                        .map_err(|error| {
-                            step2::Step2Refusal::retry(step1::describe(
-                                crate::services::claim_coordinator::Error::Journal(error),
-                            ))
-                        })?;
-                    if controller.is_paired_ancestry_split() {
-                        if controller.recorded_signed_ancestry_pair().is_none() {
-                            let recorded = controller
-                                .recorded_split()
-                                .map_err(|_| {
-                                    step2::Step2Refusal::retry(
-                                        "The recorded source wallet could not be verified.",
-                                    )
-                                })?
-                                .ok_or_else(|| {
-                                    step2::Step2Refusal::retry(
-                                        "The recorded split source is missing.",
-                                    )
-                                })?;
-                            let source = recorded.source.ok_or_else(|| {
-                                step2::Step2Refusal::retry(
-                                    "The recorded source descriptors are unavailable.",
-                                )
-                            })?;
-                            if recorded.source_digest != digest || recorded.target_cube != target {
-                                return Err(step2::Step2Refusal::retry(
-                                    "The recorded split belongs to another wallet or target.",
-                                ));
-                            }
-                            drop(controller);
-                            let addresses = step1::recover_unsigned_paired_funding_addresses(
-                                &*connect,
-                                directory,
-                                &source,
-                                &target,
-                                target_vault.as_ref(),
-                            )
-                            .await
-                            .map_err(step2::Step2Refusal::retry)?;
-                            return Ok(Restarted::PairedFunding(source, addresses));
-                        }
-                        let recovery = paired_recovery(&mut controller, &*connect)
-                            .await
-                            .map_err(step2::Step2Refusal::retry)?;
-                        return Ok(Restarted::PairedRecovery(recovery));
-                    }
-                    drop(controller);
-                    step2::restart(context, recon, resend, directory, target, digest)
-                        .await
-                        .map(|restart| match restart {
-                            step2::Restart::Step1 => Restarted::Step1,
-                            step2::Restart::Reconcile(recon, dead_end, note, forgotten) => {
-                                Restarted::Reconcile(Recon(recon), dead_end, note, forgotten)
-                            }
-                            step2::Restart::Resend(coord) => Restarted::Resend(Coord(coord)),
-                            step2::Restart::Closed => Restarted::Closed,
-                            step2::Restart::Unified(record) => Restarted::Unified(record),
-                        })
-                },
-                SplitEvent::Restarted,
-            );
+            return self.restart_split_journal(connect, digest, directory);
         }
         self.resume_journal(connect)
     }
@@ -1268,6 +1251,182 @@ impl SplitPanel {
     /// dead end comes with its reconciler and its close, and a journal that
     /// still allows a resend reopens the coordinator. A reconcile from
     /// before no longer counts for the close: it waits for a new one.
+    fn restart_split_journal(
+        &mut self,
+        connect: Arc<dyn SplitConnect>,
+        digest: sha256::Hash,
+        directory: PathBuf,
+    ) -> Task<Message> {
+        // A recorded step-2 submission reopens only the reconciler. The
+        // decision needs only the session, never the Vault daemon, so a
+        // daemon that is unloaded or on an unsupported route can't send
+        // a recorded step 2 back to step 1 (#637 R1). A resend the
+        // journal allows reopens the coordinator through the Vault's
+        // step-2 port when there is one (P3-3).
+        self.stage = Stage::Working(Work::Restarting);
+        let target = self.target_cube.clone();
+        let target_vault = self.target_vault.clone();
+        let (context, recon) = (connect.context(), self.recon_port.clone());
+        let resend = self.step2_port.clone().map(|port| (port, connect.clone()));
+        self.spawn(
+            async move {
+                let identity =
+                    crate::services::claim_workflow::split_identity(target.clone(), digest);
+                let mut controller = crate::services::claim_workflow::Controller::reopen_settling(
+                    &directory,
+                    &identity,
+                    context.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    step2::Step2Refusal::retry(step1::describe(
+                        crate::services::claim_coordinator::Error::Journal(error),
+                    ))
+                })?;
+                if controller.is_paired_ancestry_split() {
+                    if controller.recorded_signed_ancestry_pair().is_none() {
+                        let recorded = controller
+                            .recorded_split()
+                            .map_err(|_| {
+                                step2::Step2Refusal::retry(
+                                    "The recorded source wallet could not be verified.",
+                                )
+                            })?
+                            .ok_or_else(|| {
+                                step2::Step2Refusal::retry("The recorded split source is missing.")
+                            })?;
+                        let source = recorded.source.ok_or_else(|| {
+                            step2::Step2Refusal::retry(
+                                "The recorded source descriptors are unavailable.",
+                            )
+                        })?;
+                        if recorded.source_digest != digest || recorded.target_cube != target {
+                            return Err(step2::Step2Refusal::retry(
+                                "The recorded split belongs to another wallet or target.",
+                            ));
+                        }
+                        drop(controller);
+                        let addresses = step1::recover_unsigned_paired_funding_addresses(
+                            &*connect,
+                            directory,
+                            &source,
+                            &target,
+                            target_vault.as_ref(),
+                        )
+                        .await
+                        .map_err(step2::Step2Refusal::retry)?;
+                        return Ok(Restarted::PairedFunding(source, addresses));
+                    }
+                    let recovery = paired_recovery(&mut controller, &*connect)
+                        .await
+                        .map_err(step2::Step2Refusal::retry)?;
+                    return Ok(Restarted::PairedRecovery(recovery));
+                }
+                drop(controller);
+                step2::restart(context, recon, resend, directory, target, digest)
+                    .await
+                    .map(|restart| match restart {
+                        step2::Restart::Step1 => Restarted::Step1,
+                        step2::Restart::Reconcile(recon, dead_end, note, forgotten) => {
+                            Restarted::Reconcile(Recon(recon), dead_end, note, forgotten)
+                        }
+                        step2::Restart::Resend(coord) => Restarted::Resend(Coord(coord)),
+                        step2::Restart::Closed => Restarted::Closed,
+                        step2::Restart::Unified(record) => Restarted::Unified(record),
+                    })
+            },
+            SplitEvent::Restarted,
+        )
+    }
+
+    fn reserve_split_funding(
+        &mut self,
+        connect: Arc<dyn SplitConnect>,
+        intent: Arc<SplitIntent>,
+    ) -> Task<Message> {
+        let source = match crate::services::split_source::split_source(
+            &intent.external,
+            intent.internal.as_ref(),
+        ) {
+            Ok(source) => source,
+            Err(error) => {
+                self.stage = Stage::Refused(Refusal::final_(error.to_string()));
+                return Task::none();
+            }
+        };
+        let directory = step1::journal_directory(&self.journal_root, source.digest());
+        let target = self.target_cube.clone();
+        let target_binding = self.funding_target_binding.clone();
+        let reservation_root = self.device_datadir().cloned();
+        let reservation_wallet = self.target_vault.as_ref().map(|(id, _)| id.clone());
+        self.stage = Stage::Working(Work::ReservingFunding);
+        self.spawn(
+            async move {
+                if !connect.session_current() {
+                    return Err(
+                        "The Connect session changed before reserving deposit addresses.".into(),
+                    );
+                }
+                let context = connect.context();
+                let inventory = intent.inventory.clone();
+                let for_reservation = source.clone();
+                let for_directory = directory.clone();
+                let for_target = target.clone();
+                tokio::task::spawn_blocking(move || {
+                    let imported_minimum = target_binding
+                        .as_ref()
+                        .map(|binding| binding.imported_address_window())
+                        .transpose()
+                        .map_err(|_| "The imported Claim scan range is invalid.".to_string())?
+                        .flatten();
+                    let reserve = |allocation_floor| {
+                        match target_binding {
+                            Some(binding) => {
+                                crate::services::claim_workflow::reserve_split_funding_with_target(
+                                    &for_directory,
+                                    &for_reservation,
+                                    &for_target,
+                                    &context,
+                                    &inventory,
+                                    &binding,
+                                    allocation_floor,
+                                )
+                            }
+                            None if cfg!(test) => {
+                                crate::services::claim_workflow::reserve_split_funding(
+                                    &for_directory,
+                                    &for_reservation,
+                                    &for_target,
+                                    &context,
+                                    &inventory,
+                                )
+                            }
+                            None => Err(crate::services::claim_workflow::Error::InvalidPlan),
+                        }
+                        .map_err(|_| {
+                            "The funding addresses could not be reserved for this wallet."
+                                .to_string()
+                        })
+                    };
+                    SplitFundingAllocation {
+                        root: reservation_root,
+                        wallet: reservation_wallet,
+                        source: &for_reservation,
+                        target: &for_target,
+                        inventory: &inventory,
+                        imported_minimum,
+                    }
+                    .reserve(reserve)
+                })
+                .await
+                .map_err(|_| "Saving the funding addresses was interrupted.".to_string())??;
+                step1::check_reserved_funding_addresses(&*connect, directory, &source, &target)
+                    .await
+            },
+            SplitEvent::FundingPrepared,
+        )
+    }
+
     fn restart_step2(&mut self, notice: Option<String>) -> Task<Message> {
         self.revoke_step2();
         self.step2_seen_here = None;
@@ -1305,110 +1464,7 @@ impl SplitPanel {
             return Task::none();
         }
         if !self.legacy_flow_fixture() {
-            let source = match crate::services::split_source::split_source(
-                &intent.external,
-                intent.internal.as_ref(),
-            ) {
-                Ok(source) => source,
-                Err(error) => {
-                    self.stage = Stage::Refused(Refusal::final_(error.to_string()));
-                    return Task::none();
-                }
-            };
-            let directory = step1::journal_directory(&self.journal_root, source.digest());
-            let target = self.target_cube.clone();
-            let target_binding = self.funding_target_binding.clone();
-            let reservation_root = self.device_datadir().cloned();
-            let reservation_wallet = self.target_vault.as_ref().map(|(id, _)| id.clone());
-            self.stage = Stage::Working(Work::ReservingFunding);
-            return self.spawn(
-                async move {
-                    if !connect.session_current() {
-                        return Err(
-                            "The Connect session changed before reserving deposit addresses."
-                                .into(),
-                        );
-                    }
-                    let context = connect.context();
-                    let inventory = intent.inventory.clone();
-                    let for_reservation = source.clone();
-                    let for_directory = directory.clone();
-                    let for_target = target.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let imported_minimum = target_binding.as_ref()
-                            .map(|binding| binding.imported_address_window())
-                            .transpose()
-                            .map_err(|_| "The imported Claim scan range is invalid.".to_string())?
-                            .flatten();
-                        let reserve = |allocation_floor| {
-                            match target_binding {
-                                Some(binding) => {
-                                    crate::services::claim_workflow::reserve_split_funding_with_target(
-                                        &for_directory,
-                                        &for_reservation,
-                                        &for_target,
-                                        &context,
-                                        &inventory,
-                                        &binding,
-                                        allocation_floor,
-                                    )
-                                }
-                                None if cfg!(test) => {
-                                    crate::services::claim_workflow::reserve_split_funding(
-                                        &for_directory,
-                                        &for_reservation,
-                                        &for_target,
-                                        &context,
-                                        &inventory,
-                                    )
-                                }
-                                None => Err(crate::services::claim_workflow::Error::InvalidPlan),
-                            }
-                            .map_err(|_| {
-                                "The funding addresses could not be reserved for this wallet."
-                                    .to_string()
-                            })
-                        };
-                        match (reservation_root, reservation_wallet) {
-                            (Some(root), Some(wallet)) => {
-                                crate::services::bitcoin_import::pairing::legacy::with_source_reservation_lock(
-                                    &root,
-                                    &for_reservation,
-                                    || {
-                                        crate::services::bitcoin_import::pairing::legacy::refuse_conflicting_claim(
-                                            &root,
-                                            &for_reservation,
-                                            &for_target,
-                                            &wallet,
-                                        )?;
-                                        let floor = match imported_minimum {
-                                            Some(minimum) => {
-                                                let current = crate::services::bitcoin_import::pairing::claim_scan_state(
-                                                    &root, &for_target, &for_reservation, minimum,
-                                                )?;
-                                                if !inventory.covers_address_window(current.source.address_window) {
-                                                    return Err("The imported wallet allocation changed beyond the accepted scan. Scan the source wallet again.".into());
-                                                }
-                                                Some(current.receive_allocation_floor)
-                                            }
-                                            None => None,
-                                        };
-                                        reserve(floor)
-                                    },
-                                )
-                            }
-                            _ if cfg!(test) => reserve(None),
-                            _ => Err("Reopen this Cube before reserving Claim deposit addresses."
-                                .to_string()),
-                        }
-                    })
-                    .await
-                    .map_err(|_| "Saving the funding addresses was interrupted.".to_string())??;
-                    step1::check_reserved_funding_addresses(&*connect, directory, &source, &target)
-                        .await
-                },
-                SplitEvent::FundingPrepared,
-            );
+            return self.reserve_split_funding(connect, intent);
         }
         self.stage = Stage::Working(Work::Checking);
         self.spawn(
@@ -1695,193 +1751,25 @@ impl SplitPanel {
                 self.begin()
             }
             SplitMessage::ReviewPairedBitcoin if self.stage == Stage::PairedRecovery => {
-                if crate::services::claim_ancestry_gate::authorization().is_none() {
-                    return Task::none();
-                }
-                if !self
-                    .paired_recovery
-                    .as_ref()
-                    .is_some_and(|recovery| recovery.bitcoin_unattempted)
-                {
-                    return Task::none();
-                }
-                let (Some(connect), Some((digest, directory))) =
-                    (self.connect.clone(), self.journal.clone())
-                else {
-                    return Task::none();
-                };
-                let target = self.target_cube.clone();
-                let target_vault = self.target_vault.clone();
-                self.stage = Stage::Working(Work::ReviewingPairedBitcoin);
-                self.spawn(
-                    async move {
-                        connect
-                            .review_recorded_first_broadcast(
-                                directory,
-                                digest,
-                                &target,
-                                target_vault.as_ref(),
-                            )
-                            .await
-                    },
-                    SplitEvent::PairedBitcoinReviewed,
-                )
+                self.split_action_review_paired_bitcoin()
             }
             SplitMessage::ConfirmPairedBitcoin if self.stage == Stage::PairedBitcoinReview => {
-                if crate::services::claim_ancestry_gate::authorization().is_none() {
-                    self.paired_bitcoin_review = None;
-                    self.stage = Stage::PairedRecovery;
-                    return Task::none();
-                }
-                let (Some(connect), Some((digest, directory)), Some(displayed)) = (
-                    self.connect.clone(),
-                    self.journal.clone(),
-                    self.paired_bitcoin_review.take(),
-                ) else {
-                    return Task::none();
-                };
-                let target = self.target_cube.clone();
-                let target_vault = self.target_vault.clone();
-                self.stage = Stage::Working(Work::SubmittingPairedBitcoin);
-                self.spawn(
-                    async move {
-                        connect
-                            .confirm_recorded_first_broadcast(
-                                directory,
-                                digest,
-                                &target,
-                                target_vault.as_ref(),
-                                &displayed,
-                            )
-                            .await
-                    },
-                    SplitEvent::PairedBitcoinSubmitted,
-                )
+                self.split_action_confirm_paired_bitcoin()
             }
             SplitMessage::ReviewPairedFork if self.stage == Stage::PairedRecovery => {
-                if crate::services::claim_ancestry_gate::authorization().is_none()
-                    || !self
-                        .paired_recovery
-                        .as_ref()
-                        .is_some_and(|recovery| recovery.fork_ready_for_review)
-                {
-                    return Task::none();
-                }
-                let (Some(connect), Some((digest, directory))) =
-                    (self.connect.clone(), self.journal.clone())
-                else {
-                    return Task::none();
-                };
-                let target = self.target_cube.clone();
-                let target_vault = self.target_vault.clone();
-                self.stage = Stage::Working(Work::ReviewingPairedFork);
-                self.spawn(
-                    async move {
-                        connect
-                            .review_recorded_second_broadcast(
-                                directory,
-                                digest,
-                                &target,
-                                target_vault.as_ref(),
-                            )
-                            .await
-                    },
-                    SplitEvent::PairedForkReviewed,
-                )
+                self.split_action_review_paired_fork()
             }
             SplitMessage::ConfirmPairedFork if self.stage == Stage::PairedForkReview => {
-                if crate::services::claim_ancestry_gate::authorization().is_none() {
-                    self.paired_fork_review = None;
-                    self.stage = Stage::PairedRecovery;
-                    return Task::none();
-                }
-                let (Some(connect), Some((digest, directory)), Some(displayed)) = (
-                    self.connect.clone(),
-                    self.journal.clone(),
-                    self.paired_fork_review.take(),
-                ) else {
-                    return Task::none();
-                };
-                let target = self.target_cube.clone();
-                let target_vault = self.target_vault.clone();
-                self.stage = Stage::Working(Work::SubmittingPairedFork);
-                self.spawn(
-                    async move {
-                        connect
-                            .confirm_recorded_second_broadcast(
-                                directory,
-                                digest,
-                                &target,
-                                target_vault.as_ref(),
-                                &displayed,
-                            )
-                            .await
-                    },
-                    SplitEvent::PairedForkSubmitted,
-                )
+                self.split_action_confirm_paired_fork()
             }
             SplitMessage::BeginPairedSigning if self.stage == Stage::FundingDeposits => {
-                // A verified deposit preview is evidence, not permission to
-                // expose spendable PSBTs before the migration acceptance gate.
-                if crate::services::claim_ancestry_gate::authorization().is_none() {
-                    return Task::none();
-                }
-                let (Some(connect), Some(source), Some((_, directory)), Some(progress)) = (
-                    self.connect.clone(),
-                    self.funding_source.clone(),
-                    self.funding_journal.clone(),
-                    self.funding_progress.as_ref(),
-                ) else {
-                    return Task::none();
-                };
-                if !progress.both_verified || !progress.exact_review_retained() {
-                    return Task::none();
-                }
-                let Some(prepared) = progress.prepared.as_ref() else {
-                    return Task::none();
-                };
-                let (bitcoin, fork, rates) = prepared.signing_plan();
-                let target = self.target_cube.clone();
-                let target_vault = self.target_vault.clone();
-                self.paired_signing = Some(PairedSplitSigning {
-                    bitcoin_current: bitcoin.psbt().clone(),
-                    fork_current: fork.psbt().clone(),
-                    bitcoin: bitcoin.clone(),
-                    fork: fork.clone(),
-                    rates,
-                    bitcoin_returns: Vec::new(),
-                    fork_returns: Vec::new(),
-                });
-                self.funding_progress = None;
-                self.notice = None;
-                self.stage = Stage::Working(Work::PreparingPairedSign);
-                self.spawn(
-                    async move {
-                        connect
-                            .prepare_exact_pair_intent(
-                                directory,
-                                &source,
-                                &target,
-                                target_vault.as_ref(),
-                                &bitcoin,
-                                &fork,
-                                rates,
-                            )
-                            .await
-                            .map(|_| ())
-                    },
-                    SplitEvent::PairedSigningPrepared,
-                )
+                self.split_action_begin_paired_signing()
             }
             SplitMessage::ExportPairedUnsigned(chain, encoding)
                 if self.stage == Stage::PairedSign && self.paired_signing.is_some() =>
             {
-                let name = match (chain, encoding) {
-                    (ChainId::Bitcoin, Encoding::Binary) => "split-bitcoin.psbt",
-                    (ChainId::Bitcoin, Encoding::Base64) => "split-bitcoin.txt",
-                    (ChainId::BitcoinBlake2b, Encoding::Binary) => "split-btcb2.psbt",
-                    (ChainId::BitcoinBlake2b, Encoding::Base64) => "split-btcb2.txt",
-                    _ => return Task::none(),
+                let Some(name) = paired_split_export_name(chain, encoding) else {
+                    return Task::none();
                 };
                 Task::perform(
                     async move {
@@ -1921,38 +1809,9 @@ impl SplitPanel {
                 )
             }
             SplitMessage::CheckDeposits if self.stage == Stage::FundingDeposits => {
-                let (Some(connect), Some(source), Some((_, directory))) = (
-                    self.connect.clone(),
-                    self.funding_source.clone(),
-                    self.funding_journal.clone(),
-                ) else {
-                    return Task::none();
-                };
-                let target = self.target_cube.clone();
-                let target_vault = self.target_vault.clone();
-                self.notice = None;
-                self.funding_progress = None;
-                self.stage = Stage::Working(Work::CheckingFunding);
-                self.spawn(
-                    async move {
-                        connect
-                            .check_split_deposits(
-                                directory,
-                                &source,
-                                &target,
-                                target_vault.as_ref(),
-                            )
-                            .await
-                    },
-                    SplitEvent::FundingChecked,
-                )
+                self.split_action_check_deposits()
             }
-            SplitMessage::Retry => {
-                if matches!(self.stage, Stage::Refused(Refusal { retry: true, .. })) {
-                    self.stage = Stage::NeedsSession;
-                }
-                self.begin()
-            }
+            SplitMessage::Retry => self.retry_split(),
             SplitMessage::ExportUnsigned(encoding) if self.stage == Stage::Sign => {
                 let name = match encoding {
                     Encoding::Binary => "split-step1.psbt",
@@ -1996,144 +1855,30 @@ impl SplitPanel {
                 move |path| Message::Split(Box::new(SplitEvent::SignedExportChosen(seq, path))),
             ),
             SplitMessage::Review if matches!(self.stage, Stage::Ready | Stage::Review) => {
-                self.review = None;
-                let Some(destination) = self
-                    .construction
-                    .as_deref()
-                    .and_then(step1::construction_destination)
-                else {
-                    return Task::none();
-                };
-                let Some((mut driver, connect)) = self.take_driver(Work::Reviewing) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        // The destination must still be unused on both
-                        // chains when the review is shown.
-                        let result = match step1::destination_unused(&*connect, &destination).await
-                        {
-                            Ok(()) => driver
-                                .review(&connect.context())
-                                .await
-                                .map_err(step1::describe),
-                            Err(refusal) => Err(refusal.reason),
-                        };
-                        (Driver(driver), result)
-                    },
-                    |seq, (driver, result)| SplitEvent::Reviewed(seq, driver, result),
-                )
+                self.split_action_review()
             }
-            SplitMessage::Confirm if self.stage == Stage::Review => {
-                self.review = None;
-                let Some((mut driver, connect)) = self.take_driver(Work::Submitting) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let result = driver
-                            .submit(&connect.context())
-                            .await
-                            .map_err(step1::describe);
-                        (Driver(driver), result)
-                    },
-                    |seq, (driver, result)| SplitEvent::Submitted(seq, driver, result),
-                )
-            }
+            SplitMessage::Confirm if self.stage == Stage::Review => self.split_action_confirm(),
             SplitMessage::Reconcile
                 if matches!(
                     self.stage,
                     Stage::Tracking | Stage::Ready | Stage::Reconfirm { .. } | Stage::Resend
                 ) =>
             {
-                self.review = None;
-                let Some((mut driver, connect)) = self.take_driver(Work::Reconciling) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let result = driver
-                            .reconcile(&connect.context())
-                            .await
-                            .map_err(step1::describe);
-                        (Driver(driver), result)
-                    },
-                    |seq, (driver, result)| SplitEvent::Reconciled(seq, driver, result),
-                )
+                self.split_action_reconcile()
             }
             SplitMessage::CheckReorg if self.stage == Stage::Tracking && self.reorged() => {
-                let (Some(tracked), claimed) = (self.tracked_txid(), self.claimed.clone()) else {
-                    return Task::none();
-                };
-                let Some((mut driver, connect)) = self.take_driver(Work::Recovering) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let recovered = match driver.recover(&connect.context()).await {
-                            Ok(recovery) => Recovered::Review(recovery),
-                            Err(error) => {
-                                let reason = step1::describe(error);
-                                match step1::step1_double_spent(&*connect, tracked, &claimed).await
-                                {
-                                    Ok(true) => Recovered::NewStep1Needed,
-                                    Ok(false) => Recovered::Refused(reason),
-                                    Err(refusal) => Recovered::Refused(refusal.reason),
-                                }
-                            }
-                        };
-                        (Driver(driver), recovered)
-                    },
-                    |seq, (driver, recovered)| SplitEvent::Recovered(seq, driver, recovered),
-                )
+                self.split_action_check_reorg()
             }
             SplitMessage::AcknowledgeReconfirmation
                 if matches!(self.stage, Stage::Reconfirm { .. }) =>
             {
-                let Some((mut driver, connect)) = self.take_driver(Work::Acknowledging) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let result = driver
-                            .acknowledge(&connect.context())
-                            .await
-                            .map_err(step1::describe);
-                        (Driver(driver), result)
-                    },
-                    |seq, (driver, result)| SplitEvent::Acknowledged(seq, driver, result),
-                )
+                self.split_action_acknowledge_reconfirmation()
             }
             SplitMessage::ConfirmResend if self.stage == Stage::Resend => {
-                self.review = None;
-                let Some((mut driver, connect)) = self.take_driver(Work::Resending) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let result = driver
-                            .resend(&connect.context())
-                            .await
-                            .map_err(step1::describe);
-                        (Driver(driver), result)
-                    },
-                    |seq, (driver, result)| SplitEvent::Resent(seq, driver, result),
-                )
+                self.split_action_confirm_resend()
             }
             SplitMessage::CheckAbandon if self.can_check_abandon() => {
-                let (Some(connect), Some(tracked)) = (self.connect.clone(), self.abandon_tracked())
-                else {
-                    return Task::none();
-                };
-                let claimed = self.claimed.clone();
-                self.abandon_checked = false;
-                let back =
-                    std::mem::replace(&mut self.stage, Stage::Working(Work::CheckingAbandon));
-                self.resume_stage = Some(back);
-                self.spawn(
-                    async move { step1::check_abandon(&*connect, tracked, &claimed).await },
-                    SplitEvent::AbandonChecked,
-                )
+                self.split_action_check_abandon()
             }
             SplitMessage::ConfirmAbandon if self.can_confirm_abandon() => {
                 let (Some(connect), Some(tracked), Some((digest, directory))) = (
@@ -2193,6 +1938,344 @@ impl SplitPanel {
 
     /// Apply a task's result. A result from an older request is dropped; a
     /// coordinator it carries is released (it was revoked with that request).
+    fn retry_split(&mut self) -> Task<Message> {
+        if matches!(self.stage, Stage::Refused(Refusal { retry: true, .. })) {
+            self.stage = Stage::NeedsSession;
+        }
+        self.begin()
+    }
+
+    fn split_action_review_paired_bitcoin(&mut self) -> Task<Message> {
+        if crate::services::claim_ancestry_gate::authorization().is_none() {
+            return Task::none();
+        }
+        if !self
+            .paired_recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.bitcoin_unattempted)
+        {
+            return Task::none();
+        }
+        let (Some(connect), Some((digest, directory))) =
+            (self.connect.clone(), self.journal.clone())
+        else {
+            return Task::none();
+        };
+        let target = self.target_cube.clone();
+        let target_vault = self.target_vault.clone();
+        self.stage = Stage::Working(Work::ReviewingPairedBitcoin);
+        self.spawn(
+            async move {
+                connect
+                    .review_recorded_first_broadcast(
+                        directory,
+                        digest,
+                        &target,
+                        target_vault.as_ref(),
+                    )
+                    .await
+            },
+            SplitEvent::PairedBitcoinReviewed,
+        )
+    }
+    fn split_action_confirm_paired_bitcoin(&mut self) -> Task<Message> {
+        if crate::services::claim_ancestry_gate::authorization().is_none() {
+            self.paired_bitcoin_review = None;
+            self.stage = Stage::PairedRecovery;
+            return Task::none();
+        }
+        let (Some(connect), Some((digest, directory)), Some(displayed)) = (
+            self.connect.clone(),
+            self.journal.clone(),
+            self.paired_bitcoin_review.take(),
+        ) else {
+            return Task::none();
+        };
+        let target = self.target_cube.clone();
+        let target_vault = self.target_vault.clone();
+        self.stage = Stage::Working(Work::SubmittingPairedBitcoin);
+        self.spawn(
+            async move {
+                connect
+                    .confirm_recorded_first_broadcast(
+                        directory,
+                        digest,
+                        &target,
+                        target_vault.as_ref(),
+                        &displayed,
+                    )
+                    .await
+            },
+            SplitEvent::PairedBitcoinSubmitted,
+        )
+    }
+    fn split_action_review_paired_fork(&mut self) -> Task<Message> {
+        if crate::services::claim_ancestry_gate::authorization().is_none()
+            || !self
+                .paired_recovery
+                .as_ref()
+                .is_some_and(|recovery| recovery.fork_ready_for_review)
+        {
+            return Task::none();
+        }
+        let (Some(connect), Some((digest, directory))) =
+            (self.connect.clone(), self.journal.clone())
+        else {
+            return Task::none();
+        };
+        let target = self.target_cube.clone();
+        let target_vault = self.target_vault.clone();
+        self.stage = Stage::Working(Work::ReviewingPairedFork);
+        self.spawn(
+            async move {
+                connect
+                    .review_recorded_second_broadcast(
+                        directory,
+                        digest,
+                        &target,
+                        target_vault.as_ref(),
+                    )
+                    .await
+            },
+            SplitEvent::PairedForkReviewed,
+        )
+    }
+    fn split_action_confirm_paired_fork(&mut self) -> Task<Message> {
+        if crate::services::claim_ancestry_gate::authorization().is_none() {
+            self.paired_fork_review = None;
+            self.stage = Stage::PairedRecovery;
+            return Task::none();
+        }
+        let (Some(connect), Some((digest, directory)), Some(displayed)) = (
+            self.connect.clone(),
+            self.journal.clone(),
+            self.paired_fork_review.take(),
+        ) else {
+            return Task::none();
+        };
+        let target = self.target_cube.clone();
+        let target_vault = self.target_vault.clone();
+        self.stage = Stage::Working(Work::SubmittingPairedFork);
+        self.spawn(
+            async move {
+                connect
+                    .confirm_recorded_second_broadcast(
+                        directory,
+                        digest,
+                        &target,
+                        target_vault.as_ref(),
+                        &displayed,
+                    )
+                    .await
+            },
+            SplitEvent::PairedForkSubmitted,
+        )
+    }
+    fn split_action_begin_paired_signing(&mut self) -> Task<Message> {
+        // A verified deposit preview is evidence, not permission to
+        // expose spendable PSBTs before the migration acceptance gate.
+        if crate::services::claim_ancestry_gate::authorization().is_none() {
+            return Task::none();
+        }
+        let (Some(connect), Some(source), Some((_, directory)), Some(progress)) = (
+            self.connect.clone(),
+            self.funding_source.clone(),
+            self.funding_journal.clone(),
+            self.funding_progress.as_ref(),
+        ) else {
+            return Task::none();
+        };
+        if !progress.both_verified || !progress.exact_review_retained() {
+            return Task::none();
+        }
+        let Some(prepared) = progress.prepared.as_ref() else {
+            return Task::none();
+        };
+        let (bitcoin, fork, rates) = prepared.signing_plan();
+        let target = self.target_cube.clone();
+        let target_vault = self.target_vault.clone();
+        self.paired_signing = Some(PairedSplitSigning {
+            bitcoin_current: bitcoin.psbt().clone(),
+            fork_current: fork.psbt().clone(),
+            bitcoin: bitcoin.clone(),
+            fork: fork.clone(),
+            rates,
+            bitcoin_returns: Vec::new(),
+            fork_returns: Vec::new(),
+        });
+        self.funding_progress = None;
+        self.notice = None;
+        self.stage = Stage::Working(Work::PreparingPairedSign);
+        self.spawn(
+            async move {
+                connect
+                    .prepare_exact_pair_intent(
+                        directory,
+                        &source,
+                        &target,
+                        target_vault.as_ref(),
+                        &bitcoin,
+                        &fork,
+                        rates,
+                    )
+                    .await
+                    .map(|_| ())
+            },
+            SplitEvent::PairedSigningPrepared,
+        )
+    }
+    fn split_action_check_deposits(&mut self) -> Task<Message> {
+        let (Some(connect), Some(source), Some((_, directory))) = (
+            self.connect.clone(),
+            self.funding_source.clone(),
+            self.funding_journal.clone(),
+        ) else {
+            return Task::none();
+        };
+        let target = self.target_cube.clone();
+        let target_vault = self.target_vault.clone();
+        self.notice = None;
+        self.funding_progress = None;
+        self.stage = Stage::Working(Work::CheckingFunding);
+        self.spawn(
+            async move {
+                connect
+                    .check_split_deposits(directory, &source, &target, target_vault.as_ref())
+                    .await
+            },
+            SplitEvent::FundingChecked,
+        )
+    }
+    fn split_action_review(&mut self) -> Task<Message> {
+        self.review = None;
+        let Some(destination) = self
+            .construction
+            .as_deref()
+            .and_then(step1::construction_destination)
+        else {
+            return Task::none();
+        };
+        let Some((mut driver, connect)) = self.take_driver(Work::Reviewing) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                // The destination must still be unused on both
+                // chains when the review is shown.
+                let result = match step1::destination_unused(&*connect, &destination).await {
+                    Ok(()) => driver
+                        .review(&connect.context())
+                        .await
+                        .map_err(step1::describe),
+                    Err(refusal) => Err(refusal.reason),
+                };
+                (Driver(driver), result)
+            },
+            |seq, (driver, result)| SplitEvent::Reviewed(seq, driver, result),
+        )
+    }
+    fn split_action_confirm(&mut self) -> Task<Message> {
+        self.review = None;
+        let Some((mut driver, connect)) = self.take_driver(Work::Submitting) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let result = driver
+                    .submit(&connect.context())
+                    .await
+                    .map_err(step1::describe);
+                (Driver(driver), result)
+            },
+            |seq, (driver, result)| SplitEvent::Submitted(seq, driver, result),
+        )
+    }
+    fn split_action_reconcile(&mut self) -> Task<Message> {
+        self.review = None;
+        let Some((mut driver, connect)) = self.take_driver(Work::Reconciling) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let result = driver
+                    .reconcile(&connect.context())
+                    .await
+                    .map_err(step1::describe);
+                (Driver(driver), result)
+            },
+            |seq, (driver, result)| SplitEvent::Reconciled(seq, driver, result),
+        )
+    }
+    fn split_action_check_reorg(&mut self) -> Task<Message> {
+        let (Some(tracked), claimed) = (self.tracked_txid(), self.claimed.clone()) else {
+            return Task::none();
+        };
+        let Some((mut driver, connect)) = self.take_driver(Work::Recovering) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let recovered = match driver.recover(&connect.context()).await {
+                    Ok(recovery) => Recovered::Review(recovery),
+                    Err(error) => {
+                        let reason = step1::describe(error);
+                        match step1::step1_double_spent(&*connect, tracked, &claimed).await {
+                            Ok(true) => Recovered::NewStep1Needed,
+                            Ok(false) => Recovered::Refused(reason),
+                            Err(refusal) => Recovered::Refused(refusal.reason),
+                        }
+                    }
+                };
+                (Driver(driver), recovered)
+            },
+            |seq, (driver, recovered)| SplitEvent::Recovered(seq, driver, recovered),
+        )
+    }
+    fn split_action_acknowledge_reconfirmation(&mut self) -> Task<Message> {
+        let Some((mut driver, connect)) = self.take_driver(Work::Acknowledging) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let result = driver
+                    .acknowledge(&connect.context())
+                    .await
+                    .map_err(step1::describe);
+                (Driver(driver), result)
+            },
+            |seq, (driver, result)| SplitEvent::Acknowledged(seq, driver, result),
+        )
+    }
+    fn split_action_confirm_resend(&mut self) -> Task<Message> {
+        self.review = None;
+        let Some((mut driver, connect)) = self.take_driver(Work::Resending) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let result = driver
+                    .resend(&connect.context())
+                    .await
+                    .map_err(step1::describe);
+                (Driver(driver), result)
+            },
+            |seq, (driver, result)| SplitEvent::Resent(seq, driver, result),
+        )
+    }
+    fn split_action_check_abandon(&mut self) -> Task<Message> {
+        let (Some(connect), Some(tracked)) = (self.connect.clone(), self.abandon_tracked()) else {
+            return Task::none();
+        };
+        let claimed = self.claimed.clone();
+        self.abandon_checked = false;
+        let back = std::mem::replace(&mut self.stage, Stage::Working(Work::CheckingAbandon));
+        self.resume_stage = Some(back);
+        self.spawn(
+            async move { step1::check_abandon(&*connect, tracked, &claimed).await },
+            SplitEvent::AbandonChecked,
+        )
+    }
+
     pub fn apply(&mut self, event: SplitEvent) -> Task<Message> {
         if let SplitEvent::DeadlinePassed(epoch) = event {
             self.deadline_passed(epoch);
@@ -2201,6 +2284,122 @@ impl SplitPanel {
         if event.seq() != self.seq {
             return Task::none();
         }
+        match event {
+            event @ SplitEvent::PairedForkReviewed(..) => {
+                self.apply_split_paired_fork_reviewed(event)
+            }
+            event @ SplitEvent::PairedForkSubmitted(..) => {
+                self.apply_split_paired_fork_submitted(event)
+            }
+            event @ SplitEvent::PairedBitcoinReviewed(..) => {
+                self.apply_split_paired_bitcoin_reviewed(event)
+            }
+            event @ SplitEvent::PairedBitcoinSubmitted(..) => {
+                self.apply_split_paired_bitcoin_submitted(event)
+            }
+            event @ SplitEvent::FundingPrepared(..) => self.apply_split_funding_prepared(event),
+
+            SplitEvent::FundingRecovered(_, Ok((source, addresses))) => {
+                self.funding_source = Some(source);
+                self.funding_addresses = Some(addresses);
+                self.funding_progress = None;
+                self.stage = Stage::FundingDeposits;
+                Task::none()
+            }
+            SplitEvent::FundingRecovered(_, Err(reason)) => {
+                self.stage = Stage::Refused(Refusal::retry(reason));
+                Task::none()
+            }
+            event @ SplitEvent::FundingChecked(..) => self.apply_split_funding_checked(event),
+
+            event @ SplitEvent::PairedSigningPrepared(..) => {
+                self.apply_split_paired_signing_prepared(event)
+            }
+            event @ SplitEvent::PairedExportChosen(..) => {
+                self.apply_split_paired_export_chosen(event)
+            }
+
+            event @ SplitEvent::PairedImportChosen(..) => {
+                self.apply_split_paired_import_chosen(event)
+            }
+
+            event @ SplitEvent::PairedExported(..) => self.apply_split_paired_exported(event),
+            event @ SplitEvent::PairedSignaturesChecked(..) => {
+                self.apply_split_paired_signatures_checked(event)
+            }
+            event @ SplitEvent::PairedSignaturesRecorded(..) => {
+                self.apply_split_paired_signatures_recorded(event)
+            }
+            event @ SplitEvent::FundingReviewExpired(..) => {
+                self.apply_split_funding_review_expired(event)
+            }
+            event @ SplitEvent::Checked(..) => self.apply_split_checked(event),
+
+            SplitEvent::Built(_, Ok(construction)) => {
+                self.construction = Some(construction);
+                self.files.clear();
+                self.signed = None;
+                self.stage = Stage::Sign;
+                Task::none()
+            }
+            SplitEvent::Built(_, Err(reason)) => {
+                self.stage = Stage::Refused(Refusal::final_(reason));
+                Task::none()
+            }
+            SplitEvent::ExportChosen(_, Some(path), encoding) => self.export_to(path, encoding),
+            SplitEvent::ImportChosen(_, Some(paths)) if !paths.is_empty() => {
+                self.import_from(paths)
+            }
+            SplitEvent::SignedExportChosen(_, Some(path)) => self.export_signed_to(path),
+            SplitEvent::ExportChosen(..)
+            | SplitEvent::ImportChosen(..)
+            | SplitEvent::SignedExportChosen(..) => Task::none(),
+            SplitEvent::Exported(_, result) => {
+                match result {
+                    Ok(path) => self.exported = path.or(self.exported.take()),
+                    Err(reason) => self.notice = Some(reason),
+                }
+                self.stage = Stage::Sign;
+                Task::none()
+            }
+            event @ SplitEvent::Imported(..) => self.apply_split_imported(event),
+
+            event @ SplitEvent::Recorded(..) => self.apply_split_recorded(event),
+
+            event @ SplitEvent::Resumed(..) => self.apply_split_resumed(event),
+
+            event @ SplitEvent::Reviewed(..) => self.apply_split_reviewed(event),
+            event @ SplitEvent::Submitted(..) => self.apply_split_submitted(event),
+            event @ SplitEvent::Reconciled(..) => self.apply_split_reconciled(event),
+            event @ SplitEvent::Recovered(..) => self.apply_split_recovered(event),
+            event @ SplitEvent::Acknowledged(..) => self.apply_split_acknowledged(event),
+            event @ SplitEvent::Resent(..) => self.apply_split_resent(event),
+            event @ SplitEvent::AbandonChecked(..) => self.apply_split_abandon_checked(event),
+            SplitEvent::Abandoned(_, Ok(())) => {
+                self.ending = None;
+                self.journal = None;
+                self.phase = None;
+                self.claimed.clear();
+                self.abandon_only = None;
+                self.notice = None;
+                self.stage = Stage::Abandoned;
+                Task::none()
+            }
+            SplitEvent::Abandoned(_, Err(reason)) => {
+                self.ending = None;
+                self.stage = Stage::Refused(Refusal::retry(reason));
+                Task::none()
+            }
+            event @ (SplitEvent::DeviceListed(..) | SplitEvent::DeviceSigned(..)) => {
+                self.apply_device(event)
+            }
+            SplitEvent::Unified(_, event) => self.apply_unified(event),
+            event @ SplitEvent::SignedExported(..) => self.apply_split_signed_exported(event),
+            other => self.apply_step2(other),
+        }
+    }
+
+    fn apply_split_paired_fork_reviewed(&mut self, event: SplitEvent) -> Task<Message> {
         match event {
             SplitEvent::PairedForkReviewed(_, result) => {
                 if self.stage != Stage::Working(Work::ReviewingPairedFork) {
@@ -2220,6 +2419,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_paired_fork_submitted(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::PairedForkSubmitted(_, result) => {
                 if self.stage != Stage::Working(Work::SubmittingPairedFork) {
                     return Task::none();
@@ -2237,6 +2441,11 @@ impl SplitPanel {
                     }
                 }
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_paired_bitcoin_reviewed(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::PairedBitcoinReviewed(_, result) => {
                 if self.stage != Stage::Working(Work::ReviewingPairedBitcoin) {
                     return Task::none();
@@ -2255,6 +2464,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_paired_bitcoin_submitted(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::PairedBitcoinSubmitted(_, result) => {
                 if self.stage != Stage::Working(Work::SubmittingPairedBitcoin) {
                     return Task::none();
@@ -2272,6 +2486,11 @@ impl SplitPanel {
                     }
                 }
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_funding_prepared(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::FundingPrepared(_, Ok(addresses)) => {
                 let Some(intent) = self.intent.as_ref() else {
                     self.stage =
@@ -2300,17 +2519,11 @@ impl SplitPanel {
                 self.stage = Stage::Refused(Refusal::retry(reason));
                 Task::none()
             }
-            SplitEvent::FundingRecovered(_, Ok((source, addresses))) => {
-                self.funding_source = Some(source);
-                self.funding_addresses = Some(addresses);
-                self.funding_progress = None;
-                self.stage = Stage::FundingDeposits;
-                Task::none()
-            }
-            SplitEvent::FundingRecovered(_, Err(reason)) => {
-                self.stage = Stage::Refused(Refusal::retry(reason));
-                Task::none()
-            }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_funding_checked(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::FundingChecked(_, Ok(progress)) => {
                 if !progress.exact_review_retained() {
                     self.funding_progress = None;
@@ -2339,6 +2552,11 @@ impl SplitPanel {
                 self.stage = Stage::FundingDeposits;
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_paired_signing_prepared(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::PairedSigningPrepared(_, result) => {
                 if self.stage != Stage::Working(Work::PreparingPairedSign) {
                     return Task::none();
@@ -2362,6 +2580,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_paired_export_chosen(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::PairedExportChosen(_, chain, encoding, Some(path))
                 if self.stage == Stage::PairedSign =>
             {
@@ -2423,6 +2646,11 @@ impl SplitPanel {
                 )
             }
             SplitEvent::PairedExportChosen(..) => Task::none(),
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_paired_import_chosen(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::PairedImportChosen(_, chain, Some(paths))
                 if self.stage == Stage::PairedSign && !paths.is_empty() =>
             {
@@ -2477,6 +2705,11 @@ impl SplitPanel {
                 )
             }
             SplitEvent::PairedImportChosen(..) => Task::none(),
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_paired_exported(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::PairedExported(_, result) => {
                 if self.stage != Stage::Working(Work::Exporting) {
                     return Task::none();
@@ -2488,6 +2721,11 @@ impl SplitPanel {
                 });
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_paired_signatures_checked(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::PairedSignaturesChecked(_, result) => {
                 if self.stage != Stage::Working(Work::CheckingPairedSignatures) {
                     return Task::none();
@@ -2516,6 +2754,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_paired_signatures_recorded(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::PairedSignaturesRecorded(_, result) => {
                 if self.stage != Stage::Working(Work::RecordingPairedSignatures)
                     || self.paired_signing.is_none()
@@ -2538,6 +2781,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_funding_review_expired(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::FundingReviewExpired(_) => {
                 if self.stage == Stage::FundingDeposits {
                     self.funding_progress = None;
@@ -2548,6 +2796,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_checked(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Checked(_, Ok(prepared)) => {
                 self.stage = Stage::Working(Work::Building);
                 let for_build = prepared.clone();
@@ -2573,33 +2826,11 @@ impl SplitPanel {
                 self.stage = Stage::Refused(refusal);
                 Task::none()
             }
-            SplitEvent::Built(_, Ok(construction)) => {
-                self.construction = Some(construction);
-                self.files.clear();
-                self.signed = None;
-                self.stage = Stage::Sign;
-                Task::none()
-            }
-            SplitEvent::Built(_, Err(reason)) => {
-                self.stage = Stage::Refused(Refusal::final_(reason));
-                Task::none()
-            }
-            SplitEvent::ExportChosen(_, Some(path), encoding) => self.export_to(path, encoding),
-            SplitEvent::ImportChosen(_, Some(paths)) if !paths.is_empty() => {
-                self.import_from(paths)
-            }
-            SplitEvent::SignedExportChosen(_, Some(path)) => self.export_signed_to(path),
-            SplitEvent::ExportChosen(..)
-            | SplitEvent::ImportChosen(..)
-            | SplitEvent::SignedExportChosen(..) => Task::none(),
-            SplitEvent::Exported(_, result) => {
-                match result {
-                    Ok(path) => self.exported = path.or(self.exported.take()),
-                    Err(reason) => self.notice = Some(reason),
-                }
-                self.stage = Stage::Sign;
-                Task::none()
-            }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_imported(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Imported(_, Ok((files, imported))) => {
                 self.files = files;
                 self.notice = None;
@@ -2624,6 +2855,11 @@ impl SplitPanel {
                 self.stage = Stage::Sign;
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_recorded(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Recorded(_, Ok(Driver(driver))) => {
                 if let Some(construction) = &self.construction {
                     let digest = construction.source().digest();
@@ -2645,6 +2881,11 @@ impl SplitPanel {
                 self.stage = Stage::Refused(Refusal::retry(reason));
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_resumed(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Resumed(_, Ok((resumed, Driver(driver)))) => {
                 self.install(*resumed);
                 self.bind(driver);
@@ -2682,6 +2923,11 @@ impl SplitPanel {
                 self.stage = Stage::Refused(refusal);
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_reviewed(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Reviewed(_, Driver(driver), result) => {
                 self.bind(driver);
                 match result {
@@ -2697,6 +2943,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_submitted(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Submitted(_, Driver(driver), result) => {
                 self.bind(driver);
                 match result {
@@ -2710,6 +2961,11 @@ impl SplitPanel {
                 self.settle();
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_reconciled(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Reconciled(_, Driver(driver), result) => {
                 self.bind(driver);
                 match result {
@@ -2722,6 +2978,11 @@ impl SplitPanel {
                 self.settle();
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_recovered(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Recovered(_, Driver(driver), recovered) => {
                 self.bind(driver);
                 match recovered {
@@ -2750,6 +3011,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_acknowledged(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Acknowledged(_, Driver(driver), result) => {
                 self.bind(driver);
                 match result {
@@ -2766,6 +3032,11 @@ impl SplitPanel {
                 self.settle();
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_resent(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Resent(_, Driver(driver), result) => {
                 self.bind(driver);
                 match result {
@@ -2779,6 +3050,11 @@ impl SplitPanel {
                 self.settle();
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_abandon_checked(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::AbandonChecked(_, result) => {
                 match result {
                     Ok(()) => self.abandon_checked = true,
@@ -2787,25 +3063,11 @@ impl SplitPanel {
                 self.stage = self.resume_stage.take().unwrap_or(Stage::Ready);
                 Task::none()
             }
-            SplitEvent::Abandoned(_, Ok(())) => {
-                self.ending = None;
-                self.journal = None;
-                self.phase = None;
-                self.claimed.clear();
-                self.abandon_only = None;
-                self.notice = None;
-                self.stage = Stage::Abandoned;
-                Task::none()
-            }
-            SplitEvent::Abandoned(_, Err(reason)) => {
-                self.ending = None;
-                self.stage = Stage::Refused(Refusal::retry(reason));
-                Task::none()
-            }
-            event @ (SplitEvent::DeviceListed(..) | SplitEvent::DeviceSigned(..)) => {
-                self.apply_device(event)
-            }
-            SplitEvent::Unified(_, event) => self.apply_unified(event),
+            _ => Task::none(),
+        }
+    }
+    fn apply_split_signed_exported(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::SignedExported(_, result) => {
                 self.notice = Some(match result {
                     Ok(Some(path)) => format!("Signed step 1 saved to {}.", path.display()),
@@ -2814,10 +3076,9 @@ impl SplitPanel {
                 });
                 Task::none()
             }
-            other => self.apply_step2(other),
+            _ => Task::none(),
         }
     }
-
     /// The earliest deadline of what is on screen: the "cannot replay"
     /// label's, the resend review's and the O1 review's.
     fn deadline(&self) -> Option<Instant> {

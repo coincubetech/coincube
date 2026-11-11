@@ -203,106 +203,14 @@ impl State for VaultOverview {
                     );
                 }
             },
-            Message::Payments(res) => match res {
-                Err(e) => {
-                    let err_msg = crate::user_error::report(&e);
-                    self.warning = Some(e);
-                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                }
-                Ok(events) => {
-                    self.warning = None;
-                    // Detect new incoming payment by comparing newest tx
-                    if let Some(newest) = events.first() {
-                        use crate::daemon::model::PaymentKind;
-                        let is_incoming = matches!(newest.kind, PaymentKind::Incoming);
-                        let is_new = self
-                            .payments
-                            .list
-                            .first()
-                            .is_none_or(|prev| prev.outpoint != newest.outpoint);
-                        if is_incoming && is_new && !self.payments.list.is_empty() {
-                            use coincube_ui::component::amount::DisplayAmount;
-                            self.received_amount_display = newest
-                                .amount
-                                .to_formatted_string_with_unit(cache.bitcoin_unit);
-                            self.received_quote =
-                                coincube_ui::component::quote_display::random_quote(
-                                    "bitcoin-receive",
-                                );
-                            self.received_image_handle =
-                                coincube_ui::component::quote_display::image_handle_for_context(
-                                    "bitcoin-receive",
-                                );
-                            self.show_received_celebration = true;
-                        }
-                    }
-                    self.payments.list = events;
-                    self.payments.loaded_page_count = 1;
-                    self.payments.is_last_page =
-                        (self.payments.list.len() as u64) < HISTORY_EVENT_PAGE_SIZE;
-                }
-            },
-            Message::PaymentsExtension(res) => match res {
-                Err(e) => {
-                    self.processing = false;
-                    let err_msg = crate::user_error::report(&e);
-                    self.warning = Some(e);
-                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                }
-                Ok((events, actual_limit)) => {
-                    self.processing = false;
-                    self.warning = None;
-                    self.payments.loaded_page_count += 1;
-                    self.payments.is_last_page = (events.len() as u64) < actual_limit;
-                    if let Some(event) = events.first() {
-                        if let Some(position) = self
-                            .payments
-                            .list
-                            .iter()
-                            .position(|event2| event2.outpoint == event.outpoint)
-                        {
-                            let len = self.payments.list.len();
-                            for event in events {
-                                if !self.payments.list[position..len]
-                                    .iter()
-                                    .any(|event2| event2.outpoint == event.outpoint)
-                                {
-                                    self.payments.list.push(event);
-                                }
-                            }
-                        } else {
-                            self.payments.list.extend(events);
-                        }
-                    }
-                }
-            },
+            Message::Payments(res) => {
+                return self.apply_payments(cache, res);
+            }
+            Message::PaymentsExtension(res) => {
+                return self.apply_payments_extension(res);
+            }
             Message::UpdatePanelCache(is_current) => {
-                // `rescan_progress` is the daemon's definitive signal: it is
-                // reported for exactly as long as the persisted rescan
-                // timestamp is set, and only `complete_rescan` clears that,
-                // after the post-rescan update succeeds. An interrupted rescan
-                // keeps it and goes on reporting progress (0% if the backend
-                // is unreachable); a failed refresh leaves this cache as it was.
-                if cache.rescan_progress().is_some() {
-                    self.rescan_seen_running = true;
-                } else if self.rescan_seen_running {
-                    // The rescan the restore was owed has run to completion.
-                    self.rescan_seen_running = false;
-                    self.awaiting_rescan_date = false;
-                }
-                let wallet_was_syncing = !self.sync_status.is_synced();
-                self.sync_status = sync_status(
-                    daemon.backend(),
-                    cache.blockheight(),
-                    cache.sync_progress(),
-                    cache.last_poll_timestamp(),
-                    cache.last_poll_at_startup,
-                    cache.history_sync(),
-                );
-                // If this is the current panel, reload it if wallet is no longer syncing.
-                if is_current && wallet_was_syncing && self.sync_status.is_synced() {
-                    return self.reload(Some(daemon.clone()), Some(self.wallet.clone()));
-                }
+                return self.apply_panel_cache(daemon, cache, is_current);
             }
             Message::Payment(res) => match res {
                 Ok(event) => {
@@ -371,48 +279,7 @@ impl State for VaultOverview {
                 }
             }
             Message::View(view::Message::Next) => {
-                if let Some(last) = self.payments.list.last() {
-                    let daemon = daemon.clone();
-                    let last_event_date = last.time.unwrap();
-                    self.processing = true;
-                    return Task::perform(
-                        async move {
-                            let last_event_date = last_event_date.timestamp() as u32;
-                            let mut limit = HISTORY_EVENT_PAGE_SIZE;
-                            let mut events = daemon
-                                .list_confirmed_payments(0_u32, last_event_date, limit)
-                                .await?;
-
-                            // because gethistory cursor is inclusive and use blocktime
-                            // multiple events can occur in the same block.
-                            // If there is more event in the same block that the
-                            // HISTORY_EVENT_PAGE_SIZE they can not be retrieved by changing
-                            // the cursor value (blocktime) but by increasing the limit.
-                            //
-                            // 1. Check if the events retrieved have all the same blocktime
-                            let blocktime = if let Some(event) = events.first() {
-                                event.time
-                            } else {
-                                return Ok((events, limit));
-                            };
-
-                            // 2. Retrieve a larger batch of event with the same cursor but
-                            //    a larger limit.
-                            while !events.iter().any(|evt| evt.time != blocktime)
-                                && events.len() as u64 == limit
-                            {
-                                // increments of the equivalent of one page more.
-                                limit += HISTORY_EVENT_PAGE_SIZE;
-                                events = daemon
-                                    .list_confirmed_payments(0, last_event_date, limit)
-                                    .await?;
-                            }
-                            events.sort_by(|a, b| a.compare(b));
-                            Ok((events, limit))
-                        },
-                        Message::PaymentsExtension,
-                    );
-                }
+                return self.next_payments(daemon);
             }
             _ => {}
         }
@@ -475,6 +342,173 @@ impl State for VaultOverview {
                 Message::Coins,
             ),
         ])
+    }
+}
+
+impl VaultOverview {
+    fn apply_payments(&mut self, cache: &Cache, res: Result<Vec<Payment>, Error>) -> Task<Message> {
+        match res {
+            Err(e) => {
+                let err_msg = crate::user_error::report(&e);
+                self.warning = Some(e);
+                return Task::done(Message::View(view::Message::ShowError(err_msg)));
+            }
+            Ok(events) => {
+                self.warning = None;
+                // Detect new incoming payment by comparing newest tx
+                if let Some(newest) = events.first() {
+                    use crate::daemon::model::PaymentKind;
+                    let is_incoming = matches!(newest.kind, PaymentKind::Incoming);
+                    let is_new = self
+                        .payments
+                        .list
+                        .first()
+                        .is_none_or(|prev| prev.outpoint != newest.outpoint);
+                    if is_incoming && is_new && !self.payments.list.is_empty() {
+                        use coincube_ui::component::amount::DisplayAmount;
+                        self.received_amount_display = newest
+                            .amount
+                            .to_formatted_string_with_unit(cache.bitcoin_unit);
+                        self.received_quote =
+                            coincube_ui::component::quote_display::random_quote("bitcoin-receive");
+                        self.received_image_handle =
+                            coincube_ui::component::quote_display::image_handle_for_context(
+                                "bitcoin-receive",
+                            );
+                        self.show_received_celebration = true;
+                    }
+                }
+                self.payments.list = events;
+                self.payments.loaded_page_count = 1;
+                self.payments.is_last_page =
+                    (self.payments.list.len() as u64) < HISTORY_EVENT_PAGE_SIZE;
+            }
+        };
+        Task::none()
+    }
+    fn apply_payments_extension(
+        &mut self,
+        res: Result<(Vec<Payment>, u64), Error>,
+    ) -> Task<Message> {
+        match res {
+            Err(e) => {
+                self.processing = false;
+                let err_msg = crate::user_error::report(&e);
+                self.warning = Some(e);
+                return Task::done(Message::View(view::Message::ShowError(err_msg)));
+            }
+            Ok((events, actual_limit)) => {
+                self.processing = false;
+                self.warning = None;
+                self.payments.loaded_page_count += 1;
+                self.payments.is_last_page = (events.len() as u64) < actual_limit;
+                self.append_payments_extension(events);
+            }
+        };
+        Task::none()
+    }
+    fn apply_panel_cache(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: &Cache,
+        is_current: bool,
+    ) -> Task<Message> {
+        // `rescan_progress` is the daemon's definitive signal: it is
+        // reported for exactly as long as the persisted rescan
+        // timestamp is set, and only `complete_rescan` clears that,
+        // after the post-rescan update succeeds. An interrupted rescan
+        // keeps it and goes on reporting progress (0% if the backend
+        // is unreachable); a failed refresh leaves this cache as it was.
+        if cache.rescan_progress().is_some() {
+            self.rescan_seen_running = true;
+        } else if self.rescan_seen_running {
+            // The rescan the restore was owed has run to completion.
+            self.rescan_seen_running = false;
+            self.awaiting_rescan_date = false;
+        }
+        let wallet_was_syncing = !self.sync_status.is_synced();
+        self.sync_status = sync_status(
+            daemon.backend(),
+            cache.blockheight(),
+            cache.sync_progress(),
+            cache.last_poll_timestamp(),
+            cache.last_poll_at_startup,
+            cache.history_sync(),
+        );
+        // If this is the current panel, reload it if wallet is no longer syncing.
+        if is_current && wallet_was_syncing && self.sync_status.is_synced() {
+            return self.reload(Some(daemon.clone()), Some(self.wallet.clone()));
+        }
+
+        Task::none()
+    }
+    fn append_payments_extension(&mut self, events: Vec<Payment>) {
+        if let Some(event) = events.first() {
+            if let Some(position) = self
+                .payments
+                .list
+                .iter()
+                .position(|event2| event2.outpoint == event.outpoint)
+            {
+                let len = self.payments.list.len();
+                for event in events {
+                    if !self.payments.list[position..len]
+                        .iter()
+                        .any(|event2| event2.outpoint == event.outpoint)
+                    {
+                        self.payments.list.push(event);
+                    }
+                }
+            } else {
+                self.payments.list.extend(events);
+            }
+        }
+    }
+    fn next_payments(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        if let Some(last) = self.payments.list.last() {
+            let daemon = daemon.clone();
+            let last_event_date = last.time.unwrap();
+            self.processing = true;
+            return Task::perform(
+                async move {
+                    let last_event_date = last_event_date.timestamp() as u32;
+                    let mut limit = HISTORY_EVENT_PAGE_SIZE;
+                    let mut events = daemon
+                        .list_confirmed_payments(0_u32, last_event_date, limit)
+                        .await?;
+
+                    // because gethistory cursor is inclusive and use blocktime
+                    // multiple events can occur in the same block.
+                    // If there is more event in the same block that the
+                    // HISTORY_EVENT_PAGE_SIZE they can not be retrieved by changing
+                    // the cursor value (blocktime) but by increasing the limit.
+                    //
+                    // 1. Check if the events retrieved have all the same blocktime
+                    let blocktime = if let Some(event) = events.first() {
+                        event.time
+                    } else {
+                        return Ok((events, limit));
+                    };
+
+                    // 2. Retrieve a larger batch of event with the same cursor but
+                    //    a larger limit.
+                    while !events.iter().any(|evt| evt.time != blocktime)
+                        && events.len() as u64 == limit
+                    {
+                        // increments of the equivalent of one page more.
+                        limit += HISTORY_EVENT_PAGE_SIZE;
+                        events = daemon
+                            .list_confirmed_payments(0, last_event_date, limit)
+                            .await?;
+                    }
+                    events.sort_by(|a, b| a.compare(b));
+                    Ok((events, limit))
+                },
+                Message::PaymentsExtension,
+            );
+        }
+
+        Task::none()
     }
 }
 

@@ -196,7 +196,10 @@ impl Step for DefineNode {
         }
     }
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
-        if let Message::DefineNode(msg) = message {
+        let Message::DefineNode(msg) = message else {
+            return Task::none();
+        };
+        {
             match msg {
                 message::DefineNode::NodeTypeSelected(node_type) => {
                     if self.get(node_type).is_some() {

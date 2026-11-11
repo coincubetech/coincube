@@ -1301,26 +1301,65 @@ fn cannot_replay_label_comes_only_from_live_check_evidence() {
 /// (itself started only from the sweep review, or resumed from its journal,
 /// `split_panel_start_is_reached_only_from_the_review_overlay_under_the_flag`),
 /// and the App only hands the panel its port. Whole identifiers.
-#[test]
-fn step2_panel_layer_is_reached_only_through_the_split_panel() {
-    fn walk(dir: &Path, files: &mut Vec<(String, String)>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                walk(&path, files);
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                files.push((
-                    path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                        .unwrap()
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                    std::fs::read_to_string(&path).unwrap(),
-                ));
-            }
+fn walk_step2_sources(dir: &Path, files: &mut Vec<(String, String)>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            walk_step2_sources(&path, files);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            files.push((
+                path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                std::fs::read_to_string(&path).unwrap(),
+            ));
         }
     }
+}
+
+fn step2_external_ident_is_allowed(file: &str, ident: &str) -> bool {
+    let allowed = (file == "src/app/mod.rs"
+        && [
+            "ProductionStep2",
+            "Step2Port",
+            "set_step2_port",
+            "ProductionRecon",
+            "ReconPort",
+            "set_recon_port",
+            // S3-D4: the port build says why there is no step 2.
+            "Step2Unavailable",
+            // B5b: where the reconcile-only port records a
+            // completion.
+            "CompletionSite",
+            // B5c-1: the Cube's completion records, for a restart
+            // into Completed.
+            "set_split_from",
+        ]
+        .contains(&ident))
+        || (file == "src/app/view/vault/split.rs"
+            && [
+                "RESERVING",
+                "SPLIT_COMPLETED",
+                // #568 S4b: O4's close copy.
+                "conflict_close_copy",
+                "conflict_closable_copy",
+            ]
+            .contains(&ident));
+    // #568 B5c-1 (#658): the service's O1 test drives the
+    // production reconciler driver over a real reconciler.
+    let allowed = allowed
+        || (file == "src/services/claim_coordinator/fork/split/tests/step2/reorg.rs"
+            && ["reconciler_driver", "RECONFIRMATION_AGAIN"].contains(&ident));
+    // The journal tests may discuss restart without entering the
+    // retired step-2 GUI route.
+    allowed || (file == "src/services/claim_workflow/split/tests.rs" && ident == "restart")
+}
+
+#[test]
+fn step2_panel_layer_is_reached_only_through_the_split_panel() {
     let mut files = Vec::new();
-    walk(
+    walk_step2_sources(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
         &mut files,
     );
@@ -1420,42 +1459,7 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             // The App hands the panel the port of its Vault daemon and the
             // session's reconcile-only port with its completion site; the
             // view shows the N4 waiting text and the completion copy.
-            let allowed = (file == "src/app/mod.rs"
-                && [
-                    "ProductionStep2",
-                    "Step2Port",
-                    "set_step2_port",
-                    "ProductionRecon",
-                    "ReconPort",
-                    "set_recon_port",
-                    // S3-D4: the port build says why there is no step 2.
-                    "Step2Unavailable",
-                    // B5b: where the reconcile-only port records a
-                    // completion.
-                    "CompletionSite",
-                    // B5c-1: the Cube's completion records, for a restart
-                    // into Completed.
-                    "set_split_from",
-                ]
-                .contains(&ident))
-                || (file == "src/app/view/vault/split.rs"
-                    && [
-                        "RESERVING",
-                        "SPLIT_COMPLETED",
-                        // #568 S4b: O4's close copy.
-                        "conflict_close_copy",
-                        "conflict_closable_copy",
-                    ]
-                    .contains(&ident));
-            // #568 B5c-1 (#658): the service's O1 test drives the
-            // production reconciler driver over a real reconciler.
-            let allowed = allowed
-                || (file == "src/services/claim_coordinator/fork/split/tests/step2/reorg.rs"
-                    && ["reconciler_driver", "RECONFIRMATION_AGAIN"].contains(&ident));
-            // The journal tests may discuss restart without entering the
-            // retired step-2 GUI route.
-            let allowed = allowed
-                || (file == "src/services/claim_workflow/split/tests.rs" && ident == "restart");
+            let allowed = step2_external_ident_is_allowed(file, ident);
             // `restart`/`Restart` are common words elsewhere: only a path
             // into the step-2 module counts for them.
             let generic = ["restart", "Restart"].contains(&ident)

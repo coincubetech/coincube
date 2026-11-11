@@ -56,43 +56,115 @@ struct UpdatedCoins {
     pub spent: Vec<(bitcoin::OutPoint, bitcoin::Txid, i32, u32)>,
 }
 
-// Update the state of our coins. There may be new unspent, and existing ones may become confirmed
-// or spent.
-// NOTE: A coin may be updated multiple times at once. That is, a coin may be received, confirmed,
-// and spent in a single poll.
-// NOTE: Coinbase transaction deposits are very much an afterthought here. We treat them as
-// unconfirmed until the CB tx matures.
-fn update_coins(
+enum ReceivedMapping {
+    Mapped((bitcoin::bip32::ChildNumber, bool)),
+    Invalid,
+    Unresolved,
+}
+
+fn find_extended_derivation(
+    bit: &impl BitcoinInterface,
+    descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    network: bitcoin::Network,
+    address: &bitcoin::Address,
+    initial_highest: u32,
+    highest: u32,
+) -> Result<Option<(bitcoin::bip32::ChildNumber, bool)>, String> {
+    let gap = crate::database::sqlite::LOOK_AHEAD_LIMIT;
+    let start = initial_highest
+        .checked_add(gap)
+        .ok_or("Derivation range overflow")?;
+    let mut end = highest
+        .checked_add(gap)
+        .ok_or("Derivation range overflow")?;
+    if bit.wallet_record_replay_pending().is_some() {
+        end = end.max(1001);
+    }
+    let mut found = None;
+    for index in start..end {
+        let child = bitcoin::bip32::ChildNumber::from_normal_idx(index)
+            .map_err(|_| "Derivation range exhausted")?;
+        for (branch, desc) in descs.iter().enumerate().take(2) {
+            if desc
+                .at_derivation_index(u32::from(child))
+                .map_err(|error| error.to_string())?
+                .address(network)
+                .map_err(|error| error.to_string())?
+                == *address
+            {
+                found = Some((child, branch == 1));
+                break;
+            }
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+    Ok(found)
+}
+
+fn map_received_address(
+    address: &UTxOAddress,
     bit: &impl BitcoinInterface,
     db_conn: &mut Box<dyn DatabaseConnection>,
-    previous_tip: &BlockChainTip,
     descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
-    _secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
-) -> Result<UpdatedCoins, String> {
-    let network = db_conn.network();
-    let curr_coins = db_conn.coins(&[], &[]);
-    let mut receive_index = db_conn.receive_index();
-    let mut change_index = db_conn.change_index();
-    let initial_highest = u32::from(receive_index.max(change_index));
-    log::debug!("Current coins: {:?}", curr_coins);
-
-    // Start by fetching newly received coins.
-    let mut received = Vec::new();
-    // An imported wallet may expand its discovery window after the database
-    // tip already passed the funding blocks. During that pending historical
-    // scan, offer all backend-discovered outputs and let the durable outpoint
-    // set below de-duplicate them. A tip-bounded query would permanently hide
-    // those old outputs and falsely mark the larger scan complete at zero.
-    let mut pending = if db_conn
-        .imported_history()
-        .is_some_and(|history| !history.history_complete)
-    {
-        bit.try_historical_received_coins(previous_tip, descs)?
-    } else {
-        bit.try_received_coins(previous_tip, descs)?
+    network: bitcoin::Network,
+    initial_highest: u32,
+    highest: bitcoin::bip32::ChildNumber,
+) -> Result<ReceivedMapping, String> {
+    let mapped = match address {
+        UTxOAddress::Address(address) => {
+            let address = match address.clone().require_network(network) {
+                Ok(addr) => addr,
+                Err(e) => {
+                    log::error!("Invalid network for address: {}", e);
+                    return Ok(ReceivedMapping::Invalid);
+                }
+            };
+            if let Some((derivation_index, is_change)) =
+                db_conn.derivation_index_by_address(&address)
+            {
+                (derivation_index, is_change)
+            } else {
+                // Earlier deposits in this batch may extend the lookahead.
+                // Resolve that extension in memory, keeping DB writes deferred.
+                let found = find_extended_derivation(
+                    bit,
+                    descs,
+                    network,
+                    &address,
+                    initial_highest,
+                    u32::from(highest),
+                )?;
+                match found {
+                    Some(mapped) => mapped,
+                    None => {
+                        return Ok(ReceivedMapping::Unresolved);
+                    }
+                }
+            }
+        }
+        UTxOAddress::DerivIndex(index, is_change) => (*index, *is_change),
     };
-    loop {
-        let before = pending.len();
+    Ok(ReceivedMapping::Mapped(mapped))
+}
+
+struct ReceivedCoins {
+    receive_index: bitcoin::bip32::ChildNumber,
+    change_index: bitcoin::bip32::ChildNumber,
+    received: Vec<Coin>,
+}
+
+impl ReceivedCoins {
+    fn map_batch(
+        &mut self,
+        pending: Vec<UTxO>,
+        bit: &impl BitcoinInterface,
+        db_conn: &mut Box<dyn DatabaseConnection>,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+        curr_coins: &std::collections::HashMap<bitcoin::OutPoint, Coin>,
+        range: (bitcoin::Network, u32),
+    ) -> Result<Vec<UTxO>, String> {
         let mut unresolved = Vec::new();
         for utxo in pending {
             let UTxO {
@@ -103,73 +175,31 @@ fn update_coins(
                 ..
             } = utxo;
             // We can only really treat them if we know the derivation index that was used.
-            let (derivation_index, is_change) = match address {
-                UTxOAddress::Address(address) => {
-                    let address = match address.clone().require_network(network) {
-                        Ok(addr) => addr,
-                        Err(e) => {
-                            log::error!("Invalid network for address: {}", e);
-                            continue;
-                        }
-                    };
-                    if let Some((derivation_index, is_change)) =
-                        db_conn.derivation_index_by_address(&address)
-                    {
-                        (derivation_index, is_change)
-                    } else {
-                        // Earlier deposits in this batch may extend the lookahead.
-                        // Resolve that extension in memory, keeping DB writes deferred.
-                        let highest = u32::from(receive_index.max(change_index));
-                        let gap = crate::database::sqlite::LOOK_AHEAD_LIMIT;
-                        let start = initial_highest
-                            .checked_add(gap)
-                            .ok_or("Derivation range overflow")?;
-                        let mut end = highest
-                            .checked_add(gap)
-                            .ok_or("Derivation range overflow")?;
-                        if bit.wallet_record_replay_pending().is_some() {
-                            end = end.max(1001);
-                        }
-                        let mut found = None;
-                        for index in start..end {
-                            let child = bitcoin::bip32::ChildNumber::from_normal_idx(index)
-                                .map_err(|_| "Derivation range exhausted")?;
-                            for (branch, desc) in descs.iter().enumerate().take(2) {
-                                if desc
-                                    .at_derivation_index(u32::from(child))
-                                    .map_err(|error| error.to_string())?
-                                    .address(network)
-                                    .map_err(|error| error.to_string())?
-                                    == address
-                                {
-                                    found = Some((child, branch == 1));
-                                    break;
-                                }
-                            }
-                            if found.is_some() {
-                                break;
-                            }
-                        }
-                        match found {
-                            Some(mapped) => mapped,
-                            None => {
-                                unresolved.push(utxo);
-                                continue;
-                            }
-                        }
-                    }
+            let (derivation_index, is_change) = match map_received_address(
+                address,
+                bit,
+                db_conn,
+                descs,
+                range.0,
+                range.1,
+                self.receive_index.max(self.change_index),
+            )? {
+                ReceivedMapping::Mapped(mapped) => mapped,
+                ReceivedMapping::Invalid => continue,
+                ReceivedMapping::Unresolved => {
+                    unresolved.push(utxo);
+                    continue;
                 }
-                UTxOAddress::DerivIndex(index, is_change) => (*index, *is_change),
             };
             // First of if we are receiving coins that are beyond our next derivation index,
             // adjust it.
             // Stage index changes with the coin updates. Later backend reads may
             // fail or reveal a changed tip, in which case nothing from this batch
             // should have been written yet.
-            if !is_change && derivation_index > receive_index {
-                receive_index = derivation_index;
-            } else if is_change && derivation_index > change_index {
-                change_index = derivation_index;
+            if !is_change && derivation_index > self.receive_index {
+                self.receive_index = derivation_index;
+            } else if is_change && derivation_index > self.change_index {
+                self.change_index = derivation_index;
             }
 
             // Now record this coin as a newly received one.
@@ -185,9 +215,53 @@ fn update_coins(
                     spend_block: None,
                     is_from_self: false,
                 };
-                received.push(coin);
+                self.received.push(coin);
             }
         }
+        Ok(unresolved)
+    }
+}
+
+fn discover_received_coins(
+    bit: &impl BitcoinInterface,
+    db_conn: &mut Box<dyn DatabaseConnection>,
+    previous_tip: &BlockChainTip,
+    descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    curr_coins: &std::collections::HashMap<bitcoin::OutPoint, Coin>,
+    network: bitcoin::Network,
+) -> Result<ReceivedCoins, String> {
+    let mut state = ReceivedCoins {
+        receive_index: db_conn.receive_index(),
+        change_index: db_conn.change_index(),
+        received: Vec::new(),
+    };
+    let initial_highest = u32::from(state.receive_index.max(state.change_index));
+    log::debug!("Current coins: {:?}", curr_coins);
+
+    // Start by fetching newly received coins.
+    // An imported wallet may expand its discovery window after the database
+    // tip already passed the funding blocks. During that pending historical
+    // scan, offer all backend-discovered outputs and let the durable outpoint
+    // set below de-duplicate them. A tip-bounded query would permanently hide
+    // those old outputs and falsely mark the larger scan complete at zero.
+    let mut pending = if db_conn
+        .imported_history()
+        .is_some_and(|history| !history.history_complete)
+    {
+        bit.try_historical_received_coins(previous_tip, descs)?
+    } else {
+        bit.try_received_coins(previous_tip, descs)?
+    };
+    loop {
+        let before = pending.len();
+        let unresolved = state.map_batch(
+            pending,
+            bit,
+            db_conn,
+            descs,
+            curr_coins,
+            (network, initial_highest),
+        )?;
         // A later entry may have widened the staged range. Revisit only
         // unresolved entries until no more can be mapped, independent of RPC
         // ordering. Unknown outliers must not stall the entire wallet poll.
@@ -208,7 +282,31 @@ fn update_coins(
         }
         pending = unresolved;
     }
-    log::debug!("Newly received coins: {:?}", received);
+    log::debug!("Newly received coins: {:?}", state.received);
+
+    Ok(state)
+}
+
+// Update the state of our coins. There may be new unspent, and existing ones may become confirmed
+// or spent.
+// NOTE: A coin may be updated multiple times at once. That is, a coin may be received, confirmed,
+// and spent in a single poll.
+// NOTE: Coinbase transaction deposits are very much an afterthought here. We treat them as
+// unconfirmed until the CB tx matures.
+fn update_coins(
+    bit: &impl BitcoinInterface,
+    db_conn: &mut Box<dyn DatabaseConnection>,
+    previous_tip: &BlockChainTip,
+    descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    _secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+) -> Result<UpdatedCoins, String> {
+    let network = db_conn.network();
+    let curr_coins = db_conn.coins(&[], &[]);
+    let ReceivedCoins {
+        receive_index,
+        change_index,
+        received,
+    } = discover_received_coins(bit, db_conn, previous_tip, descs, &curr_coins, network)?;
 
     // We need to take the newly received ones into account as well, as they may have been
     // confirmed within the previous tip and the current one, and we may not poll this chunk of the
@@ -330,6 +428,60 @@ enum TipUpdate {
     Unavailable,
 }
 
+fn find_common_ancestor(
+    bit: &impl BitcoinInterface,
+    current_tip: &BlockChainTip,
+) -> Option<TipUpdate> {
+    match bit.common_ancestor(current_tip, MAX_REORG_DEPTH + 1) {
+        AncestorSearch::Found(common_ancestor) => {
+            let depth = current_tip.height.saturating_sub(common_ancestor.height);
+            if depth > MAX_REORG_DEPTH {
+                return Some(TipUpdate::ImplausibleReorg { min_depth: depth });
+            }
+            log::info!(
+                "Common ancestor found: '{}'. Starting rescan from there. Old tip was '{}'.",
+                common_ancestor,
+                current_tip
+            );
+            return Some(TipUpdate::Reorged(common_ancestor));
+        }
+        // An answer, not a failure: retrying would just spend the same round-trips again
+        // to reach the same conclusion. Deeper than we were willing to walk.
+        AncestorSearch::TooDeep => {
+            return Some(TipUpdate::ImplausibleReorg {
+                min_depth: MAX_REORG_DEPTH + 1,
+            })
+        }
+        AncestorSearch::Failed => {}
+    }
+
+    None
+}
+
+fn chain_progress(
+    bit: &impl BitcoinInterface,
+    current_tip: &BlockChainTip,
+    bitcoin_tip: BlockChainTip,
+) -> Option<TipUpdate> {
+    // If the tip didn't change, there is nothing to update.
+    if current_tip == &bitcoin_tip {
+        return Some(TipUpdate::Same);
+    }
+
+    if bitcoin_tip.height > current_tip.height {
+        // Make sure we are on the same chain.
+        if match bit.try_is_in_chain(current_tip) {
+            Ok(in_chain) => in_chain,
+            Err(_) => return Some(TipUpdate::Unavailable),
+        } {
+            // All good, we just moved forward.
+            return Some(TipUpdate::Progress(bitcoin_tip));
+        }
+    }
+
+    None
+}
+
 // Returns the new block chain tip, if it changed.
 fn new_tip(bit: &impl BitcoinInterface, current_tip: &BlockChainTip) -> TipUpdate {
     // A failed common-ancestor lookup used to re-enter this function immediately and without
@@ -341,20 +493,8 @@ fn new_tip(bit: &impl BitcoinInterface, current_tip: &BlockChainTip) -> TipUpdat
             return TipUpdate::Unavailable;
         };
 
-        // If the tip didn't change, there is nothing to update.
-        if current_tip == &bitcoin_tip {
-            return TipUpdate::Same;
-        }
-
-        if bitcoin_tip.height > current_tip.height {
-            // Make sure we are on the same chain.
-            if match bit.try_is_in_chain(current_tip) {
-                Ok(in_chain) => in_chain,
-                Err(_) => return TipUpdate::Unavailable,
-            } {
-                // All good, we just moved forward.
-                return TipUpdate::Progress(bitcoin_tip);
-            }
+        if let Some(update) = chain_progress(bit, current_tip, bitcoin_tip) {
+            return update;
         }
 
         // Either the new height is lower or the same but the block hash differs. There was a
@@ -378,27 +518,8 @@ fn new_tip(bit: &impl BitcoinInterface, current_tip: &BlockChainTip) -> TipUpdat
         // anything deeper is refused without walking the rest of the way. Unbounded, a
         // backend claiming a 10k-block reorg would cost us 10k sequential round-trips before
         // we rejected the answer.
-        match bit.common_ancestor(current_tip, MAX_REORG_DEPTH + 1) {
-            AncestorSearch::Found(common_ancestor) => {
-                let depth = current_tip.height.saturating_sub(common_ancestor.height);
-                if depth > MAX_REORG_DEPTH {
-                    return TipUpdate::ImplausibleReorg { min_depth: depth };
-                }
-                log::info!(
-                    "Common ancestor found: '{}'. Starting rescan from there. Old tip was '{}'.",
-                    common_ancestor,
-                    current_tip
-                );
-                return TipUpdate::Reorged(common_ancestor);
-            }
-            // An answer, not a failure: retrying would just spend the same round-trips again
-            // to reach the same conclusion. Deeper than we were willing to walk.
-            AncestorSearch::TooDeep => {
-                return TipUpdate::ImplausibleReorg {
-                    min_depth: MAX_REORG_DEPTH + 1,
-                }
-            }
-            AncestorSearch::Failed => {}
+        if let Some(update) = find_common_ancestor(bit, current_tip) {
+            return update;
         }
 
         log::error!(
@@ -713,6 +834,18 @@ pub fn poll(
     if let Some(ticket) = replay_ticket {
         bit.acknowledge_wallet_record_replay(ticket);
     }
+    if !complete_imported_history(&mut db_conn, history_sync, now) {
+        return;
+    }
+    history_sync.poll_succeeded(now);
+    db_conn.set_last_poll(now);
+}
+
+fn complete_imported_history(
+    db_conn: &mut Box<dyn DatabaseConnection>,
+    history_sync: &HistorySyncCache,
+    now: u32,
+) -> bool {
     if let Some((receive_scanned, change_scanned)) = history_sync.pending_full_scan_coverage() {
         if db_conn.imported_history().is_some() {
             if let Err(error) = db_conn.complete_import_history(receive_scanned, change_scanned) {
@@ -720,12 +853,11 @@ pub fn poll(
                 if failure_is_worth_a_warning(&failure, changed) {
                     log::warn!("Imported history status could not be saved: {error}");
                 }
-                return;
+                return false;
             }
         }
     }
-    history_sync.poll_succeeded(now);
-    db_conn.set_last_poll(now);
+    true
 }
 
 /// Whether a failed poll should be logged as a warning rather than at debug level.
