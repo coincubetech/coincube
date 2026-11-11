@@ -470,11 +470,20 @@ pub enum SparkReceiveMessage {
         vout: u32,
     },
     /// Phase 4f: a `claim_deposit` RPC succeeded. Triggers a deposits
-    /// reload so the row disappears.
-    ClaimDepositSucceeded(coincube_spark_protocol::ClaimDepositOk),
+    /// reload so the row disappears. Carries the `(txid, vout)` that was
+    /// claimed, since another claim may have started before this result.
+    ClaimDepositSucceeded {
+        txid: String,
+        vout: u32,
+        ok: coincube_spark_protocol::ClaimDepositOk,
+    },
     /// Phase 4f: a `claim_deposit` RPC failed. Surface the SDK error
     /// in the panel and keep the row.
-    ClaimDepositFailed(String),
+    ClaimDepositFailed {
+        txid: String,
+        vout: u32,
+        error: String,
+    },
     /// Phase 4f: app-level signal that the bridge emitted a
     /// `DepositsChanged` event. The panel re-fetches the list.
     DepositsChanged,

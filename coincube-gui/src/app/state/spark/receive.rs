@@ -20,7 +20,7 @@
 //! Lightning Address display, and the on-chain claim lifecycle all
 //! land in Phase 4d.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::sync::Arc;
 
@@ -116,11 +116,12 @@ pub struct SparkReceive {
     /// every `Event::DepositsChanged`. The view renders this as a
     /// dedicated "Pending deposits" card below the main phase body.
     pub pending_deposits: Vec<DepositInfo>,
-    /// Phase 4f: tracks which deposit is currently being claimed so
-    /// the UI can disable the row's button while the RPC is in flight.
-    /// Keyed by `(txid, vout)`. Cleared when the RPC finishes
-    /// (success or failure).
-    pub claiming: Option<(String, u32)>,
+    /// Phase 4f: tracks which deposits are currently being claimed so
+    /// the UI can disable each row's button while its RPC is in flight.
+    /// Keyed by `(txid, vout)`; each entry is removed when that
+    /// deposit's RPC finishes (success or failure). A set, because a
+    /// second deposit can be claimed before the first answers.
+    pub claiming: HashSet<(String, u32)>,
     /// Phase 4f: surface a transient claim error to the user. Cleared
     /// on the next reload or successful claim.
     pub claim_error: Option<String>,
@@ -157,6 +158,18 @@ pub struct SparkReceive {
 }
 
 impl SparkReceive {
+    /// Drop the deferral note only when it is about `deposit`; a note on
+    /// another row stays until that deposit's own result or departure.
+    fn clear_claim_notice_for(&mut self, deposit: &(String, u32)) {
+        if self
+            .claim_notice
+            .as_ref()
+            .is_some_and(|(noted, _)| noted == deposit)
+        {
+            self.claim_notice = None;
+        }
+    }
+
     pub fn new(backend: Option<Arc<SparkBackend>>) -> Self {
         Self {
             backend,
@@ -172,7 +185,7 @@ impl SparkReceive {
             qr_data: None,
             lightning_address_qr: None,
             pending_deposits: Vec::new(),
-            claiming: None,
+            claiming: HashSet::new(),
             claim_error: None,
             claim_notice: None,
             pending_deposit_confirmations: HashMap::new(),
@@ -274,7 +287,7 @@ impl State for SparkReceive {
                     |(source, qr)| (lightning_address == Some(source.as_str())).then_some(qr),
                 ),
                 pending_deposits: &self.pending_deposits,
-                claiming: self.claiming.as_ref(),
+                claiming: &self.claiming,
                 claim_error: self.claim_error.as_deref(),
                 claim_notice: self
                     .claim_notice
@@ -417,8 +430,8 @@ impl State for SparkReceive {
                     | SparkReceiveMessage::DepositConfirmationsUpdated(_)
                     | SparkReceiveMessage::PendingDepositsLoaded(_)
                     | SparkReceiveMessage::PendingDepositsFailed(_)
-                    | SparkReceiveMessage::ClaimDepositSucceeded(_)
-                    | SparkReceiveMessage::ClaimDepositFailed(_)
+                    | SparkReceiveMessage::ClaimDepositSucceeded { .. }
+                    | SparkReceiveMessage::ClaimDepositFailed { .. }
             )
         {
             return Task::none();
@@ -750,34 +763,46 @@ impl State for SparkReceive {
                 let Some(backend) = self.backend.clone() else {
                     return Task::none();
                 };
-                self.claiming = Some((txid.clone(), vout));
+                let deposit = (txid.clone(), vout);
                 self.claim_error = None;
-                self.claim_notice = None;
+                // A note about another deposit stays on that row.
+                self.clear_claim_notice_for(&deposit);
+                self.claiming.insert(deposit);
+                let claimed_txid = txid.clone();
                 Task::perform(
                     async move { backend.claim_deposit(txid, vout).await },
-                    |result| match result {
-                        Ok(ok) => Message::View(crate::app::view::Message::SparkReceive(
-                            crate::app::view::SparkReceiveMessage::ClaimDepositSucceeded(ok),
-                        )),
-                        Err(e) => Message::View(crate::app::view::Message::SparkReceive(
-                            crate::app::view::SparkReceiveMessage::ClaimDepositFailed(
-                                e.to_string(),
-                            ),
-                        )),
+                    move |result| {
+                        let msg = match result {
+                            Ok(ok) => {
+                                crate::app::view::SparkReceiveMessage::ClaimDepositSucceeded {
+                                    txid: claimed_txid,
+                                    vout,
+                                    ok,
+                                }
+                            }
+                            Err(e) => crate::app::view::SparkReceiveMessage::ClaimDepositFailed {
+                                txid: claimed_txid,
+                                vout,
+                                error: e.to_string(),
+                            },
+                        };
+                        Message::View(crate::app::view::Message::SparkReceive(msg))
                     },
                 )
             }
-            SparkReceiveMessage::ClaimDepositSucceeded(ok) => {
-                let claimed = self.claiming.take();
+            SparkReceiveMessage::ClaimDepositSucceeded { txid, vout, ok } => {
+                // Key everything by the deposit this result is for, not by
+                // whichever claim was started last.
+                let deposit = (txid, vout);
+                self.claiming.remove(&deposit);
                 self.claim_error = None;
                 if let Some(deferral) = &ok.deferred {
                     // Nothing changed: no splash, no refetch (a reload would
                     // not show anything new), and the row stays pending.
-                    self.claim_notice =
-                        claimed.map(|deposit| (deposit, claim_deferral_notice(deferral)));
+                    self.claim_notice = Some((deposit, claim_deferral_notice(deferral)));
                     return Task::none();
                 }
-                self.claim_notice = None;
+                self.clear_claim_notice_for(&deposit);
                 let mut tasks = vec![
                     // Drop the claimed row from the pending-deposits list.
                     fetch_deposits_task(self.backend.clone()),
@@ -800,10 +825,11 @@ impl State for SparkReceive {
                 }
                 Task::batch(tasks)
             }
-            SparkReceiveMessage::ClaimDepositFailed(err) => {
-                self.claiming = None;
-                self.claim_notice = None;
-                self.claim_error = Some(err);
+            SparkReceiveMessage::ClaimDepositFailed { txid, vout, error } => {
+                let deposit = (txid, vout);
+                self.claiming.remove(&deposit);
+                self.clear_claim_notice_for(&deposit);
+                self.claim_error = Some(error);
                 Task::none()
             }
             SparkReceiveMessage::DepositsChanged => Task::batch(vec![
@@ -1500,28 +1526,36 @@ mod tests {
                 vout: 0,
             },
         );
-        assert!(panel.claiming.is_none());
+        assert!(panel.claiming.is_empty());
         assert_eq!(panel.claim_error.as_deref(), Some("old claim error"));
 
-        panel.claiming = Some(("tx".to_string(), 0));
+        panel.claiming.insert(("tx".to_string(), 0));
         update(
             &mut panel,
-            SparkReceiveMessage::ClaimDepositFailed("claim failed".to_string()),
+            SparkReceiveMessage::ClaimDepositFailed {
+                txid: "tx".to_string(),
+                vout: 0,
+                error: "claim failed".to_string(),
+            },
         );
-        assert!(panel.claiming.is_none());
+        assert!(panel.claiming.is_empty());
         assert_eq!(panel.claim_error.as_deref(), Some("claim failed"));
 
-        panel.claiming = Some(("tx".to_string(), 0));
+        panel.claiming.insert(("tx".to_string(), 0));
         panel.claim_error = Some("old".to_string());
         update(
             &mut panel,
-            SparkReceiveMessage::ClaimDepositSucceeded(coincube_spark_protocol::ClaimDepositOk {
-                payment_id: Some("payment".to_string()),
-                amount_sat: Some(5_000),
-                deferred: None,
-            }),
+            SparkReceiveMessage::ClaimDepositSucceeded {
+                txid: "tx".to_string(),
+                vout: 0,
+                ok: coincube_spark_protocol::ClaimDepositOk {
+                    payment_id: Some("payment".to_string()),
+                    amount_sat: Some(5_000),
+                    deferred: None,
+                },
+            },
         );
-        assert!(panel.claiming.is_none());
+        assert!(panel.claiming.is_empty());
         assert!(panel.claim_error.is_none());
         assert!(panel.claim_notice.is_none());
     }
@@ -1531,16 +1565,20 @@ mod tests {
     #[test]
     fn a_deferred_claim_leaves_a_note_until_the_deposit_is_claimed() {
         let mut panel = SparkReceive::new(None);
-        panel.claiming = Some(("tx".to_string(), 0));
+        panel.claiming.insert(("tx".to_string(), 0));
         update(
             &mut panel,
-            SparkReceiveMessage::ClaimDepositSucceeded(coincube_spark_protocol::ClaimDepositOk {
-                payment_id: None,
-                amount_sat: None,
-                deferred: Some(coincube_spark_protocol::ClaimDeferral::NoEarlyClaimAvailable),
-            }),
+            SparkReceiveMessage::ClaimDepositSucceeded {
+                txid: "tx".to_string(),
+                vout: 0,
+                ok: coincube_spark_protocol::ClaimDepositOk {
+                    payment_id: None,
+                    amount_sat: None,
+                    deferred: Some(coincube_spark_protocol::ClaimDeferral::NoEarlyClaimAvailable),
+                },
+            },
         );
-        assert!(panel.claiming.is_none());
+        assert!(panel.claiming.is_empty());
         assert!(panel.claim_error.is_none());
         let (deposit_key, note) = panel.claim_notice.clone().expect("deferral note");
         assert_eq!(deposit_key, ("tx".to_string(), 0));
@@ -1562,6 +1600,67 @@ mod tests {
             SparkReceiveMessage::PendingDepositsLoaded(vec![deposit("other", 1, true)]),
         );
         assert!(panel.claim_notice.is_none());
+    }
+
+    /// Two claims in flight: each result is keyed by the deposit it was
+    /// for, whichever claim started last and whichever answers first.
+    #[test]
+    fn overlapping_claims_key_results_by_their_own_deposit() {
+        let a = ("a".to_string(), 0);
+        let b = ("b".to_string(), 1);
+        let deferred = |txid: &str, vout| SparkReceiveMessage::ClaimDepositSucceeded {
+            txid: txid.to_string(),
+            vout,
+            ok: coincube_spark_protocol::ClaimDepositOk {
+                payment_id: None,
+                amount_sat: None,
+                deferred: Some(coincube_spark_protocol::ClaimDeferral::NoEarlyClaimAvailable),
+            },
+        };
+        let claimed = |txid: &str, vout| SparkReceiveMessage::ClaimDepositSucceeded {
+            txid: txid.to_string(),
+            vout,
+            ok: coincube_spark_protocol::ClaimDepositOk {
+                payment_id: Some("payment".to_string()),
+                amount_sat: None,
+                deferred: None,
+            },
+        };
+
+        // A then B started; A's deferral answers first. The note is A's,
+        // and B's row stays "Claiming…".
+        let mut panel = SparkReceive::new(None);
+        panel.claiming.insert(a.clone());
+        panel.claiming.insert(b.clone());
+        update(&mut panel, deferred("a", 0));
+        assert_eq!(panel.claim_notice.as_ref().map(|(d, _)| d), Some(&a));
+        assert_eq!(panel.claiming, HashSet::from([b.clone()]));
+        // B then succeeds: A's note stays on A's row.
+        update(&mut panel, claimed("b", 1));
+        assert_eq!(panel.claim_notice.as_ref().map(|(d, _)| d), Some(&a));
+        assert!(panel.claiming.is_empty());
+
+        // B answers first, then A's deferral: the note is still A's.
+        let mut panel = SparkReceive::new(None);
+        panel.claiming.insert(a.clone());
+        panel.claiming.insert(b.clone());
+        update(&mut panel, claimed("b", 1));
+        assert_eq!(panel.claiming, HashSet::from([a.clone()]));
+        update(&mut panel, deferred("a", 0));
+        assert_eq!(panel.claim_notice.as_ref().map(|(d, _)| d), Some(&a));
+        assert!(panel.claiming.is_empty());
+
+        // B failing does not drop the note about A.
+        update(
+            &mut panel,
+            SparkReceiveMessage::ClaimDepositFailed {
+                txid: "b".to_string(),
+                vout: 1,
+                error: "claim failed".to_string(),
+            },
+        );
+        assert_eq!(panel.claim_notice.as_ref().map(|(d, _)| d), Some(&a));
+        assert_eq!(panel.claim_error.as_deref(), Some("claim failed"));
     }
 
     #[test]
