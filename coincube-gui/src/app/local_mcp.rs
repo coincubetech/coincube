@@ -64,6 +64,9 @@ pub enum Message {
     TogglePairing,
     /// Enable or disable MCP for the current unlocked session.
     Enable(bool),
+    /// The pairing form's Turn on: `Enable(true)`, after which focus moves
+    /// to the form's first field because the pressed control disappears.
+    TurnOnFromForm,
     /// Select whether the current Vault may be shared.
     Wallet(bool),
     /// Edit balance, history or policy access by capability index.
@@ -190,12 +193,26 @@ impl Settings {
             } else {
                 presentation::FORM_ENABLE_ID
             })),
+            // Pair a client is disabled after a storage failure.
+            FocusAfter::TogglePairing if self.pairing_poisoned => None,
             FocusAfter::TogglePairing => Some(Id::from(presentation::PAIR_OPEN_ID)),
             FocusAfter::Enable if self.pairing_open && self.enabled => {
                 Some(Id::from(presentation::NAME_ID))
             }
             FocusAfter::Enable => None,
         }
+    }
+
+    /// Whether the Cube-wide switch can take focus on the read-access page:
+    /// it is enabled while on, or while a Vault on a documented chain can pair.
+    pub(crate) fn switch_focusable(&self, supported: bool) -> bool {
+        self.enabled
+            || (supported
+                && self
+                    .pairing_location
+                    .as_ref()
+                    .and_then(pairings::Location::chain)
+                    .is_none_or(presentation::chain_supported))
     }
 
     pub(crate) fn pending_revoke(&self) -> Option<(&str, &str)> {
@@ -656,6 +673,9 @@ impl Settings {
             #[cfg(feature = "mcp-transactions")]
             Message::ReviewTransaction { .. } | Message::ReviewTransactionChecked { .. } => {
                 return None;
+            }
+            Message::TurnOnFromForm => {
+                return self.update(Message::Enable(true), wallet, daemon, supported, cube_id);
             }
             Message::Enable(value) => {
                 self.copied = None;

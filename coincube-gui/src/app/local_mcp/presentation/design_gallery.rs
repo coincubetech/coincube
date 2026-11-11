@@ -410,6 +410,41 @@ fn focus_follows_controls_that_disappear() {
         settings.focus_after(FocusAfter::TogglePairing),
         Some(Id::from(PAIR_OPEN_ID))
     );
+    // After a storage failure Pair a client is disabled, so closing the
+    // form leaves focus alone rather than sending it to a disabled control.
+    settings.pairing_poisoned = true;
+    assert_eq!(settings.focus_after(FocusAfter::TogglePairing), None);
+}
+
+/// The form's Turn on is its own intent (so only it moves focus) and turns
+/// AI access on exactly as the Cube-wide switch does.
+#[test]
+fn form_turn_on_is_the_switch_with_its_own_focus() {
+    let mut settings = Settings {
+        pairing_open: true,
+        ..Settings::default()
+    };
+    let emitted = capture::activate(
+        view_for_cube(
+            leak(Settings {
+                pairing_open: true,
+                ..Settings::default()
+            }),
+            true,
+        ),
+        iced::advanced::widget::Id::new(FORM_ENABLE_ID),
+        (1024, 768),
+        true,
+    );
+    assert!(emitted
+        .iter()
+        .any(|m| matches!(m, view::Message::LocalMcp(Message::TurnOnFromForm))));
+    settings.update(Message::TurnOnFromForm, None, None, true, "turn-on");
+    assert!(settings.enabled);
+    assert_eq!(
+        settings.focus_after(super::super::FocusAfter::Enable),
+        Some(iced::advanced::widget::Id::from(NAME_ID))
+    );
 }
 
 /// A Vault on a chain outside the documented five (here Signet) is not

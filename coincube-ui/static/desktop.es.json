@@ -89,7 +89,7 @@
   "AI access": "Acceso de IA",
   "AI access currently supports a Bitcoin Vault served by the embedded daemon on macOS, Linux and Windows. This wallet is unavailable for MCP.": "Por ahora, el acceso de IA admite un Vault de Bitcoin servido por el daemon integrado en macOS, Linux y Windows. Esta cartera no está disponible para MCP.",
   "AI access is off for this Cube.": "El acceso de IA está desactivado para este Cube.",
-  "AI access is off for this Cube. Turn it on to pair a client; that alone grants nothing.": "El acceso de IA está desactivado para este Cube. Actívalo para vincular un cliente; eso por sí solo no concede nada.",
+  "AI access is off for this Cube. Turn it on to pair a client. That resumes existing clients with their access and grants no new access.": "El acceso de IA está desactivado para este Cube. Actívalo para vincular un cliente. Eso reanuda los clientes existentes con su acceso y no concede acceso nuevo.",
   "AI access needs a Vault on Bitcoin (mainnet, Testnet4 or Regtest) or Bitcoin Blake2b (mainnet or Testnet4) run by Tenshu's built-in daemon. This Cube has no such Vault loaded right now, so no client can be paired. Spark, Liquid, imported wallets that aren't Vaults and external daemons aren't supported.": "El acceso de IA necesita un Vault en Bitcoin (mainnet, Testnet4 o Regtest) o Bitcoin Blake2b (mainnet o Testnet4) gestionado por el daemon integrado de Tenshu. Este Cube no tiene ese Vault cargado ahora, así que no se puede vincular ningún cliente. Spark, Liquid, las carteras importadas que no son Vaults y los daemons externos no son compatibles.",
   "AI wallet preparation": "Preparación de cartera con IA",
   "AI wallet preparation — Regtest experiment": "Preparación de cartera con IA — experimento en Regtest",

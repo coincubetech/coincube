@@ -91,10 +91,10 @@ fn cube_chain(settings: &Settings) -> Option<crate::chain::ChainId> {
         .and_then(pairings::Location::chain)
 }
 
-/// The scope tag naming an exact supported chain. Bitcoin and Bitcoin Blake2b
-/// share address and key encodings, so the tag is never inferred from either.
-/// The five exact chains local MCP documents and supports.
-fn chain_supported(chain: crate::chain::ChainId) -> bool {
+/// The five exact chains local MCP documents and supports; the same set as
+/// `coincube_mcp::Chain` and `transactions::supported_chain`, kept here so the
+/// page needs no optional feature.
+pub(super) fn chain_supported(chain: crate::chain::ChainId) -> bool {
     matches!(
         chain,
         crate::chain::ChainId::Bitcoin
@@ -105,6 +105,8 @@ fn chain_supported(chain: crate::chain::ChainId) -> bool {
     )
 }
 
+/// The scope tag naming an exact supported chain. Bitcoin and Bitcoin Blake2b
+/// share address and key encodings, so the tag is never inferred from either.
 pub(super) fn chain_tag(chain: Option<crate::chain::ChainId>) -> &'static str {
     match chain {
         Some(crate::chain::ChainId::Bitcoin) => "BTC · MAINNET",
@@ -1249,12 +1251,12 @@ fn access_off_note<'a>() -> Ui<'a> {
     page::note(
         Tone::Warn,
         muted(localized_copy(
-            "AI access is off for this Cube. Turn it on to pair a client; that alone grants nothing.",
+            "AI access is off for this Cube. Turn it on to pair a client. That resumes existing clients with their access and grants no new access.",
         )),
         Some(page::button(
             FORM_ENABLE_ID,
             localized_copy("Turn on"),
-            Some(message(Message::Enable(true))),
+            Some(message(Message::TurnOnFromForm)),
         )),
     )
 }

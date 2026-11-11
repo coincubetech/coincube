@@ -6489,7 +6489,9 @@ impl App {
                     // "Pair a client" is hidden while the form is open and
                     // disabled after a storage failure.
                     Some(iced::advanced::widget::Id::from(
-                        if self.mcp_proposals_supported() || self.mcp_supported() {
+                        if self.mcp_proposals_supported()
+                            || (self.mcp_supported() && self.local_mcp.switch_focusable(true))
+                        {
                             "tenshu.ai-access.enable"
                         } else {
                             view::nav::shell::CUBE_SWITCHER_ID
@@ -6503,7 +6505,7 @@ impl App {
             let focus_later = match &message {
                 local_mcp::Message::Pair => Some(local_mcp::FocusAfter::Pair),
                 local_mcp::Message::TogglePairing => Some(local_mcp::FocusAfter::TogglePairing),
-                local_mcp::Message::Enable(true) => Some(local_mcp::FocusAfter::Enable),
+                local_mcp::Message::TurnOnFromForm => Some(local_mcp::FocusAfter::Enable),
                 _ => None,
             };
             #[cfg(feature = "mcp-transactions")]
