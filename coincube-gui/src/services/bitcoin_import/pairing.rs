@@ -316,6 +316,96 @@ fn validate_syncing_discovery(
     Ok(())
 }
 
+fn existing_pair(
+    root: &CoincubeDirectory,
+    source: &CubeSettings,
+    target_dir: &NetworkDirectory,
+) -> Result<Option<CubeSettings>, String> {
+    if target_dir
+        .path()
+        .join(settings::SETTINGS_FILE_NAME)
+        .exists()
+    {
+        let saved = Settings::from_file(target_dir).map_err(|e| e.to_string())?;
+        if saved
+            .cubes
+            .iter()
+            .any(|c| c.id == target_cube_id(&source.id))
+        {
+            let prior = unique_cube(&saved, &target_cube_id(&source.id))?;
+            validate_target(source, prior)?;
+            if prior.has_imported_bitcoin() {
+                validate_pair(root, prior)?;
+                if !prior
+                    .bitcoin_import
+                    .as_ref()
+                    .is_some_and(|import| import.is_ready())
+                {
+                    validate_syncing_discovery(target_dir, prior)?;
+                }
+                return Ok(Some(prior.clone()));
+            }
+            if read_journal(&journal_path(
+                target_dir,
+                prior
+                    .bitcoin_import
+                    .as_ref()
+                    .ok_or("The paired import is unavailable.")?
+                    .operation_id,
+            ))?
+            .is_some_and(|journal| journal.restored_discovery_target.is_none())
+            {
+                return Err("This unfinished paired wallet has no saved discovery range. Resolve its pending import before retrying Claim; no wallet data was changed.".into());
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn attach_paired_cube(
+    mut saved: Settings,
+    source: &CubeSettings,
+    target: &CubeSettings,
+    wallet: &ImportedWalletAttachment,
+    source_metadata: &WalletSettings,
+) -> Result<Option<Settings>, SettingsError> {
+    if saved.cubes.iter().any(|c| c.id == target.id) {
+        validate_target(
+            source,
+            unique_cube(&saved, &target.id).map_err(SettingsError::WritingFile)?,
+        )
+        .map_err(SettingsError::WritingFile)?;
+    } else {
+        if saved.cubes.iter().any(|c| {
+            c.bitcoin_import
+                .as_ref()
+                .and_then(|i| i.attachment())
+                .is_some_and(|w| w.wallet_id == wallet.wallet_id)
+        }) {
+            return Err(SettingsError::WritingFile("This imported fork wallet already belongs to another Cube. Resolve that attachment first.".into()));
+        }
+        saved.cubes.push(target.clone());
+    }
+    let mut metadata = source_metadata.clone();
+    metadata.descriptor_checksum = wallet.wallet_id.descriptor_checksum.clone();
+    metadata.pinned_at = wallet.wallet_id.timestamp;
+    if let Some(prior) = saved
+        .wallets
+        .iter()
+        .find(|w| w.wallet_id() == wallet.wallet_id)
+    {
+        unique_wallet(&saved, &wallet.wallet_id).map_err(SettingsError::WritingFile)?;
+        if !matching_signers(&metadata, prior) {
+            return Err(SettingsError::WritingFile(
+                "Paired signer metadata conflicts; nothing was replaced.".into(),
+            ));
+        }
+    } else {
+        saved.wallets.push(metadata);
+    }
+    Ok(Some(saved))
+}
+
 /// Create/retry the sole pair for this source, using the normal staged import
 /// journal. Its separate identity never rewrites legacy Split attempts.
 pub async fn install_pair(
@@ -341,43 +431,8 @@ pub async fn install_pair(
     // A completed pair is reused without reopening or rewriting its database.
     // Source discovery may grow while the fork daemon is running.
     let target_dir = root.network_directory(ChainId::BitcoinBlake2b);
-    if target_dir
-        .path()
-        .join(settings::SETTINGS_FILE_NAME)
-        .exists()
-    {
-        let saved = Settings::from_file(&target_dir).map_err(|e| e.to_string())?;
-        if saved
-            .cubes
-            .iter()
-            .any(|c| c.id == target_cube_id(&source.id))
-        {
-            let prior = unique_cube(&saved, &target_cube_id(&source.id))?;
-            validate_target(source, prior)?;
-            if prior.has_imported_bitcoin() {
-                validate_pair(root, prior)?;
-                if !prior
-                    .bitcoin_import
-                    .as_ref()
-                    .is_some_and(|import| import.is_ready())
-                {
-                    validate_syncing_discovery(&target_dir, prior)?;
-                }
-                return Ok(prior.clone());
-            }
-            if read_journal(&journal_path(
-                &target_dir,
-                prior
-                    .bitcoin_import
-                    .as_ref()
-                    .ok_or("The paired import is unavailable.")?
-                    .operation_id,
-            ))?
-            .is_some_and(|journal| journal.restored_discovery_target.is_none())
-            {
-                return Err("This unfinished paired wallet has no saved discovery range. Resolve its pending import before retrying Claim; no wallet data was changed.".into());
-            }
-        }
+    if let Some(prior) = existing_pair(root, source, &target_dir)? {
+        return Ok(prior);
     }
     let source_data = source_dir.coincubed_data_directory(&binding.source_wallet.wallet_id);
     let source_config =
@@ -445,21 +500,11 @@ pub async fn install_pair(
     {
         return Err("This unfinished paired wallet has no saved discovery range. Resolve its pending import before retrying Claim; no wallet data was changed.".into());
     }
-    settings::update_settings_file_checked(&directory, |mut saved| {
-        if saved.cubes.iter().any(|c|c.id == target.id) { validate_target(source,unique_cube(&saved,&target.id).map_err(SettingsError::WritingFile)?).map_err(SettingsError::WritingFile)?; }
-        else {
-            if saved.cubes.iter().any(|c|c.bitcoin_import.as_ref().and_then(|i|i.attachment()).is_some_and(|w|w.wallet_id == wallet.wallet_id)) { return Err(SettingsError::WritingFile("This imported fork wallet already belongs to another Cube. Resolve that attachment first.".into())); }
-            saved.cubes.push(target.clone());
-        }
-        let mut metadata = source_metadata.clone();
-        metadata.descriptor_checksum = wallet.wallet_id.descriptor_checksum.clone();
-        metadata.pinned_at = wallet.wallet_id.timestamp;
-        if let Some(prior) = saved.wallets.iter().find(|w|w.wallet_id() == wallet.wallet_id) {
-            unique_wallet(&saved,&wallet.wallet_id).map_err(SettingsError::WritingFile)?;
-            if !matching_signers(&metadata,prior) { return Err(SettingsError::WritingFile("Paired signer metadata conflicts; nothing was replaced.".into())); }
-        } else { saved.wallets.push(metadata); }
-        Ok(Some(saved))
-    }).await.map_err(|e|e.to_string())?;
+    settings::update_settings_file_checked(&directory, |saved| {
+        attach_paired_cube(saved, source, &target, &wallet, &source_metadata)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     let secret = crate::services::unlock::device_secret::get_or_create(root.path(), &target.id)
         .map_err(|e| e.to_string())?;
     crate::installer::persist_cube_master_seed(

@@ -99,6 +99,99 @@ fn remove_owned_directory(path: &Path, parent: &Path) -> Result<(), String> {
     }
 }
 
+fn check_missing_import_owner(
+    journal: Option<&Journal>,
+    final_from_attachment: &Option<std::path::PathBuf>,
+) -> Result<(), String> {
+    if journal.is_none() {
+        if let Some(path) = final_from_attachment.as_ref() {
+            if fs::symlink_metadata(path).is_ok() {
+                return Err(
+                    "Imported wallet storage lacks an owner; no files were removed.".into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_import_owner_records(
+    file_journal: &Option<Journal>,
+    staged_owner: &Option<Journal>,
+    final_owner: &Option<Journal>,
+    journal: Option<&Journal>,
+    expected: &CubeSettings,
+    expected_attachment: Option<&ImportedWalletAttachment>,
+) -> Result<(), String> {
+    for owner in [
+        file_journal.as_ref(),
+        staged_owner.as_ref(),
+        final_owner.as_ref(),
+    ]
+    .iter()
+    .flatten()
+    {
+        check_journal(owner, expected, expected_attachment)?;
+        if let Some(primary) = journal {
+            if owner.cube_id != primary.cube_id
+                || owner.operation_id != primary.operation_id
+                || owner.wallet != primary.wallet
+            {
+                return Err("The import ownership records disagree; no files were removed.".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn another_cube_references_wallet(
+    settings: &Settings,
+    expected: &CubeSettings,
+    wallet_id: &super::WalletId,
+) -> bool {
+    settings.cubes.iter().any(|other| {
+        other.id != expected.id
+            && (other.vault_wallet_id.as_ref() == Some(wallet_id)
+                || other
+                    .bitcoin_import
+                    .as_ref()
+                    .and_then(|import| import.attachment())
+                    .is_some_and(|wallet| &wallet.wallet_id == wallet_id))
+    })
+}
+
+fn detach_import_settings(
+    mut current: Settings,
+    expected: &CubeSettings,
+    wallet_id: Option<&super::WalletId>,
+) -> Result<Option<Settings>, SettingsError> {
+    checked_live_cube(&current, expected).map_err(SettingsError::WritingFile)?;
+    if let Some(wallet_id) = wallet_id {
+        if current.cubes.iter().any(|other| {
+            other.id != expected.id
+                && (other.vault_wallet_id.as_ref() == Some(wallet_id)
+                    || other
+                        .bitcoin_import
+                        .as_ref()
+                        .and_then(|import| import.attachment())
+                        .is_some_and(|wallet| &wallet.wallet_id == wallet_id))
+        }) {
+            return Err(SettingsError::WritingFile(
+                "Another Cube now references this wallet; retry its deletion.".into(),
+            ));
+        }
+        current
+            .wallets
+            .retain(|wallet| wallet.wallet_id() != *wallet_id);
+    }
+    current.cubes.retain(|cube| cube.id != expected.id);
+    if current.cubes.is_empty() && current.wallets.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(current))
+    }
+}
+
 /// Delete the selected Cube's imported wallet and its exact operation record.
 /// All present storage is checked against the journal and owner marker before
 /// mutation. Settings are changed last so an interrupted cleanup remains
@@ -161,33 +254,15 @@ pub async fn remove_cube_import(
         .as_ref()
         .or(staged_owner.as_ref())
         .or(final_owner.as_ref());
-    if journal.is_none() {
-        if let Some(path) = final_from_attachment.as_ref() {
-            if fs::symlink_metadata(path).is_ok() {
-                return Err(
-                    "Imported wallet storage lacks an owner; no files were removed.".into(),
-                );
-            }
-        }
-    }
-    for owner in [
-        file_journal.as_ref(),
-        staged_owner.as_ref(),
-        final_owner.as_ref(),
-    ]
-    .iter()
-    .flatten()
-    {
-        check_journal(owner, expected, expected_attachment)?;
-        if let Some(primary) = journal {
-            if owner.cube_id != primary.cube_id
-                || owner.operation_id != primary.operation_id
-                || owner.wallet != primary.wallet
-            {
-                return Err("The import ownership records disagree; no files were removed.".into());
-            }
-        }
-    }
+    check_missing_import_owner(journal, &final_from_attachment)?;
+    check_import_owner_records(
+        &file_journal,
+        &staged_owner,
+        &final_owner,
+        journal,
+        expected,
+        expected_attachment,
+    )?;
     let destination = journal.map(|owner| owner.final_path(directory));
     if let (Some(expected_path), Some(actual_path)) =
         (final_from_attachment.as_ref(), destination.as_ref())
@@ -222,15 +297,7 @@ pub async fn remove_cube_import(
         .map(|owner| &owner.wallet.wallet_id)
         .or_else(|| expected_attachment.map(|wallet| &wallet.wallet_id));
     if let Some(wallet_id) = wallet_id {
-        if settings.cubes.iter().any(|other| {
-            other.id != expected.id
-                && (other.vault_wallet_id.as_ref() == Some(wallet_id)
-                    || other
-                        .bitcoin_import
-                        .as_ref()
-                        .and_then(|import| import.attachment())
-                        .is_some_and(|wallet| &wallet.wallet_id == wallet_id))
-        }) {
+        if another_cube_references_wallet(&settings, expected, wallet_id) {
             return Err("Another Cube still references this wallet; no files were removed.".into());
         }
     }
@@ -256,32 +323,8 @@ pub async fn remove_cube_import(
         Err(error) if error.kind() == ErrorKind::NotFound => (),
         Err(error) => return Err(error.to_string()),
     }
-    settings::update_settings_file_checked(directory, |mut current| {
-        checked_live_cube(&current, expected).map_err(SettingsError::WritingFile)?;
-        if let Some(wallet_id) = wallet_id {
-            if current.cubes.iter().any(|other| {
-                other.id != expected.id
-                    && (other.vault_wallet_id.as_ref() == Some(wallet_id)
-                        || other
-                            .bitcoin_import
-                            .as_ref()
-                            .and_then(|import| import.attachment())
-                            .is_some_and(|wallet| &wallet.wallet_id == wallet_id))
-            }) {
-                return Err(SettingsError::WritingFile(
-                    "Another Cube now references this wallet; retry its deletion.".into(),
-                ));
-            }
-            current
-                .wallets
-                .retain(|wallet| wallet.wallet_id() != *wallet_id);
-        }
-        current.cubes.retain(|cube| cube.id != expected.id);
-        if current.cubes.is_empty() && current.wallets.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(current))
-        }
+    settings::update_settings_file_checked(directory, |current| {
+        detach_import_settings(current, expected, wallet_id)
     })
     .await
     .map_err(|error| error.to_string())?;
