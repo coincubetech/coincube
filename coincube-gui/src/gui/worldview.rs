@@ -42,6 +42,8 @@ enum Request {
 #[derive(Debug, Default)]
 pub struct Sharing {
     binding: Option<Binding>,
+    // Rebinding must never allow a second request while an old PUT is active.
+    in_flight: Option<(Binding, uuid::Uuid)>,
     pending: Option<uuid::Uuid>,
     operation: Option<Request>,
     snapshot: Option<Snapshot>,
@@ -62,12 +64,19 @@ impl Sharing {
 
     fn bind(&mut self, binding: &Binding) {
         if self.binding.as_ref() != Some(binding) {
-            self.invalidate_intents();
+            let same_account = self
+                .binding
+                .as_ref()
+                .is_some_and(|current| current.context.0 == binding.context.0);
+            self.desired = None;
+            self.read_ready = false;
             self.binding = Some(binding.clone());
             self.pending = None;
             self.operation = None;
             self.snapshot = None;
-            self.error = None;
+            if !same_account {
+                self.error = None;
+            }
         }
     }
 
@@ -141,9 +150,8 @@ impl GUI {
         self.worldview_binding().map(|binding| binding.context)
     }
 
-    fn worldview_intent(&mut self) -> Option<Intent> {
+    fn worldview_intent(&self) -> Option<Intent> {
         let binding = self.worldview_binding()?;
-        self.worldview_sharing.bind(&binding);
         Some(Intent {
             binding,
             epoch: self.worldview_sharing.epoch,
@@ -211,6 +219,9 @@ impl GUI {
         };
         let selection = Selection::from(after);
         if before.map(Selection::from) != Some(selection) {
+            // An attempted edit cannot displace a previously accepted intent.
+            // Rebind only when the new active pair has actually been saved.
+            self.worldview_sharing.bind(&intent.binding);
             // Keep reverts too: the cached snapshot can predate an in-flight PUT.
             self.worldview_sharing.desired = Some(selection);
         }
@@ -225,7 +236,7 @@ impl GUI {
         };
         let sharing = &self.worldview_sharing;
         let same = sharing.binding.as_ref() == Some(&binding);
-        let pending = same && sharing.pending.is_some();
+        let pending = sharing.in_flight.is_some();
         let snapshot = same.then_some(sharing.snapshot.as_ref()).flatten();
         let error = same.then_some(sharing.error).flatten();
         let status = if pending {
@@ -282,6 +293,9 @@ impl GUI {
     }
 
     fn worldview_start(&mut self, binding: Binding, operation: Request) -> Task<Message> {
+        if self.worldview_sharing.in_flight.is_some() {
+            return Task::none();
+        }
         let Some(client) = self
             .connect_panel(&binding.origin)
             .and_then(|panel| panel.authenticated_client())
@@ -291,6 +305,7 @@ impl GUI {
         let previous = self.worldview_sharing.snapshot.clone();
         let request = uuid::Uuid::new_v4();
         self.worldview_sharing.pending = Some(request);
+        self.worldview_sharing.in_flight = Some((binding.clone(), request));
         self.worldview_sharing.operation = Some(operation);
         self.worldview_sharing.error = None;
         Task::perform(
@@ -317,7 +332,7 @@ impl GUI {
 
     pub(super) fn worldview_automatic(&mut self) -> Task<Message> {
         let sharing = &self.worldview_sharing;
-        if sharing.pending.is_some()
+        if sharing.in_flight.is_some()
             || sharing.error.is_some()
             || sharing.desired.is_none()
             || self.preferences.is_busy()
@@ -371,8 +386,33 @@ impl GUI {
         result: Result<Snapshot, Error>,
     ) -> Task<Message> {
         let binding = Binding { origin, context };
-        if self.worldview_sharing.binding.as_ref() != Some(&binding) {
+        if !self
+            .worldview_sharing
+            .in_flight
+            .as_ref()
+            .is_some_and(|(owner, id)| owner == &binding && *id == request)
+        {
             return Task::none();
+        }
+        self.worldview_sharing.in_flight = None;
+        if self.worldview_sharing.binding.as_ref() != Some(&binding)
+            || self.worldview_sharing.pending != Some(request)
+        {
+            // A new origin's edit waited for this request. It must read again
+            // after success, or pause if the same account's write is uncertain.
+            if let Err(error) = result {
+                if self
+                    .worldview_sharing
+                    .binding
+                    .as_ref()
+                    .is_some_and(|current| current.context.0 == binding.context.0)
+                {
+                    self.worldview_sharing.invalidate_intents();
+                    self.worldview_sharing.snapshot = None;
+                    self.worldview_sharing.error = Some(error);
+                }
+            }
+            return self.worldview_automatic();
         }
         if self.worldview_binding_for(&binding.origin).as_ref() != Some(&binding) {
             // A removed/locked origin must not strand its request on return.
@@ -583,9 +623,31 @@ mod tests {
     }
 
     fn remote(gui: &mut GUI, result: Result<Snapshot, Error>) {
-        let binding = gui.worldview_sharing.binding.clone().unwrap();
-        let request = gui.worldview_sharing.pending.unwrap();
+        let (binding, request) = gui.worldview_sharing.in_flight.clone().unwrap();
         drop(gui.worldview_complete(binding.origin, binding.context, request, result));
+    }
+
+    fn another_home(gui: &mut GUI, account: Option<u32>) {
+        let pane = gui.focus.unwrap();
+        let mut home =
+            super::super::home::Home::new_for_chain(gui.config.coincube_directory.clone(), None).0;
+        if let Some(id) = account {
+            home.connect_account.user = Some(crate::services::coincube::User {
+                id,
+                email: "fixture@example.invalid".into(),
+                email_verified: Some(true),
+            });
+            home.connect_account.step = crate::app::state::connect::ConnectFlowStep::Dashboard;
+        }
+        gui.panes
+            .get_mut(pane)
+            .unwrap()
+            .tabs
+            .push(super::super::tab::Tab::new(
+                2,
+                super::super::tab::State::Home(home),
+            ));
+        gui.panes.get_mut(pane).unwrap().focused_tab = 1;
     }
 
     #[test]
@@ -847,6 +909,98 @@ mod tests {
             gui.panes.get_mut(pane).unwrap().focused_tab = 0;
             assert!(gui.worldview_view().can_refresh);
         });
+    }
+
+    #[test]
+    fn edits_from_another_authenticated_origin_wait_for_the_in_flight_write() {
+        for (failure, round_trip) in [
+            (None, false),
+            (None, true),
+            (Some(Error::Unavailable), false),
+            (Some(Error::Unavailable), true),
+        ] {
+            with_gui(move |gui| {
+                use crate::app::settings::preferences::WorldviewMode::*;
+                shared(gui);
+                let original = selected(gui);
+                edit(gui, PreferenceChange::Worldview(Luke));
+                remote(gui, Ok(snapshot(Some(original))));
+                let luke = selected(gui);
+                let first = gui.worldview_sharing.in_flight.clone();
+                another_home(gui, Some(7));
+                edit(gui, PreferenceChange::Worldview(Suitcoiner));
+                if round_trip {
+                    let pane = gui.focus.unwrap();
+                    gui.panes.get_mut(pane).unwrap().focused_tab = 0;
+                    edit(gui, PreferenceChange::Worldview(Samurai));
+                }
+                assert_eq!(gui.worldview_sharing.in_flight, first);
+                assert!(gui.worldview_sharing.pending.is_none());
+                assert!(!gui.worldview_view().can_refresh);
+                assert!(!gui.worldview_view().can_publish);
+                assert!(!gui.worldview_view().can_revoke);
+                if let Some(error) = failure {
+                    remote(gui, Err(error));
+                    assert_eq!(gui.worldview_sharing.error, Some(error));
+                    assert!(gui.worldview_sharing.desired.is_none());
+                    assert!(gui.worldview_sharing.in_flight.is_none());
+                    let pane = gui.focus.unwrap();
+                    gui.panes.get_mut(pane).unwrap().focused_tab = usize::from(round_trip);
+                    edit(gui, PreferenceChange::Worldview(Luke));
+                    assert_eq!(gui.worldview_sharing.error, Some(error));
+                    assert!(gui.worldview_sharing.in_flight.is_none());
+                } else {
+                    remote(gui, Ok(snapshot(Some(luke))));
+                    assert!(matches!(
+                        gui.worldview_sharing.operation,
+                        Some(Request::AutomaticRead)
+                    ));
+                    remote(gui, Ok(snapshot(Some(luke))));
+                    let latest = selected(gui);
+                    assert!(
+                        matches!(gui.worldview_sharing.operation, Some(Request::Publish(value)) if value == latest)
+                    );
+                    remote(gui, Ok(snapshot(Some(latest))));
+                    assert!(gui.worldview_sharing.in_flight.is_none());
+                    assert_eq!(
+                        gui.worldview_sharing.snapshot.as_ref().unwrap().selection,
+                        Some(latest)
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn unsuccessful_or_inactive_edits_in_another_origin_preserve_the_accepted_intent() {
+        for kind in 0..3 {
+            with_gui(move |gui| {
+                use crate::app::settings::preferences::{ArtworkStyle::*, WorldviewMode::*};
+                shared(gui);
+                let original = selected(gui);
+                edit(gui, PreferenceChange::Worldview(Luke));
+                let binding = gui.worldview_sharing.binding.clone();
+                let accepted = selected(gui);
+                another_home(gui, Some(7));
+                match kind {
+                    0 => edit(gui, PreferenceChange::Worldview(Luke)), // No-op.
+                    1 => edit(gui, PreferenceChange::Artwork(Samurai, Scene)),
+                    _ => {
+                        drop(gui.change_preference(PreferenceChange::Worldview(Suitcoiner)));
+                        let request = gui.worldview_sharing.save.as_ref().unwrap().0.clone();
+                        drop(gui.update(Message::Preferences(request, Err("disk full".into()))));
+                    }
+                }
+                assert_eq!(gui.worldview_sharing.binding, binding);
+                assert_eq!(gui.worldview_sharing.desired, Some(accepted));
+                remote(gui, Ok(snapshot(Some(original))));
+                assert!(
+                    matches!(gui.worldview_sharing.operation, Some(Request::Publish(value)) if value == accepted)
+                );
+                remote(gui, Ok(snapshot(Some(accepted))));
+                assert!(gui.worldview_sharing.in_flight.is_none());
+            });
+        }
     }
 
     #[test]
