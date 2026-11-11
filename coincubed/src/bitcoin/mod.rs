@@ -851,6 +851,60 @@ pub trait BitcoinInterface: Send {
     }
 }
 
+/// Find a confirmed conflicting spender without treating assumed confirmation as final.
+fn confirmed_conflicting_spender(
+    getter: &mut CachedTxGetter<'_>,
+    conflicts: Vec<bitcoin::Txid>,
+    op: &bitcoin::OutPoint,
+) -> Result<(Option<(bitcoin::Txid, Block)>, bool), String> {
+    let mut confirmed_conflict = None;
+    let mut assumed_conflict = false;
+    for conflict in conflicts {
+        if let Some(other) = getter.try_get_transaction(&conflict)? {
+            if other.has_assumed_confirmation() {
+                assumed_conflict |= other.tx.input.iter().any(|i| i.previous_output == *op);
+                continue;
+            }
+            if let Some(block) = other.block {
+                if other
+                    .tx
+                    .input
+                    .iter()
+                    .any(|input| input.previous_output == *op)
+                {
+                    confirmed_conflict = Some((conflict, block));
+                    break;
+                }
+            }
+        }
+    }
+    Ok((confirmed_conflict, assumed_conflict))
+}
+
+/// Find a mined conflict that actually spends the requested outpoint.
+fn legacy_confirmed_conflicting_spender(
+    tx_getter: &mut CachedTxGetter<'_>,
+    conflicts: &[bitcoin::Txid],
+    op: &bitcoin::OutPoint,
+) -> Option<(bitcoin::Txid, Block)> {
+    conflicts.iter().find_map(|txid| {
+        tx_getter.get_transaction(txid).and_then(|tx| {
+            tx.block.and_then(|block| {
+                // Being part of our watchonly wallet isn't enough, as it could be a
+                // conflicting transaction which spends a different set of coins. Make sure
+                // it does actually spend this coin.
+                tx.tx.input.iter().find_map(|txin| {
+                    if &txin.previous_output == op {
+                        Some((*txid, block))
+                    } else {
+                        None
+                    }
+                })
+            })
+        })
+    })
+}
+
 impl BitcoinInterface for d::BitcoinD {
     fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
         if self.local_fork_chain.is_some() {
@@ -972,27 +1026,8 @@ impl BitcoinInterface for d::BitcoinD {
                 spent.push((*op, *txid, block.height, block.time));
                 continue;
             }
-            let mut confirmed_conflict = None;
-            let mut assumed_conflict = false;
-            for conflict in tx.conflicting_txs {
-                if let Some(other) = getter.try_get_transaction(&conflict)? {
-                    if other.has_assumed_confirmation() {
-                        assumed_conflict |= other.tx.input.iter().any(|i| i.previous_output == *op);
-                        continue;
-                    }
-                    if let Some(block) = other.block {
-                        if other
-                            .tx
-                            .input
-                            .iter()
-                            .any(|input| input.previous_output == *op)
-                        {
-                            confirmed_conflict = Some((conflict, block));
-                            break;
-                        }
-                    }
-                }
-            }
+            let (confirmed_conflict, assumed_conflict) =
+                confirmed_conflicting_spender(&mut getter, tx.conflicting_txs, op)?;
             if let Some((txid, block)) = confirmed_conflict {
                 spent.push((*op, txid, block.height, block.time));
             } else if !assumed_conflict && !self.try_is_in_mempool(txid)? {
@@ -1211,22 +1246,8 @@ impl BitcoinInterface for d::BitcoinD {
 
             // If a conflicting transaction was confirmed instead, replace the txid of the
             // spender for this coin with it and mark it as confirmed.
-            let conflict = res.conflicting_txs.iter().find_map(|txid| {
-                tx_getter.get_transaction(txid).and_then(|tx| {
-                    tx.block.and_then(|block| {
-                        // Being part of our watchonly wallet isn't enough, as it could be a
-                        // conflicting transaction which spends a different set of coins. Make sure
-                        // it does actually spend this coin.
-                        tx.tx.input.iter().find_map(|txin| {
-                            if &txin.previous_output == op {
-                                Some((*txid, block))
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                })
-            });
+            let conflict =
+                legacy_confirmed_conflicting_spender(&mut tx_getter, &res.conflicting_txs, op);
             if let Some((txid, block)) = conflict {
                 spent.push((*op, txid, block.height, block.time));
                 continue;

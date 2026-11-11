@@ -265,6 +265,37 @@ impl BdkWallet {
         }
     }
 
+    /// Project a spend while excluding stale unconfirmed observations.
+    fn spend_info(
+        spent_by: Option<(ChainPosition<ConfirmationTimeHeightAnchor>, bitcoin::Txid)>,
+        last_seen: Option<u64>,
+        outpoint: OutPoint,
+    ) -> (Option<bitcoin::Txid>, Option<crate::bitcoin::BlockInfo>) {
+        let (mut spend_txid, mut spend_block) = (None, None);
+        if let Some((spend_pos, txid)) = spent_by {
+            spend_txid = Some(txid);
+            match spend_pos {
+                ChainPosition::Unconfirmed(ls) => {
+                    if let Some(last_seen) = last_seen.filter(|last_seen| *last_seen != ls) {
+                        log::debug!(
+                            "Ignoring spend txid {} for coin at {}, \
+                            which was last seen at {} instead of {} as required.",
+                            txid,
+                            outpoint,
+                            ls,
+                            last_seen
+                        );
+                        spend_txid = None;
+                    }
+                }
+                ChainPosition::Confirmed(anchor) => {
+                    spend_block = Some(block_info_from_anchor(anchor));
+                }
+            }
+        }
+        (spend_txid, spend_block)
+    }
+
     /// Get the coins currently stored by the `BdkWallet` optionally filtered by `outpoints`.
     /// If `outpoints` is `None`, no filter will be applied.
     /// If `outpoints` is an empty slice, no coins will be returned.
@@ -318,28 +349,8 @@ impl BdkWallet {
                     .unwrap_or(true);
 
             // Get spend status of this coin.
-            let (mut spend_txid, mut spend_block) = (None, None);
-            if let Some((spend_pos, txid)) = full_txo.spent_by {
-                spend_txid = Some(txid);
-                match spend_pos {
-                    ChainPosition::Unconfirmed(ls) => {
-                        if let Some(last_seen) = last_seen.filter(|last_seen| *last_seen != ls) {
-                            log::debug!(
-                                "Ignoring spend txid {} for coin at {}, \
-                                which was last seen at {} instead of {} as required.",
-                                txid,
-                                outpoint,
-                                ls,
-                                last_seen
-                            );
-                            spend_txid = None;
-                        }
-                    }
-                    ChainPosition::Confirmed(anchor) => {
-                        spend_block = Some(block_info_from_anchor(anchor));
-                    }
-                }
-            }
+            let (spend_txid, spend_block) =
+                Self::spend_info(full_txo.spent_by, last_seen, outpoint);
             let coin = crate::bitcoin::Coin {
                 outpoint,
                 amount,
