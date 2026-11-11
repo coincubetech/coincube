@@ -221,6 +221,45 @@ fn open(
     Ok(file)
 }
 
+fn prepare_component(current: &Path, component: Component<'_>, create: bool) -> io::Result<()> {
+    if matches!(component, Component::RootDir) {
+        let root = wide(current)?;
+        // DRIVE_FIXED = 3; refuse remote mapped and removable storage.
+        if unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) } != 3 {
+            return Err(invalid());
+        }
+    }
+    if create && matches!(component, Component::Normal(_)) {
+        let user = User::current()?;
+        let security = user.security(true)?;
+        let attrs = attributes(&security);
+        let name = wide(current)?;
+        if let Err(error) = unsafe { CreateDirectoryW(PCWSTR(name.as_ptr()), Some(&attrs)) } {
+            let error = win(error);
+            if error.kind() != io::ErrorKind::AlreadyExists {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_ntfs(file: &File) -> io::Result<()> {
+    let mut filesystem = [0u16; 32];
+    unsafe {
+        GetVolumeInformationByHandleW(handle(file), None, None, None, None, Some(&mut filesystem))
+            .map_err(win)?;
+    }
+    let end = filesystem
+        .iter()
+        .position(|c| *c == 0)
+        .ok_or_else(invalid)?;
+    if String::from_utf16_lossy(&filesystem[..end]) != "NTFS" {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 /// Pin each path component: OPEN_REPARSE_POINT alone protects only the leaf.
 pub(super) struct Directory {
     pub(super) path: PathBuf,
@@ -249,47 +288,10 @@ impl Directory {
                 continue;
             }
             let leaf = i + 1 == total;
-            if matches!(component, Component::RootDir) {
-                let root = wide(&current)?;
-                // DRIVE_FIXED = 3; refuse remote mapped and removable storage.
-                if unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) } != 3 {
-                    return Err(invalid());
-                }
-            }
-            if create && matches!(component, Component::Normal(_)) {
-                let user = User::current()?;
-                let security = user.security(true)?;
-                let attrs = attributes(&security);
-                let name = wide(&current)?;
-                if let Err(error) = unsafe { CreateDirectoryW(PCWSTR(name.as_ptr()), Some(&attrs)) }
-                {
-                    let error = win(error);
-                    if error.kind() != io::ErrorKind::AlreadyExists {
-                        return Err(error);
-                    }
-                }
-            }
+            prepare_component(&current, component, create)?;
             let file = open(&current, true, OPEN_EXISTING, leaf)?;
             if leaf {
-                let mut filesystem = [0u16; 32];
-                unsafe {
-                    GetVolumeInformationByHandleW(
-                        handle(&file),
-                        None,
-                        None,
-                        None,
-                        None,
-                        Some(&mut filesystem),
-                    )
-                    .map_err(win)?;
-                }
-                let end = filesystem
-                    .iter()
-                    .position(|c| *c == 0)
-                    .ok_or_else(invalid)?;
-                if String::from_utf16_lossy(&filesystem[..end]) != "NTFS" {
-                    return Err(invalid());
-                }
+                validate_ntfs(&file)?;
             }
             pins.push(file);
         }

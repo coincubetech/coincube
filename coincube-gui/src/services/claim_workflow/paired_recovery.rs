@@ -395,115 +395,126 @@ mod tests {
             "confirmed",
             "noncanonical",
         ] {
-            let server = MockServer::start();
-            let (source, _sender) = source(&server);
-            let base = "/api/v1/esplora/bitcoin/mainnet";
-            let hash = "11".repeat(32);
-            server.mock(|when, then| {
-                when.method(GET)
-                    .path(format!("{base}/blocks/tip/hash"))
-                    .header("x-coincube-observation", "fresh");
-                fresh(then).status(200).body(hash.clone());
-            });
-            server.mock(|when, then| {
-                when.method(GET)
-                    .path(format!("{base}/block/{hash}/status"))
-                    .header("x-coincube-observation", "fresh");
-                fresh(then)
-                    .status(200)
-                    .body(r#"{"in_best_chain":true,"height":10}"#);
-            });
-            server.mock(|when, then| {
-                when.method(GET)
-                    .path(format!("{base}/block-height/10"))
-                    .header("x-coincube-observation", "fresh");
-                fresh(then).status(200).body(hash.clone());
-            });
-            server.mock(|when, then| {
-                when.method(GET)
-                    .path(format!("{base}/block-height/5"))
-                    .header("x-coincube-observation", "fresh");
-                fresh(then).status(200).body(if case == "noncanonical" {
-                    "22".repeat(32)
-                } else {
-                    hash.clone()
-                });
-            });
-            server.mock(|when, then| {
-                when.method(GET)
-                    .path(format!("{base}/tx/{}", signed.compute_txid()))
-                    .header("x-coincube-observation", "fresh");
-                let then = then
-                    .header("x-coincube-observation", "fresh")
-                    .header(
-                        "x-cache",
-                        if case == "cached-status" {
-                            "HIT"
-                        } else {
-                            "BYPASS"
-                        },
-                    )
-                    .header("cache-control", "no-store");
-                if case == "absent" {
-                    then.status(404);
-                } else if case == "confirmed" || case == "noncanonical" {
-                    then.status(200).body(format!(
-                        r#"{{"txid":"{}","status":{{"confirmed":true,"block_height":5,"block_hash":"{hash}"}}}}"#,
-                        signed.compute_txid()
-                    ));
-                } else {
-                    then.status(200).body(format!(
-                        r#"{{"txid":"{}","status":{{"confirmed":false}}}}"#,
-                        signed.compute_txid()
-                    ));
-                }
-            });
-            let raw = if case == "different-witness" {
-                &other
-            } else {
-                &signed
-            };
-            let raw_mock = server.mock(|when, then| {
-                when.method(GET)
-                    .path(format!("{base}/tx/{}/hex", signed.compute_txid()));
-                then.status(200)
-                    .body(hex::encode(consensus::serialize(raw)));
-            });
-            let result = reconcile_side(&source, ChainId::Bitcoin, &signed, 30).await;
-            match case {
-                "absent" => assert_eq!(result, Ok(ChainState::Absent)),
-                "exact" => assert_eq!(result, Ok(ChainState::Unconfirmed)),
-                "confirmed" => assert_eq!(
-                    result,
-                    Ok(ChainState::Confirmed {
-                        block: BlockRef {
-                            height: 5,
-                            hash: hash.parse().unwrap(),
-                        },
-                        tip: BlockRef {
-                            height: 10,
-                            hash: hash.parse().unwrap(),
-                        },
-                        confirmations: 6,
-                    })
-                ),
-                "noncanonical" => {
-                    assert_eq!(result, Err(ReconciliationError::Read(FailureKind::Changed)))
-                }
-                "different-witness" => {
-                    assert_eq!(result, Err(ReconciliationError::WitnessMismatch));
-                }
-                "cached-status" => assert_eq!(
-                    result,
-                    Err(ReconciliationError::Read(FailureKind::FreshnessUnverified))
-                ),
-                _ => unreachable!(),
-            }
-            raw_mock.assert_hits(if case == "absent" || case == "cached-status" {
-                0
-            } else {
-                1
-            });
+            check_attempt_recovery_case(case, &signed, &other).await;
         }
+    }
+    async fn check_attempt_recovery_case(case: &str, signed: &Transaction, other: &Transaction) {
+        let server = MockServer::start();
+        let (source, _sender) = source(&server);
+        let base = "/api/v1/esplora/bitcoin/mainnet";
+        let hash = "11".repeat(32);
+        server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("{base}/blocks/tip/hash"))
+                .header("x-coincube-observation", "fresh");
+            fresh(then).status(200).body(hash.clone());
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("{base}/block/{hash}/status"))
+                .header("x-coincube-observation", "fresh");
+            fresh(then)
+                .status(200)
+                .body(r#"{"in_best_chain":true,"height":10}"#);
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("{base}/block-height/10"))
+                .header("x-coincube-observation", "fresh");
+            fresh(then).status(200).body(hash.clone());
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("{base}/block-height/5"))
+                .header("x-coincube-observation", "fresh");
+            fresh(then).status(200).body(if case == "noncanonical" {
+                "22".repeat(32)
+            } else {
+                hash.clone()
+            });
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("{base}/tx/{}", signed.compute_txid()))
+                .header("x-coincube-observation", "fresh");
+            let then = then
+                .header("x-coincube-observation", "fresh")
+                .header(
+                    "x-cache",
+                    if case == "cached-status" {
+                        "HIT"
+                    } else {
+                        "BYPASS"
+                    },
+                )
+                .header("cache-control", "no-store");
+            if case == "absent" {
+                then.status(404);
+            } else if case == "confirmed" || case == "noncanonical" {
+                then.status(200).body(format!(
+                    r#"{{"txid":"{}","status":{{"confirmed":true,"block_height":5,"block_hash":"{hash}"}}}}"#,
+                    signed.compute_txid()
+                ));
+            } else {
+                then.status(200).body(format!(
+                    r#"{{"txid":"{}","status":{{"confirmed":false}}}}"#,
+                    signed.compute_txid()
+                ));
+            }
+        });
+        let raw = if case == "different-witness" {
+            other
+        } else {
+            signed
+        };
+        let raw_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("{base}/tx/{}/hex", signed.compute_txid()));
+            then.status(200)
+                .body(hex::encode(consensus::serialize(raw)));
+        });
+        let result = reconcile_side(&source, ChainId::Bitcoin, signed, 30).await;
+        assert_recovery_case(case, result, &hash, &raw_mock);
+    }
+    fn assert_recovery_case(
+        case: &str,
+        result: Result<ChainState, ReconciliationError>,
+        hash: &str,
+        raw_mock: &httpmock::Mock<'_>,
+    ) {
+        match case {
+            "absent" => assert_eq!(result, Ok(ChainState::Absent)),
+            "exact" => assert_eq!(result, Ok(ChainState::Unconfirmed)),
+            "confirmed" => assert_eq!(
+                result,
+                Ok(ChainState::Confirmed {
+                    block: BlockRef {
+                        height: 5,
+                        hash: hash.parse().unwrap(),
+                    },
+                    tip: BlockRef {
+                        height: 10,
+                        hash: hash.parse().unwrap(),
+                    },
+                    confirmations: 6,
+                })
+            ),
+            "noncanonical" => {
+                assert_eq!(result, Err(ReconciliationError::Read(FailureKind::Changed)))
+            }
+            "different-witness" => {
+                assert_eq!(result, Err(ReconciliationError::WitnessMismatch));
+            }
+            "cached-status" => assert_eq!(
+                result,
+                Err(ReconciliationError::Read(FailureKind::FreshnessUnverified))
+            ),
+            _ => unreachable!(),
+        }
+        raw_mock.assert_hits(if case == "absent" || case == "cached-status" {
+            0
+        } else {
+            1
+        });
     }
 }

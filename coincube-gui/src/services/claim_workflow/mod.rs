@@ -269,6 +269,22 @@ fn validate(intent: &Intent) -> Result<(), Error> {
         return Err(Error::InvalidPlan);
     }
     ancestry::validate_poison(intent)?;
+    validate_claim_sweep(intent)?;
+    if let Some(submission) = intent.fork_submission {
+        if intent
+            .fork_sweep
+            .as_ref()
+            .is_none_or(|sweep| sweep.compute_txid() != submission.txid)
+        {
+            return Err(Error::InvalidPlan);
+        }
+    }
+    reorg::validate_history(intent)?;
+    recovery::validate_record(intent)?;
+    Ok(())
+}
+fn validate_claim_sweep(intent: &Intent) -> Result<(), Error> {
+    let p = &intent.plan;
     if let Some(sweep) = &intent.fork_sweep {
         let inputs: std::collections::BTreeSet<_> =
             sweep.input.iter().map(|i| i.previous_output).collect();
@@ -296,17 +312,6 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             return Err(Error::InvalidPlan);
         }
     }
-    if let Some(submission) = intent.fork_submission {
-        if intent
-            .fork_sweep
-            .as_ref()
-            .is_none_or(|sweep| sweep.compute_txid() != submission.txid)
-        {
-            return Err(Error::InvalidPlan);
-        }
-    }
-    reorg::validate_history(intent)?;
-    recovery::validate_record(intent)?;
     Ok(())
 }
 impl Controller {
@@ -793,28 +798,33 @@ impl Controller {
                 | Assessment::WaitingForDepth { .. }
                 | Assessment::ObservationsEligibleForPreflight
         ) {
-            let mut next = self.intent.clone();
-            if let TransactionLocation::Confirmed { block, .. } = o.bitcoin.location {
-                next.plan.previous_confirmation = Some(block);
-                if next.signed_txid.is_some() {
-                    next.phase = Phase::Tracking;
-                }
-            }
-            let changed = next.plan.previous_confirmation != self.intent.plan.previous_confirmation
-                || next.phase != self.intent.phase;
-            if changed {
-                if let Err(error) = self.journal.store(&next) {
-                    self.clear_check();
-                    return Err(error);
-                }
-                self.intent = next;
-            } else if let Err(error) = self.journal.ensure_current() {
-                self.clear_check();
-                return Err(error);
-            }
+            self.persist_observed_confirmation(o)?;
             self.fresh = Some(fresh);
         }
         Ok(self.status)
+    }
+    // Persist before retaining live proof; any storage refusal withdraws the check.
+    fn persist_observed_confirmation(&mut self, o: ObservationBundle) -> Result<(), Error> {
+        let mut next = self.intent.clone();
+        if let TransactionLocation::Confirmed { block, .. } = o.bitcoin.location {
+            next.plan.previous_confirmation = Some(block);
+            if next.signed_txid.is_some() {
+                next.phase = Phase::Tracking;
+            }
+        }
+        let changed = next.plan.previous_confirmation != self.intent.plan.previous_confirmation
+            || next.phase != self.intent.phase;
+        if changed {
+            if let Err(error) = self.journal.store(&next) {
+                self.clear_check();
+                return Err(error);
+            }
+            self.intent = next;
+        } else if let Err(error) = self.journal.ensure_current() {
+            self.clear_check();
+            return Err(error);
+        }
+        Ok(())
     }
     /// Persist the exact fork-side unsigned plan only after a fresh depth/tip
     /// assessment of the Bitcoin poison. This is a restart record, not signing

@@ -853,27 +853,30 @@ impl SplitFundingReservation {
             return Err(Error::InvalidPlan);
         }
         let source = self.source()?;
-        if let Some(target) = &self.target_binding {
-            target.validate()?;
-            if let Some(imported) = &target.imported_descriptor {
-                if imported.receive_descriptor() != source.external()
-                    || Some(imported.change_descriptor()) != source.internal()
-                    || [bitcoin, fork, returning].contains(&target.receive_index)
-                    || target.imported_address_window.is_none_or(|window| {
-                        [bitcoin, fork, returning]
-                            .iter()
-                            .any(|index| *index >= window)
-                    })
-                {
-                    return Err(Error::InvalidPlan);
-                }
-            }
-        }
+        self.validate_target_source(&source, [bitcoin, fork, returning])?;
         if !source.external().has_wildcard() || source.digest() != self.source_digest {
             return Err(Error::InvalidPlan);
         }
         for index in [bitcoin, fork, returning] {
             self.address(index)?;
+        }
+        Ok(())
+    }
+
+    fn validate_target_source(&self, source: &SplitSource, indices: [u32; 3]) -> Result<(), Error> {
+        if let Some(target) = &self.target_binding {
+            target.validate()?;
+            if let Some(imported) = &target.imported_descriptor {
+                if imported.receive_descriptor() != source.external()
+                    || Some(imported.change_descriptor()) != source.internal()
+                    || indices.contains(&target.receive_index)
+                    || target
+                        .imported_address_window
+                        .is_none_or(|window| indices.iter().any(|index| *index >= window))
+                {
+                    return Err(Error::InvalidPlan);
+                }
+            }
         }
         Ok(())
     }
