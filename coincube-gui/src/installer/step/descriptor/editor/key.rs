@@ -1458,8 +1458,10 @@ impl SelectKeySource {
                     let key_reused = candidate_fp.is_some_and(|fp| self.key_placed_elsewhere(fp));
                     let used_elsewhere = rk.raw.used_by_vault;
                     let disabled = owner_blocked || key_reused || used_elsewhere;
-                    let fp = &rk.raw.fingerprint;
-                    let fingerprint = Some(format!("#{}", &fp[..fp.len().min(8)]));
+                    // A rejected server fingerprint still appears on its disabled row.
+                    // Truncate by characters so malformed UTF-8 boundaries cannot panic.
+                    let fp_short: String = rk.raw.fingerprint.chars().take(8).collect();
+                    let fingerprint = Some(format!("#{}", fp_short));
                     let msg = if disabled {
                         None
                     } else {
@@ -3219,6 +3221,69 @@ mod tests {
             owner: KeychainKeyOwner::SelfUser {
                 primary_owner_id: owner_id,
             },
+        }
+    }
+
+    #[tokio::test]
+    async fn review_repair_contact_rows_render_untrusted_fingerprints() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+        let renderer = <iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        for (fingerprint, displayed, valid) in [
+            ("1234567é", "#1234567é", false),
+            ("c658b283", "#c658b283", true),
+            ("", "#", false),
+            ("123", "#123", false),
+        ] {
+            let mut raw = contact_owned_raw_key(10, 42);
+            raw.fingerprint = fingerprint.to_owned();
+            let resolved = resolve_cube_keys(
+                vec![raw],
+                &[contact_with_role(7, 42, ContactRole::Keyholder)],
+                1,
+            );
+            assert_eq!(resolved.contact_keys.len(), 1);
+            let mut picker = empty_picker();
+            drop(picker.on_cube_keys_loaded(Ok(resolved)));
+            let mut list = picker.view_contact_keychain_keys();
+            let mut tree = Tree::new(list.as_widget());
+            let node = list.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1600.0, 2200.0)),
+            );
+            let mut labels = Labels::default();
+            list.as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+            assert!(
+                labels.0.iter().any(|label| label == displayed),
+                "{fingerprint:?}: {:?}",
+                labels.0
+            );
+            assert_eq!(
+                labels.0.iter().any(|label| label == "Already selected"),
+                !valid
+            );
         }
     }
 

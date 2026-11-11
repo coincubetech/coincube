@@ -73,6 +73,7 @@ jobs:
           cargo clippy -p coincube-gui --no-default-features --all-targets --locked -- -D warnings
 
   mcp_tests:
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
