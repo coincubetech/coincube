@@ -570,7 +570,7 @@ fn refund_section<'a>(
         .push(tile_pair(deposit, reload_icon(), back_to));
 
     if *status == ShiftStatusKind::Refunding {
-        if let Some(reason) = out_of_range_reason(v) {
+        if let Some(reason) = out_of_range_reason(v, mask_amounts) {
             col = col.push(tinted_note(
                 Tone::Warn,
                 clock_icon(),
@@ -620,7 +620,7 @@ fn refunded_section<'a>(v: &ActiveShift<'a>, mask_amounts: bool) -> Element<'a, 
         short_address(v.refund_address),
         v.selected.network.network_name(),
     );
-    if let Some(reason) = out_of_range_reason(v) {
+    if let Some(reason) = out_of_range_reason(v, mask_amounts) {
         returned = format!("{returned} {reason}");
     }
     col.push(
@@ -839,22 +839,31 @@ fn deposit_tile<'a>(v: &ActiveShift<'a>, mask_amounts: bool) -> Element<'a, Msg>
 /// Why a deposit is being refunded, when the amounts say so. SideShift's status
 /// carries no reason, but a deposit outside the shift's own min/max is refunded
 /// by rule — so when that's what happened we can say it plainly.
-fn out_of_range_reason(v: &ActiveShift<'_>) -> Option<String> {
+///
+/// With amounts masked the sentence still gives the reason, but names "the
+/// deposit" instead of its value; the swap's limits are SideShift's, not the
+/// user's, so they stay.
+fn out_of_range_reason(v: &ActiveShift<'_>, mask_amounts: bool) -> Option<String> {
     let amount = v.deposit_amount()?;
     let coin = v.selected.coin.to_uppercase();
+    let what = if mask_amounts {
+        localized_copy("The deposit").to_owned()
+    } else {
+        format!("{amount} {coin}")
+    };
     if let Some(min) = v.shift.deposit_min.as_deref() {
         if cmp_decimal(amount, min)? == Ordering::Less {
             return Some(localized_format!(
-                "{amount} {coin} is below the {min} {coin} minimum, so nothing was converted.",
-                "{amount} {coin} está por debajo del mínimo de {min} {coin}, así que no se convirtió nada.",
+                "{what} is below the {min} {coin} minimum, so nothing was converted.",
+                "{what} está por debajo del mínimo de {min} {coin}, así que no se convirtió nada.",
             ));
         }
     }
     if let Some(max) = v.shift.deposit_max.as_deref() {
         if cmp_decimal(amount, max)? == Ordering::Greater {
             return Some(localized_format!(
-                "{amount} {coin} is above the {max} {coin} maximum, so nothing was converted.",
-                "{amount} {coin} está por encima del máximo de {max} {coin}, así que no se convirtió nada.",
+                "{what} is above the {max} {coin} maximum, so nothing was converted.",
+                "{what} está por encima del máximo de {max} {coin}, así que no se convirtió nada.",
             ));
         }
     }
@@ -952,10 +961,12 @@ fn settle_amount_display(
     status: &ShiftStatusKind,
     bitcoin_unit: BitcoinDisplayUnit,
 ) -> String {
-    let settled = matches!(status, ShiftStatusKind::Settled);
+    // Once SideShift is settling it has fixed the bitcoin output, so the
+    // figure is firm — the same point the tile switches to "Bitcoin on the way".
+    let firm = matches!(status, ShiftStatusKind::Settling | ShiftStatusKind::Settled);
     format!(
         "{}{} {}",
-        if settled { "" } else { "≈ " },
+        if firm { "" } else { "≈ " },
         Amount::from_sat(sats).to_formatted_string_with_unit(bitcoin_unit),
         bitcoin_unit_label(bitcoin_unit),
     )
@@ -1299,6 +1310,48 @@ mod tests {
     }
 
     #[test]
+    fn refund_reason_hides_the_deposit_amount_when_amounts_are_masked() {
+        let mut shift = sample_shift();
+        shift.deposit_amount = Some("12.00".into());
+        let view = ActiveShift {
+            shift: &shift,
+            selected: liquid_usdt(),
+            status: Some(&ShiftStatusKind::Refunding),
+            qr: None,
+            refund_address: "lq1qqvq9d3fkk0x2l5ffhaw5hm7r3w0yq0t5p4yq9ax7d2",
+            polled_deposit_amount: None,
+            settle_amount_sat: None,
+        };
+        assert_eq!(
+            out_of_range_reason(&view, false).as_deref(),
+            Some("12.00 USDT is below the 25.08 USDT minimum, so nothing was converted.")
+        );
+        let masked = out_of_range_reason(&view, true).unwrap();
+        assert_eq!(
+            masked,
+            "The deposit is below the 25.08 USDT minimum, so nothing was converted."
+        );
+        assert!(!masked.contains("12.00"));
+
+        for status in [ShiftStatusKind::Refunding, ShiftStatusKind::Refunded] {
+            let view = ActiveShift {
+                status: Some(&status),
+                ..view
+            };
+            let mounted = capture::inspect_wide_content(
+                "spark-shift-refund-masked",
+                active_shift_body(&view, BitcoinDisplayUnit::Sats, true),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+                632,
+            );
+            assert!(!mounted.contains("12.00"), "{:?} leaked the amount", status);
+            assert!(mounted.contains("The deposit is below the 25.08 USDT minimum"));
+        }
+    }
+
+    #[test]
     fn decimal_comparison_is_exact_and_rejects_non_decimals() {
         assert_eq!(cmp_decimal("12.00", "25.08"), Some(Ordering::Less));
         assert_eq!(cmp_decimal("25.08", "25.080"), Some(Ordering::Equal));
@@ -1417,7 +1470,15 @@ mod tests {
     }
 
     #[test]
-    fn settle_amount_display_is_approx_until_settled_and_uses_selected_unit() {
+    fn settle_amount_display_is_approx_until_settling_and_uses_selected_unit() {
+        assert_eq!(
+            settle_amount_display(
+                123_456_789,
+                &ShiftStatusKind::Settling,
+                BitcoinDisplayUnit::Sats
+            ),
+            "123,456,789 SATS"
+        );
         assert_eq!(
             settle_amount_display(
                 123_456_789,
