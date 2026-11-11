@@ -116,3 +116,137 @@ pub async fn create_testnet4_cube(
     }
     Ok(cube)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::create_testnet4_cube;
+    use crate::app::settings::{self, CubeSettings};
+    use crate::chain::ChainId;
+    use crate::dir::CoincubeDirectory;
+    use crate::services::unlock::creation_gate::{self, CreationBackupBypass, CreationRecoveryKit};
+    use coincube_core::miniscript::bitcoin::Network;
+
+    fn temp_root(tag: &str) -> CoincubeDirectory {
+        let path = std::env::temp_dir().join(format!(
+            "coincube-testnet4-reentry-{tag}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        CoincubeDirectory::new(path)
+    }
+
+    fn write_cubes(root: &CoincubeDirectory, cubes: Vec<CubeSettings>) -> Vec<u8> {
+        let directory = root.network_directory(Network::Testnet4);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let settings = settings::Settings {
+            cubes,
+            ..settings::Settings::default()
+        };
+        let bytes = serde_json::to_vec_pretty(&settings).unwrap();
+        std::fs::write(directory.path().join(settings::SETTINGS_FILE_NAME), &bytes).unwrap();
+        bytes
+    }
+
+    fn reenter(
+        root: CoincubeDirectory,
+        id: uuid::Uuid,
+        name: &str,
+    ) -> Result<CubeSettings, &'static str> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(create_testnet4_cube(
+            root,
+            id,
+            name.to_string(),
+            "0000",
+            &[],
+            1,
+        ))
+    }
+
+    fn assert_settings_unchanged(root: &CoincubeDirectory, before: &[u8]) {
+        let path = root
+            .network_directory(Network::Testnet4)
+            .path()
+            .join(settings::SETTINGS_FILE_NAME);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn reentry_refuses_a_different_cube_identity_without_rewriting_settings() {
+        let id = uuid::Uuid::new_v4();
+        for (label, cube) in [
+            (
+                "name",
+                CubeSettings::new_with_id(id, "Other".to_string(), ChainId::Testnet4),
+            ),
+            (
+                "chain",
+                CubeSettings::new_with_id(id, "E2E".to_string(), ChainId::Bitcoin),
+            ),
+        ] {
+            let root = temp_root(label);
+            let before = write_cubes(&root, vec![cube]);
+            let error = reenter(root.clone(), id, "E2E").unwrap_err();
+            assert_eq!(error, "cube_identity_mismatch", "{label}");
+            assert_settings_unchanged(&root, &before);
+            std::fs::remove_dir_all(root.path()).unwrap();
+        }
+    }
+
+    #[test]
+    fn reentry_requires_a_verified_phrase_and_refuses_a_bypass_or_kit_substitute() {
+        let id = uuid::Uuid::new_v4();
+        let mut unverified = CubeSettings::new_with_id(id, "E2E".to_string(), ChainId::Testnet4);
+        unverified.creation_backup_required = true;
+
+        let mut bypassed = unverified.clone();
+        bypassed.backed_up = true;
+        bypassed.creation_backup_bypass = Some(CreationBackupBypass {
+            at: 1_700_000_000,
+            acknowledged: creation_gate::BYPASS_ACKNOWLEDGEMENT.to_string(),
+        });
+
+        // A seed-bearing creation kit satisfies the open gate, and a legacy
+        // cube is not gated at all. Neither is the phrase this driver re-reads.
+        let mut kit_only = unverified.clone();
+        kit_only.creation_recovery_kit = Some(CreationRecoveryKit {
+            at: 1_700_000_000,
+            cube_id: 7,
+            has_seed: true,
+        });
+        let mut legacy = CubeSettings::new_with_id(id, "E2E".to_string(), ChainId::Testnet4);
+        legacy.backed_up = false;
+
+        for (label, cube) in [
+            ("unverified", unverified),
+            ("bypassed", bypassed),
+            ("kit", kit_only),
+            ("legacy", legacy),
+        ] {
+            let root = temp_root(label);
+            let before = write_cubes(&root, vec![cube]);
+            let error = reenter(root.clone(), id, "E2E").unwrap_err();
+            assert_eq!(error, "cube_backup_not_verified", "{label}");
+            assert_settings_unchanged(&root, &before);
+            std::fs::remove_dir_all(root.path()).unwrap();
+        }
+    }
+
+    #[test]
+    fn reentry_refuses_unreadable_settings_without_creating_a_cube() {
+        let root = temp_root("corrupt");
+        let directory = root.network_directory(Network::Testnet4);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let path = directory.path().join(settings::SETTINGS_FILE_NAME);
+        std::fs::write(&path, b"{").unwrap();
+
+        let error = reenter(root.clone(), uuid::Uuid::new_v4(), "E2E").unwrap_err();
+        assert_eq!(error, "cube_settings_unreadable");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{");
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+}
