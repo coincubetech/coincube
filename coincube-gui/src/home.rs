@@ -8919,11 +8919,27 @@ impl DeleteCubeModal {
                     let pin = self.pin_input.value();
                     let loc =
                         crate::services::unlock::CubeLocation::new(&self.datadir_root, &self.cube);
-                    match crate::services::unlock::throttle::classify_regular_pin(
-                        &self.datadir_root,
-                        &loc,
-                        &pin,
-                    ) {
+                    // The generic unlock refuses a Bitcoin Blake2b Cube before
+                    // it reads the PIN (the chain is dormant to it), which
+                    // left these Cubes undeletable behind an "update Tenshu"
+                    // notice. Check their PIN with the fork's own trial, as
+                    // the PIN screen does. Deleting runs nothing on the fork,
+                    // so the PIN is the whole admission; the fork trial has no
+                    // duress outcome, so a duress PIN is a wrong PIN here too.
+                    let attempt = if self.cube.network.is_blake2b() {
+                        crate::services::unlock::throttle::classify_connect_fork(
+                            &self.datadir_root,
+                            &loc,
+                            &pin,
+                        )
+                    } else {
+                        crate::services::unlock::throttle::classify_regular_pin(
+                            &self.datadir_root,
+                            &loc,
+                            &pin,
+                        )
+                    };
+                    match attempt {
                         Ok(crate::services::unlock::throttle::PinAttempt::Classified(
                             crate::services::unlock::PinOutcome::Unlock(_),
                         )) => {}
@@ -12843,6 +12859,99 @@ mod tests {
         assert!(!modal.cube.has_pin(&root));
         assert!(!modal.waiting_for_stop);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Bitcoin Blake2b Cubes are dormant to the generic unlock, so the
+    /// delete confirmation refused them before reading the PIN with "update
+    /// Tenshu…" and they could not be deleted at all. Their PIN is checked
+    /// with the fork's own trial: a wrong PIN still refuses, the right one
+    /// deletes.
+    #[test]
+    fn a_blake2b_cube_deletes_with_its_pin() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let enter_pin = |modal: &mut DeleteCubeModal, pin: &str| {
+            for (index, digit) in pin.chars().enumerate() {
+                let _ = modal.update(Message::View(ViewMessage::DeleteCube(
+                    DeleteCubeMessage::PinInput(pin_input::Message::DigitChanged(
+                        index,
+                        digit.to_string(),
+                    )),
+                )));
+            }
+        };
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let root =
+                std::env::temp_dir().join(format!("delete-blake2b-{}", uuid::Uuid::new_v4()));
+            let network_dir = CoincubeDirectory::new(root.clone()).network_directory(chain);
+            let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
+            let signer =
+                coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
+            let mut cube =
+                CubeSettings::new_with_raw_id("blake2b-delete".into(), "Fork".into(), chain);
+            cube.master_signer_fingerprint = Some(signer.fingerprint(&secp));
+            signer
+                .store_encrypted_for_chain(&root, chain, &secp, None, "1234", &cube.id, None)
+                .unwrap();
+            let listed = cube.clone();
+            Handle::current()
+                .block_on(settings::update_settings_file(&network_dir, |mut s| {
+                    s.cubes.push(listed);
+                    Some(s)
+                }))
+                .unwrap();
+            let on_disk = || {
+                settings::Settings::from_file(&network_dir)
+                    .map(|s| s.cubes.iter().any(|c| c.id == "blake2b-delete"))
+                    .unwrap_or(false)
+            };
+            let mut modal = DeleteCubeModal::new(
+                cube.clone(),
+                network_dir.clone(),
+                root.clone(),
+                None,
+                None,
+                false,
+            );
+            assert!(modal.cube.has_pin(&root), "{:?}", chain);
+
+            enter_pin(&mut modal, "9999");
+            let _ = modal.update(Message::View(ViewMessage::DeleteCube(
+                DeleteCubeMessage::Confirm(cube.id.clone()),
+            )));
+            assert_eq!(
+                modal.pin_error.as_deref(),
+                Some("Incorrect PIN. Please try again."),
+                "{:?}",
+                chain
+            );
+            assert!(
+                !modal.deleted && on_disk(),
+                "{:?}: a wrong PIN deleted",
+                chain
+            );
+
+            enter_pin(&mut modal, "1234");
+            let _ = modal.update(Message::View(ViewMessage::DeleteCube(
+                DeleteCubeMessage::Confirm(cube.id.clone()),
+            )));
+            assert!(
+                modal
+                    .pin_error
+                    .as_deref()
+                    .is_none_or(|error| !error.contains(crate::chain::BTCB2_DORMANT_REASON)),
+                "{:?}: {:?}",
+                chain,
+                modal.pin_error
+            );
+            assert!(modal.deleted, "{:?}: {:?}", chain, modal.pin_error);
+            assert!(!on_disk(), "{:?}: the Cube is still listed", chain);
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     #[test]
