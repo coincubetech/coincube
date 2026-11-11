@@ -21,7 +21,7 @@ Upstream reqwest 0.13 selects rustls-platform-verifier, which requires Apple's
 security-framework-sys >=2.12. The existing wallet's Breez dependency pins
 security-framework-sys =2.10.0 in its iOS-only build dependencies. Cargo resolves
 those constraints across targets even for desktop builds. Cargo cannot resolve both. The adapter reuses the
-wallet's existing reqwest 0.12.18 and webpki roots without altering Liquid or
+wallet's existing reqwest 0.12.18 without altering Liquid or
 reimplementing the SDK protocol. Other SDK dependency requirements are unchanged.
 The GUI dependency is pinned to this local version =3.2.1. This is an adapted
 vendored official SDK, not an unmodified crates.io dependency.
@@ -30,10 +30,14 @@ Remove this manifest adjustment when an upstream client/TLS configuration option
 or wallet dependency resolution permits the unmodified release. SDK examples are
 reference only: do not run them (they use live services and Loose mode).
 
-TLS deliberately uses the existing wallet reqwest webpki/Mozilla root set, rather
-than the newer upstream platform trust store. Corporate/private installed roots
-will not be accepted; such lookups remain silent and non-blocking. Roots update
-with dependencies. The logo client uses the same reqwest feature configuration.
+The `rustls-tls` feature resolves the dependency conflict but does not choose the
+runtime TLS backend. Workspace feature unification also enables reqwest
+`default-tls` (native-tls) and `system-proxy` through Breez's default features, so
+reqwest's default backend is native-tls. The SDK lookup client
+(`reqwest::Client::new()`) and the wrapper's logo client therefore use the OS TLS
+stack and trust store, including OS-added private roots, and honour environment
+and system proxy settings. Pinning them to rustls with webpki roots would need
+`use_rustls_tls()` on each client; for the lookup client that is a vendor change.
 
 The upstream lookup client still permits redirects and unbounded response bodies.
 The wrapper bounds wall time but does not change those source semantics. An

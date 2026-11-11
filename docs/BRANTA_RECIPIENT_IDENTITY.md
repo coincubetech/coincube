@@ -115,7 +115,7 @@ Branta, i.e. one from a `btcpay` list instance.
 Official Branta 3.2.1 source is vendored from reviewed commit
 `ba5e510a3189f32d11cb57e10267284b7109cb39` (same tree as published source commit
 `dff65e0f65c1970273a7cdc198ece63019692c76`), with version requirement `=3.2.1`.
-The sole upstream manifest adjustment reuses reqwest `0.12.18` with `rustls-tls`.
+The sole upstream manifest adjustment reuses reqwest `0.12.18` with `rustls-tls` (a resolution fix; see below for the runtime TLS backend).
 No SDK Rust source was changed. See [provenance](../vendor/branta/TENSHU_PROVENANCE.md)
 and enforced source hashes in `vendor/branta/UPSTREAM_SHA256.json`.
 
@@ -127,8 +127,18 @@ errors silently. The vendored README is preserved as part of the pinned artifact
 
 Upstream reqwest 0.13 uses platform-verifier, whose Apple dependency conflicts
 with Breez's exact iOS build-dependency pin even on desktop because Cargo resolves
-across targets. No Liquid file or dependency pin was changed. The adjustment uses
-the wallet's webpki/Mozilla roots (including logos), not OS-added private roots.
+across targets. No Liquid file or dependency pin was changed.
+
+Declaring `rustls-tls` does not select rustls at runtime. Cargo unifies reqwest
+`0.12.18` features across the workspace, and Breez (`breez-sdk-liquid`,
+`sdk-common`, `esplora-client` defaults) also enables `default-tls` (native-tls)
+and `system-proxy`. With `default-tls` present, reqwest's `TlsBackend::default()`
+is native-tls, and neither the SDK lookup client (`reqwest::Client::new()`) nor
+the logo client calls `use_rustls_tls()`. Both therefore use the OS TLS stack and
+trust store (Security.framework on macOS, including admin/user-added roots;
+OpenSSL system roots on Linux; SChannel on Windows), and both honour
+`HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` and the macOS/Windows system proxy
+settings. Confirm with `cargo tree -e features -i reqwest@0.12.18`.
 
 Compared with the original lockfile:
 
