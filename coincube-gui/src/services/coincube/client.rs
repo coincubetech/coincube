@@ -1,17 +1,18 @@
+mod avatar;
+
 use super::{
-    get_countries, AddVaultMemberRequest, ApiResponse, AvatarGenerateData, AvatarGenerateRequest,
-    AvatarSelectData, AvatarSelectRequest, BillingHistoryEntry, ChargeStatusResponse,
+    get_countries, AddVaultMemberRequest, ApiResponse, BillingHistoryEntry, ChargeStatusResponse,
     CheckoutRequest, CheckoutResponse, CoincubeError, ConnectPlan, ConnectVaultResponse, Contact,
     ContactCube, Country, CreateConnectVaultRequest, CreateInviteRequest,
     CubeEncryptionPubkeyResponse, CubeInviteOrAddResult, CubeKeyRaw, CubeLimitsResponse,
-    CubeResponse, DownloadStats, FeaturesResponse, GetAvatarData, Invite, LightningAddress,
+    CubeResponse, DownloadStats, FeaturesResponse, Invite, LightningAddress,
     LightningAddressAvailability, LoginActivity, LoginResponse, OtpRequest, OtpVerifyRequest,
-    PatchConnectVaultRequest, PublicAvatarData, PutCubeEncryptionPubkeyRequest, ReceivedInvite,
-    RecoveryKit, RecoveryKitStatus, RedeemCampaignRequest, RedeemCampaignResponse,
-    RefreshTokenRequest, RegenerationData, RegisterCubeRequest, ReportEnvelopeInvalidRequest,
-    ReserveLightningAddressRequest, SaveQuoteRequest, SaveQuoteResponse, StatsPeriod,
-    TimeseriesResponse, TodayStats, UpdateCubeRequest, UpdateLightningAddressRequest,
-    UpsertRecoveryKitRequest, User, VaultMemberResponse, VerifiedDevice,
+    PatchConnectVaultRequest, PutCubeEncryptionPubkeyRequest, ReceivedInvite, RecoveryKit,
+    RecoveryKitStatus, RedeemCampaignRequest, RedeemCampaignResponse, RefreshTokenRequest,
+    RegisterCubeRequest, ReportEnvelopeInvalidRequest, ReserveLightningAddressRequest,
+    SaveQuoteRequest, SaveQuoteResponse, StatsPeriod, TimeseriesResponse, TodayStats,
+    UpdateCubeRequest, UpdateLightningAddressRequest, UpsertRecoveryKitRequest, User,
+    VaultMemberResponse, VerifiedDevice,
 };
 use reqwest::{Client, Method};
 use serde::Deserialize;
@@ -802,99 +803,6 @@ impl CoincubeClient {
         let res = res.check_success().await?;
         let resp: ApiResponse<LightningAddress> = res.json().await?;
         Ok(resp.data)
-    }
-}
-
-impl CoincubeClient {
-    /// GET /api/v1/connect/cubes/{cubeId}/avatar
-    pub async fn get_avatar(&self, cube_id: &str) -> Result<GetAvatarData, CoincubeError> {
-        let url = format!("{}/api/v1/connect/cubes/{}/avatar", self.base_url, cube_id);
-        let res = self.client.get(&url).send().await?;
-        let res = res.check_success().await?;
-        let resp: ApiResponse<GetAvatarData> = res.json().await?;
-        Ok(resp.data)
-    }
-
-    /// POST /api/v1/connect/cubes/{cubeId}/avatar/generate
-    pub async fn post_avatar_generate(
-        &self,
-        cube_id: &str,
-        req: AvatarGenerateRequest,
-    ) -> Result<AvatarGenerateData, CoincubeError> {
-        let slow_client = Self::client_builder(
-            &self.base_url,
-            &self.identity_headers,
-            self.token(),
-            Duration::from_secs(120),
-        )?
-        .build()
-        .map_err(CoincubeError::Network)?;
-
-        let url = format!(
-            "{}/api/v1/connect/cubes/{}/avatar/generate",
-            self.base_url, cube_id
-        );
-        let res = slow_client.post(&url).json(&req).send().await?;
-        let res = res.check_success().await?;
-        let resp: ApiResponse<AvatarGenerateData> = res.json().await?;
-        Ok(resp.data)
-    }
-
-    /// POST /api/v1/connect/cubes/{cubeId}/avatar/select
-    pub async fn post_avatar_select(
-        &self,
-        cube_id: &str,
-        req: AvatarSelectRequest,
-    ) -> Result<AvatarSelectData, CoincubeError> {
-        let url = format!(
-            "{}/api/v1/connect/cubes/{}/avatar/select",
-            self.base_url, cube_id
-        );
-        let res = self.client.post(&url).json(&req).send().await?;
-        let res = res.check_success().await?;
-        let resp: ApiResponse<AvatarSelectData> = res.json().await?;
-        Ok(resp.data)
-    }
-
-    /// GET /api/v1/connect/cubes/{cubeId}/avatar/regenerations
-    pub async fn get_avatar_regenerations(
-        &self,
-        cube_id: &str,
-    ) -> Result<RegenerationData, CoincubeError> {
-        let url = format!(
-            "{}/api/v1/connect/cubes/{}/avatar/regenerations",
-            self.base_url, cube_id
-        );
-        let res = self.client.get(&url).send().await?;
-        let res = res.check_success().await?;
-        let resp: ApiResponse<RegenerationData> = res.json().await?;
-        Ok(resp.data)
-    }
-
-    /// GET /api/v1/connect/avatar/public/{lightning_address} (public, no cube scope)
-    pub async fn get_public_avatar(
-        &self,
-        lightning_address: &str,
-    ) -> Result<PublicAvatarData, CoincubeError> {
-        let url = format!(
-            "{}/api/v1/connect/avatar/public/{}",
-            self.base_url, lightning_address
-        );
-        let res = self.client.get(&url).send().await?;
-        let res = res.check_success().await?;
-        let resp: ApiResponse<PublicAvatarData> = res.json().await?;
-        Ok(resp.data)
-    }
-
-    /// GET /api/v1/connect/avatar/image/{id} (public, no cube scope)
-    pub async fn fetch_avatar_image(&self, variant_id: u64) -> Result<Vec<u8>, CoincubeError> {
-        let url = format!(
-            "{}/api/v1/connect/avatar/image/{}",
-            self.base_url, variant_id
-        );
-        let res = self.client.get(&url).send().await?;
-        let res = res.check_success().await?;
-        Ok(res.bytes().await.map_err(CoincubeError::Network)?.to_vec())
     }
 }
 
@@ -4354,6 +4262,7 @@ impl CoincubeClient {
 #[cfg(test)]
 mod transport_identity_tests {
     use super::*;
+    use crate::services::coincube::AvatarGenerateRequest;
     use httpmock::{Method as MockMethod, MockServer};
 
     fn identity() -> reqwest::header::HeaderMap {
