@@ -105,6 +105,54 @@ fn untouched(listener: &TcpListener) -> bool {
     matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
 }
 
+fn serve_split_step1_case(listener: TcpListener, tx: bitcoin::Transaction, case: usize) {
+    let address = listener.local_addr().unwrap();
+    let mut stream =
+        super::tests::accept_transport_request(&listener, "connect fixture accept failed");
+    stream.set_nonblocking(false).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let headers = super::tests::read_transport_headers(&mut stream);
+    let length = super::tests::transport_content_length(&headers);
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).unwrap();
+    assert!(headers.starts_with("POST /api/v1/esplora/bitcoin/mainnet/tx HTTP/1.1\r\n"));
+    assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+    assert_eq!(
+        body,
+        bitcoin::consensus::encode::serialize_hex(&tx).as_bytes()
+    );
+    let status = match case {
+        1 => "401 Unauthorized",
+        2 => "307 Temporary Redirect",
+        _ => "200 OK",
+    };
+    let answer = match case {
+        3 => Txid::all_zeros().to_string(),
+        4 => "not a transaction id".into(),
+        _ => tx.compute_txid().to_string(),
+    };
+    write!(
+                stream,
+                "HTTP/1.1 {}\r\nContent-Length: {}\r\nLocation: http://{}/redirected\r\nConnection: close\r\n\r\n{}",
+                status,
+                answer.len(),
+                address,
+                answer
+            )
+            .unwrap();
+    drop(stream);
+    let deadline = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < deadline {
+        assert!(
+            untouched(&listener),
+            "sender retried or followed a redirect"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// (e) One attempt with exactly the verified witness bytes, no daemon and no
 /// credentials. A gate is consumed by that attempt: a second call is
 /// `AlreadyStarted` and never reaches the socket. Any response other than the
@@ -117,77 +165,7 @@ fn split_step1_connect_transport_sends_exact_bytes_once_without_a_daemon() {
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
         let tx = verified.transaction().clone();
-        let worker = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(e)
-                        if e.kind() == std::io::ErrorKind::WouldBlock
-                            && Instant::now() < deadline =>
-                    {
-                        std::thread::sleep(Duration::from_millis(5))
-                    }
-                    other => panic!("connect fixture accept failed: {:?}", other),
-                }
-            };
-            stream.set_nonblocking(false).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut headers = Vec::new();
-            let mut byte = [0];
-            while !headers.ends_with(b"\r\n\r\n") {
-                stream.read_exact(&mut byte).unwrap();
-                headers.push(byte[0]);
-                assert!(headers.len() < 8192);
-            }
-            let headers = String::from_utf8(headers).unwrap();
-            let length: usize = headers
-                .lines()
-                .find_map(|line| {
-                    let (key, value) = line.split_once(':')?;
-                    key.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse().unwrap())
-                })
-                .unwrap();
-            let mut body = vec![0; length];
-            stream.read_exact(&mut body).unwrap();
-            assert!(headers.starts_with("POST /api/v1/esplora/bitcoin/mainnet/tx HTTP/1.1\r\n"));
-            assert!(!headers.to_ascii_lowercase().contains("authorization:"));
-            assert_eq!(
-                body,
-                bitcoin::consensus::encode::serialize_hex(&tx).as_bytes()
-            );
-            let status = match case {
-                1 => "401 Unauthorized",
-                2 => "307 Temporary Redirect",
-                _ => "200 OK",
-            };
-            let answer = match case {
-                3 => Txid::all_zeros().to_string(),
-                4 => "not a transaction id".into(),
-                _ => tx.compute_txid().to_string(),
-            };
-            write!(
-                stream,
-                "HTTP/1.1 {}\r\nContent-Length: {}\r\nLocation: http://{}/redirected\r\nConnection: close\r\n\r\n{}",
-                status,
-                answer.len(),
-                address,
-                answer
-            )
-            .unwrap();
-            drop(stream);
-            let deadline = Instant::now() + Duration::from_millis(200);
-            while Instant::now() < deadline {
-                assert!(
-                    untouched(&listener),
-                    "sender retried or followed a redirect"
-                );
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        });
+        let worker = std::thread::spawn(move || serve_split_step1_case(listener, tx, case));
         let (gate, revoker) = fresh_gate(&verified);
         let origin = format!("http://{}/", address);
         let result = submit_verified_split_step1_to_connect(&verified, &gate, &origin);
