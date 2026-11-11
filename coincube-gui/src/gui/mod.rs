@@ -1422,7 +1422,7 @@ mod fork_auth_dispatch_tests {
             root.clone(),
             bitcoin::Network::Bitcoin,
             None,
-            installer::UserFlow::CreateWallet,
+            installer::UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
             false,
             None,
             None,

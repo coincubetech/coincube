@@ -1,28 +1,37 @@
 # Vault signer derivation and Developer mode
 
-New Vault installers generate a fresh hot signer regardless of Developer mode
-or whether the Cube master is available. Developer mode controls test-network
-visibility; it neither selects the hot key nor changes the stored user setting
-when a Cube signer is unavailable. The Cube master remains the authority for
-Cube-level services, including encrypted Connect envelopes.
+The Cube Key in a new Vault derives from that Cube's master seed using the
+descriptor's normal BIP32 paths. Developer mode controls test-network
+visibility and never selects another mnemonic or changes itself when a master
+is unavailable. Bitcoin, Bitcoin Blake2b and their test networks follow this
+same rule. Mainnet/testnet account paths and xpub encodings remain unchanged;
+Bitcoin Blake2b still uses its existing unified-signature rules.
 
-## Existing Vaults
+For an existing Bitcoin-family Cube, construction requires its authenticated,
+Cube-ID- and fingerprint-scoped master session. An SDK client is not a source
+of Cube identity. Bitcoin Blake2b deliberately keeps its root out of that
+Bitcoin signer cache; its admitted installer reads only the Cube's chain-bound
+encrypted seed with its current scoped PIN. Revoked loaders cannot enter this
+path. Missing or inconsistent identity, credentials or seed material returns an
+error instead of generating an unrelated Vault key. Passkey Cubes use their
+authenticated master session without requiring a PIN.
 
-Older Developer-mode installers could reuse the Cube master as a Vault hot
-key. This fix does not rotate that key, rewrite a descriptor, or migrate any
-seed. Existing encrypted per-Vault files still load by the descriptor's
-fingerprints and Cube credential. The fingerprint-scoped session cache remains
-a valid source for these legacy keys. The passkey Cube guard remains necessary:
-a legacy Vault file bearing the Cube master's fingerprint does not mean the
-Cube has a PIN-protected master seed on disk.
+A fresh standalone Bitcoin Blake2b Cube generates its single Cube master and
+requires its existing seed backup step. Ordinary Bitcoin Vault creation needs
+an existing unlocked Cube. Claim and recovery flows keep their explicit source
+material and existing admission checks.
 
-## Border Wallet grid phrases
+## Recovery and existing Vaults
 
-BIP-85 provenance continues to name the exact source fingerprint. New Vaults
-derive from their independent installer signer; old records can still name the
-Cube master. Signing first checks the loaded hot signer and then the scoped
-Cube session, without substituting another seed. As in ordinary non-Developer
-creation before this fix, an installer signer not included in the descriptor is
-not automatically persisted. If that source is absent, the user reconstructs
-from the saved grid phrase, pattern and checksum required by the wizard.
-This change adds no seed persistence or new secret-export path.
+A Cube master backup and the Vault descriptor reproduce newly created Cube
+Keys. Recovery Kits keep their existing one-master-seed format; this change adds
+no seed slot, remote secret payload or key migration. External hardware,
+Keychain and separately imported keys retain their own recovery requirements.
+
+Existing descriptors, encrypted Vault seed files and keys are not rewritten.
+Historical Developer-mode Vaults that used the Cube master remain recoverable
+from it. Historical independently generated Vault keys still require their
+original seed backup or encrypted seed file; the Cube master cannot recreate an
+unrelated historical seed. Loading continues to match the recorded fingerprint.
+The passkey no-PIN classification guard and exact-source BIP85 provenance guard
+remain necessary and unchanged.

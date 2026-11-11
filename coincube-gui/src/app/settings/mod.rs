@@ -1554,8 +1554,8 @@ pub enum GridSeedSource {
     /// BIP-85 from the signer with this **BIP-32 master fingerprint**.
     ///
     /// The fingerprint is the point. The installer derives the grid seed from
-    /// the independently generated installer signer (the Cube master for
-    /// legacy Developer-mode Vaults). That signer is not
+    /// whichever signer that session holds — the Cube's master seed in
+    /// developer mode, a freshly generated one otherwise — and neither is
     /// guaranteed to be the hot signer a later `Wallet` load turns up.
     /// `Wallet::signer` is "some descriptor key whose seed is on this machine",
     /// which can be a *different* seed entirely (a key reused from an earlier

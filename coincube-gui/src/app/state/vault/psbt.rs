@@ -1961,11 +1961,9 @@ impl SignModal {
     ///   on this machine". A Vault that reuses an earlier Vault's key can load a
     ///   seed that is *not* the one the wizard derived from, and BIP-85 off it
     ///   yields twelve confident, wrong words.
-    /// - **No words.** Legacy Developer-mode Vaults derived from the Cube's
-    ///   master seed, which need not be a descriptor key. `Wallet::signer` can
-    ///   be `None` while that exact source remains unlocked in the session.
-    ///   A new Vault uses its independent installer signer; if that source
-    ///   was not retained, the user supplies the saved grid phrase instead.
+    /// - **No words.** The wizard derives from the Cube's master seed,
+    ///   which need not be a descriptor key. `Wallet::signer` can be `None`
+    ///   while the exact source remains unlocked in the Cube session.
     ///
     /// Naming the seed at enrolment settles both: derive from *that*
     /// fingerprint, looking first at the loaded hot signer and then at the
@@ -1996,7 +1994,7 @@ impl SignModal {
     ///
     /// Two places it can be: loaded as the Vault's hot signer, or — for a
     /// master seed that is not a descriptor key, which is the passkey and
-    /// legacy Developer-mode shape — unlocked in the session. The session lookup is
+    /// Cube-master shape — unlocked in the session. The session lookup is
     /// fingerprint-checked by [`crate::app::session::unlocked_signer`] and
     /// scoped to the open Cube, so it cannot answer with another seed.
     fn grid_phrase_from_seed(&self, seed: Fingerprint) -> Option<GridRecoveryPhrase> {
@@ -3707,7 +3705,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_grid_source_uses_only_its_recorded_cube_session_seed() {
+    fn a_grid_source_uses_only_its_recorded_cube_session_seed() {
         use crate::app::{session, settings::GridSeedSource};
         use coincube_core::{miniscript::bitcoin, signer::MasterSigner};
         let _guard = session::test_guard();
@@ -3718,8 +3716,8 @@ mod tests {
         let source_fp = source.fingerprint(&secp);
         let expected = GridRecoveryPhrase::from_master_signer(&source, &secp).unwrap();
         let border_key = fingerprint("f714c228");
-        // A newly independent Vault hot key must never replace the recorded
-        // legacy Cube master as the grid's BIP-85 source.
+        // An unrelated imported/historical hot key must never replace the
+        // recorded Cube master as the grid's BIP-85 source.
         let hot = crate::signer::Signer::generate(Network::Signet).unwrap();
         let mut wallet = wallet().with_signer(hot);
         wallet.border_wallet_grid_seed.insert(

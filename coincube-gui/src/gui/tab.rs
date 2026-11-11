@@ -1337,8 +1337,8 @@ impl Tab {
                     command.map(Message::Launch)
                 }
                 login::Message::Install(remote_backend) => {
-                    // Bitcoin family only and no Cube here, so the gate cannot
-                    // refuse; the arm still reports rather than unwraps.
+                    // Legacy login has no Cube master. The constructor refuses
+                    // creation until a Cube is created/unlocked; show that error.
                     match Installer::new(
                         l.datadir.clone(),
                         l.network,
@@ -1355,10 +1355,11 @@ impl Tab {
                             self.state = State::Installer(Box::new(install));
                             command.map(Message::Install)
                         }
-                        Err(error) => {
-                            error!("Installer refused from login: {}", error);
-                            Task::none()
-                        }
+                        Err(error) => l
+                            .update(login::Message::Run(Err(login::Error::Unexpected(
+                                error.to_string(),
+                            ))))
+                            .map(Message::Login),
                     }
                 }
                 login::Message::Run(Ok((backend_client, wallet, coins))) => {
@@ -2044,6 +2045,14 @@ impl Tab {
                     command.map(Message::Launch)
                 }
                 loader::Message::View(loader::ViewMessage::SetupVault) => {
+                    // A cached PIN outlives Loader auth revocation. Refuse the
+                    // stale intent before the installer can read the fork seed.
+                    if loader.cube_settings.network.is_blake2b() && loader.fork_revoked() {
+                        loader.fail(loader::Error::Unexpected(
+                            "Connect session changed; reopen this Cube".into(),
+                        ));
+                        return Task::none();
+                    }
                     if loader.cube_settings.bitcoin_import.is_some() {
                         loader.fail(loader::Error::Unexpected(
                             "This Cube is reserved for an imported Bitcoin wallet. Resume its import from the Cube overview."
@@ -6151,6 +6160,48 @@ mod unlock_routing_tests {
     }
 
     #[test]
+    fn revoked_fork_loader_cannot_create_a_vault_with_a_leftover_session_pin() {
+        use crate::dir::CoincubeDirectory;
+        use coincube_core::miniscript::bitcoin;
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("revoked-installer-761-{}", uuid::Uuid::new_v4()));
+        let master = crate::signer::Signer::generate(bitcoin::Network::Bitcoin).unwrap();
+        master
+            .store_encrypted_seed_only_for_chain(
+                &CoincubeDirectory::new(root.clone()),
+                crate::chain::ChainId::BitcoinBlake2b,
+                "2468",
+                "split-loader",
+                None,
+            )
+            .unwrap();
+        crate::app::session::open("split-loader", zeroize::Zeroizing::new("2468".into()));
+        let mut tab = super::Tab::new(1, blake2b_error_loader());
+        let State::Loader(loader) = &mut tab.state else {
+            unreachable!()
+        };
+        loader.datadir_path = CoincubeDirectory::new(root.clone());
+        loader.cube_settings.master_signer_fingerprint = Some(master.fingerprint());
+        loader.invalidate_fork_session();
+        // Even a stale auth completion must not reopen this revoked generation.
+        let mut client = crate::services::coincube::CoincubeClient::new();
+        client.set_token("synthetic-stale-token");
+        loader.connect_client = Some(client);
+        assert!(crate::app::session::pin_for("split-loader").is_some());
+        drop(
+            tab.update(super::Message::Load(crate::loader::Message::View(
+                crate::loader::ViewMessage::SetupVault,
+            ))),
+        );
+        let State::Loader(loader) = &tab.state else {
+            panic!("a revoked Loader must never release a root to an installer");
+        };
+        assert!(loader.fork_revoked());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn global_beta_off_invalidates_a_fork_loader_and_rejects_late_results() {
         let _guard = crate::app::session::test_guard();
         let root_path =
@@ -6308,7 +6359,7 @@ mod fork_completion_tests {
             root,
             bitcoin::Network::Bitcoin,
             None,
-            installer::UserFlow::CreateWallet,
+            installer::UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
             false,
             None,
             None,
@@ -6347,7 +6398,7 @@ mod fork_completion_tests {
                 root,
                 bitcoin::Network::Bitcoin,
                 None,
-                installer::UserFlow::CreateWallet,
+                installer::UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
                 false,
                 None,
                 None,
@@ -6421,7 +6472,7 @@ mod fork_completion_tests {
                 root,
                 bitcoin::Network::Bitcoin,
                 None,
-                installer::UserFlow::CreateWallet,
+                installer::UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
                 true,
                 None,
                 None,
@@ -6613,7 +6664,7 @@ mod fork_completion_tests {
             root.clone(),
             bitcoin::Network::Bitcoin,
             None,
-            installer::UserFlow::CreateWallet,
+            installer::UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
             false,
             None,
             None,

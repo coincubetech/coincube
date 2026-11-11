@@ -520,11 +520,11 @@ impl Installer {
                 None,
                 developer_mode,
                 coincube_client,
-            );
+            )?;
             installer.source_cube = Some(source);
             return Ok((installer, task));
         }
-        Ok(Self::build_for_chain(
+        Self::build_for_chain(
             destination_path,
             chain,
             remote_backend,
@@ -535,7 +535,7 @@ impl Installer {
             spark_backend,
             developer_mode,
             coincube_client,
-        ))
+        )
     }
 
     /// Bitcoin-family compatibility wrapper over [`Self::try_new_for_chain`].
@@ -581,12 +581,18 @@ impl Installer {
         spark_backend: Option<std::sync::Arc<crate::app::wallets::SparkBackend>>,
         developer_mode: bool,
         coincube_client: Option<crate::services::coincube::CoincubeClient>,
-    ) -> (Installer, Task<Message>) {
+    ) -> Result<(Installer, Task<Message>), Error> {
         let network = chain.bitcoin_network();
-        // Developer mode controls network visibility, never key identity. The
-        // Cube master remains available for Cube services, but every new Vault
-        // starts with its own independently generated hot signer.
-        let signer = Arc::new(Mutex::new(Signer::generate(network).unwrap()));
+        // Cube Key uses the Cube master and the descriptor's ordinary BIP32
+        // paths. Developer mode changes visibility, never the signing seed.
+        let master =
+            installer_master(&destination_path, chain, &user_flow, cube_settings.as_ref())?;
+        let cube_encryption_key = matches!(user_flow, UserFlow::CreateWallet).then(|| {
+            Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+                &master, network,
+            ))
+        });
+        let signer = Arc::new(Mutex::new(Signer::new(master)));
         let mut context = Context::new_for_chain(
             chain,
             destination_path.clone(),
@@ -689,18 +695,22 @@ impl Installer {
             .and_then(crate::app::session::seed_file_password);
         // Connect blinding (PR D3): the Vault builder opens Contacts' xpub
         // envelopes with the Cube's seed-derived encryption key. The master
-        // signer behind the Breez client is that seed, already unlocked — same
-        // source `App` uses for `Cache::cube_encryption_key`.
-        context.cube_encryption_key = breez_client
-            .as_ref()
-            .and_then(|bc| bc.liquid_signer())
-            .and_then(|arc| {
-                arc.lock().ok().map(|s| {
-                    std::sync::Arc::new(
-                        crate::services::connect::crypto::CubeEncryptionKey::derive(&s, network),
-                    )
+        // source for a new Vault is the same verified Cube master as the hot
+        // signer. Import/restore flows retain their existing SDK fallback.
+        context.cube_encryption_key = cube_encryption_key.or_else(|| {
+            breez_client
+                .as_ref()
+                .and_then(|bc| bc.liquid_signer())
+                .and_then(|arc| {
+                    arc.lock().ok().map(|s| {
+                        std::sync::Arc::new(
+                            crate::services::connect::crypto::CubeEncryptionKey::derive(
+                                &s, network,
+                            ),
+                        )
+                    })
                 })
-            });
+        });
         let context = context;
 
         let mut installer = Installer {
@@ -966,7 +976,7 @@ impl Installer {
             .expect("There is always a step");
         current_step.load_context(&installer.context);
         let command = current_step.load();
-        (installer, command)
+        Ok((installer, command))
     }
 
     pub fn destination_path(&self) -> CoincubeDirectory {
@@ -1553,9 +1563,8 @@ async fn install_local_wallet_with_seed_mode(
             .to_string()
             .contains(&signer.lock().unwrap().fingerprint().to_string())
     }) {
-        // Persist the independent Vault signer with the Cube's credential.
-        // Older Developer-mode Vaults reused the Cube master; their existing
-        // encrypted files remain readable through the same fingerprint lookup.
+        // Persist the Cube-derived Vault signer under the Cube credential.
+        // Historical independent Vault seeds still load by their own fingerprint.
         let password = seed_password(&ctx)?;
         let already_verified = match seed_mode {
             SeedWriteMode::Create => false,
@@ -2269,6 +2278,9 @@ fn validate_installer_entry(
         return Err(Error::Unexpected(reason.to_string()));
     }
     if (matches!(user_flow, UserFlow::ClaimBlake2b { .. })
+        || (chain.is_blake2b()
+            && cube_settings.is_some()
+            && matches!(user_flow, UserFlow::CreateWallet))
         || (chain.is_blake2b() && is_fork_restore_flow(user_flow)))
         && coincube_client.and_then(|c| c.token()).is_none()
     {
@@ -2303,6 +2315,58 @@ fn validate_installer_entry(
         ));
     }
     Ok(())
+}
+
+/// Select the existing Cube's authenticated master, never an SDK client's
+/// unscoped signer. Only a fresh fork Cube mints its own master here; import
+/// and restore flows replace their placeholder with explicitly recovered keys.
+fn installer_master(
+    datadir: &CoincubeDirectory,
+    chain: crate::chain::ChainId,
+    flow: &UserFlow,
+    cube: Option<&crate::app::settings::CubeSettings>,
+) -> Result<coincube_core::signer::MasterSigner, Error> {
+    use coincube_core::signer::MasterSigner;
+    let unavailable =
+        || Error::Unexpected("Unlock this Cube again before creating its Vault".into());
+    let mut master = if matches!(flow, UserFlow::CreateWallet) {
+        if let Some(cube) = cube {
+            if cube.id.is_empty() {
+                return Err(unavailable());
+            }
+            let fp = cube.master_signer_fingerprint.ok_or_else(unavailable)?;
+            let signer = if chain.is_blake2b() {
+                // Fork unlock deliberately never parks its root in the Bitcoin
+                // signer cache. Read only this admitted Cube's chain-bound file
+                // with its current session credential instead.
+                let pin = crate::app::session::pin_for(&cube.id).ok_or_else(unavailable)?;
+                crate::services::unlock::open_seed_by_fingerprint(
+                    datadir.path(),
+                    chain,
+                    fp,
+                    &pin,
+                    &cube.id,
+                )
+                .map_err(|_| unavailable())?
+            } else {
+                crate::app::session::unlocked_signer(&cube.id, fp).ok_or_else(unavailable)?
+            };
+            if signer.fingerprint(&bitcoin::secp256k1::Secp256k1::new()) != fp {
+                return Err(unavailable());
+            }
+            signer
+        } else if chain.is_blake2b() {
+            MasterSigner::generate(chain.bitcoin_network()).map_err(|_| unavailable())?
+        } else {
+            return Err(Error::Unexpected(
+                "Create or unlock a Cube before creating its Vault".into(),
+            ));
+        }
+    } else {
+        MasterSigner::generate(chain.bitcoin_network()).map_err(|_| unavailable())?
+    };
+    master.set_network(chain.bitcoin_network());
+    Ok(master)
 }
 
 impl Installer {
@@ -2484,78 +2548,428 @@ fn persist_recovered_seed_only(ctx: Context) -> Result<(), Error> {
 }
 
 #[cfg(test)]
-mod signer_isolation_tests {
+mod cube_signer_tests {
     use super::*;
     use crate::app::{breez_liquid::BreezClient, settings::CubeSettings};
     use coincube_core::signer::MasterSigner;
 
     #[test]
-    fn new_vault_signers_are_independent_of_the_cube_in_every_developer_mode() {
+    fn vault_keys_come_from_the_cube_master_on_every_chain_and_in_every_mode() {
+        let _guard = crate::app::session::test_guard();
         let secp = bitcoin::secp256k1::Secp256k1::new();
+        // One synthetic primary seed can reproduce keys with every supported
+        // chain's encoding; selecting test networks never mints another seed.
+        let master = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let master_fp = master.fingerprint(&secp);
         for chain in [
             crate::chain::ChainId::Bitcoin,
             crate::chain::ChainId::Testnet4,
             crate::chain::ChainId::Signet,
             crate::chain::ChainId::Regtest,
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
         ] {
             let network = chain.bitcoin_network();
-            let master = Arc::new(Mutex::new(MasterSigner::generate(network).unwrap()));
-            let master_fp = master.lock().unwrap().fingerprint(&secp);
-            let master_xpub = master
-                .lock()
-                .unwrap()
-                .xpub_at(&bitcoin::bip32::DerivationPath::master(), &secp);
-            let client = Arc::new(BreezClient::disconnected_with_signer(network, master));
-            let mut previous = None;
-            for developer_mode in [false, true, true] {
-                let root =
-                    std::env::temp_dir().join(format!("signer-761-{}", uuid::Uuid::new_v4()));
-                let (installer, _) = Installer::build_for_chain(
+            let cube = CubeSettings::new("synthetic".into(), chain).with_master_signer(master_fp);
+            let root = std::env::temp_dir().join(format!("signer-761-{}", uuid::Uuid::new_v4()));
+            crate::app::session::close();
+            if chain.is_blake2b() {
+                // Real fork unlock retains only its PIN in the legacy cache.
+                Signer::new(master.try_clone().unwrap())
+                    .store_encrypted_seed_only_for_chain(
+                        &CoincubeDirectory::new(root.clone()),
+                        chain,
+                        "2468",
+                        &cube.id,
+                        None,
+                    )
+                    .unwrap();
+            } else {
+                crate::app::session::store_unlocked_signer(
+                    &cube.id,
+                    master_fp,
+                    master.try_clone().unwrap(),
+                );
+            }
+            crate::app::session::open(&cube.id, zeroize::Zeroizing::new("2468".into()));
+            let mut expected = master.try_clone().unwrap();
+            expected.set_network(network);
+            let account_path = step::descriptor::editor::key::derivation_path(
+                network,
+                bitcoin::bip32::ChildNumber::from_hardened_idx(0).unwrap(),
+            );
+            for developer_mode in [false, true, false] {
+                let mut client = crate::services::coincube::CoincubeClient::new();
+                client.set_token("synthetic-installer-token");
+                let (installer, _) = Installer::try_new_for_chain(
                     CoincubeDirectory::new(root.clone()),
                     chain,
                     None,
                     UserFlow::CreateWallet,
                     true,
-                    Some(CubeSettings::new("synthetic".into(), chain)),
-                    Some(client.clone()),
+                    Some(cube.clone()),
+                    None, // BTCB2 has no SDK client; the session is the source.
                     None,
                     developer_mode,
-                    None,
-                );
+                    Some(client),
+                )
+                .unwrap();
                 let signer = installer.signer.lock().unwrap();
-                assert_ne!(signer.fingerprint(), master_fp, "{:?}", chain);
-                let xpub = signer.get_extended_pubkey(&bitcoin::bip32::DerivationPath::master());
-                assert_ne!(xpub, master_xpub);
-                assert_ne!(Some(xpub), previous, "each Vault gets a fresh seed");
-                previous = Some(xpub);
+                assert_eq!(signer.fingerprint(), master_fp, "{:?}", chain);
+                assert_eq!(
+                    signer.get_extended_pubkey(&account_path),
+                    expected.xpub_at(&account_path, &secp),
+                    "the complete account xpub, including its network encoding, must match"
+                );
                 assert_eq!(installer.developer_mode, developer_mode);
-                assert!(!root.exists(), "constructing an installer writes no seed");
+                assert_eq!(
+                    root.exists(),
+                    chain.is_blake2b(),
+                    "only fixture setup writes a seed"
+                );
+                assert_eq!(
+                    installer
+                        .context
+                        .cube_encryption_key
+                        .as_ref()
+                        .unwrap()
+                        .public_key(),
+                    crate::services::connect::crypto::CubeEncryptionKey::derive(&expected, network)
+                        .public_key()
+                );
+            }
+            if root.exists() {
+                std::fs::remove_dir_all(root).unwrap();
             }
         }
     }
 
     #[test]
-    fn missing_cube_master_does_not_disable_developer_mode() {
+    fn an_existing_cube_without_its_scoped_master_is_refused_without_a_random_fallback() {
+        let _guard = crate::app::session::test_guard();
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let master = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let fp = master.fingerprint(&secp);
         for chain in [
             crate::chain::ChainId::Bitcoin,
             crate::chain::ChainId::BitcoinBlake2b,
             crate::chain::ChainId::BitcoinBlake2bTestnet4,
         ] {
-            let root = std::env::temp_dir().join(format!("signer-761-{}", uuid::Uuid::new_v4()));
-            let (installer, _) = Installer::build_for_chain(
+            for developer_mode in [false, true] {
+                for missing in [
+                    "fingerprint",
+                    "session",
+                    "wrong-cube",
+                    "wrong-fingerprint",
+                    "wrong-seed",
+                ] {
+                    crate::app::session::close();
+                    let mut cube =
+                        CubeSettings::new("synthetic".into(), chain).with_master_signer(fp);
+                    if missing == "fingerprint" {
+                        cube.master_signer_fingerprint = None;
+                    }
+                    if missing != "session" {
+                        let session_cube = if missing == "wrong-cube" {
+                            "another-cube"
+                        } else {
+                            &cube.id
+                        };
+                        let session_fp = if missing == "wrong-fingerprint" {
+                            bitcoin::bip32::Fingerprint::from([0; 4])
+                        } else {
+                            fp
+                        };
+                        let seed = if missing == "wrong-seed" {
+                            MasterSigner::generate(Network::Bitcoin).unwrap()
+                        } else {
+                            master.try_clone().unwrap()
+                        };
+                        crate::app::session::store_unlocked_signer(session_cube, session_fp, seed);
+                    }
+                    let root =
+                        std::env::temp_dir().join(format!("signer-761-{}", uuid::Uuid::new_v4()));
+                    // An SDK handle, even carrying the expected key, cannot supply
+                    // principal/session binding for a locked or different Cube.
+                    let client = Arc::new(BreezClient::disconnected_with_signer(
+                        chain.bitcoin_network(),
+                        Arc::new(Mutex::new(master.try_clone().unwrap())),
+                    ));
+                    let mut connect = crate::services::coincube::CoincubeClient::new();
+                    connect.set_token("synthetic-installer-token");
+                    let result = Installer::try_new_for_chain(
+                        CoincubeDirectory::new(root.clone()),
+                        chain,
+                        None,
+                        UserFlow::CreateWallet,
+                        true,
+                        Some(cube),
+                        Some(client),
+                        None,
+                        developer_mode,
+                        Some(connect),
+                    );
+                    assert!(
+                        matches!(result, Err(Error::Unexpected(ref message)) if message.contains("Unlock this Cube")),
+                        "{:?}: {}",
+                        chain,
+                        missing
+                    );
+                    assert!(!root.exists());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_passkey_cube_uses_its_authenticated_master_without_a_pin_or_sdk() {
+        let _guard = crate::app::session::test_guard();
+        let master = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let fp = master.fingerprint(&bitcoin::secp256k1::Secp256k1::new());
+        let cube = CubeSettings::new("synthetic".into(), crate::chain::ChainId::Bitcoin)
+            .with_master_signer(fp)
+            .with_passkey(crate::app::settings::PasskeyMetadata {
+                credential_id: "synthetic".into(),
+                rp_id: "coincube.io".into(),
+                created_at: 0,
+                label: None,
+            });
+        crate::app::session::store_unlocked_signer(&cube.id, fp, master);
+        assert!(crate::app::session::pin_for(&cube.id).is_none());
+        for developer_mode in [false, true] {
+            let (installer, _) = Installer::new(
+                CoincubeDirectory::new(std::path::PathBuf::from("/nonexistent")),
+                Network::Bitcoin,
+                None,
+                UserFlow::CreateWallet,
+                true,
+                Some(cube.clone()),
+                None,
+                None,
+                developer_mode,
+                None,
+            )
+            .unwrap();
+            assert_eq!(installer.signer.lock().unwrap().fingerprint(), fp);
+            assert!(installer.context.passkey_seed_password.is_some());
+            assert!(installer.context.cube_pin.is_none());
+            assert_eq!(installer.developer_mode, developer_mode);
+        }
+    }
+
+    #[test]
+    fn creating_a_bitcoin_vault_without_a_cube_requires_creating_or_unlocking_one() {
+        for network in [
+            Network::Bitcoin,
+            Network::Testnet4,
+            Network::Signet,
+            Network::Regtest,
+        ] {
+            for developer_mode in [false, true] {
+                let result = Installer::new(
+                    CoincubeDirectory::new(std::path::PathBuf::from("/nonexistent")),
+                    network,
+                    None,
+                    UserFlow::CreateWallet,
+                    false,
+                    None,
+                    None,
+                    None,
+                    developer_mode,
+                    None,
+                );
+                assert!(
+                    matches!(result, Err(Error::Unexpected(ref e)) if e.contains("Create or unlock a Cube"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cube_master_recovery_kit_restores_the_exact_vault_signing_key_on_every_chain() {
+        use crate::services::recovery::{
+            self, DescriptorBlob, DescriptorBlobCube, DescriptorBlobVault, SeedBlob, SeedBlobCube,
+            SeedBlobMnemonic, BLOB_VERSION,
+        };
+        use coincube_core::{
+            descriptors::{CoincubeDescriptor, CoincubePolicy, PathInfo},
+            miniscript::descriptor::DescriptorPublicKey,
+        };
+        use std::str::FromStr;
+        let _guard = crate::app::session::test_guard();
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let master = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let fp = master.fingerprint(&secp);
+        let backup_template = SeedBlob {
+            version: BLOB_VERSION,
+            cube: SeedBlobCube {
+                uuid: "synthetic".into(),
+                name: "synthetic".into(),
+                network: "mainnet".into(),
+                created_at: "0".into(),
+                lightning_address: None,
+            },
+            mnemonic: SeedBlobMnemonic {
+                phrase: master.words().join(" "),
+                language: "en".into(),
+            },
+        };
+        for chain in [
+            crate::chain::ChainId::Bitcoin,
+            crate::chain::ChainId::Testnet4,
+            crate::chain::ChainId::Signet,
+            crate::chain::ChainId::Regtest,
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let network = chain.bitcoin_network();
+            let mut backup = backup_template.clone();
+            backup.cube.network = chain.api_str().into();
+            // The production encrypted envelope contains one Cube master only.
+            let password = zeroize::Zeroizing::new("synthetic-recovery-password".to_string());
+            let envelope = recovery::encrypt(
+                &serde_json::to_vec(&backup).unwrap(),
+                &password,
+                recovery::KdfParams::DEFAULT_V1,
+            )
+            .unwrap();
+            let recovered: SeedBlob =
+                serde_json::from_slice(&recovery::decrypt(&envelope, &password).unwrap()).unwrap();
+            let root =
+                std::env::temp_dir().join(format!("signer-recovery-761-{}", uuid::Uuid::new_v4()));
+            let cube = CubeSettings::new_with_raw_id("synthetic".into(), "synthetic".into(), chain)
+                .with_master_signer(fp);
+            crate::app::session::close();
+            if chain.is_blake2b() {
+                Signer::new(master.try_clone().unwrap())
+                    .store_encrypted_seed_only_for_chain(
+                        &CoincubeDirectory::new(root.clone()),
+                        chain,
+                        "2468",
+                        &cube.id,
+                        None,
+                    )
+                    .unwrap();
+                crate::app::session::open(&cube.id, zeroize::Zeroizing::new("2468".into()));
+            } else {
+                crate::app::session::store_unlocked_signer(
+                    &cube.id,
+                    fp,
+                    master.try_clone().unwrap(),
+                );
+            }
+            let mut connect = crate::services::coincube::CoincubeClient::new();
+            connect.set_token("synthetic-installer-token");
+            let (installer, _) = Installer::try_new_for_chain(
                 CoincubeDirectory::new(root.clone()),
                 chain,
                 None,
                 UserFlow::CreateWallet,
-                false,
-                None,
-                None,
-                None,
                 true,
+                Some(cube),
                 None,
+                None,
+                false,
+                Some(connect),
+            )
+            .unwrap();
+            let signer = installer.signer.lock().unwrap();
+            let key = |account| {
+                let path = step::descriptor::editor::key::derivation_path(
+                    network,
+                    bitcoin::bip32::ChildNumber::from_hardened_idx(account).unwrap(),
+                );
+                DescriptorPublicKey::from_str(&format!(
+                    "[{}/{}]{}/<0;1>/*",
+                    fp,
+                    path.to_string().trim_start_matches("m/"),
+                    signer.get_extended_pubkey(&path)
+                ))
+                .unwrap()
+            };
+            let descriptor = CoincubeDescriptor::new(
+                CoincubePolicy::new_legacy(
+                    PathInfo::Single(key(0)),
+                    std::iter::once((10, PathInfo::Single(key(1)))).collect(),
+                )
+                .unwrap(),
             );
-            assert!(installer.developer_mode, "{:?}", chain);
-            assert!(!root.exists());
+            let blob = DescriptorBlob {
+                version: BLOB_VERSION,
+                cube: DescriptorBlobCube {
+                    uuid: "synthetic".into(),
+                    network: chain.api_str().into(),
+                },
+                vault: DescriptorBlobVault {
+                    name: "synthetic".into(),
+                    descriptor: descriptor.to_string(),
+                    change_descriptor: None,
+                    signers: vec![],
+                    birthday: Some(1),
+                },
+            };
+            let staged = step::recovery_kit_restore::stage_restore(
+                network,
+                RestoreScope::Full,
+                Some(&recovered),
+                Some(&blob),
+            )
+            .unwrap();
+            let restored = staged.signer.unwrap();
+            let derived = staged
+                .descriptor
+                .unwrap()
+                .receive_descriptor()
+                .derive(7.into(), &secp);
+            let prevout = bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(20_000),
+                script_pubkey: derived.script_pubkey(),
+            };
+            let funding = bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![bitcoin::TxIn::default()],
+                output: vec![prevout.clone()],
+            };
+            let input = bitcoin::TxIn {
+                previous_output: bitcoin::OutPoint {
+                    txid: funding.compute_txid(),
+                    vout: 0,
+                },
+                ..bitcoin::TxIn::default()
+            };
+            let mut psbt = bitcoin::psbt::Psbt::from_unsigned_tx(bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![input],
+                output: vec![bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(19_000),
+                    script_pubkey: bitcoin::ScriptBuf::new(),
+                }],
+            })
+            .unwrap();
+            derived.update_psbt_in(&mut psbt.inputs[0]);
+            psbt.inputs[0].witness_utxo = Some(prevout);
+            psbt.inputs[0].non_witness_utxo = Some(funding);
+            if chain.is_blake2b() {
+                let psbt = coincube_core::psbt_unified::UnifiedPsbt::from_psbt(psbt).unwrap();
+                let expected = signer.sign_psbt_unified(&psbt).unwrap();
+                let signed = restored.sign_psbt_unified(&psbt).unwrap();
+                assert_eq!(signed, expected);
+                assert!(
+                    coincube_core::unified_signing::verify_p2wsh_all_unified(&signed, &secp)
+                        .unwrap()
+                        > 0
+                );
+            } else {
+                let expected = signer.sign_psbt(psbt.clone()).unwrap();
+                let signed = restored.sign_psbt(psbt).unwrap();
+                assert_eq!(signed, expected);
+                assert!(!signed.inputs[0].partial_sigs.is_empty());
+            }
+            if root.exists() {
+                std::fs::remove_dir_all(root).unwrap();
+            }
         }
     }
 
@@ -2688,6 +3102,7 @@ mod pending_rescan_tests {
     /// carrying that Cube. It now goes through the gate and refuses.
     #[test]
     fn the_bitcoin_constructor_refuses_a_cube_on_another_chain() {
+        let _guard = crate::app::session::test_guard();
         let root = std::env::temp_dir().join(format!("cube-chain-{}", uuid::Uuid::new_v4()));
         let build = |cube: crate::app::settings::CubeSettings| {
             Installer::new(
@@ -2718,11 +3133,15 @@ mod pending_rescan_tests {
         );
         // The same constructor still serves a Bitcoin Cube, so the refusal is
         // the chain check and not the constructor refusing every Cube.
-        let (installer, _) = build(crate::app::settings::CubeSettings::new(
+        let master = coincube_core::signer::MasterSigner::generate(Network::Bitcoin).unwrap();
+        let fp = master.fingerprint(&bitcoin::secp256k1::Secp256k1::new());
+        let cube = crate::app::settings::CubeSettings::new(
             "bitcoin".into(),
             crate::chain::ChainId::Bitcoin,
-        ))
-        .expect("a Bitcoin Cube builds a Bitcoin installer");
+        )
+        .with_master_signer(fp);
+        crate::app::session::store_unlocked_signer(&cube.id, fp, master);
+        let (installer, _) = build(cube).expect("a Bitcoin Cube builds a Bitcoin installer");
         assert_eq!(
             installer.context.bitcoin_config.chain,
             crate::chain::ChainId::Bitcoin
@@ -2748,7 +3167,8 @@ mod pending_rescan_tests {
                 None,
                 false,
                 None,
-            );
+            )
+            .unwrap();
             assert_eq!(installer.context.bitcoin_config.chain, chain);
             assert_eq!(installer.context.network, chain.bitcoin_network());
             assert!(installer.context.remote_backend.is_none());
