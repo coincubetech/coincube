@@ -56,6 +56,91 @@ use miniscript::{
 };
 use serde::{Deserialize, Serialize};
 
+fn recorded_transaction_price(
+    values: &HashMap<bitcoin::OutPoint, bitcoin::Amount>,
+    tx: &bitcoin::Transaction,
+) -> Option<(bitcoin::Amount, u64)> {
+    let spent = tx
+        .input
+        .iter()
+        .try_fold(bitcoin::Amount::ZERO, |sum, txin| {
+            sum.checked_add(*values.get(&txin.previous_output)?)
+        })?;
+    let created = tx
+        .output
+        .iter()
+        .try_fold(bitcoin::Amount::ZERO, |sum, txo| sum.checked_add(txo.value))?;
+    let fee = spent.checked_sub(created)?;
+    let vsize: u64 = tx.vsize().try_into().ok()?;
+    (fee <= bitcoin::Amount::MAX_MONEY).then_some((fee, vsize))
+}
+
+// Bound totals by the money supply so adding the replacement relay fee cannot overflow.
+fn capped_replacement_fee(total: bitcoin::Amount, fee: bitcoin::Amount) -> bitcoin::Amount {
+    total
+        .checked_add(fee)
+        .map_or(bitcoin::Amount::MAX_MONEY, |sum| {
+            sum.min(bitcoin::Amount::MAX_MONEY)
+        })
+}
+
+fn recorded_descendant_fees(
+    spending: &HashMap<bitcoin::OutPoint, Coin>,
+    tx_getter: &mut DbTxGetter<'_>,
+    conflicts: Vec<bitcoin::Txid>,
+    txid: &bitcoin::Txid,
+    values: &HashMap<bitcoin::OutPoint, bitcoin::Amount>,
+    mut replaced_fee: bitcoin::Amount,
+) -> bitcoin::Amount {
+    // Our own transactions spending their outputs are evicted along with them, so their fees
+    // count towards what the replacement must pay as well.
+    let mut seen: HashSet<bitcoin::Txid> = conflicts.iter().copied().collect();
+    let mut parents = conflicts;
+    while let Some(parent) = parents.pop() {
+        for child in spending
+            .values()
+            .filter(|coin| coin.outpoint.txid == parent)
+            .filter_map(|coin| coin.spend_txid)
+        {
+            if !seen.insert(child) {
+                continue;
+            }
+            match tx_getter
+                .get_tx(&child)
+                .as_ref()
+                .and_then(|tx| recorded_transaction_price(values, tx))
+            {
+                Some((fee, _)) => replaced_fee = capped_replacement_fee(replaced_fee, fee),
+                None => log::warn!(
+                    "Cannot price {}, which spends from {}: the replacement of {} may pay too \
+                         little to be relayed",
+                    child,
+                    parent,
+                    txid
+                ),
+            }
+            parents.push(child);
+        }
+    }
+
+    replaced_fee
+}
+
+fn retry_cancel_with_all_inputs(
+    is_cancel: bool,
+    candidate_coins: &mut Vec<CandidateCoin>,
+    confirmed_cands: &[CandidateCoin],
+) -> bool {
+    if is_cancel && candidate_coins.iter().all(|c| !c.must_select) {
+        for cand in candidate_coins.iter_mut() {
+            cand.must_select = true;
+        }
+        candidate_coins.extend_from_slice(confirmed_cands);
+        return true;
+    }
+    false
+}
+
 fn merge_imported_partial_signatures(stored: &mut Psbt, psbt: &Psbt) -> Result<(), CommandError> {
     for (old, incoming) in stored.inputs.iter_mut().zip(&psbt.inputs) {
         for (key, signature) in &incoming.partial_sigs {
@@ -831,31 +916,7 @@ impl DaemonControl {
             .map(|coin| (coin.outpoint, coin.amount))
             .collect();
         // Fee and virtual size of a transaction, if it only spends coins we know the value of.
-        let price = |tx: &bitcoin::Transaction| -> Option<(bitcoin::Amount, u64)> {
-            let spent = tx
-                .input
-                .iter()
-                .try_fold(bitcoin::Amount::ZERO, |sum, txin| {
-                    sum.checked_add(*values.get(&txin.previous_output)?)
-                })?;
-            let created = tx
-                .output
-                .iter()
-                .try_fold(bitcoin::Amount::ZERO, |sum, txo| sum.checked_add(txo.value))?;
-            let fee = spent.checked_sub(created)?;
-            let vsize: u64 = tx.vsize().try_into().ok()?;
-            (fee <= bitcoin::Amount::MAX_MONEY).then_some((fee, vsize))
-        };
-        // Kept within the money supply, so that coin selection adding the replacement's own relay
-        // fee to it cannot overflow.
-        let add_fee = |total: bitcoin::Amount, fee: bitcoin::Amount| {
-            total
-                .checked_add(fee)
-                .map_or(bitcoin::Amount::MAX_MONEY, |sum| {
-                    sum.min(bitcoin::Amount::MAX_MONEY)
-                })
-        };
-
+        let price = |tx: &bitcoin::Transaction| recorded_transaction_price(&values, tx);
         let mut conflicts: Vec<bitcoin::Txid> = prev_coins
             .values()
             .filter_map(|coin| coin.spend_txid)
@@ -881,7 +942,7 @@ impl DaemonControl {
                     {
                         min_feerate_vb = std::cmp::max(min_feerate_vb, floor);
                     }
-                    replaced_fee = add_fee(replaced_fee, fee);
+                    replaced_fee = capped_replacement_fee(replaced_fee, fee);
                 }
                 Some(None) => {
                     return Err(CommandError::MempoolUnavailable(format!(
@@ -899,32 +960,8 @@ impl DaemonControl {
             }
         }
 
-        // Our own transactions spending their outputs are evicted along with them, so their fees
-        // count towards what the replacement must pay as well.
-        let mut seen: HashSet<bitcoin::Txid> = conflicts.iter().copied().collect();
-        let mut parents = conflicts;
-        while let Some(parent) = parents.pop() {
-            for child in spending
-                .values()
-                .filter(|coin| coin.outpoint.txid == parent)
-                .filter_map(|coin| coin.spend_txid)
-            {
-                if !seen.insert(child) {
-                    continue;
-                }
-                match tx_getter.get_tx(&child).as_ref().and_then(&price) {
-                    Some((fee, _)) => replaced_fee = add_fee(replaced_fee, fee),
-                    None => log::warn!(
-                        "Cannot price {}, which spends from {}: the replacement of {} may pay too \
-                         little to be relayed",
-                        child,
-                        parent,
-                        txid
-                    ),
-                }
-                parents.push(child);
-            }
-        }
+        replaced_fee =
+            recorded_descendant_fees(&spending, tx_getter, conflicts, txid, &values, replaced_fee);
 
         log::info!(
             "Backend cannot see the mempool: the replacement of {} must pay at least {} sat/vb \
@@ -2026,6 +2063,44 @@ impl DaemonControl {
         (candidate_coins, confirmed_cands)
     }
 
+    fn replacement_target_feerate(
+        is_cancel: bool,
+        feerate_vb: Option<u64>,
+        min_feerate_vb: u64,
+    ) -> Result<u64, CommandError> {
+        let feerate_vb = if is_cancel {
+            min_feerate_vb
+        } else {
+            feerate_vb.ok_or(CommandError::RbfError(RbfErrorInfo::MissingFeerate))?
+        };
+        if feerate_vb < min_feerate_vb {
+            return Err(CommandError::RbfError(RbfErrorInfo::TooLowFeerate(
+                feerate_vb,
+                min_feerate_vb,
+            )));
+        }
+        Ok(feerate_vb)
+    }
+
+    fn replacement_transaction(
+        db_conn: &mut Box<dyn DatabaseConnection>,
+        tx_getter: &mut DbTxGetter<'_>,
+        txid: &bitcoin::Txid,
+    ) -> Result<(Option<Psbt>, bitcoin::Transaction), CommandError> {
+        let prev_psbt = db_conn.spend_tx(txid);
+        let prev_tx = if let Some(psbt) = &prev_psbt {
+            psbt.unsigned_tx.clone()
+        } else {
+            db_conn
+                .coins(&[CoinStatus::Spending], &[])
+                .into_values()
+                .find(|c| c.spend_txid == Some(*txid))
+                .and_then(|_| tx_getter.get_tx(txid))
+                .ok_or(CommandError::UnknownSpend(*txid))?
+        };
+        Ok((prev_psbt, prev_tx))
+    }
+
     /// Create PSBT to replace the given transaction using RBF.
     ///
     /// `txid` must either point to a PSBT in our database (not necessarily broadcast) or an
@@ -2062,17 +2137,8 @@ impl DaemonControl {
             return Err(CommandError::RbfError(RbfErrorInfo::SuperfluousFeerate));
         }
 
-        let prev_psbt = db_conn.spend_tx(txid);
-        let prev_tx = if let Some(psbt) = &prev_psbt {
-            psbt.unsigned_tx.clone()
-        } else {
-            db_conn
-                .coins(&[CoinStatus::Spending], &[])
-                .into_values()
-                .find(|c| c.spend_txid == Some(*txid))
-                .and_then(|_| tx_getter.get_tx(txid))
-                .ok_or(CommandError::UnknownSpend(*txid))?
-        };
+        let (prev_psbt, prev_tx) =
+            Self::replacement_transaction(&mut db_conn, &mut tx_getter, txid)?;
         if !prev_tx.is_explicitly_rbf() {
             return Err(CommandError::RbfError(RbfErrorInfo::NotSignaling));
         }
@@ -2098,17 +2164,7 @@ impl DaemonControl {
         )?;
         // Check replacement transaction's target feerate, if set, is high enough,
         // and otherwise set it to the min feerate found above.
-        let feerate_vb = if is_cancel {
-            min_feerate_vb
-        } else {
-            feerate_vb.ok_or(CommandError::RbfError(RbfErrorInfo::MissingFeerate))?
-        };
-        if feerate_vb < min_feerate_vb {
-            return Err(CommandError::RbfError(RbfErrorInfo::TooLowFeerate(
-                feerate_vb,
-                min_feerate_vb,
-            )));
-        }
+        let feerate_vb = Self::replacement_target_feerate(is_cancel, feerate_vb, min_feerate_vb)?;
         // Get info about prev outputs to determine replacement outputs.
         let (prev_change_address, destinations) =
             self.replacement_outputs(&mut db_conn, &prev_tx, is_cancel);
@@ -2176,11 +2232,11 @@ impl DaemonControl {
                     // If we get a coin selection error due to insufficient funds and we want to cancel the
                     // transaction, then set all previous coins as mandatory and add confirmed coins as
                     // optional, unless we have already done this.
-                    if is_cancel && candidate_coins.iter().all(|c| !c.must_select) {
-                        for cand in candidate_coins.iter_mut() {
-                            cand.must_select = true;
-                        }
-                        candidate_coins.extend(&confirmed_cands);
+                    if retry_cancel_with_all_inputs(
+                        is_cancel,
+                        &mut candidate_coins,
+                        &confirmed_cands,
+                    ) {
                         continue;
                     } else {
                         return Ok(CreateSpendResult::InsufficientFunds { missing: e.missing });

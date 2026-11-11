@@ -1323,6 +1323,50 @@ impl DaemonHandle {
         Ok(())
     }
 
+    fn prepare_startup_directory(
+        config: &Config,
+        data_dir: &DataDirectory,
+    ) -> Result<bool, StartupError> {
+        let fresh_data_dir = !data_dir.exists() || !data_dir.sqlite_db_file_path().exists();
+        if !fresh_data_dir {
+            preflight_existing_database(config, &data_dir.sqlite_db_file_path())?;
+        } else if data_dir.exists() {
+            // A directory without a database is only "fresh" if nothing of a database is left
+            // in it: a stray rollback journal or WAL sidecar means one was here.
+            preflight::refuse_orphan_sidecars(&data_dir.sqlite_db_file_path())
+                .map_err(StartupError::DbPreflight)?;
+        }
+        // Retain the historical Vault refusal order (chain admission and
+        // existing-database identity first), while still validating every
+        // caller-built configuration before any startup writes.
+        if config.main_descriptor.as_vault().is_some() {
+            config.check().map_err(StartupError::Config)?;
+        }
+        if !data_dir.exists() {
+            data_dir
+                .init()
+                .map_err(|e| StartupError::DatadirCreation(data_dir.path().to_path_buf(), e))?;
+            log::info!(
+                "Created a new data directory at '{}'",
+                data_dir.path().to_string_lossy()
+            );
+        }
+
+        Ok(fresh_data_dir)
+    }
+
+    fn heal_startup_scan_window(
+        bitcoind: &mut Option<BitcoinD>,
+        db: &sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
+        config: &Config,
+    ) {
+        if let Some(bitcoind) = bitcoind.as_mut() {
+            if let Some(vault) = config.main_descriptor.as_vault() {
+                heal_scan_window(bitcoind, db, vault);
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn start_inner(
         config: Config,
@@ -1372,30 +1416,7 @@ impl DaemonHandle {
         } else {
             None
         };
-        let fresh_data_dir = !data_dir.exists() || !data_dir.sqlite_db_file_path().exists();
-        if !fresh_data_dir {
-            preflight_existing_database(&config, &data_dir.sqlite_db_file_path())?;
-        } else if data_dir.exists() {
-            // A directory without a database is only "fresh" if nothing of a database is left
-            // in it: a stray rollback journal or WAL sidecar means one was here.
-            preflight::refuse_orphan_sidecars(&data_dir.sqlite_db_file_path())
-                .map_err(StartupError::DbPreflight)?;
-        }
-        // Retain the historical Vault refusal order (chain admission and
-        // existing-database identity first), while still validating every
-        // caller-built configuration before any startup writes.
-        if config.main_descriptor.as_vault().is_some() {
-            config.check().map_err(StartupError::Config)?;
-        }
-        if !data_dir.exists() {
-            data_dir
-                .init()
-                .map_err(|e| StartupError::DatadirCreation(data_dir.path().to_path_buf(), e))?;
-            log::info!(
-                "Created a new data directory at '{}'",
-                data_dir.path().to_string_lossy()
-            );
-        }
+        let fresh_data_dir = Self::prepare_startup_directory(&config, &data_dir)?;
 
         // Set up the connection to bitcoind (if using it) first as we may need it for the database
         // migration when setting up SQLite below.
@@ -1428,11 +1449,7 @@ impl DaemonHandle {
 
         // A wallet whose scan window starts after the coins we already know about
         // cannot track them, and nothing else notices — see `heal_scan_window`.
-        if let Some(bitcoind) = bitcoind.as_mut() {
-            if let Some(vault) = config.main_descriptor.as_vault() {
-                heal_scan_window(bitcoind, &db, vault);
-            }
-        }
+        Self::heal_startup_scan_window(&mut bitcoind, &db, &config);
 
         // Shared abort flag: `stop` flips it so an in-flight Esplora scan stops
         // walking the provider chain and returns promptly, instead of the poller

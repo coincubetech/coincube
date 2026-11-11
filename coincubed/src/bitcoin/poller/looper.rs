@@ -458,6 +458,30 @@ fn find_common_ancestor(
     None
 }
 
+fn chain_progress(
+    bit: &impl BitcoinInterface,
+    current_tip: &BlockChainTip,
+    bitcoin_tip: BlockChainTip,
+) -> Option<TipUpdate> {
+    // If the tip didn't change, there is nothing to update.
+    if current_tip == &bitcoin_tip {
+        return Some(TipUpdate::Same);
+    }
+
+    if bitcoin_tip.height > current_tip.height {
+        // Make sure we are on the same chain.
+        if match bit.try_is_in_chain(current_tip) {
+            Ok(in_chain) => in_chain,
+            Err(_) => return Some(TipUpdate::Unavailable),
+        } {
+            // All good, we just moved forward.
+            return Some(TipUpdate::Progress(bitcoin_tip));
+        }
+    }
+
+    None
+}
+
 // Returns the new block chain tip, if it changed.
 fn new_tip(bit: &impl BitcoinInterface, current_tip: &BlockChainTip) -> TipUpdate {
     // A failed common-ancestor lookup used to re-enter this function immediately and without
@@ -469,20 +493,8 @@ fn new_tip(bit: &impl BitcoinInterface, current_tip: &BlockChainTip) -> TipUpdat
             return TipUpdate::Unavailable;
         };
 
-        // If the tip didn't change, there is nothing to update.
-        if current_tip == &bitcoin_tip {
-            return TipUpdate::Same;
-        }
-
-        if bitcoin_tip.height > current_tip.height {
-            // Make sure we are on the same chain.
-            if match bit.try_is_in_chain(current_tip) {
-                Ok(in_chain) => in_chain,
-                Err(_) => return TipUpdate::Unavailable,
-            } {
-                // All good, we just moved forward.
-                return TipUpdate::Progress(bitcoin_tip);
-            }
+        if let Some(update) = chain_progress(bit, current_tip, bitcoin_tip) {
+            return update;
         }
 
         // Either the new height is lower or the same but the block hash differs. There was a
