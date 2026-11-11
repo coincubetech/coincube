@@ -1150,7 +1150,10 @@ impl State for SparkSend {
                 // than an empty box. Clearing on the way out matters as much as
                 // filling in: swapping one invoice for another must not leave
                 // the previous invoice's amount sitting there.
-                let carried = bolt11_amount_sat(&self.destination_input);
+                // Not under US Dollar: the field holds dollars there, and a
+                // Lightning invoice is refused at prepare anyway.
+                let carried = bolt11_amount_sat(&self.destination_input)
+                    .filter(|_| self.receive_target != SparkSendTarget::SparkUsd);
                 if carried.is_some() || self.invoice_amount_sat.is_some() {
                     self.amount_input = carried
                         .map(|sats| format_amount_for_input(sats, cache.bitcoin_unit))
@@ -3155,6 +3158,35 @@ mod tests {
         .expect_err("a Lightning invoice");
         assert!(error.contains("Lightning invoice"), "{}", error);
         assert!(lightning.prepared.lock().unwrap().is_empty());
+    }
+
+    /// Under US Dollar a pasted Lightning invoice neither fills its sats into
+    /// the dollar field nor locks it.
+    #[test]
+    fn a_lightning_invoice_does_not_fill_the_us_dollar_amount() {
+        let mut panel = SparkSend::new(None);
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::SparkUsd),
+        );
+        panel.amount_input = "12.50".to_string();
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::DestinationInputChanged(SPEC_VECTOR_25M.to_string()),
+        );
+        assert_eq!(panel.invoice_amount_sat, None);
+        assert_eq!(panel.amount_input, "12.50");
+
+        // The same paste under Bitcoin still fills and locks the field.
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::Lightning),
+        );
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::DestinationInputChanged(SPEC_VECTOR_25M.to_string()),
+        );
+        assert!(panel.invoice_amount_sat.is_some());
     }
 
     /// US Dollar over Spark pays from US Dollar and offers no other balance;
