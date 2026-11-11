@@ -64,6 +64,8 @@ pub struct SparkSettingsView {
     pub auto_convert: Option<coincube_spark_protocol::AutoConvertState>,
     /// Whether Swap exists here, for the Swap by hand row (mainnet only).
     pub swap_available: bool,
+    /// Sats awaiting on-chain recovery (SDK 0.28.0+), from `get_info`.
+    pub recoverable_funds_sats: u64,
 }
 
 pub const STABLE_BALANCE_ID: &str = "tenshu.settings.spark.auto-convert";
@@ -172,6 +174,11 @@ impl SparkSettingsView {
                     .max_width(560),
             );
         }
+        if self.recoverable_funds_sats > 0 {
+            service = service.line(page::muted(recoverable_funds_copy(
+                self.recoverable_funds_sats,
+            )));
+        }
         page::group(
             localized_copy("Health"),
             None,
@@ -187,6 +194,18 @@ impl SparkSettingsView {
 }
 
 pub const TECHNICAL_DETAILS_ID: &str = "tenshu.settings.spark.technical-details";
+
+/// Funds that left the Spark balance and wait to be recovered on-chain (SDK
+/// 0.28.0+). Tenshu can't run the recovery yet, so this only says they exist.
+fn recoverable_funds_copy(sats: u64) -> String {
+    coincube_ui::localized_format!(
+        "{} sats left the Spark balance and are waiting to be recovered on-chain. Tenshu can't \
+         run that recovery yet.",
+        "{} sats salieron del saldo de Spark y esperan ser recuperados en cadena. Tenshu aún no \
+         puede hacer esa recuperación.",
+        sats
+    )
+}
 
 /// Spark's health in plain words, under "Spark wallet service".
 fn service_summary(status: &SparkSettingsStatus) -> &'static str {
@@ -466,6 +485,7 @@ mod tests {
                                     stable_balance_saving: false,
                                     auto_convert: None,
                                     swap_available: true,
+                                    recoverable_funds_sats: 0,
                                 }
                                 .render(),
                             )
@@ -489,6 +509,7 @@ mod tests {
                 stable_balance_saving: false,
                 auto_convert,
                 swap_available,
+                recoverable_funds_sats: 0,
             }
             .render(),
             (1440, 900),
@@ -531,6 +552,7 @@ mod tests {
                 stable_balance_saving: false,
                 auto_convert: None,
                 swap_available: true,
+                recoverable_funds_sats: 0,
             }
             .render()
         };
@@ -555,6 +577,7 @@ mod tests {
                 stable_balance_saving: false,
                 auto_convert: None,
                 swap_available: true,
+                recoverable_funds_sats: 0,
             }
             .render(),
             iced::advanced::widget::Id::new(STABLE_BALANCE_ID),
@@ -641,6 +664,7 @@ mod tests {
             stable_balance_saving: false,
             auto_convert: None,
             swap_available: true,
+            recoverable_funds_sats: 0,
         };
         let inspect = |content| {
             crate::app::view::shared::landing::capture::inspect(

@@ -202,6 +202,7 @@ mod tests {
             identity_pubkey: String::new(),
             stable_balance: legacy.clone(),
             usdb_balance,
+            recoverable_funds_sats: 0,
         };
         assert_eq!(
             usdb_holding(&info(Some(usdb(5_000_000)))),

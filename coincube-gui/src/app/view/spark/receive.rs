@@ -53,6 +53,9 @@ pub struct SparkReceiveView<'a> {
     pub claiming: Option<&'a (String, u32)>,
     /// Phase 4f: transient error from the most recent claim attempt.
     pub claim_error: Option<&'a str>,
+    /// The most recent claim was deferred (SDK 0.28.0+): which deposit, and
+    /// why it waits. Shown on that deposit's row.
+    pub claim_notice: Option<(&'a (String, u32), &'a str)>,
     /// Live on-chain confirmation count per pending deposit, keyed by
     /// `(txid, vout)`. Sourced from a public Esplora and refreshed on a
     /// 30s tick; missing keys render the SDK's plain fallback text.
@@ -288,6 +291,7 @@ impl<'a> SparkReceiveView<'a> {
                 self.pending_deposits,
                 self.claiming,
                 self.claim_error,
+                self.claim_notice,
                 self.pending_deposit_confirmations,
                 self.network,
                 self.mask_amounts,
@@ -572,6 +576,7 @@ fn pending_deposits_card<'a>(
     deposits: &'a [DepositInfo],
     claiming: Option<&'a (String, u32)>,
     claim_error: Option<&'a str>,
+    claim_notice: Option<(&'a (String, u32), &'a str)>,
     confirmations: &'a HashMap<(String, u32), u32>,
     network: Network,
     mask_amounts: bool,
@@ -593,12 +598,21 @@ fn pending_deposits_card<'a>(
             err
         )));
     }
-
     for deposit in deposits {
         let confs = confirmations
             .get(&(deposit.txid.clone(), deposit.vout))
             .copied();
-        card = card.push(deposit_row(deposit, claiming, confs, network, mask_amounts));
+        let notice = claim_notice
+            .filter(|((txid, vout), _)| txid == &deposit.txid && *vout == deposit.vout)
+            .map(|(_, notice)| notice);
+        card = card.push(deposit_row(
+            deposit,
+            claiming,
+            notice,
+            confs,
+            network,
+            mask_amounts,
+        ));
     }
 
     Container::new(card)
@@ -610,6 +624,7 @@ fn pending_deposits_card<'a>(
 fn deposit_row<'a>(
     deposit: &'a DepositInfo,
     claiming: Option<&'a (String, u32)>,
+    claim_notice: Option<&'a str>,
     confirmations: Option<u32>,
     network: Network,
     mask_amounts: bool,
@@ -699,7 +714,8 @@ fn deposit_row<'a>(
                     .spacing(4)
                     .width(Length::Fill)
                     .push(p1_regular(amount_label))
-                    .push(p2_regular(txid_label)),
+                    .push(p2_regular(txid_label))
+                    .push_maybe(claim_notice.map(p2_regular)),
             )
             .push(action),
     )
@@ -1497,6 +1513,7 @@ mod tests {
                         pending_deposits: &deposits,
                         claiming: None,
                         claim_error: None,
+                        claim_notice: None,
                         pending_deposit_confirmations: &confirmations,
                         network: Network::Bitcoin,
                         cube_name: "Everyday",
@@ -1614,6 +1631,7 @@ mod tests {
                     &deposits,
                     None,
                     None,
+                    None,
                     &confirmations,
                     Network::Bitcoin,
                     cache.balance_amounts_masked(),
@@ -1672,6 +1690,7 @@ mod tests {
                     pending_deposits: &deposits,
                     claiming: None,
                     claim_error: None,
+                    claim_notice: None,
                     pending_deposit_confirmations: &confirmations,
                     network: Network::Bitcoin,
                     cube_name: "Everyday",

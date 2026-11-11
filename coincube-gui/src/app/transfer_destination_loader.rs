@@ -1251,6 +1251,7 @@ mod tests {
                             identity_pubkey: "same-identity".into(),
                             stable_balance: None,
                             usdb_balance: None,
+                            recoverable_funds_sats: 0,
                         })),
                     )
                     .await;

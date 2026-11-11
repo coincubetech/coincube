@@ -10308,6 +10308,7 @@ impl App {
                     SparkEvent::PaymentSucceeded { .. }
                         | SparkEvent::PaymentPending { .. }
                         | SparkEvent::PaymentFailed { .. }
+                        | SparkEvent::PaymentUpdated { .. }
                 ) {
                     tasks.push(self.panels.spark_transactions.reload(None, None));
                 }
@@ -12193,6 +12194,7 @@ fn overview_activity_spark_event(event: &coincube_spark_protocol::Event) -> bool
             | SparkEvent::PaymentSucceeded { .. }
             | SparkEvent::PaymentPending { .. }
             | SparkEvent::PaymentFailed { .. }
+            | SparkEvent::PaymentUpdated { .. }
     )
 }
 
