@@ -1279,34 +1279,37 @@ pub(super) fn unlock_svg(network: ChainId, light: bool, name: &str, passkey: boo
     let field = if light { "#faf9f6" } else { "#161716" };
     let accent = if light { "#a14d00" } else { "#f3821d" };
     let name: String = name.chars().take(22).collect();
-    // `.pn`: "Open <name>" semibold, then ` · <network>` muted, both 20px.
+    // `.pn`: "Open <name>" at 20px semibold, then the `.pnet` line 8px
+    // below it — the 18px coin and the network at 14px — as the live face
+    // lays them out. Everything under it sits 28px lower to make room.
     let mut svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 420 420\" width=\"420\" height=\"420\" font-family=\"IBM Plex Sans\"><text x=\"28\" y=\"48\" font-size=\"20\"><tspan font-weight=\"600\" fill=\"{ink}\">Open {}</tspan><tspan fill=\"{muted}\"> · {}</tspan></text>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 420 420\" width=\"420\" height=\"420\" font-family=\"IBM Plex Sans\" color=\"{ink}\"><text x=\"28\" y=\"48\" font-size=\"20\" font-weight=\"600\" fill=\"{ink}\">Open {}</text>{}<text x=\"52\" y=\"77\" font-size=\"14\" fill=\"{ink}\">{}</text>",
         xml_text(&name),
+        launcher_coin::fragment(network, 28.0, 63.0, 18.0, 1.0, 1.5),
         xml_text(super::launcher_chrome::network_name(network))
     );
     if passkey {
         let _ = write!(
             svg,
-            "<rect x=\"28\" y=\"78\" width=\"164\" height=\"36\" rx=\"8\" fill=\"#f3821d\"/><text x=\"110\" y=\"101\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"500\" fill=\"#201407\">Unlock with passkey</text>"
+            "<rect x=\"28\" y=\"106\" width=\"164\" height=\"36\" rx=\"8\" fill=\"#f3821d\"/><text x=\"110\" y=\"129\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"500\" fill=\"#201407\">Unlock with passkey</text>"
         );
     } else {
         // `.fld`: the PIN legend, four 48px `.dg` boxes, `.pineye`, `.help`,
         // then Unlock at `opacity: .45` until all four digits are in.
         let _ = write!(
             svg,
-            "<text x=\"28\" y=\"91\" font-size=\"13\" font-weight=\"500\" fill=\"{ink}\">PIN</text>"
+            "<text x=\"28\" y=\"119\" font-size=\"13\" font-weight=\"500\" fill=\"{ink}\">PIN</text>"
         );
         for i in 0..4 {
             let _ = write!(
                 svg,
-                "<rect x=\"{}.5\" y=\"101.5\" width=\"47\" height=\"47\" rx=\"8\" fill=\"{field}\" stroke=\"{line}\"/>",
+                "<rect x=\"{}.5\" y=\"129.5\" width=\"47\" height=\"47\" rx=\"8\" fill=\"{field}\" stroke=\"{line}\"/>",
                 28 + i * 58
             );
         }
         let _ = write!(
             svg,
-            "<g transform=\"translate(274 115) scale(0.833)\"><path d=\"M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12z\" fill=\"none\" stroke=\"{muted}\" stroke-width=\"1.8\"/><circle cx=\"12\" cy=\"12\" r=\"3\" fill=\"{muted}\"/></g><text x=\"28\" y=\"164\" font-size=\"12\" fill=\"{muted}\">Enter this Cube's PIN.</text><rect x=\"28\" y=\"189\" width=\"76\" height=\"36\" rx=\"8\" fill=\"#f3821d\" fill-opacity=\".45\"/><text x=\"66\" y=\"212\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"500\" fill=\"#201407\" fill-opacity=\".45\">Unlock</text>"
+            "<g transform=\"translate(274 143) scale(0.833)\"><path d=\"M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12z\" fill=\"none\" stroke=\"{muted}\" stroke-width=\"1.8\"/><circle cx=\"12\" cy=\"12\" r=\"3\" fill=\"{muted}\"/></g><text x=\"28\" y=\"192\" font-size=\"12\" fill=\"{muted}\">Enter this Cube's PIN.</text><rect x=\"28\" y=\"217\" width=\"76\" height=\"36\" rx=\"8\" fill=\"#f3821d\" fill-opacity=\".45\"/><text x=\"66\" y=\"240\" text-anchor=\"middle\" font-size=\"14\" font-weight=\"500\" fill=\"#201407\" fill-opacity=\".45\">Unlock</text>"
         );
     }
     let _ = write!(

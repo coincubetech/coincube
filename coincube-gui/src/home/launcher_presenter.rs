@@ -282,6 +282,23 @@ fn network_coin(
     .height(Length::Fixed(size))
 }
 
+/// `.pnet`: the 18px coin and the network's full name at 14px on a 20px
+/// line, under the name on both the details and the unlock face.
+fn face_network<'a, M: 'a>(chain: ChainId, light: bool) -> Element<'a, M> {
+    Row::new()
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .height(Length::Fixed(20.0))
+        .push(network_coin(chain, 18.0, light))
+        .push(face_words(
+            launcher_chrome::network_name(chain),
+            14.0,
+            coincube_ui::font::REGULAR,
+            false,
+        ))
+        .into()
+}
+
 fn network_label<'a>(
     chain: ChainId,
     label: &'static str,
@@ -783,19 +800,7 @@ fn floor_details<'a>(
                     ),
             )
             .push(Space::new().height(Length::Fixed(8.0)))
-            .push(
-                Row::new()
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-                    .height(Length::Fixed(20.0))
-                    .push(network_coin(row.key.chain, 18.0, light))
-                    .push(face_words(
-                        super::launcher_chrome::network_name(row.key.chain),
-                        14.0,
-                        font::REGULAR,
-                        false,
-                    )),
-            )
+            .push(face_network(row.key.chain, light))
             .push(Space::new().height(Length::Fixed(20.0)))
             .push(rule::horizontal(1))
             .push(Space::new().height(Length::Fixed(16.0)))
@@ -2187,6 +2192,7 @@ pub(crate) fn unlock_face<'a, M: 'a>(
     // Render that state's live widgets on the second (270°) square face,
     // placed where `lone_cube` draws it: at the scene's target, not the
     // window's center, and at the face's own size.
+    let light = matches!(mode, coincube_ui::theme::palette::ThemeMode::Light);
     Stack::new()
         .width(Length::Fill)
         .height(Length::Fill)
@@ -2200,7 +2206,7 @@ pub(crate) fn unlock_face<'a, M: 'a>(
                     .width(Length::Fill)
                     .push(Space::new().height(Length::Fixed(target_y - face / 2.0)))
                     .push(
-                        Container::new(unlock_controls(cube, controls(), face))
+                        Container::new(unlock_controls(cube, controls(), face, light))
                             .width(Length::Fill)
                             .center_x(Length::Fill),
                     )
@@ -2218,21 +2224,24 @@ fn unlock_controls<'a, M: 'a>(
     cube: &crate::app::settings::CubeSettings,
     controls: Element<'a, M>,
     side: f32,
+    light: bool,
 ) -> Element<'a, M> {
-    // `.pn`: "Open <name>" at 20px semibold, then ` · <network>` muted.
-    let heading = Row::new()
-        .push(face_words(
-            localized_format!("Open {}", "Abrir {}", crate::cube_display::name(&cube.name)),
-            20.0,
-            coincube_ui::font::SEMIBOLD,
-            false,
-        ))
-        .push(face_words(
-            format!(" · {}", launcher_chrome::network_name(cube.network)),
-            20.0,
-            coincube_ui::font::REGULAR,
-            true,
-        ));
+    // `.pn`: "Open <name>" at 20px semibold across the whole face, then the
+    // network on its own `.pnet` line as on the details face. Side by side,
+    // a long name left the network a sliver that broke glyph by glyph and
+    // pushed the PIN field, Unlock and Cancel off the face.
+    let heading = Column::new()
+        .push(
+            face_words(
+                localized_format!("Open {}", "Abrir {}", crate::cube_display::name(&cube.name)),
+                20.0,
+                coincube_ui::font::SEMIBOLD,
+                false,
+            )
+            .width(Length::Fill),
+        )
+        .push(Space::new().height(Length::Fixed(8.0)))
+        .push(face_network(cube.network, light));
     Container::new(Column::new().push(heading).push(controls))
         .width(Length::Fixed(side))
         .height(Length::Fixed(side))
@@ -2255,7 +2264,12 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
             let (_, target_y) = layout.target();
             Some((
                 target_y - face / 2.0,
-                iced::widget::opaque(unlock_controls(cube, controls, face)),
+                iced::widget::opaque(unlock_controls(
+                    cube,
+                    controls,
+                    face,
+                    matches!(mode, coincube_ui::theme::palette::ThemeMode::Light),
+                )),
             ))
         }
         _ => None,
@@ -3835,7 +3849,7 @@ mod tests {
         );
         for text in [
             "Open Everyday",
-            " · Bitcoin mainnet",
+            "Bitcoin mainnet",
             "PIN",
             "Enter this Cube's PIN.",
             "Unlock",
@@ -3947,6 +3961,129 @@ mod tests {
                     cancel.y + cancel.height,
                     top + face - 28.0
                 );
+            }
+        }
+    }
+
+    /// A long name beside a long network once left the network a sliver of
+    /// the heading row: it broke glyph by glyph down the face and took every
+    /// pixel the PIN field, Unlock and Cancel needed, so a Bitcoin Blake2b
+    /// unlock had no live control left and the window seemed frozen.
+    #[test]
+    fn long_names_keep_the_network_on_its_own_line_and_the_pin_controls_on_the_face() {
+        let bounds = |mounted: &capture::Inspection, needle: &str| {
+            mounted
+                .text
+                .iter()
+                .find_map(|(value, bounds)| (value == needle).then_some(*bounds))
+                .unwrap_or_else(|| panic!("missing {:?}", needle))
+        };
+        for chain in [
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+            ChainId::Bitcoin,
+        ] {
+            let cube = crate::app::settings::CubeSettings::new_with_raw_id(
+                "long".into(),
+                "My Vault Bitcoin Blake2b Testnet4 wallet".into(),
+                chain,
+            );
+            let context = floor_context(&cube);
+            let entry = crate::pin_entry::PinEntry::new(
+                cube.clone(),
+                PathBuf::new(),
+                crate::pin_entry::PinEntrySuccess::LoadApp {
+                    datadir: crate::dir::CoincubeDirectory::new(Default::default()),
+                    config: crate::app::Config::new(false),
+                    network: cube.network.bitcoin_network(),
+                    internal_bitcoind: None,
+                    backup: None,
+                    wallet_settings: None,
+                    connect_client: None,
+                },
+                None,
+            );
+            for size in [(1024, 768), (1440, 900)] {
+                for on_floor in [false, true] {
+                    let (w, h) = (size.0 as f32, size.1 as f32);
+                    let (layout, offset) = if on_floor {
+                        (
+                            floor_stage_layout(Size::new(w, h)),
+                            launcher_chrome::BAR_HEIGHT + 1.0,
+                        )
+                    } else {
+                        (launcher_scene::Layout::new(w, h), 0.0)
+                    };
+                    let face = layout.face();
+                    let (target_x, target_y) = layout.target();
+                    let top = offset + target_y - face / 2.0;
+                    let left = target_x - face / 2.0;
+                    let mounted = capture::inspect_filled(
+                        "unlock-pin-face-long-name",
+                        entry.view_with_theme_and_floor(
+                            coincube_ui::theme::palette::ThemeMode::Dark,
+                            on_floor.then_some(&context),
+                        ),
+                        size,
+                        "dark",
+                        theme::Theme::dark(),
+                        size,
+                    );
+                    let at = format!("{:?} {:?} floor={}", chain, size, on_floor);
+                    let inside = |rect: Rectangle| {
+                        rect.height > 0.0
+                            && rect.y >= top - 1.0
+                            && rect.y + rect.height <= top + face - 28.0 + 1.0
+                    };
+                    let digit = mounted
+                        .focus
+                        .iter()
+                        .find_map(|(id, rect)| {
+                            (id == &crate::pin_input::first_digit_id()).then_some(*rect)
+                        })
+                        .unwrap_or_else(|| panic!("{}: no PIN digit", at));
+                    assert!(inside(digit), "{}: PIN digit at {:?}", at, digit);
+                    let cancel = bounds(&mounted, "Cancel");
+                    assert!(inside(cancel), "{}: Cancel at {:?}", at, cancel);
+                    let unlock = bounds(&mounted, "Unlock");
+                    assert!(inside(unlock), "{}: Unlock at {:?}", at, unlock);
+
+                    let heading = mounted
+                        .text
+                        .iter()
+                        .find_map(|(value, rect)| value.starts_with("Open ").then_some(*rect))
+                        .unwrap_or_else(|| panic!("{}: no heading", at));
+                    let network = bounds(&mounted, launcher_chrome::network_name(chain));
+                    // Its own line, under the whole name and never beside it.
+                    assert!(
+                        network.y >= heading.y + heading.height - 1.0,
+                        "{}: network at {:?} under a heading at {:?}",
+                        at,
+                        network,
+                        heading
+                    );
+                    assert!(
+                        network.x >= left + 28.0 && network.x < left + 28.0 + 40.0,
+                        "{}: network starts at x {} for a face from {}",
+                        at,
+                        network.x,
+                        left
+                    );
+                    // One 14px line, not a column of glyphs.
+                    assert!(
+                        network.height < 24.0,
+                        "{}: network wraps to {:?}",
+                        at,
+                        network
+                    );
+                    assert!(
+                        digit.y >= network.y + network.height,
+                        "{}: PIN digit at {:?} overlaps the network at {:?}",
+                        at,
+                        digit,
+                        network
+                    );
+                }
             }
         }
     }
