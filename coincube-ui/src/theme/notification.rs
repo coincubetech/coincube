@@ -73,13 +73,14 @@ impl From<log::Level> for ToastTone {
 impl ToastTone {
     /// Tone colour for the icon and, on toasts that need attention, the border.
     pub fn color(self, theme: &Theme) -> iced::Color {
-        let shell = &theme.colors.shell;
+        use super::tenshu::Tone;
         match self {
-            ToastTone::Info => shell.focus,
-            ToastTone::Success => shell.good,
-            ToastTone::Warning => shell.warn,
-            ToastTone::Error => shell.bad,
-            ToastTone::Debug => shell.muted,
+            // Info has no chip tone of its own; it borrows the focus blue.
+            ToastTone::Info => theme.colors.shell.focus,
+            ToastTone::Success => Tone::Good.color(theme),
+            ToastTone::Warning => Tone::Warn.color(theme),
+            ToastTone::Error => Tone::Bad.color(theme),
+            ToastTone::Debug => Tone::Muted.color(theme),
         }
     }
 
@@ -98,27 +99,11 @@ const TOAST_TILE_ALPHA: f32 = 0.13;
 /// Toast surface: the menu/popover panel (`tenshu::surface::panel`) with a
 /// tone-tinted border on warnings and errors.
 pub fn toast(theme: &Theme, tone: ToastTone) -> Style {
-    let shell = &theme.colors.shell;
-    let border = if tone.needs_attention() {
-        super::tenshu::faded(tone.color(theme), TOAST_BORDER_ALPHA)
-    } else {
-        shell.line
-    };
-    Style {
-        text_color: Some(shell.ink),
-        background: Some(Background::Color(shell.panel)),
-        border: Border {
-            color: border,
-            width: 1.0,
-            radius: super::tenshu::radius::MENU.into(),
-        },
-        shadow: iced::Shadow {
-            color: shell.shadow,
-            offset: iced::Vector::new(0.0, 12.0),
-            blur_radius: 28.0,
-        },
-        ..Style::default()
+    let mut style = super::tenshu::surface::panel(theme);
+    if tone.needs_attention() {
+        style.border.color = super::tenshu::faded(tone.color(theme), TOAST_BORDER_ALPHA);
     }
+    style
 }
 
 /// The 28px tile behind a toast's icon: the tone at low opacity.
@@ -134,17 +119,6 @@ pub fn toast_icon_tile(theme: &Theme, tone: ToastTone) -> Style {
             ..Border::default()
         },
         ..Style::default()
-    }
-}
-
-/// Map log::Level to the notification palette for consistent styling
-pub fn palette_for_level<'a>(level: &log::Level, theme: &'a Theme) -> &'a ContainerPalette {
-    match level {
-        log::Level::Error => &theme.colors.notifications.error,
-        log::Level::Warn => &theme.colors.notifications.warning,
-        log::Level::Info => &theme.colors.notifications.info,
-        log::Level::Debug => &theme.colors.notifications.debug,
-        log::Level::Trace => &theme.colors.notifications.debug,
     }
 }
 
@@ -193,6 +167,9 @@ mod toast_tests {
                 let ratio = contrast(tone.color(&theme), panel);
                 assert!(ratio >= 3.0, "{tone:?} is {ratio:.2}:1 on the panel");
             }
+            // The dismiss cross is drawn in `shell.muted` (Tenshu icon action).
+            let cross = contrast(theme.colors.shell.muted, panel);
+            assert!(cross >= 3.0, "dismiss cross is {cross:.2}:1 on the panel");
         }
     }
 }

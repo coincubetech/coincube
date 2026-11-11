@@ -56,15 +56,6 @@ use crate::app::{
     menu::Menu,
 };
 
-/// Simple toast notification for clipboard copy and other success messages
-pub fn simple_toast(message: &str) -> Container<'_, Message> {
-    toast_card(
-        coincube_ui::theme::notification::ToastTone::Success,
-        message.to_string(),
-        None,
-    )
-}
-
 /// Wraps `content` in the shared balance card style used across wallet overview and send screens
 /// (themed card background, orange border, rounded corners).
 pub fn balance_header_card<'a, Msg: 'a>(content: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {
@@ -884,11 +875,14 @@ fn toast_card<'a>(
         .center_y(TOAST_CONTROL)
         .style(move |t| notification::toast_icon_tile(t, tone));
 
+    // `Word` wrapping never breaks inside a word, so a txid, address or URL
+    // would run past the card; fall back to breaking between glyphs.
     let message = if tone == ToastTone::Debug {
         tenshu_text::mono(message)
     } else {
         tenshu_text::label(message)
-    };
+    }
+    .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
 
     let mut content = iced::widget::Row::new()
         .spacing(12)
@@ -927,6 +921,7 @@ fn toast_card<'a>(
             left: 12.0,
         })
         .style(move |t| notification::toast(t, tone))
+        .clip(true)
 }
 
 pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
