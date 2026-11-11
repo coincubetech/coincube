@@ -265,7 +265,7 @@ fn ai_access_state_gallery() {
     for label in [
         "Available",
         "Read · Balances, Confirmed history",
-        "Prepare transactions",
+        "Prepare unsigned transactions",
         "Copied",
         "not a connection status",
         "Unverified label",

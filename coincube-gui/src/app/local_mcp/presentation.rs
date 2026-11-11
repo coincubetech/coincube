@@ -303,7 +303,7 @@ fn kinds_of_access<'a>(setup: bool) -> Ui<'a> {
     rows.push(
         page::row(localized_copy("Changing access"))
             .description(localized_copy(
-                "Revoke and pair again. Clients never gain access.",
+                "Paired clients never gain new access. To change one, revoke and pair again.",
             ))
             .into(),
     );
@@ -327,7 +327,7 @@ fn scope_line(scope: &pairings::Scope) -> String {
             format!("{} · {}", localized_copy("Read"), granted.join(", "))
         }
         pairings::Scope::TransactionPreparation { .. } => {
-            localized_copy("Prepare transactions").to_owned()
+            localized_copy("Prepare unsigned transactions").to_owned()
         }
         pairings::Scope::Proposal => localized_copy("Propose a wallet policy").to_owned(),
         pairings::Scope::WalletCreation => {
@@ -709,7 +709,7 @@ fn transaction_card(client_id: &str, draft: Prepared) -> Ui<'static> {
             .align_y(iced::Alignment::Center),
         )
         .push(muted(localized_copy(
-            "Drafted by this client. Nothing is sent until you sign in Tenshu.",
+            "Drafted by this client, which can't sign or send. You review and sign in Tenshu.",
         )))
         .push(page::status(status, localized_copy(status_text)))
         .push(details)
@@ -1593,7 +1593,7 @@ mod ai_access_tests {
             "Prepare unsigned transactions",
             "Never shared",
             "Seeds, keys, PINs, passwords, passkeys",
-            "Clients never gain access.",
+            "Paired clients never gain new access.",
             "Local isn't private.",
         ] {
             assert!(probe.contains(label), "{}", label);
