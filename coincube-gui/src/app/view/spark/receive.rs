@@ -53,9 +53,9 @@ pub struct SparkReceiveView<'a> {
     pub claiming: &'a HashSet<(String, u32)>,
     /// Phase 4f: transient error from the most recent claim attempt.
     pub claim_error: Option<&'a str>,
-    /// The most recent claim was deferred (SDK 0.28.0+): which deposit, and
-    /// why it waits. Shown on that deposit's row.
-    pub claim_notice: Option<(&'a (String, u32), &'a str)>,
+    /// Deferred claims (SDK 0.28.0+), keyed by deposit so every waiting
+    /// deposit keeps its own explanation on its row.
+    pub claim_notices: &'a HashMap<(String, u32), String>,
     /// Live on-chain confirmation count per pending deposit, keyed by
     /// `(txid, vout)`. Sourced from a public Esplora and refreshed on a
     /// 30s tick; missing keys render the SDK's plain fallback text.
@@ -291,7 +291,7 @@ impl<'a> SparkReceiveView<'a> {
                 self.pending_deposits,
                 self.claiming,
                 self.claim_error,
-                self.claim_notice,
+                self.claim_notices,
                 self.pending_deposit_confirmations,
                 self.network,
                 self.mask_amounts,
@@ -576,7 +576,7 @@ fn pending_deposits_card<'a>(
     deposits: &'a [DepositInfo],
     claiming: &'a HashSet<(String, u32)>,
     claim_error: Option<&'a str>,
-    claim_notice: Option<(&'a (String, u32), &'a str)>,
+    claim_notices: &'a HashMap<(String, u32), String>,
     confirmations: &'a HashMap<(String, u32), u32>,
     network: Network,
     mask_amounts: bool,
@@ -602,9 +602,9 @@ fn pending_deposits_card<'a>(
         let confs = confirmations
             .get(&(deposit.txid.clone(), deposit.vout))
             .copied();
-        let notice = claim_notice
-            .filter(|((txid, vout), _)| txid == &deposit.txid && *vout == deposit.vout)
-            .map(|(_, notice)| notice);
+        let notice = claim_notices
+            .get(&(deposit.txid.clone(), deposit.vout))
+            .map(String::as_str);
         card = card.push(deposit_row(
             deposit,
             claiming,
@@ -1512,7 +1512,7 @@ mod tests {
                         pending_deposits: &deposits,
                         claiming: &claiming,
                         claim_error: None,
-                        claim_notice: None,
+                        claim_notices: &HashMap::new(),
                         pending_deposit_confirmations: &confirmations,
                         network: Network::Bitcoin,
                         cube_name: "Everyday",
@@ -1603,6 +1603,60 @@ mod tests {
     }
 
     #[test]
+    fn pending_deposits_render_each_outputs_own_notice() {
+        let deposits: Vec<_> = [0, 1]
+            .iter()
+            .copied()
+            .map(|vout| DepositInfo {
+                txid: "shared-tx".to_string(),
+                vout,
+                amount_sat: 5_000,
+                is_mature: true,
+                claim_error: None,
+            })
+            .collect();
+        let notices = HashMap::from([
+            (
+                ("shared-tx".to_string(), 0),
+                "First output waits".to_string(),
+            ),
+            (
+                ("shared-tx".to_string(), 1),
+                "Second output waits".to_string(),
+            ),
+            (("absent".to_string(), 0), "Absent output waits".to_string()),
+        ]);
+        let mounted = capture::inspect(
+            "spark-pending-deposit-notices",
+            pending_deposits_card(
+                &deposits,
+                &HashSet::new(),
+                None,
+                &notices,
+                &HashMap::new(),
+                Network::Bitcoin,
+                false,
+            ),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        let y = |label| {
+            mounted
+                .text
+                .iter()
+                .find(|(value, _)| value == label)
+                .unwrap()
+                .1
+                .y
+        };
+        assert!(y("shared-tx:0") < y("First output waits"));
+        assert!(y("First output waits") < y("shared-tx:1"));
+        assert!(y("shared-tx:1") < y("Second output waits"));
+        assert!(!mounted.contains("Absent output waits"));
+    }
+
+    #[test]
     fn pending_deposit_amount_follows_passive_privacy_authority() {
         let mut cache = Cache::default();
         let deposits = vec![DepositInfo {
@@ -1631,7 +1685,7 @@ mod tests {
                     &deposits,
                     &claiming,
                     None,
-                    None,
+                    &HashMap::new(),
                     &confirmations,
                     Network::Bitcoin,
                     cache.balance_amounts_masked(),
@@ -1691,7 +1745,7 @@ mod tests {
                     pending_deposits: &deposits,
                     claiming: &claiming,
                     claim_error: None,
-                    claim_notice: None,
+                    claim_notices: &HashMap::new(),
                     pending_deposit_confirmations: &confirmations,
                     network: Network::Bitcoin,
                     cube_name: "Everyday",

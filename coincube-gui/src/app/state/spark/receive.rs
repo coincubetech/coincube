@@ -125,11 +125,10 @@ pub struct SparkReceive {
     /// Phase 4f: surface a transient claim error to the user. Cleared
     /// on the next reload or successful claim.
     pub claim_error: Option<String>,
-    /// The most recent claim was deferred (SDK 0.28.0+): nothing claimed
-    /// yet, and the SDK keeps trying on its own. A neutral note, not an
-    /// error, keyed by the deposit's `(txid, vout)` so it shows on that
-    /// deposit's row only and goes when that deposit leaves the list.
-    pub claim_notice: Option<((String, u32), String)>,
+    /// Deferred claims (SDK 0.28.0+): nothing claimed yet, and the SDK
+    /// keeps trying on its own. Each deposit's `(txid, vout)` keeps its
+    /// own neutral note until it is retried, claimed or leaves the list.
+    pub claim_notices: HashMap<(String, u32), String>,
     /// Live on-chain confirmation count per pending deposit, fetched
     /// from a public Esplora ([`esplora::fetch_confirmations`]). The
     /// SDK only tells us `is_mature: bool`, so we query Esplora
@@ -158,18 +157,6 @@ pub struct SparkReceive {
 }
 
 impl SparkReceive {
-    /// Drop the deferral note only when it is about `deposit`; a note on
-    /// another row stays until that deposit's own result or departure.
-    fn clear_claim_notice_for(&mut self, deposit: &(String, u32)) {
-        if self
-            .claim_notice
-            .as_ref()
-            .is_some_and(|(noted, _)| noted == deposit)
-        {
-            self.claim_notice = None;
-        }
-    }
-
     pub fn new(backend: Option<Arc<SparkBackend>>) -> Self {
         Self {
             backend,
@@ -187,7 +174,7 @@ impl SparkReceive {
             pending_deposits: Vec::new(),
             claiming: HashSet::new(),
             claim_error: None,
-            claim_notice: None,
+            claim_notices: HashMap::new(),
             pending_deposit_confirmations: HashMap::new(),
             displayed_invoice: None,
             received_amount_display: String::new(),
@@ -289,10 +276,7 @@ impl State for SparkReceive {
                 pending_deposits: &self.pending_deposits,
                 claiming: &self.claiming,
                 claim_error: self.claim_error.as_deref(),
-                claim_notice: self
-                    .claim_notice
-                    .as_ref()
-                    .map(|(deposit, notice)| (deposit, notice.as_str())),
+                claim_notices: &self.claim_notices,
                 pending_deposit_confirmations: &self.pending_deposit_confirmations,
                 network: cache.network,
                 cube_name: &cache.cube_name,
@@ -698,17 +682,6 @@ impl State for SparkReceive {
             SparkReceiveMessage::PendingDepositsLoaded(deposits) => {
                 self.pending_deposits = deposits;
                 self.claim_error = None;
-                // A deferral note stands until the SDK claims its deposit on
-                // its own, which takes that deposit off the list.
-                if let Some(((txid, vout), _)) = &self.claim_notice {
-                    if !self
-                        .pending_deposits
-                        .iter()
-                        .any(|d| &d.txid == txid && d.vout == *vout)
-                    {
-                        self.claim_notice = None;
-                    }
-                }
                 // Drop confirmation entries for deposits that left
                 // the list (claimed or refunded), then kick off a
                 // fresh Esplora fetch for any immature deposit still
@@ -720,6 +693,8 @@ impl State for SparkReceive {
                     .iter()
                     .map(|d| (d.txid.clone(), d.vout))
                     .collect();
+                // Keep every live deposit's deferral note across refreshes.
+                self.claim_notices.retain(|k, _| live_keys.contains(k));
                 self.pending_deposit_confirmations
                     .retain(|k, _| live_keys.contains(k));
                 refresh_confirmations_task(cache.network, &self.pending_deposits)
@@ -766,7 +741,7 @@ impl State for SparkReceive {
                 let deposit = (txid.clone(), vout);
                 self.claim_error = None;
                 // A note about another deposit stays on that row.
-                self.clear_claim_notice_for(&deposit);
+                self.claim_notices.remove(&deposit);
                 self.claiming.insert(deposit);
                 let claimed_txid = txid.clone();
                 Task::perform(
@@ -799,10 +774,11 @@ impl State for SparkReceive {
                 if let Some(deferral) = &ok.deferred {
                     // Nothing changed: no splash, no refetch (a reload would
                     // not show anything new), and the row stays pending.
-                    self.claim_notice = Some((deposit, claim_deferral_notice(deferral)));
+                    self.claim_notices
+                        .insert(deposit, claim_deferral_notice(deferral));
                     return Task::none();
                 }
-                self.clear_claim_notice_for(&deposit);
+                self.claim_notices.remove(&deposit);
                 let mut tasks = vec![
                     // Drop the claimed row from the pending-deposits list.
                     fetch_deposits_task(self.backend.clone()),
@@ -828,7 +804,7 @@ impl State for SparkReceive {
             SparkReceiveMessage::ClaimDepositFailed { txid, vout, error } => {
                 let deposit = (txid, vout);
                 self.claiming.remove(&deposit);
-                self.clear_claim_notice_for(&deposit);
+                self.claim_notices.remove(&deposit);
                 self.claim_error = Some(error);
                 Task::none()
             }
@@ -1557,7 +1533,7 @@ mod tests {
         );
         assert!(panel.claiming.is_empty());
         assert!(panel.claim_error.is_none());
-        assert!(panel.claim_notice.is_none());
+        assert!(panel.claim_notices.is_empty());
     }
 
     /// 0.28.0: a deferred claim leaves a neutral note, not an error, and
@@ -1580,8 +1556,12 @@ mod tests {
         );
         assert!(panel.claiming.is_empty());
         assert!(panel.claim_error.is_none());
-        let (deposit_key, note) = panel.claim_notice.clone().expect("deferral note");
-        assert_eq!(deposit_key, ("tx".to_string(), 0));
+        let deposit_key = ("tx".to_string(), 0);
+        let note = panel
+            .claim_notices
+            .get(&deposit_key)
+            .expect("deferral note")
+            .clone();
         assert!(note.contains("claimed automatically"), "{}", note);
 
         update(
@@ -1591,7 +1571,7 @@ mod tests {
                 deposit("other", 1, true),
             ]),
         );
-        assert_eq!(panel.claim_notice, Some((deposit_key, note)));
+        assert_eq!(panel.claim_notices.get(&deposit_key), Some(&note));
 
         // The deferred deposit is claimed while another is still pending:
         // the note was about the first one only, so it goes.
@@ -1599,7 +1579,103 @@ mod tests {
             &mut panel,
             SparkReceiveMessage::PendingDepositsLoaded(vec![deposit("other", 1, true)]),
         );
-        assert!(panel.claim_notice.is_none());
+        assert!(panel.claim_notices.is_empty());
+    }
+
+    #[test]
+    fn deferred_claims_keep_notes_for_both_outputs() {
+        for (first, second) in [(0, 1), (1, 0)] {
+            let mut panel = SparkReceive::new(None);
+            for vout in [first, second] {
+                update(
+                    &mut panel,
+                    SparkReceiveMessage::ClaimDepositSucceeded {
+                        txid: "shared-tx".to_string(),
+                        vout,
+                        ok: coincube_spark_protocol::ClaimDepositOk {
+                            payment_id: None,
+                            amount_sat: None,
+                            deferred: Some(
+                                coincube_spark_protocol::ClaimDeferral::NoEarlyClaimAvailable,
+                            ),
+                        },
+                    },
+                );
+            }
+            for vout in [first, second] {
+                assert!(
+                    panel
+                        .claim_notices
+                        .contains_key(&("shared-tx".to_string(), vout)),
+                    "each output must keep its note in either response order"
+                );
+            }
+            assert_eq!(panel.claim_notices.len(), 2);
+
+            // A list refresh retains both notes; removing one output only
+            // removes that output's note, even with a shared transaction id.
+            update(
+                &mut panel,
+                SparkReceiveMessage::PendingDepositsLoaded(vec![
+                    deposit("shared-tx", first, true),
+                    deposit("shared-tx", second, true),
+                ]),
+            );
+            assert_eq!(panel.claim_notices.len(), 2);
+            update(
+                &mut panel,
+                SparkReceiveMessage::PendingDepositsLoaded(vec![deposit(
+                    "shared-tx",
+                    second,
+                    true,
+                )]),
+            );
+            assert_eq!(panel.claim_notices.len(), 1);
+            assert!(panel
+                .claim_notices
+                .contains_key(&("shared-tx".to_string(), second)));
+            update(
+                &mut panel,
+                SparkReceiveMessage::PendingDepositsLoaded(vec![]),
+            );
+            assert!(panel.claim_notices.is_empty());
+        }
+    }
+
+    #[test]
+    fn claim_lifecycle_clears_only_its_own_notice() {
+        let a = ("shared-tx".to_string(), 0);
+        let b = ("shared-tx".to_string(), 1);
+        for message in [
+            SparkReceiveMessage::ClaimDepositRequested {
+                txid: a.0.clone(),
+                vout: a.1,
+            },
+            SparkReceiveMessage::ClaimDepositSucceeded {
+                txid: a.0.clone(),
+                vout: a.1,
+                ok: coincube_spark_protocol::ClaimDepositOk {
+                    payment_id: Some("payment".to_string()),
+                    amount_sat: None,
+                    deferred: None,
+                },
+            },
+            SparkReceiveMessage::ClaimDepositFailed {
+                txid: a.0.clone(),
+                vout: a.1,
+                error: "claim failed".to_string(),
+            },
+        ] {
+            let client = crate::app::breez_spark::SparkClient::disconnected_for_test();
+            let mut panel = SparkReceive::new(Some(Arc::new(SparkBackend::new(Arc::new(client)))));
+            panel.claim_notices.insert(a.clone(), "A waits".to_string());
+            panel.claim_notices.insert(b.clone(), "B waits".to_string());
+            update(&mut panel, message);
+            assert_eq!(
+                panel.claim_notices,
+                HashMap::from([(b.clone(), "B waits".to_string())])
+            );
+        }
     }
 
     /// Two claims in flight: each result is keyed by the deposit it was
@@ -1633,11 +1709,11 @@ mod tests {
         panel.claiming.insert(a.clone());
         panel.claiming.insert(b.clone());
         update(&mut panel, deferred("a", 0));
-        assert_eq!(panel.claim_notice.as_ref().map(|(d, _)| d), Some(&a));
+        assert_eq!(panel.claim_notices.keys().collect::<Vec<_>>(), vec![&a]);
         assert_eq!(panel.claiming, HashSet::from([b.clone()]));
         // B then succeeds: A's note stays on A's row.
         update(&mut panel, claimed("b", 1));
-        assert_eq!(panel.claim_notice.as_ref().map(|(d, _)| d), Some(&a));
+        assert_eq!(panel.claim_notices.keys().collect::<Vec<_>>(), vec![&a]);
         assert!(panel.claiming.is_empty());
 
         // B answers first, then A's deferral: the note is still A's.
@@ -1647,7 +1723,7 @@ mod tests {
         update(&mut panel, claimed("b", 1));
         assert_eq!(panel.claiming, HashSet::from([a.clone()]));
         update(&mut panel, deferred("a", 0));
-        assert_eq!(panel.claim_notice.as_ref().map(|(d, _)| d), Some(&a));
+        assert_eq!(panel.claim_notices.keys().collect::<Vec<_>>(), vec![&a]);
         assert!(panel.claiming.is_empty());
 
         // B failing does not drop the note about A.
@@ -1659,7 +1735,7 @@ mod tests {
                 error: "claim failed".to_string(),
             },
         );
-        assert_eq!(panel.claim_notice.as_ref().map(|(d, _)| d), Some(&a));
+        assert_eq!(panel.claim_notices.keys().collect::<Vec<_>>(), vec![&a]);
         assert_eq!(panel.claim_error.as_deref(), Some("claim failed"));
     }
 
