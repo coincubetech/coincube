@@ -122,7 +122,7 @@ impl GUI {
         if tab.preferences_source() != Some(origin.source) {
             return None;
         }
-        let account = self.connect_panel(&origin)?;
+        let account = self.connect_panel(origin)?;
         if !account.is_authenticated() {
             return None;
         }
