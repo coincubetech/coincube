@@ -28,22 +28,7 @@ impl LabelsEdited {
         match message {
             Message::View(view::Message::Label(items, msg)) => match msg {
                 view::LabelMessage::Edited(value) => {
-                    let valid = value.len() <= 100;
-                    for item in items {
-                        if let Some(label) = self.0.get_mut(&item) {
-                            label.valid = valid;
-                            label.value.clone_from(&value);
-                        } else {
-                            self.0.insert(
-                                item,
-                                form::Value {
-                                    valid,
-                                    warning: None,
-                                    value: value.clone(),
-                                },
-                            );
-                        }
-                    }
+                    self.edit_labels(items, value);
                 }
                 view::LabelMessage::Cancel => {
                     for item in items {
@@ -51,27 +36,7 @@ impl LabelsEdited {
                     }
                 }
                 view::LabelMessage::Confirm => {
-                    let mut updated_labels = HashMap::<LabelItem, Option<String>>::new();
-                    let mut updated_labels_str = HashMap::<String, Option<String>>::new();
-                    for item in items {
-                        if let Some(label) = self.0.get(&item).cloned() {
-                            let item_str = label_item_from_str(&item);
-                            if label.value.is_empty() {
-                                updated_labels.insert(item_str, None);
-                                updated_labels_str.insert(item, None);
-                            } else {
-                                updated_labels.insert(item_str, Some(label.value.clone()));
-                                updated_labels_str.insert(item, Some(label.value));
-                            }
-                        }
-                    }
-                    return Ok(Task::perform(
-                        async move {
-                            daemon.update_labels(&updated_labels).await?;
-                            Ok(updated_labels_str)
-                        },
-                        Message::LabelsUpdated,
-                    ));
+                    return Ok(self.confirm_labels(daemon, items));
                 }
             },
             Message::LabelsUpdated(res) => match res {
@@ -90,6 +55,51 @@ impl LabelsEdited {
             _ => {}
         }
         Ok(Task::none())
+    }
+    fn edit_labels(&mut self, items: Vec<String>, value: String) {
+        let valid = value.len() <= 100;
+        for item in items {
+            if let Some(label) = self.0.get_mut(&item) {
+                label.valid = valid;
+                label.value.clone_from(&value);
+            } else {
+                self.0.insert(
+                    item,
+                    form::Value {
+                        valid,
+                        warning: None,
+                        value: value.clone(),
+                    },
+                );
+            }
+        }
+    }
+    fn confirm_labels(
+        &self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        items: Vec<String>,
+    ) -> Task<Message> {
+        let mut updated_labels = HashMap::<LabelItem, Option<String>>::new();
+        let mut updated_labels_str = HashMap::<String, Option<String>>::new();
+        for item in items {
+            if let Some(label) = self.0.get(&item).cloned() {
+                let item_str = label_item_from_str(&item);
+                if label.value.is_empty() {
+                    updated_labels.insert(item_str, None);
+                    updated_labels_str.insert(item, None);
+                } else {
+                    updated_labels.insert(item_str, Some(label.value.clone()));
+                    updated_labels_str.insert(item, Some(label.value));
+                }
+            }
+        }
+        Task::perform(
+            async move {
+                daemon.update_labels(&updated_labels).await?;
+                Ok(updated_labels_str)
+            },
+            Message::LabelsUpdated,
+        )
     }
 }
 

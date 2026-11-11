@@ -102,6 +102,29 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 /// fresh idempotency key — which is how one payment becomes two.
 const SEND_SOFT_DEADLINE: Duration = Duration::from_secs(120);
 
+/// `CREATE_NO_WINDOW`. The bridge is a console-subsystem binary, so a
+/// windows-subsystem GUI that spawns it without this flag gets a visible
+/// console — the stray terminal that appears when a Cube opens.
+#[cfg(any(test, target_os = "windows"))]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// `DETACHED_PROCESS`. [`crate::node::detach_spawned_process`] sets this so
+/// bitcoind and Tor outlive the app. The bridge holds the session mnemonic
+/// and must stay a `kill_on_drop` child, so this flag is never applied.
+#[cfg(any(test, target_os = "windows"))]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+/// Windows creation flags for the Spark bridge child.
+///
+/// Suppresses the console window and nothing else. Masking off
+/// [`DETACHED_PROCESS`] keeps a later edit from reusing the node/Tor detach
+/// helper, which would leave the bridge (and the mnemonic) alive after the
+/// GUI exits.
+#[cfg(any(test, target_os = "windows"))]
+fn bridge_windows_creation_flags() -> u32 {
+    CREATE_NO_WINDOW & !DETACHED_PROCESS
+}
+
 /// How long to wait for the [`Method::Init`] handshake.
 ///
 /// `init` is not an ordinary query. It drives `SdkBuilder::build()`, and that
@@ -328,11 +351,8 @@ impl SparkClient {
         // console, so without this Windows opens an empty console window for
         // it. Deliberately not `node::detach_spawned_process`: the bridge must
         // die with the gui (`kill_on_drop`), not outlive it like bitcoind/Tor.
-        #[cfg(windows)]
-        {
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
+        #[cfg(target_os = "windows")]
+        command.creation_flags(bridge_windows_creation_flags());
         let mut child = command.spawn().map_err(|e| {
             SparkClientError::BridgeUnavailable(format!(
                 "failed to spawn {}: {}",
@@ -2172,6 +2192,17 @@ mod unknown_outcome_tests {
             deadline_for(&send, RequestKind::StateChanging),
             SEND_SOFT_DEADLINE
         );
+    }
+
+    /// The bridge's console is hidden on Windows, and the child is not
+    /// detached. Detach is what lets bitcoind and Tor outlive the GUI; the
+    /// bridge holds the session mnemonic and has to die with it.
+    #[test]
+    fn the_spark_bridge_suppresses_its_console_without_detaching() {
+        let flags = bridge_windows_creation_flags();
+        assert_eq!(flags, 0x0800_0000, "CREATE_NO_WINDOW");
+        assert_eq!(flags & DETACHED_PROCESS, 0);
+        assert_eq!(flags, CREATE_NO_WINDOW & !DETACHED_PROCESS);
     }
 
     /// An unknown outcome must not read as a failure anywhere it is rendered

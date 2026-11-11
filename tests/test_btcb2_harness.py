@@ -92,14 +92,17 @@ def test_chains_share_history_then_diverge_at_activation(two_chain):
         == two_chain.fork_parent_hash
     )
     assert a.rpc.getblockhash(n) != b.rpc.getblockhash(n)
-    assert a.rpc.getblockcount() > n and b.rpc.getblockcount() > n
+    assert a.rpc.getblockcount() > n
+    assert b.rpc.getblockcount() > n
 
     # Node B: the hardfork and RDTS are scheduled at N and active past it.
     info_b = b.rpc.getdeploymentinfo()
     assert info_b["blake2b"] == {"height": n, "active": True}
     rdts = info_b["deployments"]["reduced_data"]
-    assert rdts["type"] == "flagday" and rdts["height"] == n
-    assert rdts["expiry_time"] == RDTS_EXPIRY_FAR_FUTURE and rdts["active"] is True
+    assert rdts['type'] == 'flagday'
+    assert rdts['height'] == n
+    assert rdts['expiry_time'] == RDTS_EXPIRY_FAR_FUTURE
+    assert rdts['active'] is True
     # `active` describes the block *after* the queried one: false at N-2, true
     # at N-1 (whose successor is the fork block).
     info_before = b.rpc.getdeploymentinfo(b.rpc.getblockhash(n - 2))
@@ -160,11 +163,13 @@ def test_vault_fixtures_exist_where_expected(two_chain):
             assert tx["txid"] == txid
             assert node.rpc.getblockheader(block_hash)["height"] < n
             utxo = node.rpc.gettxout(txid, vout)
-            assert utxo is not None and utxo["value"] == amount
+            assert utxo is not None
+            assert utxo['value'] == amount
 
     txid, vout, amount = two_chain.poison_outpoint
     utxo_a = a.rpc.gettxout(txid, vout)
-    assert utxo_a is not None and utxo_a["value"] == amount
+    assert utxo_a is not None
+    assert utxo_a['value'] == amount
     assert a.rpc.getblockheader(two_chain.poison_block_hash)["height"] > n
     assert (
         a.rpc.getrawtransaction(txid, True, two_chain.poison_block_hash)["txid"] == txid

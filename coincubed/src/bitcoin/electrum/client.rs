@@ -83,6 +83,119 @@ impl std::fmt::Display for Error {
     }
 }
 
+/// Calculate one entry after the complete ancestor/descendant graph has been fetched.
+fn mempool_entry_from_graph(
+    tx: std::sync::Arc<bitcoin::Transaction>,
+    graph: &TxGraph<ConfirmationHeightAnchor>,
+    local_chain: &LocalChain,
+) -> Result<MempoolEntry, Error> {
+    // Each fee needs every input's value, which only the server's answers
+    // provide: a transaction it refused leaves a hole, reported as an
+    // error rather than a panic.
+    let incomplete = |txid: bitcoin::Txid, what: String| Error::IncompleteMempoolGraph(txid, what);
+    let fee_of = |tx: &bitcoin::Transaction| {
+        graph
+            .calculate_fee(tx)
+            .map_err(|e| incomplete(tx.compute_txid(), e.to_string()))
+    };
+    let add = |txid: bitcoin::Txid, total: bitcoin::Amount, fee: bitcoin::Amount| {
+        total
+            .checked_add(fee)
+            .ok_or_else(|| incomplete(txid, "fee total overflows".to_string()))
+    };
+    // Now iterate over ancestors and descendants in the graph.
+    let base_fee = fee_of(&tx)?;
+    let base_size = tx.vsize();
+    // Ancestor & descendant fees include those of `txid`.
+    let mut desc_fees = base_fee;
+    let mut anc_fees = base_fee;
+    // Ancestor size includes that of `txid`.
+    let mut anc_size = base_size;
+    for desc_txid in graph.walk_descendants(tx.compute_txid(), |_, desc_txid| Some(desc_txid)) {
+        log::debug!("Getting fee for desc txid '{}'.", desc_txid);
+        let desc_tx = graph
+            .get_tx(desc_txid)
+            .ok_or_else(|| incomplete(desc_txid, "descendant not in graph".to_string()))?;
+        desc_fees = add(desc_txid, desc_fees, fee_of(&desc_tx)?)?;
+    }
+    for anc_tx in graph.walk_ancestors(tx, |_, anc_tx| Some(anc_tx)) {
+        log::debug!(
+            "Getting fee and size for anc txid '{}'.",
+            anc_tx.compute_txid()
+        );
+        if let Some(ChainPosition::Unconfirmed(_)) = graph.get_chain_position(
+            local_chain,
+            local_chain.tip().block_id(),
+            anc_tx.compute_txid(),
+        ) {
+            anc_fees = add(anc_tx.compute_txid(), anc_fees, fee_of(&anc_tx)?)?;
+            anc_size += anc_tx.vsize();
+        } else {
+            log::debug!(
+                "Ancestor txid '{}' is not unconfirmed.",
+                anc_tx.compute_txid()
+            );
+            continue;
+        }
+    }
+    let fees = MempoolEntryFees {
+        base: base_fee,
+        ancestor: anc_fees,
+        descendant: desc_fees,
+    };
+    let entry = MempoolEntry {
+        vsize: base_size.try_into().expect("tx size must fit into u64"),
+        fees,
+        ancestor_vsize: anc_size.try_into().expect("tx size must fit into u64"),
+    };
+    Ok(entry)
+}
+
+/// Continue the ancestor walk only through unconfirmed transactions.
+fn unconfirmed_ancestor_txids(
+    txids: &HashSet<bitcoin::Txid>,
+    graph: &TxGraph<ConfirmationHeightAnchor>,
+    local_chain: &LocalChain,
+) -> HashSet<bitcoin::Txid> {
+    txids
+        .iter()
+        .filter_map(|anc_txid| {
+            if let Some(ChainPosition::Unconfirmed(_)) =
+                graph.get_chain_position(local_chain, local_chain.tip().block_id(), *anc_txid)
+            {
+                let anc_tx = graph.get_tx(*anc_txid).expect("we must have it");
+                Some(
+                    anc_tx
+                        .input
+                        .clone()
+                        .iter()
+                        .map(|txin| txin.previous_output.txid)
+                        .collect::<HashSet<_>>(),
+                )
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect()
+}
+
+/// An explicitly pinned tip is an error, rather than a request to restart the walk.
+fn ensure_expected_tip(
+    expected_tip: Option<&CheckPoint>,
+    local_chain: &LocalChain,
+) -> Result<(), Error> {
+    if let Some(expected_tip) = expected_tip {
+        if expected_tip != &local_chain.tip() {
+            return Err(Error::TipChanged(
+                expected_tip.block_id(),
+                local_chain.tip().block_id(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub struct Client(BdkElectrumClient<electrum_client::Client>);
 
 impl Client {
@@ -260,14 +373,7 @@ impl Client {
         let _ = local_chain.apply_update(sync_result.chain_update);
         // Store local tip after first sync. This will be our reference tip.
         let local_tip = local_chain.tip();
-        if let Some(ref expected_tip) = expected_tip {
-            if expected_tip != &local_chain.tip() {
-                return Err(Error::TipChanged(
-                    expected_tip.block_id(),
-                    local_chain.tip().block_id(),
-                ));
-            }
-        }
+        ensure_expected_tip(expected_tip.as_ref(), &local_chain)?;
         let mut desc_ops = Vec::new();
         let mut txs = Vec::new();
         for txid in txids {
@@ -295,14 +401,7 @@ impl Client {
             // An unconfirmed descendant may have a confirmed parent that we wouldn't have in our graph.
             let sync_result = self.sync_with_confirmation_height_anchor(request, true)?;
             let _ = local_chain.apply_update(sync_result.chain_update);
-            if let Some(ref expected_tip) = expected_tip {
-                if expected_tip != &local_chain.tip() {
-                    return Err(Error::TipChanged(
-                        expected_tip.block_id(),
-                        local_chain.tip().block_id(),
-                    ));
-                }
-            }
+            ensure_expected_tip(expected_tip.as_ref(), &local_chain)?;
             if local_chain.tip() != local_tip {
                 return Ok(None);
             }
@@ -344,110 +443,19 @@ impl Client {
             // fees for unconfirmed transactions.
             let sync_result = self.sync_with_confirmation_height_anchor(request, false)?;
             let _ = local_chain.apply_update(sync_result.chain_update);
-            if let Some(expected_tip) = &expected_tip {
-                if expected_tip != &local_chain.tip() {
-                    return Err(Error::TipChanged(
-                        expected_tip.block_id(),
-                        local_chain.tip().block_id(),
-                    ));
-                }
-            }
+            ensure_expected_tip(expected_tip.as_ref(), &local_chain)?;
             if local_chain.tip() != local_tip {
                 return Ok(None);
             }
             let _ = graph.apply_update(sync_result.graph_update);
 
             // Add ancestors of any unconfirmed txs.
-            anc_txids = anc_txids
-                .iter()
-                .filter_map(|anc_txid| {
-                    if let Some(ChainPosition::Unconfirmed(_)) = graph.get_chain_position(
-                        &local_chain,
-                        local_chain.tip().block_id(),
-                        *anc_txid,
-                    ) {
-                        let anc_tx = graph.get_tx(*anc_txid).expect("we must have it");
-                        Some(
-                            anc_tx
-                                .input
-                                .clone()
-                                .iter()
-                                .map(|txin| txin.previous_output.txid)
-                                .collect::<HashSet<_>>(),
-                        )
-                    } else {
-                        None
-                    }
-                })
-                .flatten()
-                .collect();
+            anc_txids = unconfirmed_ancestor_txids(&anc_txids, &graph, &local_chain);
         }
-        let mut entries = Vec::new();
-        for tx in txs {
-            // Each fee needs every input's value, which only the server's answers
-            // provide: a transaction it refused leaves a hole, reported as an
-            // error rather than a panic.
-            let incomplete =
-                |txid: bitcoin::Txid, what: String| Error::IncompleteMempoolGraph(txid, what);
-            let fee_of = |tx: &bitcoin::Transaction| {
-                graph
-                    .calculate_fee(tx)
-                    .map_err(|e| incomplete(tx.compute_txid(), e.to_string()))
-            };
-            let add = |txid: bitcoin::Txid, total: bitcoin::Amount, fee: bitcoin::Amount| {
-                total
-                    .checked_add(fee)
-                    .ok_or_else(|| incomplete(txid, "fee total overflows".to_string()))
-            };
-            // Now iterate over ancestors and descendants in the graph.
-            let base_fee = fee_of(&tx)?;
-            let base_size = tx.vsize();
-            // Ancestor & descendant fees include those of `txid`.
-            let mut desc_fees = base_fee;
-            let mut anc_fees = base_fee;
-            // Ancestor size includes that of `txid`.
-            let mut anc_size = base_size;
-            for desc_txid in
-                graph.walk_descendants(tx.compute_txid(), |_, desc_txid| Some(desc_txid))
-            {
-                log::debug!("Getting fee for desc txid '{}'.", desc_txid);
-                let desc_tx = graph
-                    .get_tx(desc_txid)
-                    .ok_or_else(|| incomplete(desc_txid, "descendant not in graph".to_string()))?;
-                desc_fees = add(desc_txid, desc_fees, fee_of(&desc_tx)?)?;
-            }
-            for anc_tx in graph.walk_ancestors(tx, |_, anc_tx| Some(anc_tx)) {
-                log::debug!(
-                    "Getting fee and size for anc txid '{}'.",
-                    anc_tx.compute_txid()
-                );
-                if let Some(ChainPosition::Unconfirmed(_)) = graph.get_chain_position(
-                    &local_chain,
-                    local_chain.tip().block_id(),
-                    anc_tx.compute_txid(),
-                ) {
-                    anc_fees = add(anc_tx.compute_txid(), anc_fees, fee_of(&anc_tx)?)?;
-                    anc_size += anc_tx.vsize();
-                } else {
-                    log::debug!(
-                        "Ancestor txid '{}' is not unconfirmed.",
-                        anc_tx.compute_txid()
-                    );
-                    continue;
-                }
-            }
-            let fees = MempoolEntryFees {
-                base: base_fee,
-                ancestor: anc_fees,
-                descendant: desc_fees,
-            };
-            let entry = MempoolEntry {
-                vsize: base_size.try_into().expect("tx size must fit into u64"),
-                fees,
-                ancestor_vsize: anc_size.try_into().expect("tx size must fit into u64"),
-            };
-            entries.push(entry)
-        }
+        let entries = txs
+            .into_iter()
+            .map(|tx| mempool_entry_from_graph(tx, &graph, &local_chain))
+            .collect::<Result<Vec<_>, _>>()?;
 
         // It's possible that the chain tip has now changed, but it hadn't done as of the last sync,
         // so go ahead and return the results.
@@ -515,5 +523,189 @@ impl Client {
             .copied()
             .collect();
         self.mempool_entries(txids, Some(local_tip))
+    }
+}
+
+#[cfg(test)]
+mod graph_tests {
+    use super::*;
+    use bitcoin::{absolute, transaction::Version, Amount, OutPoint, Transaction, TxIn, TxOut};
+    use std::sync::Arc;
+
+    fn spend(previous_output: OutPoint, value: u64) -> Arc<Transaction> {
+        spend_inputs(&[previous_output], value)
+    }
+
+    fn spend_inputs(inputs: &[OutPoint], value: u64) -> Arc<Transaction> {
+        Arc::new(Transaction {
+            version: Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: inputs
+                .iter()
+                .copied()
+                .map(|previous_output| TxIn {
+                    previous_output,
+                    ..TxIn::default()
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        })
+    }
+
+    #[test]
+    fn mempool_fees_include_descendants_but_only_unconfirmed_ancestors() {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let (chain, _) = LocalChain::from_genesis_hash(genesis.block_hash());
+        let funding = Arc::new(genesis.txdata[0].clone());
+        let ancestor = spend(OutPoint::new(funding.compute_txid(), 0), 90_000);
+        let tx = spend(OutPoint::new(ancestor.compute_txid(), 0), 80_000);
+        let descendant = spend(OutPoint::new(tx.compute_txid(), 0), 65_000);
+        let mut graph = TxGraph::default();
+        for transaction in [&funding, &ancestor, &tx, &descendant] {
+            let _ = graph.insert_tx(transaction.clone());
+            let _ = graph.insert_seen_at(transaction.compute_txid(), 1);
+        }
+        let anchor = ConfirmationHeightAnchor {
+            anchor_block: chain.tip().block_id(),
+            confirmation_height: 0,
+        };
+        let _ = graph.insert_anchor(funding.compute_txid(), anchor);
+        let entry = mempool_entry_from_graph(tx.clone(), &graph, &chain).unwrap();
+        assert_eq!(entry.fees.base, Amount::from_sat(10_000));
+        assert_eq!(entry.fees.descendant, Amount::from_sat(25_000));
+        assert_eq!(
+            entry.fees.ancestor,
+            funding.output[0].value - Amount::from_sat(80_000)
+        );
+        assert_eq!(entry.ancestor_vsize, (tx.vsize() + ancestor.vsize()) as u64);
+        assert_eq!(entry.vsize, tx.vsize() as u64);
+
+        let _ = graph.insert_anchor(ancestor.compute_txid(), anchor);
+        let entry = mempool_entry_from_graph(tx.clone(), &graph, &chain).unwrap();
+        assert_eq!(entry.fees.ancestor, entry.fees.base);
+        assert_eq!(entry.ancestor_vsize, tx.vsize() as u64);
+        assert_eq!(entry.fees.descendant, Amount::from_sat(25_000));
+    }
+
+    #[test]
+    fn mempool_fee_missing_input_is_an_error() {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let (chain, _) = LocalChain::from_genesis_hash(genesis.block_hash());
+        let tx = spend(OutPoint::new(genesis.txdata[0].compute_txid(), 0), 80_000);
+        let mut graph = TxGraph::default();
+        let _ = graph.insert_tx(tx.clone());
+        assert!(
+            matches!(mempool_entry_from_graph(tx.clone(), &graph, &chain),
+            Err(Error::IncompleteMempoolGraph(txid, _)) if txid == tx.compute_txid())
+        );
+    }
+
+    #[test]
+    fn ancestor_discovery_follows_only_unconfirmed_transactions() {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let (chain, _) = LocalChain::from_genesis_hash(genesis.block_hash());
+        let funding = genesis.txdata[0].compute_txid();
+        // These parents are named by the candidate transactions and are not
+        // themselves inserted, so the walk's result is exactly their ids.
+        let confirmed_parent = spend(OutPoint::new(funding, 0), 100_000).compute_txid();
+        let shared_parent = spend(OutPoint::new(funding, 1), 100_000).compute_txid();
+        let other_parent = spend(OutPoint::new(funding, 2), 100_000).compute_txid();
+        let unknown = spend(OutPoint::new(funding, 4), 100_000).compute_txid();
+        let confirmed = spend(OutPoint::new(confirmed_parent, 0), 90_000);
+        // Two inputs share one parent. The next fetch must name that parent once.
+        let unconfirmed = spend_inputs(
+            &[
+                OutPoint::new(shared_parent, 0),
+                OutPoint::new(shared_parent, 1),
+                OutPoint::new(other_parent, 0),
+            ],
+            80_000,
+        );
+        let also_unconfirmed = spend(OutPoint::new(shared_parent, 2), 70_000);
+        let mut graph = TxGraph::default();
+        for transaction in [&confirmed, &unconfirmed, &also_unconfirmed] {
+            let _ = graph.insert_tx(transaction.clone());
+        }
+        // A full transaction with no anchor is unconfirmed. `seen_at` is not
+        // what stops the walk; an anchor in the best chain is.
+        let _ = graph.insert_seen_at(unconfirmed.compute_txid(), 1);
+        let anchor = ConfirmationHeightAnchor {
+            anchor_block: chain.tip().block_id(),
+            confirmation_height: 0,
+        };
+        let _ = graph.insert_anchor(confirmed.compute_txid(), anchor);
+
+        let mut candidates = HashSet::new();
+        candidates.insert(confirmed.compute_txid());
+        candidates.insert(unconfirmed.compute_txid());
+        candidates.insert(also_unconfirmed.compute_txid());
+        candidates.insert(unknown);
+
+        let next = unconfirmed_ancestor_txids(&candidates, &graph, &chain);
+        assert_eq!(
+            next,
+            HashSet::from([shared_parent, other_parent]),
+            "an anchored transaction and an unknown txid must not extend the walk"
+        );
+
+        let mut confirmed_only = HashSet::new();
+        confirmed_only.insert(confirmed.compute_txid());
+        assert!(
+            unconfirmed_ancestor_txids(&confirmed_only, &graph, &chain).is_empty(),
+            "a confirmed ancestor is where the fetch stops"
+        );
+        assert!(unconfirmed_ancestor_txids(&HashSet::new(), &graph, &chain).is_empty());
+    }
+
+    #[test]
+    fn mempool_fee_missing_descendant_input_names_that_descendant() {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let (chain, _) = LocalChain::from_genesis_hash(genesis.block_hash());
+        let funding = Arc::new(genesis.txdata[0].clone());
+        let tx = spend(OutPoint::new(funding.compute_txid(), 0), 80_000);
+        let missing = spend(OutPoint::new(funding.compute_txid(), 1), 50_000).compute_txid();
+        let descendant = spend_inputs(
+            &[
+                OutPoint::new(tx.compute_txid(), 0),
+                OutPoint::new(missing, 0),
+            ],
+            70_000,
+        );
+        let mut graph = TxGraph::default();
+        for transaction in [&funding, &tx, &descendant] {
+            let _ = graph.insert_tx(transaction.clone());
+            let _ = graph.insert_seen_at(transaction.compute_txid(), 1);
+        }
+        let anchor = ConfirmationHeightAnchor {
+            anchor_block: chain.tip().block_id(),
+            confirmation_height: 0,
+        };
+        let _ = graph.insert_anchor(funding.compute_txid(), anchor);
+
+        match mempool_entry_from_graph(tx, &graph, &chain) {
+            Err(Error::IncompleteMempoolGraph(txid, _)) => {
+                assert_eq!(txid, descendant.compute_txid());
+            }
+            other => panic!("expected the descendant's missing input, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn expected_tip_distinguishes_a_pinned_walk_from_an_unpinned_walk() {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let (mut chain, _) = LocalChain::from_genesis_hash(genesis.block_hash());
+        let expected = chain.tip();
+        assert!(ensure_expected_tip(Some(&expected), &chain).is_ok());
+        let changed = BlockId {
+            height: 1,
+            hash: genesis.block_hash(),
+        };
+        let _ = chain.insert_block(changed).unwrap();
+        assert!(ensure_expected_tip(None, &chain).is_ok());
+        assert!(matches!(ensure_expected_tip(Some(&expected), &chain),
+            Err(Error::TipChanged(old, actual)) if old == expected.block_id() && actual == changed));
     }
 }

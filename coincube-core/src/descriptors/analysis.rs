@@ -228,30 +228,37 @@ impl PathInfo {
         } else if k == subs.len() && subs.len() > 2 {
             // The N-of-N case. All subs but the threshold must be keys (if one had been thresh()
             // of keys it would have been normalized).
-            let mut tl_value = None;
-            let mut keys = Vec::with_capacity(subs.len());
-            for sub in subs {
-                match sub.as_ref() {
-                    SemanticPolicy::Key(key) => keys.push(key.clone()),
-                    SemanticPolicy::Older(val) => {
-                        if tl_value.is_some() {
-                            return Err(CoincubePolicyError::IncompatibleDesc);
-                        }
-                        tl_value = Some(csv_check(val.to_consensus_u32())?);
-                    }
-                    _ => return Err(CoincubePolicyError::IncompatibleDesc),
-                }
-            }
-            assert!(keys.len() > 1); // At least 3 subs, only one of which may be older().
-            Ok((
-                tl_value.ok_or(CoincubePolicyError::IncompatibleDesc)?,
-                PathInfo::Multi(k - 1, keys),
-            ))
+            Self::from_all_required_recovery(k, subs)
         } else {
             // If there is less than 2 subs, there can't be both a timelock and keys. If the
             // threshold is not equal to the number of subs, the timelock can't be mandatory.
             Err(CoincubePolicyError::IncompatibleDesc)
         }
+    }
+
+    fn from_all_required_recovery(
+        k: usize,
+        subs: Vec<sync::Arc<SemanticPolicy<descriptor::DescriptorPublicKey>>>,
+    ) -> Result<(u16, PathInfo), CoincubePolicyError> {
+        let mut tl_value = None;
+        let mut keys = Vec::with_capacity(subs.len());
+        for sub in subs {
+            match sub.as_ref() {
+                SemanticPolicy::Key(key) => keys.push(key.clone()),
+                SemanticPolicy::Older(val) => {
+                    if tl_value.is_some() {
+                        return Err(CoincubePolicyError::IncompatibleDesc);
+                    }
+                    tl_value = Some(csv_check(val.to_consensus_u32())?);
+                }
+                _ => return Err(CoincubePolicyError::IncompatibleDesc),
+            }
+        }
+        assert!(keys.len() > 1); // At least 3 subs, only one of which may be older().
+        Ok((
+            tl_value.ok_or(CoincubePolicyError::IncompatibleDesc)?,
+            PathInfo::Multi(k - 1, keys),
+        ))
     }
 
     /// Add another available key to this `PathInfo`. Note this doesn't change the threshold.
@@ -566,14 +573,10 @@ impl CoincubePolicy {
         )
     }
 
-    /// Create a Coincube policy from a descriptor. This will check the descriptor is correctly formed
-    /// (P2WSH, multipath, ..) and has a valid Coincube semantic.
-    pub fn from_multipath_descriptor(
+    fn descriptor_policy(
         desc: &descriptor::Descriptor<descriptor::DescriptorPublicKey>,
-    ) -> Result<CoincubePolicy, CoincubePolicyError> {
-        // Lift a semantic policy out of this Miniscript and normalize it to make sure we compare
-        // apples to apples below.
-        let policy = match desc {
+    ) -> Result<SemanticPolicy<descriptor::DescriptorPublicKey>, CoincubePolicyError> {
+        Ok(match desc {
             descriptor::Descriptor::Wsh(wsh_desc) => {
                 let ms = match wsh_desc.as_inner() {
                     descriptor::WshInner::Ms(ms) => ms,
@@ -605,8 +608,17 @@ impl CoincubePolicy {
             }
             // We only allow P2WSH and Taproot descriptors.
             _ => return Err(CoincubePolicyError::IncompatibleDesc),
-        }
-        .normalized();
+        })
+    }
+
+    /// Create a Coincube policy from a descriptor. This will check the descriptor is correctly formed
+    /// (P2WSH, multipath, ..) and has a valid Coincube semantic.
+    pub fn from_multipath_descriptor(
+        desc: &descriptor::Descriptor<descriptor::DescriptorPublicKey>,
+    ) -> Result<CoincubePolicy, CoincubePolicyError> {
+        // Lift a semantic policy out of this Miniscript and normalize it to make sure we compare
+        // apples to apples below.
+        let policy = Self::descriptor_policy(desc)?.normalized();
         let is_taproot = matches!(desc, descriptor::Descriptor::Tr(..));
 
         // The policy must always be "1 of N spending paths" with at least an always-available
@@ -636,15 +648,7 @@ impl CoincubePolicy {
                 // 1-of-N multisig. In this case the policy is normalized from `thresh(1, thresh(1,
                 // pk(A), pk(B)), thresh(2, older(42), pk(C)))` to `thresh(1, pk(A), pk(B),
                 // thresh(2, older(42), pk(C)))`.
-                if let Some(prim_path) = primary_path {
-                    if let SemanticPolicy::Key(key) = sub {
-                        primary_path = Some(prim_path.with_added_key(key.clone()));
-                    } else {
-                        return Err(CoincubePolicyError::IncompatibleDesc);
-                    }
-                } else {
-                    primary_path = Some(PathInfo::from_primary_path(sub)?);
-                }
+                primary_path = Some(Self::add_primary_path(primary_path, sub)?);
             } else {
                 // If it's not a simple (multi)key check, it must be (one of) the timelocked
                 // recovery path(s).
@@ -668,6 +672,21 @@ impl CoincubePolicy {
             is_taproot,
             /* compile = */ false,
         )
+    }
+
+    fn add_primary_path(
+        primary: Option<PathInfo>,
+        sub: SemanticPolicy<descriptor::DescriptorPublicKey>,
+    ) -> Result<PathInfo, CoincubePolicyError> {
+        if let Some(primary) = primary {
+            if let SemanticPolicy::Key(key) = sub {
+                Ok(primary.with_added_key(key.clone()))
+            } else {
+                Err(CoincubePolicyError::IncompatibleDesc)
+            }
+        } else {
+            PathInfo::from_primary_path(sub)
+        }
     }
 
     pub fn primary_path(&self) -> &PathInfo {

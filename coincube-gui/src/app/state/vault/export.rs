@@ -141,77 +141,7 @@ impl VaultExportModal {
         message: ImportExportMessage,
     ) -> Task<M> {
         match message {
-            ImportExportMessage::Progress(m) => match m {
-                Progress::Started(handle) => {
-                    self.handle = Some(handle);
-                    self.state = ImportExportState::Progress(0.0);
-                }
-                Progress::Progress(p) => {
-                    if let ImportExportState::Progress(_) = self.state {
-                        self.state = ImportExportState::Progress(p);
-                    }
-                }
-                Progress::Finished | Progress::Ended => self.state = ImportExportState::Ended,
-                Progress::KeyAliasesConflict(ref sender) => {
-                    if let ImportExportType::ImportBackup {
-                        network_dir,
-                        wallet,
-                        ..
-                    } = &self.import_export_type
-                    {
-                        self.import_export_type = ImportExportType::ImportBackup {
-                            network_dir: network_dir.clone(),
-                            wallet: wallet.clone(),
-                            overwrite_labels: None,
-                            overwrite_aliases: Some(sender.clone()),
-                        };
-                    }
-                }
-                Progress::LabelsConflict(ref sender) => {
-                    if let ImportExportType::ImportBackup {
-                        network_dir,
-                        wallet,
-                        ..
-                    } = &self.import_export_type
-                    {
-                        self.import_export_type = ImportExportType::ImportBackup {
-                            network_dir: network_dir.clone(),
-                            wallet: wallet.clone(),
-                            overwrite_labels: Some(sender.clone()),
-                            overwrite_aliases: None,
-                        };
-                    }
-                }
-                Progress::Error(e) => {
-                    self.error = Some(e.clone());
-                }
-                Progress::None => {}
-                Progress::DeviceAdvisory(kind) => {
-                    self.advisory = crate::hw_advisory::evaluate_file_import(&kind);
-                    return Task::perform(async {}, move |_| {
-                        ImportExportMessage::DeviceAdvisory(kind).into()
-                    });
-                }
-                Progress::Xpub(xpub_str) => {
-                    if matches!(self.import_export_type, ImportExportType::ExportXpub(_)) {
-                        self.state = ImportExportState::Ended;
-                    }
-                    return Task::perform(async {}, move |_| {
-                        ImportExportMessage::Xpub(xpub_str.clone()).into()
-                    });
-                }
-                Progress::Descriptor(_) => {
-                    if matches!(self.import_export_type, ImportExportType::ImportDescriptor) {
-                        self.state = ImportExportState::Ended;
-                    }
-                }
-                Progress::UpdateAliases(map) => {
-                    return Task::perform(async {}, move |_| {
-                        ImportExportMessage::UpdateAliases(map.clone()).into()
-                    });
-                }
-                Progress::WalletFromBackup(_) | Progress::EncryptedFile(_) | Progress::Psbt(_) => {}
-            },
+            ImportExportMessage::Progress(m) => return self.apply_progress(m),
             ImportExportMessage::TimedOut => {
                 self.stop(ImportExportState::TimedOut);
             }
@@ -228,68 +158,10 @@ impl VaultExportModal {
             }
             ImportExportMessage::Close | ImportExportMessage::Open => { /* unreachable */ }
             ImportExportMessage::Overwrite => {
-                if let ImportExportType::ImportBackup {
-                    overwrite_labels,
-                    overwrite_aliases,
-                    ..
-                } = &mut self.import_export_type
-                {
-                    if let Some(sender) = overwrite_labels.take() {
-                        return Task::perform(
-                            async move {
-                                if sender.send(true).await.is_err() {
-                                    tracing::error!(
-                                        "VaultExportModal.update(): fail to send labels NACK"
-                                    );
-                                }
-                            },
-                            |_| ImportExportMessage::Ignore.into(),
-                        );
-                    } else if let Some(sender) = overwrite_aliases.take() {
-                        return Task::perform(
-                            async move {
-                                if sender.send(true).await.is_err() {
-                                    tracing::error!(
-                                        "VaultExportModal.update(): fail to send aliases NACK"
-                                    );
-                                }
-                            },
-                            |_| ImportExportMessage::Ignore.into(),
-                        );
-                    }
-                }
+                return self.confirm_overwrite();
             }
             ImportExportMessage::Ignore => {
-                if let ImportExportType::ImportBackup {
-                    overwrite_labels,
-                    overwrite_aliases,
-                    ..
-                } = &mut self.import_export_type
-                {
-                    if let Some(sender) = overwrite_labels.take() {
-                        return Task::perform(
-                            async move {
-                                if sender.send(false).await.is_err() {
-                                    tracing::error!(
-                                        "VaultExportModal.update(): fail to send labels NACK"
-                                    );
-                                }
-                            },
-                            |_| ImportExportMessage::Ignore.into(),
-                        );
-                    } else if let Some(sender) = overwrite_aliases.take() {
-                        return Task::perform(
-                            async move {
-                                if sender.send(false).await.is_err() {
-                                    tracing::error!(
-                                        "VaultExportModal.update(): fail to send aliases NACK"
-                                    );
-                                }
-                            },
-                            |_| ImportExportMessage::Ignore.into(),
-                        );
-                    }
-                }
+                return self.decline_overwrite();
             }
             ImportExportMessage::UpdateAliases(_) => { /* unexpected */ }
             ImportExportMessage::Xpub(_) => { /* unexpected */ }
@@ -303,6 +175,146 @@ impl VaultExportModal {
                 }
             }
         }
+        Task::none()
+    }
+
+    fn confirm_overwrite<M: From<ImportExportMessage> + Send + 'static>(&mut self) -> Task<M> {
+        if let ImportExportType::ImportBackup {
+            overwrite_labels,
+            overwrite_aliases,
+            ..
+        } = &mut self.import_export_type
+        {
+            if let Some(sender) = overwrite_labels.take() {
+                return Task::perform(
+                    async move {
+                        if sender.send(true).await.is_err() {
+                            tracing::error!("VaultExportModal.update(): fail to send labels NACK");
+                        }
+                    },
+                    |_| ImportExportMessage::Ignore.into(),
+                );
+            } else if let Some(sender) = overwrite_aliases.take() {
+                return Task::perform(
+                    async move {
+                        if sender.send(true).await.is_err() {
+                            tracing::error!("VaultExportModal.update(): fail to send aliases NACK");
+                        }
+                    },
+                    |_| ImportExportMessage::Ignore.into(),
+                );
+            }
+        }
+
+        Task::none()
+    }
+
+    fn decline_overwrite<M: From<ImportExportMessage> + Send + 'static>(&mut self) -> Task<M> {
+        if let ImportExportType::ImportBackup {
+            overwrite_labels,
+            overwrite_aliases,
+            ..
+        } = &mut self.import_export_type
+        {
+            if let Some(sender) = overwrite_labels.take() {
+                return Task::perform(
+                    async move {
+                        if sender.send(false).await.is_err() {
+                            tracing::error!("VaultExportModal.update(): fail to send labels NACK");
+                        }
+                    },
+                    |_| ImportExportMessage::Ignore.into(),
+                );
+            } else if let Some(sender) = overwrite_aliases.take() {
+                return Task::perform(
+                    async move {
+                        if sender.send(false).await.is_err() {
+                            tracing::error!("VaultExportModal.update(): fail to send aliases NACK");
+                        }
+                    },
+                    |_| ImportExportMessage::Ignore.into(),
+                );
+            }
+        }
+
+        Task::none()
+    }
+
+    fn apply_progress<M: From<ImportExportMessage> + Send + 'static>(
+        &mut self,
+        m: Progress,
+    ) -> Task<M> {
+        match m {
+            Progress::Started(handle) => {
+                self.handle = Some(handle);
+                self.state = ImportExportState::Progress(0.0);
+            }
+            Progress::Progress(p) => {
+                if let ImportExportState::Progress(_) = self.state {
+                    self.state = ImportExportState::Progress(p);
+                }
+            }
+            Progress::Finished | Progress::Ended => self.state = ImportExportState::Ended,
+            Progress::KeyAliasesConflict(ref sender) => {
+                if let ImportExportType::ImportBackup {
+                    network_dir,
+                    wallet,
+                    ..
+                } = &self.import_export_type
+                {
+                    self.import_export_type = ImportExportType::ImportBackup {
+                        network_dir: network_dir.clone(),
+                        wallet: wallet.clone(),
+                        overwrite_labels: None,
+                        overwrite_aliases: Some(sender.clone()),
+                    };
+                }
+            }
+            Progress::LabelsConflict(ref sender) => {
+                if let ImportExportType::ImportBackup {
+                    network_dir,
+                    wallet,
+                    ..
+                } = &self.import_export_type
+                {
+                    self.import_export_type = ImportExportType::ImportBackup {
+                        network_dir: network_dir.clone(),
+                        wallet: wallet.clone(),
+                        overwrite_labels: Some(sender.clone()),
+                        overwrite_aliases: None,
+                    };
+                }
+            }
+            Progress::Error(e) => {
+                self.error = Some(e.clone());
+            }
+            Progress::None => {}
+            Progress::DeviceAdvisory(kind) => {
+                self.advisory = crate::hw_advisory::evaluate_file_import(&kind);
+                return Task::perform(async {}, move |_| {
+                    ImportExportMessage::DeviceAdvisory(kind).into()
+                });
+            }
+            Progress::Xpub(xpub_str) => {
+                if matches!(self.import_export_type, ImportExportType::ExportXpub(_)) {
+                    self.state = ImportExportState::Ended;
+                }
+                return Task::perform(async {}, move |_| {
+                    ImportExportMessage::Xpub(xpub_str.clone()).into()
+                });
+            }
+            Progress::Descriptor(_) => {
+                if matches!(self.import_export_type, ImportExportType::ImportDescriptor) {
+                    self.state = ImportExportState::Ended;
+                }
+            }
+            Progress::UpdateAliases(map) => {
+                return Task::perform(async {}, move |_| {
+                    ImportExportMessage::UpdateAliases(map.clone()).into()
+                });
+            }
+            Progress::WalletFromBackup(_) | Progress::EncryptedFile(_) | Progress::Psbt(_) => {}
+        };
         Task::none()
     }
 

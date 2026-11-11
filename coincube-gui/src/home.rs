@@ -68,6 +68,8 @@ pub(crate) mod launcher_scene;
 mod remote_catalog;
 pub(crate) mod restore_frame;
 pub(crate) use launcher_catalog::LauncherSceneContext;
+#[cfg(feature = "integration-tests")]
+pub mod integration;
 
 /// The firmware advisory whose one-time incident notice this install still
 /// owes the user, if any.
@@ -13512,10 +13514,31 @@ mod tests {
         ignore = "needs a code-signed binary (data-protection keychain returns -34018 unsigned)"
     )]
     fn creating_a_cube_walks_the_backup_step_and_the_cube_opens() {
+        create_verify_and_reopen_cube(Network::Bitcoin, "Fresh");
+    }
+
+    #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "needs the signed macOS test runner for the data-protection keychain"
+    )]
+    fn creating_a_testnet4_cube_walks_the_backup_step_and_reopens() {
+        create_verify_and_reopen_cube(Network::Testnet4, "E2E-Testnet4");
+    }
+
+    fn create_verify_and_reopen_cube(network: Network, name: &str) {
         let dir = tmp_datadir("e2e");
         let mut home = home_with_datadir(&dir);
+        let _ = drain(home.update(Message::View(ViewMessage::ToggleDeveloperMode(true))));
+        let select = Message::View(ViewMessage::SelectNetwork(network.into()));
+        for result in drain(home.update(select)) {
+            let _ = drain(home.update(result));
+        }
+        assert_eq!(home.network, network.into());
 
-        let task = start_creation(&mut home, "Fresh", "1234");
+        // This PIN is used only for the disposable test Cube.
+        let pin = zeroize::Zeroizing::new(format!("{:04}", rand::random::<u16>() % 10_000));
+        let task = start_creation(&mut home, name, &pin);
         assert!(
             drain(task).is_empty(),
             "clicking Create must not create anything on its own — the backup step comes first"
@@ -13526,7 +13549,8 @@ mod tests {
             "creation must land on the backup step, not on a finished Cube"
         );
         assert!(
-            cubes_on_disk(&dir).is_empty(),
+            settings::Settings::from_file(&home.datadir_path.network_directory(network))
+                .map_or(true, |settings| settings.cubes.is_empty()),
             "no Cube may exist on disk while the backup step is still running"
         );
 
@@ -13549,7 +13573,23 @@ mod tests {
             "the seed phrase must not outlive the creation flow"
         );
 
-        let on_disk = cubes_on_disk(&dir);
+        // Reconstruct Home from disk and run its startup probe before unlocking.
+        drop(home);
+        let directory = CoincubeDirectory::new(dir.clone());
+        let network_dir = directory.network_directory(network);
+        let (mut reopened, startup) = Home::new(directory, Some(network));
+        for result in drain(startup) {
+            let _ = drain(reopened.update(result));
+        }
+        assert_eq!(reopened.network, network.into());
+        assert!(matches!(
+            &reopened.state,
+            State::Cubes { cubes, .. } if cubes.iter().any(|cube| cube.name == name)
+        ));
+        let on_disk = settings::Settings::from_file(&network_dir).unwrap().cubes;
+        if network == Network::Testnet4 {
+            assert!(cubes_on_disk(&dir).is_empty());
+        }
         assert_eq!(
             on_disk.len(),
             1,
@@ -13557,6 +13597,8 @@ mod tests {
             on_disk
         );
         let cube = &on_disk[0];
+        assert_eq!(cube.network, network.into());
+        assert_eq!(cube.name, name);
         assert!(
             cube.backed_up,
             "a completed verification must be recorded as a backup"
@@ -13575,16 +13617,16 @@ mod tests {
         // typed into the create form, and the seed file that was actually
         // sealed. This is the assertion the bricking bug would have failed.
         let loc = unlock::CubeLocation::new(&dir, cube);
-        match unlock::unlock_blocking(&loc, "1234") {
-            Ok(unlock::PinOutcome::Unlock(signer)) => assert_eq!(
-                signer.words(),
-                words,
-                "the phrase the user wrote down must be the phrase that got sealed"
-            ),
-            other => panic!("a freshly created Cube did not unlock: {:?}", other),
-        }
-
-        let _ = std::fs::remove_dir_all(&dir);
+        let result = unlock::unlock_blocking(&loc, &pin);
+        unlock::device_secret::delete(&cube.id).expect("remove the disposable device secret");
+        std::fs::remove_dir_all(&dir).expect("remove the disposable Cube");
+        let Ok(unlock::PinOutcome::Unlock(signer)) = result else {
+            panic!("a freshly created Cube did not unlock");
+        };
+        assert!(
+            signer.words() == words,
+            "the verified phrase must match the phrase that was sealed"
+        );
     }
 
     /// The bypass completes creation and leaves the evidence support needs.

@@ -6,7 +6,17 @@ name: BTCB2 Regtest Harness
 # dispatched by hand — never on every push — to protect Actions minutes.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+      - ready_for_review
+      - edited
+      - converted_to_draft
+    branches:
+      - master
+      - redesign
   workflow_dispatch:
     inputs:
       trace_syscalls:
@@ -50,8 +60,8 @@ on:
         default: ""
 
 concurrency:
-  group: btcb2-regtest-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: batch-${{ github.workflow }}-${{ github.ref }}-${{ github.event.action == 'edited' && github.event.changes.base == null && github.run_id || 'candidate' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Checkout, caches and the failure-log artifact need nothing beyond reading
 # the repository.
@@ -65,7 +75,7 @@ env:
 
 jobs:
   btcb2-harness:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'btcb2')
+    if: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && (github.event.action != 'edited' || github.event.changes.base != null))) && (github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'btcb2')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
 

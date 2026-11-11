@@ -366,43 +366,7 @@ fn validate_typed_psbt(psbt: &Psbt) -> Result<usize, UnifiedPsbtError> {
     }
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
-        // A sighash *request* the chain does not serve is invalid here, not
-        // just at finalisation: absent, `SIGHASH_ALL` or `ALL|UNIFIED`. (An
-        // input that also carries a unified record is held to the stricter
-        // rule — absent or `ALL|UNIFIED` — by the verifier.)
-        if let Some(requested) = input.sighash_type {
-            let raw = requested.to_u32();
-            if raw != u32::from(LEGACY_SIGHASH_ALL) && raw != u32::from(UNIFIED_SIGHASH_ALL) {
-                return Err(UnifiedPsbtError::UnsupportedSighashRequest {
-                    input: input_index,
-                    sighash: raw,
-                });
-            }
-        }
-        // And every standard signature's own flag: `SIGHASH_ALL` only.
-        for (public_key, signature) in &input.partial_sigs {
-            let raw = signature.sighash_type.to_u32();
-            if raw != u32::from(LEGACY_SIGHASH_ALL) {
-                return Err(UnifiedPsbtError::UnsupportedLegacySighash {
-                    input: input_index,
-                    public_key: *public_key,
-                    sighash: raw,
-                });
-            }
-        }
-        for (key, value) in &input.proprietary {
-            if !is_reserved_key(key) {
-                continue;
-            }
-            let public_key = parse_public_key(&key.key, input_index)?;
-            validate_signature(value, input_index)?;
-            if input.partial_sigs.contains_key(&public_key) {
-                return Err(UnifiedPsbtError::AmbiguousSignatureEncoding {
-                    input: input_index,
-                    public_key,
-                });
-            }
-        }
+        validate_input_signatures(input_index, input)?;
     }
     Ok(serialized.len())
 }
@@ -570,17 +534,7 @@ fn convert_standard_input_to_internal(
         if pair.key.first() == Some(&PSBT_IN_PARTIAL_SIG) {
             let public_key = parse_public_key(&pair.key[1..], input_index)?;
             standard_keys.insert(public_key);
-            if let Some(sighash) = pair.value.last().copied() {
-                if sighash & 0x20 != 0 {
-                    if sighash != UNIFIED_SIGHASH_ALL {
-                        return Err(UnifiedPsbtError::UnsupportedUnifiedSighash {
-                            input: input_index,
-                            sighash,
-                        });
-                    }
-                    validate_signature(&pair.value, input_index)?;
-                }
-            }
+            validate_standard_signature(pair, input_index)?;
         } else if let Some((public_key, _)) = raw_reserved_signature(pair, input_index)? {
             reserved_keys.insert(public_key);
         }
@@ -975,6 +929,65 @@ fn encode_compact_size(bytes: &mut Vec<u8>, value: usize) -> Result<(), UnifiedP
         _ => {
             bytes.push(0xff);
             bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+fn validate_input_signatures(
+    input_index: usize,
+    input: &miniscript::bitcoin::psbt::Input,
+) -> Result<(), UnifiedPsbtError> {
+    // A sighash *request* the chain does not serve is invalid here, not
+    // just at finalisation: absent, `SIGHASH_ALL` or `ALL|UNIFIED`. (An
+    // input that also carries a unified record is held to the stricter
+    // rule — absent or `ALL|UNIFIED` — by the verifier.)
+    if let Some(requested) = input.sighash_type {
+        let raw = requested.to_u32();
+        if raw != u32::from(LEGACY_SIGHASH_ALL) && raw != u32::from(UNIFIED_SIGHASH_ALL) {
+            return Err(UnifiedPsbtError::UnsupportedSighashRequest {
+                input: input_index,
+                sighash: raw,
+            });
+        }
+    }
+    // And every standard signature's own flag: `SIGHASH_ALL` only.
+    for (public_key, signature) in &input.partial_sigs {
+        let raw = signature.sighash_type.to_u32();
+        if raw != u32::from(LEGACY_SIGHASH_ALL) {
+            return Err(UnifiedPsbtError::UnsupportedLegacySighash {
+                input: input_index,
+                public_key: *public_key,
+                sighash: raw,
+            });
+        }
+    }
+    for (key, value) in &input.proprietary {
+        if !is_reserved_key(key) {
+            continue;
+        }
+        let public_key = parse_public_key(&key.key, input_index)?;
+        validate_signature(value, input_index)?;
+        if input.partial_sigs.contains_key(&public_key) {
+            return Err(UnifiedPsbtError::AmbiguousSignatureEncoding {
+                input: input_index,
+                public_key,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_standard_signature(pair: &RawPair, input_index: usize) -> Result<(), UnifiedPsbtError> {
+    if let Some(sighash) = pair.value.last().copied() {
+        if sighash & 0x20 != 0 {
+            if sighash != UNIFIED_SIGHASH_ALL {
+                return Err(UnifiedPsbtError::UnsupportedUnifiedSighash {
+                    input: input_index,
+                    sighash,
+                });
+            }
+            validate_signature(&pair.value, input_index)?;
         }
     }
     Ok(())

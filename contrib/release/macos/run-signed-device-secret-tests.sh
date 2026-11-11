@@ -124,7 +124,8 @@ _cr="$BUNDLE/Contents/_CodeSignature/CodeResources"
     || /usr/libexec/PlistBuddy -c 'Print :files:embedded.provisionprofile' "$_cr" >/dev/null 2>&1 \
     || { echo "the profile is present but not sealed into CodeResources" >&2; exit 1; }
 
-echo "==> Running the ignored device_secret tests"
+FILTER="${1:-device_secret}"
+echo "==> Running ignored tests matching $FILTER"
 # --test-threads=1: these tests share one keychain service name and assert on
 # provisioning races; running them concurrently would have them fight.
 #
@@ -134,7 +135,7 @@ echo "==> Running the ignored device_secret tests"
 # than leaving the next person to rediscover the predicate.
 STARTED_AT=$(date '+%Y-%m-%d %H:%M:%S')
 set +e
-"$BUNDLE/Contents/MacOS/TestRunner" device_secret --ignored --test-threads=1
+"$BUNDLE/Contents/MacOS/TestRunner" "$FILTER" --ignored --test-threads=1
 STATUS=$?
 set -e
 if [ "$STATUS" -eq 137 ]; then

@@ -248,15 +248,17 @@ def test_import_history_send_and_restart(import_chain, tmp_path, shape, backend)
         unknown = PSBT.from_base64(first)
         unknown.tx.nLockTime += 1
         unknown.g.map[0] = unknown.tx.serialize_without_witness()
+        serialized_psbt = unknown.to_base64()
         with pytest.raises(RpcError):
-            daemon.rpc.updatespend(unknown.to_base64())
+            daemon.rpc.updatespend(serialized_psbt)
         altered = PSBT.from_base64(first)
         origin_key = next(iter(altered.i[0].map[6]))
         altered.i[0].map[6][origin_key] = bytes([0]) * len(
             altered.i[0].map[6][origin_key]
         )
+        serialized_psbt = altered.to_base64()
         with pytest.raises(RpcError):
-            daemon.rpc.updatespend(altered.to_base64())
+            daemon.rpc.updatespend(serialized_psbt)
         daemon.rpc.updatespend(first)
         second = daemon.rpc.createspend({recipient: 100_000}, outpoints, 2)["psbt"]
         first_tx = node.rpc.decodepsbt(first)["tx"]

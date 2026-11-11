@@ -1526,6 +1526,71 @@ impl BitcoinD {
             .and_then(Json::as_array)
             .expect("tx array must be there");
 
+        self.find_spender_in_transactions(spent_outpoint, transactions)
+    }
+
+    /// Return this outgoing transaction only if it spends the coin and remains eligible.
+    fn eligible_spender(
+        &self,
+        spending_txid: &str,
+        spent_outpoint: &bitcoin::OutPoint,
+    ) -> Option<bitcoin::Txid> {
+        let gettx_res = self.make_wallet_request(
+            "gettransaction",
+            params!(
+                Json::String(spending_txid.to_string()),
+                Json::Bool(true), // watchonly
+                Json::Bool(true)  // verbose
+            ),
+        );
+        let vin = gettx_res
+            .get("decoded")
+            .and_then(|d| d.get("vin").and_then(Json::as_array))
+            .expect("A valid vin array must be present");
+
+        for input in vin {
+            let txid = input
+                .get("txid")
+                .and_then(Json::as_str)
+                .and_then(|t| bitcoin::Txid::from_str(t).ok())
+                .expect("A valid txid must be present");
+            let vout = input
+                .get("vout")
+                .and_then(Json::as_u64)
+                .expect("A valid vout must be present") as u32;
+            let input_outpoint = bitcoin::OutPoint { txid, vout };
+
+            if spent_outpoint == &input_outpoint {
+                let spending_txid =
+                    bitcoin::Txid::from_str(spending_txid).expect("Must be a valid txid");
+
+                // If the spending transaction is unconfirmed, there may more than one of them.
+                // Make sure to not return one that RBF'd.
+                let confs = gettx_res
+                    .get("confirmations")
+                    .and_then(Json::as_i64)
+                    .expect("A valid number of confirmations must always be present.");
+                let conflicts = gettx_res
+                    .get("walletconflicts")
+                    .and_then(Json::as_array)
+                    .expect("A valid list of wallet conflicts must always be present.");
+                if confs == 0 && !conflicts.is_empty() && !self.is_in_mempool(&spending_txid) {
+                    log::debug!("Noticed '{}' as spending '{}', but is unconfirmed with conflicts and is not in mempool anymore. Discarding it.", spending_txid, spent_outpoint);
+                    return None;
+                }
+
+                return Some(spending_txid);
+            }
+        }
+        None
+    }
+
+    /// Inspect each outgoing wallet transaction once to locate an eligible spender.
+    fn find_spender_in_transactions(
+        &self,
+        spent_outpoint: &bitcoin::OutPoint,
+        transactions: &[Json],
+    ) -> Option<bitcoin::Txid> {
         // Get the spent txid to ignore the entries about this transaction
         let spent_txid = spent_outpoint.txid.to_string();
         // We use a cache to avoid needless iterations, since listsinceblock returns an entry
@@ -1546,52 +1611,8 @@ impl BitcoinD {
                 visited_txs.insert(spending_txid);
             }
 
-            let gettx_res = self.make_wallet_request(
-                "gettransaction",
-                params!(
-                    Json::String(spending_txid.to_string()),
-                    Json::Bool(true), // watchonly
-                    Json::Bool(true)  // verbose
-                ),
-            );
-            let vin = gettx_res
-                .get("decoded")
-                .and_then(|d| d.get("vin").and_then(Json::as_array))
-                .expect("A valid vin array must be present");
-
-            for input in vin {
-                let txid = input
-                    .get("txid")
-                    .and_then(Json::as_str)
-                    .and_then(|t| bitcoin::Txid::from_str(t).ok())
-                    .expect("A valid txid must be present");
-                let vout = input
-                    .get("vout")
-                    .and_then(Json::as_u64)
-                    .expect("A valid vout must be present") as u32;
-                let input_outpoint = bitcoin::OutPoint { txid, vout };
-
-                if spent_outpoint == &input_outpoint {
-                    let spending_txid =
-                        bitcoin::Txid::from_str(spending_txid).expect("Must be a valid txid");
-
-                    // If the spending transaction is unconfirmed, there may more than one of them.
-                    // Make sure to not return one that RBF'd.
-                    let confs = gettx_res
-                        .get("confirmations")
-                        .and_then(Json::as_i64)
-                        .expect("A valid number of confirmations must always be present.");
-                    let conflicts = gettx_res
-                        .get("walletconflicts")
-                        .and_then(Json::as_array)
-                        .expect("A valid list of wallet conflicts must always be present.");
-                    if confs == 0 && !conflicts.is_empty() && !self.is_in_mempool(&spending_txid) {
-                        log::debug!("Noticed '{}' as spending '{}', but is unconfirmed with conflicts and is not in mempool anymore. Discarding it.", spending_txid, spent_outpoint);
-                        break;
-                    }
-
-                    return Some(spending_txid);
-                }
+            if let Some(txid) = self.eligible_spender(spending_txid, spent_outpoint) {
+                return Some(txid);
             }
         }
 

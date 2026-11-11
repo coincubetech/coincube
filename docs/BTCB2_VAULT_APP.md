@@ -25,10 +25,13 @@ unlock/Loader. Reopening uses a new authenticated context. Generic backend
 switches cannot reuse fork authority and instruct the user to reopen instead.
 Persisted daemon configuration is sanitized; no bearer token belongs on disk.
 
-Anchor freshness currently assumes synchronized API/device wall clocks and
-rejects any future timestamp. A stale-evidence error instructs the operator to
-check both clocks. There is no added skew allowance, timestamp clamping or
-freshness extension. The status/anchor service's shared per-IP rate budget
+Anchor freshness is measured on this desktop's clock. When Connect sends
+`served_at`, the client shifts `observed_at` by the skew between that stamp
+and the time the request was sent; a response without `served_at` still
+requires synchronized clocks. A translated stamp in the future, or older than
+90 seconds, is stale. There is no added skew allowance, and the shift does not
+extend freshness. The stale-evidence message still tells the operator to check
+both clocks and retry. The status/anchor service's shared per-IP rate budget
 remains authoritative; rate limits do not trigger unbounded retries.
 
 This boundary alone does not activate the runtime gate. Authenticated unlock,

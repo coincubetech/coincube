@@ -95,6 +95,17 @@ impl std::fmt::Debug for DeviceTransportKey {
 }
 
 impl DeviceTransportKey {
+    /// The integration runner must never replace an existing desktop identity.
+    #[cfg(feature = "integration-tests")]
+    pub fn load_existing_for_integration(network_dir: &NetworkDirectory) -> io::Result<Self> {
+        read_key(&key_path(network_dir)).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "existing transport key unavailable",
+            )
+        })
+    }
+
     fn from_secret(sk: &SecretKey) -> Self {
         let secp = Secp256k1::new();
         let pk = PublicKey::from_secret_key(&secp, sk);

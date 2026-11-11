@@ -266,14 +266,17 @@ def test_marker_must_match_binary_digest_and_version(tmp_path, pinned_repo):
         cache, commit, version_line=f"mempool-electrs 0.0.0-dev-{commit[:7]}(dirty)"
     )
     res = run_fetch(cache, repo, commit)
-    assert res.returncode == 0 and "dry-run: would build" in res.stderr
-    assert not binary.exists() and not marker.exists()
+    assert res.returncode == 0
+    assert 'dry-run: would build' in res.stderr
+    assert not binary.exists()
+    assert not marker.exists()
 
     # A marker of the pre-repair format is ignored (forces a checked rebuild).
     binary, version_line = fake_binary(cache, commit)
     (cache / "target" / f".built-{commit}").write_text(sha256_file(binary) + "\n")
     res = run_fetch(cache, repo, commit)
-    assert res.returncode == 0 and "dry-run: would build" in res.stderr
+    assert res.returncode == 0
+    assert 'dry-run: would build' in res.stderr
     assert not binary.exists()
 
 
@@ -285,7 +288,8 @@ def test_wrong_commit_in_marker_is_not_reused(tmp_path, pinned_repo):
     marker = write_marker(cache, commit, binary, version_line)
     marker.write_text(marker.read_text().replace(commit, "0" * 40))
     res = run_fetch(cache, repo, commit)
-    assert res.returncode == 0 and "dry-run: would build" in res.stderr
+    assert res.returncode == 0
+    assert 'dry-run: would build' in res.stderr
     assert not binary.exists()
 
 
@@ -397,7 +401,8 @@ def test_knots_reuse_reverifies_with_the_current_verifier(
     assert f"verifier: {verifier}" in first.stderr
 
     second = run_knots_fetch(cache, release, verifier)
-    assert second.returncode == 0 and second.stdout.strip() == str(bitcoind)
+    assert second.returncode == 0
+    assert second.stdout.strip() == str(bitcoind)
     assert len(_invocations(log)) == 2, "reuse must re-run the verifier"
     assert not any(p.suffix == ".part" for p in (cache / FAKE_VERSION).iterdir())
 
@@ -414,7 +419,8 @@ def test_knots_tampered_extraction_is_replaced_from_the_archive(
     bitcoind.write_bytes(b"#!/bin/sh\necho substitute\n")
 
     res = run_knots_fetch(cache, release, verifier)
-    assert res.returncode == 0 and res.stdout.strip() == str(bitcoind)
+    assert res.returncode == 0
+    assert res.stdout.strip() == str(bitcoind)
     assert bitcoind.read_bytes() == original
 
 
@@ -440,7 +446,8 @@ def test_knots_rejected_cache_is_refetched_then_fails_if_still_rejected(
 
     rc_file.write_text("0")
     res = run_knots_fetch(cache, release, verifier)
-    assert res.returncode == 0 and res.stdout.strip() == str(bitcoind)
+    assert res.returncode == 0
+    assert res.stdout.strip() == str(bitcoind)
 
 
 def test_knots_overrides_are_refused_outside_test_mode(
@@ -478,7 +485,8 @@ def test_knots_test_mode_never_falls_back_to_a_real_verifier(tmp_path, fake_rele
         capture_output=True,
         text=True,
     )
-    assert res.returncode == 2 and "requires both" in res.stderr
+    assert res.returncode == 2
+    assert 'requires both' in res.stderr
 
 
 def test_knots_relative_cache_dir_is_canonicalised(
@@ -503,7 +511,8 @@ def test_knots_relative_cache_dir_is_canonicalised(
     assert os.access(printed, os.X_OK)
     # Reuse from another cwd resolves the same extraction rather than nesting one.
     res = run_knots_fetch(str(tmp_path / "rel-cache"), release, verifier, cwd="/")
-    assert res.returncode == 0 and res.stdout.strip() == printed
+    assert res.returncode == 0
+    assert res.stdout.strip() == printed
     assert not (tmp_path / "rel-cache" / FAKE_VERSION / "rel-cache").exists()
 
 
@@ -568,12 +577,12 @@ def test_workflow_knots_cache_key_is_bound_to_verifier_inputs():
     ]
     verifier_keys = [k for k in keys if "-knots-verify-" in k]
     knots_keys = [k for k in keys if "-knots-v" in k and "-knots-verify-" not in k]
-    assert len(verifier_keys) == 1 and inputs in verifier_keys[0]
-    assert len(knots_keys) == 1 and inputs in knots_keys[0]
-    assert (
-        "KNOTS_LEGACY_VERSION" in knots_keys[0]
-        and "KNOTS_BLAKE2B_VERSION" in knots_keys[0]
-    )
+    assert len(verifier_keys) == 1
+    assert inputs in verifier_keys[0]
+    assert len(knots_keys) == 1
+    assert inputs in knots_keys[0]
+    assert 'KNOTS_LEGACY_VERSION' in knots_keys[0]
+    assert 'KNOTS_BLAKE2B_VERSION' in knots_keys[0]
 
 
 # ── Bitcoind(extra_args=...) ─────────────────────────────────────────────────
