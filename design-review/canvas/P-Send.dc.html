@@ -776,7 +776,7 @@ class Component extends DCLogic {
     if(k==='btc'||isV)checks.push({ok:true,label:'Network',val:'Bitcoin mainnet',tone:'ok'});
     if(k==='usdtx')checks.push({ok:true,label:'Network',val:rNet,tone:'ok'});
     if(k==='liquid')checks.push({ok:true,label:'Network',val:'Liquid',tone:'ok'});
-    const RID={notIdentified:{ok:false,unk:true,val:'Not identified',tone:'unk'},identified:{ok:true,val:'Verified · Example Coffee Co.',tone:'ok'},
+    const RID={notIdentified:{ok:false,unk:true,val:'Not identified',tone:'unk'},identified:{ok:true,val:'Identified · Example Coffee Co.',tone:'ok'},
       checksOff:{ok:false,unk:true,off:true,val:'Checks off',tone:'unk'},tampered:{ok:false,bad:true,val:'Does not match',tone:'bad'}};
     checks.push(Object.assign({label:'Recipient identity (Branta)'},RID[rid]||RID.notIdentified));
     checks.forEach(c=>{c.unk=!!c.unk;c.bad=!!c.bad;c.off=!!c.off;});

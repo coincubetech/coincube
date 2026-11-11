@@ -409,12 +409,12 @@ a{color:#f3821d}a:hover{color:#ffa54d}
         <div class="sect">
           <div class="grp">
             <h3>Recipient identity checks</h3>
-            <p class="intro">What is checked and when: before you send to a supported payment request, Tenshu asks Branta whether the recipient matches a verified identity. The result appears in the send review. It never replaces your own review of the transaction.</p>
+            <p class="intro">What is checked and when: before you send to a supported payment request, Tenshu asks Branta whether it can identify the recipient. The result appears in the send review. It never replaces your own review of the transaction.</p>
             <div class="rows">
               <div class="row"><div><p class="lb">Check supported payment requests</p><span class="sc">Storage per current preference</span></div><p class="ds">On. Turning checks off goes through the existing confirmation and its safeguards.</p><div class="ct"><button type="button" class="tog" aria-pressed="true"><span class="kn"></span>On</button><span class="hint">Turning off opens a confirmation</span></div></div>
               <div class="row"><div><p class="lb">Strict mode</p><span class="sc">Storage per current preference</span></div><div class="ds"><p>Strict mode does not share the plaintext destination or payment amount. Branta can still observe lookup timing and your network connection.</p><p style="margin-top:6px"><a href="#branta-privacy">Read Branta privacy information</a></p></div><div class="ct"><button type="button" class="tog" aria-pressed="{{ strictP }}" onClick="{{ togStrict }}"><span class="kn"></span>{{ strictText }}</button></div></div>
             </div>
-            <p class="cap" style="margin-top:12px">A check never guarantees who the recipient is. Unverifiable recipients are shown as "Not verified" in the send review.</p>
+            <p class="cap" style="margin-top:12px">A check never guarantees who the recipient is. Recipients Branta can’t identify are shown as "Not identified" in the send review.</p>
           </div>
         </div>
       </sc-if>

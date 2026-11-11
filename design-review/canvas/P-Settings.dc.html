@@ -403,7 +403,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <sc-if value="{{ sec.payments }}" hint-placeholder-val="{{ false }}">
           <section class="grp" aria-labelledby="h-pc">
             <h3 id="h-pc">Recipient checks</h3>
-            <p class="intro">Before you send, Tenshu asks Branta whether the recipient is verified.</p>
+            <p class="intro">Before you send, Tenshu asks Branta whether it can identify the recipient.</p>
             <div class="rows">
               <div class="row"><div class="rl"><p class="lb" id="chk-l">Check payment requests</p></div><div class="rc"><button type="button" class="tog" aria-labelledby="chk-l" aria-pressed="{{ chk.p }}" aria-expanded="{{ chk.exp }}" onClick="{{ chk.tog }}"><span class="kn"></span>{{ chk.text }}</button></div></div>
               <sc-if value="{{ chk.asking }}" hint-placeholder-val="{{ false }}">
@@ -411,7 +411,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
               </sc-if>
               <div class="row atop"><div class="rl"><p class="lb" id="str-l">Strict mode</p><p class="ds">Strict mode does not share the plaintext destination or payment amount. Branta can still observe lookup timing and your network connection.</p><p class="ds"><a href="#branta-privacy">Branta privacy information</a></p></div><div class="rc"><button type="button" class="tog" aria-labelledby="str-l" aria-pressed="{{ strictP }}" onClick="{{ togStrict }}"><span class="kn"></span>{{ strictText }}</button></div></div>
             </div>
-            <p class="cap" style="margin-top:12px">A check never guarantees who the recipient is. Unverifiable recipients show as “Not verified”.</p>
+            <p class="cap" style="margin-top:12px">A check never guarantees who the recipient is. Recipients Branta can’t identify show as “Not identified”.</p>
           </section>
         </sc-if>
 
