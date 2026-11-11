@@ -80,7 +80,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Setup Python dependencies
-        run: pip install --break-system-packages -r tests/requirements.txt
+        # pytest tests/ also collects the node-free E2E harness self-tests.
+        run: pip install --break-system-packages -r tests/requirements.txt -r tests/e2e/requirements.txt
 
       - name: Add local bin to PATH
         run: echo "$HOME/.local/bin" >> $GITHUB_PATH
@@ -96,7 +97,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('tests/requirements.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('tests/requirements.txt', 'tests/e2e/requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
       - name: Build coincubed and taproot_signer
