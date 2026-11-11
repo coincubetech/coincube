@@ -247,6 +247,12 @@ class FreshRunner(Runner):
         store = SecretStore(Provision(self.provision.binary, phone_dir, phone_dir, secret_id), phone_dir / "phone-secrets.keychain.json")
         self.onboarding = Onboarding(self.phone, store, self.artifacts["account_identity"], self.deadline)
         state = store.load()
+        self.validate_discovery_back()
+        self.validate_discovery_restart()
+        self.archive_discovery_timeout(self.journal.data["stages"].get("sign"))
+        self.prepare_discovery_no_restart()
+        if "request_discovery_no_restart" in self.artifacts and not self.artifacts.get("approval_started"):
+            self.require_discovery_idle()  # Recheck before any account/settings navigation on resume.
         self.prepare_key_generation_recovery(state)
         self.defer_pending_phone_attempt(state)
         if self.deferred_phone_purpose:
@@ -869,11 +875,217 @@ class FreshRunner(Runner):
             return
         self.journal.artifact("phone", self.phone.check_fixture(self.artifacts["cube_name"], self.deadline))
 
+    def discovery_binding(self):
+        approval = self.approval_binding()
+        build = self.artifacts.get("phone", {}).get("build")
+        if (self.artifacts.get("approval_binding") != approval or type(build) is not int
+                or build < 38 or build != self.phone.build):
+            raise Failed("REQUEST_DISCOVERY_BINDING", "The discovery restart requires the original account, device, build and exact saved signing request.")
+        return {"approval_binding": approval, "build": build}
+
+    def archive_discovery_timeout(self, outcome):
+        if "request_discovery_timeout" in self.artifacts:
+            failure = self.artifacts["request_discovery_timeout"]
+            if (not isinstance(failure, dict) or not self.valid_discovery_history(failure.get("binding"))
+                    or not isinstance(failure.get("outcome"), dict)
+                    or failure.get("outcome", {}).get("status") != "blocked"
+                    or failure["outcome"].get("code") != "REQUEST_DELIVERY"
+                    or type(failure["outcome"].get("at")) is not int or failure["outcome"]["at"] <= 0):
+                raise Failed("REQUEST_DISCOVERY_BINDING", "The archived request-discovery timeout changed.")
+            return
+        if not isinstance(outcome, dict) or outcome.get("status") != "blocked" or outcome.get("code") != "REQUEST_DELIVERY":
+            return
+        if type(outcome.get("at")) is not int or outcome["at"] <= 0:
+            raise Failed("REQUEST_DISCOVERY_BINDING", "The original request-discovery timeout lacks a valid timestamp.")
+        binding = {"approval_binding": self.approval_binding(), "build": self.artifacts.get("phone", {}).get("build")}
+        if not self.valid_discovery_history(binding):
+            raise Failed("REQUEST_DISCOVERY_BINDING", "The original delivery timeout lacks its immutable approval identity and saved build.")
+        self.pin_artifact("request_discovery_timeout", {"binding": binding, "outcome": deepcopy(outcome)})
+
+    def valid_discovery_history(self, binding):
+        # Historical evidence survives a build change; only restart eligibility
+        # requires equality with the currently installed and observed build.
+        return (isinstance(binding, dict) and set(binding) == {"approval_binding", "build"}
+                and type(binding["build"]) is int and binding["build"] >= 38
+                and binding["approval_binding"] == self.approval_binding() == self.artifacts.get("approval_binding"))
+
+    def prepare_discovery_no_restart(self):
+        failure = self.artifacts.get("request_discovery_timeout")
+        name = "request_discovery_no_restart"
+        decision = self.artifacts.get(name)
+        if "request_discovery_restart" in self.artifacts:
+            if name in self.artifacts:
+                raise Failed("REQUEST_DISCOVERY_BINDING", "A no-restart decision cannot coexist with any restart receipt.")
+            self.validate_discovery_restart()
+            return
+        if failure is None and name not in self.artifacts:
+            return
+        self.archive_discovery_timeout(None)
+        if not isinstance(failure, dict):
+            raise Failed("REQUEST_DISCOVERY_BINDING", "The no-restart decision requires its preserved timeout.")
+        original_build = failure["binding"]["build"]
+        if type(self.phone.build) is not int or self.phone.build < 38:
+            raise Failed("REQUEST_DISCOVERY_BINDING", "Ordinary session-bound review requires a supported current phone build.")
+        if name in self.artifacts:
+            if (not isinstance(decision, dict) or set(decision) != {"reason", "binding", "timeout", "timeout_sha256", "original_build", "observed_build"}
+                    or decision.get("reason") != "build_changed_without_restart"
+                    or decision.get("binding") != failure["binding"]["approval_binding"]
+                    or decision.get("timeout") != failure or decision.get("timeout_sha256") != digest(failure)
+                    or decision.get("original_build") != original_build
+                    or type(decision.get("observed_build")) is not int or decision["observed_build"] < 38
+                    or decision["observed_build"] == original_build):
+                raise Failed("REQUEST_DISCOVERY_BINDING", "The permanent no-restart decision changed its original timeout or request binding.")
+            # Never re-enable restart on rollback or a further build change.
+            return
+        if self.phone.build == original_build:
+            return
+        if (type(self.phone.build) is not int or self.phone.build < 38
+                or self.artifacts.get("phone", {}).get("build") != original_build):
+            raise Failed("REQUEST_DISCOVERY_BINDING", "A build-change decision must precede replacement of the historical phone observation.")
+        self.require_discovery_idle()
+        self.pin_artifact(name, {"reason": "build_changed_without_restart",
+            "binding": deepcopy(failure["binding"]["approval_binding"]), "timeout": deepcopy(failure),
+            "timeout_sha256": digest(failure), "original_build": original_build, "observed_build": self.phone.build})
+
+    def validate_discovery_back(self):
+        if "request_discovery_back" not in self.artifacts:
+            return
+        back = self.artifacts["request_discovery_back"]
+        self.archive_discovery_timeout(None)
+        failure = self.artifacts.get("request_discovery_timeout")
+        process = back.get("process") if isinstance(back, dict) else None
+        if (not isinstance(back, dict) or set(back) != {"binding", "timeout_sha256", "process", "phase"}
+                or not isinstance(failure, dict) or back.get("binding") != failure.get("binding")
+                or back.get("timeout_sha256") != digest(failure)
+                or not isinstance(process, dict) or process.get("bundle_id") != "io.coincube.keychainApp"
+                or type(process.get("pid")) is not int or process["pid"] <= 0):
+            raise Failed("REQUEST_DISCOVERY_BINDING", "The queue Back receipt changed its immutable timeout, request or process binding.")
+        if back.get("phase") != "completed":
+            raise Blocked("REQUEST_DISCOVERY_BACK_UNCERTAIN", "The queue Back outcome was not verified; no setup navigation or retry is allowed.")
+
+    def validate_discovery_restart(self):
+        if "request_discovery_restart" not in self.artifacts:
+            return
+        receipt = self.artifacts["request_discovery_restart"]
+        failure = self.artifacts.get("request_discovery_timeout")
+        self.archive_discovery_timeout(None)  # Validate preserved evidence without replacing it.
+        if (not isinstance(failure, dict) or not isinstance(receipt, dict) or receipt.get("binding") != self.discovery_binding()
+                or receipt.get("timeout") != failure or receipt.get("timeout_sha256") != digest(failure)):
+            raise Failed("REQUEST_DISCOVERY_BINDING", "The one-time discovery restart no longer matches its original timeout and request.")
+        if receipt.get("phase") != "completed":
+            raise Blocked("REQUEST_DISCOVERY_UNCERTAIN", "The discovery restart was attempted but its outcome is uncertain; it will not be repeated.")
+        before, after = receipt.get("before_process"), receipt.get("after_process")
+        if (not isinstance(before, dict) or not isinstance(after, dict)
+                or any(v.get("bundle_id") != "io.coincube.keychainApp" or type(v.get("pid")) is not int or v["pid"] <= 0 for v in (before, after))
+                or before["pid"] == after["pid"] or receipt.get("stopped_verified") is not True):
+            raise Failed("REQUEST_DISCOVERY_BINDING", "The completed discovery restart lacks a verified replacement process.")
+
+    def require_discovery_idle(self):
+        markers = ("approval_started", "approval_context", "pin_resume_probe", "pin_dispatch_started")
+        state = self.onboarding.store.load()
+        reservation = state.get("key_generation_reservation") if isinstance(state, dict) else None
+        if (any(name in self.artifacts for name in markers)
+                or not state or state.get("identity") != self.onboarding.identity or state.get("verified") is not True
+                or "pending_attempt" in state
+                or (reservation is not None and (not isinstance(reservation, dict) or reservation.get("status") != "completed"))):
+            raise Blocked("REQUEST_DISCOVERY_INPUT", "Discovery restart requires an unused approval and an idle verified credential; no approval or PIN marker may be reset.")
+
+    def require_pending_discovery(self):
+        self.discovery_binding()
+        self.require_discovery_idle()
+        if self.collect_once():
+            return False  # A cryptographically verified signature wins the race.
+        self.require_discovery_idle()  # Input may become pending while the remote guard runs.
+        result = self.last_collection
+        if (result.get("ready") is not False or type(result.get("status")) is not int or result["status"] != 1
+                or type(result.get("submitted_signature_count")) is not int or result["submitted_signature_count"] != 0):
+            raise Blocked("REQUEST_DISCOVERY_ADVANCED", "The exact session is no longer pending with zero submissions; reconcile it without restarting discovery.")
+        return True
+
+    def restart_request_discovery(self):
+        self.validate_discovery_back()
+        if "request_discovery_no_restart" in self.artifacts:
+            self.prepare_discovery_no_restart()
+            raise Blocked("REQUEST_DISCOVERY_DISABLED", "A build change permanently disabled restart for this request.")
+        if "request_discovery_restart" in self.artifacts:
+            self.validate_discovery_restart()
+            return True  # Completed receipts never consume another restart.
+        failure = self.artifacts.get("request_discovery_timeout")
+        if not failure:
+            raise Failed("REQUEST_DISCOVERY_BINDING", "Discovery restart requires the original delivery timeout.")
+        receipt = {"binding": self.discovery_binding(), "timeout": deepcopy(failure), "timeout_sha256": digest(failure)}
+        if not self.phone.restart_for_request_discovery(self.journal, receipt, before_restart=self.require_pending_discovery):
+            return False
+        self.validate_discovery_restart()
+        self.stage_phone_setup()
+        self.stage_phone()
+        return True
+
+    def review_incoming_discovery(self):
+        # A known notification can appear before or after the phone's remote
+        # guard. Recheck credential/markers and the exact session before any UI.
+        try:
+            return self.require_pending_discovery()
+        except Blocked as error:
+            result = getattr(self, "last_collection", {})
+            if (not isinstance(error, Failed) and error.code == "REQUEST_DISCOVERY_ADVANCED"
+                    and result.get("ready") is False and type(result.get("status")) is int
+                    and result["status"] in (2, 3) and type(result.get("submitted_signature_count")) is int
+                    and result["submitted_signature_count"] == 0):
+                return True
+            raise
+
+    def continue_request_discovery(self):
+        self.validate_discovery_back()
+        if "request_discovery_no_restart" in self.artifacts:
+            self.prepare_discovery_no_restart()
+            self.require_discovery_idle()
+            if self.collect_once():
+                return False
+            self.require_discovery_idle()  # A credential/input marker may arrive during the remote check.
+            result = self.last_collection
+            if (result.get("ready") is not False or type(result.get("status")) is not int or result["status"] not in (1, 2, 3)
+                    or type(result.get("submitted_signature_count")) is not int or result["submitted_signature_count"] != 0):
+                raise Blocked("REQUEST_DISCOVERY_ADVANCED", "Ordinary review requires the exact pending, delivered or viewed session with zero submissions.")
+            return True
+        if "request_discovery_restart" in self.artifacts:
+            self.validate_discovery_restart()  # An incomplete attempt always blocks before navigation.
+        try:
+            if not self.require_pending_discovery():
+                return False
+            return self.restart_request_discovery()
+        except Blocked as error:
+            if not isinstance(error, Failed) and error.code in ("REQUEST_DISCOVERY_INCOMING", "REQUEST_DISCOVERY_READY"):
+                # A post-Back refusal must not excuse an uncertain navigation.
+                self.validate_discovery_back()
+                return self.review_incoming_discovery()
+            result = getattr(self, "last_collection", {})
+            if (not isinstance(error, Failed) and error.code == "REQUEST_DISCOVERY_ADVANCED"
+                    and result.get("ready") is False and type(result.get("status")) is int
+                    and result["status"] in (2, 3) and type(result.get("submitted_signature_count")) is int
+                    and result["submitted_signature_count"] == 0):
+                # Delivery/view acknowledgement needs no process recovery. This
+                # also handles advancement during the final pre-restart guard.
+                # Preserve the restart allowance and perform ordinary exact review.
+                return True
+            raise
+
     def stage_sign(self):
         if self.artifacts.get("already_broadcast") or self.collect_once():
             return
         if not self.artifacts.get("approval_started"):
-            self.approve_phone()
+            archived_timeout = "request_discovery_timeout" in self.artifacts
+            if archived_timeout and not self.continue_request_discovery():
+                return
+            try:
+                self.approve_phone()
+            except Blocked as error:
+                if (isinstance(error, Failed) or error.code != "REQUEST_DELIVERY" or archived_timeout
+                        or "request_discovery_restart" in self.artifacts):
+                    raise
+                self.archive_discovery_timeout({"status": "blocked", "code": error.code, "at": int(time.time())})
+                if self.continue_request_discovery():
+                    self.approve_phone()  # A second timeout propagates; there is no second restart.
             return
         if self.upgrade_approval():
             return

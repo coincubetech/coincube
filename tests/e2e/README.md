@@ -149,6 +149,49 @@ Connect's validated VIEWED status with zero submitted signatures. It records a
 background/resume probe and durable dispatch intent before requesting the
 protected credential. An interrupted probe or input is never retried.
 
+A `REQUEST_DELIVERY` timeout before any approval or PIN activity permits one
+journaled app restart solely to rediscover the same request. The runner preserves
+the original timeout and exact run/account/device/build/transaction bindings,
+requires public Home and a verified idle credential (including no unfinished key
+reservation), and rechecks native-validated PENDING status with zero submitted
+signatures immediately before termination. It records the attempt before the
+restart and requires `NOT_RUNNING` followed by a different foreground process.
+An uncertain response blocks all further navigation on resume; it never repeats
+the restart. A completed receipt permits ordinary account/network checks and full
+transaction review. A second delivery timeout stops without another restart.
+If the timeout leaves the app on **Pending Requests**, recovery supports only
+that exact route with one visible, enabled **Back** button (exposed by QA build
+39; build 38 lacks it). It rejects authentication/review/conflicting surfaces
+and native modals, rechecks the idle credential and exact session before one
+journaled Back, and requires genuine Home in the same process before completing
+that navigation. A missing/ambiguous Back is explicitly unsupported; generic
+navigation recovery is never used by this recovery helper. The obsolete pending
+queue restart fallback is also removed from ordinary approval and setup/resume
+navigation: those paths require the accessible Back control too. An uncertain
+Back blocks resume before setup navigation, even
+across a build change. A completed Back still requires the existing final Home,
+process and native eligibility checks before the separate journaled restart.
+If the exact session advances to DELIVERED or VIEWED with zero submissions,
+the runner proceeds to ordinary exact-request review without restarting or
+consuming the restart allowance. Approved, terminal, unknown, or nonzero-submission
+states cannot use this path; a verified signature proceeds to collection.
+If the app build changes after an untouched delivery timeout and no restart
+receipt exists, authentication preserves the original timeout and permanently
+records that restart is disabled for this request before updating phone build
+observations. This requires the same account/device/request and an idle verified
+credential with no approval or PIN markers. Normal account/network/Cube checks
+still run; then a fresh native PENDING, DELIVERED or VIEWED status with zero
+submissions permits ordinary full review. A verified signature can instead be
+reconciled without review. The disable decision survives another timeout,
+rollback or later upgrade; it cannot coexist with an attempted, completed or
+malformed restart receipt and never re-enables a restart allowance.
+The exact known incoming-transaction notification also routes to ordinary queue
+review after fresh idle-credential and session checks, without consuming a
+restart. Partial, ambiguous, authentication, and unknown modal screens remain
+blocked; the notification itself is never treated as the selected request.
+No request, approval, or PIN marker is reset or replaced. This is a bounded
+discovery repair, not evidence that the underlying delivery cause is resolved.
+
 An approval interrupted before any PIN/probe may resume in the same process only
 with the saved build, device, session and immutable transaction context. One
 reviewed app upgrade may instead create a fresh UI review of that same request:
