@@ -178,7 +178,9 @@ fn promote_esplora_providers(
         // and leave nothing in the middle slot, which is no better
         // than what we started with.
         let Some(blockstream) = public_fallback else {
-            return false;
+            // The chain stays two-tier, but the caller may have adjusted
+            // its poll interval; preserve that pending write decision.
+            return touched_poll_interval;
         };
         let fallback_token = esplora
             .get("fallback_token")
@@ -416,6 +418,42 @@ addr = "{addr}"
             addr = super::super::connect_url(network),
             token_line = token_line,
         )
+    }
+
+    #[test]
+    fn review_repair_two_tier_without_public_fallback_persists_only_poll_change() {
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for (network, name) in [(Network::Signet, "signet"), (Network::Testnet4, "testnet4")] {
+            for interval in [30, 299, 300, 600, 900] {
+                let p = fresh_path();
+                let original = format!(
+                    "# preserve an unchanged file byte-for-byte\n[bitcoin_config]\nnetwork = \"{name}\"\npoll_interval_secs = {interval}\n[esplora_config]\naddr = \"{}\"\ntoken = \"primary-test-token\"\nfallback_addr = \"{}\"\nfallback_token = \"connect-test-token\"\n",
+                    super::super::public_esplora_url(network),
+                    super::super::connect_url(network),
+                );
+                let before: toml::Table = toml::from_str(&original).unwrap();
+                std::fs::write(&p, &original).unwrap();
+                let changed = migrate_esplora_config(&p).unwrap();
+                let saved = std::fs::read_to_string(&p).unwrap();
+                let after: toml::Table = toml::from_str(&saved).unwrap();
+                observed.push((name, interval, changed, poll_interval(&after)));
+                expected.push((
+                    name,
+                    interval,
+                    interval < 300,
+                    Some(if interval < 300 { 600 } else { interval }),
+                ));
+                assert_eq!(after.get("esplora_config"), before.get("esplora_config"));
+                if interval >= 300 {
+                    assert_eq!(saved, original);
+                }
+                assert!(!migrate_esplora_config(&p).unwrap());
+                assert_eq!(std::fs::read_to_string(&p).unwrap(), saved);
+                std::fs::remove_file(p).unwrap();
+            }
+        }
+        assert_eq!(observed, expected);
     }
 
     /// Reading `poll_interval_secs` out of a parsed TOML table.
