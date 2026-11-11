@@ -3189,5 +3189,5 @@
   "Share saved selection": "Compartir selección guardada",
   "Stop sharing": "Dejar de compartir",
   "Share with Keychain": "Compartir con Keychain",
-  "Share this device’s saved Worldview and artwork with Keychain on your Connect account.": "Comparte la Visión de Bitcoin y las ilustraciones guardadas en este dispositivo con Keychain en tu cuenta de Connect."
+  "Once sharing is enabled, saved Worldview and artwork changes automatically update Keychain on your Connect account.": "Una vez activado el uso compartido, los cambios guardados en la Visión de Bitcoin y las ilustraciones actualizan Keychain automáticamente en tu cuenta de Connect."
 }

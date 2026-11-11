@@ -533,7 +533,7 @@ fn worldview_sharing_row<'a>(sharing: &WorldviewSharing) -> Element<'a, Message>
         .spacing(8)
         .push(tenshu_text::label(localized_copy("Share with Keychain")))
         .push(
-            tenshu_text::body(localized_copy("Share this device’s saved Worldview and artwork with Keychain on your Connect account."))
+            tenshu_text::body(localized_copy("Once sharing is enabled, saved Worldview and artwork changes automatically update Keychain on your Connect account."))
                 .size(13)
                 .style(theme::tenshu::text::muted),
         )
