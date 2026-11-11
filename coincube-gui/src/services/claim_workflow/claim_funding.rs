@@ -322,6 +322,52 @@ fn ensure_claim_wallet_ready(
     Ok(())
 }
 
+async fn advance_remote_receive(
+    daemon: &(dyn Daemon + Send + Sync),
+    saved: &ClaimFundingReservation,
+    generation: &watch::Receiver<u64>,
+    expected: u64,
+    receive_index: u32,
+    highest: u32,
+) -> Result<(), ClaimAddressError> {
+    let advances = highest - receive_index;
+    if advances > MAX_REMOTE_RECEIVE_ADVANCES {
+        return Err(ClaimAddressError::WalletState);
+    }
+    let descriptor = saved
+        .descriptor()
+        .map_err(|_| ClaimAddressError::InvalidReservation)?;
+    let mut last = receive_index;
+    for _ in 0..advances {
+        if !current(generation, expected) {
+            return Err(ClaimAddressError::ChangedSession);
+        }
+        let generated = daemon
+            .get_new_address()
+            .await
+            .map_err(|_| ClaimAddressError::WalletState)?;
+        let ChildNumber::Normal { index } = generated.derivation_index else {
+            return Err(ClaimAddressError::WalletState);
+        };
+        if index <= last
+            || generated.address.to_string()
+                != saved
+                    .address(&descriptor, index)
+                    .map_err(|_| ClaimAddressError::InvalidReservation)?
+        {
+            return Err(ClaimAddressError::WalletState);
+        }
+        last = index;
+        if last >= highest {
+            break;
+        }
+    }
+    if last < highest {
+        return Err(ClaimAddressError::WalletState);
+    }
+    Ok(())
+}
+
 /// Make both already reserved receive addresses visible to the wallet's own
 /// scanner. Connect's remote backend advances one address at a time; local
 /// Coincubed can advance directly. Either way, read back the exact two
@@ -346,41 +392,15 @@ async fn reveal_claim_receive_addresses(
     }
     if info.receive_index < highest {
         if daemon.backend().is_remote() {
-            let advances = highest - info.receive_index;
-            if advances > MAX_REMOTE_RECEIVE_ADVANCES {
-                return Err(ClaimAddressError::WalletState);
-            }
-            let descriptor = saved
-                .descriptor()
-                .map_err(|_| ClaimAddressError::InvalidReservation)?;
-            let mut last = info.receive_index;
-            for _ in 0..advances {
-                if !current(generation, expected) {
-                    return Err(ClaimAddressError::ChangedSession);
-                }
-                let generated = daemon
-                    .get_new_address()
-                    .await
-                    .map_err(|_| ClaimAddressError::WalletState)?;
-                let ChildNumber::Normal { index } = generated.derivation_index else {
-                    return Err(ClaimAddressError::WalletState);
-                };
-                if index <= last
-                    || generated.address.to_string()
-                        != saved
-                            .address(&descriptor, index)
-                            .map_err(|_| ClaimAddressError::InvalidReservation)?
-                {
-                    return Err(ClaimAddressError::WalletState);
-                }
-                last = index;
-                if last >= highest {
-                    break;
-                }
-            }
-            if last < highest {
-                return Err(ClaimAddressError::WalletState);
-            }
+            advance_remote_receive(
+                daemon,
+                saved,
+                generation,
+                expected,
+                info.receive_index,
+                highest,
+            )
+            .await?;
         } else {
             let updated = daemon
                 .update_deriv_indexes(Some(highest), None)
@@ -402,6 +422,19 @@ async fn reveal_claim_receive_addresses(
     if info.receive_index < highest {
         return Err(ClaimAddressError::WalletState);
     }
+    check_revealed_receive_addresses(daemon, saved, generation, expected).await?;
+    if !current(generation, expected) {
+        return Err(ClaimAddressError::ChangedSession);
+    }
+    Ok(())
+}
+
+async fn check_revealed_receive_addresses(
+    daemon: &(dyn Daemon + Send + Sync),
+    saved: &ClaimFundingReservation,
+    generation: &watch::Receiver<u64>,
+    expected: u64,
+) -> Result<(), ClaimAddressError> {
     let addresses = saved
         .addresses()
         .map_err(|_| ClaimAddressError::InvalidReservation)?;
@@ -421,9 +454,6 @@ async fn reveal_claim_receive_addresses(
         }) {
             return Err(ClaimAddressError::WalletState);
         }
-    }
-    if !current(generation, expected) {
-        return Err(ClaimAddressError::ChangedSession);
     }
     Ok(())
 }
@@ -499,6 +529,42 @@ fn current(generation: &watch::Receiver<u64>, expected: u64) -> bool {
     *generation.borrow() == expected && matches!(generation.has_changed(), Ok(false))
 }
 
+async fn check_address_history(
+    source: &dyn AddressHistory,
+    chain: ChainId,
+    address: &str,
+    generation: &watch::Receiver<u64>,
+    expected: u64,
+    require_unused: bool,
+) -> Result<(), ClaimAddressError> {
+    let (used, observed_at) = source
+        .used(chain, address)
+        .await
+        .map_err(|error| match error {
+            FailureKind::Http(429) => ClaimAddressError::RateLimited(
+                source.retry_after().unwrap_or(Duration::from_secs(60)),
+            ),
+            _ => ClaimAddressError::Unavailable,
+        })?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ClaimAddressError::Stale)?
+        .as_secs() as i64;
+    let age = now
+        .checked_sub(observed_at)
+        .ok_or(ClaimAddressError::Stale)?;
+    if !(0..=MAX_ADDRESS_AGE_SECONDS).contains(&age) {
+        return Err(ClaimAddressError::Stale);
+    }
+    if used && require_unused {
+        return Err(ClaimAddressError::Used);
+    }
+    if !current(generation, expected) {
+        return Err(ClaimAddressError::ChangedSession);
+    }
+    Ok(())
+}
+
 async fn checked_history(
     source: &dyn AddressHistory,
     addresses: [String; 2],
@@ -513,32 +579,8 @@ async fn checked_history(
     tokio::time::timeout(ADDRESS_CHECK_BUDGET, async {
         for address in &addresses {
             for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
-                let (used, observed_at) =
-                    source
-                        .used(chain, address)
-                        .await
-                        .map_err(|error| match error {
-                            FailureKind::Http(429) => ClaimAddressError::RateLimited(
-                                source.retry_after().unwrap_or(Duration::from_secs(60)),
-                            ),
-                            _ => ClaimAddressError::Unavailable,
-                        })?;
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|_| ClaimAddressError::Stale)?
-                    .as_secs() as i64;
-                let age = now
-                    .checked_sub(observed_at)
-                    .ok_or(ClaimAddressError::Stale)?;
-                if !(0..=MAX_ADDRESS_AGE_SECONDS).contains(&age) {
-                    return Err(ClaimAddressError::Stale);
-                }
-                if used && require_unused {
-                    return Err(ClaimAddressError::Used);
-                }
-                if !current(generation, expected) {
-                    return Err(ClaimAddressError::ChangedSession);
-                }
+                check_address_history(source, chain, address, generation, expected, require_unused)
+                    .await?;
             }
         }
         Ok(CheckedClaimAddresses {
@@ -1325,6 +1367,70 @@ pub fn load_claim_funding(
     }
 }
 
+fn load_change_reservation(
+    directory: &Path,
+    descriptor: &CoincubeDescriptor,
+    identity: &WalletIdentity,
+    context: &Context,
+) -> Result<ClaimFundingReservation, Error> {
+    let journal = Journal::open(directory)?;
+    if journal.load()?.is_some()
+        || journal.load_split_funding_reservation()?.is_some()
+        || std::fs::symlink_metadata(directory.join(super::SPLIT_TOMBSTONE)).is_ok()
+    {
+        return Err(Error::Conflict);
+    }
+    let saved = journal
+        .load_claim_funding_reservation()?
+        .ok_or(Error::InvalidPlan)?;
+    if !saved.matches(descriptor, identity, context) {
+        return Err(Error::WrongIdentity);
+    }
+    Ok(saved)
+}
+
+async fn reserve_distinct_change_indices(
+    bitcoin_daemon: &(dyn Daemon + Send + Sync),
+    fork_daemon: &(dyn Daemon + Send + Sync),
+    descriptor: &CoincubeDescriptor,
+    sessions_current: &impl Fn() -> bool,
+) -> Result<ClaimChangeIndices, ClaimChangeError> {
+    if !sessions_current() {
+        return Err(ClaimChangeError::Cancelled);
+    }
+    let bitcoin = bitcoin_daemon
+        .reserve_claim_change(ChainId::Bitcoin, descriptor)
+        .await
+        .map_err(|_| ClaimChangeError::WalletState)?;
+    if !sessions_current() {
+        return Err(ClaimChangeError::Cancelled);
+    }
+    let mut fork = fork_daemon
+        .reserve_claim_change(ChainId::BitcoinBlake2b, descriptor)
+        .await
+        .map_err(|_| ClaimChangeError::WalletState)?;
+    if !sessions_current() {
+        return Err(ClaimChangeError::Cancelled);
+    }
+    if bitcoin == fork {
+        fork = fork_daemon
+            .reserve_claim_change(ChainId::BitcoinBlake2b, descriptor)
+            .await
+            .map_err(|_| ClaimChangeError::WalletState)?;
+        if !sessions_current() {
+            return Err(ClaimChangeError::Cancelled);
+        }
+    }
+    if bitcoin.is_hardened() || fork.is_hardened() || bitcoin == fork {
+        return Err(ClaimChangeError::WalletState);
+    }
+    let change = ClaimChangeIndices {
+        bitcoin: u32::from(bitcoin),
+        fork: u32::from(fork),
+    };
+    Ok(change)
+}
+
 /// Ask each wallet backend to atomically advance its own change branch, then
 /// bind the resulting two indices to the released deposit record under the
 /// Claim journal lock. An index consumed before an error is deliberately
@@ -1358,20 +1464,7 @@ pub async fn reserve_claim_change_indices(
         let identity = identity.clone();
         let context = context.clone();
         tokio::task::spawn_blocking(move || {
-            let journal = Journal::open(&directory)?;
-            if journal.load()?.is_some()
-                || journal.load_split_funding_reservation()?.is_some()
-                || std::fs::symlink_metadata(directory.join(super::SPLIT_TOMBSTONE)).is_ok()
-            {
-                return Err(Error::Conflict);
-            }
-            let saved = journal
-                .load_claim_funding_reservation()?
-                .ok_or(Error::InvalidPlan)?;
-            if !saved.matches(&descriptor, &identity, &context) {
-                return Err(Error::WrongIdentity);
-            }
-            Ok(saved)
+            load_change_reservation(&directory, &descriptor, &identity, &context)
         })
         .await
         .map_err(|_| ClaimChangeError::Journal(Error::InvalidJournal))?
@@ -1412,39 +1505,13 @@ pub async fn reserve_claim_change_indices(
         };
     }
 
-    if !sessions_current() {
-        return Err(ClaimChangeError::Cancelled);
-    }
-    let bitcoin = bitcoin_daemon
-        .reserve_claim_change(ChainId::Bitcoin, &descriptor)
-        .await
-        .map_err(|_| ClaimChangeError::WalletState)?;
-    if !sessions_current() {
-        return Err(ClaimChangeError::Cancelled);
-    }
-    let mut fork = fork_daemon
-        .reserve_claim_change(ChainId::BitcoinBlake2b, &descriptor)
-        .await
-        .map_err(|_| ClaimChangeError::WalletState)?;
-    if !sessions_current() {
-        return Err(ClaimChangeError::Cancelled);
-    }
-    if bitcoin == fork {
-        fork = fork_daemon
-            .reserve_claim_change(ChainId::BitcoinBlake2b, &descriptor)
-            .await
-            .map_err(|_| ClaimChangeError::WalletState)?;
-        if !sessions_current() {
-            return Err(ClaimChangeError::Cancelled);
-        }
-    }
-    if bitcoin.is_hardened() || fork.is_hardened() || bitcoin == fork {
-        return Err(ClaimChangeError::WalletState);
-    }
-    let change = ClaimChangeIndices {
-        bitcoin: u32::from(bitcoin),
-        fork: u32::from(fork),
-    };
+    let change = reserve_distinct_change_indices(
+        bitcoin_daemon,
+        fork_daemon,
+        &descriptor,
+        &sessions_current,
+    )
+    .await?;
     let (bitcoin_info, fork_info) =
         tokio::try_join!(bitcoin_daemon.get_info(), fork_daemon.get_info(),)
             .map_err(|_| ClaimChangeError::WalletState)?;
@@ -1961,6 +2028,11 @@ mod tests {
         descriptor: CoincubeDescriptor,
         backend: DaemonBackend,
         receive: Mutex<u32>,
+        chain: ChainId,
+        change: Mutex<u32>,
+        reservation_calls: Option<std::sync::Arc<Mutex<Vec<ChainId>>>>,
+        cancel_after_reservation: Option<watch::Sender<u64>>,
+        hide_reserved_change: bool,
         wrong_generated_address: bool,
         omit_revealed_address: bool,
     }
@@ -1971,6 +2043,11 @@ mod tests {
                 descriptor,
                 backend,
                 receive: Mutex::new(3),
+                chain: ChainId::Bitcoin,
+                change: Mutex::new(0),
+                reservation_calls: None,
+                cancel_after_reservation: None,
+                hide_reserved_change: false,
                 wrong_generated_address: false,
                 omit_revealed_address: false,
             }
@@ -2009,7 +2086,7 @@ mod tests {
             Ok(model::GetInfoResult {
                 version: String::new(),
                 network: Network::Bitcoin,
-                chain_id: Some(ChainId::Bitcoin),
+                chain_id: Some(self.chain),
                 block_height: 100,
                 sync: 1.0,
                 descriptors: coincubed::commands::GetInfoDescriptors {
@@ -2023,7 +2100,11 @@ mod tests {
                 history_sync: Default::default(),
                 imported_wallet: None,
                 receive_index: *self.receive.lock().unwrap(),
-                change_index: 0,
+                change_index: if self.hide_reserved_change {
+                    0
+                } else {
+                    *self.change.lock().unwrap()
+                },
             })
         }
 
@@ -2087,6 +2168,25 @@ mod tests {
                 receive: *current,
                 change: 0,
             })
+        }
+
+        async fn reserve_claim_change(
+            &self,
+            chain: ChainId,
+            descriptor: &CoincubeDescriptor,
+        ) -> Result<ChildNumber, DaemonError> {
+            if chain != self.chain || descriptor != &self.descriptor {
+                return Err(DaemonError::NotImplemented);
+            }
+            if let Some(calls) = &self.reservation_calls {
+                calls.lock().unwrap().push(chain);
+            }
+            let mut index = self.change.lock().unwrap();
+            *index += 1;
+            if let Some(sender) = &self.cancel_after_reservation {
+                sender.send_modify(|_| {});
+            }
+            Ok(ChildNumber::Normal { index: *index })
         }
 
         async fn list_coins(
@@ -2522,5 +2622,162 @@ mod tests {
             Err(Error::InvalidJournal)
         ));
         std::fs::remove_dir_all(directory).unwrap();
+    }
+    fn released_change_reservation() -> (PathBuf, CoincubeDescriptor, WalletIdentity, Context) {
+        let directory =
+            std::env::temp_dir().join(format!("claim-change-contract-{}", uuid::Uuid::new_v4()));
+        let saved = reserved_deposits(4, 5).unwrap().released_copy();
+        let descriptor = saved.descriptor().unwrap();
+        let identity = saved.identity.clone();
+        let context = Context {
+            generation: 7,
+            account: saved.account.clone(),
+            provider: saved.provider.clone(),
+        };
+        super::super::prepare_directory(&directory).unwrap();
+        Journal::open(&directory)
+            .unwrap()
+            .store_claim_funding_reservation(&saved)
+            .unwrap();
+        (directory, descriptor, identity, context)
+    }
+
+    #[tokio::test]
+    async fn public_change_reservation_orders_collision_readback_and_idempotent_persistence() {
+        let (directory, descriptor, identity, context) = released_change_reservation();
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mut bitcoin = ReceiveWallet::new(descriptor.clone(), DaemonBackend::RemoteBackend);
+        bitcoin.reservation_calls = Some(calls.clone());
+        *bitcoin.change.lock().unwrap() = 8;
+        let mut fork = ReceiveWallet::new(descriptor.clone(), DaemonBackend::RemoteBackend);
+        fork.chain = ChainId::BitcoinBlake2b;
+        fork.reservation_calls = Some(calls.clone());
+        *fork.change.lock().unwrap() = 8;
+        let (_account_sender, generation) = watch::channel(7);
+        let (_fork_sender, fork_generation) = watch::channel(19);
+        let result = reserve_claim_change_indices(
+            directory.clone(),
+            &descriptor,
+            &identity,
+            &context,
+            &bitcoin,
+            &fork,
+            &generation,
+            &fork_generation,
+            19,
+        )
+        .await;
+        let change = result.unwrap();
+        assert_eq!(
+            change,
+            ClaimChangeIndices {
+                bitcoin: 9,
+                fork: 10
+            }
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                ChainId::Bitcoin,
+                ChainId::BitcoinBlake2b,
+                ChainId::BitcoinBlake2b
+            ]
+        );
+        let persisted = load_claim_funding(&directory, &descriptor, &identity, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.change_indices(), Some(change));
+        let bytes = std::fs::read(directory.join("claim-funding.json")).unwrap();
+        assert_eq!(
+            reserve_claim_change_indices(
+                directory.clone(),
+                &descriptor,
+                &identity,
+                &context,
+                &bitcoin,
+                &fork,
+                &generation,
+                &fork_generation,
+                19
+            )
+            .await
+            .unwrap(),
+            change
+        );
+        assert_eq!(calls.lock().unwrap().len(), 3);
+        assert_eq!(
+            std::fs::read(directory.join("claim-funding.json")).unwrap(),
+            bytes
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_change_reservation_cancellation_and_missing_readback_burn_without_recording() {
+        for cancelled in [true, false] {
+            let (directory, descriptor, identity, context) = released_change_reservation();
+            let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let (account_sender, generation) = watch::channel(7);
+            let (_fork_sender, fork_generation) = watch::channel(19);
+            let mut bitcoin = ReceiveWallet::new(descriptor.clone(), DaemonBackend::RemoteBackend);
+            bitcoin.reservation_calls = Some(calls.clone());
+            *bitcoin.change.lock().unwrap() = 8;
+            let mut fork = ReceiveWallet::new(descriptor.clone(), DaemonBackend::RemoteBackend);
+            fork.chain = ChainId::BitcoinBlake2b;
+            fork.reservation_calls = Some(calls.clone());
+            *fork.change.lock().unwrap() = 10;
+            if cancelled {
+                bitcoin.cancel_after_reservation = Some(account_sender.clone());
+            } else {
+                fork.hide_reserved_change = true;
+            }
+            let bytes = std::fs::read(directory.join("claim-funding.json")).unwrap();
+            let result = reserve_claim_change_indices(
+                directory.clone(),
+                &descriptor,
+                &identity,
+                &context,
+                &bitcoin,
+                &fork,
+                &generation,
+                &fork_generation,
+                19,
+            )
+            .await;
+            assert!(
+                matches!(
+                    (&result, cancelled),
+                    (Err(ClaimChangeError::Cancelled), true)
+                        | (Err(ClaimChangeError::WalletState), false)
+                ),
+                "{:?}",
+                result
+            );
+            assert_eq!(*bitcoin.change.lock().unwrap(), 9);
+            assert_eq!(
+                *fork.change.lock().unwrap(),
+                if cancelled { 10 } else { 11 }
+            );
+            assert_eq!(
+                *calls.lock().unwrap(),
+                if cancelled {
+                    vec![ChainId::Bitcoin]
+                } else {
+                    vec![ChainId::Bitcoin, ChainId::BitcoinBlake2b]
+                }
+            );
+            assert_eq!(
+                std::fs::read(directory.join("claim-funding.json")).unwrap(),
+                bytes
+            );
+            assert!(
+                load_claim_funding(&directory, &descriptor, &identity, &context)
+                    .unwrap()
+                    .unwrap()
+                    .change_indices()
+                    .is_none()
+            );
+            std::fs::remove_dir_all(directory).unwrap();
+        }
     }
 }

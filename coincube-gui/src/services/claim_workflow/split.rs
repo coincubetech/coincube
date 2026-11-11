@@ -649,6 +649,41 @@ fn validate_ancestry_plan(intent: &Intent, record: &SplitRecord) -> Result<(), E
 pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
     let record = intent.split.as_ref().ok_or(Error::InvalidPlan)?;
     let p = &intent.plan;
+    validate_split_identity(intent, record)?;
+    validate_split_kind(intent, record)?;
+    if let Some(descriptors) = &record.descriptors {
+        if descriptors.source()?.digest() != record.source_digest {
+            return Err(Error::InvalidJournal);
+        }
+    }
+    validate_split_bitcoin_attempts(intent, record)?;
+    // A two-step record's step 1 must be tracked before the sweep and the
+    // reservation; a fork-only record is Tracking from creation (above).
+    validate_split_sweep(intent, record)?;
+    // The signed step 2 and its submission are recorded together; the
+    // submission names the signed bytes' own txid and wtxid, and those bytes
+    // are the recorded sweep with a signature on every input. Resends and an
+    // observation exist only for a recorded step 2, and every resend is of
+    // exactly its bytes.
+    validate_split_step2_submission(intent, record)?;
+    // O4 (#568 S4): a two-step record's claimed coin, only after step 2 was
+    // submitted.
+    if record.step1_conflict.is_some_and(|conflict| {
+        record.kind != SplitKind::Split
+            || intent.fork_submission.is_none()
+            || !p.claimed_prevouts.contains(&conflict.outpoint)
+            || conflict.terminal_at.is_some_and(|at| {
+                Step1Conflict::new(conflict.outpoint, conflict.bitcoin_tip).terminal(at)
+                    != Some(conflict)
+            })
+    }) {
+        return Err(Error::InvalidPlan);
+    }
+    reorg::validate_history(intent)
+}
+
+fn validate_split_identity(intent: &Intent, record: &SplitRecord) -> Result<(), Error> {
+    let p = &intent.plan;
     let inputs: std::collections::BTreeSet<_> =
         p.step1.input.iter().map(|i| i.previous_output).collect();
     // What both kinds share: the kind's version, the identity, the chains,
@@ -694,6 +729,12 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
     {
         return Err(Error::InvalidPlan);
     }
+
+    Ok(())
+}
+
+fn validate_split_kind(intent: &Intent, record: &SplitRecord) -> Result<(), Error> {
+    let p = &intent.plan;
     match record.kind {
         SplitKind::Split => {
             if p.step1.input.is_empty()
@@ -735,11 +776,11 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
         }
         SplitKind::Ancestry => validate_ancestry_plan(intent, record)?,
     }
-    if let Some(descriptors) = &record.descriptors {
-        if descriptors.source()?.digest() != record.source_digest {
-            return Err(Error::InvalidJournal);
-        }
-    }
+    Ok(())
+}
+
+fn validate_split_bitcoin_attempts(intent: &Intent, record: &SplitRecord) -> Result<(), Error> {
+    let p = &intent.plan;
     if record.kind == SplitKind::Split {
         // The signed step 1 is the only place a signature may appear, and
         // its own txid is the one tracked on both chains.
@@ -760,8 +801,11 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
             return Err(Error::InvalidJournal);
         }
     }
-    // A two-step record's step 1 must be tracked before the sweep and the
-    // reservation; a fork-only record is Tracking from creation (above).
+    Ok(())
+}
+
+fn validate_split_sweep(intent: &Intent, record: &SplitRecord) -> Result<(), Error> {
+    let p = &intent.plan;
     let tracked = intent.phase == Phase::Tracking
         && (record.kind == SplitKind::Unified || intent.signed_txid.is_some());
     if let Some(sweep) = &intent.fork_sweep {
@@ -786,11 +830,11 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
     if record.target_index.is_some() && !tracked && record.kind != SplitKind::Ancestry {
         return Err(Error::InvalidPlan);
     }
-    // The signed step 2 and its submission are recorded together; the
-    // submission names the signed bytes' own txid and wtxid, and those bytes
-    // are the recorded sweep with a signature on every input. Resends and an
-    // observation exist only for a recorded step 2, and every resend is of
-    // exactly its bytes.
+
+    Ok(())
+}
+
+fn validate_split_step2_submission(intent: &Intent, record: &SplitRecord) -> Result<(), Error> {
     match (&intent.fork_submission, &record.step2_transaction) {
         (None, None) => {
             if !record.step2_resubmissions.is_empty()
@@ -820,20 +864,7 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
         }
         _ => return Err(Error::InvalidPlan),
     }
-    // O4 (#568 S4): a two-step record's claimed coin, only after step 2 was
-    // submitted.
-    if record.step1_conflict.is_some_and(|conflict| {
-        record.kind != SplitKind::Split
-            || intent.fork_submission.is_none()
-            || !p.claimed_prevouts.contains(&conflict.outpoint)
-            || conflict.terminal_at.is_some_and(|at| {
-                Step1Conflict::new(conflict.outpoint, conflict.bitcoin_tip).terminal(at)
-                    != Some(conflict)
-            })
-    }) {
-        return Err(Error::InvalidPlan);
-    }
-    reorg::validate_history(intent)
+    Ok(())
 }
 
 fn check_paired_target_source(
