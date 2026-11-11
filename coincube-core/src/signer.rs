@@ -674,8 +674,8 @@ impl MasterSigner {
     }
 
     /// Reconstructs an equivalent signer by re-deriving from this signer's mnemonic.
-    /// Useful when a second owner needs the same key material (e.g., the installer
-    /// re-using the cube's master seed as the vault hot-signer in dev mode).
+    /// Useful when a second scoped owner needs the same existing key material.
+    /// New Vault creation generates an independent signer in every mode.
     pub fn try_clone(&self) -> Result<Self, SignerError> {
         Self::from_mnemonic(self.network, self.mnemonic.clone())
     }

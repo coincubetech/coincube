@@ -579,11 +579,14 @@ impl Installer {
         cube_settings: Option<crate::app::settings::CubeSettings>,
         breez_client: Option<std::sync::Arc<crate::app::breez_liquid::BreezClient>>,
         spark_backend: Option<std::sync::Arc<crate::app::wallets::SparkBackend>>,
-        mut developer_mode: bool,
+        developer_mode: bool,
         coincube_client: Option<crate::services::coincube::CoincubeClient>,
     ) -> (Installer, Task<Message>) {
         let network = chain.bitcoin_network();
-        let signer = installer_signer(network, &breez_client, &mut developer_mode);
+        // Developer mode controls network visibility, never key identity. The
+        // Cube master remains available for Cube services, but every new Vault
+        // starts with its own independently generated hot signer.
+        let signer = Arc::new(Mutex::new(Signer::generate(network).unwrap()));
         let mut context = Context::new_for_chain(
             chain,
             destination_path.clone(),
@@ -1550,10 +1553,9 @@ async fn install_local_wallet_with_seed_mode(
             .to_string()
             .contains(&signer.lock().unwrap().fingerprint().to_string())
     }) {
-        // In developer mode this signer is a *clone of the Cube master signer*
-        // (see `Installer::new`), so the pre-hardening `store(...)` here was
-        // writing the master seed itself to disk in the clear. It gets the same
-        // treatment as every other seed, not an exemption.
+        // Persist the independent Vault signer with the Cube's credential.
+        // Older Developer-mode Vaults reused the Cube master; their existing
+        // encrypted files remain readable through the same fingerprint lookup.
         let password = seed_password(&ctx)?;
         let already_verified = match seed_mode {
             SeedWriteMode::Create => false,
@@ -2303,37 +2305,6 @@ fn validate_installer_entry(
     Ok(())
 }
 
-fn installer_signer(
-    network: bitcoin::Network,
-    breez_client: &Option<std::sync::Arc<crate::app::breez_liquid::BreezClient>>,
-    developer_mode: &mut bool,
-) -> Arc<Mutex<Signer>> {
-    if *developer_mode {
-        let master_signer = breez_client
-            .as_ref()
-            .and_then(|bc| bc.liquid_signer())
-            .and_then(|arc_hs| {
-                arc_hs
-                    .lock()
-                    .ok()
-                    .and_then(|hs_guard| hs_guard.try_clone().ok())
-                    .map(|hs| Arc::new(Mutex::new(Signer::new(hs))))
-            });
-        if let Some(ms) = master_signer {
-            ms
-        } else {
-            tracing::warn!(
-                "developer_mode=true but master signer unavailable; \
-                     downgrading to normal mode"
-            );
-            *developer_mode = false;
-            Arc::new(Mutex::new(Signer::generate(network).unwrap()))
-        }
-    } else {
-        Arc::new(Mutex::new(Signer::generate(network).unwrap()))
-    }
-}
-
 impl Installer {
     fn update_hardware_wallets(&mut self, msg: HardwareWalletMessage) -> Task<Message> {
         let update = matches!(&msg, &HardwareWalletMessage::List(_));
@@ -2510,6 +2481,169 @@ fn persist_recovered_seed_only(ctx: Context) -> Result<(), Error> {
         ctx.seed_cube_id(),
         seed_device_secret(&ctx)?.as_ref(),
     )
+}
+
+#[cfg(test)]
+mod signer_isolation_tests {
+    use super::*;
+    use crate::app::{breez_liquid::BreezClient, settings::CubeSettings};
+    use coincube_core::signer::MasterSigner;
+
+    #[test]
+    fn new_vault_signers_are_independent_of_the_cube_in_every_developer_mode() {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        for chain in [
+            crate::chain::ChainId::Bitcoin,
+            crate::chain::ChainId::Testnet4,
+            crate::chain::ChainId::Signet,
+            crate::chain::ChainId::Regtest,
+        ] {
+            let network = chain.bitcoin_network();
+            let master = Arc::new(Mutex::new(MasterSigner::generate(network).unwrap()));
+            let master_fp = master.lock().unwrap().fingerprint(&secp);
+            let master_xpub = master
+                .lock()
+                .unwrap()
+                .xpub_at(&bitcoin::bip32::DerivationPath::master(), &secp);
+            let client = Arc::new(BreezClient::disconnected_with_signer(network, master));
+            let mut previous = None;
+            for developer_mode in [false, true, true] {
+                let root =
+                    std::env::temp_dir().join(format!("signer-761-{}", uuid::Uuid::new_v4()));
+                let (installer, _) = Installer::build_for_chain(
+                    CoincubeDirectory::new(root.clone()),
+                    chain,
+                    None,
+                    UserFlow::CreateWallet,
+                    true,
+                    Some(CubeSettings::new("synthetic".into(), chain)),
+                    Some(client.clone()),
+                    None,
+                    developer_mode,
+                    None,
+                );
+                let signer = installer.signer.lock().unwrap();
+                assert_ne!(signer.fingerprint(), master_fp, "{:?}", chain);
+                let xpub = signer.get_extended_pubkey(&bitcoin::bip32::DerivationPath::master());
+                assert_ne!(xpub, master_xpub);
+                assert_ne!(Some(xpub), previous, "each Vault gets a fresh seed");
+                previous = Some(xpub);
+                assert_eq!(installer.developer_mode, developer_mode);
+                assert!(!root.exists(), "constructing an installer writes no seed");
+            }
+        }
+    }
+
+    #[test]
+    fn missing_cube_master_does_not_disable_developer_mode() {
+        for chain in [
+            crate::chain::ChainId::Bitcoin,
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let root = std::env::temp_dir().join(format!("signer-761-{}", uuid::Uuid::new_v4()));
+            let (installer, _) = Installer::build_for_chain(
+                CoincubeDirectory::new(root.clone()),
+                chain,
+                None,
+                UserFlow::CreateWallet,
+                false,
+                None,
+                None,
+                None,
+                true,
+                None,
+            );
+            assert!(installer.developer_mode, "{:?}", chain);
+            assert!(!root.exists());
+        }
+    }
+
+    #[test]
+    fn legacy_cube_master_vault_seed_still_loads_and_signs_without_rewriting() {
+        use bitcoin::{hashes::Hash, sighash::SighashCache, Amount, ScriptBuf};
+        let network = bitcoin::Network::Regtest;
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let root = std::env::temp_dir().join(format!("legacy-signer-761-{}", uuid::Uuid::new_v4()));
+        let cube_id = "synthetic-legacy-developer-cube";
+        let master = MasterSigner::generate(network).unwrap();
+        let fingerprint = master.fingerprint(&secp);
+        let legacy_vault = Signer::new(master.try_clone().unwrap());
+        // The old installer wrote this same Cube master as a per-Vault v2
+        // encrypted seed. No new signer, migration or rotation may replace it.
+        legacy_vault
+            .store_encrypted(
+                &CoincubeDirectory::new(root.clone()),
+                network,
+                "oldvault",
+                1000,
+                "2468",
+                cube_id,
+                None,
+            )
+            .unwrap();
+        let files: Vec<_> = std::fs::read_dir(MasterSigner::mnemonics_folder(&root, network))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 1);
+        let before = std::fs::read(&files[0]).unwrap();
+        let loaded = crate::services::unlock::open_seed_by_fingerprint(
+            &root,
+            network,
+            fingerprint,
+            "2468",
+            cube_id,
+        )
+        .unwrap();
+        let loaded = Signer::new(loaded);
+        let path: bitcoin::bip32::DerivationPath = "m/48'/1'/0'/2'/0/0".parse().unwrap();
+        let public_key = bitcoin::PublicKey::new(master.xpub_at(&path, &secp).public_key);
+        let witness_script = bitcoin::script::Builder::new()
+            .push_key(&public_key)
+            .push_opcode(bitcoin::opcodes::all::OP_CHECKSIG)
+            .into_script();
+        let prevout = bitcoin::TxOut {
+            value: Amount::from_sat(19_000),
+            script_pubkey: witness_script.to_p2wsh(),
+        };
+        let mut psbt = bitcoin::psbt::Psbt::from_unsigned_tx(bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn::default()],
+            output: vec![bitcoin::TxOut {
+                value: Amount::from_sat(18_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        })
+        .unwrap();
+        psbt.inputs[0].witness_utxo = Some(prevout.clone());
+        psbt.inputs[0].witness_script = Some(witness_script.clone());
+        psbt.inputs[0]
+            .bip32_derivation
+            .insert(public_key.inner, (fingerprint, path));
+        let unsigned_tx = psbt.unsigned_tx.clone();
+        let expected = legacy_vault.sign_psbt(psbt.clone()).unwrap();
+        let signed = loaded.sign_psbt(psbt).unwrap();
+        assert_eq!(
+            signed, expected,
+            "the old key still produces the same signatures"
+        );
+        assert_eq!(signed.unsigned_tx, unsigned_tx);
+        assert_eq!(signed.inputs[0].partial_sigs.len(), 1);
+        let signature = signed.inputs[0].partial_sigs.get(&public_key).unwrap();
+        let sighash = SighashCache::new(&unsigned_tx)
+            .p2wsh_signature_hash(0, &witness_script, prevout.value, signature.sighash_type)
+            .unwrap();
+        secp.verify_ecdsa(
+            &bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array()),
+            &signature.signature,
+            &public_key.inner,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&files[0]).unwrap(), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]
