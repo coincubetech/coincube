@@ -60,6 +60,7 @@ mod run {
     };
     use serde::Deserialize;
     use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
 
     type Result<T> = std::result::Result<T, &'static str>;
     const MAX_FILE: u64 = 4_000_000;
@@ -81,6 +82,16 @@ mod run {
         request_id: String,
         session_id: Option<String>,
         output_psbt_file: Option<PathBuf>,
+        authorize_abort: Option<String>,
+        abort_binding: Option<AbortBinding>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct AbortBinding {
+        owner_user_id: u32,
+        creator_identity: String,
+        psbt_sha256: String,
     }
 
     fn check(condition: bool, code: &'static str) -> Result<()> {
@@ -101,7 +112,10 @@ mod run {
     fn validate_input(input: &Input) -> Result<()> {
         check(input.network == "testnet4", "wrong_network")?;
         check(
-            matches!(input.action.as_str(), "inspect" | "request" | "collect"),
+            matches!(
+                input.action.as_str(),
+                "inspect" | "request" | "collect" | "cancel"
+            ),
             "invalid_action",
         )?;
         check(
@@ -128,7 +142,7 @@ mod run {
         for path in [&input.profile_dir, &input.psbt_file, &input.descriptor_file] {
             check(path.is_absolute(), "absolute_paths_required")?;
         }
-        if input.action == "collect" {
+        if matches!(input.action.as_str(), "collect" | "cancel") {
             check(
                 input
                     .session_id
@@ -136,6 +150,32 @@ mod run {
                     .is_some_and(|id| !id.is_empty() && id.len() < 128),
                 "session_id_required",
             )?;
+        }
+        if input.action == "cancel" {
+            check(
+                input
+                    .authorize_abort
+                    .as_ref()
+                    .is_some_and(|v| !v.trim().is_empty() && v.len() <= 512),
+                "abort_authorization_required",
+            )?;
+            let binding = input
+                .abort_binding
+                .as_ref()
+                .ok_or("abort_binding_required")?;
+            check(
+                binding.owner_user_id > 0
+                    && hex_string(&binding.creator_identity, 64)
+                    && hex_string(&binding.psbt_sha256, 64),
+                "invalid_abort_binding",
+            )?;
+        } else {
+            check(
+                input.authorize_abort.is_none() && input.abort_binding.is_none(),
+                "unexpected_abort_authorization",
+            )?;
+        }
+        if input.action == "collect" {
             check(
                 input.output_psbt_file.as_ref().is_some_and(|p| {
                     p.is_absolute() && p != &input.psbt_file && p != &input.descriptor_file
@@ -345,7 +385,7 @@ mod run {
                 && session.note == format!("Testnet4 QA {}", input.request_id),
             "session_binding_mismatch",
         )?;
-        if input.action == "collect" {
+        if matches!(input.action.as_str(), "collect" | "cancel") {
             check(
                 input.session_id.as_deref() == Some(session.session_id.as_str()),
                 "session_binding_mismatch",
@@ -369,6 +409,23 @@ mod run {
                     || session.targets[0].transport_pubkey == target.transport_pubkey),
             "session_target_mismatch",
         )
+    }
+
+    // Cancel only unsigned active requests, or reconcile our exact already-
+    // cancelled request. Never adopt rejected/expired/failed or signed states.
+    fn cancellation_state(session: &SigningSession, terminal: bool) -> Result<bool> {
+        check(
+            session.submitted_signatures.is_empty(),
+            "abort_signature_present",
+        )?;
+        if session.status == SessionStatus::Cancelled as i32 {
+            return Ok(false);
+        }
+        check(
+            !terminal && (1..=4).contains(&session.status),
+            "abort_not_unsigned_or_cancelled",
+        )?;
+        Ok(true)
     }
 
     fn collection_progress(
@@ -484,6 +541,20 @@ mod run {
         std::env::set_var("COINCUBE_API_URL", "https://api.coincube.io");
         let mut rest = CoincubeClient::new();
         rest.set_token(&account.tokens.access_token);
+        if let Some(binding) = &input.abort_binding {
+            let user = rest.get_user().await.map_err(rest_error)?;
+            check(user.id == binding.owner_user_id, "abort_account_mismatch")?;
+            let creator = serde_json::to_vec(device).map_err(|_| "abort_creator_mismatch")?;
+            check(
+                format!("{:x}", Sha256::digest(&creator)) == binding.creator_identity,
+                "abort_creator_mismatch",
+            )?;
+            check(
+                format!("{:x}", Sha256::digest(private_read(&input.psbt_file)?))
+                    == binding.psbt_sha256,
+                "abort_psbt_mismatch",
+            )?;
+        }
         let cube = rest.get_cube(input.cube_id).await.map_err(rest_error)?;
         check(cube.network == "testnet4", "connect_cube_wrong_network")?;
         let vault = rest
@@ -575,6 +646,47 @@ mod run {
             .map_err(rpc_error)?
             .session
             .ok_or("session_missing")?;
+        if input.action == "cancel" {
+            validate_session(&input, &session, &descriptor_id, device, &key, &target)?;
+            let needs_cancel = cancellation_state(&session, false)?;
+            if needs_cancel {
+                client
+                    .cancel_signing_session(
+                        session.session_id.clone(),
+                        "qa_interrupted_pin_attempt".into(),
+                    )
+                    .await
+                    .map_err(rpc_error)?;
+            }
+            // A successful mutation response is not terminal evidence. A raced
+            // signature or changed binding must never release a credential.
+            let terminal = client
+                .get_signing_session(session.session_id.clone())
+                .await
+                .map_err(rpc_error)?
+                .session
+                .ok_or("session_missing")?;
+            validate_session(&input, &terminal, &descriptor_id, device, &key, &target)?;
+            cancellation_state(&terminal, true)?;
+            output["cancelled"] = json!(true);
+            output["owner_user_id"] = json!(
+                input
+                    .abort_binding
+                    .as_ref()
+                    .ok_or("abort_binding_required")?
+                    .owner_user_id
+            );
+            output["session_id"] = json!(terminal.session_id);
+            output["request_id"] = json!(input.request_id);
+            output["status"] = json!(terminal.status);
+            output["submitted_signature_count"] = json!(0);
+            output["descriptor_id"] = json!(descriptor_id);
+            output["creator_device_id"] = json!(device);
+            output["target_device_id"] = json!(target.device_id);
+            output["target_key_id"] = json!(input.target_key_id);
+            output["target_fingerprint"] = json!(input.target_fingerprint);
+            return Ok(output);
+        }
         let progress =
             collection_progress(&input, &session, &descriptor_id, device, &key, &target)?;
         output["status"] = progress["status"].clone();
@@ -683,6 +795,55 @@ mod run {
             assert_eq!(validate_input(&fixture), Err("output_file_required"));
             fixture.output_psbt_file = Some(PathBuf::from("/private/signed.psbt"));
             assert!(validate_input(&fixture).is_ok());
+        }
+
+        #[test]
+        fn cancellation_requires_authorization_and_exact_session() {
+            let mut fixture = input();
+            fixture.action = "cancel".into();
+            assert_eq!(validate_input(&fixture), Err("session_id_required"));
+            fixture.session_id = Some("session".into());
+            assert_eq!(
+                validate_input(&fixture),
+                Err("abort_authorization_required")
+            );
+            fixture.authorize_abort = Some("owner QA instruction".into());
+            assert_eq!(validate_input(&fixture), Err("abort_binding_required"));
+            fixture.abort_binding = Some(AbortBinding {
+                owner_user_id: 1,
+                creator_identity: "ab".repeat(32),
+                psbt_sha256: "cd".repeat(32),
+            });
+            assert!(validate_input(&fixture).is_ok());
+            fixture.action = "inspect".into();
+            assert_eq!(
+                validate_input(&fixture),
+                Err("unexpected_abort_authorization")
+            );
+        }
+
+        #[test]
+        fn cancellation_never_accepts_signature_races_or_other_terminal_states() {
+            for status in 0..=11 {
+                let mut session = SigningSession {
+                    status,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    cancellation_state(&session, false).is_ok(),
+                    (1..=4).contains(&status) || status == 8
+                );
+                assert_eq!(cancellation_state(&session, true).is_ok(), status == 8);
+                session.submitted_signatures.push(Default::default());
+                assert_eq!(
+                    cancellation_state(&session, false),
+                    Err("abort_signature_present")
+                );
+                assert_eq!(
+                    cancellation_state(&session, true),
+                    Err("abort_signature_present")
+                );
+            }
         }
 
         #[test]
