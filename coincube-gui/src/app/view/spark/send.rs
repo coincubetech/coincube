@@ -1347,15 +1347,35 @@ fn check_row<'a>(
     label: &'a str,
     status: Element<'a, Message>,
 ) -> Element<'a, Message> {
+    check_row_noted(passed, label, None, status)
+}
+
+/// A check row whose label carries a muted note beneath it.
+fn check_row_noted<'a>(
+    passed: bool,
+    label: &'a str,
+    note: Option<&'a str>,
+    status: Element<'a, Message>,
+) -> Element<'a, Message> {
     Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
         .push(check_mark(passed))
-        .push(coincube_ui::component::tenshu::body(label).width(Length::Fill))
+        .push(
+            Column::new()
+                .spacing(2)
+                .width(Length::Fill)
+                .push(coincube_ui::component::tenshu::body(label))
+                .push_maybe(note.map(coincube_ui::component::tenshu::caption)),
+        )
         .push(status)
         .padding([10, 0])
         .into()
 }
+
+/// Lookups always run in Branta's strict privacy mode (`services::branta`
+/// hard-codes it), so Review can say so without consulting a setting.
+const STRICT_MODE_NOTE: &str = "Strict mode: Branta never gets the plaintext address or amount.";
 
 fn check_status<'a>(value: String, passed: bool) -> Element<'a, Message> {
     let tone = if passed {
@@ -1406,10 +1426,16 @@ fn recipient_status_row<'a>(
         .enumerate()
         .find(|(_, identity)| identity.is_current())
     {
-        Some((index, identity)) => check_row(true, label, identity_card(index, identity, mode)),
-        None => check_row(
+        Some((index, identity)) => check_row_noted(
+            true,
+            label,
+            Some(localized_copy(STRICT_MODE_NOTE)),
+            identity_card(index, identity, mode),
+        ),
+        None => check_row_noted(
             false,
             label,
+            Some(localized_copy(STRICT_MODE_NOTE)),
             check_status(localized_copy("Not identified").to_owned(), false),
         ),
     }
@@ -2338,12 +2364,17 @@ mod tests {
         assert!(identified.contains("Identified by Branta"));
         assert!(identified.contains("View"));
         assert!(!identified.contains("Verified"));
+        // Lookups always run in strict mode; the note rides with every lookup.
+        assert!(identified.contains(STRICT_MODE_NOTE));
         let off = inspect(false, std::slice::from_ref(&identity));
         assert!(off.contains("Checks off"));
         assert!(off.contains("Turn on in Settings"));
         assert!(!off.contains("Identified"));
+        assert!(!off.contains("Strict mode"));
         ticket.set_test_enabled(false);
-        assert!(inspect(true, &[identity]).contains("Not identified"));
+        let silent = inspect(true, &[identity]);
+        assert!(silent.contains("Not identified"));
+        assert!(silent.contains(STRICT_MODE_NOTE));
     }
 
     #[test]
