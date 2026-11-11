@@ -1,7 +1,7 @@
 use iced::widget::button::{Catalog, Status, Style, StyleFn};
 use iced::{Background, Border, Color};
 
-use super::palette::Button;
+use super::palette::{Button, ButtonPalette};
 use super::Theme;
 
 impl Catalog for Theme {
@@ -60,88 +60,46 @@ pub fn orange_outline(theme: &Theme, status: Status) -> Style {
     button(&theme.colors.buttons.orange_outline, status)
 }
 
+fn palette_style(palette: ButtonPalette) -> Style {
+    Style {
+        background: Some(Background::Color(palette.background)),
+        text_color: palette.text,
+        border: if let Some(color) = palette.border {
+            Border {
+                radius: 25.0.into(),
+                width: 1.0,
+                color,
+            }
+        } else {
+            Border {
+                ..Default::default()
+            }
+        },
+        ..Default::default()
+    }
+}
+
 fn button(p: &Button, status: Status) -> Style {
     match status {
-        Status::Active => Style {
-            background: Some(Background::Color(p.active.background)),
-            text_color: p.active.text,
-            border: if let Some(color) = p.active.border {
-                Border {
-                    radius: 25.0.into(),
-                    width: 1.0,
-                    color,
-                }
-            } else {
-                Border {
-                    ..Default::default()
-                }
-            },
-            ..Default::default()
+        Status::Active => palette_style(p.active),
+        Status::Pressed => match p.pressed {
+            Some(pressed) => palette_style(pressed),
+            None => button(p, Status::Active),
         },
-        Status::Pressed => {
-            if let Some(pressed) = p.pressed {
-                Style {
-                    background: Some(Background::Color(pressed.background)),
-                    text_color: pressed.text,
-                    border: if let Some(color) = pressed.border {
-                        Border {
-                            radius: 25.0.into(),
-                            width: 1.0,
-                            color,
-                        }
-                    } else {
-                        Border {
-                            ..Default::default()
-                        }
-                    },
-                    ..Default::default()
-                }
-            } else {
-                button(p, Status::Active)
-            }
-        }
-        Status::Hovered => Style {
-            background: Some(Background::Color(p.hovered.background)),
-            text_color: p.hovered.text,
-            border: if let Some(color) = p.hovered.border {
-                Border {
-                    radius: 25.0.into(),
-                    width: 1.0,
-                    color,
-                }
-            } else {
-                Border {
-                    ..Default::default()
-                }
-            },
-            ..Default::default()
-        },
+        Status::Hovered => palette_style(p.hovered),
         Status::Disabled => {
             if let Some(disabled) = p.disabled {
                 Style {
-                    background: Some(Background::Color(disabled.background)),
                     text_color: Color {
                         a: 0.2,
                         r: disabled.text.r,
                         g: disabled.text.g,
                         b: disabled.text.b,
                     },
-                    border: if let Some(color) = disabled.border {
-                        Border {
-                            radius: 25.0.into(),
-                            width: 1.0,
-                            color,
-                        }
-                    } else {
-                        Border {
-                            ..Default::default()
-                        }
-                    },
-                    ..Default::default()
+                    ..palette_style(disabled)
                 }
             } else {
                 let active: Style = button(p, Status::Active);
-
                 Style {
                     text_color: Color {
                         a: 0.2,
