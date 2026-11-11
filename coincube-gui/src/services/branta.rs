@@ -149,6 +149,7 @@ impl LookupRequest {
         // Reject ambiguous parameters before the SDK's first-value-wins parser sees them.
         let mut keys = std::collections::HashSet::new();
         let (mut id, mut secret) = (None, None);
+        let mut forwarded = Vec::new();
         for pair in query.split('&') {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
             let key = key.to_ascii_lowercase();
@@ -159,6 +160,14 @@ impl LookupRequest {
                 "branta_id" => id = Some(percent_decode(value)),
                 "branta_secret" => secret = Some(percent_decode(value)),
                 _ => (),
+            }
+            // VAULT pays only the path address, so the SDK sees only what identifies it: the
+            // Branta pair and on-chain alternates (which must agree with the path or the
+            // request is tampered). Other legs (`pay`, `lno`, `lightning`, ...) would make
+            // the SDK return `unknown` before it decrypts and compares the address, hiding
+            // a swapped path address.
+            if matches!(key.as_str(), "branta_id" | "branta_secret" | "bc" | "tb") {
+                forwarded.push(pair);
             }
         }
         if secret?.is_empty() {
@@ -172,7 +181,7 @@ impl LookupRequest {
             return None;
         }
         Some(Self {
-            raw: raw.into(),
+            raw: format!("bitcoin:{path}?{}", forwarded.join("&")),
             destination: address.to_string(),
             kind: DestinationType::BitcoinAddress,
         })
@@ -1006,6 +1015,37 @@ mod sdk_contract_tests {
         assert_eq!(result.status, VerifyStatus::Tampered);
     }
     #[tokio::test]
+    async fn unverifiable_extra_legs_cannot_mask_tampering() {
+        let address = ADDRESS
+            .parse::<Address<coincube_core::miniscript::bitcoin::address::NetworkUnchecked>>()
+            .unwrap()
+            .require_network(Network::Bitcoin)
+            .unwrap();
+        // The SDK checks conflicting on-chain addresses before extra legs...
+        let raw = format!(
+            "bitcoin:{ADDRESS}?pay=1&bc={OTHER}&branta_id={}&branta_secret=key",
+            envelope()
+        );
+        let direct = offline_sdk().verify(&raw, None).await.unwrap();
+        assert_eq!(direct.status, VerifyStatus::Tampered);
+        let raw = format!(
+            "bitcoin:{ADDRESS}?pay=1&branta_id={}&branta_secret=key",
+            envelope()
+        );
+        // ...but stops at a `pay=` leg with `unknown` before decrypting `branta_id`, which
+        // would hide a swapped path address.
+        let direct = offline_sdk().verify(&raw, None).await.unwrap();
+        assert_eq!(direct.status, VerifyStatus::Unknown);
+        // What the wrapper forwards has no such leg left to stop on.
+        let request = LookupRequest::bitcoin(&raw, &address).unwrap();
+        assert!(!request.raw.contains("pay="));
+        let raw = format!(
+            "bitcoin:{ADDRESS}?pay=1&bc={OTHER}&branta_id={}&branta_secret=key",
+            envelope()
+        );
+        assert!(LookupRequest::bitcoin(&raw, &address).is_some_and(|r| r.raw.contains("bc=")));
+    }
+    #[tokio::test]
     async fn official_sdk_never_looks_up_plain_or_unbindable_destinations() {
         for input in [
             ADDRESS.to_string(),
@@ -1029,7 +1069,20 @@ mod sdk_contract_tests {
         let encrypted = envelope();
         let raw = format!("bitcoin:{ADDRESS}?amount=0.001&branta_id={encrypted}&branta_secret=key");
         let request = LookupRequest::bitcoin(&raw, &address).unwrap();
-        assert_eq!(request.raw, raw);
+        // Only the paid address, the Branta pair and on-chain alternates reach the SDK.
+        assert_eq!(
+            request.raw,
+            format!("bitcoin:{ADDRESS}?branta_id={encrypted}&branta_secret=key")
+        );
+        let with_legs = format!(
+            "bitcoin:{ADDRESS}?pay=1&lno=lno1offer&lightning=lnbc1x&bolt12=x&ark=x&sp=x&\
+             bc={ADDRESS}&branta_id={encrypted}&branta_secret=key&label=Shop"
+        );
+        let request = LookupRequest::bitcoin(&with_legs, &address).unwrap();
+        assert_eq!(
+            request.raw,
+            format!("bitcoin:{ADDRESS}?bc={ADDRESS}&branta_id={encrypted}&branta_secret=key")
+        );
         assert!(!format!("{request:?}").contains("key"));
         let encoded = encrypted
             .replace('+', "%2B")

@@ -80,9 +80,12 @@ prepared destination. Identity attribution makes no claim of payment safety.
 Only a `tampered` verdict from the SDK's `verify` blocks sending and requires
 replacing the request. In SDK 4.0.0 it covers an on-chain BIP21 address that does
 not match the address decrypted from `branta_id`, and on-chain addresses in one
-request (path, `bc=`, `tb=`) that disagree. It is not reachable for BOLT11. An
-added payment leg that cannot be bound (for example `lightning=`, `lno=`, `bolt12`)
-makes the request `unknown`, so it is never identified. `unknown`, `incomplete`
+request (path, `bc=`, `tb=`) that disagree. It is not reachable for BOLT11. VAULT
+pays only the path address, so Tenshu passes the SDK only the path address,
+`branta_id`, `branta_secret` and any `bc=`/`tb=`. Other legs (`pay=`, `lno=`,
+`lightning=`, `bolt12`, ...) are dropped first: the SDK would otherwise return
+`unknown` for an unbindable leg before decrypting `branta_id`, which would hide a
+swapped path address. Identity therefore covers exactly the address being paid. `unknown`, `incomplete`
 (Branta unreachable, 5xx or 429), wrong secrets and ordinary failures are silent,
 so absence of a block is not a safety claim. The known bad destination stays blocked for the current form despite preference
 changes, metadata/encoding changes, or edits to another recipient. Replace or
