@@ -14,7 +14,7 @@ use coincube_ui::{
     component::{
         amount::{BitcoinDisplayUnit, DisplayAmount},
         button,
-        tenshu::{segment, segmented},
+        tenshu::{segment, segmented, ActionButton, ActionKind},
         text::*,
     },
     icon,
@@ -234,53 +234,62 @@ impl<'a> SparkSendView<'a> {
         let footer_in_card = !self.recipient_mismatch
             && matches!(self.phase, SparkSendPhase::Idle | SparkSendPhase::Preparing);
         let body = phase_body(&self);
-        let (footer, below) = if footer_in_card {
+        // A prepared quote replaces Payment details on the same surface
+        // (P-Send Review): nothing under the quote can be edited, and Back
+        // returns to the form with what was typed.
+        let (footer, below) = if footer_in_card || is_review(self.phase) {
             (Some(body), None)
         } else {
             (None, Some(body))
         };
 
-        let card = Container::new(
-            Column::new()
-                .push(
-                    Container::new(
-                        Row::new()
-                            .spacing(12)
-                            .align_y(Alignment::Center)
-                            .push(h4_bold(localized_copy("Payment details")).width(Length::Fill))
-                            .push(send_kind_selector(self.receive_target, self.network)),
+        let card = if is_review(self.phase) {
+            Container::new(footer.unwrap_or_else(|| Space::new().into()))
+        } else {
+            Container::new(
+                Column::new()
+                    .push(
+                        Container::new(
+                            Row::new()
+                                .spacing(12)
+                                .align_y(Alignment::Center)
+                                .push(
+                                    h4_bold(localized_copy("Payment details")).width(Length::Fill),
+                                )
+                                .push(send_kind_selector(self.receive_target, self.network)),
+                        )
+                        .padding([16, 24])
+                        .width(Length::Fill),
                     )
-                    .padding([16, 24])
-                    .width(Length::Fill),
-                )
-                .push(iced::widget::rule::horizontal(1))
-                .push(card_section(spark_send_cards(
-                    self.receive_target,
-                    self.destination_input.is_empty(),
-                    self.pay_from,
-                )))
-                .push(iced::widget::rule::horizontal(1))
-                .push(card_section(
-                    Column::new()
-                        .spacing(10)
-                        .push(p1_bold(localized_copy("Destination")))
-                        .push(destination),
-                ))
-                .push(iced::widget::rule::horizontal(1))
-                .push(card_section(
-                    Column::new()
-                        .spacing(10)
-                        .push(p1_bold(amount_label))
-                        .push(amount)
-                        .push(amount_notes)
-                        .push(available),
-                ))
-                .push(Column::new().push_maybe(footer.map(|footer| {
-                    Column::new()
-                        .push(iced::widget::rule::horizontal(1))
-                        .push(card_section(footer))
-                }))),
-        )
+                    .push(iced::widget::rule::horizontal(1))
+                    .push(card_section(spark_send_cards(
+                        self.receive_target,
+                        self.destination_input.is_empty(),
+                        self.pay_from,
+                    )))
+                    .push(iced::widget::rule::horizontal(1))
+                    .push(card_section(
+                        Column::new()
+                            .spacing(10)
+                            .push(p1_bold(localized_copy("Destination")))
+                            .push(destination),
+                    ))
+                    .push(iced::widget::rule::horizontal(1))
+                    .push(card_section(
+                        Column::new()
+                            .spacing(10)
+                            .push(p1_bold(amount_label))
+                            .push(amount)
+                            .push(amount_notes)
+                            .push(available),
+                    ))
+                    .push(Column::new().push_maybe(footer.map(|footer| {
+                        Column::new()
+                            .push(iced::widget::rule::horizontal(1))
+                            .push(card_section(footer))
+                    }))),
+            )
+        }
         .width(Length::Fill)
         .style(payment_card_style);
 
@@ -306,7 +315,19 @@ impl<'a> SparkSendView<'a> {
 
         // The steps are on the head's rule; the side panel lists what the
         // payment can come from.
-        let aside = self.balances.view();
+        let aside: Element<'a, Message> = match self.phase {
+            // A mismatch blocks the payment: no balances after a send that
+            // must not happen.
+            SparkSendPhase::Prepared(ok) if is_review(self.phase) && !self.recipient_mismatch => {
+                Column::new()
+                    .spacing(20)
+                    .push(self.balances.view())
+                    .push(iced::widget::rule::horizontal(1))
+                    .push(after_payment(&self, ok))
+                    .into()
+            }
+            _ => self.balances.view(),
+        };
         // The title, the Cube line, Back to Spark and the steps are in the
         // page head (`head`).
         let page = Row::new()
@@ -372,39 +393,6 @@ fn send_kind_selector(target: SparkSendTarget, network: Network) -> Element<'sta
     .into()
 }
 
-fn recipient_status_row(
-    enabled: bool,
-    identities: &[crate::services::branta::RecipientIdentity],
-) -> Element<'static, Message> {
-    let status = if !enabled {
-        "Checks off".to_owned()
-    } else if let Some(identity) = identities.iter().find(|identity| identity.is_current()) {
-        localized_format!("Identified · {}", "Identificado · {}", identity.platform)
-    } else {
-        "Not identified".to_owned()
-    };
-    Column::new()
-        .spacing(4)
-        .push(
-            Row::new()
-                .spacing(12)
-                .align_y(Alignment::Center)
-                .push(p2_regular(localized_copy("Recipient identity (Branta)")).width(Length::Fill))
-                .push(p2_bold(status)),
-        )
-        .push_maybe((!enabled).then(|| {
-            iced::widget::button(text(localized_copy("Turn on in Settings")).color(color::ORANGE))
-                .padding([2, 0])
-                .style(theme::button::transparent)
-                .on_press(Message::Menu(crate::app::menu::Menu::Cube(
-                    crate::app::menu::CubeSubMenu::Settings(
-                        crate::app::menu::CubeSettingsOption::PaymentChecks,
-                    ),
-                )))
-        }))
-        .into()
-}
-
 fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
     let phase = view.phase;
     let bitcoin_network = crate::chain::canonical_network_name(view.chain);
@@ -414,19 +402,12 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
     let quote_countdown = view.quote_countdown.clone();
     let reference_btc_usd_price = view.reference_btc_usd_price;
     let bitcoin_unit = view.bitcoin_unit;
-    let recipient_identities = view.recipient_identities;
     let recipient_mismatch = view.recipient_mismatch;
-    let recipient_checks_enabled = view.recipient_checks_enabled;
-    let recipient_lookup_eligible = view.recipient_lookup_eligible;
-    let theme_mode = view.theme_mode;
-    let paid_from = view.paid_from;
-    let conversion = view.conversion;
-    let token_payment = view.token_payment;
-    let usdb_decimals = view.balances.stable.map_or(6, |usdb| usdb.decimals);
     use crate::app::view::SparkSendMessage;
     use coincube_ui::component::amount::format_u64_as_string;
 
-    if recipient_mismatch {
+    // Review shows the mismatch in its own card, in place of the quote.
+    if recipient_mismatch && !is_review(phase) {
         return Container::new(
             Column::new()
                 .spacing(12)
@@ -678,77 +659,7 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
                     .into();
             }
 
-            let identities = Column::with_children(recipient_identities.iter().enumerate().map(
-                |(index, identity)| {
-                    crate::app::view::shared::recipient_identity::card(
-                        identity,
-                        Message::SparkSend(SparkSendMessage::OpenRecipientIdentity(index)),
-                        theme_mode,
-                    )
-                },
-            ))
-            .spacing(8);
-            let confirm = button::primary(None, localized_copy("Confirm and send"))
-                .on_press_maybe(
-                    (!recipient_mismatch)
-                        .then_some(Message::SparkSend(SparkSendMessage::ConfirmRequested)),
-                )
-                .width(Length::Fixed(200.0));
-            Container::new(
-                Column::new()
-                    .spacing(14)
-                    .push(h4_bold(CopyText::Preview.get()))
-                    .push(kv_row(CopyText::BitcoinNetwork.get(), bitcoin_network.to_owned()))
-                    .push(kv_row(localized_copy("Method"), ok.method.clone()))
-                    .push(kv_row(localized_copy("Paid from"), pay_from_label(paid_from).to_owned()))
-                    // The conversion funding the send, with its own fee and
-                    // the price cap that stops it, as Swap's Review shows them.
-                    .push_maybe(conversion.map(|quote| {
-                        kv_row(localized_copy("Conversion"), conversion_line(quote, usdb_decimals))
-                    }))
-                    .push_maybe(conversion.map(|quote| {
-                        kv_row(
-                            localized_copy("Conversion fee"),
-                            crate::app::view::spark::swap::quote_fee_line(quote, usdb_decimals),
-                        )
-                    }))
-                    .push_maybe(conversion.map(|quote| {
-                        kv_row(
-                            localized_copy("Max price change"),
-                            crate::app::view::spark::swap::price_change(quote.max_slippage_bps),
-                        )
-                    }))
-                    .extend(
-                        review_amounts(ok, token_payment, usdb_decimals)
-                            .map(|(label, value)| kv_row(label, value)),
-                    )
-                    .push_maybe(recipient_lookup_eligible.then(|| {
-                        recipient_status_row(recipient_checks_enabled, recipient_identities)
-                    }))
-                    .push_maybe(ok.method.starts_with("Spark").then(|| {
-                        p2_regular(
-                            localized_copy("Spark transfer — instant, lower fee than Lightning or on-chain."),
-                        )
-                    }))
-                    .push(identities)
-                    .push_maybe(recipient_mismatch.then(|| p1_regular(
-                        localized_copy("This payment request’s address does not match its verification data. Do not send. Return and replace the payment request.")
-                    )))
-                    .push(Space::new().height(Length::Fixed(8.0)))
-                    .push(
-                        Row::new()
-                            .spacing(10)
-                            .push(confirm)
-                            .push(
-                                button::transparent_border(None, CopyText::Cancel.get())
-                                    .on_press(Message::SparkSend(SparkSendMessage::Reset))
-                                    .width(Length::Fixed(120.0)),
-                            ),
-                    ),
-            )
-            .padding(16)
-            .style(theme::card::simple)
-            .into()
+            review_card(view, ok)
         }
 
         // A failed cross-chain send. What we offer here depends entirely on
@@ -971,6 +882,825 @@ fn total_row<'a>(label: &'a str, value: String) -> Element<'a, Message> {
         .into()
 }
 
+// ── Review (P-Send prepared) ─────────────────────────────────────────────────
+
+const REVIEW_BACK_ID: &str = "spark-send-review-back";
+const REVIEW_CONFIRM_ID: &str = "spark-send-review-confirm";
+const REVIEW_REPLACE_ID: &str = "spark-send-review-replace";
+const RECIPIENT_IDENTITY_ID: &str = "spark-send-recipient-identity";
+
+/// Whether `phase` is Review: a prepared quote that isn't cross-chain (those
+/// keep their own countdown preview below the form).
+fn is_review(phase: &SparkSendPhase) -> bool {
+    matches!(phase, SparkSendPhase::Prepared(ok) if ok.cross_chain.is_none())
+}
+
+/// What a prepare method is, in words. Unknown tags show as they come.
+fn method_label(method: &str) -> &str {
+    match method {
+        "Bolt11Invoice" => "Lightning invoice",
+        "LnurlPay" => "Lightning address",
+        "SparkAddress" => "Spark address",
+        "SparkInvoice" => "Spark invoice",
+        "BitcoinAddress" => "Bitcoin address · on-chain",
+        other => other,
+    }
+}
+
+/// An address or invoice too long for the row, kept recognisable at both
+/// ends: "lnbc15u1pn…x7q2g9".
+fn shorten_middle(value: &str, head: usize, tail: usize) -> String {
+    let chars: Vec<char> = value.trim().chars().collect();
+    if chars.len() <= head + tail + 1 {
+        return chars.into_iter().collect();
+    }
+    let start: String = chars[..head].iter().collect();
+    let end: String = chars[chars.len() - tail..].iter().collect();
+    format!("{start}…{end}")
+}
+
+/// A bitcoin figure and its unit in the wallet's display unit: ("1,000", "SATS").
+fn btc_figure(sats: u64, unit: BitcoinDisplayUnit) -> (String, &'static str) {
+    (
+        Amount::from_sat(sats).to_formatted_string_with_unit(unit),
+        if matches!(unit, BitcoinDisplayUnit::BTC) {
+            "BTC"
+        } else {
+            "SATS"
+        },
+    )
+}
+
+/// A protocol sats amount as the `u64` display takes, clamped.
+fn clamp_sats(sats: u128) -> u64 {
+    sats.min(u128::from(u64::MAX)) as u64
+}
+
+fn btc_line(sats: u64, unit: BitcoinDisplayUnit) -> String {
+    let (figure, unit) = btc_figure(sats, unit);
+    format!("{figure} {unit}")
+}
+
+fn usdb_figure(amount: u128, usdb_decimals: u32) -> String {
+    crate::app::breez_spark::assets::format_token_display_u128(amount, usdb_decimals)
+}
+
+/// "≈ $0.74" for `sats` at the BTC/USD price, when there is one.
+fn usd_estimate(sats: u64, price: Option<f64>) -> Option<String> {
+    price.filter(|price| *price > 0.0).map(|price| {
+        format!(
+            "≈ ${}",
+            crate::app::view::spark::swap::dollars(sats as f64 / 100_000_000.0 * price)
+        )
+    })
+}
+
+/// One side of the route on Review: the asset, the amount and its rail.
+struct ReviewTile<'a> {
+    caption: &'static str,
+    logo: Element<'a, Message>,
+    asset: &'static str,
+    figure: String,
+    unit: &'static str,
+    note: Option<String>,
+    rail: &'static str,
+}
+
+fn review_tile(tile: ReviewTile<'_>) -> Element<'_, Message> {
+    use coincube_ui::component::tenshu::{caption, heading};
+    Container::new(
+        Column::new()
+            .spacing(8)
+            .push(
+                text(tile.caption)
+                    .size(P2_SIZE)
+                    .style(theme::text::secondary),
+            )
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .align_y(Alignment::Center)
+                    .push(tile.logo)
+                    .push(
+                        text(tile.asset)
+                            .size(H5_SIZE)
+                            .bold()
+                            .style(theme::text::primary),
+                    ),
+            )
+            .push(
+                Column::new()
+                    .spacing(2)
+                    .push(
+                        Row::new()
+                            .spacing(4)
+                            .align_y(Alignment::End)
+                            .push(heading(tile.figure))
+                            .push(caption(tile.unit).size(13)),
+                    )
+                    // Always a line, so both tiles keep one height.
+                    .push(caption(tile.note.unwrap_or_default()).size(13)),
+            )
+            .push(orange_badge(tile.rail)),
+    )
+    .padding([14, 16])
+    .width(Length::Fill)
+    .style(fixed_tile_style)
+    .into()
+}
+
+/// You send → They receive, with the amounts the quote settled on.
+fn review_route<'a>(
+    view: &SparkSendView<'a>,
+    ok: &'a coincube_spark_protocol::PrepareSendOk,
+    usdb_decimals: u32,
+) -> Element<'a, Message> {
+    use coincube_spark_protocol::WalletAsset;
+    let unit = view.bitcoin_unit;
+    let price = view.reference_btc_usd_price;
+    let usdb_logo = || -> Element<'a, Message> {
+        asset_logo("usdb")
+            .width(Length::Fixed(40.0))
+            .height(Length::Fixed(40.0))
+            .into()
+    };
+    let total_sats = ok.amount_sat.saturating_add(ok.fee_sat);
+
+    let you_send = match (view.token_payment, view.paid_from, view.conversion) {
+        (Some(payment), _, _) => ReviewTile {
+            caption: "You send",
+            logo: usdb_logo(),
+            asset: "US Dollar",
+            figure: usdb_figure(
+                payment.amount.amount.saturating_add(payment.fee.amount),
+                usdb_decimals,
+            ),
+            unit: "USDB",
+            note: None,
+            rail: "USDB",
+        },
+        (None, WalletAsset::Usdb, Some(quote)) => ReviewTile {
+            caption: "You send",
+            logo: usdb_logo(),
+            asset: "US Dollar",
+            figure: usdb_figure(quote.amount_in.amount, usdb_decimals),
+            unit: "USDB",
+            note: Some(localized_format!(
+                "Converts to {}",
+                "Se convierte en {}",
+                btc_line(clamp_sats(quote.amount_out.amount), unit)
+            )),
+            rail: "USDB",
+        },
+        _ => {
+            let (figure, unit) = btc_figure(total_sats, unit);
+            ReviewTile {
+                caption: "You send",
+                logo: asset_network_logo("btc", "spark", 40.0),
+                asset: "Bitcoin",
+                figure,
+                unit,
+                note: usd_estimate(total_sats, price),
+                rail: "SPARK",
+            }
+        }
+    };
+    let they_receive = match view.token_payment {
+        Some(payment) => ReviewTile {
+            caption: "They receive",
+            logo: usdb_logo(),
+            asset: "US Dollar",
+            figure: usdb_figure(payment.amount.amount, usdb_decimals),
+            unit: "USDB",
+            note: None,
+            rail: view.receive_target.badge(),
+        },
+        None => {
+            let (figure, unit) = btc_figure(ok.amount_sat, unit);
+            ReviewTile {
+                caption: "They receive",
+                logo: target_logo(view.receive_target, 40.0),
+                asset: view.receive_target.label(),
+                figure,
+                unit,
+                note: usd_estimate(ok.amount_sat, price),
+                rail: view.receive_target.badge(),
+            }
+        }
+    };
+
+    Row::new()
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .push(Container::new(review_tile(you_send)).width(Length::FillPortion(1)))
+        .push(text("→").size(H5_SIZE).style(theme::text::secondary))
+        .push(Container::new(review_tile(they_receive)).width(Length::FillPortion(1)))
+        .into()
+}
+
+/// A quote row: muted label left, the value right with an optional line
+/// under it. `strong` is the total the eye should land on.
+fn quote_row<'a>(
+    label: &'a str,
+    value: Element<'a, Message>,
+    note: Option<String>,
+    strong: bool,
+) -> Element<'a, Message> {
+    use coincube_ui::component::tenshu::{body, caption};
+    let label = if strong {
+        coincube_ui::component::tenshu::label(label)
+    } else {
+        body(label).style(coincube_ui::theme::tenshu::text::muted)
+    };
+    Row::new()
+        .spacing(16)
+        .align_y(Alignment::Start)
+        .push(Container::new(label).width(Length::Fixed(160.0)))
+        .push(
+            Column::new()
+                .spacing(2)
+                .width(Length::Fill)
+                .align_x(Alignment::End)
+                .push(value)
+                .push_maybe(note.map(|note| caption(note).align_x(Alignment::End))),
+        )
+        .padding([10, 0])
+        .into()
+}
+
+/// Rows separated by hairlines, as the design's `.kv` list.
+fn ruled<'a>(rows: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    let mut column = Column::new();
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0 {
+            column = column.push(iced::widget::rule::horizontal(1));
+        }
+        column = column.push(row);
+    }
+    column.into()
+}
+
+/// Review's figures: where it goes, what it costs, what pays, the total.
+fn review_quote<'a>(
+    view: &SparkSendView<'a>,
+    ok: &'a coincube_spark_protocol::PrepareSendOk,
+    usdb_decimals: u32,
+) -> Element<'a, Message> {
+    use coincube_spark_protocol::WalletAsset;
+    use coincube_ui::component::tenshu::{body, label, mono};
+    let unit = view.bitcoin_unit;
+    let price = view.reference_btc_usd_price;
+    let total_sats = ok.amount_sat.saturating_add(ok.fee_sat);
+    let value = |value: String| -> Element<'a, Message> { body(value).into() };
+
+    let to_note = if ok.method.starts_with("Spark") {
+        localized_copy("Spark transfer — instant, lower fee than Lightning or on-chain.").to_owned()
+    } else {
+        localized_copy(method_label(&ok.method)).to_owned()
+    };
+    let mut rows = vec![quote_row(
+        localized_copy("To"),
+        mono(shorten_middle(view.destination_input, 14, 8)).into(),
+        Some(to_note),
+        false,
+    )];
+
+    match view.token_payment {
+        Some(payment) => {
+            rows.push(quote_row(
+                localized_copy("Amount"),
+                value(usdb_amount_line(payment.amount.amount, usdb_decimals)),
+                None,
+                false,
+            ));
+            rows.push(quote_row(
+                localized_copy("Fee"),
+                value(usdb_amount_line(payment.fee.amount, usdb_decimals)),
+                None,
+                false,
+            ));
+        }
+        None => {
+            rows.push(quote_row(
+                localized_copy("Amount"),
+                value(btc_line(ok.amount_sat, unit)),
+                usd_estimate(ok.amount_sat, price),
+                false,
+            ));
+            rows.push(quote_row(
+                localized_copy("Fee"),
+                value(btc_line(ok.fee_sat, unit)),
+                None,
+                false,
+            ));
+        }
+    }
+
+    let (paid_from, paid_note) = match (view.paid_from, view.conversion) {
+        (WalletAsset::Usdb, Some(_)) => (
+            localized_copy("US Dollar (USDB)"),
+            Some(localized_copy("Converts to bitcoin at send").to_owned()),
+        ),
+        (WalletAsset::Usdb, None) => (localized_copy("US Dollar (USDB)"), None),
+        (WalletAsset::Bitcoin, Some(_)) => (
+            localized_copy("Bitcoin, then US Dollar (USDB)"),
+            Some(localized_copy("USDB converts to cover what bitcoin can't").to_owned()),
+        ),
+        (WalletAsset::Bitcoin, None) => ("Bitcoin", None),
+    };
+    rows.push(quote_row(
+        localized_copy("Paid from"),
+        value(paid_from.to_owned()),
+        paid_note,
+        false,
+    ));
+
+    if let Some(quote) = view.conversion {
+        let mut terms = Vec::new();
+        if let Some(rate) = crate::app::view::spark::swap::quote_rate(quote, usdb_decimals) {
+            terms.push(format!(
+                "1 BTC ≈ ${}",
+                crate::app::view::spark::swap::dollars(rate)
+            ));
+        }
+        terms.push(localized_format!(
+            "fee {}",
+            "comisión {}",
+            crate::app::view::spark::swap::quote_fee_line(quote, usdb_decimals)
+        ));
+        terms.push(localized_format!(
+            "max price change {}",
+            "cambio máximo de precio {}",
+            crate::app::view::spark::swap::price_change(quote.max_slippage_bps)
+        ));
+        rows.push(quote_row(
+            localized_copy("Conversion"),
+            value(conversion_line(quote, usdb_decimals, unit)),
+            Some(terms.join(" · ")),
+            false,
+        ));
+    }
+
+    let (total, total_note) = match (view.token_payment, view.paid_from, view.conversion) {
+        (Some(payment), _, _) => (
+            usdb_amount_line(
+                payment.amount.amount.saturating_add(payment.fee.amount),
+                usdb_decimals,
+            ),
+            None,
+        ),
+        (None, WalletAsset::Usdb, Some(quote)) => (
+            usdb_amount_line(quote.amount_in.amount, usdb_decimals),
+            Some(localized_format!(
+                "Converts to {} · {} pays this send",
+                "Se convierte en {} · {} paga este envío",
+                btc_line(clamp_sats(quote.amount_out.amount), unit),
+                btc_line(total_sats, unit)
+            )),
+        ),
+        (None, _, Some(quote)) => (
+            btc_line(total_sats, unit),
+            Some(localized_format!(
+                "Includes {} converted from {}",
+                "Incluye {} convertidos de {}",
+                btc_line(clamp_sats(quote.amount_out.amount), unit),
+                usdb_amount_line(quote.amount_in.amount, usdb_decimals)
+            )),
+        ),
+        (None, _, None) => (btc_line(total_sats, unit), usd_estimate(total_sats, price)),
+    };
+    rows.push(quote_row(
+        localized_copy("Total you send"),
+        label(total).size(16).into(),
+        total_note,
+        true,
+    ));
+
+    Column::new()
+        .push(ruled(rows))
+        .push_maybe(view.conversion.map(|quote| {
+            Container::new(
+                Row::new()
+                    .spacing(10)
+                    .align_y(Alignment::Start)
+                    .push(icon::warning_icon().size(14).style(|theme: &theme::Theme| {
+                        iced::widget::text::Style {
+                            color: Some(theme.colors.shell.warn),
+                        }
+                    }))
+                    .push(
+                        coincube_ui::component::tenshu::caption(localized_format!(
+                            "If the price moves more than {} before the conversion settles, \
+                             the conversion is refunded and nothing is sent.",
+                            "Si el precio se mueve más de {} antes de que se complete la \
+                             conversión, se reembolsa y no se envía nada.",
+                            crate::app::view::spark::swap::price_change(quote.max_slippage_bps)
+                        ))
+                        .size(13)
+                        .width(Length::Fill),
+                    ),
+            )
+            .padding([10, 12])
+            .width(Length::Fill)
+            .style(notice_style)
+        }))
+        .spacing(16)
+        .into()
+}
+
+/// The quiet inset for the price-move notice and the identity card.
+fn notice_style(theme: &theme::Theme) -> container::Style {
+    let shell = &theme.colors.shell;
+    container::Style {
+        background: Some(Background::Color(shell.background)),
+        border: iced::Border {
+            color: shell.line,
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// A check's status mark: passed, or not known.
+fn check_mark<'a>(passed: bool) -> Element<'a, Message> {
+    let (glyph, tone) = if passed {
+        (
+            icon::check_circle_icon(),
+            coincube_ui::theme::tenshu::Tone::Good,
+        )
+    } else {
+        (
+            icon::dash_circle_icon(),
+            coincube_ui::theme::tenshu::Tone::Muted,
+        )
+    };
+    glyph
+        .size(16)
+        .style(move |theme: &theme::Theme| coincube_ui::theme::tenshu::text::tone(theme, tone))
+        .into()
+}
+
+fn check_row<'a>(
+    passed: bool,
+    label: &'a str,
+    status: Element<'a, Message>,
+) -> Element<'a, Message> {
+    Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(check_mark(passed))
+        .push(coincube_ui::component::tenshu::body(label).width(Length::Fill))
+        .push(status)
+        .padding([10, 0])
+        .into()
+}
+
+fn check_status<'a>(value: String, passed: bool) -> Element<'a, Message> {
+    let tone = if passed {
+        coincube_ui::theme::tenshu::Tone::Good
+    } else {
+        coincube_ui::theme::tenshu::Tone::Muted
+    };
+    coincube_ui::component::tenshu::label(value)
+        .style(move |theme: &theme::Theme| coincube_ui::theme::tenshu::text::tone(theme, tone))
+        .into()
+}
+
+/// The Branta row. Identified, the recipient's card takes the status's
+/// place; otherwise the status says why there is none.
+fn recipient_status_row<'a>(
+    enabled: bool,
+    identities: &'a [crate::services::branta::RecipientIdentity],
+    mode: theme::palette::ThemeMode,
+) -> Element<'a, Message> {
+    let label = localized_copy("Recipient identity (Branta)");
+    if !enabled {
+        return check_row(
+            false,
+            label,
+            Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .push(check_status(localized_copy("Checks off").to_owned(), false))
+                .push(
+                    iced::widget::button(
+                        text(localized_copy("Turn on in Settings"))
+                            .size(P2_SIZE)
+                            .style(coincube_ui::theme::tenshu::text::accent),
+                    )
+                    .padding([2, 0])
+                    .style(theme::button::transparent)
+                    .on_press(Message::Menu(crate::app::menu::Menu::Cube(
+                        crate::app::menu::CubeSubMenu::Settings(
+                            crate::app::menu::CubeSettingsOption::PaymentChecks,
+                        ),
+                    ))),
+                )
+                .into(),
+        );
+    }
+    match identities
+        .iter()
+        .enumerate()
+        .find(|(_, identity)| identity.is_current())
+    {
+        Some((index, identity)) => check_row(true, label, identity_card(index, identity, mode)),
+        None => check_row(
+            false,
+            label,
+            check_status(localized_copy("Not identified").to_owned(), false),
+        ),
+    }
+}
+
+/// The identified recipient, compact enough to sit in the check row.
+fn identity_card<'a>(
+    index: usize,
+    identity: &'a crate::services::branta::RecipientIdentity,
+    mode: theme::palette::ThemeMode,
+) -> Element<'a, Message> {
+    use coincube_ui::component::tenshu::{caption, label};
+    let logo = match mode {
+        theme::palette::ThemeMode::Light => identity.logo_light.as_ref().or(identity.logo.as_ref()),
+        theme::palette::ThemeMode::Dark => identity.logo.as_ref(),
+    };
+    let mark: Element<'a, Message> = match logo {
+        Some(logo) => iced::widget::image(logo.clone())
+            .width(36)
+            .height(36)
+            .into(),
+        None => Container::new(
+            label(
+                identity
+                    .platform
+                    .chars()
+                    .next()
+                    .map(|c| c.to_uppercase().to_string())
+                    .unwrap_or_default(),
+            )
+            .style(coincube_ui::theme::tenshu::text::accent),
+        )
+        .center(Length::Fixed(36.0))
+        .style(|theme: &theme::Theme| container::Style {
+            background: Some(Background::Color(theme.colors.shell.selected)),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into(),
+    };
+    let who = Column::new()
+        .spacing(1)
+        .width(Length::Fill)
+        .push(label(&identity.platform).wrapping(iced::widget::text::Wrapping::WordOrGlyph))
+        .push(
+            caption(localized_copy("Identified by Branta")).style(|theme: &theme::Theme| {
+                coincube_ui::theme::tenshu::text::tone(
+                    theme,
+                    coincube_ui::theme::tenshu::Tone::Good,
+                )
+            }),
+        )
+        .push_maybe(identity.description.as_deref().map(|description| {
+            caption(description).wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+        }));
+    Container::new(
+        Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .push(mark)
+            .push(who)
+            .push(
+                ActionButton::new(
+                    iced::advanced::widget::Id::new(RECIPIENT_IDENTITY_ID),
+                    localized_copy("View"),
+                    ActionKind::Secondary,
+                    Message::FocusAction,
+                )
+                .on_press(Message::SparkSend(
+                    SparkSendMessage::OpenRecipientIdentity(index),
+                )),
+            ),
+    )
+    .padding([10, 12])
+    .width(Length::Fixed(340.0))
+    .style(notice_style)
+    .into()
+}
+
+/// Review's checks on where the payment goes.
+fn review_checks<'a>(
+    view: &SparkSendView<'a>,
+    ok: &'a coincube_spark_protocol::PrepareSendOk,
+) -> Element<'a, Message> {
+    let mut rows = vec![
+        check_row(
+            true,
+            localized_copy("Destination format"),
+            check_status(localized_copy(method_label(&ok.method)).to_owned(), true),
+        ),
+        check_row(
+            true,
+            CopyText::Network.get(),
+            check_status(
+                crate::chain::canonical_network_name(view.chain).to_owned(),
+                true,
+            ),
+        ),
+    ];
+    if view.recipient_lookup_eligible {
+        rows.push(recipient_status_row(
+            view.recipient_checks_enabled,
+            view.recipient_identities,
+            view.theme_mode,
+        ));
+    }
+    Column::new()
+        .spacing(6)
+        .push(coincube_ui::component::tenshu::label(localized_copy(
+            "Recipient checks",
+        )))
+        .push(ruled(rows))
+        .into()
+}
+
+/// Review's side panel: each balance now and after this payment, estimated
+/// (as Swap's Review shows it).
+fn after_payment<'a>(
+    view: &SparkSendView<'a>,
+    ok: &'a coincube_spark_protocol::PrepareSendOk,
+) -> Element<'a, Message> {
+    use coincube_ui::component::tenshu::{body, caption, MASK};
+    let usdb_decimals = view.balances.stable.map_or(6, |usdb| usdb.decimals);
+    let converted_in = view.conversion.map_or(0, |quote| quote.amount_in.amount);
+    let converted_out = view
+        .conversion
+        .map_or(0, |quote| clamp_sats(quote.amount_out.amount));
+    let btc_now = view.balances.btc_sats;
+    let btc_after = btc_now
+        .saturating_add(converted_out)
+        .saturating_sub(ok.amount_sat.saturating_add(ok.fee_sat));
+    let row = |name: &'static str, now: String, after: String| -> Element<'a, Message> {
+        Column::new()
+            .spacing(2)
+            .push(body(name))
+            .push(caption(if view.mask_amounts {
+                format!("{MASK} → {MASK}")
+            } else {
+                format!("{now} → {after}")
+            }))
+            .into()
+    };
+    Column::new()
+        .spacing(10)
+        .push(caption(localized_copy("After this payment, estimated")).size(13))
+        .push(row(
+            "Bitcoin",
+            btc_line(btc_now, view.bitcoin_unit),
+            btc_line(btc_after, view.bitcoin_unit),
+        ))
+        .push_maybe(view.balances.stable.map(|usdb| {
+            let spent = view.token_payment.map_or(converted_in, |payment| {
+                payment.amount.amount.saturating_add(payment.fee.amount)
+            });
+            row(
+                "US Dollar",
+                usdb_amount_line(usdb.balance, usdb_decimals),
+                usdb_amount_line(usdb.balance.saturating_sub(spent), usdb_decimals),
+            )
+        }))
+        .into()
+}
+
+/// Review's footer: a status line, then its actions on the right.
+fn review_footer<'a>(
+    status: &'static str,
+    actions: Vec<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut row = Row::new().spacing(12).align_y(Alignment::Center).push(
+        p2_regular(status)
+            .style(theme::text::secondary)
+            .width(Length::Fill),
+    );
+    for action in actions {
+        row = row.push(action);
+    }
+    row.into()
+}
+
+/// The Review card (P-Send prepared): the route, the quote, the recipient
+/// checks and Confirm. A Branta mismatch replaces the quote and offers only
+/// a new payment request.
+fn review_card<'a>(
+    view: &SparkSendView<'a>,
+    ok: &'a coincube_spark_protocol::PrepareSendOk,
+) -> Element<'a, Message> {
+    let usdb_decimals = view.balances.stable.map_or(6, |usdb| usdb.decimals);
+    let action = |id: &'static str, label: &'static str, kind, message| -> Element<'a, Message> {
+        ActionButton::new(
+            iced::advanced::widget::Id::new(id),
+            label,
+            kind,
+            Message::FocusAction,
+        )
+        .on_press(message)
+        .into()
+    };
+    let head = Container::new(
+        Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .push(h4_bold(localized_copy("Review and confirm")).width(Length::Fill))
+            .push(
+                p2_regular(localized_copy(method_label(&ok.method))).style(theme::text::secondary),
+            ),
+    )
+    .padding([16, 24])
+    .width(Length::Fill);
+
+    let mut card = Column::new()
+        .push(head)
+        .push(iced::widget::rule::horizontal(1))
+        .push(card_section(review_route(view, ok, usdb_decimals)))
+        .push(iced::widget::rule::horizontal(1));
+
+    if view.recipient_mismatch {
+        return card
+            .push(card_section(
+                Container::new(
+                    Row::new()
+                        .spacing(12)
+                        .align_y(Alignment::Start)
+                        .push(icon::warning_icon().size(18).style(|theme: &theme::Theme| {
+                            coincube_ui::theme::tenshu::text::tone(
+                                theme,
+                                coincube_ui::theme::tenshu::Tone::Bad,
+                            )
+                        }))
+                        .push(
+                            p1_bold(crate::services::branta::MISMATCH_MESSAGE)
+                                .style(|theme: &theme::Theme| {
+                                    coincube_ui::theme::tenshu::text::tone(
+                                        theme,
+                                        coincube_ui::theme::tenshu::Tone::Bad,
+                                    )
+                                })
+                                .width(Length::Fill),
+                        ),
+                )
+                .padding([14, 16])
+                .width(Length::Fill)
+                .style(|theme: &theme::Theme| container::Style {
+                    border: iced::Border {
+                        color: theme.colors.shell.bad,
+                        width: 1.0,
+                        radius: 10.0.into(),
+                    },
+                    ..Default::default()
+                }),
+            ))
+            .push(iced::widget::rule::horizontal(1))
+            .push(card_section(review_footer(
+                "Nothing has been sent.",
+                vec![action(
+                    REVIEW_REPLACE_ID,
+                    localized_copy("Replace payment request"),
+                    ActionKind::Primary,
+                    Message::SparkSend(SparkSendMessage::Reset),
+                )],
+            )))
+            .into();
+    }
+
+    card = card
+        .push(card_section(review_quote(view, ok, usdb_decimals)))
+        .push(iced::widget::rule::horizontal(1))
+        .push(card_section(review_checks(view, ok)))
+        .push(iced::widget::rule::horizontal(1))
+        .push(card_section(review_footer(
+            "Nothing moves until you confirm.",
+            vec![
+                action(
+                    REVIEW_BACK_ID,
+                    CopyText::Back.get(),
+                    ActionKind::Secondary,
+                    Message::SparkSend(SparkSendMessage::EditDetails),
+                ),
+                action(
+                    REVIEW_CONFIRM_ID,
+                    localized_copy("Confirm and send"),
+                    ActionKind::Primary,
+                    Message::SparkSend(SparkSendMessage::ConfirmRequested),
+                ),
+            ],
+        )));
+    card.into()
+}
+
 // ── Two-card "YOU SEND → THEY RECEIVE" selector + picker ─────────────────────
 
 /// Logo for a send target: bitcoin rails get the BTC coin badged with the rail;
@@ -1027,36 +1757,6 @@ fn pay_from_label(asset: coincube_spark_protocol::WalletAsset) -> &'static str {
     }
 }
 
-/// Review's Amount, Fee and Total. In sats, except for a USDB invoice paid
-/// from USDB, whose figures are USDB and whose sats are zero.
-fn review_amounts(
-    ok: &coincube_spark_protocol::PrepareSendOk,
-    token_payment: Option<&coincube_spark_protocol::TokenPayment>,
-    usdb_decimals: u32,
-) -> [(&'static str, String); 3] {
-    match token_payment {
-        Some(payment) => {
-            let (amount, fee) = (payment.amount.amount, payment.fee.amount);
-            [
-                ("Amount", usdb_amount_line(amount, usdb_decimals)),
-                ("Fee", usdb_amount_line(fee, usdb_decimals)),
-                (
-                    "Total",
-                    usdb_amount_line(amount.saturating_add(fee), usdb_decimals),
-                ),
-            ]
-        }
-        None => [
-            ("Amount", format!("{} sats", ok.amount_sat)),
-            ("Fee", format!("{} sats", ok.fee_sat)),
-            (
-                "Total",
-                format!("{} sats", ok.amount_sat.saturating_add(ok.fee_sat)),
-            ),
-        ],
-    }
-}
-
 /// A USDB amount in token base units, for display: "2.50 USDB".
 pub fn usdb_amount_line(amount: u128, usdb_decimals: u32) -> String {
     format!(
@@ -1065,23 +1765,18 @@ pub fn usdb_amount_line(amount: u128, usdb_decimals: u32) -> String {
     )
 }
 
-/// Review's Conversion row: "12.40 USDB → 15,003 sats".
+/// Review's Conversion row: "12.40 USDB → 15,003 SATS", bitcoin in the
+/// wallet's display unit.
 pub fn conversion_line(
     quote: &coincube_spark_protocol::ConversionQuote,
     usdb_decimals: u32,
+    unit: BitcoinDisplayUnit,
 ) -> String {
     let side = |amount: coincube_spark_protocol::AssetAmount| match amount.asset {
-        coincube_spark_protocol::WalletAsset::Usdb => format!(
-            "{} USDB",
-            crate::app::breez_spark::assets::format_token_display_u128(
-                amount.amount,
-                usdb_decimals
-            )
-        ),
-        coincube_spark_protocol::WalletAsset::Bitcoin => format!(
-            "{} sats",
-            crate::app::breez_spark::assets::format_token_display_u128(amount.amount, 0)
-        ),
+        coincube_spark_protocol::WalletAsset::Usdb => {
+            usdb_amount_line(amount.amount, usdb_decimals)
+        }
+        coincube_spark_protocol::WalletAsset::Bitcoin => btc_line(clamp_sats(amount.amount), unit),
     };
     format!("{} → {}", side(quote.amount_in), side(quote.amount_out))
 }
@@ -1631,14 +2326,18 @@ mod tests {
         let inspect = |enabled, identities: &[crate::services::branta::RecipientIdentity]| {
             capture::inspect(
                 "spark-send-recipient-status",
-                recipient_status_row(enabled, identities),
+                recipient_status_row(enabled, identities, ThemeMode::Dark),
                 (1024, 768),
                 "dark",
                 theme::Theme::dark(),
             )
         };
-        assert!(inspect(true, std::slice::from_ref(&identity))
-            .contains("Identified · Example Coffee Co."));
+        // Identified, the recipient's card takes the status's place.
+        let identified = inspect(true, std::slice::from_ref(&identity));
+        assert!(identified.contains("Example Coffee Co."));
+        assert!(identified.contains("Identified by Branta"));
+        assert!(identified.contains("View"));
+        assert!(!identified.contains("Verified"));
         let off = inspect(false, std::slice::from_ref(&identity));
         assert!(off.contains("Checks off"));
         assert!(off.contains("Turn on in Settings"));
@@ -1699,6 +2398,7 @@ mod tests {
         usdb_unavailable: Option<&'static str>,
         conversion: Option<coincube_spark_protocol::ConversionQuote>,
         token_payment: Option<coincube_spark_protocol::TokenPayment>,
+        identities: Vec<crate::services::branta::RecipientIdentity>,
     }
 
     impl Fixture {
@@ -1734,6 +2434,7 @@ mod tests {
                 usdb_unavailable: Some("You have no USDB."),
                 conversion: None,
                 token_payment: None,
+                identities: Vec::new(),
             }
         }
 
@@ -1780,7 +2481,7 @@ mod tests {
                 amount_input: &self.amount,
                 amount_set_by_invoice: self.invoice_amount,
                 phase: &self.phase,
-                recipient_identities: &[],
+                recipient_identities: &self.identities,
                 recipient_mismatch: self.mismatch,
                 recipient_checks_enabled: self.recipient_checks_enabled,
                 recipient_lookup_eligible: self.recipient_lookup_eligible,
@@ -2517,12 +3218,15 @@ mod tests {
         let cache = review.cache();
         let mut harness = Harness::new(screen(&review, &menu, &cache, false), FULL_HEIGHT);
         let probe = harness.probe();
-        assert!(probe.contains("Paid from"));
-        assert!(probe.contains("12.40 USDB → 15,003 sats"));
-        // The conversion's own fee and cap, not just the bitcoin send fee.
-        assert!(probe.contains("Conversion fee"));
-        assert!(probe.contains("0.01 USDB (0.10%)"));
-        assert!(probe.contains("Max price change") && probe.contains("0.5%"));
+        assert!(probe.contains("Paid from") && probe.contains("US Dollar (USDB)"));
+        assert!(probe.contains("12.40 USDB → 15,003 SATS"));
+        // The conversion's own rate, fee and cap, not just the send fee.
+        assert!(probe.contains("1 BTC ≈ $82,650.14"));
+        assert!(probe.contains("fee 0.01 USDB (0.10%)"));
+        assert!(probe.contains("max price change 0.5%"));
+        assert!(probe.contains("the conversion is refunded and nothing is sent."));
+        // The total is what leaves the wallet: USDB.
+        assert!(probe.contains("12.40 USDB") && probe.contains("Total you send"));
 
         // Paying from bitcoin with a USDB shortfall shows the same rows.
         drop(probe);
@@ -2531,8 +3235,9 @@ mod tests {
         let cache = review.cache();
         let mut harness = Harness::new(screen(&review, &menu, &cache, false), FULL_HEIGHT);
         let probe = harness.probe();
-        assert!(probe.contains("12.40 USDB → 15,003 sats"));
-        assert!(probe.contains("Conversion fee") && probe.contains("Max price change"));
+        assert!(probe.contains("12.40 USDB → 15,003 SATS"));
+        assert!(probe.contains("Bitcoin, then US Dollar (USDB)"));
+        assert!(probe.contains("Includes 15,003 SATS converted from 12.40 USDB"));
     }
 
     /// A USDB invoice paid from USDB: Review's figures are in USDB, it is
@@ -2566,8 +3271,13 @@ mod tests {
         assert!(probe.contains("2.50 USDB"), "amount in USDB");
         assert!(probe.contains("0.01 USDB"), "fee in USDB");
         assert!(probe.contains("2.51 USDB"), "total in USDB");
-        assert!(!probe.contains(" sats"), "no figure reads as sats");
-        assert!(!probe.contains("Conversion") && !probe.contains("Max price change"));
+        // The preview's sats are zero here; none of them may show as a figure.
+        // (The side panel's bitcoin balance does read in sats.)
+        assert!(
+            !probe.contains("Total you send0 SATS") && !probe.contains(" 0 SATS"),
+            "no figure reads as sats"
+        );
+        assert!(!probe.contains("Conversion") && !probe.contains("max price change"));
     }
 
     #[test]
@@ -3261,8 +3971,20 @@ mod tests {
             Case {
                 scenario: "prepared",
                 fixture: Fixture::ordinary_prepared(),
-                present: &["Preview", "Bolt11Invoice", "Confirm and send", "Cancel"],
-                absent: &["Get a fresh quote"],
+                present: &[
+                    "Review and confirm",
+                    "Lightning invoice",
+                    "Total you send",
+                    "Recipient checks",
+                    "Confirm and send",
+                    "Back",
+                ],
+                absent: &[
+                    "Get a fresh quote",
+                    "Bolt11Invoice",
+                    "Payment details",
+                    "Cancel",
+                ],
             },
             Case {
                 scenario: "mismatch",
@@ -3271,7 +3993,12 @@ mod tests {
                     crate::services::branta::MISMATCH_MESSAGE,
                     "Replace payment request",
                 ],
-                absent: &["Confirm and send", "Preview"],
+                absent: &[
+                    "Confirm and send",
+                    "Total you send",
+                    "Payment details",
+                    "After this payment",
+                ],
             },
             Case {
                 scenario: "quote-valid",
@@ -3358,7 +4085,13 @@ mod tests {
                     "{}: compose footer leaked into a later phase",
                     label
                 );
-                assert!(probe.contains("Payment details"), "{}", label);
+                // A prepared quote is Review, which replaces Payment details.
+                assert_eq!(
+                    probe.contains("Payment details"),
+                    !is_review(&case.fixture.phase),
+                    "{}",
+                    label
+                );
                 harness.assert_no_horizontal_overflow(&label);
             }
         }
@@ -3381,6 +4114,86 @@ mod tests {
         assert!(probe.contains("Spark is not available for this cube."));
         assert!(!probe.contains("Payment details"));
         assert!(probe.bounds(PREPARE_ACTION_ID).is_none());
+    }
+
+    /// Review paid from US Dollar with the recipient identified: the
+    /// conversion and the identity card render, and Back and Confirm each
+    /// send their one intent.
+    #[test]
+    fn review_captures_and_actions_in_both_themes() {
+        use coincube_spark_protocol::{AssetAmount, ConversionQuote, WalletAsset};
+        let menu = spark_send_menu();
+        let ticket = crate::services::branta::test_ticket(true);
+        for mode in themes() {
+            let mut review = Fixture::ordinary_prepared().themed(mode);
+            review.pay_from = WalletAsset::Usdb;
+            review.conversion = Some(ConversionQuote {
+                amount_in: AssetAmount {
+                    asset: WalletAsset::Usdb,
+                    amount: 1_240_000,
+                },
+                amount_out: AssetAmount {
+                    asset: WalletAsset::Bitcoin,
+                    amount: 1_510,
+                },
+                fee: AssetAmount {
+                    asset: WalletAsset::Usdb,
+                    amount: 1_240,
+                },
+                amount_adjustment: None,
+                max_slippage_bps: 50,
+            });
+            review.stable = Some(coincube_spark_protocol::UsdbBalanceSnapshot {
+                token_identifier: "btkn1synthetic".to_owned(),
+                balance: 9_000_000,
+                decimals: 6,
+                ticker: "USDB".to_owned(),
+            });
+            review.identities = vec![crate::services::branta::test_identity(
+                &ticket,
+                "Example Coffee Co.",
+            )];
+            let cache = review.cache();
+            let theme = review.theme();
+            let mut harness = Harness::new(screen(&review, &menu, &cache, false), FULL_HEIGHT);
+            let probe = harness.probe();
+            for text in [
+                "Review and confirm",
+                "1.24 USDB",
+                "Converts to 1,510 SATS",
+                "Example Coffee Co.",
+                "Identified by Branta",
+                "Recipient checks",
+                "After this payment, estimated",
+                "35,000 SATS → 35,007 SATS",
+                "9.00 USDB → 7.76 USDB",
+            ] {
+                assert!(probe.contains(text), "missing {:?}", text);
+            }
+            assert!(!probe.contains("Verified"));
+            drop(probe);
+            harness.assert_no_horizontal_overflow("review-usdb-identified");
+            harness.capture("review-usdb-identified", &theme, appearance(mode));
+
+            assert!(harness.click(REVIEW_BACK_ID).iter().any(|message| matches!(
+                message,
+                Message::SparkSend(SparkSendMessage::EditDetails)
+            )));
+            assert!(harness
+                .click(REVIEW_CONFIRM_ID)
+                .iter()
+                .any(|message| matches!(
+                    message,
+                    Message::SparkSend(SparkSendMessage::ConfirmRequested)
+                )));
+            assert!(harness
+                .click(RECIPIENT_IDENTITY_ID)
+                .iter()
+                .any(|message| matches!(
+                    message,
+                    Message::SparkSend(SparkSendMessage::OpenRecipientIdentity(0))
+                )));
+        }
     }
 
     #[test]
