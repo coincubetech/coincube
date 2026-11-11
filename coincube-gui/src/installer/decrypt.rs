@@ -134,43 +134,7 @@ pub fn decrypt_descriptor_with_pk(bytes: &[u8], pk: secp256k1::PublicKey) -> Opt
         .set_keys(vec![pk])
         .decrypt()
     {
-        Ok(dec) => match dec {
-            Decrypted::Descriptor(d) => {
-                let descr = match CoincubeDescriptor::from_str(&d.to_string()) {
-                    Ok(descr) => descr,
-                    Err(_) => return Some(Decrypt::UnexpectedPayload(Decrypted::Descriptor(d))),
-                };
-                let network = if descr.all_xpubs_net_is(Network::Bitcoin) {
-                    Network::Bitcoin
-                } else {
-                    Network::Signet
-                };
-                Some(Decrypt::Backup(Backup::from_descriptor(descr, network)))
-            }
-            Decrypted::WalletBackup(backup_bytes) => {
-                let backup_str = String::from_utf8(backup_bytes.clone()).ok()?;
-                let backup: Backup = serde_json::from_str(&backup_str).ok()?;
-                // The pinned decoder does not emit WalletBackup yet. Keep this
-                // future payload boundary fail-closed before generic restore.
-                if !matches!(backup.chain_identity(), Ok(chain) if !chain.is_blake2b()) {
-                    return Some(Decrypt::ContentNotSupported);
-                }
-                if backup.accounts.len() != 1 {
-                    return None;
-                }
-                let descriptor_str = &backup.accounts.first().expect("checked").descriptor;
-                let _ = match CoincubeDescriptor::from_str(descriptor_str) {
-                    Ok(descr) => descr,
-                    Err(_) => {
-                        return Some(Decrypt::UnexpectedPayload(Decrypted::WalletBackup(
-                            backup_bytes,
-                        )))
-                    }
-                };
-                Some(Decrypt::Backup(backup))
-            }
-            decrypted => Some(Decrypt::UnexpectedPayload(decrypted)),
-        },
+        Ok(dec) => decode_backup_payload(dec),
         Err(_) => None,
     }
 }
@@ -378,15 +342,13 @@ impl DecryptModal {
                 } => {
                     new_cant_fetch.insert(id.clone(), (name(*kind, None), pairing_code.clone()));
                 }
-                d => {
-                    if let HardwareWallet::Supported { fingerprint, .. } = d {
-                        if !self.fetched.contains_key(fingerprint)
-                            && !self.fetching.contains_key(fingerprint)
-                        {
-                            to_fetch.push(d);
-                        }
-                    }
+                HardwareWallet::Supported { fingerprint, .. }
+                    if !self.fetched.contains_key(fingerprint)
+                        && !self.fetching.contains_key(fingerprint) =>
+                {
+                    to_fetch.push(d);
                 }
+                _ => {}
             }
         }
         self.cant_fetch = new_cant_fetch;
@@ -762,6 +724,46 @@ pub fn decrypt_view<'a>(state: &DecryptModal) -> Container<'a, installer::Messag
     card::simple(column)
         .width(Length::Fixed(modal::MODAL_WIDTH as f32))
         .height(Length::Fixed(450.0))
+}
+
+fn decode_backup_payload(dec: Decrypted) -> Option<Decrypt> {
+    match dec {
+        Decrypted::Descriptor(d) => {
+            let descr = match CoincubeDescriptor::from_str(&d.to_string()) {
+                Ok(descr) => descr,
+                Err(_) => return Some(Decrypt::UnexpectedPayload(Decrypted::Descriptor(d))),
+            };
+            let network = if descr.all_xpubs_net_is(Network::Bitcoin) {
+                Network::Bitcoin
+            } else {
+                Network::Signet
+            };
+            Some(Decrypt::Backup(Backup::from_descriptor(descr, network)))
+        }
+        Decrypted::WalletBackup(backup_bytes) => {
+            let backup_str = String::from_utf8(backup_bytes.clone()).ok()?;
+            let backup: Backup = serde_json::from_str(&backup_str).ok()?;
+            // The pinned decoder does not emit WalletBackup yet. Keep this
+            // future payload boundary fail-closed before generic restore.
+            if !matches!(backup.chain_identity(), Ok(chain) if !chain.is_blake2b()) {
+                return Some(Decrypt::ContentNotSupported);
+            }
+            if backup.accounts.len() != 1 {
+                return None;
+            }
+            let descriptor_str = &backup.accounts.first().expect("checked").descriptor;
+            let _ = match CoincubeDescriptor::from_str(descriptor_str) {
+                Ok(descr) => descr,
+                Err(_) => {
+                    return Some(Decrypt::UnexpectedPayload(Decrypted::WalletBackup(
+                        backup_bytes,
+                    )))
+                }
+            };
+            Some(Decrypt::Backup(backup))
+        }
+        decrypted => Some(Decrypt::UnexpectedPayload(decrypted)),
+    }
 }
 
 #[cfg(test)]

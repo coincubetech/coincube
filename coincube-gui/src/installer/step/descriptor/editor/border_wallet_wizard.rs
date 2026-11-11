@@ -534,40 +534,7 @@ impl BorderWalletWizard {
             for row_idx in 0..WordGrid::ROWS {
                 let mut row_widget = Row::new().spacing(1);
                 for col_idx in 0..WordGrid::COLS {
-                    let word = grid.word_at(row_idx, col_idx).unwrap_or("???");
-                    let prefix = &word[..std::cmp::min(4, word.len())];
-                    let cell = CellRef::new(row_idx as u16, col_idx as u8);
-                    let is_selected = self.pattern.cells().contains(&cell);
-
-                    let order_num = self
-                        .pattern
-                        .cells()
-                        .iter()
-                        .position(|c| c == &cell)
-                        .map(|p| p + 1);
-
-                    let label = if let Some(n) = order_num {
-                        format!("{}", n)
-                    } else {
-                        prefix.to_string()
-                    };
-
-                    let cell_style = if is_selected {
-                        theme::button::primary
-                    } else {
-                        theme::button::secondary
-                    };
-
-                    let r = row_idx as u16;
-                    let c = col_idx as u8;
-                    let cell_btn = Button::new(text(label).size(11).align_x(Horizontal::Center))
-                        .style(cell_style)
-                        .on_press(
-                            self.wizard_msg(BorderWalletWizardMessage::ToggleCellSelection(r, c)),
-                        )
-                        .width(50)
-                        .height(28);
-
+                    let cell_btn = self.grid_cell(grid, row_idx, col_idx);
                     row_widget = row_widget.push(cell_btn);
                 }
                 grid_col = grid_col.push(row_widget);
@@ -774,5 +741,43 @@ impl super::DescriptorEditModal for BorderWalletWizard {
             WizardStep::Checksum => self.view_checksum(),
             WizardStep::Confirm => self.view_confirm(),
         }
+    }
+}
+
+impl BorderWalletWizard {
+    fn grid_cell(&self, grid: &WordGrid, row_idx: usize, col_idx: usize) -> Button<'_, Message> {
+        let word = grid.word_at(row_idx, col_idx).unwrap_or("???");
+        let prefix = &word[..std::cmp::min(4, word.len())];
+        let cell = CellRef::new(row_idx as u16, col_idx as u8);
+        let is_selected = self.pattern.cells().contains(&cell);
+
+        let order_num = self
+            .pattern
+            .cells()
+            .iter()
+            .position(|c| c == &cell)
+            .map(|p| p + 1);
+
+        let label = if let Some(n) = order_num {
+            format!("{}", n)
+        } else {
+            prefix.to_string()
+        };
+
+        let cell_style = if is_selected {
+            theme::button::primary
+        } else {
+            theme::button::secondary
+        };
+
+        let r = row_idx as u16;
+        let c = col_idx as u8;
+        let cell_btn = Button::new(text(label).size(11).align_x(Horizontal::Center))
+            .style(cell_style)
+            .on_press(self.wizard_msg(BorderWalletWizardMessage::ToggleCellSelection(r, c)))
+            .width(50)
+            .height(28);
+
+        cell_btn
     }
 }

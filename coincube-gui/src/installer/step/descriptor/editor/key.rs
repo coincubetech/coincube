@@ -517,74 +517,74 @@ impl SelectKeySource {
                 } else {
                     false
                 };
-                if !registered {
-                    let mut out = match hw {
-                        HardwareWallet::Unsupported {
-                            kind,
-                            version,
-                            reason,
-                            ..
-                        } => match version {
-                            Some(v) => (
-                                format!("{kind} {v}"),
-                                None,
-                                HwState::Unsupported(reason.clone()),
-                                is_compatible_with_tapminiscript(kind, Some(v)),
-                            ),
-                            None => (
-                                kind.to_string(),
-                                None,
-                                HwState::Unsupported(reason.clone()),
-                                is_compatible_with_tapminiscript(kind, None),
-                            ),
-                        },
-                        HardwareWallet::Locked {
-                            kind, pairing_code, ..
-                        } => (
+                if registered {
+                    return None;
+                }
+
+                let mut out = match hw {
+                    HardwareWallet::Unsupported {
+                        kind,
+                        version,
+                        reason,
+                        ..
+                    } => match version {
+                        Some(v) => (
+                            format!("{kind} {v}"),
+                            None,
+                            HwState::Unsupported(reason.clone()),
+                            is_compatible_with_tapminiscript(kind, Some(v)),
+                        ),
+                        None => (
                             kind.to_string(),
                             None,
-                            HwState::Locked {
-                                pairing_code: pairing_code.clone(),
-                            },
+                            HwState::Unsupported(reason.clone()),
                             is_compatible_with_tapminiscript(kind, None),
                         ),
-                        HardwareWallet::Supported {
-                            kind,
-                            fingerprint,
-                            version,
-                            ..
-                        } => match version {
-                            Some(v) => (
-                                format!("{kind} {v}"),
-                                Some(*fingerprint),
-                                HwState::Supported,
-                                is_compatible_with_tapminiscript(kind, Some(v)),
-                            ),
-                            None => (
-                                kind.to_string(),
-                                Some(*fingerprint),
-                                HwState::Supported,
-                                is_compatible_with_tapminiscript(kind, None),
-                            ),
+                    },
+                    HardwareWallet::Locked {
+                        kind, pairing_code, ..
+                    } => (
+                        kind.to_string(),
+                        None,
+                        HwState::Locked {
+                            pairing_code: pairing_code.clone(),
                         },
-                    };
+                        is_compatible_with_tapminiscript(kind, None),
+                    ),
+                    HardwareWallet::Supported {
+                        kind,
+                        fingerprint,
+                        version,
+                        ..
+                    } => match version {
+                        Some(v) => (
+                            format!("{kind} {v}"),
+                            Some(*fingerprint),
+                            HwState::Supported,
+                            is_compatible_with_tapminiscript(kind, Some(v)),
+                        ),
+                        None => (
+                            kind.to_string(),
+                            Some(*fingerprint),
+                            HwState::Supported,
+                            is_compatible_with_tapminiscript(kind, None),
+                        ),
+                    },
+                };
 
-                    // Capitalize first letter
-                    let alias = &mut out.0;
-                    if let Some(first) = alias.get_mut(0..1) {
-                        first.make_ascii_uppercase();
-                    }
-
-                    Some((
-                        out.0,
-                        out.1,
-                        out.2,
-                        out.3,
-                        crate::hw_advisory::view::hit(hw),
-                    ))
-                } else {
-                    None
+                // Capitalize first letter
+                let alias = &mut out.0;
+                if let Some(first) = alias.get_mut(0..1) {
+                    first.make_ascii_uppercase();
                 }
+
+                Some((
+                    out.0,
+                    out.1,
+                    out.2,
+                    out.3,
+                    crate::hw_advisory::view::hit(hw),
+                ))
             })
             .collect()
     }
@@ -820,48 +820,49 @@ impl SelectKeySource {
             ),
             _ => return Task::none(),
         };
-        match key {
-            Ok(k) => {
-                // If it is a provider key that has just been fetched, do some additional sanity checks.
-                if let Some(key_kind) = k.source.provider_key_kind() {
-                    // We don't need to check key's status as redeemed keys are not returned.
-                    *warning = if !check_key_network(&k.key, self.network) {
-                        Some("Fetched key does not have the correct network")
-                    } else if !self.actual_path.token_kind.contains(&key_kind) {
-                        let warn = match key_kind {
-                            KeyKind::SafetyNet => {
-                                "SafetyNet kind of token is not allowed for this path"
-                            }
-                            KeyKind::Cosigner => {
-                                "Cosigner kind of token is not allowed for this path"
-                            }
-                        };
-                        Some(warn)
-                    }
-                    // If two keys have the same fingerprint, they must both have the same provider key kind (which could be `None`).
-                    // Note that this checks all keys regardless of whether they are currently being used in a path.
-                    else if self.keys.iter().any(|(fg, (_, key))| {
-                        *fg == key.fingerprint
-                            && key.source.provider_key_kind() != key.source.provider_key_kind()
-                    }) {
-                        Some("Fetched key has already been added to the wallet.")
-                    } else {
-                        None
-                    };
-                    *valid = warning.is_none();
-                    if *valid {
-                        self.selected_key = SelectedKey::New(Box::new(k.clone()));
-                        if let Some(kind) = k.source.provider_key_kind() {
-                            self.form_alias.value = format!("{:?}", kind);
-                        }
-                        let _ = self.on_next();
-                    }
-                }
-            }
+        let k = match key {
+            Ok(k) => k,
             Err(e) => {
                 self.error = Some(e.to_string());
+                return Task::none();
             }
+        };
+        let Some(key_kind) = k.source.provider_key_kind() else {
+            return Task::none();
+        };
+
+        // We don't need to check key's status as redeemed keys are not returned.
+        *warning = if !check_key_network(&k.key, self.network) {
+            Some("Fetched key does not have the correct network")
+        } else if !self.actual_path.token_kind.contains(&key_kind) {
+            let warn = match key_kind {
+                KeyKind::SafetyNet => "SafetyNet kind of token is not allowed for this path",
+                KeyKind::Cosigner => "Cosigner kind of token is not allowed for this path",
+            };
+            Some(warn)
         }
+        // If two keys have the same fingerprint, they must both have the same provider key kind (which could be `None`).
+        // Note that this checks all keys regardless of whether they are currently being used in a path.
+        else if self
+            .keys
+            .get(&k.fingerprint)
+            .is_some_and(|(_, existing_key)| {
+                existing_key.source.provider_key_kind() != Some(key_kind)
+            })
+        {
+            Some("Fetched key has already been added to the wallet.")
+        } else {
+            None
+        };
+        *valid = warning.is_none();
+        if *valid {
+            self.selected_key = SelectedKey::New(Box::new(k.clone()));
+            if let Some(kind) = k.source.provider_key_kind() {
+                self.form_alias.value = format!("{:?}", kind);
+            }
+            let _ = self.on_next();
+        }
+
         Task::none()
     }
     fn on_load_key(&mut self, key: Result<Key, Error>) -> Task<Message> {
@@ -902,38 +903,40 @@ impl SelectKeySource {
         self.form_xpub.warning = None;
         self.selected_key = SelectedKey::None;
         self.form_xpub.value = xpub.clone();
-        if let Ok(DescriptorPublicKey::XPub(key)) = DescriptorPublicKey::from_str(&xpub) {
-            if !key.derivation_path.is_master() {
-                self.form_xpub.valid = false;
-                self.form_xpub.warning = Some("Wrong derivation path");
-            } else if let Some((fingerprint, _)) = key.origin {
-                self.form_xpub.valid = if self.network == Network::Bitcoin {
-                    key.xkey.network == Network::Bitcoin.into()
-                } else {
-                    key.xkey.network == Network::Testnet.into()
-                };
-                if !self.form_xpub.valid {
-                    self.form_xpub.warning = Some("Wrong network");
-                    self.form_xpub.valid = false;
-                }
-                if self.keys.contains_key(&fingerprint) {
-                    self.form_xpub.warning = Some("Key already used");
-                    self.form_xpub.valid = false;
-                }
-
-                if self.form_xpub.valid {
-                    self.xpub_valid(fingerprint, key);
-                }
-            } else {
-                self.form_xpub.valid = false;
-                self.form_xpub.warning = Some("Origin missing");
-            }
-        } else {
+        let Ok(DescriptorPublicKey::XPub(key)) = DescriptorPublicKey::from_str(&xpub) else {
             self.form_xpub.valid = xpub.is_empty();
             if !self.form_xpub.valid {
                 self.form_xpub.warning = Some("Invalid Xpub");
             }
+            return Task::none();
+        };
+        if !key.derivation_path.is_master() {
+            self.form_xpub.valid = false;
+            self.form_xpub.warning = Some("Wrong derivation path");
+            return Task::none();
         }
+        let Some((fingerprint, _)) = key.origin else {
+            self.form_xpub.valid = false;
+            self.form_xpub.warning = Some("Origin missing");
+            return Task::none();
+        };
+        self.form_xpub.valid = if self.network == Network::Bitcoin {
+            key.xkey.network == Network::Bitcoin.into()
+        } else {
+            key.xkey.network == Network::Testnet.into()
+        };
+        if !self.form_xpub.valid {
+            self.form_xpub.warning = Some("Wrong network");
+            self.form_xpub.valid = false;
+        }
+        if self.keys.contains_key(&fingerprint) {
+            self.form_xpub.warning = Some("Key already used");
+            self.form_xpub.valid = false;
+        }
+        if self.form_xpub.valid {
+            self.xpub_valid(fingerprint, key);
+        }
+
         Task::none()
     }
     fn on_import_xpub(&mut self, xpub: String) -> Task<Message> {
@@ -1504,62 +1507,7 @@ impl SelectKeySource {
         }
 
         for rk in &self.my_keychain_keys {
-            let owner_id = rk.raw.effective_owner_user_id();
-            // Match the submit-side `on_select_keychain_key` backstop:
-            // a row is "owner-blocked" only when a DIFFERENT key from
-            // the same owner occupies coordinates outside the
-            // currently-edited slot. Replacing the key at the active
-            // slot is allowed. An unparseable fingerprint disables the
-            // row defensively — the submit path would also reject it.
-            let candidate_fp = Fingerprint::from_str(&rk.raw.fingerprint).ok();
-            let owner_blocked = match candidate_fp {
-                Some(fp) => self.owner_placed_elsewhere(owner_id, fp),
-                None => true,
-            };
-            // Disable a key that's already placed in this quorum so it
-            // can't be selected into a second slot.
-            let key_reused = candidate_fp.is_some_and(|fp| self.key_placed_elsewhere(fp));
-            // W9 pre-check: reject keys that another Vault already claims.
-            let used_elsewhere = rk.raw.used_by_vault;
-            // I2: the owner-self recovery key restores this Cube but is never a
-            // signer. Show it — it teaches the model — but disabled, and let
-            // its caption win over the reuse/selection reasons below.
-            let is_recovery = rk.raw.is_owner_self_recovery();
-            let disabled = is_recovery || owner_blocked || key_reused || used_elsewhere;
-            let fp_short: String = rk.raw.fingerprint.chars().take(8).collect();
-            let fingerprint = Some(format!("#{}", fp_short));
-            let msg = if disabled {
-                None
-            } else {
-                let rk_clone = rk.clone();
-                Some(move || {
-                    Self::route(SelectKeySourceMessage::SelectKeychainKey(rk_clone.clone()))
-                })
-            };
-            // Surface the most specific reason when several apply: the recovery
-            // caption first (it's the whole point of the row), then a key
-            // claimed by another Vault, then an exact reuse in this quorum,
-            // then the owner being placed elsewhere.
-            let warning = if is_recovery {
-                Some("Recovery key — restores this Cube, never signs".to_string())
-            } else if used_elsewhere {
-                Some("Used by another Vault".to_string())
-            } else if key_reused {
-                Some("Already used in this Vault".to_string())
-            } else if owner_blocked {
-                Some("Already selected".to_string())
-            } else {
-                None
-            };
-            col = col.push(modal::key_entry(
-                Some(icon::round_key_icon()),
-                rk.raw.name.clone(),
-                fingerprint,
-                None,
-                None,
-                warning,
-                msg,
-            ));
+            col = col.push(self.my_keychain_entry(rk));
         }
         col.into()
     }
@@ -1609,47 +1557,7 @@ impl SelectKeySource {
                 };
                 col = col.push(p1_bold(contact_label));
                 for rk in keys {
-                    let owner_id = rk.raw.effective_owner_user_id();
-                    // See `view_my_keychain_keys` above — we mirror the
-                    // coordinate-aware `owner_placed_elsewhere` check
-                    // used by the submit-side backstop so row-disabled
-                    // state matches what clicking actually rejects.
-                    let candidate_fp = Fingerprint::from_str(&rk.raw.fingerprint).ok();
-                    let owner_blocked = match candidate_fp {
-                        Some(fp) => self.owner_placed_elsewhere(owner_id, fp),
-                        None => true,
-                    };
-                    let key_reused = candidate_fp.is_some_and(|fp| self.key_placed_elsewhere(fp));
-                    let used_elsewhere = rk.raw.used_by_vault;
-                    let disabled = owner_blocked || key_reused || used_elsewhere;
-                    let fp = &rk.raw.fingerprint;
-                    let fingerprint = Some(format!("#{}", &fp[..fp.len().min(8)]));
-                    let msg = if disabled {
-                        None
-                    } else {
-                        let rk_clone = (*rk).clone();
-                        Some(move || {
-                            Self::route(SelectKeySourceMessage::SelectKeychainKey(rk_clone.clone()))
-                        })
-                    };
-                    let warning = if used_elsewhere {
-                        Some("Used by another Vault".to_string())
-                    } else if key_reused {
-                        Some("Already used in this Vault".to_string())
-                    } else if owner_blocked {
-                        Some("Already selected".to_string())
-                    } else {
-                        None
-                    };
-                    col = col.push(modal::key_entry(
-                        Some(icon::round_key_icon()),
-                        rk.raw.name.clone(),
-                        fingerprint,
-                        None,
-                        None,
-                        warning,
-                        msg,
-                    ));
+                    col = col.push(self.contact_keychain_entry(rk));
                 }
             }
         }
@@ -2319,52 +2227,14 @@ impl super::DescriptorEditModal for SelectKeySource {
         self.processing
     }
     fn update(&mut self, hws: &mut HardwareWallets, message: Message) -> Task<Message> {
-        if self.chain.is_blake2b() {
-            if let Message::SelectKeySource(ref msg) = message {
-                // Hardware devices and Border Wallet are allowed on Bitcoin
-                // Blake2b (HW-1): their messages pass, and a fetched key still
-                // goes through `available_for_creation` in `LoadKey` below.
-                // Keychain and provider-token entry points stay refused
-                // before any work.
-                let refused = match msg {
-                    SelectKeySourceMessage::ShowKeychainKeys
-                    | SelectKeySourceMessage::FetchCubeKeys
-                    | SelectKeySourceMessage::CubeKeysLoaded(_)
-                    | SelectKeySourceMessage::SelectKeychainKey(_)
-                    | SelectKeySourceMessage::SelectEnterSafetyNetToken
-                    | SelectKeySourceMessage::SelectEnterCosignerToken
-                    | SelectKeySourceMessage::PasteToken
-                    | SelectKeySourceMessage::Token(_)
-                    | SelectKeySourceMessage::ProviderKey(_) => true,
-                    SelectKeySourceMessage::LoadKey(Ok(key)) => {
-                        !key.source.available_for_creation(self.chain)
-                    }
-                    SelectKeySourceMessage::SelectKey(fp) => self
-                        .keys
-                        .get(fp)
-                        .is_some_and(|(_, key)| !key.source.available_for_creation(self.chain)),
-                    _ => false,
-                };
-                if refused {
-                    self.error = Some(
-                        "This key source is not available for Bitcoin Blake2b yet".to_string(),
-                    );
-                    return Task::none();
-                }
-            }
+        if self.chain.is_blake2b() && !self.check_chain_key_source(&message) {
+            return Task::none();
         }
+
         // step back if selected device disconnected — pop back into
         // the HW listening sub-screen rather than all the way to the
         // grid so the user sees "Plug in a hardware device…" again.
-        if self.step == Step::Details {
-            if let Focus::Device(fg) = self.focus {
-                if !hws.list.iter().any(|d| d.fingerprint() == Some(fg)) {
-                    self.step = Step::HardwareListen;
-                    self.focus = Focus::None;
-                    self.selected_key = SelectedKey::None;
-                }
-            }
-        }
+        self.refresh_selected_device(hws);
         match message {
             Message::ImportExport(ImportExportMessage::Close) => {
                 self.modal = None;
@@ -2740,6 +2610,154 @@ pub async fn get_extended_pubkey(
         wildcard: Wildcard::None,
         xkey,
     }))
+}
+
+impl SelectKeySource {
+    fn check_chain_key_source(&mut self, message: &Message) -> bool {
+        if let Message::SelectKeySource(ref msg) = message {
+            // Hardware devices and Border Wallet are allowed on Bitcoin
+            // Blake2b (HW-1): their messages pass, and a fetched key still
+            // goes through `available_for_creation` in `LoadKey` below.
+            // Keychain and provider-token entry points stay refused
+            // before any work.
+            let refused = match msg {
+                SelectKeySourceMessage::ShowKeychainKeys
+                | SelectKeySourceMessage::FetchCubeKeys
+                | SelectKeySourceMessage::CubeKeysLoaded(_)
+                | SelectKeySourceMessage::SelectKeychainKey(_)
+                | SelectKeySourceMessage::SelectEnterSafetyNetToken
+                | SelectKeySourceMessage::SelectEnterCosignerToken
+                | SelectKeySourceMessage::PasteToken
+                | SelectKeySourceMessage::Token(_)
+                | SelectKeySourceMessage::ProviderKey(_) => true,
+                SelectKeySourceMessage::LoadKey(Ok(key)) => {
+                    !key.source.available_for_creation(self.chain)
+                }
+                SelectKeySourceMessage::SelectKey(fp) => self
+                    .keys
+                    .get(fp)
+                    .is_some_and(|(_, key)| !key.source.available_for_creation(self.chain)),
+                _ => false,
+            };
+            if refused {
+                self.error =
+                    Some("This key source is not available for Bitcoin Blake2b yet".to_string());
+                return false;
+            }
+        }
+
+        true
+    }
+    fn refresh_selected_device(&mut self, hws: &HardwareWallets) {
+        if self.step == Step::Details {
+            if let Focus::Device(fg) = self.focus {
+                if !hws.list.iter().any(|d| d.fingerprint() == Some(fg)) {
+                    self.step = Step::HardwareListen;
+                    self.focus = Focus::None;
+                    self.selected_key = SelectedKey::None;
+                }
+            }
+        }
+    }
+    fn my_keychain_entry<'a>(&self, rk: &ResolvedCubeKey) -> Element<'a, Message> {
+        let owner_id = rk.raw.effective_owner_user_id();
+        // Match the submit-side `on_select_keychain_key` backstop:
+        // a row is "owner-blocked" only when a DIFFERENT key from
+        // the same owner occupies coordinates outside the
+        // currently-edited slot. Replacing the key at the active
+        // slot is allowed. An unparseable fingerprint disables the
+        // row defensively — the submit path would also reject it.
+        let candidate_fp = Fingerprint::from_str(&rk.raw.fingerprint).ok();
+        let owner_blocked = match candidate_fp {
+            Some(fp) => self.owner_placed_elsewhere(owner_id, fp),
+            None => true,
+        };
+        // Disable a key that's already placed in this quorum so it
+        // can't be selected into a second slot.
+        let key_reused = candidate_fp.is_some_and(|fp| self.key_placed_elsewhere(fp));
+        // W9 pre-check: reject keys that another Vault already claims.
+        let used_elsewhere = rk.raw.used_by_vault;
+        // I2: the owner-self recovery key restores this Cube but is never a
+        // signer. Show it — it teaches the model — but disabled, and let
+        // its caption win over the reuse/selection reasons below.
+        let is_recovery = rk.raw.is_owner_self_recovery();
+        let disabled = is_recovery || owner_blocked || key_reused || used_elsewhere;
+        let fp_short: String = rk.raw.fingerprint.chars().take(8).collect();
+        let fingerprint = Some(format!("#{}", fp_short));
+        let msg = if disabled {
+            None
+        } else {
+            let rk_clone = rk.clone();
+            Some(move || Self::route(SelectKeySourceMessage::SelectKeychainKey(rk_clone.clone())))
+        };
+        // Surface the most specific reason when several apply: the recovery
+        // caption first (it's the whole point of the row), then a key
+        // claimed by another Vault, then an exact reuse in this quorum,
+        // then the owner being placed elsewhere.
+        let warning = if is_recovery {
+            Some("Recovery key — restores this Cube, never signs".to_string())
+        } else if used_elsewhere {
+            Some("Used by another Vault".to_string())
+        } else if key_reused {
+            Some("Already used in this Vault".to_string())
+        } else if owner_blocked {
+            Some("Already selected".to_string())
+        } else {
+            None
+        };
+        modal::key_entry(
+            Some(icon::round_key_icon()),
+            rk.raw.name.clone(),
+            fingerprint,
+            None,
+            None,
+            warning,
+            msg,
+        )
+    }
+    fn contact_keychain_entry<'a>(&self, rk: &ResolvedCubeKey) -> Element<'a, Message> {
+        let owner_id = rk.raw.effective_owner_user_id();
+        // See `view_my_keychain_keys` above — we mirror the
+        // coordinate-aware `owner_placed_elsewhere` check
+        // used by the submit-side backstop so row-disabled
+        // state matches what clicking actually rejects.
+        let candidate_fp = Fingerprint::from_str(&rk.raw.fingerprint).ok();
+        let owner_blocked = match candidate_fp {
+            Some(fp) => self.owner_placed_elsewhere(owner_id, fp),
+            None => true,
+        };
+        let key_reused = candidate_fp.is_some_and(|fp| self.key_placed_elsewhere(fp));
+        let used_elsewhere = rk.raw.used_by_vault;
+        let disabled = owner_blocked || key_reused || used_elsewhere;
+        // A rejected server fingerprint still appears on its disabled row.
+        // Truncate by characters so malformed UTF-8 boundaries cannot panic.
+        let fp_short: String = rk.raw.fingerprint.chars().take(8).collect();
+        let fingerprint = Some(format!("#{}", fp_short));
+        let msg = if disabled {
+            None
+        } else {
+            let rk_clone = rk.clone();
+            Some(move || Self::route(SelectKeySourceMessage::SelectKeychainKey(rk_clone.clone())))
+        };
+        let warning = if used_elsewhere {
+            Some("Used by another Vault".to_string())
+        } else if key_reused {
+            Some("Already used in this Vault".to_string())
+        } else if owner_blocked {
+            Some("Already selected".to_string())
+        } else {
+            None
+        };
+        modal::key_entry(
+            Some(icon::round_key_icon()),
+            rk.raw.name.clone(),
+            fingerprint,
+            None,
+            None,
+            warning,
+            msg,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -3507,6 +3525,100 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn review_repair_contact_rows_render_untrusted_fingerprints_and_reject_invalid_clicks() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout, Shell,
+        };
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+        let renderer = <iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        for (fingerprint, displayed, valid) in [
+            ("1234567é", "#1234567é", false),
+            ("c658b283", "#c658b283", true),
+            ("", "#", false),
+            ("123", "#123", false),
+        ] {
+            let mut raw = contact_owned_raw_key(10, 42);
+            raw.fingerprint = fingerprint.to_owned();
+            let resolved = resolve_cube_keys(
+                vec![raw],
+                &[contact_with_role(7, 42, ContactRole::Keyholder)],
+                1,
+            );
+            assert_eq!(resolved.contact_keys.len(), 1);
+            let mut picker = empty_picker();
+            drop(picker.on_cube_keys_loaded(Ok(resolved)));
+            let mut list = picker.view_contact_keychain_keys();
+            let mut tree = Tree::new(list.as_widget());
+            let node = list.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1600.0, 2200.0)),
+            );
+            let mut labels = Labels::default();
+            list.as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+            assert!(
+                labels.0.iter().any(|label| label == displayed),
+                "{fingerprint:?}: {:?}",
+                labels.0
+            );
+            assert_eq!(
+                labels.0.iter().any(|label| label == "Already selected"),
+                !valid
+            );
+            let mut entry = picker.contact_keychain_entry(&picker.contact_keychain_keys[0]);
+            let mut tree = Tree::new(entry.as_widget());
+            let node = entry.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(800.0, 200.0)),
+            );
+            let bounds = node.bounds();
+            let cursor = iced::mouse::Cursor::Available(bounds.center());
+            let mut messages = Vec::new();
+            for event in [
+                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            ] {
+                entry.as_widget_mut().update(
+                    &mut tree,
+                    &iced::Event::Mouse(event),
+                    Layout::new(&node),
+                    cursor,
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut Shell::new(&mut messages),
+                    &bounds,
+                );
+            }
+            assert_eq!(messages.len(), usize::from(valid), "{fingerprint:?}");
+            if valid {
+                assert!(
+                    matches!(&messages[0], Message::SelectKeySource(SelectKeySourceMessage::SelectKeychainKey(key)) if key.raw.fingerprint == fingerprint)
+                );
+            }
+        }
+    }
+
     /// A resolved owner-self recovery key — the `recoveryRole: "owner-self"`
     /// annotation the API stamps on the Cube's recovery recipient (PR 2).
     fn resolved_recovery_key(id: u64, fingerprint: &str, owner_id: u64) -> ResolvedCubeKey {
@@ -4062,5 +4174,169 @@ mod tests {
 
         assert!(resolved.my_keys.is_empty());
         assert!(resolved.contact_keys.is_empty());
+    }
+
+    fn provider_contract_key(fingerprint: Fingerprint, kind: Option<KeyKind>) -> Key {
+        let mut key = manual_key(fingerprint);
+        if let Some(kind) = kind {
+            key.source = KeySource::Token(
+                kind,
+                ProviderKey {
+                    uuid: "synthetic-key-id".into(),
+                    token: "synthetic-provider-token".into(),
+                    provider: crate::app::settings::Provider {
+                        uuid: "synthetic-provider-id".into(),
+                        name: "Synthetic provider".into(),
+                    },
+                },
+            );
+        }
+        key
+    }
+
+    fn provider_contract_picker(kind: KeyKind) -> SelectKeySource {
+        let mut picker = empty_picker();
+        picker.actual_path.token_kind = vec![KeyKind::SafetyNet, KeyKind::Cosigner];
+        picker.focus = match kind {
+            KeyKind::SafetyNet => Focus::EnterSafetyNetToken,
+            KeyKind::Cosigner => Focus::EnterCosignerToken,
+        };
+        picker.processing = true;
+        picker
+    }
+
+    fn assert_provider_contract_case(
+        incoming: KeyKind,
+        existing: Option<KeyKind>,
+        same_fingerprint: bool,
+        coordinates: Vec<(usize, usize)>,
+    ) {
+        let fingerprint = Fingerprint::from_str("01020304").unwrap();
+        let registered_fingerprint = if same_fingerprint {
+            fingerprint
+        } else {
+            Fingerprint::from_str("05060708").unwrap()
+        };
+        let mut picker = provider_contract_picker(incoming);
+        picker.keys.insert(
+            registered_fingerprint,
+            (
+                coordinates,
+                provider_contract_key(registered_fingerprint, existing),
+            ),
+        );
+        picker.form_alias.value = "Existing alias".into();
+        picker.selected_key = SelectedKey::Existing(registered_fingerprint);
+        let focus_before = picker.focus;
+        let key = provider_contract_key(fingerprint, Some(incoming));
+        let task = picker.on_provider_key(Ok(key.clone()));
+        assert_eq!(task.units(), 0);
+        assert!(!picker.processing);
+        assert_eq!(picker.focus, focus_before);
+        let form = match incoming {
+            KeyKind::SafetyNet => &picker.form_safety_net_token,
+            KeyKind::Cosigner => &picker.form_cosigner_token,
+        };
+        let refused = same_fingerprint && existing != Some(incoming);
+        assert_eq!(
+            form.valid, !refused,
+            "incoming={incoming:?}, existing={existing:?}, same_fingerprint={same_fingerprint}"
+        );
+        if refused {
+            assert_eq!(
+                form.warning,
+                Some("Fetched key has already been added to the wallet.")
+            );
+            assert!(
+                matches!(picker.selected_key, SelectedKey::Existing(fp) if fp == registered_fingerprint)
+            );
+            assert_eq!(picker.step, Step::Grid);
+            assert_eq!(picker.form_alias.value, "Existing alias");
+        } else {
+            assert!(form.warning.is_none());
+            assert!(
+                matches!(&picker.selected_key, SelectedKey::New(selected) if **selected == key)
+            );
+            assert_eq!(picker.step, Step::Details);
+            assert_eq!(picker.form_alias.value, format!("{incoming:?}"));
+        }
+    }
+
+    #[test]
+    fn provider_contract_rejects_fingerprint_kind_conflicts_in_unused_and_placed_keys() {
+        for coordinates in [vec![], vec![(1, 0)]] {
+            for (incoming, existing) in [
+                (KeyKind::SafetyNet, None),
+                (KeyKind::SafetyNet, Some(KeyKind::Cosigner)),
+                (KeyKind::Cosigner, None),
+                (KeyKind::Cosigner, Some(KeyKind::SafetyNet)),
+            ] {
+                assert_provider_contract_case(incoming, existing, true, coordinates.clone());
+            }
+        }
+    }
+
+    #[test]
+    fn provider_contract_allows_matching_kinds_and_unrelated_fingerprints() {
+        for coordinates in [vec![], vec![(1, 0)]] {
+            for (incoming, existing, same_fingerprint) in [
+                (KeyKind::SafetyNet, Some(KeyKind::SafetyNet), true),
+                (KeyKind::Cosigner, Some(KeyKind::Cosigner), true),
+                (KeyKind::SafetyNet, None, false),
+                (KeyKind::SafetyNet, Some(KeyKind::Cosigner), false),
+                (KeyKind::SafetyNet, Some(KeyKind::SafetyNet), false),
+                (KeyKind::Cosigner, None, false),
+                (KeyKind::Cosigner, Some(KeyKind::SafetyNet), false),
+                (KeyKind::Cosigner, Some(KeyKind::Cosigner), false),
+            ] {
+                assert_provider_contract_case(
+                    incoming,
+                    existing,
+                    same_fingerprint,
+                    coordinates.clone(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn provider_contract_keeps_network_and_path_checks_ahead_of_kind_conflicts() {
+        let fingerprint = Fingerprint::from_str("01020304").unwrap();
+        for kind in [KeyKind::SafetyNet, KeyKind::Cosigner] {
+            let mut picker = provider_contract_picker(kind);
+            picker
+                .keys
+                .insert(fingerprint, (vec![], manual_key(fingerprint)));
+            picker.actual_path.token_kind.clear();
+            let mut key = provider_contract_key(fingerprint, Some(kind));
+            key.key = DescriptorPublicKey::from_str(MAINNET_DESCRIPTOR_KEY).unwrap();
+            let task = picker.on_provider_key(Ok(key));
+            assert_eq!(task.units(), 0);
+            let form = match kind {
+                KeyKind::SafetyNet => &picker.form_safety_net_token,
+                KeyKind::Cosigner => &picker.form_cosigner_token,
+            };
+            assert_eq!(
+                form.warning,
+                Some("Fetched key does not have the correct network")
+            );
+            assert!(!form.valid);
+            assert!(matches!(picker.selected_key, SelectedKey::None));
+            assert_eq!(picker.step, Step::Grid);
+            let task = picker.on_provider_key(Ok(provider_contract_key(fingerprint, Some(kind))));
+            assert_eq!(task.units(), 0);
+            let form = match kind {
+                KeyKind::SafetyNet => &picker.form_safety_net_token,
+                KeyKind::Cosigner => &picker.form_cosigner_token,
+            };
+            let warning = match kind {
+                KeyKind::SafetyNet => "SafetyNet kind of token is not allowed for this path",
+                KeyKind::Cosigner => "Cosigner kind of token is not allowed for this path",
+            };
+            assert_eq!(form.warning, Some(warning));
+            assert!(!form.valid);
+            assert!(matches!(picker.selected_key, SelectedKey::None));
+            assert_eq!(picker.step, Step::Grid);
+        }
     }
 }

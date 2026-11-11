@@ -243,13 +243,10 @@ impl Step for OwnerKeychainRestoreStep {
         // network. The password-kit step refuses the same mismatch through
         // `validate_against_selection`.
         let chain = ctx.bitcoin_config.chain;
-        let crosses_fork = |network: &str| {
-            network != chain.api_str()
-                && (chain.is_blake2b()
-                    || crate::chain::ChainId::from_api_str(network).is_some_and(|c| c.is_blake2b()))
-        };
-        if seed.as_ref().is_some_and(|s| crosses_fork(&s.cube.network))
-            || vault_blob.is_some_and(|d| crosses_fork(&d.cube.network))
+        if seed
+            .as_ref()
+            .is_some_and(|s| crosses_fork(chain, &s.cube.network))
+            || vault_blob.is_some_and(|d| crosses_fork(chain, &d.cube.network))
         {
             self.phase = Phase::Error {
                 message: "This phone backup belongs to a different Cube or chain.".into(),
@@ -282,12 +279,15 @@ impl Step for OwnerKeychainRestoreStep {
         // a duplicate — the same duplicate-Cube bug the owner CRK restore had.
         // Full scope only (a real Cube); Vault-only restores into an existing
         // Cube with its own identity.
-        if matches!(self.scope, RestoreScope::Full) {
-            if let Some(seed) = seed {
-                ctx.cube_id = Some(seed.cube.uuid.clone());
-                ctx.cube_name = Some(seed.cube.name.clone());
-            }
+
+        if let Some(seed) = seed
+            .as_ref()
+            .filter(|_| matches!(self.scope, RestoreScope::Full))
+        {
+            ctx.cube_id = Some(seed.cube.uuid.clone());
+            ctx.cube_name = Some(seed.cube.name.clone());
         }
+
         // Thread the owner's Connect session into the context so the downstream
         // `CoincubeConnectStep` skips a redundant re-auth and `Final` re-registers
         // the recovered Cube under the owner's account — mirrors the owner CRK
@@ -336,6 +336,12 @@ impl Step for OwnerKeychainRestoreStep {
             }
         }
     }
+}
+
+fn crosses_fork(chain: crate::chain::ChainId, network: &str) -> bool {
+    network != chain.api_str()
+        && (chain.is_blake2b()
+            || crate::chain::ChainId::from_api_str(network).is_some_and(|c| c.is_blake2b()))
 }
 
 #[cfg(test)]
