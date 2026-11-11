@@ -108,6 +108,10 @@ pub struct SparkSendView<'a> {
 pub const PAID_FROM_USDB_NOTE: &str = "Paid from USDB: the amount converts to bitcoin at send. \
      Review shows the rate and conversion fee before anything moves.";
 
+/// Under the Amount field for US Dollar over Spark: nothing converts.
+pub const US_DOLLAR_SEND_NOTE: &str = "Sent from your US Dollar balance and received as US \
+     Dollar, with no conversion.";
+
 /// The pay-from picker's explanation of paying from bitcoin (S2's
 /// "Always on" shortfall conversion).
 pub const PAY_FROM_BITCOIN_NOTE: &str = "Bitcoin is used first. If it can't cover a payment, \
@@ -162,13 +166,18 @@ impl<'a> SparkSendView<'a> {
         // The amount field follows the wallet's display unit, like the Vault
         // send form: label, placeholder, and the parse in state all switch on
         // it, so a BTC-configured wallet enters BTC and a sats one enters sats.
+        // A US Dollar send is typed in US Dollars whatever the unit.
+        let usd_send = self.receive_target == SparkSendTarget::SparkUsd;
         let is_btc = matches!(self.bitcoin_unit, BitcoinDisplayUnit::BTC);
-        let amount_label = if is_btc {
+        let amount_label = if usd_send {
+            localized_copy("Amount (US Dollar)")
+        } else if is_btc {
             localized_copy("Amount (BTC)")
         } else {
             localized_copy("Amount (sats)")
         };
         let amount_placeholder = match (self.receive_target.is_stablecoin(), is_btc) {
+            _ if usd_send => "Amount in US Dollars (optional for invoices with amount)",
             (true, true) => "Amount in BTC — funded from your Bitcoin balance",
             (true, false) => "Amount in sats — funded from your Bitcoin balance",
             (false, true) => "Amount in BTC (optional for invoices with amount)",
@@ -200,11 +209,21 @@ impl<'a> SparkSendView<'a> {
                     .map(|hint| p2_regular(hint).style(theme::text::secondary)),
             )
             .push_maybe(
-                self.pays_from_usdb()
+                (self.pays_from_usdb() && !usd_send)
                     .then(|| p2_regular(PAID_FROM_USDB_NOTE).style(theme::text::secondary)),
+            )
+            .push_maybe(
+                usd_send.then(|| p2_regular(US_DOLLAR_SEND_NOTE).style(theme::text::secondary)),
             );
 
-        // Unified balance (BTC + Stable Balance), as the YOU SEND card showed it.
+        // Unified balance (BTC + Stable Balance), as the YOU SEND card showed
+        // it; a US Dollar send can spend only the US Dollar balance.
+        let us_dollar_available = || {
+            let (rows, _) = self.balances.rows();
+            rows.into_iter()
+                .find(|(name, _, _)| *name == "US Dollar")
+                .map_or_else(|| "0".to_owned(), |(_, figure, _)| figure)
+        };
         let available = Row::new()
             .spacing(6)
             .push(Space::new().width(Length::Fill))
@@ -212,6 +231,8 @@ impl<'a> SparkSendView<'a> {
             .push(
                 text(if self.mask_amounts {
                     "••••••".to_owned()
+                } else if usd_send {
+                    format!("{} {}", us_dollar_available(), localized_copy("US Dollar"))
                 } else {
                     format!(
                         "{} {}",
@@ -362,6 +383,8 @@ pub fn send_step(phase: &SparkSendPhase) -> usize {
 
 fn send_kind_selector(target: SparkSendTarget, network: Network) -> Element<'static, Message> {
     let stablecoin = target.is_stablecoin();
+    // US Dollar over Spark is neither a bitcoin rail nor cross-chain.
+    let usd = target == SparkSendTarget::SparkUsd;
     segmented(
         [
             segment("spark-send-kind-bitcoin", false, "Bitcoin"),
@@ -372,7 +395,7 @@ fn send_kind_selector(target: SparkSendTarget, network: Network) -> Element<'sta
             )
             .enabled(cross_chain::supported_on(network)),
         ],
-        Some(stablecoin),
+        (!usd).then_some(stablecoin),
         Message::FocusAction,
     )
     .on_select(move |choice| {
@@ -383,7 +406,7 @@ fn send_kind_selector(target: SparkSendTarget, network: Network) -> Element<'sta
                 SparkSendTarget::Usdt
             }
         } else {
-            if stablecoin {
+            if stablecoin || usd {
                 SparkSendTarget::Lightning
             } else {
                 target
@@ -1711,6 +1734,7 @@ fn target_logo<'a>(target: SparkSendTarget, size: f32) -> Element<'a, Message> {
         SparkSendTarget::Lightning => asset_network_logo("btc", "lightning", size),
         SparkSendTarget::OnChain => asset_network_logo("btc", "bitcoin", size),
         SparkSendTarget::Spark => asset_network_logo("btc", "spark", size),
+        SparkSendTarget::SparkUsd => asset_network_logo("usdb", "spark", size),
         SparkSendTarget::Usdt => asset_logo("usdt")
             .width(Length::Fixed(size))
             .height(Length::Fixed(size))
@@ -1883,6 +1907,7 @@ fn target_action_id(target: SparkSendTarget) -> &'static str {
         SparkSendTarget::Lightning => "spark-send-target-lightning",
         SparkSendTarget::OnChain => "spark-send-target-on-chain",
         SparkSendTarget::Spark => "spark-send-target-spark",
+        SparkSendTarget::SparkUsd => "spark-send-target-spark-us-dollar",
         SparkSendTarget::Usdt => "spark-send-target-usdt",
         SparkSendTarget::Usdc => "spark-send-target-usdc",
     }
@@ -2017,11 +2042,12 @@ fn spark_send_cards<'a>(
             .push(text(label).size(H5_SIZE).bold().style(theme::text::primary))
     };
 
-    // A stablecoin send is BTC-funded cross-chain, so only bitcoin rails
-    // offer a choice of balance (S4).
-    let choose = !target.is_stablecoin();
+    // A stablecoin send is BTC-funded cross-chain and US Dollar over Spark
+    // moves US Dollar, so only bitcoin rails offer a choice of balance (S4).
+    let choose = target.fixed_pay_from().is_none();
+    let pay_from = target.fixed_pay_from().unwrap_or(pay_from);
     let (logo, label, badge): (Element<'a, Message>, &'static str, &'static str) = match pay_from {
-        coincube_spark_protocol::WalletAsset::Usdb if choose => (
+        coincube_spark_protocol::WalletAsset::Usdb => (
             asset_logo("usdb")
                 .width(Length::Fixed(40.0))
                 .height(Length::Fixed(40.0))
@@ -2171,6 +2197,18 @@ pub fn send_target_picker_modal<'a>(
         SparkSendTarget::Spark,
     ] {
         list = list.push(row(target));
+    }
+
+    // USDB is a mainnet token, so US Dollar over Spark is offered there only.
+    if network == Network::Bitcoin {
+        list = list
+            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(
+                text(localized_copy("US Dollar"))
+                    .size(P2_SIZE)
+                    .style(theme::text::secondary),
+            )
+            .push(row(SparkSendTarget::SparkUsd));
     }
 
     // Cross-chain stablecoins are mainnet-only (providers/chains have no test

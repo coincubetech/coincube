@@ -52,10 +52,10 @@ use coincube_spark_protocol::{
     ListPaymentsParams, ListUnclaimedDepositsOk, Method, OkPayload, ParseInputOk, ParseInputParams,
     PrepareCrossChainParams, PrepareLnurlPayFromParams, PrepareLnurlPayParams, PrepareSendFromOk,
     PrepareSendFromParams, PrepareSendOk, PrepareSendParams, PrepareSwapOk, PrepareSwapParams,
-    ReceiveBolt11Params, ReceiveOnchainParams, ReceivePaymentOk, RegisterLightningAddressParams,
-    Request, Response, ResponseResult, SendPaymentOk, SendPaymentParams, SetAutoConvertParams,
-    SetStableBalanceParams, SwapAmount, SwapOk, SwapParams, TokenPayment, WalletAsset,
-    CONVERSION_MAX_SLIPPAGE_BPS,
+    PrepareUsdbSendParams, ReceiveBolt11Params, ReceiveOnchainParams, ReceivePaymentOk,
+    RegisterLightningAddressParams, Request, Response, ResponseResult, SendPaymentOk,
+    SendPaymentParams, SetAutoConvertParams, SetStableBalanceParams, SwapAmount, SwapOk,
+    SwapParams, TokenPayment, WalletAsset, CONVERSION_MAX_SLIPPAGE_BPS,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -1020,6 +1020,39 @@ impl SparkClient {
         }
     }
 
+    /// Send `amount` USDB base units from the USDB balance to the Spark
+    /// address `input`. The preview's handle executes through
+    /// [`Self::send_payment`].
+    ///
+    /// Only a direct USDB transfer to a Spark address of exactly `amount`,
+    /// disclosed as [`PrepareSendFromOk::token_payment`], is accepted.
+    pub async fn prepare_usdb_send(
+        &self,
+        input: String,
+        amount: u128,
+    ) -> Result<PrepareSendFromOk, SparkClientError> {
+        match self
+            .request(Method::PrepareUsdbSend(PrepareUsdbSendParams {
+                input,
+                amount,
+            }))
+            .await?
+        {
+            OkPayload::PrepareSendFrom(ok) => {
+                check_usdb_send(&ok, amount).map_err(|reason| {
+                    SparkClientError::Protocol(format!(
+                        "prepare_usdb_send returned an inconsistent preview: {reason}"
+                    ))
+                })?;
+                Ok(ok)
+            }
+            other => Err(SparkClientError::Protocol(format!(
+                "prepare_usdb_send returned unexpected payload: {:?}",
+                other
+            ))),
+        }
+    }
+
     /// A client with no bridge behind it: every request fails at once.
     #[cfg(test)]
     pub(crate) fn disconnected_for_test() -> Self {
@@ -1478,7 +1511,7 @@ fn check_send_from(ok: &PrepareSendFromOk, pay_from: WalletAsset) -> Result<(), 
         ));
     }
     if let Some(payment) = &ok.token_payment {
-        return check_token_payment(ok, payment);
+        return check_token_payment(ok, payment, "SparkInvoice");
     }
     // A conversion is the only token leg these methods prepare, so the two
     // come together.
@@ -1499,10 +1532,31 @@ fn check_send_from(ok: &PrepareSendFromOk, pay_from: WalletAsset) -> Result<(), 
     }
 }
 
-/// Check the one token leg a pay-from preview may carry without a
-/// conversion: a USDB invoice paid from USDB, with its figures in USDB and
-/// none in sats, so Review can't show token base units as a bitcoin payment.
-fn check_token_payment(ok: &PrepareSendFromOk, payment: &TokenPayment) -> Result<(), String> {
+/// Check a [`SparkClient::prepare_usdb_send`] preview: a USDB transfer to a
+/// Spark address that pays the recipient exactly the `amount` asked.
+fn check_usdb_send(ok: &PrepareSendFromOk, amount: u128) -> Result<(), String> {
+    let Some(payment) = &ok.token_payment else {
+        return Err("no token payment".to_string());
+    };
+    check_token_payment(ok, payment, "SparkAddress")?;
+    if payment.amount.amount != amount {
+        return Err(format!(
+            "a token payment of {}, asked for {amount}",
+            payment.amount.amount
+        ));
+    }
+    Ok(())
+}
+
+/// Check the token leg a preview may carry without a conversion: USDB paid
+/// from USDB by `method` (a USDB invoice, or a Spark address), with its
+/// figures in USDB and none in sats, so Review can't show token base units
+/// as a bitcoin payment.
+fn check_token_payment(
+    ok: &PrepareSendFromOk,
+    payment: &TokenPayment,
+    method: &str,
+) -> Result<(), String> {
     if ok.pay_from != WalletAsset::Usdb {
         return Err(format!("a token payment from {:?}", ok.pay_from));
     }
@@ -1513,7 +1567,7 @@ fn check_token_payment(ok: &PrepareSendFromOk, payment: &TokenPayment) -> Result
     if ok.prepare.has_token_leg != Some(true) {
         return Err("a token payment without a token leg".to_string());
     }
-    if ok.prepare.method != "SparkInvoice" || ok.prepare.cross_chain.is_some() {
+    if ok.prepare.method != method || ok.prepare.cross_chain.is_some() {
         return Err(format!("a token payment by {}", ok.prepare.method));
     }
     if payment.amount.asset != WalletAsset::Usdb || payment.fee.asset != WalletAsset::Usdb {
@@ -2430,6 +2484,50 @@ mod p0_contract_tests {
         }
         // Asked to pay from bitcoin, a USDB-paid preview is refused first.
         assert!(check_send_from(&ok, Bitcoin).is_err());
+        // An address-shaped token payment isn't what `prepare_send_from` pays.
+        let mut by_address = usdb_invoice_from_usdb();
+        by_address.prepare.method = "SparkAddress".to_string();
+        assert!(check_send_from(&by_address, Usdb).is_err());
+    }
+
+    /// The preview the bridge returns for a USDB send to a Spark address.
+    fn usdb_to_address() -> PrepareSendFromOk {
+        let mut ok = usdb_invoice_from_usdb();
+        ok.prepare.method = "SparkAddress".to_string();
+        ok
+    }
+
+    #[test]
+    fn a_usdb_address_send_pays_exactly_the_amount_asked() {
+        assert_eq!(check_usdb_send(&usdb_to_address(), 2_500_000), Ok(()));
+
+        type Mutation = (&'static str, fn(&mut PrepareSendFromOk));
+        let mutations: [Mutation; 6] = [
+            ("asked for", |_| {}),
+            ("no token payment", |ok| ok.token_payment = None),
+            ("by SparkInvoice", |ok| {
+                ok.prepare.method = "SparkInvoice".to_string()
+            }),
+            ("token payment from Bitcoin", |ok| {
+                ok.pay_from = WalletAsset::Bitcoin
+            }),
+            ("with a conversion", |ok| {
+                ok.conversion = Some(Box::new(quote(WalletAsset::Usdb)))
+            }),
+            ("sats figures", |ok| ok.prepare.fee_sat = 1),
+        ];
+        for (why, mutate) in mutations {
+            let mut bad = usdb_to_address();
+            mutate(&mut bad);
+            // The unmutated case is checked against a different amount.
+            let asked = if why == "asked for" {
+                2_000_000
+            } else {
+                2_500_000
+            };
+            let err = check_usdb_send(&bad, asked).expect_err(why);
+            assert!(err.contains(why), "{}: {}", why, err);
+        }
     }
 
     #[test]
@@ -3063,6 +3161,22 @@ mod p0_contract_tests {
         assert_eq!(params.comment.as_deref(), Some("thanks"));
         assert_eq!(params.pay_from, WalletAsset::Usdb);
         assert!(result.expect("preview").conversion.is_some());
+
+        let (result, method) = tokio::join!(
+            client.prepare_usdb_send("spark1".to_string(), 2_500_000),
+            bridge_answers(
+                &client,
+                &mut requests,
+                Some(OkPayload::PrepareSendFrom(usdb_to_address()))
+            )
+        );
+        let Method::PrepareUsdbSend(params) = method else {
+            panic!("expected prepare_usdb_send, got {:?}", method);
+        };
+        assert_eq!(params.input, "spark1");
+        assert_eq!(params.amount, 2_500_000);
+        let preview = result.expect("preview");
+        assert_eq!(preview.prepare.method, "SparkAddress");
 
         // The legacy payload for a new method is a protocol error, not a
         // preview with the conversion silently missing.
