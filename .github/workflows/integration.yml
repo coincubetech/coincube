@@ -75,7 +75,7 @@ jobs:
         run: pip install --break-system-packages -r tests/requirements.txt
 
       - name: Add local bin to PATH
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Cache target/
         uses: actions/cache@v5
@@ -111,7 +111,9 @@ jobs:
             curl -O $KNOTS_DIR/$KNOTS_ARCHIVE
             curl -O $KNOTS_DIR/SHA256SUMS
             curl -O $KNOTS_DIR/SHA256SUMS.asc
-            gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys $KNOTS_KEY
+            # Use the desktop verifier's pinned key, avoiding a keyserver
+            # dependency while retaining the exact VALIDSIG fingerprint below.
+            gpg --batch --import coincube-gui/assets/knots_signing_key.asc
             # The detached signature file is a concatenation from several
             # maintainers. GPG exits non-zero when any signer key is missing,
             # even after the pinned signer verifies successfully, so require
