@@ -133,6 +133,14 @@ pub(super) fn update_deriv_indexes(
     control: &DaemonControl,
     params: Params,
 ) -> Result<serde_json::Value, Error> {
+    let (receive, change) = parse_derivation_indexes(&params)?;
+    Ok(serde_json::json!(
+        control.update_deriv_indexes(receive, change)?
+    ))
+}
+
+/// Parse optional indexes, accepting the explicit JSON nulls sent by the GUI.
+fn parse_derivation_indexes(params: &Params) -> Result<(Option<u32>, Option<u32>), Error> {
     let receive = params.get(0, "receive");
     let change = params.get(1, "change");
 
@@ -143,6 +151,7 @@ pub(super) fn update_deriv_indexes(
     }
 
     let receive = match receive {
+        Some(i) if i.is_null() => None,
         Some(i) => {
             let res = i.as_i64().ok_or(Error::invalid_params(
                 "Invalid value for 'receive' param".to_string(),
@@ -156,6 +165,7 @@ pub(super) fn update_deriv_indexes(
     };
 
     let change = match change {
+        Some(i) if i.is_null() => None,
         Some(i) => {
             let res = i.as_i64().ok_or(Error::invalid_params(
                 "Invalid value for 'change' param".to_string(),
@@ -168,9 +178,7 @@ pub(super) fn update_deriv_indexes(
         None => None,
     };
 
-    Ok(serde_json::json!(
-        control.update_deriv_indexes(receive, change)?
-    ))
+    Ok((receive, change))
 }
 
 pub(super) fn list_confirmed(
@@ -239,6 +247,39 @@ pub(super) fn start_rescan(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn derivation_indexes_accept_gui_nulls_without_weakening_validation() {
+        for (receive, change) in [
+            (None, None),
+            (Some(7u32), None),
+            (None, Some(8u32)),
+            (Some(7), Some(8)),
+        ] {
+            for supplied in [
+                json!([receive, change]),
+                json!({"receive": receive, "change": change}),
+            ] {
+                let params = serde_json::from_value::<Params>(supplied).unwrap();
+                assert_eq!(
+                    parse_derivation_indexes(&params).unwrap(),
+                    (receive, change)
+                );
+            }
+        }
+        for supplied in [
+            json!([]),
+            json!({}),
+            json!([-1, null]),
+            json!([null, -1]),
+            json!([1.5, null]),
+            json!([null, "1"]),
+            json!([u64::MAX, null]),
+        ] {
+            let params = serde_json::from_value::<Params>(supplied).unwrap();
+            assert!(parse_derivation_indexes(&params).is_err());
+        }
+    }
 
     #[test]
     fn optional_address_bounds_preserve_named_and_positional_semantics() {
