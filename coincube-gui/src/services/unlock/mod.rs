@@ -249,9 +249,8 @@ pub struct CubeLocation<'a> {
     /// without looking at the folder.
     ///
     /// Carried rather than inferred because the folder cannot answer it. A
-    /// passkey Cube's Vault *hot signer* is a seed file like any other, and in
-    /// developer mode — where the installer's signer is a clone of the Cube
-    /// master signer — that file's name carries the Cube's own master
+    /// passkey Cube's Vault *hot signer* is a seed file like any other. When
+    /// the Vault uses its Cube Key, that file's name carries the Cube's master
     /// fingerprint. The fingerprint branch below matches on the name, so
     /// without this flag it would hand back a Vault seed as if it were the
     /// Cube's master seed, and [`pin_requirement`] would answer `Required` for
@@ -327,7 +326,7 @@ pub fn master_seed_path(loc: &CubeLocation) -> Option<PathBuf> {
     // A passkey Cube has no master seed file — the seed comes from the
     // assertion, never from disk — so the answer is `None` before the folder is
     // even opened. Anything found there belongs to something else (a Vault hot
-    // signer), and in developer mode that file carries this Cube's own master
+    // signer); a Cube-derived Vault key carries this Cube's own master
     // fingerprint, which the branch below would otherwise match on. See
     // `CubeLocation::is_passkey`.
     if loc.is_passkey {
@@ -2785,8 +2784,7 @@ mod tests {
     /// and the folder alone cannot prove that, which is why `is_passkey` is
     /// carried rather than inferred.
     ///
-    /// The concrete failure this pins: in developer mode the Vault installer's
-    /// signer is a clone of the Cube master signer, so the Vault's hot-signer
+    /// The concrete failure this pins: a Cube-derived Vault key's hot-signer
     /// seed file is named with the Cube's *own* master fingerprint. The
     /// fingerprint branch of `master_seed_path` matches on that name, so
     /// without the flag it hands back a Vault seed as the Cube's master seed
@@ -2852,7 +2850,7 @@ mod tests {
         let dir = tmp_dir("passkey-no-master-seed");
         let cube_id = format!("cube-passkey-{}", std::process::id());
 
-        // Exactly the developer-mode shape: a seed file carrying the Cube's own
+        // A Cube-derived Vault key: a seed file carrying the Cube's own
         // master fingerprint, encrypted, sitting in the shared folder.
         let fp = make_cube(&dir, &cube_id, 1000, "1234");
 
