@@ -45,7 +45,6 @@ impl Location {
     pub fn transaction_supported(&self) -> bool {
         self.binding.chain.parse::<coincube_mcp::Chain>().is_ok()
     }
-    #[cfg(feature = "mcp-proposals")]
     pub fn chain(&self) -> Option<crate::chain::ChainId> {
         self.binding.chain.parse().ok()
     }
