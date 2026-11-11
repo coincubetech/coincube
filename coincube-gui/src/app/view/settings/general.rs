@@ -316,7 +316,7 @@ fn payment_checks_section<'a>(
         .width(Length::Fill)
         .push(page::group(
             localized_copy("Recipient checks"),
-            Some("Before you send, Tenshu asks Branta whether the recipient is verified. This applies to every Cube on this device.".into()),
+            Some("Before you send, Tenshu asks Branta whether it can identify the recipient. This applies to every Cube on this device.".into()),
             page::rows(rows),
         ))
         .push(page::caption(
