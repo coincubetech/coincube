@@ -548,7 +548,7 @@ pub fn create_spend_tx<'a>(
     batch_label: &form::Value<String>,
     amount_left: Option<&Amount>,
     draft_warning: Option<String>,
-    tamper_warning: Option<String>,
+    blocking_warning: Option<String>,
     feerate: &form::Value<String>,
     fee_amount: Option<&Amount>,
     sync_status: &SyncStatus,
@@ -575,16 +575,17 @@ pub fn create_spend_tx<'a>(
     };
 
     let can_proceed = is_valid
-        && tamper_warning.is_none()
+        && blocking_warning.is_none()
         && !duplicate
         && (is_self_send
             || recovery_timelock.is_some()
             || Some(&Amount::from_sat(0)) == amount_left);
 
-    // A Branta tamper result blocks the send with the draft fully selected
-    // (`amount_left == Some(0)`), so it must win over every other hint.
-    let disabled_hint: Option<String> = if tamper_warning.is_some() {
-        tamper_warning
+    // A Branta tamper result or a BIP21 amount mismatch blocks the send with
+    // the draft fully selected (`amount_left == Some(0)`), so it must win over
+    // every other hint.
+    let disabled_hint: Option<String> = if blocking_warning.is_some() {
+        blocking_warning
     } else if can_proceed {
         None
     } else if feerate.value.is_empty() {
@@ -1510,7 +1511,7 @@ mod tests {
         recovery: bool,
         amount_left: Option<u64>,
         draft_warning: Option<&'static str>,
-        tamper_warning: Option<&'static str>,
+        blocking_warning: Option<&'static str>,
         feerate: (&'static str, bool),
         fee: bool,
         first_step: bool,
@@ -1540,7 +1541,7 @@ mod tests {
                 recovery: false,
                 amount_left: Some(0),
                 draft_warning: None,
-                tamper_warning: None,
+                blocking_warning: None,
                 feerate: ("5", true),
                 fee: false,
                 first_step: true,
@@ -1609,7 +1610,7 @@ mod tests {
             &fixture.batch_label,
             amount_left.as_ref(),
             s.draft_warning.map(String::from),
-            s.tamper_warning.map(String::from),
+            s.blocking_warning.map(String::from),
             &feerate,
             s.fee.then_some(&fixture.fee),
             &fixture.sync_status,
@@ -2545,7 +2546,7 @@ mod tests {
                 is_valid: false,
                 recovery,
                 amount_left: Some(0),
-                tamper_warning: Some(TAMPER),
+                blocking_warning: Some(TAMPER),
                 ..Scenario::valid_send()
             };
             let probe = Harness::new(compose(&fixture, &scenario), TALL).probe();

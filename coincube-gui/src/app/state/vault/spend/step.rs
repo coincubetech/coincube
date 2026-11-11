@@ -26,6 +26,7 @@ use iced::{Subscription, Task};
 static PREPARATION_ID: AtomicU64 = AtomicU64::new(1);
 static FEE_ESTIMATE_ID: AtomicU64 = AtomicU64::new(1);
 const TAMPER_WARNING: &str = "This payment request’s address does not match its verification data. Do not send. Return and replace the payment request.";
+const AMOUNT_MISMATCH_WARNING: &str = "The prepared amount does not match the Bitcoin payment request. Return and resolve the amount before sending.";
 
 use coincube_ui::{
     component::{
@@ -383,6 +384,21 @@ impl DefineSpend {
             && self.form_values_are_valid(false)
             && self.coins.iter().any(|(_, selected)| *selected);
         self.is_duplicate = self.exists_duplicate();
+    }
+
+    /// A warning that blocks Prepare whatever the draft's coin selection says:
+    /// an authenticated Branta tamper result, or a prepared output that does
+    /// not honour the BIP21 amount. A later successful redraft clears the
+    /// latter with `warning`.
+    fn blocking_warning(&self) -> Option<String> {
+        if self.tampered {
+            Some(TAMPER_WARNING.to_string())
+        } else {
+            self.warning
+                .as_ref()
+                .filter(|warning| is_amount_mismatch(warning))
+                .map(|_| AMOUNT_MISMATCH_WARNING.to_string())
+        }
     }
     /// Schedule a debounced redraft. Bumps the generation token and returns a
     /// task that, after a short delay, fires `Message::RedraftDebounce` with
@@ -1150,6 +1166,12 @@ impl Step for DefineSpend {
                         self.generated = Some((psbt, warnings));
                         return Task::done(Message::View(view::Message::Next));
                     }
+                    // Shown as the compose hint; the generic error toast would
+                    // hide why, and preparing again cannot change the outcome.
+                    Err(e) if is_amount_mismatch(&e) => {
+                        self.warning = Some(e);
+                        return Task::none();
+                    }
                     Err(e) => {
                         let err_msg = crate::user_error::report(&e);
                         self.warning = Some(e);
@@ -1297,6 +1319,7 @@ impl Step for DefineSpend {
         let insufficient = self.recovery_timelock.is_none()
             && self.coins.iter().any(|(_, selected)| *selected)
             && self.amount_left_to_select.is_some_and(|a| a.to_sat() != 0);
+        let blocking_warning = self.blocking_warning();
         view::vault::spend::create_spend_tx(
             &self.balance,
             &self.unconfirmed_balance,
@@ -1326,12 +1349,12 @@ impl Step for DefineSpend {
             &self.coins_labels,
             &self.batch_label,
             self.amount_left_to_select.as_ref(),
-            if self.tampered {
+            if blocking_warning.is_some() {
                 None
             } else {
                 self.warning.as_ref().map(|e| e.to_string())
             },
-            self.tampered.then(|| TAMPER_WARNING.to_string()),
+            blocking_warning,
             &self.feerate,
             self.fee_amount.as_ref(),
             &self.sync_status,
@@ -1436,6 +1459,10 @@ fn associate_recipients(recipients: &[Recipient], psbt: &Psbt) -> Option<Vec<usi
 /// Unlike optional identity metadata, an explicit BIP21 amount constrains the
 /// payment itself. Check the actual prepared outputs even when Branta is disabled
 /// or a recovery/send-max amount changed after the form's earlier redraft.
+fn is_amount_mismatch(error: &Error) -> bool {
+    matches!(error, Error::Unexpected(message) if message == AMOUNT_MISMATCH_WARNING)
+}
+
 fn validate_requested_amounts(recipients: &[Recipient], psbt: &Psbt) -> Result<(), Error> {
     let mut used = HashSet::new();
     for recipient in recipients {
@@ -1443,10 +1470,18 @@ fn validate_requested_amounts(recipients: &[Recipient], psbt: &Psbt) -> Result<(
             continue;
         };
         let address = address.assume_checked();
-        let output = psbt.unsigned_tx.output.iter().enumerate().find(|(index, output)|
-            !used.contains(index) && output.value == amount && address.matches_script_pubkey(&output.script_pubkey))
-            .map(|(index, _)| index).ok_or_else(|| Error::Unexpected(
-                "The prepared amount does not match the Bitcoin payment request. Return and resolve the amount before sending.".to_string()))?;
+        let output = psbt
+            .unsigned_tx
+            .output
+            .iter()
+            .enumerate()
+            .find(|(index, output)| {
+                !used.contains(index)
+                    && output.value == amount
+                    && address.matches_script_pubkey(&output.script_pubkey)
+            })
+            .map(|(index, _)| index)
+            .ok_or_else(|| Error::Unexpected(AMOUNT_MISMATCH_WARNING.to_string()))?;
         used.insert(output);
     }
     Ok(())
@@ -3230,12 +3265,53 @@ mod tests {
                 );
                 assert!(!state.can_advance());
                 assert!(state.generated.is_none());
-                assert!(state.warning.is_some());
+                assert_eq!(
+                    state.blocking_warning().as_deref(),
+                    Some(AMOUNT_MISMATCH_WARNING)
+                );
                 assert!(
                     !state.tampered,
                     "amount disagreement is distinct from authenticated tampering"
                 );
             }
         }
+    }
+
+    /// Preparation itself rejects a BIP21 amount mismatch. Its reason must
+    /// become the compose hint, not the generic "Something went wrong" toast.
+    #[tokio::test]
+    async fn a_prepared_bip21_amount_mismatch_is_the_blocking_hint_not_a_generic_toast() {
+        use iced::futures::StreamExt;
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        state.generating = true;
+        let task = state.update(
+            daemon,
+            &Cache::default(),
+            Message::VaultSpendPrepared {
+                generation: state.preparation_id,
+                result: Err(Error::Unexpected(AMOUNT_MISMATCH_WARNING.to_string())),
+                identities: vec![],
+            },
+        );
+        if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+            while let Some(action) = stream.next().await {
+                assert!(
+                    !matches!(
+                        action,
+                        iced_runtime::Action::Output(Message::View(view::Message::ShowError(_)))
+                    ),
+                    "the mismatch must not be reported as a generic error"
+                );
+            }
+        }
+        assert!(!state.can_advance());
+        assert_eq!(
+            state.blocking_warning().as_deref(),
+            Some(AMOUNT_MISMATCH_WARNING)
+        );
+        assert!(!state.tampered);
     }
 }
