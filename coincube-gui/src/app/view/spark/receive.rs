@@ -807,10 +807,17 @@ fn spark_receive_cards<'a>(
                             .style(theme::text::primary),
                     ),
             )
+            // A cross-network swap has a min/max (shown next to its deposit
+            // address), so "Any amount" would be wrong there; keep the line's
+            // height so the card doesn't jump when switching.
             .push(
-                text(localized_copy("Any amount"))
-                    .size(P2_SIZE)
-                    .style(theme::text::secondary),
+                text(if cross.is_some() {
+                    ""
+                } else {
+                    localized_copy("Any amount")
+                })
+                .size(P2_SIZE)
+                .style(theme::text::secondary),
             )
             .push(orange_badge("SPARK")),
     )
