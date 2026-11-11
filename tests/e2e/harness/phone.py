@@ -94,7 +94,7 @@ def stop_owned(process):
 
 
 @contextmanager
-def attach(config):
+def attach(config, *, strict=None):
     from appium import webdriver
     from appium.options.ios import XCUITestOptions
     from appium.webdriver.client_config import AppiumClientConfig
@@ -169,9 +169,12 @@ def attach(config):
         })
         client_config = AppiumClientConfig(remote_server_addr=url, timeout=30)
         driver = webdriver.Remote(options=options, client_config=client_config)
-        driver.activate_app(BUNDLE)
         phone = Phone(driver, build)
         phone.device_digest = hashlib.sha256(device["hardwareProperties"]["udid"].encode()).hexdigest()
+        if strict:
+            strict.bind_phone(phone)
+        else:
+            driver.activate_app(BUNDLE)
         yield phone
     except Blocked:
         raise
@@ -194,8 +197,11 @@ def attach(config):
 class Phone:
     def __init__(self, driver, build):
         self.driver, self.build = driver, build
+        self.strict = None
 
     def labels(self):
+        if self.strict:
+            self.strict.observe()
         if self.driver.execute_script("mobile: activeAppInfo").get("bundleId") != BUNDLE:
             raise Blocked("PHONE_AUTH", "Keychain yielded to an OS authentication prompt; unattended signing cannot proceed.")
         root = ElementTree.fromstring(self.driver.page_source)
@@ -227,6 +233,8 @@ class Phone:
             time.sleep(.25)
 
     def refresh(self):
+        if self.strict:
+            self.strict.before_refresh()
         self.driver.execute_script("mobile: swipe", {"direction": "down"})
 
     def matching_cards(self, title, *, container=False):
@@ -257,6 +265,8 @@ class Phone:
 
     def home_key_card(self, title, timeout=15):
         """Refresh Home's key list and reveal its exact horizontal PageView card."""
+        if self.strict:
+            self.strict.before_navigation()
         from appium.webdriver.common.appiumby import AppiumBy
         until = time.monotonic() + timeout
 
@@ -351,6 +361,8 @@ class Phone:
         return False
 
     def restore_navigation(self):
+        if self.strict:
+            self.strict.before_navigation()
         # noReset preserves the route left by a previous attempt. Only dismiss
         # completed results or navigate back; never approve, reject, retry, or
         # enter credentials while reconciling an interrupted run.
@@ -373,6 +385,8 @@ class Phone:
                 # Key details exposes its decorative Back child as disabled
                 # through XCTest. This persisted route has no pending ceremony;
                 # relaunch without reset instead of guessing a parent tap.
+                if self.strict:
+                    self.strict.reject_restart()
                 self.driver.terminate_app(BUNDLE)
                 self.driver.activate_app(BUNDLE)
                 restarted = True
@@ -383,6 +397,8 @@ class Phone:
                 # only this known route instead of guessing coordinates or
                 # tapping an unrelated control. Flutter starts at '/', and
                 # persisted login/keys are retained (noReset).
+                if self.strict:
+                    self.strict.reject_restart()
                 self.driver.terminate_app(BUNDLE)
                 self.driver.activate_app(BUNDLE)
                 restarted = True
@@ -428,6 +444,8 @@ class Phone:
                 "observation": "visible_capacity_modal"}
 
     def restart_for_key_generation(self, journal, receipt):
+        if self.strict:
+            self.strict.reject_restart()
         if (self.build != 38 or receipt.get("creation_started") or receipt.get("pin_entered")
                 or receipt.get("phase") not in {"planned", "process_stopped", "ready_for_reconciliation", "reserved"}):
             raise Blocked("KEY_GENERATION_UNCERTAIN", "The one-time key generation process boundary cannot be replayed after dispatch.")
@@ -447,6 +465,8 @@ class Phone:
         journal.artifact("key_generation_recovery", deepcopy(receipt))
 
     def restart_for_request_discovery(self, journal, receipt, *, before_restart):
+        if self.strict:
+            self.strict.reject_restart()
         if "request_discovery_restart" in journal.data["artifacts"]:
             raise Blocked("REQUEST_DISCOVERY_UNCERTAIN", "The run's single discovery restart was already attempted.")
         from appium.webdriver.common.appiumby import AppiumBy
@@ -499,6 +519,8 @@ class Phone:
         return True
 
     def restart_for_upgrade(self, journal, receipt):
+        if self.strict:
+            self.strict.reject_restart()
         if (self.build < 38 or self.build <= receipt["original_build"]
                 or receipt["current_build"] != self.build
                 or receipt["phase"] not in {"planned", "process_stopped", "ready_for_review"}):
@@ -558,20 +580,33 @@ class Phone:
         self.require_empty_pin(session_id)
         if not before_pin():
             return False
-        self.verify_pin_resume(journal, session_id=session_id)
+        if self.strict:
+            self.strict.probe(request_id, session_id, timeout=30)
+        else:
+            self.verify_pin_resume(journal, session_id=session_id)
         if self.approval_context(request_id, session_id, intent, fee_sats, journal) != expected:
             raise Blocked("PIN_PROCESS", "The Keychain process changed across the PIN lifecycle probe.")
         self.require_empty_pin(session_id)
         if not before_pin():
             return False
-        journal.artifact("pin_dispatch_started", {"context": deepcopy(expected)})
+        dispatch = {"context": deepcopy(expected)}
+        if self.strict:
+            dispatch["strict_scope"] = self.strict.assert_live_probe(request_id, session_id)
+        journal.artifact("pin_dispatch_started", dispatch)
         # The provider persists the encrypted credential's pending-purpose
         # marker before returning the PIN. Any later exception is unretryable.
         pin = pin_provider()
         if len(pin) != 6 or not pin.isascii() or not pin.isdigit():
             raise Blocked("SIGNER_PIN", "The private signing PIN must contain six digits.")
-        for digit in pin:
+        if self.strict:
+            self.strict.assert_live_probe(request_id, session_id)
+        for index, digit in enumerate(pin):
+            if self.strict:
+                self.strict.assert_live_probe(request_id, session_id, empty=index == 0)
             self.click(digit)
+        if self.strict:
+            self.strict.observe()
+            journal.artifact("strict_pin_input", {"context": deepcopy(expected), "scope": dispatch["strict_scope"], "completed": True})
         return True
 
     def wait_signed(self, timeout):
@@ -590,6 +625,8 @@ class Phone:
             self.wait_signed(timeout)
 
     def verify_pin_resume(self, journal, *, session_id=None):
+        if self.strict:
+            self.strict.reject_restart()
         # Observe lifecycle survival only. Resume reconnects the stream, but
         # does not prove Home's FetchPendingSessionsEvent actually ran.
         journal.artifact("pin_resume_probe", {"status": "started", "trigger": "background_resume"})
@@ -611,6 +648,8 @@ class Phone:
     def approve(self, request_id, intent, fee_sats, pin_file, journal, timeout, *, pin_provider=None, probe_pin_resume=False,
                 session_id=None, before_approve=None, before_pin=None, reapproval=False):
         artifacts = journal.data["artifacts"]
+        if self.strict and (reapproval or not session_id):
+            self.strict.reject_restart()
         receipt = artifacts.get("approval_upgrade_recovery", {})
         if reapproval and (not session_id or receipt.get("phase") != "ready_for_review"
                            or receipt.get("binding") != artifacts.get("approval_binding")
@@ -625,9 +664,12 @@ class Phone:
             raise Blocked("APPROVAL_UNCERTAIN", "An earlier approval attempt must be reconciled before any phone navigation.")
         note = "Testnet4 QA " + request_id
         until = time.monotonic() + timeout
-        self.restore_navigation()
-        self.click("Home")
-        self.refresh()
+        if self.strict:
+            self.strict.require_delivery(request_id, session_id)
+        else:
+            self.restore_navigation()
+            self.click("Home")
+            self.refresh()
         while True:
             labels = self.labels()
             if self.dismiss_incoming(labels):
