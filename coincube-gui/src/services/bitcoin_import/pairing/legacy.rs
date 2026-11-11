@@ -102,14 +102,7 @@ pub(crate) fn refuse_conflicting_claim(
         }
         let data = network.coincubed_data_directory(&wallet);
         if data.path() == intended.path() {
-            if saved.cubes.iter().any(|cube| {
-                cube_wallet(cube).is_some_and(|id| {
-                    network.coincubed_data_directory(id).path() == intended.path()
-                        && cube.id != target_cube
-                })
-            }) {
-                return refused();
-            }
+            check_current_target_owner(&saved, &network, &intended, target_cube)?;
             continue;
         }
         let directory = data.path().join("split").join(source.digest().to_string());
@@ -122,42 +115,64 @@ pub(crate) fn refuse_conflicting_claim(
         {
             return refused();
         }
-        match claim_workflow::peek_split_journal(&directory)
-            .map_err(|_| RESUME_EXISTING.to_string())?
-        {
-            Some(summary) => {
-                let owners: Vec<_> = saved
-                    .cubes
-                    .iter()
-                    .filter(|cube| {
-                        cube.id == summary.target_cube && cube_wallet(cube) == Some(&wallet)
-                    })
-                    .collect();
-                if summary.source_digest != source.digest()
-                    || owners.len() != 1
-                    || !recorded_complete(&summary, owners[0])
-                {
-                    return refused();
-                }
+        check_existing_claim_record(&saved, source, &wallet, &directory)?;
+    }
+    Ok(())
+}
+
+fn check_current_target_owner(
+    saved: &Settings,
+    network: &crate::dir::NetworkDirectory,
+    intended: &coincubed::datadir::DataDirectory,
+    target_cube: &str,
+) -> Result<(), String> {
+    if saved.cubes.iter().any(|cube| {
+        cube_wallet(cube).is_some_and(|id| {
+            network.coincubed_data_directory(id).path() == intended.path() && cube.id != target_cube
+        })
+    }) {
+        return refused();
+    }
+    Ok(())
+}
+
+fn check_existing_claim_record(
+    saved: &Settings,
+    source: &SplitSource,
+    wallet: &WalletId,
+    directory: &Path,
+) -> Result<(), String> {
+    match claim_workflow::peek_split_journal(directory).map_err(|_| RESUME_EXISTING.to_string())? {
+        Some(summary) => {
+            let owners: Vec<_> = saved
+                .cubes
+                .iter()
+                .filter(|cube| cube.id == summary.target_cube && cube_wallet(cube) == Some(wallet))
+                .collect();
+            if summary.source_digest != source.digest()
+                || owners.len() != 1
+                || !recorded_complete(&summary, owners[0])
+            {
+                return refused();
             }
-            None => {
-                if let Some(reservation) = claim_workflow::peek_split_funding(&directory)
-                    .map_err(|_| RESUME_EXISTING.to_string())?
+        }
+        None => {
+            if let Some(reservation) = claim_workflow::peek_split_funding(directory)
+                .map_err(|_| RESUME_EXISTING.to_string())?
+            {
+                // The reader validates the descriptors against this digest.
+                // Even a not-yet-released reservation owns these indices;
+                // a released reservation may already have been shown unpaid.
+                let recorded = reservation
+                    .source()
+                    .map_err(|_| RESUME_EXISTING.to_string())?;
+                if recorded.external() != source.external()
+                    || recorded.internal() != source.internal()
+                    || reservation.source_digest != source.digest()
                 {
-                    // The reader validates the descriptors against this digest.
-                    // Even a not-yet-released reservation owns these indices;
-                    // a released reservation may already have been shown unpaid.
-                    let recorded = reservation
-                        .source()
-                        .map_err(|_| RESUME_EXISTING.to_string())?;
-                    if recorded.external() != source.external()
-                        || recorded.internal() != source.internal()
-                        || reservation.source_digest != source.digest()
-                    {
-                        return refused();
-                    }
                     return refused();
                 }
+                return refused();
             }
         }
     }
