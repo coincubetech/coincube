@@ -474,6 +474,14 @@ mod tests {
                 .body(hex::encode(consensus::serialize(raw)));
         });
         let result = reconcile_side(&source, ChainId::Bitcoin, signed, 30).await;
+        assert_recovery_case(case, result, &hash, &raw_mock);
+    }
+    fn assert_recovery_case(
+        case: &str,
+        result: Result<ChainState, ReconciliationError>,
+        hash: &str,
+        raw_mock: &httpmock::Mock<'_>,
+    ) {
         match case {
             "absent" => assert_eq!(result, Ok(ChainState::Absent)),
             "exact" => assert_eq!(result, Ok(ChainState::Unconfirmed)),

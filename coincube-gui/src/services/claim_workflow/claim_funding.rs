@@ -1431,6 +1431,29 @@ async fn reserve_distinct_change_indices(
     Ok(change)
 }
 
+fn validate_recorded_change(
+    bitcoin_info: &model::GetInfoResult,
+    fork_info: &model::GetInfoResult,
+    descriptor: &CoincubeDescriptor,
+    change: ClaimChangeIndices,
+) -> Result<ClaimChangeIndices, ClaimChangeError> {
+    if change_wallet_ready(
+        bitcoin_info,
+        ChainId::Bitcoin,
+        descriptor,
+        Some(change.bitcoin),
+    ) && change_wallet_ready(
+        fork_info,
+        ChainId::BitcoinBlake2b,
+        descriptor,
+        Some(change.fork),
+    ) {
+        Ok(change)
+    } else {
+        Err(ClaimChangeError::WalletState)
+    }
+}
+
 /// Ask each wallet backend to atomically advance its own change branch, then
 /// bind the resulting two indices to the released deposit record under the
 /// Claim journal lock. An index consumed before an error is deliberately
@@ -1488,21 +1511,7 @@ pub async fn reserve_claim_change_indices(
         return Err(ClaimChangeError::WalletState);
     }
     if let Some(change) = saved.change_indices() {
-        return if change_wallet_ready(
-            &bitcoin_info,
-            ChainId::Bitcoin,
-            &descriptor,
-            Some(change.bitcoin),
-        ) && change_wallet_ready(
-            &fork_info,
-            ChainId::BitcoinBlake2b,
-            &descriptor,
-            Some(change.fork),
-        ) {
-            Ok(change)
-        } else {
-            Err(ClaimChangeError::WalletState)
-        };
+        return validate_recorded_change(&bitcoin_info, &fork_info, &descriptor, change);
     }
 
     let change = reserve_distinct_change_indices(

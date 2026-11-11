@@ -2417,6 +2417,36 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
     assert!(matches!(full_validate(&next), Err(Error::InvalidPlan)));
 }
 
+fn collect_split_references(
+    file: &str,
+    text: &str,
+    items: &[&str],
+    own: &[&str],
+    unexpected: &mut Vec<(String, String)>,
+) {
+    let mut start = None;
+    for (index, c) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
+        let word = c.is_ascii_alphanumeric() || c == '_';
+        match (word, start) {
+            (true, None) => start = Some(index),
+            (false, Some(from)) => {
+                let ident = &text[from..index];
+                if items.contains(&ident)
+                    && !own.contains(&file)
+                    && !allowed_split_reference(file, ident)
+                {
+                    unexpected.push((file.to_owned(), ident.to_owned()));
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+}
+
 fn split_panel_reference(file: &str, ident: &str) -> bool {
     // B1b: the Split step-1 panel and its tests. It is
     // started only from the sweep review under the server
@@ -2668,27 +2698,7 @@ fn split_b0_journal_api_has_no_gui_callers() {
     );
     let mut unexpected = Vec::new();
     for (file, text) in &files {
-        let mut start = None;
-        for (index, c) in text
-            .char_indices()
-            .chain(std::iter::once((text.len(), ' ')))
-        {
-            let word = c.is_ascii_alphanumeric() || c == '_';
-            match (word, start) {
-                (true, None) => start = Some(index),
-                (false, Some(from)) => {
-                    let ident = &text[from..index];
-                    if ITEMS.contains(&ident)
-                        && !OWN.contains(&file.as_str())
-                        && !allowed_split_reference(file, ident)
-                    {
-                        unexpected.push((file.clone(), ident.to_owned()));
-                    }
-                    start = None;
-                }
-                _ => {}
-            }
-        }
+        collect_split_references(file, text, &ITEMS, &OWN, &mut unexpected);
     }
     assert!(unexpected.is_empty(), "{:?}", unexpected);
 }
