@@ -6484,11 +6484,13 @@ impl App {
                         .pending_revoke()
                         .is_some_and(|(_, pending)| pending == id) =>
                 {
+                    // The Cube-wide switch is on both AI access views and
+                    // stays focusable whenever access is available or on;
+                    // "Pair a client" is hidden while the form is open and
+                    // disabled after a storage failure.
                     Some(iced::advanced::widget::Id::from(
-                        if self.mcp_proposals_supported() {
+                        if self.mcp_proposals_supported() || self.mcp_supported() {
                             "tenshu.ai-access.enable"
-                        } else if self.mcp_supported() {
-                            "tenshu.ai-access.open"
                         } else {
                             view::nav::shell::CUBE_SWITCHER_ID
                         },
@@ -6497,6 +6499,13 @@ impl App {
                 _ => None,
             };
             let requested_revoke = matches!(&message, local_mcp::Message::RequestRevokePair(_));
+            // Controls that remove themselves hand focus to what replaces them.
+            let focus_later = match &message {
+                local_mcp::Message::Pair => Some(local_mcp::FocusAfter::Pair),
+                local_mcp::Message::TogglePairing => Some(local_mcp::FocusAfter::TogglePairing),
+                local_mcp::Message::Enable(true) => Some(local_mcp::FocusAfter::Enable),
+                _ => None,
+            };
             #[cfg(feature = "mcp-transactions")]
             if let local_mcp::Message::ReviewTransaction {
                 client_id,
@@ -6601,6 +6610,8 @@ impl App {
                 &self.cube_settings.id,
             );
             self.refresh_mcp_pairings();
+            let focus_after = focus_after
+                .or_else(|| focus_later.and_then(|after| self.local_mcp.focus_after(after)));
             if let Some(id) = focus_after {
                 if !requested_revoke || self.local_mcp.pending_revoke().is_some() {
                     return iced::widget::operation::focus(id);

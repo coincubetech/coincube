@@ -117,6 +117,14 @@ pub enum Message {
     #[cfg(feature = "mcp-proposals")]
     ReviewPairedProposal(String),
 }
+/// A trusted AI access action whose control disappears once it is handled.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FocusAfter {
+    Pair,
+    TogglePairing,
+    Enable,
+}
+
 /// Native consent and active endpoints. The default grants no access.
 /// Durable authorization is encrypted; runtime access requires an unlocked Cube.
 #[derive(Default)]
@@ -167,6 +175,29 @@ pub(crate) struct PairingContext<'a> {
     pub last_poll_at_startup: Option<u32>,
 }
 impl Settings {
+    /// Where keyboard focus goes after an action removed its own control.
+    pub(crate) fn focus_after(&self, after: FocusAfter) -> Option<iced::advanced::widget::Id> {
+        use iced::advanced::widget::Id;
+        match after {
+            // A successful pairing closes the form and opens the new client.
+            FocusAfter::Pair => self
+                .managing
+                .as_ref()
+                .filter(|_| !self.pairing_open)
+                .map(|id| Id::from(format!("tenshu.ai-access.client.{id}.manage"))),
+            FocusAfter::TogglePairing if self.pairing_open => Some(Id::from(if self.enabled {
+                presentation::NAME_ID
+            } else {
+                presentation::FORM_ENABLE_ID
+            })),
+            FocusAfter::TogglePairing => Some(Id::from(presentation::PAIR_OPEN_ID)),
+            FocusAfter::Enable if self.pairing_open && self.enabled => {
+                Some(Id::from(presentation::NAME_ID))
+            }
+            FocusAfter::Enable => None,
+        }
+    }
+
     pub(crate) fn pending_revoke(&self) -> Option<(&str, &str)> {
         let id = self.revoke_confirmation.as_deref()?;
         let client = self
@@ -202,6 +233,7 @@ impl Settings {
     pub fn revoke(&mut self) {
         // Runtime suspension only. Explicit durable revocation is RevokePair.
         self.revoke_confirmation = None;
+        self.copied = None;
         self.paired.clear();
         self.revoke_legacy();
     }
@@ -1543,9 +1575,11 @@ mod tests {
             &mut renderer,
         );
         apply_task(&mut ui, &renderer, confirm);
+        // Focus returns to the Cube-wide switch, which is present whether or
+        // not the pairing form is open and after a storage failure.
         assert_eq!(
             focused(&mut ui, &renderer),
-            Some(Id::from("tenshu.ai-access.open"))
+            Some(Id::from("tenshu.ai-access.enable"))
         );
         drop(ui);
         drop(app);
@@ -2296,9 +2330,11 @@ mod tests {
             &mut renderer,
         );
         apply_task(&mut ui, &renderer, confirm);
+        // Focus returns to the Cube-wide switch, which is present whether or
+        // not the pairing form is open and after a storage failure.
         assert_eq!(
             focused(&mut ui, &renderer),
-            Some(Id::from("tenshu.ai-access.open"))
+            Some(Id::from("tenshu.ai-access.enable"))
         );
         drop(ui);
         drop(app);

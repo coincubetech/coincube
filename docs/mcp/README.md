@@ -55,8 +55,9 @@ already signed application bundle.
    The page shows this Cube's switch and Vault (with its exact chain tag), the paired
    clients, and what each kind of access allows. If the Cube has no supported Vault
    loaded, the switch reads **Unavailable for this Cube** and names the supported scope.
-2. Turn **Allow AI clients** on. This Cube-wide switch grants nothing by itself; turning
-   it off later pauses every paired client without forgetting them.
+2. Turn **Allow AI clients** on. This Cube-wide switch grants no new access by itself:
+   it resumes existing clients with their stored scope, and turning it off later pauses
+   every paired client without forgetting them.
 3. Choose **Pair a client**. Enter a **Client name**, explicitly select **This Cube's
    Vault**, then choose one kind of **Access**: **Read wallet information** (then switch
    on each part you allow: Balances, Confirmed history, Spending-policy summary) or

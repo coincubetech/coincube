@@ -299,6 +299,8 @@ fn ai_access_state_gallery() {
     // leads, every client reads Suspended, and nothing new can be paired.
     let page = render("09-revocation-unconfirmed", || view_for_cube(failed, true));
     assert!(page.contains("Pairing problem"));
+    assert!(page.contains("Every paired client is suspended"));
+    assert!(page.contains("Copying is unavailable after a pairing storage error."));
     assert!(page.contains("durable revocation is NOT confirmed"));
     assert!(page.contains("Suspended") && !page.contains("Available"));
     assert!(!page.has_focus(iced::advanced::widget::Id::new(PAIR_OPEN_ID)));
@@ -373,4 +375,70 @@ fn pairing_form_access_is_one_explicit_choice() {
         None,
         "the next client starts empty"
     );
+}
+
+/// Controls that remove themselves hand keyboard focus to their successor.
+#[test]
+fn focus_follows_controls_that_disappear() {
+    use super::super::FocusAfter;
+    use iced::advanced::widget::Id;
+    let mut settings = Settings {
+        enabled: true,
+        ..Settings::default()
+    };
+    settings.update(Message::TogglePairing, None, None, true, "focus");
+    assert_eq!(
+        settings.focus_after(FocusAfter::TogglePairing),
+        Some(Id::from(NAME_ID))
+    );
+    settings.enabled = false;
+    assert_eq!(
+        settings.focus_after(FocusAfter::TogglePairing),
+        Some(Id::from(FORM_ENABLE_ID))
+    );
+    settings.enabled = true;
+    // A failed pairing keeps the form, and focus, where it was.
+    assert_eq!(settings.focus_after(FocusAfter::Pair), None);
+    settings.finish_pairing(Some(Ok("new-client".into())));
+    assert_eq!(
+        settings.focus_after(FocusAfter::Pair),
+        Some(Id::from("tenshu.ai-access.client.new-client.manage"))
+    );
+    settings.update(Message::TogglePairing, None, None, true, "focus");
+    settings.update(Message::TogglePairing, None, None, true, "focus");
+    assert_eq!(
+        settings.focus_after(FocusAfter::TogglePairing),
+        Some(Id::from(PAIR_OPEN_ID))
+    );
+}
+
+/// A Vault on a chain outside the documented five (here Signet) is not
+/// offered for pairing, so it is never tagged UNSUPPORTED beside Pair.
+#[test]
+fn undocumented_chain_is_not_offered_for_pairing() {
+    let root = std::env::temp_dir().join(format!("mcp-gallery-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join(crate::chain::ChainId::Signet.dir_name())).unwrap();
+    let settings = Settings {
+        pairing_location: Some(
+            pairings::Location::new(&root, crate::chain::ChainId::Signet, "signet-cube").unwrap(),
+        ),
+        ..Settings::default()
+    };
+    let page = capture::inspect(
+        "ai-access-signet",
+        view_for_cube(&settings, true),
+        (1024, 768),
+        "dark",
+        theme::Theme::dark(),
+    );
+    assert!(page.contains("Unavailable for this Cube"));
+    assert!(!page.contains("UNSUPPORTED"));
+    for id in [ENABLE_ID, PAIR_OPEN_ID] {
+        assert!(
+            !page.has_focus(iced::advanced::widget::Id::new(id)),
+            "{}",
+            id
+        );
+    }
+    let _ = std::fs::remove_dir_all(root);
 }

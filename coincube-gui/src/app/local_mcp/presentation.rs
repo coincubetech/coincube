@@ -93,6 +93,18 @@ fn cube_chain(settings: &Settings) -> Option<crate::chain::ChainId> {
 
 /// The scope tag naming an exact supported chain. Bitcoin and Bitcoin Blake2b
 /// share address and key encodings, so the tag is never inferred from either.
+/// The five exact chains local MCP documents and supports.
+fn chain_supported(chain: crate::chain::ChainId) -> bool {
+    matches!(
+        chain,
+        crate::chain::ChainId::Bitcoin
+            | crate::chain::ChainId::Testnet4
+            | crate::chain::ChainId::Regtest
+            | crate::chain::ChainId::BitcoinBlake2b
+            | crate::chain::ChainId::BitcoinBlake2bTestnet4
+    )
+}
+
 pub(super) fn chain_tag(chain: Option<crate::chain::ChainId>) -> &'static str {
     match chain {
         Some(crate::chain::ChainId::Bitcoin) => "BTC · MAINNET",
@@ -105,15 +117,15 @@ pub(super) fn chain_tag(chain: Option<crate::chain::ChainId>) -> &'static str {
 }
 
 pub(super) const ENABLE_ID: &str = "tenshu.ai-access.enable";
-const PAIR_OPEN_ID: &str = "tenshu.ai-access.open";
-const NAME_ID: &str = "tenshu.ai-access.name";
+pub(super) const PAIR_OPEN_ID: &str = "tenshu.ai-access.open";
+pub(super) const NAME_ID: &str = "tenshu.ai-access.name";
 const WALLET_ID: &str = "tenshu.ai-access.wallet";
 const READ_ID: &str = "tenshu.ai-access.access.read";
 #[cfg(feature = "mcp-transactions")]
 const TRANSACTIONS_ID: &str = "tenshu.ai-access.transactions";
 const PAIR_ID: &str = "tenshu.ai-access.pair";
 const CANCEL_ID: &str = "tenshu.ai-access.cancel";
-const FORM_ENABLE_ID: &str = "tenshu.ai-access.form.enable";
+pub(super) const FORM_ENABLE_ID: &str = "tenshu.ai-access.form.enable";
 const PERMISSIONS: [(&str, &str, &str); 3] = [
     (
         "tenshu.ai-access.permission.balances",
@@ -133,10 +145,13 @@ const PERMISSIONS: [(&str, &str, &str); 3] = [
 ];
 
 const INTRO: &str = "Let an AI app on this computer work with this Cube's Vault through Tenshu's local connection. Each client gets only the access you choose. Unlocking, creating a Vault, signing and sending stay with you in Tenshu.";
+#[cfg(feature = "mcp-proposals")]
 const SETUP_INTRO: &str = "In an empty Cube, an AI app can help plan a new Vault. You select real keys, check devices and create the Vault in Tenshu.";
 const ENABLE_ON: &str =
     "Paired clients can use their access while this Cube is unlocked. Turning this off pauses them without forgetting them.";
-const ENABLE_OFF: &str = "Paired clients are paused. Turning this on grants nothing by itself; each client also needs its own pairing.";
+const ENABLE_SUSPENDED: &str =
+    "Every paired client is suspended after a pairing storage error. See the message above.";
+const ENABLE_OFF: &str = "Paired clients are paused. Turning this on resumes them with their existing access; it grants no new access, and new clients still need their own pairing.";
 const UNSUPPORTED: &str = "AI access needs a Vault on Bitcoin (mainnet, Testnet4 or Regtest) or Bitcoin Blake2b (mainnet or Testnet4) run by Tenshu's built-in daemon. This Cube has no such Vault loaded right now, so no client can be paired. Spark, Liquid, imported wallets that aren't Vaults and external daemons aren't supported.";
 const PAIR_HINT: &str =
     "A client keeps exactly the access you choose until you revoke it. Locking this Cube pauses every client.";
@@ -148,6 +163,8 @@ fn enable_row(settings: &Settings, available: bool) -> Ui<'_> {
     let row = page::row(localized_copy("Allow AI clients"))
         .description(localized_copy(if !available {
             UNSUPPORTED
+        } else if settings.pairing_poisoned {
+            ENABLE_SUSPENDED
         } else if settings.enabled {
             ENABLE_ON
         } else {
@@ -186,7 +203,10 @@ fn vault_row(settings: &Settings) -> Option<Ui<'_>> {
 }
 
 pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
-    let available = cfg!(any(unix, windows)) && supported;
+    // Only offer pairing for a Vault on one of the documented chains, so a
+    // Vault is never tagged UNSUPPORTED beside an enabled Pair action.
+    let available =
+        cfg!(any(unix, windows)) && supported && cube_chain(settings).is_none_or(chain_supported);
     let mut cube = vec![enable_row(settings, available)];
     if available {
         cube.extend(vault_row(settings));
@@ -468,13 +488,17 @@ fn client_controls<'a>(
             ]
             .spacing(8),
         )
-        .push(if copied {
+        .push(if copied && available {
             column![
                 page::status(page::Status::Ok, localized_copy("Copied")),
                 muted(localized_copy("Paste it only into this app's local MCP settings, then clear your clipboard.")),
             ]
             .spacing(4)
             .into()
+        } else if settings.pairing_poisoned {
+            Ui::from(muted(localized_copy(
+                "Copying is unavailable after a pairing storage error.",
+            )))
         } else if available {
             Ui::from(muted(localized_copy("The configuration works like a password for this client. Keep it out of chats, issues and shared files.")))
         } else {
@@ -1349,6 +1373,7 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
                 .into()
         })
         .collect::<Vec<Ui<'_>>>();
+    #[allow(unused_mut)]
     let mut access = Column::new()
         .width(Length::Fill)
         .push(subheading(localized_copy("Access")))
@@ -1406,6 +1431,7 @@ fn legacy_and_failure<'a>(
     if let Some(server) = &settings.server {
         let active = server.grant.active();
         let calls = server.grant.successful_calls.load(Ordering::Relaxed);
+        #[allow(unused_mut)]
         let mut legacy = Column::new()
             .spacing(8)
             .push(subheading(localized_copy("Temporary session grant")))
@@ -1576,7 +1602,7 @@ mod ai_access_tests {
             "Pair a client",
             "Locking this Cube pauses every client.",
             "Allow AI clients",
-            "Turning this on grants nothing by itself",
+            "it grants no new access",
             "Read wallet information",
             "Prepare unsigned transactions",
             "Never shared",
