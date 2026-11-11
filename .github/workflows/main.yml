@@ -5,13 +5,20 @@ on:
     branches:
       - master
   pull_request:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 'Optional full commit SHA to test (blank uses the selected branch)'
+        required: false
+        type: string
 
 # A newer push to the same branch/PR supersedes the run in flight. Without
 # this a burst of pushes queues one full matrix — macOS and Windows legs
 # included — per commit, and only the last result is ever looked at.
+# Manual validation runs are independent and must not be superseded by pushes.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'workflow_dispatch' && format('manual-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 # Build-time passkey flags, same repo-level Actions variables the release
 # workflow uses. CI has to compile the *shipping* configuration: without these,
@@ -32,8 +39,17 @@ jobs:
     env:
       BREEZ_API_KEY: ${{ github.event_name == 'push' && secrets.BREEZ_API_KEY || 'DUMMY_BREEZ_API_KEY' }}
     steps:
+      # Manual runs may test a pinned integrated tree using this workflow.
+      # PR runs retain checkout's default synthetic merge ref.
+      - name: Validate manual source SHA
+        if: github.event_name == 'workflow_dispatch' && inputs.source_sha != ''
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]'
       - uses: actions/checkout@v5
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || '' }}
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -55,8 +71,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
+      # This matrix runs independently of linter, so validate before checkout too.
+      - name: Validate manual source SHA
+        if: github.event_name == 'workflow_dispatch' && inputs.source_sha != ''
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: '[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]'
       - uses: actions/checkout@v5
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || '' }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -82,6 +106,7 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || '' }}
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -158,7 +183,7 @@ jobs:
     # ignore a red tick. Their failures are still visible in the run.
     continue-on-error: ${{ matrix.toolchain != 'pinned' }}
     env:
-      BREEZ_API_KEY: ${{ secrets.BREEZ_API_KEY }}
+      BREEZ_API_KEY: ${{ github.event_name == 'workflow_dispatch' && 'DUMMY_BREEZ_API_KEY' || secrets.BREEZ_API_KEY }}
       # Empty for the pinned legs, which leaves rust-toolchain.toml in charge —
       # rustup ignores an empty RUSTUP_TOOLCHAIN rather than erroring on it.
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain != 'pinned' && matrix.toolchain || '' }}
@@ -166,6 +191,7 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v5
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha || '' }}
           persist-credentials: false
       # Nothing to install for the pinned legs: rustup provisions the toolchain
       # named by rust-toolchain.toml on first use. The canaries pin no such file
@@ -195,6 +221,7 @@ jobs:
         run: choco install protoc --yes --no-progress
       - name: Test on Rust ${{ matrix.toolchain }} (Windows)
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         # Cap test parallelism: the filesystem-heavy tests create files under
         # %TEMP% and immediately read them back, and running many at once
         # multiplies the odds that Defender is mid-scan on one of them. Test
