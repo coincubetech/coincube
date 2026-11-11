@@ -163,6 +163,16 @@ If the exact session advances to DELIVERED or VIEWED with zero submissions,
 the runner proceeds to ordinary exact-request review without restarting or
 consuming the restart allowance. Approved, terminal, unknown, or nonzero-submission
 states cannot use this path; a verified signature proceeds to collection.
+If the app build changes after an untouched delivery timeout and no restart
+receipt exists, authentication preserves the original timeout and permanently
+records that restart is disabled for this request before updating phone build
+observations. This requires the same account/device/request and an idle verified
+credential with no approval or PIN markers. Normal account/network/Cube checks
+still run; then a fresh native PENDING, DELIVERED or VIEWED status with zero
+submissions permits ordinary full review. A verified signature can instead be
+reconciled without review. The disable decision survives another timeout,
+rollback or later upgrade; it cannot coexist with an attempted, completed or
+malformed restart receipt and never re-enables a restart allowance.
 The exact known incoming-transaction notification also routes to ordinary queue
 review after fresh idle-credential and session checks, without consuming a
 restart. Partial, ambiguous, authentication, and unknown modal screens remain

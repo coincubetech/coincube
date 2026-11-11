@@ -1564,3 +1564,172 @@ def test_signature_arrival_after_known_incoming_moves_to_collection(runner):
     runner.stage_sign()
     assert calls == [] and runner.artifacts['signature_count_min'] == 2
     assert 'request_discovery_restart' not in runner.artifacts
+
+
+def changed_discovery_build(runner):
+    state, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    original = deepcopy(runner.artifacts['request_discovery_timeout'])
+    runner.phone.build = 39
+    runner.prepare_discovery_no_restart()
+    return state, calls, original
+
+
+def test_build_changed_timeout_authentication_pins_disable_before_phone_observation(runner, tmp_path, monkeypatch):
+    _, calls = auth_discovery_case(runner, tmp_path, monkeypatch)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    original = deepcopy(runner.artifacts['request_discovery_timeout'])
+    encoded = json.dumps(original, separators=(',', ':'))
+    runner.phone.build = 39
+    def labels():
+        assert runner.artifacts['request_discovery_no_restart']['original_build'] == 38
+        assert runner.artifacts['request_discovery_no_restart']['observed_build'] == 39
+        return {'Home', 'Cubes', 'Settings', runner.config['account_email']}
+    runner.phone.labels = labels
+    runner.phone.click = calls.append
+    runner.stage_authentication()
+    decision = deepcopy(runner.artifacts['request_discovery_no_restart'])
+    assert calls == ['Settings', 'Home']
+    runner.artifacts['phone']['build'] = 39  # Normal stage_phone's next observation.
+    runner.phone_journal.close()
+    calls.clear()
+    runner.stage_authentication()
+    assert calls == ['Settings', 'Home']
+    assert runner.artifacts['request_discovery_no_restart'] == decision
+    assert json.dumps(runner.artifacts['request_discovery_timeout'], separators=(',', ':')) == encoded
+
+
+def test_unarchived_original_timeout_can_disable_restart_before_build_overwrite(runner):
+    _, _ = discovery_case(runner)
+    old = deepcopy(runner.journal.data['stages']['sign'])
+    runner.phone.build = 39
+    runner.archive_discovery_timeout(old)
+    runner.prepare_discovery_no_restart()
+    assert runner.artifacts['request_discovery_timeout']['outcome'] == old
+    assert runner.artifacts['request_discovery_no_restart']['original_build'] == 38
+
+
+@pytest.mark.parametrize('status', [1, 2, 3])
+def test_build_change_uses_fresh_remote_state_and_ordinary_review_without_restart(runner, status):
+    _, calls, original = changed_discovery_build(runner)
+    runner.artifacts['phone']['build'] = 39
+    runner.native_call = lambda *a, **k: {'ready': False, 'status': status, 'submitted_signature_count': 0}
+    runner.stage_sign()
+    assert calls == ['ordinary-review']
+    assert runner.artifacts['request_discovery_timeout'] == original
+    assert 'request_discovery_restart' not in runner.artifacts
+
+
+@pytest.mark.parametrize('build', [38, 39, 40])
+def test_no_restart_decision_survives_timeout_again_rollback_and_further_upgrade(runner, build):
+    _, calls, original = changed_discovery_build(runner)
+    decision = deepcopy(runner.artifacts['request_discovery_no_restart'])
+    runner.phone.build = build
+    runner.artifacts['phone']['build'] = build
+    runner.journal.outcome('sign', 'blocked', 'REQUEST_DELIVERY')
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    runner.prepare_discovery_no_restart()
+    def absent():
+        calls.append('ordinary-review')
+        raise Blocked('REQUEST_DELIVERY', 'Synthetic timeout again')
+    runner.approve_phone = absent
+    with pytest.raises(Blocked) as error: runner.stage_sign()
+    assert error.value.code == 'REQUEST_DELIVERY'
+    with pytest.raises(Blocked) as error: runner.restart_request_discovery()
+    assert error.value.code == 'REQUEST_DISCOVERY_DISABLED'
+    assert calls == ['ordinary-review']
+    assert runner.artifacts['request_discovery_no_restart'] == decision
+    assert runner.artifacts['request_discovery_timeout'] == original
+    assert 'request_discovery_restart' not in runner.artifacts
+
+
+@pytest.mark.parametrize('phase', [None, {}, {'phase': 'attempted'}, {'phase': 'completed'}])
+def test_any_restart_receipt_presence_excludes_build_change_decision(runner, phase):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    runner.phone.build = 39
+    runner.journal.artifact('request_discovery_restart', phase)
+    with pytest.raises(Blocked): runner.prepare_discovery_no_restart()
+    assert 'request_discovery_no_restart' not in runner.artifacts
+    assert calls == []
+
+
+@pytest.mark.parametrize('marker', ['approval_started', 'approval_context', 'pin_resume_probe', 'pin_dispatch_started',
+                                   'pending_attempt', 'key_generation_reservation', 'foreign', 'unverified'])
+@pytest.mark.parametrize('late', [False, True])
+def test_no_restart_decision_never_bypasses_input_or_credential_guard(runner, marker, late):
+    state, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    runner.phone.build = 39
+    if late: runner.prepare_discovery_no_restart()
+    if marker == 'pending_attempt': state[marker] = 'sign:' + runner.request_id
+    elif marker == 'key_generation_reservation': state[marker] = {'status': 'reserved'}
+    elif marker == 'foreign': state['identity'] = 'other'
+    elif marker == 'unverified': state['verified'] = False
+    else: runner.artifacts[marker] = False
+    with pytest.raises(Blocked) as error:
+        runner.continue_request_discovery() if late else runner.prepare_discovery_no_restart()
+    assert error.value.code == 'REQUEST_DISCOVERY_INPUT'
+    assert calls == []
+    assert 'request_discovery_restart' not in runner.artifacts
+    assert ('request_discovery_no_restart' in runner.artifacts) is late
+
+
+@pytest.mark.parametrize('field', ['session_id', 'target_key_id', 'account_identity', 'desktop_identity', 'psbt_sha256', 'descriptor_id'])
+def test_disabled_restart_history_cannot_move_to_foreign_binding(runner, field):
+    _, calls, _ = changed_discovery_build(runner)
+    runner.artifacts[field] = 'f' * 64
+    with pytest.raises(Failed): runner.prepare_discovery_no_restart()
+    assert calls == []
+
+
+@pytest.mark.parametrize('status,count', [(4, 0), (6, 0), (1, 1), (2, None), (True, 0), (3, False)])
+def test_disabled_restart_still_refuses_unknown_or_submitted_remote_state(runner, status, count):
+    _, calls, _ = changed_discovery_build(runner)
+    runner.native_call = lambda *a, **k: {'ready': False, 'status': status, 'submitted_signature_count': count}
+    with pytest.raises(Blocked) as error: runner.stage_sign()
+    assert error.value.code == 'REQUEST_DISCOVERY_ADVANCED'
+    assert calls == []
+
+
+def test_disabled_restart_allows_verified_signature_reconciliation_after_legitimate_input(runner):
+    state, calls, original = changed_discovery_build(runner)
+    runner.artifacts['approval_started'] = True
+    runner.artifacts['pin_dispatch_started'] = {'context': 'saved'}
+    state['pending_attempt'] = 'sign:' + runner.request_id
+    runner.prepare_discovery_no_restart()  # Immutable decision validation does not reset input markers.
+    runner.native_call = lambda *a, **k: {'ready': True, 'signature_count_min': 2}
+    runner.stage_sign()
+    assert calls == []
+    assert state['pending_attempt'] == 'sign:' + runner.request_id
+    assert runner.artifacts['request_discovery_timeout'] == original
+    assert runner.artifacts['signature_count_min'] == 2
+
+
+def test_no_restart_review_rechecks_input_after_remote_guard(runner):
+    state, calls, _ = changed_discovery_build(runner)
+    count = 0
+    def collect(*a, **k):
+        nonlocal count
+        count += 1
+        if count == 2:
+            state['pending_attempt'] = 'another-attempt'
+        return {'ready': False, 'status': 2, 'submitted_signature_count': 0}
+    runner.native_call = collect
+    with pytest.raises(Blocked) as error: runner.stage_sign()
+    assert error.value.code == 'REQUEST_DISCOVERY_INPUT'
+    assert calls == []
+
+
+@pytest.mark.parametrize('marker', ['approval_context', 'pin_resume_probe', 'pending_attempt'])
+def test_disabled_restart_authentication_refuses_late_input_before_settings(runner, tmp_path, monkeypatch, marker):
+    state, calls = auth_discovery_case(runner, tmp_path, monkeypatch)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    runner.phone.build = 39
+    runner.prepare_discovery_no_restart()
+    if marker == 'pending_attempt': state[marker] = 'foreign-attempt'
+    else: runner.artifacts[marker] = False
+    runner.phone.labels = lambda: pytest.fail('Late input must not navigate Settings')
+    with pytest.raises(Blocked) as error: runner.stage_authentication()
+    assert error.value.code == 'REQUEST_DISCOVERY_INPUT'
+    assert calls == []
