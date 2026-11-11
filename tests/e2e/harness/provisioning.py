@@ -854,8 +854,6 @@ class FreshRunner(Runner):
         address = self.artifacts["receive_address"]
         if not isinstance(address, str) or not re.fullmatch(r"tb1q[a-z0-9]{58}", address):
             raise Failed("FUNDING_ADDRESS", "Native provisioning must return a Testnet4 P2WSH funding address.")
-        if not self.artifacts.get("funding_claim_started"):
-            faucet_claim(address, self.journal)
         until = time.monotonic() + self.deadline
         while True:
             try:
@@ -863,8 +861,8 @@ class FreshRunner(Runner):
             except Blocked as error:
                 if isinstance(error, Failed) or error.code != "FUNDING_PROPAGATION":
                     raise
-                outputs = []
-            eligible = [v for v in outputs if 100_000 <= v[2] <= 10_000_000
+                outputs = None  # Disagreement is not proof of an empty address.
+            eligible = [v for v in (outputs or []) if 100_000 <= v[2] <= 10_000_000
                         and v[2] >= self.config["amount_sats"] + self.config["fee_sats"] + 1_000
                         and (not self.artifacts.get("funding_claim_txid") or v[0] == self.artifacts["funding_claim_txid"])]
             if len(eligible) == 1:
@@ -873,7 +871,15 @@ class FreshRunner(Runner):
                 self.pin_artifact("funding_outpoint", {"txid": txid, "vout": vout, "value_sats": value})
                 return
             if len(eligible) > 1:
-                raise Failed("FUNDING_AMBIGUOUS", "More than one eligible faucet output exists; the runner will not guess.")
+                raise Failed("FUNDING_AMBIGUOUS", "More than one eligible funding output exists; the runner will not guess.")
+            if not self.artifacts.get("funding_claim_started"):
+                if outputs == []:
+                    # Only two agreeing, empty explorers authorize a new claim.
+                    # A prior external QA deposit must be adopted above instead.
+                    faucet_claim(address, self.journal)
+                    continue
+                if outputs:
+                    raise Blocked("FUNDING_UNSUITABLE", "Existing funding is outside this run's limits; no faucet claim was sent.")
             if time.monotonic() >= until:
                 raise Blocked("FUNDING_PENDING", "The faucet payment is not yet visible in both Testnet4 explorers.")
             time.sleep(3)
