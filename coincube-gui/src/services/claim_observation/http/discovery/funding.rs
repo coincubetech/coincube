@@ -1549,6 +1549,33 @@ impl HttpObservationSource {
     }
 }
 
+/// Require one coherent root/provider/session view before observing the
+/// spent marker or the exact confirmed Bitcoin witness.
+fn validate_post_bitcoin_roots(
+    bitcoin_ancestry: &DiscoveredAncestry,
+    fork: &CollectedFundingCoin,
+) -> Result<(), FailureKind> {
+    let roots = bitcoin_ancestry.pair();
+    let fork_roots = fork.ancestry.pair();
+    let anchor_a = roots.anchor();
+    let anchor_b = fork_roots.anchor();
+    if roots.root_chain() != ChainId::Bitcoin
+        || fork_roots.root_chain() != ChainId::BitcoinBlake2b
+        || bitcoin_ancestry.provider != fork.ancestry.provider
+        || roots.generation() != fork_roots.generation()
+        || roots.bitcoin().tip != fork_roots.bitcoin().tip
+        || roots.fork().tip != fork_roots.fork().tip
+        || anchor_a.tip_hash != anchor_b.tip_hash
+        || anchor_a.tip_height != anchor_b.tip_height
+        || anchor_a.tip_median_time_past != anchor_b.tip_median_time_past
+        || anchor_a.observation != anchor_b.observation
+    {
+        return Err(FailureKind::Changed);
+    }
+
+    Ok(())
+}
+
 impl HttpObservationSource {
     async fn collect_spent_bitcoin_marker(
         &self,
@@ -1673,22 +1700,7 @@ impl HttpObservationSource {
                 .collect_funding_coin(fork_path, ChainId::BitcoinBlake2b, policy)
                 .await?;
             let roots = bitcoin_ancestry.pair();
-            let fork_roots = fork.ancestry.pair();
-            let anchor_a = roots.anchor();
-            let anchor_b = fork_roots.anchor();
-            if roots.root_chain() != ChainId::Bitcoin
-                || fork_roots.root_chain() != ChainId::BitcoinBlake2b
-                || bitcoin_ancestry.provider != fork.ancestry.provider
-                || roots.generation() != fork_roots.generation()
-                || roots.bitcoin().tip != fork_roots.bitcoin().tip
-                || roots.fork().tip != fork_roots.fork().tip
-                || anchor_a.tip_hash != anchor_b.tip_hash
-                || anchor_a.tip_height != anchor_b.tip_height
-                || anchor_a.tip_median_time_past != anchor_b.tip_median_time_past
-                || anchor_a.observation != anchor_b.observation
-            {
-                return Err(FailureKind::Changed);
-            }
+            validate_post_bitcoin_roots(&bitcoin_ancestry, &fork)?;
             let bitcoin_tip = roots.bitcoin().tip;
             let fork_tip = roots.fork().tip;
             let (marker_block, marker_observed_at) = snapshot

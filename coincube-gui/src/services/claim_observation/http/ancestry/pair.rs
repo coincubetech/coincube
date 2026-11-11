@@ -1349,6 +1349,58 @@ mod tests {
         );
         super::binding_tests::check(&renewed, &restored, source, sender);
     }
+    async fn collect_root_case(
+        context: &RootCaseContext<'_>,
+        fork_read: &Mock<'_>,
+        anchor: &mut Mock<'_>,
+        bitcoin_mapping: &mut Option<Mock<'_>>,
+        sender: &watch::Sender<u64>,
+    ) -> Result<CoinbasePair, FailureKind> {
+        let RootCaseContext {
+            case,
+            server,
+            body,
+            source,
+            dependency,
+            root_height,
+            policy,
+            ..
+        } = *context;
+        let collect = async {
+            if case.starts_with("fork-") {
+                source
+                    .fork_coinbase_pair(dependency, root_height, policy)
+                    .await
+            } else {
+                source.coinbase_pair(dependency, root_height, policy).await
+            }
+        };
+        if matches!(
+            case,
+            "anchor-change"
+                | "root-anchor-change"
+                | "bitcoin-reorg"
+                | "root-bitcoin-reorg"
+                | "revoked"
+                | "same-generation-revoked"
+                | "shared-revoked"
+        ) {
+            let disrupt = disrupt_root_case(
+                case,
+                server,
+                body,
+                sender,
+                fork_read,
+                anchor,
+                bitcoin_mapping,
+            );
+            let (result, ()) = tokio::join!(collect, disrupt);
+            result
+        } else {
+            collect.await
+        }
+    }
+
     async fn assert_paired_root_case(case: &str) {
         let server = MockServer::start();
         let (source, sender) = source(&server);
@@ -1416,39 +1468,6 @@ mod tests {
         let policy = root_case_policy(case);
         let root_status = fresh_mock(&server, &format!("/api/v1/esplora/bitcoin/mainnet/tx/{}", bitcoin.compute_txid()),
                 json!({"txid":bitcoin.compute_txid(),"status":{"confirmed":true,"block_height":root_height,"block_hash":bitcoin_block}}).to_string());
-        let collect = async {
-            if case.starts_with("fork-") {
-                source
-                    .fork_coinbase_pair(&dependency, root_height, policy)
-                    .await
-            } else {
-                source.coinbase_pair(&dependency, root_height, policy).await
-            }
-        };
-        let result = if matches!(
-            case,
-            "anchor-change"
-                | "root-anchor-change"
-                | "bitcoin-reorg"
-                | "root-bitcoin-reorg"
-                | "revoked"
-                | "same-generation-revoked"
-                | "shared-revoked"
-        ) {
-            let disrupt = disrupt_root_case(
-                case,
-                &server,
-                &body,
-                &sender,
-                &fork_read,
-                &mut anchor,
-                &mut bitcoin_mapping,
-            );
-            let (result, ()) = tokio::join!(collect, disrupt);
-            result
-        } else {
-            collect.await
-        };
         let context = RootCaseContext {
             case,
             body: &body,
@@ -1463,6 +1482,15 @@ mod tests {
             fork_block: &fork_block,
             policy,
         };
+        let result = collect_root_case(
+            &context,
+            &fork_read,
+            &mut anchor,
+            &mut bitcoin_mapping,
+            &sender,
+        )
+        .await;
+
         match case {
             "valid" | "upper" | "fork-valid" | "rdts-absent" | "fork-rdts-unsupported" => {
                 let pair = result.unwrap();
