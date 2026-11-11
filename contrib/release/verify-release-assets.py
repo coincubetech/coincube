@@ -15,7 +15,25 @@ TARGETS = {
 }
 
 
+# Cargo package versions (SemVer), as releases.yml reads them with
+# `cargo metadata`. No path separators can appear in a matching value.
+VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?")
+
+
+def asset_path(directory: Path, name: str) -> Path:
+    """Resolve `name` inside `directory`, refusing anything that escapes it."""
+    path = (directory / name).resolve()
+    if path.parent != directory or not path.is_relative_to(directory):
+        raise ValueError(f"asset path escapes the asset directory: {name!r}")
+    return path
+
+
 def verify(directory: Path, version: str) -> None:
+    if not VERSION.fullmatch(version):
+        raise ValueError(f"invalid release version: {version!r}")
+    directory = directory.resolve(strict=True)
+    if not directory.is_dir():
+        raise ValueError(f"asset directory is not a directory: {directory}")
     expected = {f"tenshu-{version}-{target}" for target in TARGETS}
     manifest_name = f"SHA256SUMS-{version}.txt"
     signature_name = f"{manifest_name}.asc"
@@ -25,7 +43,7 @@ def verify(directory: Path, version: str) -> None:
         raise ValueError(f"release assets differ: missing={sorted(required - actual)}, extra={sorted(actual - required)}")
 
     checksums = {}
-    for line in (directory / manifest_name).read_text().splitlines():
+    for line in asset_path(directory, manifest_name).read_text().splitlines():
         match = re.fullmatch(r"([0-9a-fA-F]{64})  ([^/\\]+)", line)
         if not match or match[2] in checksums:
             raise ValueError(f"invalid or duplicate manifest entry: {line!r}")
@@ -35,7 +53,7 @@ def verify(directory: Path, version: str) -> None:
 
     for name in sorted(expected):
         hasher = hashlib.sha256()
-        with (directory / name).open("rb") as asset:
+        with asset_path(directory, name).open("rb") as asset:
             for chunk in iter(lambda: asset.read(1024 * 1024), b""):
                 hasher.update(chunk)
         digest = hasher.hexdigest()

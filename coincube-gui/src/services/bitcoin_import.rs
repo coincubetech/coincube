@@ -133,6 +133,52 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     result
 }
 
+/// Runs local-filesystem work on Tokio's blocking pool so a slow disk never
+/// stalls the async executor that drives the UI.
+pub(super) async fn blocking_fs<T, F>(work: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("Filesystem task failed: {e}"))?
+}
+
+/// Discards the staging directory left by an earlier attempt of this exact
+/// operation. Staged data owned by anything else is refused unless empty.
+fn discard_owned_stage(stage: &Path, journal: &Journal) -> Result<(), String> {
+    if !stage.exists() {
+        return Ok(());
+    }
+    if owns_directory(stage, journal)? {
+        // Only unpublished storage owned by this exact prepared operation
+        // can be discarded and recreated. Never touch a final wallet.
+        fs::remove_dir_all(stage).map_err(|e| e.to_string())?;
+    } else if fs::read_dir(stage)
+        .map_err(|e| e.to_string())?
+        .next()
+        .is_some()
+    {
+        return Err(
+            "The staging directory is not owned by this import; no files were changed.".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Removes this operation's staged data before its pending setup is abandoned.
+fn remove_abandoned_stage(stage: &Path, journal: &Journal) -> Result<(), String> {
+    if !stage.exists() {
+        return Ok(());
+    }
+    if !owns_directory(stage, journal)? {
+        return Err("The staged data is not owned by this import; no files were removed.".into());
+    }
+    fs::remove_dir_all(stage).map_err(|e| e.to_string())?;
+    sync_directory(stage.parent().ok_or("Missing staging parent")?)
+}
+
 fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     fs::File::open(path)
@@ -543,20 +589,9 @@ async fn install_inner(
     )
     .await?;
     let stage = journal.stage_path(directory);
-    if stage.exists() {
-        if owns_directory(&stage, &journal)? {
-            // Only unpublished storage owned by this exact prepared operation
-            // can be discarded and recreated. Never touch a final wallet.
-            fs::remove_dir_all(&stage).map_err(|e| e.to_string())?;
-        } else if fs::read_dir(&stage)
-            .map_err(|e| e.to_string())?
-            .next()
-            .is_some()
-        {
-            return Err(
-                "The staging directory is not owned by this import; no files were changed.".into(),
-            );
-        }
+    {
+        let (stage, journal) = (stage.clone(), journal.clone());
+        blocking_fs(move || discard_owned_stage(&stage, &journal)).await?;
     }
     crate::dir::create_directory(&stage).map_err(|e| e.to_string())?;
     write_json(&stage.join(OWNER_FILE), &journal)?;
@@ -928,15 +963,7 @@ pub async fn abandon_pending(
             );
         }
         let stage = journal.stage_path(directory);
-        if stage.exists() {
-            if !owns_directory(&stage, &journal)? {
-                return Err(
-                    "The staged data is not owned by this import; no files were removed.".into(),
-                );
-            }
-            fs::remove_dir_all(&stage).map_err(|e| e.to_string())?;
-            sync_directory(stage.parent().ok_or("Missing staging parent")?)?;
-        }
+        blocking_fs(move || remove_abandoned_stage(&stage, &journal)).await?;
     }
     settings::update_settings_file_checked(directory, |mut settings| {
         let cube = settings
