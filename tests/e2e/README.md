@@ -117,6 +117,62 @@ Use `--qa-config /absolute/private/workstation.json` to override the default
 workstation configuration. Only one physical acceptance process may own the
 phone at a time; the suite holds a USB lease and exclusive run/account locks.
 
+## Strict delivery and Home-refresh acceptance (version 1)
+
+For a **new** fresh run, add `"strict_acceptance": {"version": 1}` to the
+private version-2 workstation configuration and set `ios.minimum_build` to 39
+or newer. The installed QA build must include the opt-in
+`COINCUBE_QA_HOME_REFRESH=true` compile-time hook; its production default is
+false. Build number alone cannot prove the hook exists: missing or ambiguous
+markers block the test. Absence of `strict_acceptance` preserves normal mode;
+null, false and unsupported versions are rejected. The configuration and mode
+are journal-bound, so an old or completed run cannot be relabeled strict.
+
+Strict mode attaches to the already foreground app without activating it. It
+pins the device, build and process, rejects every restart/upgrade/key-recovery
+allowance, and rechecks the process on resume, during delivery, before PIN input
+and during signature collection. After setup and before request creation, it
+observes public Home for at least 90 seconds, recording sample count and maximum
+observation gap (at most five seconds). An interrupted pre-request observation
+starts a new full interval. This proves sampled foreground observations and no
+runner-initiated restart; it cannot monitor the app while the runner is stopped
+or exclude an unobserved brief lifecycle transition between samples.
+
+Setup refreshes are recorded before request creation. After that boundary, the
+runner neither refreshes Home nor restores setup navigation. It passively polls
+native-validated status for the exact request/target/transaction until
+**DELIVERED (2), zero submitted signatures**. The target-device acknowledgement
+receipt, immutable approval binding and pinned process must be saved before
+any pending-banner or queue navigation. A generic notification is not delivery
+proof. After that receipt, normal queue navigation and exact-note selection
+perform the full transaction review. Later VIEWED status can resume only with
+that receipt; advanced status without it cannot retroactively prove arrival.
+Delivery timeout never consumes a restart allowance in strict mode.
+
+At the exact empty signing PIN challenge, the runner discovers separate,
+unique accessibility elements for the QA scope, status, counters and trigger.
+It saves intent before one trigger click. That trigger invokes the app's actual
+Home refresh callback; success requires the same public session and positive
+mount serial with `requested=1:started=1:completed=1:failed=0` and status
+`completed`. Completion means the correlated pending-session Bloc outcome,
+not merely an RPC returning. Missing/duplicate markers, remounts, regressing
+counters, failure, timeout or an uncertain click block PIN input; the trigger
+is never clicked again after an uncertain attempt.
+
+Strict mode substitutes this actual Home-refresh probe for normal mode's
+background/resume probe. It retains the full transaction review, VIEWED/zero
+remote guards and protected credential CAS. It checks the completed mount after
+the final remote guard, after credential retrieval and before every digit,
+requiring an empty challenge before the first digit. The dispatch and successful
+six-click receipts bind the exact scope and approval context. A completed probe
+may resume only in the same process and live mount before any input attempt;
+an uncertain input is never retried. Signature collection and broadcast require
+all saved strict proofs, so an externally arriving valid signature alone cannot
+make this UI acceptance pass. No raw accessibility tree or credential is saved.
+
+These are additional acceptance conditions, not evidence that a physical
+strict run has passed. A new disposable run is required to collect that evidence.
+
 ## Credentials and recovery after interruption
 
 Generated Cube PIN, Master and recipient recovery phrases, Border Wallet phrase,
@@ -149,7 +205,7 @@ Connect's validated VIEWED status with zero submitted signatures. It records a
 background/resume probe and durable dispatch intent before requesting the
 protected credential. An interrupted probe or input is never retried.
 
-A `REQUEST_DELIVERY` timeout before any approval or PIN activity permits one
+In normal mode, a `REQUEST_DELIVERY` timeout before any approval or PIN activity permits one
 journaled app restart solely to rediscover the same request. The runner preserves
 the original timeout and exact run/account/device/build/transaction bindings,
 requires public Home and a verified idle credential (including no unfinished key

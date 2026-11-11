@@ -18,6 +18,7 @@ from .onboarding import Onboarding
 from .phone import attach
 from .runner import Runner
 from .secrets import SecretStore
+from .strict import StrictPolicy, validate_mode
 from .state import Blocked, Failed, Journal, atomic_write, digest, private_read
 
 STAGES = ("environment", "authentication", "phone_setup", "cube_creation", "phone_key", "vault_creation",
@@ -27,7 +28,7 @@ FAUCET = "https://cypherfaucet.com/api/v1/claim"
 
 def validate_config(config):
     required = {"version", "account_email", "profile_dir", "connect_rest", "connect_grpc", "ios", "amount_sats", "fee_sats"}
-    optional = {"native_binary", "signing_binary", "phone_state_dir", "desktop_session_namespace"}
+    optional = {"native_binary", "signing_binary", "phone_state_dir", "desktop_session_namespace", "strict_acceptance"}
     if not required <= set(config) or set(config) - required - optional or config["version"] != 2:
         raise Failed("CONFIG_SCHEMA", "Fresh-run configuration must use schema version 2 without vault or PSBT fixtures.")
     if config["connect_rest"] != REST or config["connect_grpc"] != GRPC:
@@ -47,6 +48,7 @@ def validate_config(config):
         raise Failed("IOS_CONFIG", "Fresh phone configuration accepts only minimum_build, appium and xctestrun.")
     if type(ios["minimum_build"]) is not int or ios["minimum_build"] < 35:
         raise Failed("IOS_BUILD", "A Keychain build containing #194 is required.")
+    validate_mode(config)
     return config
 
 
@@ -178,6 +180,13 @@ class FreshRunner(Runner):
         self.key_recovery_prior_run = key_recovery_prior_run
         self.deadline, self.confirm = deadline, confirm
         self.journal = Journal(directory, config)
+        try:
+            self.strict = StrictPolicy(self.journal) if config.get("strict_acceptance") else None
+            if self.strict and authorize_key_generation is not None:
+                self.strict.reject_restart()
+        except BaseException:
+            self.journal.close()
+            raise
         self.stack = ExitStack()
         self.stop, self.completed = False, set()
         self.profile = self.journal.directory / "profile"
@@ -220,7 +229,8 @@ class FreshRunner(Runner):
             if (source / "connect.json").exists() or (source / "connect_transport_key").exists():
                 copy_auth(self.config["profile_dir"], self.profile)
         self.provision = Provision(binary, self.profile, self.journal.directory, self.run_id)
-        self.phone = self.stack.enter_context(attach(self.config["ios"]))
+        self.phone = self.stack.enter_context(attach(self.config["ios"], strict=self.strict) if self.strict
+                                              else attach(self.config["ios"]))
 
     def stage_authentication(self):
         registered = self.provision.call("bootstrap_auth", expected_email=self.config["account_email"],
@@ -247,6 +257,16 @@ class FreshRunner(Runner):
         store = SecretStore(Provision(self.provision.binary, phone_dir, phone_dir, secret_id), phone_dir / "phone-secrets.keychain.json")
         self.onboarding = Onboarding(self.phone, store, self.artifacts["account_identity"], self.deadline)
         state = store.load()
+        if self.strict:
+            self.strict.account(self.artifacts["account_identity"])
+            if self.strict.requested:
+                validation = self.artifacts.get("phone_validation")
+                if (not isinstance(validation, dict) or validation.get("source") != "settings_ui"
+                        or any(validation.get(k) != v for k, v in self.phone_validation_identity().items())
+                        or validation != self.artifacts["strict_request"]["binding"].get("phone_validation")):
+                    raise Failed("STRICT_PHONE_VALIDATION", "The resumed strict request lacks unchanged account/device/network validation.")
+                self.defer_pending_phone_attempt(state)
+                return  # Reconcile native/API state; preserve the post-request UI.
         self.validate_discovery_back()
         self.validate_discovery_restart()
         self.archive_discovery_timeout(self.journal.data["stages"].get("sign"))
@@ -418,6 +438,8 @@ class FreshRunner(Runner):
         return {"keychain_id": active["id"], "personal_key_limit": limit, "network_key_count": len(network_keys)}
 
     def recover_key_generation(self, receipt):
+        if self.strict:
+            self.strict.reject_restart()
         if receipt["creation_started"]:
             return  # Remote reconciliation is the only permissible continuation.
         self.require_key_generation_capacity()
@@ -519,7 +541,7 @@ class FreshRunner(Runner):
             raise Failed("PHONE_VALIDATION_CHANGED", "Saved phone account, device or network validation does not match this run.")
         self.journal.artifact("phone_validation_reused", {"purpose": pending, "validation": validation})
         self.deferred_phone_purpose = pending
-        if pending == sign_purpose:
+        if pending == sign_purpose and not self.strict:
             self.archive_approval_attempt(state)
 
     def approval_binding(self):
@@ -586,9 +608,15 @@ class FreshRunner(Runner):
         self.pin_artifact("approval_original_attempt", original)
 
     def collect_once(self):
+        if self.strict:
+            self.strict.observe()
         result = self.native_call("collect", session_id=self.artifacts["session_id"],
                                   output_psbt_file=str(self.journal.directory / "signed.psbt"))
         self.last_collection = result
+        if self.strict:
+            self.strict.observe()
+            if result["ready"]:
+                self.strict.require_completion(self.request_id, self.artifacts["session_id"])
         if result["ready"]:
             self.journal.artifact("signature_count_min", result["signature_count_min"])
         return result["ready"]
@@ -610,6 +638,8 @@ class FreshRunner(Runner):
         return True
 
     def upgrade_approval(self):
+        if self.strict:
+            self.strict.reject_restart()
         original = self.artifacts.get("approval_original_attempt")
         if original is None:
             return False
@@ -666,6 +696,9 @@ class FreshRunner(Runner):
         self.stage_phone_setup()
 
     def stage_phone_setup(self):
+        if self.strict and self.strict.requested:
+            self.strict.observe()
+            return
         if self.deferred_phone_purpose:
             return  # Historical validation receipt is retained, not re-observed.
         self.pin = self.onboarding.setup()
@@ -706,6 +739,8 @@ class FreshRunner(Runner):
         started = recovery["creation_started"] if recovery else self.artifacts.get("phone_key_creation_started")
         if matches and (not started or "baseline_key_ids" not in self.artifacts):
             raise Failed("KEY_NOT_FRESH", "A matching key predates this run's recorded creation attempt.")
+        if not matches and self.strict and self.strict.requested:
+            raise Blocked("STRICT_KEY", "The existing strict request cannot recreate a missing signer key.")
         if not matches and recovery and not started:
             self.recover_key_generation(recovery)
         elif not matches and recovery and started and recovery["pin_entered"] is False:
@@ -794,6 +829,8 @@ class FreshRunner(Runner):
                     self.journal.artifact("phone_key_attached", True)
                     return
             elif not self.artifacts.get("phone_key_attachment_started"):
+                if self.strict and self.strict.requested:
+                    raise Blocked("STRICT_KEY", "The existing strict request cannot repeat signer attachment navigation.")
                 if self.deferred_phone_purpose:
                     raise Blocked("KEY_ATTACHMENT_PENDING", "An unresolved signing attempt forbids attachment navigation.")
                 self.onboarding.attach_key(self.phone_key_label(), self.artifacts["cube_name"], self.journal)
@@ -808,7 +845,7 @@ class FreshRunner(Runner):
                                     phone_key_file=str(self.journal.directory / "phone-key.json"))
         for key in ("vault_id", "descriptor_id", "descriptor_file", "receive_address"):
             self.pin_artifact(key, result[key])
-        if not self.deferred_phone_purpose:
+        if not self.deferred_phone_purpose and not (self.strict and self.strict.requested):
             self.phone.check_fixture(self.artifacts["cube_name"], self.deadline)
 
     def stage_funding(self):
@@ -871,6 +908,9 @@ class FreshRunner(Runner):
                 raise Blocked("INPUT_SPENT", "The generated funding output is unavailable; no replacement funding will be requested.")
 
     def stage_phone(self):
+        if self.strict and self.strict.requested:
+            self.strict.observe()
+            return
         if self.deferred_phone_purpose:
             return
         self.journal.artifact("phone", self.phone.check_fixture(self.artifacts["cube_name"], self.deadline))
@@ -1003,6 +1043,8 @@ class FreshRunner(Runner):
         return True
 
     def restart_request_discovery(self):
+        if self.strict:
+            self.strict.reject_restart()
         self.validate_discovery_back()
         if "request_discovery_no_restart" in self.artifacts:
             self.prepare_discovery_no_restart()
@@ -1070,10 +1112,42 @@ class FreshRunner(Runner):
                 return True
             raise
 
+    def stage_request(self):
+        if self.strict:
+            names = ("account_identity", "desktop_identity", "request_id", "intent", "psbt_sha256", "descriptor_id",
+                     "target_key_id", "target_fingerprint", "cube_id", "cube_uuid", "vault_id", "fee_sats")
+            binding = {name: deepcopy(self.artifacts[name]) for name in names}
+            binding.update(run_id=self.run_id, config_binding=self.journal.data["binding"],
+                           phone_validation=deepcopy(self.artifacts.get("phone_validation")),
+                           phone=deepcopy(self.artifacts.get("phone")))
+            if (not isinstance(binding["phone_validation"], dict)
+                    or binding["phone_validation"].get("source") != "settings_ui"
+                    or any(binding["phone_validation"].get(k) != v for k, v in self.phone_validation_identity().items())
+                    or binding["phone"] != {"build": self.phone.build, "network": "testnet4", "cube_visible": True}):
+                raise Failed("STRICT_PHONE_VALIDATION", "Strict request creation requires this run's full phone account/network/Cube checks.")
+            self.strict.begin_request(binding)
+            if self.artifacts.get("already_broadcast"):
+                self.strict.require_completion(self.request_id, self.artifacts["session_id"])
+        super().stage_request()
+        if self.strict:
+            self.strict.bind_session(self.artifacts["session_id"])
+
     def stage_sign(self):
+        if self.strict:
+            self.strict.observe()
+            if self.artifacts.get("already_broadcast"):
+                self.strict.require_completion(self.request_id, self.artifacts["session_id"])
         if self.artifacts.get("already_broadcast") or self.collect_once():
             return
         if not self.artifacts.get("approval_started"):
+            if self.strict:
+                self.pin_artifact("approval_binding", self.approval_binding())
+                def collect_delivery():
+                    self.collect_once()
+                    return self.last_collection
+                self.strict.wait_delivery(self.request_id, self.artifacts["session_id"], collect_delivery, self.deadline)
+                self.approve_phone()  # Queue navigation follows target-device delivery acknowledgement.
+                return
             archived_timeout = "request_discovery_timeout" in self.artifacts
             if archived_timeout and not self.continue_request_discovery():
                 return
@@ -1087,7 +1161,7 @@ class FreshRunner(Runner):
                 if self.continue_request_discovery():
                     self.approve_phone()  # A second timeout propagates; there is no second restart.
             return
-        if self.upgrade_approval():
+        if not self.strict and self.upgrade_approval():
             return
         context = self.artifacts.get("approval_context")
         if context is not None and self.untouched_signing_pin(self.onboarding.store.load()):
@@ -1098,6 +1172,10 @@ class FreshRunner(Runner):
                 before_pin=self.require_viewed_unsubmitted)
 
     def stage_collect(self):
+        if self.strict:
+            self.strict.observe()
+            if self.artifacts.get("already_broadcast"):
+                self.strict.require_completion(self.request_id, self.artifacts["session_id"])
         super().stage_collect()
         self.onboarding.reconcile_pin("sign:" + self.request_id)
         if self.deferred_phone_purpose == "sign:" + self.request_id:
@@ -1105,6 +1183,8 @@ class FreshRunner(Runner):
             self.stage_phone()
 
     def stage_broadcast(self):
+        if self.strict:
+            self.strict.require_completion(self.request_id, self.artifacts["session_id"])
         self.core.chain()
         if self.core.known(self.intent["txid"]):
             self.journal.artifact("broadcast_txid", self.intent["txid"])
