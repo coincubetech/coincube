@@ -95,6 +95,27 @@ impl Default for CoincubeClient {
 }
 
 impl CoincubeClient {
+    /// Build every API transport from the captured device identity and current
+    /// token. Specialized transports retain their own timeout/redirect policy.
+    fn client_builder(
+        base_url: &str,
+        identity_headers: &reqwest::header::HeaderMap,
+        token: Option<&str>,
+        timeout: Duration,
+    ) -> Result<reqwest::ClientBuilder, CoincubeError> {
+        let mut headers = identity_headers.clone();
+        if let Some(token) = token {
+            let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
+                .map_err(|_| CoincubeError::Api("Invalid authorization header".into()))?;
+            value.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
+        Ok(Client::builder()
+            .timeout(timeout)
+            .https_only(!base_url.starts_with("http://"))
+            .default_headers(headers))
+    }
+
     pub fn new() -> Self {
         let base_url = crate::services::coincube_api_base_url();
 
@@ -104,16 +125,18 @@ impl CoincubeClient {
             cfg!(not(debug_assertions))
         );
 
-        let https_only = !base_url.starts_with("http://");
         let identity_headers = device_headers();
 
         Self {
-            client: reqwest::ClientBuilder::new()
-                .timeout(std::time::Duration::from_secs(20))
-                .https_only(https_only)
-                .default_headers(identity_headers.clone())
-                .build()
-                .unwrap(),
+            client: Self::client_builder(
+                &base_url,
+                &identity_headers,
+                None,
+                Duration::from_secs(20),
+            )
+            .unwrap()
+            .build()
+            .unwrap(),
             base_url,
             token: None,
             identity_headers,
@@ -129,19 +152,15 @@ impl CoincubeClient {
         // allocation before the new value takes its place.
         self.token = Some(Zeroizing::new(token.to_string()));
 
-        let mut headers = self.identity_headers.clone();
-        headers.append(
-            "Authorization",
-            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        );
-
-        let https_only = !self.base_url.starts_with("http://");
-        self.client = reqwest::ClientBuilder::new()
-            .timeout(std::time::Duration::from_secs(20))
-            .https_only(https_only)
-            .default_headers(headers)
-            .build()
-            .unwrap();
+        self.client = Self::client_builder(
+            &self.base_url,
+            &self.identity_headers,
+            self.token(),
+            Duration::from_secs(20),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
     }
 
     /// Explicit logout helper: drops the token (the `Zeroizing`
@@ -157,32 +176,29 @@ impl CoincubeClient {
     /// reallocating the whole struct.
     pub fn clear_token(&mut self) {
         self.token = None;
-        let https_only = !self.base_url.starts_with("http://");
-        self.client = reqwest::ClientBuilder::new()
-            .timeout(std::time::Duration::from_secs(20))
-            .https_only(https_only)
-            .default_headers(self.identity_headers.clone())
-            .build()
-            .unwrap();
+        self.client = Self::client_builder(
+            &self.base_url,
+            &self.identity_headers,
+            None,
+            Duration::from_secs(20),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
     }
 
     /// A bounded anchor transport preserves this client's login identity while
     /// refusing redirects. No device identity filesystem access occurs here.
     pub(super) fn anchor_transport(&self) -> Result<reqwest::Client, CoincubeError> {
-        let mut headers = self.identity_headers.clone();
-        if let Some(token) = self.token() {
-            let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
-                .map_err(|_| CoincubeError::Api("Invalid authorization header".into()))?;
-            value.set_sensitive(true);
-            headers.insert(reqwest::header::AUTHORIZATION, value);
-        }
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(10))
-            .https_only(!self.base_url.starts_with("http://"))
-            .default_headers(headers)
-            .build()
-            .map_err(CoincubeError::from)
+        Self::client_builder(
+            &self.base_url,
+            &self.identity_headers,
+            self.token(),
+            Duration::from_secs(10),
+        )?
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(CoincubeError::from)
     }
 
     pub fn token(&self) -> Option<&str> {
@@ -790,22 +806,6 @@ impl CoincubeClient {
 }
 
 impl CoincubeClient {
-    /// Builds an Authorization HeaderMap from the stored token.
-    fn auth_headers(&self) -> reqwest::header::HeaderMap {
-        let mut map = reqwest::header::HeaderMap::new();
-        if let Some(ref t) = self.token {
-            // Deref through `Zeroizing<String>` to `&str` for the
-            // format — `Zeroizing` doesn't implement Display so a
-            // direct `{}` placeholder wouldn't compile.
-            if let Ok(val) =
-                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", t.as_str()))
-            {
-                map.insert("Authorization", val);
-            }
-        }
-        map
-    }
-
     /// GET /api/v1/connect/cubes/{cubeId}/avatar
     pub async fn get_avatar(&self, cube_id: &str) -> Result<GetAvatarData, CoincubeError> {
         let url = format!("{}/api/v1/connect/cubes/{}/avatar", self.base_url, cube_id);
@@ -821,12 +821,14 @@ impl CoincubeClient {
         cube_id: &str,
         req: AvatarGenerateRequest,
     ) -> Result<AvatarGenerateData, CoincubeError> {
-        let slow_client = reqwest::ClientBuilder::new()
-            .timeout(std::time::Duration::from_secs(120))
-            .https_only(!self.base_url.starts_with("http://"))
-            .default_headers(self.auth_headers())
-            .build()
-            .map_err(CoincubeError::Network)?;
+        let slow_client = Self::client_builder(
+            &self.base_url,
+            &self.identity_headers,
+            self.token(),
+            Duration::from_secs(120),
+        )?
+        .build()
+        .map_err(CoincubeError::Network)?;
 
         let url = format!(
             "{}/api/v1/connect/cubes/{}/avatar/generate",
@@ -4346,5 +4348,118 @@ impl CoincubeClient {
             .to_owned();
         let body = response.bytes().await.map_err(|_| Error::Unavailable)?;
         Snapshot::decode(&body, &etag)
+    }
+}
+
+#[cfg(test)]
+mod transport_identity_tests {
+    use super::*;
+    use httpmock::{Method as MockMethod, MockServer};
+
+    fn identity() -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "x-device-fingerprint",
+            "frozen-fingerprint".parse().unwrap(),
+        );
+        headers.insert("x-device-name", "fixture-desktop".parse().unwrap());
+        headers.insert("x-platform", "desktop".parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn raw_client_debug_does_not_reveal_authorization() {
+        let mut client = CoincubeClient::for_test("http://127.0.0.1:0");
+        client.set_token("transport-canary-first");
+        assert!(!format!("{:?}", client.client).contains("transport-canary-first"));
+        client.set_token("transport-canary-second");
+        assert!(!format!("{:?}", client.client).contains("transport-canary-second"));
+    }
+
+    #[tokio::test]
+    async fn normal_avatar_and_anchor_transports_keep_captured_identity_and_current_token() {
+        let server = MockServer::start();
+        let mut client = CoincubeClient::for_test_with_identity(server.base_url(), identity());
+        for token in [Some("first-token"), Some("second-token"), None] {
+            if let Some(token) = token {
+                client.set_token(token);
+            } else {
+                client.clear_token();
+            }
+            let expected_auth = token.map(|token| format!("Bearer {}", token));
+            let normal = server.mock(|when, then| {
+                let when = when
+                    .method(MockMethod::GET)
+                    .path("/identity-check")
+                    .header("x-device-fingerprint", "frozen-fingerprint")
+                    .header("x-device-name", "fixture-desktop")
+                    .header("x-platform", "desktop");
+                if let Some(auth) = expected_auth {
+                    when.header("authorization", auth);
+                } else {
+                    when.matches(|request| {
+                        request.headers.as_ref().is_none_or(|headers| {
+                            headers
+                                .iter()
+                                .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
+                        })
+                    });
+                }
+                then.status(200);
+            });
+            client
+                .client
+                .get(format!("{}/identity-check", server.base_url()))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap();
+            client
+                .anchor_transport()
+                .unwrap()
+                .get(format!("{}/identity-check", server.base_url()))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap();
+            normal.assert_hits(2);
+            let expected_auth = token.map(|token| format!("Bearer {}", token));
+            let mut avatar = server.mock(|when, then| {
+                let when = when
+                    .method(MockMethod::POST)
+                    .path("/api/v1/connect/cubes/7/avatar/generate")
+                    .header("x-device-fingerprint", "frozen-fingerprint")
+                    .header("x-device-name", "fixture-desktop")
+                    .header("x-platform", "desktop");
+                if let Some(auth) = expected_auth {
+                    when.header("authorization", auth);
+                } else {
+                    when.matches(|request| {
+                        request.headers.as_ref().is_none_or(|headers| {
+                            headers
+                                .iter()
+                                .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
+                        })
+                    });
+                }
+                // No image generation: only verify the real request reached the local fixture.
+                then.status(503);
+            });
+            assert!(client
+                .post_avatar_generate(
+                    "7",
+                    AvatarGenerateRequest {
+                        user_traits: Default::default()
+                    }
+                )
+                .await
+                .is_err());
+            avatar.assert();
+            avatar.delete();
+            let mut normal = normal;
+            normal.delete();
+        }
     }
 }
