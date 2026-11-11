@@ -1733,3 +1733,87 @@ def test_disabled_restart_authentication_refuses_late_input_before_settings(runn
     with pytest.raises(Blocked) as error: runner.stage_authentication()
     assert error.value.code == 'REQUEST_DISCOVERY_INPUT'
     assert calls == []
+
+
+def back_receipt(runner, phase='attempted'):
+    failure = runner.artifacts['request_discovery_timeout']
+    return {'binding': deepcopy(failure['binding']), 'timeout_sha256': provision.digest(failure),
+            'process': {'pid': 10, 'bundle_id': 'io.coincube.keychainApp'}, 'phase': phase}
+
+
+@pytest.mark.parametrize('value', [None, {}, 'attempted', 'completed'])
+@pytest.mark.parametrize('changed_build', [False, True])
+def test_uncertain_or_malformed_back_blocks_authentication_before_any_navigation(runner, tmp_path, monkeypatch, value, changed_build):
+    _, calls = auth_discovery_case(runner, tmp_path, monkeypatch)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    saved = back_receipt(runner, value) if isinstance(value, str) else value
+    if value == 'completed': saved['process']['pid'] = 0
+    runner.journal.artifact('request_discovery_back', saved)
+    if changed_build: runner.phone.build = 39
+    runner.phone.labels = lambda: pytest.fail('No UI reading or setup navigation after uncertain Back')
+    with pytest.raises(Blocked): runner.stage_authentication()
+    assert calls == []
+    assert 'request_discovery_no_restart' not in runner.artifacts
+    assert 'request_discovery_restart' not in runner.artifacts
+
+
+@pytest.mark.parametrize('field', ['timeout_sha256', 'process', 'binding'])
+def test_completed_back_rejects_corrupted_immutable_evidence(runner, field):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    saved = back_receipt(runner, 'completed')
+    saved[field] = 'changed'
+    runner.journal.artifact('request_discovery_back', saved)
+    with pytest.raises(Failed): runner.validate_discovery_back()
+    assert calls == []
+
+
+def test_completed_back_does_not_reenable_permanent_no_restart(runner):
+    _, calls, _ = changed_discovery_build(runner)
+    runner.journal.artifact('request_discovery_back', back_receipt(runner, 'completed'))
+    runner.validate_discovery_back()
+    with pytest.raises(Blocked) as error: runner.restart_request_discovery()
+    assert error.value.code == 'REQUEST_DISCOVERY_DISABLED'
+    assert calls == []
+
+
+@pytest.mark.parametrize('phase', ['attempted', 'completed'])
+def test_post_back_incoming_race_cannot_excuse_uncertain_navigation(runner, phase):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    def incoming(journal, receipt, *, before_restart):
+        assert before_restart()
+        journal.artifact('request_discovery_back', back_receipt(runner, phase))
+        raise Blocked('REQUEST_DISCOVERY_INCOMING', 'Synthetic incoming after Back')
+    runner.phone.restart_for_request_discovery = incoming
+    if phase == 'attempted':
+        with pytest.raises(Blocked) as error: runner.stage_sign()
+        assert error.value.code == 'REQUEST_DISCOVERY_BACK_UNCERTAIN'
+    else:
+        runner.stage_sign()
+    assert calls == (['ordinary-review'] if phase == 'completed' else [])
+    assert 'request_discovery_restart' not in runner.artifacts
+
+
+def test_exact_request_arrival_on_queue_routes_to_fresh_ordinary_review(runner):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    def arrived(*a, **k):
+        raise Blocked('REQUEST_DISCOVERY_READY', 'Exact request is now visible')
+    runner.phone.restart_for_request_discovery = arrived
+    runner.stage_sign()
+    assert calls == ['ordinary-review']
+    assert 'request_discovery_back' not in runner.artifacts
+    assert 'request_discovery_restart' not in runner.artifacts
+
+
+def test_pending_discovery_guard_rechecks_credential_after_native_call(runner):
+    state, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    def collect(*a, **k):
+        state['pending_attempt'] = 'foreign'
+        return {'ready': False, 'status': 1, 'submitted_signature_count': 0}
+    runner.native_call = collect
+    with pytest.raises(Blocked) as error: runner.require_pending_discovery()
+    assert error.value.code == 'REQUEST_DISCOVERY_INPUT'
+    assert calls == []

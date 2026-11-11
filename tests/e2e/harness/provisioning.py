@@ -247,6 +247,7 @@ class FreshRunner(Runner):
         store = SecretStore(Provision(self.provision.binary, phone_dir, phone_dir, secret_id), phone_dir / "phone-secrets.keychain.json")
         self.onboarding = Onboarding(self.phone, store, self.artifacts["account_identity"], self.deadline)
         state = store.load()
+        self.validate_discovery_back()
         self.validate_discovery_restart()
         self.archive_discovery_timeout(self.journal.data["stages"].get("sign"))
         self.prepare_discovery_no_restart()
@@ -946,6 +947,22 @@ class FreshRunner(Runner):
             "binding": deepcopy(failure["binding"]["approval_binding"]), "timeout": deepcopy(failure),
             "timeout_sha256": digest(failure), "original_build": original_build, "observed_build": self.phone.build})
 
+    def validate_discovery_back(self):
+        if "request_discovery_back" not in self.artifacts:
+            return
+        back = self.artifacts["request_discovery_back"]
+        self.archive_discovery_timeout(None)
+        failure = self.artifacts.get("request_discovery_timeout")
+        process = back.get("process") if isinstance(back, dict) else None
+        if (not isinstance(back, dict) or set(back) != {"binding", "timeout_sha256", "process", "phase"}
+                or not isinstance(failure, dict) or back.get("binding") != failure.get("binding")
+                or back.get("timeout_sha256") != digest(failure)
+                or not isinstance(process, dict) or process.get("bundle_id") != "io.coincube.keychainApp"
+                or type(process.get("pid")) is not int or process["pid"] <= 0):
+            raise Failed("REQUEST_DISCOVERY_BINDING", "The queue Back receipt changed its immutable timeout, request or process binding.")
+        if back.get("phase") != "completed":
+            raise Blocked("REQUEST_DISCOVERY_BACK_UNCERTAIN", "The queue Back outcome was not verified; no setup navigation or retry is allowed.")
+
     def validate_discovery_restart(self):
         if "request_discovery_restart" not in self.artifacts:
             return
@@ -978,6 +995,7 @@ class FreshRunner(Runner):
         self.require_discovery_idle()
         if self.collect_once():
             return False  # A cryptographically verified signature wins the race.
+        self.require_discovery_idle()  # Input may become pending while the remote guard runs.
         result = self.last_collection
         if (result.get("ready") is not False or type(result.get("status")) is not int or result["status"] != 1
                 or type(result.get("submitted_signature_count")) is not int or result["submitted_signature_count"] != 0):
@@ -985,6 +1003,7 @@ class FreshRunner(Runner):
         return True
 
     def restart_request_discovery(self):
+        self.validate_discovery_back()
         if "request_discovery_no_restart" in self.artifacts:
             self.prepare_discovery_no_restart()
             raise Blocked("REQUEST_DISCOVERY_DISABLED", "A build change permanently disabled restart for this request.")
@@ -1017,6 +1036,7 @@ class FreshRunner(Runner):
             raise
 
     def continue_request_discovery(self):
+        self.validate_discovery_back()
         if "request_discovery_no_restart" in self.artifacts:
             self.prepare_discovery_no_restart()
             self.require_discovery_idle()
@@ -1035,7 +1055,9 @@ class FreshRunner(Runner):
                 return False
             return self.restart_request_discovery()
         except Blocked as error:
-            if not isinstance(error, Failed) and error.code == "REQUEST_DISCOVERY_INCOMING":
+            if not isinstance(error, Failed) and error.code in ("REQUEST_DISCOVERY_INCOMING", "REQUEST_DISCOVERY_READY"):
+                # A post-Back refusal must not excuse an uncertain navigation.
+                self.validate_discovery_back()
                 return self.review_incoming_discovery()
             result = getattr(self, "last_collection", {})
             if (not isinstance(error, Failed) and error.code == "REQUEST_DISCOVERY_ADVANCED"

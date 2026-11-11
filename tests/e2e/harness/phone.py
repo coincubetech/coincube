@@ -447,27 +447,87 @@ class Phone:
         journal.artifact("key_generation_recovery", deepcopy(receipt))
 
     def restart_for_request_discovery(self, journal, receipt, *, before_restart):
+        if "request_discovery_no_restart" in journal.data["artifacts"]:
+            raise Blocked("REQUEST_DISCOVERY_DISABLED", "This request permanently disabled discovery restart; no queue navigation is allowed here.")
         if "request_discovery_restart" in journal.data["artifacts"]:
             raise Blocked("REQUEST_DISCOVERY_UNCERTAIN", "The run's single discovery restart was already attempted.")
         from appium.webdriver.common.appiumby import AppiumBy
-        def require_home():
+        def surface():
             labels = self.labels()
+            self.reject_pin_error(labels)
             forbidden = {"Incoming transaction", "View transaction", "Not now", "Enter PIN", "Enter your PIN",
                          "Approve transaction", "Create new signer key", "Name your signer key", "Set up your keychain",
                          "Pick a cube on the testnet4 network."}
             modals = self.driver.find_elements(AppiumBy.IOS_PREDICATE,
                 'visible == true AND (type == "XCUIElementTypeAlert" OR type == "XCUIElementTypeSheet")')
-            if INCOMING_TRANSACTION <= labels:
-                self.reject_pin_error(labels)
             if (INCOMING_TRANSACTION <= labels and not labels & (forbidden - INCOMING_TRANSACTION)
                     and not modals and len(self.matching_controls("Not now")) == 1):
                 # This existing notification contract has an ordinary, exact
                 # queue-review path. Do not dismiss it or consume a restart here.
                 raise Blocked("REQUEST_DISCOVERY_INCOMING", "The known incoming-transaction notification is ready for ordinary request discovery.")
-            if not {"Home", "Cubes", "Settings", "Add signer key"} <= labels or labels & forbidden or modals:
+            if labels & forbidden or modals:
                 raise Blocked("REQUEST_DISCOVERY_HOME", "Discovery restart requires public Home with no modal or authentication challenge.")
-        require_home()
+            if "Pending Requests" in labels:
+                if labels & {"Home", "Cubes", "Settings", "Add signer key", "Approve", "Reject", "Cancel", "Done"}:
+                    raise Blocked("REQUEST_DISCOVERY_HOME", "The pending queue has conflicting navigation or approval controls.")
+                request_id = receipt.get("binding", {}).get("approval_binding", {}).get("request_id")
+                if request_id and "Testnet4 QA " + request_id in labels:
+                    raise Blocked("REQUEST_DISCOVERY_READY", "The exact request is visible for ordinary guarded review; no Back or restart is needed.")
+                return "pending"
+            if not {"Home", "Cubes", "Settings", "Add signer key"} <= labels:
+                raise Blocked("REQUEST_DISCOVERY_HOME", "Discovery restart requires public Home with no modal or authentication challenge.")
+            return "home"
+
+        def require_home():
+            if surface() != "home":
+                raise Blocked("REQUEST_DISCOVERY_HOME", "The pending queue has not returned to genuine public Home.")
+
+        current = surface()
         before = self.process_identity()
+        if current == "pending":
+            if "request_discovery_back" in journal.data["artifacts"]:
+                raise Blocked("REQUEST_DISCOVERY_BACK_UNCERTAIN", "The run's single queue Back was already attempted and cannot repeat.")
+            def back_control():
+                candidates = self.driver.find_elements(AppiumBy.IOS_PREDICATE,
+                    'visible == true AND enabled == true AND type == "XCUIElementTypeButton" AND (label == "Back" OR name == "Back")')
+                if len(candidates) != 1:
+                    raise Blocked("REQUEST_DISCOVERY_NAVIGATION_UNSUPPORTED", "This Pending Requests route lacks one eligible Back button; build 38 does not support this recovery.")
+                return candidates[0]
+            back_control()  # Do not touch native state for an unsupported route.
+            if receipt.get("binding", {}).get("build") != self.build:
+                raise Failed("REQUEST_DISCOVERY_BINDING", "The phone build changed before queue navigation.")
+            if not before_restart():
+                return False
+            if surface() != "pending":
+                raise Blocked("REQUEST_DISCOVERY_HOME", "The queue route changed during its remote guard; no Back was sent.")
+            control = back_control()
+            if self.process_identity() != before:
+                raise Blocked("REQUEST_DISCOVERY_PROCESS", "The app process changed before queue navigation.")
+            back = {"binding": deepcopy(receipt["binding"]), "timeout_sha256": receipt.get("timeout_sha256"),
+                    "process": deepcopy(before), "phase": "attempted"}
+            journal.artifact("request_discovery_back", deepcopy(back))
+            try:
+                control.click()  # Exactly one dispatch; never generic restore_navigation.
+            except Exception:
+                raise Blocked("REQUEST_DISCOVERY_BACK_UNCERTAIN", "The queue Back response is uncertain; it will not be repeated.") from None
+            # A returned click is not proof of navigation. Only the genuine
+            # public Home surface in the original process completes this receipt.
+            until = time.monotonic() + 3
+            while True:
+                if self.process_identity() != before:
+                    raise Blocked("REQUEST_DISCOVERY_PROCESS", "The app process changed after queue navigation.")
+                if surface() == "home":
+                    break
+                if time.monotonic() >= until:
+                    raise Blocked("REQUEST_DISCOVERY_BACK_UNCERTAIN", "The Back click did not establish public Home; it will not be repeated.")
+                time.sleep(.1)
+            back["phase"] = "completed"
+            journal.artifact("request_discovery_back", deepcopy(back))
+        saved_back = journal.data["artifacts"].get("request_discovery_back")
+        if "request_discovery_back" in journal.data["artifacts"] and (not isinstance(saved_back, dict) or saved_back.get("phase") != "completed"
+                or saved_back.get("binding") != receipt.get("binding")
+                or saved_back.get("timeout_sha256") != receipt.get("timeout_sha256") or saved_back.get("process") != before):
+            raise Blocked("REQUEST_DISCOVERY_BACK_UNCERTAIN", "The saved queue navigation does not belong to this original process and request.")
         if receipt.get("binding", {}).get("build") != self.build:
             raise Failed("REQUEST_DISCOVERY_BINDING", "The phone build changed before discovery restart.")
         if not before_restart():

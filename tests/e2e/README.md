@@ -159,6 +159,16 @@ restart and requires `NOT_RUNNING` followed by a different foreground process.
 An uncertain response blocks all further navigation on resume; it never repeats
 the restart. A completed receipt permits ordinary account/network checks and full
 transaction review. A second delivery timeout stops without another restart.
+If the timeout leaves the app on **Pending Requests**, recovery supports only
+that exact route with one visible, enabled **Back** button (exposed by QA build
+39; build 38 lacks it). It rejects authentication/review/conflicting surfaces
+and native modals, rechecks the idle credential and exact session before one
+journaled Back, and requires genuine Home in the same process before completing
+that navigation. A missing/ambiguous Back is explicitly unsupported; generic
+navigation recovery and its unjournaled restart fallback are never used by this
+recovery helper. An uncertain Back blocks resume before setup navigation, even
+across a build change. A completed Back still requires the existing final Home,
+process and native eligibility checks before the separate journaled restart.
 If the exact session advances to DELIVERED or VIEWED with zero submissions,
 the runner proceeds to ordinary exact-request review without restarting or
 consuming the restart allowance. Approved, terminal, unknown, or nonzero-submission

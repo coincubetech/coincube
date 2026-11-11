@@ -803,3 +803,188 @@ def test_known_incoming_does_not_hide_a_pin_rejection():
         phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: pytest.fail('PIN rejection must block first'))
     assert error.value.code == 'PIN_REJECTED'
     assert calls == [] and not journal.data['artifacts']
+
+
+def pending_discovery_phone(*, click_failure=False, after_back=None):
+    phone, journal, receipt, calls = discovery_phone()
+    phone.build = 39
+    receipt.update(binding={'build': 39, 'approval_binding': {'request_id': 'exact-run'}}, timeout_sha256='a' * 64)
+    view = {'labels': {'Pending Requests', 'Back'}, 'pid': 10, 'state': 4, 'back_count': 1, 'modal': False}
+    phone.labels = lambda: set(view['labels'])
+    phone.process_identity = lambda: {'pid': view['pid'], 'bundle_id': 'io.coincube.keychainApp'}
+    def click():
+        saved = journal.data['artifacts']['request_discovery_back']
+        assert saved['phase'] == 'attempted'
+        assert saved['binding'] == receipt['binding'] and saved['process']['pid'] == 10
+        calls.append('Back')
+        view['labels'] = HOME | {'Add signer key'}
+        if after_back: after_back(view)
+        if click_failure: raise RuntimeError('Lost Back response')
+    control = SimpleNamespace(click=click)
+    def find(_, predicate):
+        if 'XCUIElementTypeAlert' in predicate:
+            return [object()] if view['modal'] else []
+        assert 'XCUIElementTypeButton' in predicate and 'visible == true' in predicate and 'enabled == true' in predicate
+        return [control] * view['back_count']
+    phone.driver.find_elements = find
+    def terminate(_):
+        assert journal.data['artifacts']['request_discovery_restart']['phase'] == 'attempted'
+        calls.append('terminate')
+        view['state'] = 1
+    def activate(_):
+        calls.append('activate')
+        view.update(state=4, pid=11)
+    phone.driver.terminate_app = terminate
+    phone.driver.activate_app = activate
+    phone.driver.query_app_state = lambda _: view['state']
+    return phone, journal, receipt, calls, view
+
+
+def test_pending_queue_back_is_once_journaled_and_guarded_before_restart():
+    phone, journal, receipt, calls, _ = pending_discovery_phone()
+    def guard():
+        calls.append('guard')
+        return True
+    assert phone.restart_for_request_discovery(journal, receipt, before_restart=guard)
+    assert calls == ['guard', 'Back', 'guard', 'terminate', 'activate']
+    assert journal.data['artifacts']['request_discovery_back']['phase'] == 'completed'
+    assert journal.data['artifacts']['request_discovery_restart']['phase'] == 'completed'
+
+
+@pytest.mark.parametrize('count', [0, 2])
+def test_pending_queue_missing_or_ambiguous_back_is_unsupported(count):
+    phone, journal, receipt, calls, view = pending_discovery_phone()
+    view['back_count'] = count
+    if count == 0:
+        phone.build = receipt['binding']['build'] = 38
+        view['labels'].remove('Back')
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: pytest.fail('Unsupported route must block first'))
+    assert error.value.code == 'REQUEST_DISCOVERY_NAVIGATION_UNSUPPORTED'
+    assert calls == [] and journal.data['artifacts'] == {}
+
+
+@pytest.mark.parametrize('conflict', ['Enter PIN', 'Approve transaction', 'Create new signer key', 'Home', 'Approve', 'Reject', 'Cancel', 'Done', 'modal'])
+def test_pending_queue_does_not_back_out_of_conflicting_or_modal_surface(conflict):
+    phone, journal, receipt, calls, view = pending_discovery_phone()
+    if conflict == 'modal': view['modal'] = True
+    else: view['labels'].add(conflict)
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: pytest.fail('No guard/input on conflicting screen'))
+    assert error.value.code == 'REQUEST_DISCOVERY_HOME'
+    assert calls == [] and not journal.data['artifacts']
+
+
+@pytest.mark.parametrize('after_remote', [False, True])
+@pytest.mark.parametrize('arrival', ['exact', 'incoming'])
+def test_queue_arrival_before_back_preserves_request_without_navigation(after_remote, arrival):
+    phone, journal, receipt, calls, view = pending_discovery_phone()
+    phone.matching_controls = lambda _: [object()]
+    def arrive():
+        if arrival == 'exact': view['labels'].add('Testnet4 QA exact-run')
+        else: view['labels'] = INCOMING
+    if not after_remote: arrive()
+    def guard():
+        assert after_remote
+        arrive()
+        return True
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=guard)
+    assert error.value.code == ('REQUEST_DISCOVERY_READY' if arrival == 'exact' else 'REQUEST_DISCOVERY_INCOMING')
+    assert calls == [] and not journal.data['artifacts']
+
+
+def test_remote_signature_arrival_on_queue_does_not_click_back():
+    phone, journal, receipt, calls, _ = pending_discovery_phone()
+    assert phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: False) is False
+    assert calls == [] and not journal.data['artifacts']
+
+
+@pytest.mark.parametrize('code', ['REQUEST_DISCOVERY_INPUT', 'REQUEST_DISCOVERY_ADVANCED'])
+@pytest.mark.parametrize('late', [False, True])
+def test_queue_native_guard_races_never_restart(code, late):
+    phone, journal, receipt, calls, _ = pending_discovery_phone()
+    count = 0
+    def guard():
+        nonlocal count
+        count += 1
+        if count == (2 if late else 1): raise Blocked(code, 'Synthetic guard race')
+        return True
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=guard)
+    assert error.value.code == code
+    assert calls == (['Back'] if late else [])
+    assert 'request_discovery_restart' not in journal.data['artifacts']
+
+
+@pytest.mark.parametrize('when', ['remote', 'back', 'final_guard'])
+def test_queue_process_change_stops_before_any_restart(when):
+    phone, journal, receipt, calls, view = pending_discovery_phone(
+        after_back=(lambda v: v.update(pid=12)) if when == 'back' else None)
+    count = 0
+    def guard():
+        nonlocal count
+        count += 1
+        if count == (2 if when == 'final_guard' else 1) and when != 'back': view['pid'] = 12
+        return True
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=guard)
+    assert error.value.code == 'REQUEST_DISCOVERY_PROCESS'
+    assert calls == ([] if when == 'remote' else ['Back'])
+    assert 'request_discovery_restart' not in journal.data['artifacts']
+
+
+def test_lost_back_response_is_durable_and_cannot_retry_even_if_home_visible():
+    phone, journal, receipt, calls, _ = pending_discovery_phone(click_failure=True)
+    for _ in range(2):
+        with pytest.raises(Blocked) as error:
+            phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: True)
+        assert error.value.code == 'REQUEST_DISCOVERY_BACK_UNCERTAIN'
+    assert calls == ['Back']
+    assert journal.data['artifacts']['request_discovery_back']['phase'] == 'attempted'
+    assert 'request_discovery_restart' not in journal.data['artifacts']
+
+
+def test_returned_back_click_with_unknown_destination_is_not_completion():
+    phone, journal, receipt, calls, _ = pending_discovery_phone(after_back=lambda view: view.update(labels={'Unknown route'}))
+    with pytest.raises(Blocked):
+        phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: True)
+    assert calls == ['Back']
+    assert journal.data['artifacts']['request_discovery_back']['phase'] == 'attempted'
+    assert 'request_discovery_restart' not in journal.data['artifacts']
+
+
+def test_known_incoming_after_completed_back_keeps_normal_review_race():
+    phone, journal, receipt, calls, view = pending_discovery_phone()
+    phone.matching_controls = lambda _: [object()]
+    count = 0
+    def guard():
+        nonlocal count
+        count += 1
+        if count == 2: view['labels'] = INCOMING
+        return True
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=guard)
+    assert error.value.code == 'REQUEST_DISCOVERY_INCOMING'
+    assert journal.data['artifacts']['request_discovery_back']['phase'] == 'completed'
+    assert calls == ['Back']
+
+
+def test_permanent_no_restart_decision_blocks_queue_navigation_at_phone_boundary():
+    phone, journal, receipt, calls, _ = pending_discovery_phone()
+    journal.artifact('request_discovery_no_restart', {'reason': 'build_changed_without_restart'})
+    phone.labels = lambda: pytest.fail('Permanent disable must precede UI inspection')
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: True)
+    assert error.value.code == 'REQUEST_DISCOVERY_DISABLED'
+    assert calls == []
+
+
+def test_null_back_receipt_cannot_be_bypassed_when_home_is_already_visible():
+    phone, journal, receipt, calls, view = pending_discovery_phone()
+    view['labels'] = HOME | {'Add signer key'}
+    journal.artifact('request_discovery_back', None)
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: pytest.fail('Malformed Back blocks first'))
+    assert error.value.code == 'REQUEST_DISCOVERY_BACK_UNCERTAIN'
+    assert calls == []
