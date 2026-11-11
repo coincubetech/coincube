@@ -239,6 +239,14 @@ fn devices_message(message: HardwareWalletMessage) -> SplitMessage {
     SplitMessage::Device(DeviceMessage::Devices(message))
 }
 
+fn paired_device_step(chain: ChainId) -> Option<DeviceStep> {
+    match chain {
+        ChainId::Bitcoin => Some(DeviceStep::PairedBitcoin),
+        ChainId::BitcoinBlake2b => Some(DeviceStep::PairedFork),
+        _ => None,
+    }
+}
+
 impl SplitPanel {
     /// The App's datadir, for the device listing (#568 B4b-3b). Set once,
     /// at discovery, with the panel.
@@ -323,6 +331,18 @@ impl SplitPanel {
         };
     }
 
+    fn update_device_listing(&mut self, message: HardwareWalletMessage) -> Task<Message> {
+        let Some(listing) = self.device.listing.as_mut() else {
+            return Task::none();
+        };
+        match listing.devices.update(message) {
+            Ok(task) => {
+                task.map(|message| Message::View(view::Message::Split(devices_message(message))))
+            }
+            Err(_) => Task::none(),
+        }
+    }
+
     pub(super) fn update_device(&mut self, message: DeviceMessage) -> Task<Message> {
         if !self.can_sign_or_submit()
             && !matches!(
@@ -336,10 +356,8 @@ impl SplitPanel {
         }
         match message {
             DeviceMessage::OpenPaired(chain) => {
-                let step = match chain {
-                    ChainId::Bitcoin => DeviceStep::PairedBitcoin,
-                    ChainId::BitcoinBlake2b => DeviceStep::PairedFork,
-                    _ => return Task::none(),
+                let Some(step) = paired_device_step(chain) else {
+                    return Task::none();
                 };
                 if !self.can_open_paired_device(step) {
                     return Task::none();
@@ -383,56 +401,11 @@ impl SplitPanel {
                     SplitEvent::DeviceListed,
                 )
             }
-            DeviceMessage::Devices(message) => {
-                let Some(listing) = self.device.listing.as_mut() else {
-                    return Task::none();
-                };
-                match listing.devices.update(message) {
-                    Ok(task) => task.map(|message| {
-                        Message::View(view::Message::Split(devices_message(message)))
-                    }),
-                    Err(_) => Task::none(),
-                }
-            }
+            DeviceMessage::Devices(message) => self.update_device_listing(message),
             DeviceMessage::Sign(id) => {
-                let (Some(step), Some(listing)) =
-                    (self.device_step(), self.device.listing.as_ref())
-                else {
+                let Some((step, psbt, signing)) = self.prepare_device_signing(id) else {
                     return Task::none();
                 };
-                if self.device.step != Some(step) {
-                    return Task::none();
-                }
-                let psbt = match step {
-                    DeviceStep::Step1 => self.construction.as_deref().map(|c| c.psbt().clone()),
-                    DeviceStep::Step2 => self.step2_psbt.clone(),
-                    DeviceStep::PairedBitcoin => self
-                        .paired_signing
-                        .as_ref()
-                        .map(|signing| signing.bitcoin_current.clone()),
-                    DeviceStep::PairedFork => self
-                        .paired_signing
-                        .as_ref()
-                        .map(|signing| signing.fork_current.clone()),
-                };
-                let Some(psbt) = psbt else {
-                    return Task::none();
-                };
-                let signing = match DeviceSigning::prepare_with(
-                    &listing.devices,
-                    &id,
-                    &listing.policy,
-                    &psbt,
-                    self.device.opener.clone(),
-                ) {
-                    Ok(signing) => signing,
-                    Err(error) => {
-                        self.notice = Some(error.to_string());
-                        return Task::none();
-                    }
-                };
-                self.notice = None;
-                self.stage = Stage::Working(Work::SigningOnDevice);
                 if let DeviceStep::PairedBitcoin | DeviceStep::PairedFork = step {
                     let (Some(connect), Some(source), Some((_, directory)), Some(pair)) = (
                         self.connect.clone(),
@@ -504,6 +477,53 @@ impl SplitPanel {
             }
             _ => Task::none(),
         }
+    }
+
+    // Keep the actual async run and paired admission visible at update_device's
+    // source-audited dispatch boundary; preparation only selects this session's device.
+    fn prepare_device_signing(
+        &mut self,
+        id: String,
+    ) -> Option<(
+        DeviceStep,
+        coincube_core::miniscript::bitcoin::Psbt,
+        DeviceSigning,
+    )> {
+        let (Some(step), Some(listing)) = (self.device_step(), self.device.listing.as_ref()) else {
+            return None;
+        };
+        if self.device.step != Some(step) {
+            return None;
+        }
+        let psbt = match step {
+            DeviceStep::Step1 => self.construction.as_deref().map(|c| c.psbt().clone()),
+            DeviceStep::Step2 => self.step2_psbt.clone(),
+            DeviceStep::PairedBitcoin => self
+                .paired_signing
+                .as_ref()
+                .map(|signing| signing.bitcoin_current.clone()),
+            DeviceStep::PairedFork => self
+                .paired_signing
+                .as_ref()
+                .map(|signing| signing.fork_current.clone()),
+        };
+        let psbt = psbt?;
+        let signing = match DeviceSigning::prepare_with(
+            &listing.devices,
+            &id,
+            &listing.policy,
+            &psbt,
+            self.device.opener.clone(),
+        ) {
+            Ok(signing) => signing,
+            Err(error) => {
+                self.notice = Some(error.to_string());
+                return None;
+            }
+        };
+        self.notice = None;
+        self.stage = Stage::Working(Work::SigningOnDevice);
+        Some((step, psbt, signing))
     }
 
     /// A device task's result. Stale ones were dropped by sequence.

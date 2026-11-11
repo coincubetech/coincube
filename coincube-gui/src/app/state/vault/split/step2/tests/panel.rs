@@ -1410,6 +1410,43 @@ async fn panel_warns_when_step1_loses_bitcoin_confirmation_after_step2() {
 /// leaves checking status again as the only action: no acknowledgement,
 /// close or step-1 resend is offered or named, nor the "cannot replay"
 /// label. Eligible evidence clears it.
+fn assert_step2_outcome_warning(after: Step1AfterStep2, warning: &str) -> &'static str {
+    let tail = if matches!(after, Step1AfterStep2::Conflict(c) if c.is_terminal()) {
+        "You can close this split after a fresh check of Bitcoin."
+    } else {
+        "Check status again later."
+    };
+    assert!(warning.ends_with(tail), "{}", warning);
+    if let Step1AfterStep2::Conflict(conflict) = after {
+        assert!(warning.contains(&conflict.outpoint().to_string()));
+    }
+    if matches!(after, Step1AfterStep2::Conflict(c) if c.is_terminal()) {
+        assert!(
+            warning.contains("step 1 can never confirm and this split can't complete"),
+            "{}",
+            warning
+        );
+    } else {
+        assert!(
+            warning.contains("step 2's recorded bytes could also be mined on Bitcoin"),
+            "{}",
+            warning
+        );
+        assert!(!warning.contains("can never confirm"), "{}", warning);
+    }
+    if matches!(after, Step1AfterStep2::Conflict(c) if !c.is_terminal()) {
+        assert!(
+            warning.contains(
+                "appears spent on Bitcoin by another transaction (it may still be unconfirmed)"
+            ),
+            "{}",
+            warning
+        );
+    }
+
+    tail
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn step2_reconcile_warning_has_one_case_per_outcome_and_never_the_replay_label() {
     use crate::services::claim_workflow::Step1Conflict;
@@ -1467,38 +1504,7 @@ async fn step2_reconcile_warning_has_one_case_per_outcome_and_never_the_replay_l
         assert_eq!(warning_lines(&panel), [warning.as_str()]);
         assert!(seen.insert(warning.clone()), "one case each: {:?}", after);
         // #658: a terminal conflict's way out is the close beside it.
-        let tail = if matches!(after, Step1AfterStep2::Conflict(c) if c.is_terminal()) {
-            "You can close this split after a fresh check of Bitcoin."
-        } else {
-            "Check status again later."
-        };
-        assert!(warning.ends_with(tail), "{}", warning);
-        if let Step1AfterStep2::Conflict(conflict) = after {
-            assert!(warning.contains(&conflict.outpoint().to_string()));
-        }
-        if matches!(after, Step1AfterStep2::Conflict(c) if c.is_terminal()) {
-            assert!(
-                warning.contains("step 1 can never confirm and this split can't complete"),
-                "{}",
-                warning
-            );
-        } else {
-            assert!(
-                warning.contains("step 2's recorded bytes could also be mined on Bitcoin"),
-                "{}",
-                warning
-            );
-            assert!(!warning.contains("can never confirm"), "{}", warning);
-        }
-        if matches!(after, Step1AfterStep2::Conflict(c) if !c.is_terminal()) {
-            assert!(
-                warning.contains(
-                    "appears spent on Bitcoin by another transaction (it may still be unconfirmed)"
-                ),
-                "{}",
-                warning
-            );
-        }
+        let tail = assert_step2_outcome_warning(after, &warning);
         assert_eq!(warning.contains("reorganized"), reorg, "{}", warning);
         if let Step1AfterStep2::Remined { .. } = after {
             assert!(warning.contains("(height 101)") && warning.contains("(height 100)"));

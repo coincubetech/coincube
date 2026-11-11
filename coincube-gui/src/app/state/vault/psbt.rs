@@ -690,34 +690,29 @@ impl PsbtState {
         Task::batch([task, recheck, dialog])
     }
 
+    fn confirm_current_broadcast(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: &Cache,
+        message: Message,
+    ) -> Task<Message> {
+        if !self.broadcast_ready(cache) {
+            return self.close_broadcast_dialog_if_not_ready(cache);
+        }
+        if let Some(modal) = self.modal.as_mut() {
+            return modal.as_mut().update(daemon.clone(), message, &mut self.tx);
+        }
+        Task::none()
+    }
+
     fn update_inner(
         &mut self,
         daemon: Arc<dyn Daemon + Sync + Send>,
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
-        if self.claim_signing {
-            let forbidden = matches!(
-                &message,
-                Message::View(view::Message::Spend(
-                    view::SpendTxMessage::Broadcast
-                        | view::SpendTxMessage::Save
-                        | view::SpendTxMessage::Delete
-                        | view::SpendTxMessage::Confirm
-                ))
-            );
-            if forbidden
-                || (claim_signing_dispatch(&message) && !self.consume_claim_signing_permit())
-            {
-                return Task::done(Message::View(view::Message::ShowError(
-                    if forbidden {
-                        "Return to the Claim review to submit this transaction."
-                    } else {
-                        "Check both chains again before requesting this signature."
-                    }
-                    .into(),
-                )));
-            }
+        if let Some(refused) = self.claim_dispatch_refusal(&message) {
+            return refused;
         }
         if self
             .recipient_identities
@@ -729,49 +724,15 @@ impl PsbtState {
         if let Message::View(view::Message::OpenVaultRecipientIdentity(output, identity_index)) =
             &message
         {
-            if let Some((_, crate::services::branta::LookupResult::Identified(identities))) = self
-                .recipient_identities()
-                .iter()
-                .find(|(vout, _)| vout == output)
-            {
-                if let Some(identity) = identities.get(*identity_index) {
-                    identity.open();
-                }
-            }
+            self.open_recipient_identity(output, identity_index);
             return Task::none();
         }
         match message {
             Message::View(view::Message::ExportPsbt) => {
-                if self.modal.is_none() {
-                    if let Err(reason) =
-                        enforce_legacy_signature_policy(self.wallet.chain, &self.tx.psbt)
-                    {
-                        let message = replay::unsafe_legacy_policy_copy(&reason)
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| {
-                                crate::user_error::report(&Error::Unexpected(reason.to_string()))
-                            });
-                        let error = Error::Unexpected(reason.to_string());
-                        self.warning = Some(error);
-                        return Task::done(Message::View(view::Message::ShowError(message)));
-                    }
-                    let psbt_str = self.tx.psbt.to_string();
-                    let modal = VaultExportModal::new(None, ImportExportType::ExportPsbt(psbt_str));
-                    let launch = modal.launch(true);
-                    self.modal = Some(PsbtModal::Export(modal));
-                    return launch;
-                }
+                return self.open_export();
             }
             Message::View(view::Message::ImportPsbt) => {
-                if self.modal.is_none() {
-                    let modal = VaultExportModal::new(
-                        Some(daemon.clone()),
-                        ImportExportType::ImportPsbt(Some(self.tx.psbt.unsigned_tx.compute_txid())),
-                    );
-                    let launch = modal.launch(false);
-                    self.modal = Some(PsbtModal::Export(modal));
-                    return launch;
-                }
+                return self.open_import(daemon);
             }
             Message::View(view::Message::ImportExport(ImportExportMessage::Close)) => {
                 if matches!(self.modal, Some(PsbtModal::Export(_))) {
@@ -784,50 +745,7 @@ impl PsbtState {
                 }
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::Cancel)) => {
-                // Dismissing the unified signing picker. A local
-                // hardware/master/border op in flight just hides the picker
-                // (keeping the device-confirmation state). Otherwise cancel
-                // any in-flight Keychain sessions server-side — otherwise
-                // signers keep seeing the request until its 24h TTL elapses.
-                // `cancel_all()` cancels sessions that already have an id;
-                // entries whose `CreateSigningSession` RPC is still in flight
-                // are cancelled later once their `SessionCreated` lands, which
-                // needs the picker to stay mounted. So when sessions are still
-                // undrained we keep the picker mounted-but-hidden — it
-                // self-closes via `Message::Updated(Ok)` once they all reach a
-                // terminal state (see `should_close_after_dismiss`).
-                if let Some(PsbtModal::Sign(sign)) = &mut self.modal {
-                    if sign.is_signing() {
-                        // A local device op is awaiting confirmation — just
-                        // hide the picker, keeping it mounted so the op's
-                        // result still lands. Any keychain sessions keep
-                        // running and are drained on the next close.
-                        sign.display_modal = false;
-                        return Task::none();
-                    }
-                    let (cancel, keep) = sign.begin_dismiss();
-                    if !keep {
-                        self.modal = None;
-                    }
-                    return cancel;
-                }
-
-                // Any other modal (save / broadcast / export / keychain
-                // unavailable): dismissing just closes it.
-                self.modal = None;
-                // After a successful broadcast we keep the user on the
-                // PSBT detail page rather than reloading back to the
-                // list: the daemon derives `SpendStatus::Broadcast` from
-                // `coin.spend_info` (filled in by its mempool poller),
-                // so an immediate reload would overwrite our optimistic
-                // `Broadcast` status with stale `Pending` and re-expose
-                // the Broadcast button. The list view stays consistent
-                // because `BroadcastModal` calls `Wallet::record_broadcast`
-                // on RPC success, and `PsbtsPanel`'s `SpendTxs` handler
-                // runs `Wallet::apply_spend_tx_overrides` on every
-                // refresh to promote matching Pending entries to
-                // Broadcast.
-                return Task::none();
+                return self.dismiss_modal();
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::KeychainConnectSignIn)) => {
                 // From the "Keychain needs Connect" modal: close it and
@@ -858,78 +776,13 @@ impl PsbtState {
                 self.modal = Some(PsbtModal::Delete(DeleteModal::default()));
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::Sign)) => {
-                if let Some(PsbtModal::Sign(SignModal { display_modal, .. })) = &mut self.modal {
-                    *display_modal = true;
-                    return Task::none();
-                }
-
-                // Build (and launch) the nested Keychain flow up front when
-                // Connect is ready, so keychain rows populate with friendly
-                // labels by the time the user reads the picker. When Connect
-                // isn't ready this is `None` and the picker shows keychain
-                // rows derived from the descriptor, disabled with a hint.
-                let (keychain, kc_launch) = if self.keychain_signing_enabled {
-                    build_keychain_if_ready(cache, &self.wallet, &self.tx.psbt)
-                } else {
-                    (None, Task::none())
-                };
-                let modal = SignModal::new(
-                    self.tx.signers(),
-                    self.wallet.clone(),
-                    cache.datadir_path.clone(),
-                    cache.network,
-                    self.saved,
-                    self.tx.recovery_timelock(),
-                    keychain,
-                    self.keychain_signing_enabled,
-                )
-                .with_connect_account(ConnectAccountStatus::from_cache(cache));
-                let cmd = modal.load(daemon);
-                self.modal = Some(PsbtModal::Sign(modal));
-                return Task::batch([cmd, kc_launch]);
+                return self.open_signer(daemon, cache);
             }
             Message::View(view::Message::Spend(
                 view::SpendTxMessage::SelectKeychainSigner(_)
                 | view::SpendTxMessage::RequestFromEveryone,
             )) => {
-                // Connect-readiness check, moved here from the old
-                // button-press: only when the user actually selects a
-                // Keychain signer do we require Connect. If it isn't ready,
-                // surface the sign-in / pair-a-phone modal (replacing the
-                // picker) instead of dead-ending on a technical error.
-                let missing = keychain_connect_missing(cache);
-                if !missing.is_empty() {
-                    tracing::info!(
-                        "Keychain signer selected but Connect not ready (missing {})",
-                        missing.join(", ")
-                    );
-                    self.modal = Some(PsbtModal::KeychainUnavailable(KeychainUnavailableModal {
-                        signed_in: connect_session_available(cache),
-                    }));
-                    return Task::none();
-                }
-                // Connect is ready. If the picker was opened before Connect
-                // came up, its nested Keychain flow is still `None` — build and
-                // launch it now (checked without holding a mutable borrow so
-                // `build_keychain_if_ready` can read `self.wallet`/`self.tx`).
-                // This click just kicks off the resolve; the keychain rows
-                // become actionable once it returns.
-                let needs_init = matches!(
-                    &self.modal,
-                    Some(PsbtModal::Sign(sign)) if sign.keychain_needs_init()
-                );
-                if needs_init {
-                    let (keychain, launch) =
-                        build_keychain_if_ready(cache, &self.wallet, &self.tx.psbt);
-                    if let Some(PsbtModal::Sign(sign)) = self.modal.as_mut() {
-                        sign.set_keychain(keychain);
-                    }
-                    return launch;
-                }
-                // Ready and initialized: forward to the picker's nested flow.
-                if let Some(modal) = self.modal.as_mut() {
-                    return modal.as_mut().update(daemon.clone(), message, &mut self.tx);
-                }
+                return self.select_keychain(daemon, cache, message);
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::AcknowledgeReplay(
                 acknowledged,
@@ -939,46 +792,13 @@ impl PsbtState {
                 }
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::Broadcast)) => {
-                // The button is disabled until `broadcast_ready`; this is the
-                // same gate for anything that reaches the handler another way.
-                if !self.broadcast_ready(cache) {
-                    return Task::none();
-                }
-                let outpoints: Vec<_> = self.tx.coins.keys().cloned().collect();
-                return Task::perform(
-                    async move {
-                        daemon
-                            .list_coins(&[CoinStatus::Spending], &outpoints)
-                            .await
-                            .map(|res| {
-                                res.coins
-                                    .iter()
-                                    .filter_map(|c| c.spend_info.map(|info| info.txid))
-                                    .collect()
-                            })
-                            .map_err(|e| e.into())
-                    },
-                    Message::BroadcastModal,
-                );
+                return self.request_broadcast(daemon, cache);
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::Save)) => {
                 self.modal = Some(PsbtModal::Save(SaveModal::default()));
             }
             Message::View(view::Message::Label(_, _)) | Message::LabelsUpdated(_) => {
-                match self.labels_edited.update(
-                    daemon,
-                    message,
-                    std::iter::once(&mut self.tx).map(|tx| tx as &mut dyn LabelsLoader),
-                ) {
-                    Ok(cmd) => {
-                        return cmd;
-                    }
-                    Err(e) => {
-                        let err_msg = crate::user_error::report(&e);
-                        self.warning = Some(e);
-                        return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                    }
-                };
+                return self.update_labels(daemon, message);
             }
             Message::Reconcile => {
                 // UI-only: recompute collected signatures and maybe close the
@@ -1002,106 +822,11 @@ impl PsbtState {
                     return Task::batch([cmd, self.reconcile_and_maybe_close(cache)]);
                 }
             }
-            Message::BroadcastModal(res) => match res {
-                Ok(conflicting_txids) => {
-                    // The click that asked for this dialog was gated, but the
-                    // `list_coins` round trip is a window: a lookup landing in
-                    // it must not open a dialog whose Confirm the gate would
-                    // then refuse. Re-check now, and say why if it moved.
-                    if !self.broadcast_ready(cache) {
-                        return match self.not_ready_reason(cache) {
-                            Some(reason) => {
-                                Task::done(Message::View(view::Message::ShowError(reason)))
-                            }
-                            None => Task::none(),
-                        };
-                    }
-                    use coincube_ui::component::amount::DisplayAmount;
-                    let is_self_transfer = self.tx.is_send_to_self();
-                    // For a self-transfer every output is change, so `spend_amount`
-                    // is 0 by construction. Showing "0 has been sent" is nonsense;
-                    // surface the total moved (sum of change outputs) instead.
-                    let display_amount = if is_self_transfer {
-                        self.tx
-                            .psbt
-                            .unsigned_tx
-                            .output
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, o)| {
-                                if self.tx.change_indexes.contains(&i) {
-                                    Some(o.value)
-                                } else {
-                                    None
-                                }
-                            })
-                            .sum()
-                    } else {
-                        self.tx.spend_amount
-                    };
-                    // Include the unit label ("SATS" / "BTC") so the success
-                    // screen reads e.g. "149,794 SATS has been sent successfully"
-                    // rather than a bare number.
-                    let amount_display = format!(
-                        "{} {}",
-                        display_amount.to_formatted_string_with_unit(cache.bitcoin_unit),
-                        cache.bitcoin_unit.label(),
-                    );
-                    self.modal = Some(PsbtModal::Broadcast(BroadcastModal {
-                        conflicting_txids,
-                        broadcast: false,
-                        broadcasting: false,
-                        error: None,
-                        sent_quote: coincube_ui::component::quote_display::random_quote(
-                            "bitcoin-send",
-                        ),
-                        sent_image_handle:
-                            coincube_ui::component::quote_display::image_handle_for_context(
-                                "bitcoin-send",
-                            ),
-                        spend_amount_display: amount_display,
-                        is_self_transfer,
-                        wallet: self.wallet.clone(),
-                        recipient_identities: self.recipient_identities.clone().filter(|review| {
-                            review.ticket.is_current()
-                                && review.transaction_id == self.tx.psbt.unsigned_tx.compute_txid()
-                        }),
-                        recipient_outputs: self.tx.psbt.unsigned_tx.output.clone(),
-                        network: cache.network,
-                        bitcoin_unit: cache.bitcoin_unit,
-                        theme_mode: cache.theme_mode,
-                    }));
-                }
-                Err(e) => {
-                    let err_msg = crate::user_error::report(&e);
-                    self.warning = Some(e);
-                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                }
-            },
+            Message::BroadcastModal(res) => {
+                return self.open_broadcast(cache, res);
+            }
             Message::Export(ImportExportMessage::Progress(Progress::Psbt(psbt))) => {
-                if let Err(e) =
-                    merge_signatures_for_chain(self.wallet.chain, &mut self.tx.psbt, &psbt)
-                {
-                    let err_msg = replay::unsafe_legacy_policy_copy(&e)
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| {
-                            crate::user_error::report(&Error::Unexpected(format!(
-                                "Couldn't merge the imported PSBT: {e}"
-                            )))
-                        });
-                    let e = Error::Unexpected(format!("Couldn't merge the imported PSBT: {e}"));
-                    self.warning = Some(e);
-                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                }
-                let Some(descriptor) = self.wallet.inheritance_descriptor() else {
-                    return Task::done(Message::View(view::Message::ShowError(
-                        "Use the imported wallet signer for this PSBT.".to_string(),
-                    )));
-                };
-                self.tx.sigs =
-                    replay::spend_info_for_chain(self.wallet.chain, descriptor, &self.tx.psbt)
-                        .expect("already checked in PSBT import logic");
-                self.refresh_replay();
+                return self.merge_import(psbt);
             }
             // Final dispatch is gated on the **current** cache, not on the
             // click that opened the dialog: a lookup that lands, a re-check
@@ -1111,12 +836,7 @@ impl PsbtState {
             Message::View(view::Message::Spend(view::SpendTxMessage::Confirm))
                 if matches!(self.modal, Some(PsbtModal::Broadcast(_))) =>
             {
-                if !self.broadcast_ready(cache) {
-                    return self.close_broadcast_dialog_if_not_ready(cache);
-                }
-                if let Some(modal) = self.modal.as_mut() {
-                    return modal.as_mut().update(daemon.clone(), message, &mut self.tx);
-                }
+                return self.confirm_current_broadcast(daemon, cache, message);
             }
             _ => {
                 if let Some(modal) = self.modal.as_mut() {
@@ -1127,6 +847,355 @@ impl PsbtState {
         Task::none()
     }
 
+    // Admission stays before recipient actions and every modal dispatch.
+    fn open_recipient_identity(&self, output: &usize, identity_index: &usize) {
+        if let Some((_, crate::services::branta::LookupResult::Identified(identities))) = self
+            .recipient_identities()
+            .iter()
+            .find(|(vout, _)| vout == output)
+        {
+            if let Some(identity) = identities.get(*identity_index) {
+                identity.open();
+            }
+        }
+    }
+
+    fn claim_dispatch_refusal(&mut self, message: &Message) -> Option<Task<Message>> {
+        if self.claim_signing {
+            let forbidden = matches!(
+                message,
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::Broadcast
+                        | view::SpendTxMessage::Save
+                        | view::SpendTxMessage::Delete
+                        | view::SpendTxMessage::Confirm
+                ))
+            );
+            if forbidden
+                || (claim_signing_dispatch(message) && !self.consume_claim_signing_permit())
+            {
+                return Some(Task::done(Message::View(view::Message::ShowError(
+                    if forbidden {
+                        "Return to the Claim review to submit this transaction."
+                    } else {
+                        "Check both chains again before requesting this signature."
+                    }
+                    .into(),
+                ))));
+            }
+        }
+        None
+    }
+
+    fn open_export(&mut self) -> Task<Message> {
+        if self.modal.is_none() {
+            if let Err(reason) = enforce_legacy_signature_policy(self.wallet.chain, &self.tx.psbt) {
+                let message = replay::unsafe_legacy_policy_copy(&reason)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        crate::user_error::report(&Error::Unexpected(reason.to_string()))
+                    });
+                let error = Error::Unexpected(reason.to_string());
+                self.warning = Some(error);
+                return Task::done(Message::View(view::Message::ShowError(message)));
+            }
+            let psbt_str = self.tx.psbt.to_string();
+            let modal = VaultExportModal::new(None, ImportExportType::ExportPsbt(psbt_str));
+            let launch = modal.launch(true);
+            self.modal = Some(PsbtModal::Export(modal));
+            return launch;
+        }
+
+        Task::none()
+    }
+    fn open_import(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        if self.modal.is_none() {
+            let modal = VaultExportModal::new(
+                Some(daemon.clone()),
+                ImportExportType::ImportPsbt(Some(self.tx.psbt.unsigned_tx.compute_txid())),
+            );
+            let launch = modal.launch(false);
+            self.modal = Some(PsbtModal::Export(modal));
+            return launch;
+        }
+
+        Task::none()
+    }
+    fn dismiss_modal(&mut self) -> Task<Message> {
+        // Dismissing the unified signing picker. A local
+        // hardware/master/border op in flight just hides the picker
+        // (keeping the device-confirmation state). Otherwise cancel
+        // any in-flight Keychain sessions server-side — otherwise
+        // signers keep seeing the request until its 24h TTL elapses.
+        // `cancel_all()` cancels sessions that already have an id;
+        // entries whose `CreateSigningSession` RPC is still in flight
+        // are cancelled later once their `SessionCreated` lands, which
+        // needs the picker to stay mounted. So when sessions are still
+        // undrained we keep the picker mounted-but-hidden — it
+        // self-closes via `Message::Updated(Ok)` once they all reach a
+        // terminal state (see `should_close_after_dismiss`).
+        if let Some(PsbtModal::Sign(sign)) = &mut self.modal {
+            if sign.is_signing() {
+                // A local device op is awaiting confirmation — just
+                // hide the picker, keeping it mounted so the op's
+                // result still lands. Any keychain sessions keep
+                // running and are drained on the next close.
+                sign.display_modal = false;
+                return Task::none();
+            }
+            let (cancel, keep) = sign.begin_dismiss();
+            if !keep {
+                self.modal = None;
+            }
+            return cancel;
+        }
+
+        // Any other modal (save / broadcast / export / keychain
+        // unavailable): dismissing just closes it.
+        self.modal = None;
+        // After a successful broadcast we keep the user on the
+        // PSBT detail page rather than reloading back to the
+        // list: the daemon derives `SpendStatus::Broadcast` from
+        // `coin.spend_info` (filled in by its mempool poller),
+        // so an immediate reload would overwrite our optimistic
+        // `Broadcast` status with stale `Pending` and re-expose
+        // the Broadcast button. The list view stays consistent
+        // because `BroadcastModal` calls `Wallet::record_broadcast`
+        // on RPC success, and `PsbtsPanel`'s `SpendTxs` handler
+        // runs `Wallet::apply_spend_tx_overrides` on every
+        // refresh to promote matching Pending entries to
+        // Broadcast.
+        Task::none()
+    }
+    fn open_signer(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: &Cache,
+    ) -> Task<Message> {
+        if let Some(PsbtModal::Sign(SignModal { display_modal, .. })) = &mut self.modal {
+            *display_modal = true;
+            return Task::none();
+        }
+
+        // Build (and launch) the nested Keychain flow up front when
+        // Connect is ready, so keychain rows populate with friendly
+        // labels by the time the user reads the picker. When Connect
+        // isn't ready this is `None` and the picker shows keychain
+        // rows derived from the descriptor, disabled with a hint.
+        let (keychain, kc_launch) = if self.keychain_signing_enabled {
+            build_keychain_if_ready(cache, &self.wallet, &self.tx.psbt)
+        } else {
+            (None, Task::none())
+        };
+        let modal = SignModal::new(
+            self.tx.signers(),
+            self.wallet.clone(),
+            cache.datadir_path.clone(),
+            cache.network,
+            self.saved,
+            self.tx.recovery_timelock(),
+            keychain,
+            self.keychain_signing_enabled,
+        )
+        .with_connect_account(ConnectAccountStatus::from_cache(cache));
+        let cmd = modal.load(daemon);
+        self.modal = Some(PsbtModal::Sign(modal));
+        Task::batch([cmd, kc_launch])
+    }
+    fn select_keychain(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: &Cache,
+        message: Message,
+    ) -> Task<Message> {
+        // Connect-readiness check, moved here from the old
+        // button-press: only when the user actually selects a
+        // Keychain signer do we require Connect. If it isn't ready,
+        // surface the sign-in / pair-a-phone modal (replacing the
+        // picker) instead of dead-ending on a technical error.
+        let missing = keychain_connect_missing(cache);
+        if !missing.is_empty() {
+            tracing::info!(
+                "Keychain signer selected but Connect not ready (missing {})",
+                missing.join(", ")
+            );
+            self.modal = Some(PsbtModal::KeychainUnavailable(KeychainUnavailableModal {
+                signed_in: connect_session_available(cache),
+            }));
+            return Task::none();
+        }
+        // Connect is ready. If the picker was opened before Connect
+        // came up, its nested Keychain flow is still `None` — build and
+        // launch it now (checked without holding a mutable borrow so
+        // `build_keychain_if_ready` can read `self.wallet`/`self.tx`).
+        // This click just kicks off the resolve; the keychain rows
+        // become actionable once it returns.
+        let needs_init = matches!(
+            &self.modal,
+            Some(PsbtModal::Sign(sign)) if sign.keychain_needs_init()
+        );
+        if needs_init {
+            let (keychain, launch) = build_keychain_if_ready(cache, &self.wallet, &self.tx.psbt);
+            if let Some(PsbtModal::Sign(sign)) = self.modal.as_mut() {
+                sign.set_keychain(keychain);
+            }
+            return launch;
+        }
+        // Ready and initialized: forward to the picker's nested flow.
+        if let Some(modal) = self.modal.as_mut() {
+            return modal.as_mut().update(daemon.clone(), message, &mut self.tx);
+        }
+
+        Task::none()
+    }
+    fn request_broadcast(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: &Cache,
+    ) -> Task<Message> {
+        // The button is disabled until `broadcast_ready`; this is the
+        // same gate for anything that reaches the handler another way.
+        if !self.broadcast_ready(cache) {
+            return Task::none();
+        }
+        let outpoints: Vec<_> = self.tx.coins.keys().cloned().collect();
+        Task::perform(
+            async move {
+                daemon
+                    .list_coins(&[CoinStatus::Spending], &outpoints)
+                    .await
+                    .map(|res| {
+                        res.coins
+                            .iter()
+                            .filter_map(|c| c.spend_info.map(|info| info.txid))
+                            .collect()
+                    })
+                    .map_err(|e| e.into())
+            },
+            Message::BroadcastModal,
+        )
+    }
+    fn update_labels(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        message: Message,
+    ) -> Task<Message> {
+        match self.labels_edited.update(
+            daemon,
+            message,
+            std::iter::once(&mut self.tx).map(|tx| tx as &mut dyn LabelsLoader),
+        ) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                let err_msg = crate::user_error::report(&e);
+                self.warning = Some(e);
+                Task::done(Message::View(view::Message::ShowError(err_msg)))
+            }
+        }
+    }
+    fn open_broadcast(
+        &mut self,
+        cache: &Cache,
+        res: Result<HashSet<Txid>, Error>,
+    ) -> Task<Message> {
+        match res {
+            Ok(conflicting_txids) => {
+                // The click that asked for this dialog was gated, but the
+                // `list_coins` round trip is a window: a lookup landing in
+                // it must not open a dialog whose Confirm the gate would
+                // then refuse. Re-check now, and say why if it moved.
+                if !self.broadcast_ready(cache) {
+                    return match self.not_ready_reason(cache) {
+                        Some(reason) => Task::done(Message::View(view::Message::ShowError(reason))),
+                        None => Task::none(),
+                    };
+                }
+                use coincube_ui::component::amount::DisplayAmount;
+                let is_self_transfer = self.tx.is_send_to_self();
+                // For a self-transfer every output is change, so `spend_amount`
+                // is 0 by construction. Showing "0 has been sent" is nonsense;
+                // surface the total moved (sum of change outputs) instead.
+                let display_amount = if is_self_transfer {
+                    self.tx
+                        .psbt
+                        .unsigned_tx
+                        .output
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, o)| {
+                            if self.tx.change_indexes.contains(&i) {
+                                Some(o.value)
+                            } else {
+                                None
+                            }
+                        })
+                        .sum()
+                } else {
+                    self.tx.spend_amount
+                };
+                // Include the unit label ("SATS" / "BTC") so the success
+                // screen reads e.g. "149,794 SATS has been sent successfully"
+                // rather than a bare number.
+                let amount_display = format!(
+                    "{} {}",
+                    display_amount.to_formatted_string_with_unit(cache.bitcoin_unit),
+                    cache.bitcoin_unit.label(),
+                );
+                self.modal = Some(PsbtModal::Broadcast(BroadcastModal {
+                    conflicting_txids,
+                    broadcast: false,
+                    broadcasting: false,
+                    error: None,
+                    sent_quote: coincube_ui::component::quote_display::random_quote("bitcoin-send"),
+                    sent_image_handle:
+                        coincube_ui::component::quote_display::image_handle_for_context(
+                            "bitcoin-send",
+                        ),
+                    spend_amount_display: amount_display,
+                    is_self_transfer,
+                    wallet: self.wallet.clone(),
+                    recipient_identities: self.recipient_identities.clone().filter(|review| {
+                        review.ticket.is_current()
+                            && review.transaction_id == self.tx.psbt.unsigned_tx.compute_txid()
+                    }),
+                    recipient_outputs: self.tx.psbt.unsigned_tx.output.clone(),
+                    network: cache.network,
+                    bitcoin_unit: cache.bitcoin_unit,
+                    theme_mode: cache.theme_mode,
+                }));
+            }
+            Err(e) => {
+                let err_msg = crate::user_error::report(&e);
+                self.warning = Some(e);
+                return Task::done(Message::View(view::Message::ShowError(err_msg)));
+            }
+        };
+        Task::none()
+    }
+    fn merge_import(&mut self, psbt: Psbt) -> Task<Message> {
+        if let Err(e) = merge_signatures_for_chain(self.wallet.chain, &mut self.tx.psbt, &psbt) {
+            let err_msg = replay::unsafe_legacy_policy_copy(&e)
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    crate::user_error::report(&Error::Unexpected(format!(
+                        "Couldn't merge the imported PSBT: {e}"
+                    )))
+                });
+            let e = Error::Unexpected(format!("Couldn't merge the imported PSBT: {e}"));
+            self.warning = Some(e);
+            return Task::done(Message::View(view::Message::ShowError(err_msg)));
+        }
+        let Some(descriptor) = self.wallet.inheritance_descriptor() else {
+            return Task::done(Message::View(view::Message::ShowError(
+                "Use the imported wallet signer for this PSBT.".to_string(),
+            )));
+        };
+        self.tx.sigs = replay::spend_info_for_chain(self.wallet.chain, descriptor, &self.tx.psbt)
+            .expect("already checked in PSBT import logic");
+        self.refresh_replay();
+
+        Task::none()
+    }
     /// The replay pill's inputs for the view: the review plus which inputs
     /// spend an entangled (or unchecked) deposit, resolved from the cache at
     /// render time. `None` on a Bitcoin-family Cube.
@@ -1669,63 +1738,7 @@ impl BorderWalletReconstructionState {
                 self.phrase_prefilled = false;
             }
             BorderWalletReconMessage::Next => {
-                self.error = None;
-                match self.step {
-                    ReconStep::RecoveryPhrase => {
-                        let phrase_str = Zeroizing::new(
-                            self.phrase_words
-                                .iter()
-                                .map(|w| w.value.trim().to_lowercase())
-                                .collect::<Vec<_>>()
-                                .join(" "),
-                        );
-                        match GridRecoveryPhrase::from_phrase(&phrase_str) {
-                            Ok(rp) => {
-                                self.grid = Some(rp.generate_grid());
-                                self.pattern = OrderedPattern::new();
-                                self.step = ReconStep::Grid;
-                            }
-                            Err(_) => {
-                                self.error = Some(
-                                    "Invalid recovery phrase. Please enter a valid 12-word BIP39 mnemonic."
-                                        .to_string(),
-                                );
-                            }
-                        }
-                    }
-                    ReconStep::Grid => {
-                        if !self.pattern.is_complete() {
-                            self.error = Some(format!(
-                                "Please select exactly {} cells. Currently selected: {}",
-                                PATTERN_LENGTH,
-                                self.pattern.len()
-                            ));
-                            return None;
-                        }
-                        if let Some(grid) = &self.grid {
-                            match build_mnemonic(grid, &self.pattern) {
-                                Ok((mnemonic, _checksum)) => {
-                                    return Some((self.target_fingerprint, mnemonic));
-                                }
-                                Err(e) => {
-                                    // The raw error names BIP39 internals the
-                                    // user can do nothing with; what matters is
-                                    // that the pattern doesn't reconstruct.
-                                    log::error!(
-                                        "[{}] border wallet mnemonic: {}",
-                                        crate::user_error::CC_WALLET,
-                                        e
-                                    );
-                                    self.error = Some(
-                                        "That pattern doesn't rebuild this wallet's recovery phrase. \
-                                         Check the grid and your cell order, then try again."
-                                            .to_string(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
+                return self.next_reconstruction();
             }
             BorderWalletReconMessage::Previous => {
                 self.error = None;
@@ -1767,6 +1780,70 @@ impl BorderWalletReconstructionState {
                 // Handled by the caller (SignModal) to clear the reconstruction state
             }
         }
+        None
+    }
+}
+
+impl BorderWalletReconstructionState {
+    fn next_reconstruction(&mut self) -> Option<(Fingerprint, coincube_core::bip39::Mnemonic)> {
+        self.error = None;
+        match self.step {
+            ReconStep::RecoveryPhrase => {
+                let phrase_str = Zeroizing::new(
+                    self.phrase_words
+                        .iter()
+                        .map(|w| w.value.trim().to_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+                match GridRecoveryPhrase::from_phrase(&phrase_str) {
+                    Ok(rp) => {
+                        self.grid = Some(rp.generate_grid());
+                        self.pattern = OrderedPattern::new();
+                        self.step = ReconStep::Grid;
+                    }
+                    Err(_) => {
+                        self.error = Some(
+                            "Invalid recovery phrase. Please enter a valid 12-word BIP39 mnemonic."
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            ReconStep::Grid => {
+                if !self.pattern.is_complete() {
+                    self.error = Some(format!(
+                        "Please select exactly {} cells. Currently selected: {}",
+                        PATTERN_LENGTH,
+                        self.pattern.len()
+                    ));
+                    return None;
+                }
+                if let Some(grid) = &self.grid {
+                    match build_mnemonic(grid, &self.pattern) {
+                        Ok((mnemonic, _checksum)) => {
+                            return Some((self.target_fingerprint, mnemonic));
+                        }
+                        Err(e) => {
+                            // The raw error names BIP39 internals the
+                            // user can do nothing with; what matters is
+                            // that the pattern doesn't reconstruct.
+                            log::error!(
+                                "[{}] border wallet mnemonic: {}",
+                                crate::user_error::CC_WALLET,
+                                e
+                            );
+                            self.error = Some(
+                                "That pattern doesn't rebuild this wallet's recovery phrase. \
+                                         Check the grid and your cell order, then try again."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         None
     }
 }
@@ -2136,10 +2213,7 @@ impl SignModal {
         view::vault::psbt::SigningKeyKind,
         view::vault::psbt::SigningKeyState,
     ) {
-        use super::keychain_sign::PendingSessionStatus;
-        use view::vault::psbt::{
-            SigningKeyAction as Act, SigningKeyKind as Kind, SigningKeyState as St,
-        };
+        use view::vault::psbt::{SigningKeyAction as Act, SigningKeyState as St};
 
         let master_fp = self.wallet.signer.as_ref().map(|s| s.fingerprint());
         let kc = self.keychain_session(fp);
@@ -2182,6 +2256,24 @@ impl SignModal {
         if self.wallet.border_wallet_fingerprints.contains(&fp) {
             return (kind, St::Available(Act::BorderWallet));
         }
+        if let Some(row) = self.connected_signing_key(fp, kc) {
+            return row;
+        }
+        self.unavailable_signing_key(fp)
+    }
+
+    fn connected_signing_key(
+        &self,
+        fp: Fingerprint,
+        kc: Option<(usize, super::keychain_sign::PendingSessionStatus)>,
+    ) -> Option<(
+        view::vault::psbt::SigningKeyKind,
+        view::vault::psbt::SigningKeyState,
+    )> {
+        use super::keychain_sign::PendingSessionStatus;
+        use view::vault::psbt::{
+            SigningKeyAction as Act, SigningKeyKind as Kind, SigningKeyState as St,
+        };
         // A currently-connected hardware wallet matching this key.
         if let Some(i) = self
             .hws
@@ -2194,19 +2286,19 @@ impl SignModal {
                     registered: Some(false),
                     ..
                 } => {
-                    return (
+                    return Some((
                         Kind::Hardware,
                         St::Disabled("Register the wallet on this device to sign.".to_string()),
-                    );
+                    ));
                 }
                 HardwareWallet::Supported { .. } => {
-                    return (Kind::Hardware, St::Available(Act::Hardware(i)));
+                    return Some((Kind::Hardware, St::Available(Act::Hardware(i))));
                 }
                 HardwareWallet::Locked { .. } => {
-                    return (
+                    return Some((
                         Kind::Hardware,
                         St::Disabled("Unlock this device to sign.".to_string()),
-                    );
+                    ));
                 }
                 _ => {}
             }
@@ -2232,19 +2324,30 @@ impl SignModal {
                         connect: connect_idle,
                     },
                 };
-                return (Kind::LanKeychain, state);
+                return Some((Kind::LanKeychain, state));
             }
         }
         // A Connect-resolved Keychain signer.
         if let Some((idx, status)) = kc {
-            return match status {
+            return Some(match status {
                 PendingSessionStatus::Idle => (Kind::Keychain, St::Available(Act::Keychain)),
                 PendingSessionStatus::Rejected
                 | PendingSessionStatus::Expired
                 | PendingSessionStatus::Failed => (Kind::Keychain, St::Retry(idx)),
                 other => (Kind::Keychain, St::InProgress(other.label().to_string())),
-            };
+            });
         }
+        None
+    }
+
+    fn unavailable_signing_key(
+        &self,
+        fp: Fingerprint,
+    ) -> (
+        view::vault::psbt::SigningKeyKind,
+        view::vault::psbt::SigningKeyState,
+    ) {
+        use view::vault::psbt::{SigningKeyKind as Kind, SigningKeyState as St};
         // A hot key whose seed IS on this machine but which this Cube's
         // credential would not open — the restore wrote it under a credential
         // that no longer opens it, or the Cube's PIN changed underneath it.
@@ -2466,6 +2569,323 @@ impl Drop for SignModal {
     }
 }
 
+impl SignModal {
+    fn select_hardware_position(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        tx: &mut SpendTx,
+        i: usize,
+    ) -> Task<Message> {
+        if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+            return refused;
+        }
+        if let Some(fingerprint) = self.hws.list.get(i).and_then(HardwareWallet::fingerprint) {
+            return self.update(
+                daemon,
+                Message::View(view::Message::SelectPsbtHardwareWallet(fingerprint)),
+                tx,
+            );
+        }
+        let reason =
+            "This signing device is no longer ready. Reconnect or unlock it, then try again.";
+        self.signer_notice = Some(reason.to_string());
+        Task::done(Message::View(view::Message::ShowError(reason.to_string())))
+    }
+
+    fn select_master_signer(&mut self, tx: &mut SpendTx) -> Task<Message> {
+        if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+            return refused;
+        }
+        if let Some(fingerprint) = self.wallet.signer.as_ref().map(|s| s.fingerprint()) {
+            self.signing.insert(fingerprint);
+        }
+        Task::perform(
+            sign_psbt_with_master_signer(self.wallet.clone(), tx.psbt.clone()),
+            |(fg, res)| Message::Signed(fg, res),
+        )
+    }
+
+    fn dispatch_keychain_message(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        message: Message,
+        tx: &mut SpendTx,
+    ) -> Task<Message> {
+        let requests_signature = matches!(
+            message,
+            Message::View(view::Message::Spend(
+                view::SpendTxMessage::SelectKeychainSigner(_)
+                    | view::SpendTxMessage::RequestFromEveryone
+                    | view::SpendTxMessage::RetryKeychainSigner(_),
+            ))
+        );
+        if requests_signature {
+            if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+                return refused;
+            }
+        }
+        if let Some(k) = self.keychain.as_mut() {
+            return k.update(daemon, message, tx);
+        }
+
+        Task::none()
+    }
+
+    fn select_signing_device(
+        &mut self,
+        tx: &mut SpendTx,
+        requested_fp: Fingerprint,
+    ) -> Task<Message> {
+        if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+            return refused;
+        }
+        self.error = None;
+        self.signer_notice = None;
+        let selected = self
+            .hws
+            .list
+            .iter()
+            .find(|hw| hw.fingerprint() == Some(requested_fp) && !hw.is_lan_phone())
+            .or_else(|| {
+                self.hws
+                    .list
+                    .iter()
+                    .find(|hw| hw.fingerprint() == Some(requested_fp))
+            })
+            .and_then(|hw| match hw {
+                HardwareWallet::Supported {
+                    fingerprint,
+                    device,
+                    ..
+                } => Some((*fingerprint, device.clone(), hw.is_lan_phone())),
+                _ => None,
+            });
+        if let Some((fingerprint, device, over_lan)) = selected {
+            // A fresh attempt over the local network supersedes the
+            // last failure; the row goes back to "Signing…". Recorded
+            // here rather than looked up when the result lands: a
+            // phone whose connection died has usually left the device
+            // list by then, and its failure is still a Wi-Fi one.
+            if over_lan {
+                self.lan_failures.remove(&fingerprint);
+                self.lan_signing.insert(fingerprint);
+            }
+            // Keep the modal open (as the master-signer path below
+            // does) so the selected device shows its "Processing… /
+            // Please check your device" state while we wait for the
+            // signature, rather than the modal vanishing with no
+            // indication that the device is awaiting confirmation.
+            self.signing.insert(fingerprint);
+            let psbt = tx.psbt.clone();
+            return Task::perform(sign_psbt(self.wallet.clone(), device, psbt), move |res| {
+                Message::Signed(fingerprint, res)
+            });
+        }
+        let reason =
+            "This signing device is no longer ready. Reconnect or unlock it, then try again.";
+        self.signer_notice = Some(reason.to_string());
+        Task::done(Message::View(view::Message::ShowError(reason.to_string())))
+    }
+    fn update_reconstruction(
+        &mut self,
+        tx: &mut SpendTx,
+        msg: BorderWalletReconMessage,
+    ) -> Task<Message> {
+        let is_cancel = matches!(msg, BorderWalletReconMessage::Cancel);
+        let is_previous_on_phrase = matches!(msg, BorderWalletReconMessage::Previous)
+            && self
+                .border_wallet_recon
+                .as_ref()
+                .is_some_and(|r| r.step == ReconStep::RecoveryPhrase);
+
+        if is_cancel || is_previous_on_phrase {
+            self.border_wallet_recon = None;
+            return Task::none();
+        }
+
+        if let Some(recon) = &mut self.border_wallet_recon {
+            if let Some((fingerprint, mnemonic)) = recon.update(msg) {
+                let network = recon.network;
+                let chain = self.wallet.chain;
+                let psbt = tx.psbt.clone();
+                // Clear reconstruction state (zeroizes phrase words via Drop).
+                self.border_wallet_recon = None;
+                self.display_modal = false;
+                self.signing.insert(fingerprint);
+                return Task::perform(
+                    async move {
+                        let result = sign_border_wallet_for_chain(
+                            chain,
+                            mnemonic,
+                            fingerprint,
+                            network,
+                            psbt,
+                        );
+                        match result {
+                            Ok((fg, signed_psbt)) => (fg, Ok(signed_psbt)),
+                            Err(e) => (
+                                fingerprint,
+                                Err(Error::Wallet(WalletError::BorderWallet(e.to_string()))),
+                            ),
+                        }
+                    },
+                    |(fg, res)| Message::Signed(fg, res),
+                );
+            }
+        }
+
+        Task::none()
+    }
+    fn apply_signature(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        tx: &mut SpendTx,
+        fingerprint: Fingerprint,
+        res: Result<Psbt, Error>,
+    ) -> Task<Message> {
+        self.signing.remove(&fingerprint);
+        let over_lan = self.lan_signing.remove(&fingerprint);
+        match res {
+            Err(e) => self.apply_signing_error(fingerprint, over_lan, e),
+            Ok(psbt) => self.apply_signed_psbt(daemon, tx, fingerprint, psbt),
+        }
+    }
+    fn apply_signing_error(
+        &mut self,
+        fingerprint: Fingerprint,
+        over_lan: bool,
+        e: Error,
+    ) -> Task<Message> {
+        self.display_modal = true;
+        if !matches!(e, Error::HardwareWallet(async_hwi::Error::UserRefused)) {
+            // A Keychain phone over the local network: remember
+            // the failure so its row offers Connect instead, and
+            // word the toast for a phone, not a USB device.
+            if over_lan {
+                let needs_repair = matches!(
+                    &e,
+                    Error::HardwareWallet(hw) if crate::phone_signer::needs_repair(hw)
+                );
+                self.lan_failures.insert(fingerprint, needs_repair);
+                let connect_available = self
+                    .keychain_session(fingerprint)
+                    .is_some_and(|(_, status)| status.is_idle());
+                let err_msg = crate::user_error::report_lan_keychain(&e, connect_available);
+                self.error = Some(e);
+                return Task::done(Message::View(view::Message::ShowError(err_msg)));
+            }
+            let err_msg = crate::user_error::report(&e);
+            self.error = Some(e);
+            return Task::done(Message::View(view::Message::ShowError(err_msg)));
+        }
+
+        Task::none()
+    }
+    fn apply_signed_psbt(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        tx: &mut SpendTx,
+        fingerprint: Fingerprint,
+        psbt: Psbt,
+    ) -> Task<Message> {
+        self.error = None;
+        self.signer_notice = None;
+        // Bring the picker back into view after a local sign
+        // (the border-wallet path hides it during the async
+        // reconstruction). The picker now closes only when the
+        // threshold is met — decided by the panel's
+        // `Message::Updated(Ok)` handler — so a sub-threshold
+        // signature should leave it visible to add more.
+        self.display_modal = true;
+        let daemon = daemon.clone();
+        if let Err(e) = merge_signatures_for_chain(self.wallet.chain, &mut tx.psbt, &psbt) {
+            // Nothing was merged and nothing is persisted: a
+            // signature the adapter refuses (conflicting or
+            // ambiguous encoding) must not reach the daemon.
+            let err_msg = replay::unsafe_legacy_policy_copy(&e)
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    crate::user_error::report(&Error::Unexpected(format!(
+                        "Couldn't merge the signature from {fingerprint}: {e}"
+                    )))
+                });
+            let e = Error::Unexpected(format!(
+                "Couldn't merge the signature from {fingerprint}: {e}"
+            ));
+            self.error = Some(e);
+            return Task::done(Message::View(view::Message::ShowError(err_msg)));
+        }
+        self.signed.insert(fingerprint);
+        // Persist the *merged* PSBT (not the lone single-signer
+        // result) so the daemon's stored copy always matches the
+        // desktop's in-memory set. Otherwise a later re-read of
+        // the tx from the daemon (list refresh / reopen) can
+        // surface a partially-signed psbt and drop signatures
+        // collected earlier in the same session.
+        let merged = tx.psbt.clone();
+        if self.is_saved {
+            Task::perform(
+                async move { daemon.update_spend_tx(&merged).await.map_err(|e| e.into()) },
+                Message::Updated,
+            )
+        // If the spend transaction was never saved before, then both the psbt and
+        // labels attached to it must be updated.
+        } else {
+            let mut labels = HashMap::<LabelItem, Option<String>>::new();
+            for (item, label) in tx.labels() {
+                if !label.is_empty() {
+                    labels.insert(label_item_from_str(item), Some(label.clone()));
+                }
+            }
+            Task::perform(
+                async move {
+                    daemon.update_spend_tx(&merged).await?;
+                    daemon.update_labels(&labels).await.map_err(|e| e.into())
+                },
+                Message::Updated,
+            )
+        }
+    }
+    fn apply_signature_persistence(
+        &mut self,
+        tx: &mut SpendTx,
+        res: Result<(), Error>,
+    ) -> Task<Message> {
+        match res {
+            Ok(()) => match replay::spend_info_for_chain(
+                self.wallet.chain,
+                match self.wallet.inheritance_descriptor() {
+                    Some(descriptor) => descriptor,
+                    None => {
+                        return Task::done(Message::View(view::Message::ShowError(
+                            "Use the imported wallet signing screen for this PSBT.".into(),
+                        )));
+                    }
+                },
+                &tx.psbt,
+            ) {
+                Ok(sigs) => tx.sigs = sigs,
+                Err(e) => {
+                    // Keep the descriptor error as itself rather than
+                    // flattening it into `Unexpected(String)`: `Desc` has
+                    // copy that names the failing part of the descriptor,
+                    // and flattening threw that away along with the class.
+                    let e = Error::Desc(e);
+                    let err_msg = crate::user_error::report(&e);
+                    self.error = Some(e);
+                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                }
+            },
+            Err(e) => {
+                let err_msg = crate::user_error::report(&e);
+                self.error = Some(e);
+                return Task::done(Message::View(view::Message::ShowError(err_msg)));
+            }
+        };
+        Task::none()
+    }
+}
+
 impl Modal for SignModal {
     fn subscription(&self) -> Subscription<Message> {
         // Local device refresh plus, when a Keychain flow is active, its
@@ -2486,84 +2906,13 @@ impl Modal for SignModal {
     ) -> Task<Message> {
         match message {
             Message::View(view::Message::SelectHardwareWallet(i)) => {
-                if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
-                    return refused;
-                }
-                if let Some(fingerprint) =
-                    self.hws.list.get(i).and_then(HardwareWallet::fingerprint)
-                {
-                    return self.update(
-                        daemon,
-                        Message::View(view::Message::SelectPsbtHardwareWallet(fingerprint)),
-                        tx,
-                    );
-                }
-                let reason = "This signing device is no longer ready. Reconnect or unlock it, then try again.";
-                self.signer_notice = Some(reason.to_string());
-                return Task::done(Message::View(view::Message::ShowError(reason.to_string())));
+                return self.select_hardware_position(daemon, tx, i);
             }
             Message::View(view::Message::SelectPsbtHardwareWallet(requested_fp)) => {
-                if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
-                    return refused;
-                }
-                self.error = None;
-                self.signer_notice = None;
-                let selected = self
-                    .hws
-                    .list
-                    .iter()
-                    .find(|hw| hw.fingerprint() == Some(requested_fp) && !hw.is_lan_phone())
-                    .or_else(|| {
-                        self.hws
-                            .list
-                            .iter()
-                            .find(|hw| hw.fingerprint() == Some(requested_fp))
-                    })
-                    .and_then(|hw| match hw {
-                        HardwareWallet::Supported {
-                            fingerprint,
-                            device,
-                            ..
-                        } => Some((*fingerprint, device.clone(), hw.is_lan_phone())),
-                        _ => None,
-                    });
-                if let Some((fingerprint, device, over_lan)) = selected {
-                    // A fresh attempt over the local network supersedes the
-                    // last failure; the row goes back to "Signing…". Recorded
-                    // here rather than looked up when the result lands: a
-                    // phone whose connection died has usually left the device
-                    // list by then, and its failure is still a Wi-Fi one.
-                    if over_lan {
-                        self.lan_failures.remove(&fingerprint);
-                        self.lan_signing.insert(fingerprint);
-                    }
-                    // Keep the modal open (as the master-signer path below
-                    // does) so the selected device shows its "Processing… /
-                    // Please check your device" state while we wait for the
-                    // signature, rather than the modal vanishing with no
-                    // indication that the device is awaiting confirmation.
-                    self.signing.insert(fingerprint);
-                    let psbt = tx.psbt.clone();
-                    return Task::perform(
-                        sign_psbt(self.wallet.clone(), device, psbt),
-                        move |res| Message::Signed(fingerprint, res),
-                    );
-                }
-                let reason = "This signing device is no longer ready. Reconnect or unlock it, then try again.";
-                self.signer_notice = Some(reason.to_string());
-                return Task::done(Message::View(view::Message::ShowError(reason.to_string())));
+                return self.select_signing_device(tx, requested_fp);
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::SelectMasterSigner)) => {
-                if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
-                    return refused;
-                }
-                if let Some(fingerprint) = self.wallet.signer.as_ref().map(|s| s.fingerprint()) {
-                    self.signing.insert(fingerprint);
-                }
-                return Task::perform(
-                    sign_psbt_with_master_signer(self.wallet.clone(), tx.psbt.clone()),
-                    |(fg, res)| Message::Signed(fg, res),
-                );
+                return self.select_master_signer(tx);
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::SelectBorderWallet(fg))) => {
                 if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
@@ -2581,178 +2930,14 @@ impl Modal for SignModal {
                 // Keep modal displayed but now showing the reconstruction wizard
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::BorderWalletRecon(msg))) => {
-                let is_cancel = matches!(msg, BorderWalletReconMessage::Cancel);
-                let is_previous_on_phrase = matches!(msg, BorderWalletReconMessage::Previous)
-                    && self
-                        .border_wallet_recon
-                        .as_ref()
-                        .is_some_and(|r| r.step == ReconStep::RecoveryPhrase);
-
-                if is_cancel || is_previous_on_phrase {
-                    self.border_wallet_recon = None;
-                    return Task::none();
-                }
-
-                if let Some(recon) = &mut self.border_wallet_recon {
-                    if let Some((fingerprint, mnemonic)) = recon.update(msg) {
-                        let network = recon.network;
-                        let chain = self.wallet.chain;
-                        let psbt = tx.psbt.clone();
-                        // Clear reconstruction state (zeroizes phrase words via Drop).
-                        self.border_wallet_recon = None;
-                        self.display_modal = false;
-                        self.signing.insert(fingerprint);
-                        return Task::perform(
-                            async move {
-                                let result = sign_border_wallet_for_chain(
-                                    chain,
-                                    mnemonic,
-                                    fingerprint,
-                                    network,
-                                    psbt,
-                                );
-                                match result {
-                                    Ok((fg, signed_psbt)) => (fg, Ok(signed_psbt)),
-                                    Err(e) => (
-                                        fingerprint,
-                                        Err(Error::Wallet(WalletError::BorderWallet(
-                                            e.to_string(),
-                                        ))),
-                                    ),
-                                }
-                            },
-                            |(fg, res)| Message::Signed(fg, res),
-                        );
-                    }
-                }
+                return self.update_reconstruction(tx, msg);
             }
             Message::Signed(fingerprint, res) => {
-                self.signing.remove(&fingerprint);
-                let over_lan = self.lan_signing.remove(&fingerprint);
-                match res {
-                    Err(e) => {
-                        self.display_modal = true;
-                        if !matches!(e, Error::HardwareWallet(async_hwi::Error::UserRefused)) {
-                            // A Keychain phone over the local network: remember
-                            // the failure so its row offers Connect instead, and
-                            // word the toast for a phone, not a USB device.
-                            if over_lan {
-                                let needs_repair = matches!(
-                                    &e,
-                                    Error::HardwareWallet(hw) if crate::phone_signer::needs_repair(hw)
-                                );
-                                self.lan_failures.insert(fingerprint, needs_repair);
-                                let connect_available = self
-                                    .keychain_session(fingerprint)
-                                    .is_some_and(|(_, status)| status.is_idle());
-                                let err_msg =
-                                    crate::user_error::report_lan_keychain(&e, connect_available);
-                                self.error = Some(e);
-                                return Task::done(Message::View(view::Message::ShowError(
-                                    err_msg,
-                                )));
-                            }
-                            let err_msg = crate::user_error::report(&e);
-                            self.error = Some(e);
-                            return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                        }
-                    }
-                    Ok(psbt) => {
-                        self.error = None;
-                        self.signer_notice = None;
-                        // Bring the picker back into view after a local sign
-                        // (the border-wallet path hides it during the async
-                        // reconstruction). The picker now closes only when the
-                        // threshold is met — decided by the panel's
-                        // `Message::Updated(Ok)` handler — so a sub-threshold
-                        // signature should leave it visible to add more.
-                        self.display_modal = true;
-                        let daemon = daemon.clone();
-                        if let Err(e) =
-                            merge_signatures_for_chain(self.wallet.chain, &mut tx.psbt, &psbt)
-                        {
-                            // Nothing was merged and nothing is persisted: a
-                            // signature the adapter refuses (conflicting or
-                            // ambiguous encoding) must not reach the daemon.
-                            let err_msg = replay::unsafe_legacy_policy_copy(&e)
-                                .map(str::to_owned)
-                                .unwrap_or_else(|| {
-                                    crate::user_error::report(&Error::Unexpected(format!(
-                                        "Couldn't merge the signature from {fingerprint}: {e}"
-                                    )))
-                                });
-                            let e = Error::Unexpected(format!(
-                                "Couldn't merge the signature from {fingerprint}: {e}"
-                            ));
-                            self.error = Some(e);
-                            return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                        }
-                        self.signed.insert(fingerprint);
-                        // Persist the *merged* PSBT (not the lone single-signer
-                        // result) so the daemon's stored copy always matches the
-                        // desktop's in-memory set. Otherwise a later re-read of
-                        // the tx from the daemon (list refresh / reopen) can
-                        // surface a partially-signed psbt and drop signatures
-                        // collected earlier in the same session.
-                        let merged = tx.psbt.clone();
-                        if self.is_saved {
-                            return Task::perform(
-                                async move {
-                                    daemon.update_spend_tx(&merged).await.map_err(|e| e.into())
-                                },
-                                Message::Updated,
-                            );
-                        // If the spend transaction was never saved before, then both the psbt and
-                        // labels attached to it must be updated.
-                        } else {
-                            let mut labels = HashMap::<LabelItem, Option<String>>::new();
-                            for (item, label) in tx.labels() {
-                                if !label.is_empty() {
-                                    labels.insert(label_item_from_str(item), Some(label.clone()));
-                                }
-                            }
-                            return Task::perform(
-                                async move {
-                                    daemon.update_spend_tx(&merged).await?;
-                                    daemon.update_labels(&labels).await.map_err(|e| e.into())
-                                },
-                                Message::Updated,
-                            );
-                        }
-                    }
-                }
+                return self.apply_signature(daemon, tx, fingerprint, res);
             }
-            Message::Updated(res) => match res {
-                Ok(()) => match replay::spend_info_for_chain(
-                    self.wallet.chain,
-                    match self.wallet.inheritance_descriptor() {
-                        Some(descriptor) => descriptor,
-                        None => {
-                            return Task::done(Message::View(view::Message::ShowError(
-                                "Use the imported wallet signing screen for this PSBT.".into(),
-                            )));
-                        }
-                    },
-                    &tx.psbt,
-                ) {
-                    Ok(sigs) => tx.sigs = sigs,
-                    Err(e) => {
-                        // Keep the descriptor error as itself rather than
-                        // flattening it into `Unexpected(String)`: `Desc` has
-                        // copy that names the failing part of the descriptor,
-                        // and flattening threw that away along with the class.
-                        let e = Error::Desc(e);
-                        let err_msg = crate::user_error::report(&e);
-                        self.error = Some(e);
-                        return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                    }
-                },
-                Err(e) => {
-                    let err_msg = crate::user_error::report(&e);
-                    self.error = Some(e);
-                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
-                }
-            },
+            Message::Updated(res) => {
+                return self.apply_signature_persistence(tx, res);
+            }
 
             Message::HardwareWallets(msg) => match self.hws.update(msg) {
                 Ok(cmd) => {
@@ -2783,22 +2968,7 @@ impl Modal for SignModal {
                 | view::SpendTxMessage::RetryKeychainSigner(_)
                 | view::SpendTxMessage::CancelKeychainSign,
             )) => {
-                let requests_signature = matches!(
-                    message,
-                    Message::View(view::Message::Spend(
-                        view::SpendTxMessage::SelectKeychainSigner(_)
-                            | view::SpendTxMessage::RequestFromEveryone
-                            | view::SpendTxMessage::RetryKeychainSigner(_),
-                    ))
-                );
-                if requests_signature {
-                    if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
-                        return refused;
-                    }
-                }
-                if let Some(k) = self.keychain.as_mut() {
-                    return k.update(daemon, message, tx);
-                }
+                return self.dispatch_keychain_message(daemon, message, tx);
             }
             _ => {}
         }
@@ -5784,11 +5954,33 @@ mod tests {
             assert!(state.modal.is_none());
         }
 
+        async fn capture_paired_signed(task: Task<Message>, signed: &mut bool) {
+            use iced::futures::StreamExt;
+            use iced_runtime::{task::into_stream, Action};
+            if let Some(mut stream) = into_stream(task) {
+                while let Some(action) = stream.next().await {
+                    if let Action::Output(Message::Signed(_, Ok(_))) = action {
+                        *signed = true;
+                    }
+                }
+            }
+        }
+        async fn capture_paired_refused(task: Task<Message>, refused: &mut bool) {
+            use iced::futures::StreamExt;
+            use iced_runtime::{task::into_stream, Action};
+            if let Some(mut stream) = into_stream(task) {
+                while let Some(action) = stream.next().await {
+                    if let Action::Output(Message::View(view::Message::ShowError(reason))) = action
+                    {
+                        *refused |= reason.contains("Check both chains again");
+                    }
+                }
+            }
+        }
+
         #[tokio::test]
         async fn paired_claim_picker_consumes_exact_one_use_permit_on_both_chains() {
             use crate::services::claim_workflow::paired_signing_permit::PairedSigningPermit;
-            use iced::futures::StreamExt;
-            use iced_runtime::{task::into_stream, Action};
             use tokio::sync::watch;
 
             let f = fixture();
@@ -5831,26 +6023,12 @@ mod tests {
 
                 let task = state.update(daemon.clone(), &Cache::default(), sign());
                 let mut signed = false;
-                if let Some(mut stream) = into_stream(task) {
-                    while let Some(action) = stream.next().await {
-                        if let Action::Output(Message::Signed(_, Ok(_))) = action {
-                            signed = true;
-                        }
-                    }
-                }
+                capture_paired_signed(task, &mut signed).await;
                 assert!(signed, "the exact {:?} permit must reach the signer", chain);
 
                 let task = state.update(daemon.clone(), &Cache::default(), sign());
                 let mut refused = false;
-                if let Some(mut stream) = into_stream(task) {
-                    while let Some(action) = stream.next().await {
-                        if let Action::Output(Message::View(view::Message::ShowError(reason))) =
-                            action
-                        {
-                            refused |= reason.contains("Check both chains again");
-                        }
-                    }
-                }
+                capture_paired_refused(task, &mut refused).await;
                 assert!(refused, "the {:?} permit must be one-use", chain);
 
                 let stale = PairedSigningPermit::for_test(chain, &state.tx.psbt, receiver, 7);
@@ -5870,15 +6048,7 @@ mod tests {
                 );
                 let task = state.update(daemon.clone(), &Cache::default(), sign());
                 let mut refused = false;
-                if let Some(mut stream) = into_stream(task) {
-                    while let Some(action) = stream.next().await {
-                        if let Action::Output(Message::View(view::Message::ShowError(reason))) =
-                            action
-                        {
-                            refused |= reason.contains("Check both chains again");
-                        }
-                    }
-                }
+                capture_paired_refused(task, &mut refused).await;
                 assert!(
                     refused,
                     "changed {:?} PSBT must not reach the signer",

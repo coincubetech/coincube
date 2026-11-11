@@ -1293,36 +1293,7 @@ impl SplitPanel {
                     && self.intent.is_some()
                     && self.journal.is_none() =>
             {
-                match route {
-                    Route::TwoStep => {
-                        if self.legacy_flow_fixture() {
-                            self.unified.route = Some(Route::TwoStep);
-                            self.notice = None;
-                            return match self.connect.clone() {
-                                Some(connect) => self.resume_journal(connect),
-                                None => {
-                                    self.stage = Stage::NeedsSession;
-                                    Task::none()
-                                }
-                            };
-                        }
-                        self.notice = Some(super::step1::RETIRED_MARKER.to_string());
-                        Task::none()
-                    }
-                    // P1: never offered; asking for it only says why.
-                    Route::Hardware => {
-                        self.notice = Some(P1_HARDWARE.to_string());
-                        Task::none()
-                    }
-                    Route::Seeds => {
-                        if self.legacy_flow_fixture() {
-                            self.choose_seeds()
-                        } else {
-                            self.notice = Some(super::step1::RETIRED_MARKER.to_string());
-                            Task::none()
-                        }
-                    }
-                }
+                self.choose_unified_route(route)
             }
             UnifiedMessage::Words(text)
                 if self.stage == Stage::Unified(UnifiedStage::EnterSeeds) =>
@@ -1372,13 +1343,7 @@ impl SplitPanel {
             UnifiedMessage::ClearSeeds
                 if self.stage == Stage::Unified(UnifiedStage::EnterSeeds) =>
             {
-                if let Some(seeds) = self.unified.seeds.as_mut() {
-                    seeds.clear();
-                }
-                self.unified.held = 0;
-                self.unified.words.clear();
-                self.unified.passphrase.clear();
-                Task::none()
+                self.clear_unified_seeds()
             }
             UnifiedMessage::BuildAndSign if self.can_build_unified() => {
                 let Some(seeds) = self.unified.seeds.take() else {
@@ -1504,43 +1469,7 @@ impl SplitPanel {
                 )
             }
             UnifiedMessage::ConfirmClose if self.can_confirm_unified_close() => {
-                let (Some(connect), Some(record), Some((digest, directory))) = (
-                    self.connect.clone(),
-                    self.unified.record.clone(),
-                    self.journal.clone(),
-                ) else {
-                    return Task::none();
-                };
-                // Release every handle on the journal, and the seeds, first.
-                self.revoke_unified();
-                let target = self.target_cube.clone();
-                let ended = Arc::new(AtomicBool::new(false));
-                self.ending = Some(ended.clone());
-                self.stage = Stage::Working(Work::Closing);
-                self.spawn(
-                    async move {
-                        if record.sweep.is_some() {
-                            check_close(&*connect, &record)
-                                .await
-                                .map_err(|refusal| refusal.reason)?;
-                        }
-                        let context = connect.context();
-                        tokio::task::spawn_blocking(move || {
-                            step2::close_unified(
-                                &directory,
-                                &target,
-                                digest,
-                                context,
-                                &record,
-                                now_secs(),
-                                &ended,
-                            )
-                        })
-                        .await
-                        .map_err(|_| "Closing was interrupted.".to_string())?
-                    },
-                    SplitEvent::Closed,
-                )
+                self.confirm_unified_close()
             }
             UnifiedMessage::Cancel
                 if matches!(
@@ -1550,16 +1479,7 @@ impl SplitPanel {
                     ) | Stage::ChooseRoute
                 ) =>
             {
-                self.revoke_unified();
-                self.notice = None;
-                if self.intent.is_some() && self.journal.is_none() {
-                    self.unified.route = None;
-                    self.stage = Stage::ChooseRoute;
-                    Task::none()
-                } else {
-                    self.stage = Stage::NeedsSession;
-                    self.begin()
-                }
+                self.cancel_unified()
             }
             _ => Task::none(),
         }
@@ -1668,41 +1588,7 @@ impl SplitPanel {
                 Task::none()
             }
             UnifiedEvent::Submitted(Flow(flow), result) => {
-                let recorded = flow.recorded_outcome();
-                self.bind_flow(flow);
-                if recorded.is_some() || result.is_ok() {
-                    // The journal exists now: a restart reconciles it.
-                    self.journal = self.journal.clone().or(self.unified.journal.clone());
-                }
-                match result {
-                    Ok(outcome) => {
-                        self.notice = None;
-                        self.unified.outcome = Some(outcome);
-                        self.stage = Stage::Unified(UnifiedStage::Submitted);
-                    }
-                    Err(refusal) => {
-                        self.notice = Some(refusal.reason);
-                        self.unified.outcome = recorded;
-                        self.stage = Stage::Unified(if recorded.is_some() {
-                            UnifiedStage::Submitted
-                        } else {
-                            UnifiedStage::Signed
-                        });
-                    }
-                }
-                // #661 F4: the restart's record said no sweep was sent; one
-                // is recorded now, so no close offer may read it as
-                // unsubmitted.
-                if let (Some(record), Some(outcome)) =
-                    (self.unified.record.as_mut(), self.unified.outcome)
-                {
-                    record.sweep = Some(match outcome {
-                        Outcome::Recorded { txid }
-                        | Outcome::UpstreamAccepted { txid, .. }
-                        | Outcome::Uncertain { txid, .. } => txid,
-                    });
-                }
-                Task::none()
+                self.apply_unified_submission(flow, result)
             }
             UnifiedEvent::Reconciled(Flow(flow), result) => {
                 self.bind_flow(flow);
@@ -1740,6 +1626,138 @@ impl SplitPanel {
         }
     }
 
+    fn choose_unified_route(&mut self, route: Route) -> Task<Message> {
+        match route {
+            Route::TwoStep => {
+                if self.legacy_flow_fixture() {
+                    self.unified.route = Some(Route::TwoStep);
+                    self.notice = None;
+                    return match self.connect.clone() {
+                        Some(connect) => self.resume_journal(connect),
+                        None => {
+                            self.stage = Stage::NeedsSession;
+                            Task::none()
+                        }
+                    };
+                }
+                self.notice = Some(super::step1::RETIRED_MARKER.to_string());
+                Task::none()
+            }
+            // P1: never offered; asking for it only says why.
+            Route::Hardware => {
+                self.notice = Some(P1_HARDWARE.to_string());
+                Task::none()
+            }
+            Route::Seeds => {
+                if self.legacy_flow_fixture() {
+                    self.choose_seeds()
+                } else {
+                    self.notice = Some(super::step1::RETIRED_MARKER.to_string());
+                    Task::none()
+                }
+            }
+        }
+    }
+    fn clear_unified_seeds(&mut self) -> Task<Message> {
+        if let Some(seeds) = self.unified.seeds.as_mut() {
+            seeds.clear();
+        }
+        self.unified.held = 0;
+        self.unified.words.clear();
+        self.unified.passphrase.clear();
+        Task::none()
+    }
+    fn confirm_unified_close(&mut self) -> Task<Message> {
+        let (Some(connect), Some(record), Some((digest, directory))) = (
+            self.connect.clone(),
+            self.unified.record.clone(),
+            self.journal.clone(),
+        ) else {
+            return Task::none();
+        };
+        // Release every handle on the journal, and the seeds, first.
+        self.revoke_unified();
+        let target = self.target_cube.clone();
+        let ended = Arc::new(AtomicBool::new(false));
+        self.ending = Some(ended.clone());
+        self.stage = Stage::Working(Work::Closing);
+        self.spawn(
+            async move {
+                if record.sweep.is_some() {
+                    check_close(&*connect, &record)
+                        .await
+                        .map_err(|refusal| refusal.reason)?;
+                }
+                let context = connect.context();
+                tokio::task::spawn_blocking(move || {
+                    step2::close_unified(
+                        &directory,
+                        &target,
+                        digest,
+                        context,
+                        &record,
+                        now_secs(),
+                        &ended,
+                    )
+                })
+                .await
+                .map_err(|_| "Closing was interrupted.".to_string())?
+            },
+            SplitEvent::Closed,
+        )
+    }
+    fn cancel_unified(&mut self) -> Task<Message> {
+        self.revoke_unified();
+        self.notice = None;
+        if self.intent.is_some() && self.journal.is_none() {
+            self.unified.route = None;
+            self.stage = Stage::ChooseRoute;
+            Task::none()
+        } else {
+            self.stage = Stage::NeedsSession;
+            self.begin()
+        }
+    }
+    fn apply_unified_submission(
+        &mut self,
+        flow: Box<dyn UnifiedFlow>,
+        result: Result<Outcome, Step2Refusal>,
+    ) -> Task<Message> {
+        let recorded = flow.recorded_outcome();
+        self.bind_flow(flow);
+        if recorded.is_some() || result.is_ok() {
+            // The journal exists now: a restart reconciles it.
+            self.journal = self.journal.clone().or(self.unified.journal.clone());
+        }
+        match result {
+            Ok(outcome) => {
+                self.notice = None;
+                self.unified.outcome = Some(outcome);
+                self.stage = Stage::Unified(UnifiedStage::Submitted);
+            }
+            Err(refusal) => {
+                self.notice = Some(refusal.reason);
+                self.unified.outcome = recorded;
+                self.stage = Stage::Unified(if recorded.is_some() {
+                    UnifiedStage::Submitted
+                } else {
+                    UnifiedStage::Signed
+                });
+            }
+        }
+        // #661 F4: the restart's record said no sweep was sent; one
+        // is recorded now, so no close offer may read it as
+        // unsubmitted.
+        if let (Some(record), Some(outcome)) = (self.unified.record.as_mut(), self.unified.outcome)
+        {
+            record.sweep = Some(match outcome {
+                Outcome::Recorded { txid }
+                | Outcome::UpstreamAccepted { txid, .. }
+                | Outcome::Uncertain { txid, .. } => txid,
+            });
+        }
+        Task::none()
+    }
     fn reconciled_unified(&mut self, result: Result<TransactionObservation, Step2Refusal>) {
         match result {
             Ok(seen) => {

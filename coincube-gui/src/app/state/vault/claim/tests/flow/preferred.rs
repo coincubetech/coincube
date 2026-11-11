@@ -131,6 +131,18 @@ fn flow_daemon(fixture: &Fixture, base_url: &str, selected: &Coin) -> Arc<FlowDa
     })
 }
 
+fn preferred_case_session(connect: &ConnectSession, case: &str) -> ConnectSession {
+    let mut current = connect.clone();
+    if case == "account" {
+        current.account = "different-account".into();
+    }
+    if case == "provider" {
+        current.client = CoincubeClient::for_test("https://other.example.invalid");
+    }
+
+    current
+}
+
 #[tokio::test]
 async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_provider_failure() {
     let fixture = fixture_with_multisig(false);
@@ -286,13 +298,7 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
         )
         .await
         .unwrap();
-        let mut current = connect.clone();
-        if case == "account" {
-            current.account = "different-account".into();
-        }
-        if case == "provider" {
-            current.client = CoincubeClient::for_test("https://other.example.invalid");
-        }
+        let current = preferred_case_session(&connect, case);
         let consumed = checked.consume(
             &built,
             &wallet,

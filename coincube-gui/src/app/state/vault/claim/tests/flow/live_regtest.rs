@@ -151,6 +151,1058 @@ async fn drive(
     }
 }
 
+// Borrow the already-created synthetic session and transports for one driver phase.
+struct RegtestDriverPorts<'a> {
+    datadir: &'a CoincubeDirectory,
+    dyn_daemon: &'a Arc<dyn Daemon + Send + Sync>,
+    daemon: &'a Arc<FlowDaemon>,
+    fork_dyn: &'a Arc<dyn Daemon + Send + Sync>,
+    fork_daemon: &'a Arc<FlowDaemon>,
+    fork_wallet: &'a Arc<Wallet>,
+    sender: &'a watch::Sender<u64>,
+    cache: &'a Cache,
+}
+
+async fn drive_reopened_pair(
+    panel: &mut ClaimStep1Panel,
+    mut input: &mut impl BufRead,
+    init: &Value,
+    resume: bool,
+    ports: RegtestDriverPorts<'_>,
+) {
+    let RegtestDriverPorts {
+        datadir,
+        dyn_daemon,
+        daemon: _,
+        fork_dyn,
+        fork_daemon: _,
+        fork_wallet,
+        sender: _sender,
+        cache,
+    } = ports;
+    assert!(resume, "a signed pair must reopen from its saved journal");
+    let Stage::PairedRecovery(recovery) = &panel.stage else {
+        panic!("signed pair did not reopen: {:?}", panel.restart_error);
+    };
+    let recovery_labels = rendered_labels(panel, cache).await;
+    assert!(has_label(&recovery_labels, "Recorded two-chain claim"));
+    assert!(has_label(&recovery_labels, "Bitcoin transaction"));
+    assert!(has_label(&recovery_labels, "Bitcoin Blake2b transaction"));
+    assert!(has_label(&recovery_labels, "Check again"));
+    assert!(!has_label(&recovery_labels, "Broadcast Transaction"));
+    assert_eq!(
+        recovery.bitcoin_txid.unwrap().to_string(),
+        init["bitcoin_txid"].as_str().unwrap()
+    );
+    assert_eq!(
+        recovery.fork_txid.unwrap().to_string(),
+        init["btcb2_txid"].as_str().unwrap()
+    );
+    assert!(panel.restart_error.is_none());
+    assert!(!panel.can_sign_or_submit());
+    let recovery = recovery.clone();
+    use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash as _};
+    let context = ClaimStep1Panel::funding_context(
+        panel.connect.as_ref().unwrap(),
+        1,
+        panel.generation.clone(),
+    )
+    .unwrap();
+    let identity = claim_workflow::WalletIdentity {
+        bitcoin_cube: "bitcoin-cube".into(),
+        fork_cube: "fork-cube".into(),
+        descriptor_digest: sha256::Hash::hash(
+            require_vault_descriptor(&panel.wallet)
+                .unwrap()
+                .to_string()
+                .as_bytes(),
+        ),
+    };
+    let directory = journal_directory(datadir, &panel.wallet);
+    let recorded = claim_workflow::Controller::reopen_settling(&directory, &identity, context)
+        .await
+        .unwrap();
+    let pair = recorded.recorded_signed_ancestry_pair().unwrap();
+    let bitcoin_raw =
+        coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(pair.bitcoin());
+    let btcb2_raw =
+        coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(pair.fork());
+    drop(recorded);
+    if init["broadcast_bitcoin"].as_bool().unwrap_or(false)
+        || init["broadcast_btcb2"].as_bool().unwrap_or(false)
+    {
+        crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
+        panel.bind_fork_daemon(Some(ClaimForkBinding::new(
+            fork_dyn,
+            fork_wallet,
+            _sender.subscribe(),
+        )));
+        if init["broadcast_bitcoin"].as_bool().unwrap_or(false) {
+            let task = panel.update(
+                Some(dyn_daemon.clone()),
+                cache,
+                Message::View(view::Message::Claim(
+                    view::ClaimMessage::ReviewPairedBitcoin,
+                )),
+            );
+            drive(panel, dyn_daemon, cache, task).await;
+            assert!(
+                matches!(panel.stage, Stage::PairedBitcoinReview(..)),
+                "{:?}",
+                panel.restart_error
+            );
+            let review_labels = rendered_labels(panel, cache).await;
+            assert!(has_label(&review_labels, "Bitcoin — broadcast now"));
+            assert!(has_label(
+                &review_labels,
+                "Bitcoin Blake2b — recorded, not sent now"
+            ));
+            assert!(has_label(&review_labels, "Broadcast Transaction"));
+            assert!(has_label(
+                &review_labels,
+                &recovery.bitcoin_txid.unwrap().to_string()
+            ));
+            let saved_script = match &mut panel.stage {
+                Stage::PairedBitcoinReview(_, review) => {
+                    std::mem::take(&mut review.fork.output[0].script_pubkey)
+                }
+                _ => unreachable!(),
+            };
+            let invalid_labels = rendered_labels(panel, cache).await;
+            assert!(has_label(
+                &invalid_labels,
+                "Cannot display both signed destinations"
+            ));
+            assert!(!has_label(&invalid_labels, "Broadcast Transaction"));
+            if let Stage::PairedBitcoinReview(_, review) = &mut panel.stage {
+                review.fork.output[0].script_pubkey = saved_script;
+            }
+            let task = panel.update(
+                Some(dyn_daemon.clone()),
+                cache,
+                Message::View(view::Message::Claim(
+                    view::ClaimMessage::ConfirmPairedBitcoin,
+                )),
+            );
+            drive(panel, dyn_daemon, cache, task).await;
+            assert!(
+                matches!(panel.stage, Stage::PairedRecovery(..)),
+                "{:?}",
+                panel.restart_error
+            );
+            let recorded = claim_workflow::Controller::reopen_settling(
+                &directory,
+                &identity,
+                ClaimStep1Panel::funding_context(
+                    panel.connect.as_ref().unwrap(),
+                    1,
+                    panel.generation.clone(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            let attempt = recorded.recorded_signed_ancestry_pair().unwrap();
+            assert!(attempt.possible_attempt(ChainId::Bitcoin).is_some());
+            assert!(attempt.possible_attempt(ChainId::BitcoinBlake2b).is_none());
+            emit(json!({
+                "event":"claim-bitcoin-broadcast-recorded",
+                "bitcoin_txid":recovery.bitcoin_txid,
+                "notice":panel.restart_error,
+            }));
+            return;
+        }
+        assert!(recovery.fork_ready_for_review, "{:?}", recovery);
+        let task = panel.update(
+            Some(dyn_daemon.clone()),
+            cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::ReviewPairedFork)),
+        );
+        drive(panel, dyn_daemon, cache, task).await;
+        assert!(
+            matches!(panel.stage, Stage::PairedForkReview(..)),
+            "{:?}",
+            panel.restart_error
+        );
+        let review_labels = rendered_labels(panel, cache).await;
+        assert!(has_label(&review_labels, "Bitcoin Blake2b — broadcast now"));
+        assert!(has_label(
+            &review_labels,
+            "Bitcoin — recorded and confirmed"
+        ));
+        assert!(has_label(&review_labels, "Broadcast Transaction"));
+        assert!(has_label(
+            &review_labels,
+            &recovery.fork_txid.unwrap().to_string()
+        ));
+        if init["pause_before_fork_confirm"].as_bool().unwrap_or(false) {
+            emit(json!({"event":"claim-btcb2-reviewed"}));
+            assert_eq!(read(&mut input)["action"], "confirm_after_reorg");
+            let task = panel.update(
+                Some(dyn_daemon.clone()),
+                cache,
+                Message::View(view::Message::Claim(view::ClaimMessage::ConfirmPairedFork)),
+            );
+            drive(panel, dyn_daemon, cache, task).await;
+            assert!(matches!(panel.stage, Stage::PairedRecovery(..)));
+            assert!(panel.restart_error.is_some());
+            let recorded = claim_workflow::Controller::reopen_settling(
+                &directory,
+                &identity,
+                ClaimStep1Panel::funding_context(
+                    panel.connect.as_ref().unwrap(),
+                    1,
+                    panel.generation.clone(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert!(recorded
+                .recorded_signed_ancestry_pair()
+                .unwrap()
+                .possible_attempt(ChainId::BitcoinBlake2b)
+                .is_none());
+            emit(json!({
+                "event":"claim-btcb2-reorg-refused",
+                "reason":panel.restart_error,
+            }));
+            return;
+        }
+        let task = panel.update(
+            Some(dyn_daemon.clone()),
+            cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::ConfirmPairedFork)),
+        );
+        drive(panel, dyn_daemon, cache, task).await;
+        assert!(
+            matches!(panel.stage, Stage::PairedRecovery(..)),
+            "{:?}",
+            panel.restart_error
+        );
+        let recorded = claim_workflow::Controller::reopen_settling(
+            &directory,
+            &identity,
+            ClaimStep1Panel::funding_context(
+                panel.connect.as_ref().unwrap(),
+                1,
+                panel.generation.clone(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let attempt = recorded.recorded_signed_ancestry_pair().unwrap();
+        assert!(attempt.possible_attempt(ChainId::Bitcoin).is_some());
+        assert!(attempt.possible_attempt(ChainId::BitcoinBlake2b).is_some());
+        emit(json!({
+            "event":"claim-btcb2-broadcast-recorded",
+            "btcb2_txid":recovery.fork_txid,
+            "notice":panel.restart_error,
+        }));
+        return;
+    }
+    emit(json!({
+        "event":"paired-signed-pair-reopened",
+        "bitcoin_unattempted":recovery.bitcoin_unattempted,
+        "bitcoin_status":recovery.bitcoin_status,
+        "btcb2_status":recovery.fork_status,
+        "bitcoin_raw":bitcoin_raw,
+        "btcb2_raw":btcb2_raw,
+    }));
+}
+
+async fn drive_paired_deposits(
+    panel: &mut ClaimStep1Panel,
+    mut input: &mut impl BufRead,
+    _init: &Value,
+    _resume: bool,
+    ports: RegtestDriverPorts<'_>,
+) {
+    let RegtestDriverPorts {
+        datadir,
+        dyn_daemon,
+        daemon,
+        fork_dyn,
+        fork_daemon,
+        fork_wallet,
+        sender: _sender,
+        cache,
+    } = ports;
+    // Reload probed the healthy Vault and prepared paired deposit
+    // addresses automatically. Keep the real entry transition under test;
+    // this binding is needed only for later two-chain verification.
+    panel.bind_fork_daemon(Some(ClaimForkBinding::new(
+        fork_dyn,
+        fork_wallet,
+        _sender.subscribe(),
+    )));
+    let Stage::FundingDeposits(addresses) = &panel.stage else {
+        panic!(
+            "automatic paired deposit preparation failed: stage={:?}, funding_error={:?}",
+            std::mem::discriminant(&panel.stage),
+            panel.funding_error,
+        );
+    };
+    let addresses = addresses.clone();
+    assert_ne!(addresses.bitcoin_deposit, addresses.btcb2_deposit);
+    assert!(!panel.can_sign_or_submit());
+    if !panel.deposit_details_expanded() {
+        let task = panel.update(
+            Some(dyn_daemon.clone()),
+            cache,
+            Message::View(view::Message::Claim(
+                view::ClaimMessage::ToggleDepositDetails,
+            )),
+        );
+        drive(panel, dyn_daemon, cache, task).await;
+    }
+    assert!(panel.deposit_details_expanded());
+    let deposit_labels = rendered_labels(panel, cache).await;
+    assert!(
+        has_label(&deposit_labels, "1. Deposits"),
+        "deposit labels: {:?}",
+        deposit_labels
+    );
+    assert!(has_label(&deposit_labels, "Hide deposit addresses"));
+    assert!(has_label(&deposit_labels, &addresses.bitcoin_deposit));
+    assert!(has_label(&deposit_labels, &addresses.btcb2_deposit));
+    assert!(has_label(&deposit_labels, "Bitcoin · minimum"));
+    assert!(has_label(&deposit_labels, "Bitcoin Blake2b · minimum"));
+    assert!(!has_label(&deposit_labels, "Broadcast Transaction"));
+    use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash as _};
+    let descriptor = require_vault_descriptor(&panel.wallet).unwrap().clone();
+    let identity = claim_workflow::WalletIdentity {
+        bitcoin_cube: "bitcoin-cube".into(),
+        fork_cube: "fork-cube".into(),
+        descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+    };
+    let context = ClaimStep1Panel::funding_context(
+        panel.connect.as_ref().unwrap(),
+        1,
+        panel.generation.clone(),
+    )
+    .unwrap();
+    let saved = claim_workflow::load_claim_funding(
+        &journal_directory(datadir, &panel.wallet),
+        &descriptor,
+        &identity,
+        &context,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(serde_json::to_value(&saved).unwrap()["released"], true);
+    emit(json!({
+        "event":"paired-deposit-addresses",
+        "bitcoin":addresses.bitcoin_deposit,
+        "btcb2":addresses.btcb2_deposit,
+        "bitcoin_minimum":addresses.bitcoin_minimum_sats,
+        "btcb2_minimum":addresses.btcb2_minimum_sats,
+        "bitcoin_index":saved.indices.bitcoin_deposit,
+        "btcb2_index":saved.indices.btcb2_deposit,
+    }));
+    let command = read(input);
+    if command["action"] == "quit" {
+        return;
+    }
+    assert_eq!(command["action"], "deposited");
+    for (daemon, field) in [(&daemon, "bitcoin"), (&fork_daemon, "btcb2")] {
+        let entry = &command[field];
+        let (coin, previous) = received_coin(&descriptor, entry);
+        daemon.extra_coins.lock().unwrap().push((coin, previous));
+        daemon.live.as_ref().unwrap().height.store(
+            i32::try_from(entry["tip_height"].as_u64().unwrap()).unwrap(),
+            Ordering::SeqCst,
+        );
+    }
+    let task = panel.update(
+        Some(dyn_daemon.clone()),
+        cache,
+        Message::View(view::Message::Claim(view::ClaimMessage::CheckFunding)),
+    );
+    drive(panel, dyn_daemon, cache, task).await;
+    let verified = panel.funding_review().is_some() && panel.prepared_pair.is_some();
+    assert!(matches!(panel.stage, Stage::FundingDeposits(_)));
+    assert!(
+        !panel.can_sign_or_submit(),
+        "the production signer gate remains closed"
+    );
+    assert!(verified, "paired Claim funding preview was not verified");
+    if !panel.deposit_details_expanded() {
+        let task = panel.update(
+            Some(dyn_daemon.clone()),
+            cache,
+            Message::View(view::Message::Claim(
+                view::ClaimMessage::ToggleDepositDetails,
+            )),
+        );
+        drive(panel, dyn_daemon, cache, task).await;
+    }
+    assert!(panel.deposit_details_expanded());
+    let preview_labels = rendered_labels(panel, cache).await;
+    assert!(has_label(&preview_labels, &addresses.bitcoin_deposit));
+    assert!(has_label(&preview_labels, &addresses.btcb2_deposit));
+    assert!(has_label(&preview_labels, "Transaction details"));
+    assert!(has_label(
+        &preview_labels,
+        "Bitcoin-only deposit — replay protected"
+    ));
+    assert!(has_label(
+        &preview_labels,
+        "BTCB2-only deposit — replay protected"
+    ));
+    assert!(has_label(&preview_labels, "Before fork"));
+    assert!(!has_label(&preview_labels, "OP_RETURN"));
+    let review = panel.funding_review().unwrap();
+    for row in review
+        .bitcoin
+        .shared
+        .iter()
+        .chain([&review.bitcoin.funding, &review.fork.funding])
+    {
+        assert!(has_label(&preview_labels, &row.outpoint.to_string()));
+        assert!(has_label(
+            &preview_labels,
+            &format!("{} sats", row.amount.to_sat())
+        ));
+    }
+    let destination = |output: &TxOut| {
+        Address::from_script(&output.script_pubkey, Network::Bitcoin)
+            .unwrap()
+            .to_string()
+    };
+    assert!(has_label(
+        &preview_labels,
+        &format!(
+            "Back to this Vault: {} · {} sats",
+            destination(&review.bitcoin.destination),
+            review.bitcoin.destination.value.to_sat()
+        )
+    ));
+    assert!(has_label(
+        &preview_labels,
+        &format!(
+            "Back to the paired BTCB2 Vault: {} · {} sats",
+            destination(&review.fork.destination),
+            review.fork.destination.value.to_sat()
+        )
+    ));
+    assert!(has_label(
+        &preview_labels,
+        &format!("Fee: {} sats", review.bitcoin.fee.to_sat())
+    ));
+    assert!(has_label(
+        &preview_labels,
+        &format!("Fee: {} sats", review.fork.fee.to_sat())
+    ));
+    emit(json!({
+        "event":"paired-deposits-checked",
+        "verified":verified,
+        "status":panel.funding_status,
+        "error":panel.funding_error,
+    }));
+    assert_eq!(read(&mut input)["action"], "sign_pair_stale");
+    crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
+    let task = panel.update(
+        Some(dyn_daemon.clone()),
+        cache,
+        Message::View(view::Message::Claim(view::ClaimMessage::SignPair)),
+    );
+    drive(panel, dyn_daemon, cache, task).await;
+    assert!(matches!(panel.stage, Stage::FundingDeposits(_)));
+    assert!(panel.funding_error.is_some());
+    emit(json!({
+        "event":"paired-signing-refused-stale",
+        "error":panel.funding_error,
+    }));
+    assert_eq!(read(&mut input)["action"], "deposited");
+    let task = panel.update(
+        Some(dyn_daemon.clone()),
+        cache,
+        Message::View(view::Message::Claim(view::ClaimMessage::CheckFunding)),
+    );
+    drive(panel, dyn_daemon, cache, task).await;
+    assert!(panel.funding_review().is_some() && panel.prepared_pair.is_some());
+    assert!(panel.funding_error.is_none());
+    let final_review = panel.funding_review().unwrap();
+    let shared_count = final_review.bitcoin.shared.len();
+    let expected_bitcoin_inputs: std::collections::BTreeSet<_> = final_review
+        .bitcoin
+        .shared
+        .iter()
+        .map(|row| row.outpoint)
+        .chain([final_review.bitcoin.funding.outpoint])
+        .collect();
+    let expected_btcb2_inputs: std::collections::BTreeSet<_> = final_review
+        .fork
+        .shared
+        .iter()
+        .map(|row| row.outpoint)
+        .chain([final_review.fork.funding.outpoint])
+        .collect();
+    emit(json!({"event":"paired-deposits-checked-after-stale"}));
+    let command = read(input);
+    if command["action"] == "quit" {
+        return;
+    }
+    assert_eq!(command["action"], "sign_pair");
+    let task = panel.update(
+        Some(dyn_daemon.clone()),
+        cache,
+        Message::View(view::Message::Claim(view::ClaimMessage::SignPair)),
+    );
+    drive(panel, dyn_daemon, cache, task).await;
+    let signer = panel.wallet.signer.as_ref().unwrap().clone();
+    let (bitcoin_psbt, fork_psbt) = match &panel.stage {
+        Stage::PairedSign { bitcoin, fork, .. } => (bitcoin.tx.psbt.clone(), fork.tx.psbt.clone()),
+        _ => panic!("paired signer admission failed: {:?}", panel.funding_error),
+    };
+    assert_eq!(bitcoin_psbt.unsigned_tx.input.len(), shared_count + 1);
+    assert_eq!(fork_psbt.unsigned_tx.input.len(), shared_count + 1);
+    assert_eq!(
+        bitcoin_psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_bitcoin_inputs
+    );
+    assert_eq!(
+        fork_psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_btcb2_inputs
+    );
+    let signing_labels = rendered_labels(panel, cache).await;
+    assert!(has_label(
+        &signing_labels,
+        "Sign both transfers with this Vault"
+    ));
+    assert!(has_label(&signing_labels, "Bitcoin transaction"));
+    assert!(has_label(&signing_labels, "Bitcoin Blake2b transaction"));
+    assert!(has_label(
+        &signing_labels,
+        "one verified chain-specific deposit"
+    ));
+    assert!(!has_label(&signing_labels, "OP_RETURN"));
+    let signed_bitcoin = signer.sign_psbt(bitcoin_psbt.clone()).unwrap();
+    let signed_fork = signer.sign_psbt(fork_psbt.clone()).unwrap();
+    emit(json!({
+        "event":"paired-signing-ready",
+        "bitcoin_unsigned":bitcoin_psbt.to_string(),
+        "btcb2_unsigned":fork_psbt.to_string(),
+        "bitcoin_signed":signed_bitcoin.to_string(),
+        "btcb2_signed":signed_fork.to_string(),
+    }));
+    let returned = read(input);
+    assert_eq!(returned["action"], "return_signatures");
+    for (side, field) in [
+        (ChainId::Bitcoin, "bitcoin_signed"),
+        (ChainId::BitcoinBlake2b, "btcb2_signed"),
+    ] {
+        let psbt = returned[field].as_str().unwrap().parse::<Psbt>().unwrap();
+        let task = panel.update(
+            Some(dyn_daemon.clone()),
+            cache,
+            Message::Claim(ClaimEvent::PairedPsbt(
+                panel.paired_sign_seq,
+                side,
+                Box::new(Message::Export(
+                    crate::export::ImportExportMessage::Progress(crate::export::Progress::Psbt(
+                        psbt,
+                    )),
+                )),
+            )),
+        );
+        drive(panel, dyn_daemon, cache, task).await;
+    }
+    let (bitcoin_txid, btcb2_txid) = match &panel.stage {
+        Stage::PairedRecovery(recovery) => (recovery.bitcoin_txid, recovery.fork_txid),
+        Stage::PairedSign { error, .. } => panic!("paired signatures refused: {:?}", error),
+        _ => panic!("paired signing did not record the exact pair"),
+    };
+    emit(json!({
+        "event":"paired-signatures-recorded",
+        "bitcoin_txid":bitcoin_txid,
+        "btcb2_txid":btcb2_txid,
+    }));
+    let command = read(input);
+    if command["action"] == "recheck_stale" || command["action"] == "recheck_spent" {
+        let task = panel.update(
+            Some(dyn_daemon.clone()),
+            cache,
+            Message::View(view::Message::Claim(
+                view::ClaimMessage::ReviewPairedBitcoin,
+            )),
+        );
+        drive(panel, dyn_daemon, cache, task).await;
+        assert!(matches!(panel.stage, Stage::PairedRecovery(_)));
+        assert!(panel.restart_error.is_some());
+        emit(json!({
+            "event":if command["action"] == "recheck_spent" {
+                "paired-review-refused-spent"
+            } else {
+                "paired-review-refused-stale"
+            },
+            "reason":panel.restart_error,
+        }));
+        if command["action"] == "recheck_spent" {
+            let next = read(input);
+            assert_eq!(next["action"], "recheck_stale");
+            let task = panel.update(
+                Some(dyn_daemon.clone()),
+                cache,
+                Message::View(view::Message::Claim(
+                    view::ClaimMessage::ReviewPairedBitcoin,
+                )),
+            );
+            drive(panel, dyn_daemon, cache, task).await;
+            assert!(matches!(panel.stage, Stage::PairedRecovery(_)));
+            assert!(panel.restart_error.is_some());
+            emit(json!({
+                "event":"paired-review-refused-stale",
+                "reason":panel.restart_error,
+            }));
+        }
+        assert_eq!(read(&mut input)["action"], "quit");
+    } else {
+        assert_eq!(command["action"], "quit");
+    }
+}
+
+fn assert_regtest_root(root: &std::path::Path, fixture: &Fixture, resume: bool) {
+    let fixture_marker = root.join("regtest-fixture-descriptor");
+    if resume {
+        assert_eq!(
+            std::fs::read_to_string(&fixture_marker).unwrap(),
+            fixture.descriptor.to_string(),
+            "only reopen a matching synthetic test root"
+        );
+    } else {
+        assert!(
+            root.read_dir().unwrap().next().is_none(),
+            "use a fresh synthetic root"
+        );
+        std::fs::write(&fixture_marker, fixture.descriptor.to_string()).unwrap();
+    }
+}
+
+fn select_regtest_bound_transport(
+    transport: &RegtestTransport,
+    root: &std::path::Path,
+    init: &Value,
+    config: &mut coincubed::config::Config,
+) -> Option<crate::daemon::embedded::EmbeddedDaemon> {
+    if matches!(
+        init["backend"].as_str(),
+        Some("node" | "electrum" | "fallback" | "both-reject" | "fallback-timeout")
+    ) {
+        let (selected, handle) = transport
+            .bound_handle(
+                root.join(format!("bound-transport-{}", uuid::Uuid::new_v4())),
+                if init["backend"].as_str() == Some("electrum") {
+                    Some(init["electrum"].as_str().unwrap().parse().unwrap())
+                } else {
+                    None
+                },
+            )
+            .unwrap();
+        *config = selected.clone();
+        Some(crate::daemon::embedded::EmbeddedDaemon::from_regtest_handle(selected, handle))
+    } else {
+        None
+    }
+}
+
+async fn prepare_regtest_cube_settings(
+    datadir: &CoincubeDirectory,
+    wallet: &Arc<Wallet>,
+    fork_wallet: &Arc<Wallet>,
+) {
+    for (chain, id, vault) in [
+        (ChainId::Bitcoin, "bitcoin-cube", wallet.clone()),
+        (ChainId::BitcoinBlake2b, "fork-cube", fork_wallet.clone()),
+    ] {
+        use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
+        let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain).with_vault(
+            VaultIdentity::new(vault.id(), vault.inheritance_descriptor()),
+        );
+        update_settings_file(&datadir.network_directory(chain), |mut settings| {
+            settings.cubes = vec![cube];
+            Some(settings)
+        })
+        .await
+        .unwrap();
+    }
+}
+
+fn add_regtest_initial_deposits(
+    daemon: &Arc<FlowDaemon>,
+    fork_daemon: &Arc<FlowDaemon>,
+    wallet: &Arc<Wallet>,
+    init: &Value,
+) {
+    for (source, field) in [(daemon, "bitcoin_funding"), (fork_daemon, "btcb2_funding")] {
+        if init[field].is_object() {
+            let (coin, previous) =
+                received_coin(require_vault_descriptor(wallet).unwrap(), &init[field]);
+            source.extra_coins.lock().unwrap().push((coin, previous));
+        }
+    }
+}
+
+async fn drive_paired_funding_proof(
+    client: &CoincubeClient,
+    generation: watch::Receiver<u64>,
+    _sender: &watch::Sender<u64>,
+    mut input: &mut impl BufRead,
+) {
+    use coincube_core::{
+        claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+        miniscript::bitcoin::consensus::encode::{deserialize_hex, serialize},
+    };
+    let mut source = HttpObservationSource::new(
+        client.clone(),
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        CollectionContext {
+            expected_generation: 1,
+            generation: generation.clone(),
+        },
+    )
+    .unwrap();
+    emit(json!({"event":"paired-funding-ready"}));
+    for _ in 0..5 {
+        let command = read(&mut input);
+        if command["action"].as_str() == Some("revoke") {
+            // A same-value notification still invalidates the old
+            // observation session and every retained proof it produced.
+            _sender.send_modify(|_| {});
+        } else if command["action"].as_str() == Some("restart") {
+            // Only a new collector explicitly acknowledging the current
+            // session may start a fresh two-chain read after a restart.
+            let mut current = generation.clone();
+            current.borrow_and_update();
+            source = HttpObservationSource::new(
+                client.clone(),
+                ChainId::Bitcoin,
+                ChainId::BitcoinBlake2b,
+                CollectionContext {
+                    expected_generation: 1,
+                    generation: current,
+                },
+            )
+            .unwrap();
+        }
+        let path = |name: &str| {
+            let transaction: Transaction =
+                deserialize_hex(command[name]["previous"].as_str().unwrap()).unwrap();
+            let vout = u32::try_from(command[name]["vout"].as_u64().unwrap()).unwrap();
+            RetainedPath::new(
+                OutPoint::new(transaction.compute_txid(), vout),
+                vec![OwnedLink {
+                    transaction: serialize(&transaction),
+                    parent_input: None,
+                }],
+            )
+            .unwrap()
+        };
+        let bitcoin_path = path("bitcoin");
+        let fork_path = path("btcb2");
+        let checked = source
+            .collect_funding_pair(&bitcoin_path, &fork_path, CHECK_POLICY.observations)
+            .await;
+        emit(json!({
+            "event":"paired-funding-proof",
+            "valid":checked.is_ok(),
+            "failure":checked.err().map(|error| format!("{error:?}")),
+        }));
+    }
+}
+
+fn emit_claim_driver_state(
+    action: &str,
+    panel: &ClaimStep1Panel,
+    daemon: &FlowDaemon,
+    datadir: &CoincubeDirectory,
+) {
+    let stage = match &panel.stage {
+        Stage::Plan { .. } => "plan",
+        Stage::Sign { .. } => "sign",
+        Stage::Review { .. } => "review",
+        Stage::Track { .. } => "track",
+        _ => "preconditions",
+    };
+    let (construction, selected_ancestry_input) = match &panel.stage {
+        Stage::Plan { built } => match &**built {
+            Construction::OpReturn(_) => (Some("op-return"), None),
+            Construction::Ancestry { .. } => (
+                Some("input-ancestry"),
+                built
+                    .selected_ancestry_input()
+                    .map(|outpoint| outpoint.to_string()),
+            ),
+        },
+        _ => (None, None),
+    };
+    let reviewed_route = match &panel.stage {
+        Stage::Review {
+            snapshot: Some(snapshot),
+            ..
+        } => Some(snapshot.route.label()),
+        _ => None,
+    };
+    let review_error = match &panel.stage {
+        Stage::Review { error, .. } => error.clone(),
+        _ => None,
+    };
+    let submission_outcome = match &panel.stage {
+        Stage::Track { outcome, .. } => Some(format!("{outcome:?}")),
+        _ => None,
+    };
+    let tracking = match &panel.stage {
+        Stage::Track {
+            status,
+            busy,
+            error,
+            ..
+        } => Some(json!({"status":format!("{status:?}"),"busy":busy,"error":error})),
+        _ => None,
+    };
+    let tx = daemon.submitted.lock().unwrap().clone();
+    let journal = journal_directory(datadir, &panel.wallet).join("intent.json");
+    emit(
+        json!({"event":action,"stage":stage,"construction":construction,
+        "selected_ancestry_input":selected_ancestry_input,
+        "reviewed_route":reviewed_route,"review_error":review_error,
+        "node_submissions":daemon.hits().iter().filter(|h| **h == "submit_verified_poison_to_node").count(),
+        "connect_submissions":daemon.hits().iter().filter(|h| **h == "submit_verified_poison_to_connect").count(),
+        "tracking":tracking,"submission_outcome":submission_outcome,"reconfirmation_review":panel.reconfirmation(),"submitted":tx.map(|tx| json!({
+        "txid":tx.compute_txid(),"wtxid":tx.compute_wtxid(),
+        "raw":coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(&tx)})),
+        "submission_calls":daemon.hits().iter().filter(|h| **h == "submit_verified_poison").count(),
+        "journal":std::fs::read(&journal).ok().map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap())}),
+    );
+}
+
+async fn replace_regtest_backend(daemon: &FlowDaemon, init: &Value, action: &str) {
+    let live = daemon.live.as_ref().unwrap();
+    let bound = live.bound.as_ref().unwrap();
+    let before = bound.claim_backend_binding().await.unwrap();
+    let (_, replacement) = live
+        .transport
+        .bound_handle(
+            PathBuf::from(init["root"].as_str().unwrap())
+                .join(format!("replacement-{}", uuid::Uuid::new_v4())),
+            if init["backend"].as_str() == Some("electrum") {
+                Some(init["electrum"].as_str().unwrap().parse().unwrap())
+            } else {
+                None
+            },
+        )
+        .unwrap();
+    bound.replace_regtest_handle(replacement).await;
+    assert_ne!(before, bound.claim_backend_binding().await.unwrap());
+    emit(json!({"event":action,"binding_changed":true}));
+}
+
+async fn dispatch_regtest_fork_command(
+    action: &str,
+    p: &mut ForkClaimPanel,
+    second: &Option<MasterSigner>,
+    ports: RegtestForkPorts<'_>,
+) {
+    let RegtestForkPorts {
+        fork_dyn,
+        fork_daemon,
+        fork_cache,
+        datadir,
+        panel,
+    } = ports;
+    let message = match action {
+        "fork_open_signer" => Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+        "fork_hot_sign" => Message::View(view::Message::Spend(
+            view::SpendTxMessage::SelectMasterSigner,
+        )),
+        "fork_second_sign" => {
+            let second = second.as_ref().expect("second software signer configured");
+            let secp = secp256k1::Secp256k1::new();
+            let psbt = fork_panel::tests::live_psbt(p);
+            Message::Signed(
+                second.fingerprint(&secp),
+                Ok(second.sign_psbt(psbt, &secp).unwrap()),
+            )
+        }
+        "fork_confirm" => Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+        _ => Message::View(view::Message::Claim(view::ClaimMessage::Refresh)),
+    };
+    let task = p.update(Some(fork_dyn.clone()), fork_cache, message);
+    drive_fork(p, fork_dyn, fork_cache, task).await;
+    emit_fork(action, p, fork_daemon, datadir, &panel.wallet);
+}
+
+struct RegtestCommandPorts<'a> {
+    common: RegtestDriverPorts<'a>,
+    fork_cache: &'a Cache,
+    second: &'a Option<MasterSigner>,
+    init: &'a Value,
+}
+
+struct RegtestForkPorts<'a> {
+    fork_dyn: &'a Arc<dyn Daemon + Send + Sync>,
+    fork_daemon: &'a Arc<FlowDaemon>,
+    fork_cache: &'a Cache,
+    datadir: &'a CoincubeDirectory,
+    panel: &'a ClaimStep1Panel,
+}
+
+async fn run_regtest_commands(
+    panel: &mut ClaimStep1Panel,
+    mut input: &mut impl BufRead,
+    mut fork_panel: Option<ForkClaimPanel>,
+    ports: RegtestCommandPorts<'_>,
+) {
+    let RegtestCommandPorts {
+        common,
+        fork_cache,
+        second,
+        init,
+    } = ports;
+    let RegtestDriverPorts {
+        datadir,
+        dyn_daemon,
+        daemon,
+        fork_dyn,
+        fork_daemon,
+        fork_wallet,
+        sender: _sender,
+        cache,
+    } = common;
+    loop {
+        let cmd = read(&mut input);
+        let action = cmd["command"].as_str().unwrap();
+        let message = match action {
+            "build" => Message::View(view::Message::Claim(view::ClaimMessage::Build)),
+            "sign" => Message::View(view::Message::Claim(view::ClaimMessage::Sign)),
+            "open_signer" => Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+            "hot_sign" => Message::View(view::Message::Spend(
+                view::SpendTxMessage::SelectMasterSigner,
+            )),
+            "second_sign" => {
+                let second = second.as_ref().expect("second software signer configured");
+                let psbt = match &panel.stage {
+                    Stage::Sign { psbt, .. } => psbt.tx.psbt.clone(),
+                    _ => panic!("second signature must start at Sign"),
+                };
+                let secp = secp256k1::Secp256k1::new();
+                Message::Signed(
+                    second.fingerprint(&secp),
+                    Ok(second.sign_psbt(psbt, &secp).unwrap()),
+                )
+            }
+            "review_reconfirmation" => Message::View(view::Message::Claim(
+                view::ClaimMessage::ReviewReconfirmation,
+            )),
+            "confirm_reconfirmation" => Message::View(view::Message::Claim(
+                view::ClaimMessage::ConfirmReconfirmation,
+            )),
+            "fork_refuse_early" => {
+                let journal = journal_directory(datadir, &panel.wallet).join("intent.json");
+                let before = std::fs::read(&journal).unwrap();
+                let error = panel
+                    .take_fork_handoff()
+                    .expect_err("early handoff must refuse");
+                assert_eq!(std::fs::read(journal).unwrap(), before);
+                assert!(fork_panel.is_none());
+                emit(json!({"event":action,"error":error,
+                    "bitcoin_submission_calls":daemon.hits().iter().filter(|h| **h == "submit_verified_poison").count(),
+                    "fork_submission_calls":fork_daemon.hits().iter().filter(|h| **h == "submit_verified_claim_fork").count()}));
+                continue;
+            }
+            "fork_open" => {
+                let handoff = panel.take_fork_handoff().unwrap();
+                assert_eq!(handoff.fork_cube(), "fork-cube");
+                let loaded = fork_load::load(
+                    datadir,
+                    fork_wallet.clone(),
+                    fork_dyn.clone(),
+                    panel.connect.clone().unwrap(),
+                    "bitcoin-cube",
+                    "fork-cube",
+                    1,
+                    _sender.subscribe(),
+                    5,
+                )
+                .await
+                .unwrap();
+                fork_panel = Some(
+                    ForkClaimPanel::new(
+                        datadir.clone(),
+                        fork_wallet.clone(),
+                        vec![fork_daemon.coin.clone()],
+                        loaded,
+                    )
+                    .unwrap(),
+                );
+                emit_fork(
+                    action,
+                    fork_panel.as_ref().unwrap(),
+                    fork_daemon,
+                    datadir,
+                    &panel.wallet,
+                );
+                continue;
+            }
+            "fork_open_signer" | "fork_hot_sign" | "fork_second_sign" | "fork_confirm"
+            | "fork_refresh" => {
+                let p = fork_panel.as_mut().unwrap();
+                dispatch_regtest_fork_command(
+                    action,
+                    p,
+                    second,
+                    RegtestForkPorts {
+                        fork_dyn,
+                        fork_daemon,
+                        fork_cache,
+                        datadir,
+                        panel,
+                    },
+                )
+                .await;
+                continue;
+            }
+            "bitcoin_return" => {
+                assert!(fork_panel.as_ref().unwrap().can_return_to_bitcoin());
+                drop(fork_panel.take());
+                panel.return_from_fork();
+                let task = panel.reload(Some(dyn_daemon.clone()), None);
+                drive(panel, dyn_daemon, cache, task).await;
+                Message::View(view::Message::Claim(view::ClaimMessage::Refresh))
+            }
+            "replace_backend" => {
+                replace_regtest_backend(daemon, init, action).await;
+                continue;
+            }
+            "confirm" => Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+            "refresh" => Message::View(view::Message::Claim(view::ClaimMessage::Refresh)),
+            "quit" => {
+                if let Some(bound) = daemon.live.as_ref().and_then(|live| live.bound.as_ref()) {
+                    bound.stop().await.unwrap();
+                }
+                break;
+            }
+            _ => panic!("unknown command"),
+        };
+        let task = panel.update(Some(dyn_daemon.clone()), cache, message);
+        drive(panel, dyn_daemon, cache, task).await;
+        emit_claim_driver_state(action, panel, daemon, datadir);
+    }
+}
+
 /// Invoked directly by the Python integration parent with --ignored --nocapture.
 /// Account/backend routing is synthetic; signing, panel transitions, journals,
 /// coordinator checks, gate consumption, and node submission are real.
@@ -167,20 +1219,7 @@ async fn claim_gui_regtest_driver() {
     assert!(root.is_dir());
     let resume = init["resume"].as_bool().unwrap_or(false);
     let second = if resume { None } else { fixture.second.take() };
-    let fixture_marker = root.join("regtest-fixture-descriptor");
-    if resume {
-        assert_eq!(
-            std::fs::read_to_string(&fixture_marker).unwrap(),
-            fixture.descriptor.to_string(),
-            "only reopen a matching synthetic test root"
-        );
-    } else {
-        assert!(
-            root.read_dir().unwrap().next().is_none(),
-            "use a fresh synthetic root"
-        );
-        std::fs::write(&fixture_marker, fixture.descriptor.to_string()).unwrap();
-    }
+    assert_regtest_root(&root, &fixture, resume);
     let recovered_transaction = |name: &str| {
         init[name].as_str().map(|raw| {
             coincube_core::miniscript::bitcoin::consensus::encode::deserialize_hex::<Transaction>(
@@ -250,25 +1289,7 @@ async fn claim_gui_regtest_driver() {
         fixture.descriptor.clone(),
     )
     .unwrap();
-    let bound = if matches!(
-        init["backend"].as_str(),
-        Some("node" | "electrum" | "fallback" | "both-reject" | "fallback-timeout")
-    ) {
-        let (selected, handle) = transport
-            .bound_handle(
-                root.join(format!("bound-transport-{}", uuid::Uuid::new_v4())),
-                if init["backend"].as_str() == Some("electrum") {
-                    Some(init["electrum"].as_str().unwrap().parse().unwrap())
-                } else {
-                    None
-                },
-            )
-            .unwrap();
-        config = selected.clone();
-        Some(crate::daemon::embedded::EmbeddedDaemon::from_regtest_handle(selected, handle))
-    } else {
-        None
-    };
+    let bound = select_regtest_bound_transport(&transport, &root, &init, &mut config);
     let daemon = Arc::new(FlowDaemon {
         binding: coincubed::poison_broadcast::ClaimBackendBinding::for_test(&config),
         config,
@@ -302,21 +1323,7 @@ async fn claim_gui_regtest_driver() {
     fork_wallet.pinned_at = Some(77);
     let fork_wallet = Arc::new(fork_wallet);
     if !resume {
-        for (chain, id, vault) in [
-            (ChainId::Bitcoin, "bitcoin-cube", wallet.clone()),
-            (ChainId::BitcoinBlake2b, "fork-cube", fork_wallet.clone()),
-        ] {
-            use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
-            let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain).with_vault(
-                VaultIdentity::new(vault.id(), vault.inheritance_descriptor()),
-            );
-            update_settings_file(&datadir.network_directory(chain), |mut settings| {
-                settings.cubes = vec![cube];
-                Some(settings)
-            })
-            .await
-            .unwrap();
-        }
+        prepare_regtest_cube_settings(&datadir, &wallet, &fork_wallet).await;
     }
     let mut fork_config = daemon.config.clone();
     fork_config.bitcoin_config.chain = ChainId::BitcoinBlake2b;
@@ -355,23 +1362,14 @@ async fn claim_gui_regtest_driver() {
         extra_coins: Mutex::new(shared_extra),
         indices: Mutex::new((1, 0)),
     });
-    for (source, field) in [
-        (&daemon, "bitcoin_funding"),
-        (&fork_daemon, "btcb2_funding"),
-    ] {
-        if init[field].is_object() {
-            let (coin, previous) =
-                received_coin(require_vault_descriptor(&wallet).unwrap(), &init[field]);
-            source.extra_coins.lock().unwrap().push((coin, previous));
-        }
-    }
+    add_regtest_initial_deposits(&daemon, &fork_daemon, &wallet, &init);
     let fork_dyn: Arc<dyn Daemon + Send + Sync> = fork_daemon.clone();
     let fork_cache = Cache {
         network: Network::Bitcoin,
         fiat_chain: ChainId::BitcoinBlake2b,
         ..Cache::default()
     };
-    let mut fork_panel: Option<ForkClaimPanel> = None;
+    let fork_panel: Option<ForkClaimPanel> = None;
     let mut client = CoincubeClient::for_test(base.to_string());
     client.set_token("synthetic-regtest-only");
     if init["ancestry_first_fork_height"].is_u64() {
@@ -388,67 +1386,7 @@ async fn claim_gui_regtest_driver() {
     }
     let (_sender, generation) = watch::channel(1);
     if init["mode"].as_str() == Some("paired-funding-proof") {
-        use coincube_core::{
-            claim_ancestry::{retained::RetainedPath, search::OwnedLink},
-            miniscript::bitcoin::consensus::encode::{deserialize_hex, serialize},
-        };
-        let mut source = HttpObservationSource::new(
-            client.clone(),
-            ChainId::Bitcoin,
-            ChainId::BitcoinBlake2b,
-            CollectionContext {
-                expected_generation: 1,
-                generation: generation.clone(),
-            },
-        )
-        .unwrap();
-        emit(json!({"event":"paired-funding-ready"}));
-        for _ in 0..5 {
-            let command = read(&mut input);
-            if command["action"].as_str() == Some("revoke") {
-                // A same-value notification still invalidates the old
-                // observation session and every retained proof it produced.
-                _sender.send_modify(|_| {});
-            } else if command["action"].as_str() == Some("restart") {
-                // Only a new collector explicitly acknowledging the current
-                // session may start a fresh two-chain read after a restart.
-                let mut current = generation.clone();
-                current.borrow_and_update();
-                source = HttpObservationSource::new(
-                    client.clone(),
-                    ChainId::Bitcoin,
-                    ChainId::BitcoinBlake2b,
-                    CollectionContext {
-                        expected_generation: 1,
-                        generation: current,
-                    },
-                )
-                .unwrap();
-            }
-            let path = |name: &str| {
-                let transaction: Transaction =
-                    deserialize_hex(command[name]["previous"].as_str().unwrap()).unwrap();
-                let vout = u32::try_from(command[name]["vout"].as_u64().unwrap()).unwrap();
-                RetainedPath::new(
-                    OutPoint::new(transaction.compute_txid(), vout),
-                    vec![OwnedLink {
-                        transaction: serialize(&transaction),
-                        parent_input: None,
-                    }],
-                )
-                .unwrap()
-            };
-            let bitcoin_path = path("bitcoin");
-            let fork_path = path("btcb2");
-            let checked = source
-                .collect_funding_pair(&bitcoin_path, &fork_path, CHECK_POLICY.observations)
-                .await;
-            emit(json!({
-                "event":"paired-funding-proof",
-                "valid":checked.is_ok(),
-                "failure":checked.err().map(|error| format!("{error:?}")),
-            }));
-        }
+        drive_paired_funding_proof(&client, generation, &_sender, &mut input).await;
         return;
     }
     let mut panel = ClaimStep1Panel::new(
@@ -470,584 +1408,43 @@ async fn claim_gui_regtest_driver() {
     let task = panel.reload(Some(dyn_daemon.clone()), Some(wallet));
     drive(&mut panel, &dyn_daemon, &cache, task).await;
     if init["mode"].as_str() == Some("paired-wizard-reopen") {
-        assert!(resume, "a signed pair must reopen from its saved journal");
-        let Stage::PairedRecovery(recovery) = &panel.stage else {
-            panic!("signed pair did not reopen: {:?}", panel.restart_error);
-        };
-        let recovery_labels = rendered_labels(&panel, &cache).await;
-        assert!(has_label(&recovery_labels, "Recorded two-chain claim"));
-        assert!(has_label(&recovery_labels, "Bitcoin transaction"));
-        assert!(has_label(&recovery_labels, "Bitcoin Blake2b transaction"));
-        assert!(has_label(&recovery_labels, "Check again"));
-        assert!(!has_label(&recovery_labels, "Broadcast Transaction"));
-        assert_eq!(
-            recovery.bitcoin_txid.unwrap().to_string(),
-            init["bitcoin_txid"].as_str().unwrap()
-        );
-        assert_eq!(
-            recovery.fork_txid.unwrap().to_string(),
-            init["btcb2_txid"].as_str().unwrap()
-        );
-        assert!(panel.restart_error.is_none());
-        assert!(!panel.can_sign_or_submit());
-        let recovery = recovery.clone();
-        use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash as _};
-        let context = ClaimStep1Panel::funding_context(
-            panel.connect.as_ref().unwrap(),
-            1,
-            panel.generation.clone(),
+        drive_reopened_pair(
+            &mut panel,
+            &mut input,
+            &init,
+            resume,
+            RegtestDriverPorts {
+                datadir: &datadir,
+                dyn_daemon: &dyn_daemon,
+                daemon: &daemon,
+                fork_dyn: &fork_dyn,
+                fork_daemon: &fork_daemon,
+                fork_wallet: &fork_wallet,
+                sender: &_sender,
+                cache: &cache,
+            },
         )
-        .unwrap();
-        let identity = claim_workflow::WalletIdentity {
-            bitcoin_cube: "bitcoin-cube".into(),
-            fork_cube: "fork-cube".into(),
-            descriptor_digest: sha256::Hash::hash(
-                require_vault_descriptor(&panel.wallet)
-                    .unwrap()
-                    .to_string()
-                    .as_bytes(),
-            ),
-        };
-        let directory = journal_directory(&datadir, &panel.wallet);
-        let recorded = claim_workflow::Controller::reopen_settling(&directory, &identity, context)
-            .await
-            .unwrap();
-        let pair = recorded.recorded_signed_ancestry_pair().unwrap();
-        let bitcoin_raw =
-            coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(pair.bitcoin());
-        let btcb2_raw =
-            coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(pair.fork());
-        drop(recorded);
-        if init["broadcast_bitcoin"].as_bool().unwrap_or(false)
-            || init["broadcast_btcb2"].as_bool().unwrap_or(false)
-        {
-            crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
-            panel.bind_fork_daemon(Some(ClaimForkBinding::new(
-                &fork_dyn,
-                &fork_wallet,
-                _sender.subscribe(),
-            )));
-            if init["broadcast_bitcoin"].as_bool().unwrap_or(false) {
-                let task = panel.update(
-                    Some(dyn_daemon.clone()),
-                    &cache,
-                    Message::View(view::Message::Claim(
-                        view::ClaimMessage::ReviewPairedBitcoin,
-                    )),
-                );
-                drive(&mut panel, &dyn_daemon, &cache, task).await;
-                assert!(
-                    matches!(panel.stage, Stage::PairedBitcoinReview(..)),
-                    "{:?}",
-                    panel.restart_error
-                );
-                let review_labels = rendered_labels(&panel, &cache).await;
-                assert!(has_label(&review_labels, "Bitcoin — broadcast now"));
-                assert!(has_label(
-                    &review_labels,
-                    "Bitcoin Blake2b — recorded, not sent now"
-                ));
-                assert!(has_label(&review_labels, "Broadcast Transaction"));
-                assert!(has_label(
-                    &review_labels,
-                    &recovery.bitcoin_txid.unwrap().to_string()
-                ));
-                let saved_script = match &mut panel.stage {
-                    Stage::PairedBitcoinReview(_, review) => {
-                        std::mem::take(&mut review.fork.output[0].script_pubkey)
-                    }
-                    _ => unreachable!(),
-                };
-                let invalid_labels = rendered_labels(&panel, &cache).await;
-                assert!(has_label(
-                    &invalid_labels,
-                    "Cannot display both signed destinations"
-                ));
-                assert!(!has_label(&invalid_labels, "Broadcast Transaction"));
-                if let Stage::PairedBitcoinReview(_, review) = &mut panel.stage {
-                    review.fork.output[0].script_pubkey = saved_script;
-                }
-                let task = panel.update(
-                    Some(dyn_daemon.clone()),
-                    &cache,
-                    Message::View(view::Message::Claim(
-                        view::ClaimMessage::ConfirmPairedBitcoin,
-                    )),
-                );
-                drive(&mut panel, &dyn_daemon, &cache, task).await;
-                assert!(
-                    matches!(panel.stage, Stage::PairedRecovery(..)),
-                    "{:?}",
-                    panel.restart_error
-                );
-                let recorded = claim_workflow::Controller::reopen_settling(
-                    &directory,
-                    &identity,
-                    ClaimStep1Panel::funding_context(
-                        panel.connect.as_ref().unwrap(),
-                        1,
-                        panel.generation.clone(),
-                    )
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
-                let attempt = recorded.recorded_signed_ancestry_pair().unwrap();
-                assert!(attempt.possible_attempt(ChainId::Bitcoin).is_some());
-                assert!(attempt.possible_attempt(ChainId::BitcoinBlake2b).is_none());
-                emit(json!({
-                    "event":"claim-bitcoin-broadcast-recorded",
-                    "bitcoin_txid":recovery.bitcoin_txid,
-                    "notice":panel.restart_error,
-                }));
-                return;
-            }
-            assert!(recovery.fork_ready_for_review, "{:?}", recovery);
-            let task = panel.update(
-                Some(dyn_daemon.clone()),
-                &cache,
-                Message::View(view::Message::Claim(view::ClaimMessage::ReviewPairedFork)),
-            );
-            drive(&mut panel, &dyn_daemon, &cache, task).await;
-            assert!(
-                matches!(panel.stage, Stage::PairedForkReview(..)),
-                "{:?}",
-                panel.restart_error
-            );
-            let review_labels = rendered_labels(&panel, &cache).await;
-            assert!(has_label(&review_labels, "Bitcoin Blake2b — broadcast now"));
-            assert!(has_label(
-                &review_labels,
-                "Bitcoin — recorded and confirmed"
-            ));
-            assert!(has_label(&review_labels, "Broadcast Transaction"));
-            assert!(has_label(
-                &review_labels,
-                &recovery.fork_txid.unwrap().to_string()
-            ));
-            if init["pause_before_fork_confirm"].as_bool().unwrap_or(false) {
-                emit(json!({"event":"claim-btcb2-reviewed"}));
-                assert_eq!(read(&mut input)["action"], "confirm_after_reorg");
-                let task = panel.update(
-                    Some(dyn_daemon.clone()),
-                    &cache,
-                    Message::View(view::Message::Claim(view::ClaimMessage::ConfirmPairedFork)),
-                );
-                drive(&mut panel, &dyn_daemon, &cache, task).await;
-                assert!(matches!(panel.stage, Stage::PairedRecovery(..)));
-                assert!(panel.restart_error.is_some());
-                let recorded = claim_workflow::Controller::reopen_settling(
-                    &directory,
-                    &identity,
-                    ClaimStep1Panel::funding_context(
-                        panel.connect.as_ref().unwrap(),
-                        1,
-                        panel.generation.clone(),
-                    )
-                    .unwrap(),
-                )
-                .await
-                .unwrap();
-                assert!(recorded
-                    .recorded_signed_ancestry_pair()
-                    .unwrap()
-                    .possible_attempt(ChainId::BitcoinBlake2b)
-                    .is_none());
-                emit(json!({
-                    "event":"claim-btcb2-reorg-refused",
-                    "reason":panel.restart_error,
-                }));
-                return;
-            }
-            let task = panel.update(
-                Some(dyn_daemon.clone()),
-                &cache,
-                Message::View(view::Message::Claim(view::ClaimMessage::ConfirmPairedFork)),
-            );
-            drive(&mut panel, &dyn_daemon, &cache, task).await;
-            assert!(
-                matches!(panel.stage, Stage::PairedRecovery(..)),
-                "{:?}",
-                panel.restart_error
-            );
-            let recorded = claim_workflow::Controller::reopen_settling(
-                &directory,
-                &identity,
-                ClaimStep1Panel::funding_context(
-                    panel.connect.as_ref().unwrap(),
-                    1,
-                    panel.generation.clone(),
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-            let attempt = recorded.recorded_signed_ancestry_pair().unwrap();
-            assert!(attempt.possible_attempt(ChainId::Bitcoin).is_some());
-            assert!(attempt.possible_attempt(ChainId::BitcoinBlake2b).is_some());
-            emit(json!({
-                "event":"claim-btcb2-broadcast-recorded",
-                "btcb2_txid":recovery.fork_txid,
-                "notice":panel.restart_error,
-            }));
-            return;
-        }
-        emit(json!({
-            "event":"paired-signed-pair-reopened",
-            "bitcoin_unattempted":recovery.bitcoin_unattempted,
-            "bitcoin_status":recovery.bitcoin_status,
-            "btcb2_status":recovery.fork_status,
-            "bitcoin_raw":bitcoin_raw,
-            "btcb2_raw":btcb2_raw,
-        }));
+        .await;
         return;
     }
     if init["mode"].as_str() == Some("paired-wizard-deposits") {
-        // Reload probed the healthy Vault and prepared paired deposit
-        // addresses automatically. Keep the real entry transition under test;
-        // this binding is needed only for later two-chain verification.
-        panel.bind_fork_daemon(Some(ClaimForkBinding::new(
-            &fork_dyn,
-            &fork_wallet,
-            _sender.subscribe(),
-        )));
-        let Stage::FundingDeposits(addresses) = &panel.stage else {
-            panic!(
-                "automatic paired deposit preparation failed: stage={:?}, funding_error={:?}",
-                std::mem::discriminant(&panel.stage),
-                panel.funding_error,
-            );
-        };
-        let addresses = addresses.clone();
-        assert_ne!(addresses.bitcoin_deposit, addresses.btcb2_deposit);
-        assert!(!panel.can_sign_or_submit());
-        if !panel.deposit_details_expanded() {
-            let task = panel.update(
-                Some(dyn_daemon.clone()),
-                &cache,
-                Message::View(view::Message::Claim(
-                    view::ClaimMessage::ToggleDepositDetails,
-                )),
-            );
-            drive(&mut panel, &dyn_daemon, &cache, task).await;
-        }
-        assert!(panel.deposit_details_expanded());
-        let deposit_labels = rendered_labels(&panel, &cache).await;
-        assert!(
-            has_label(&deposit_labels, "1. Deposits"),
-            "deposit labels: {:?}",
-            deposit_labels
-        );
-        assert!(has_label(&deposit_labels, "Hide deposit addresses"));
-        assert!(has_label(&deposit_labels, &addresses.bitcoin_deposit));
-        assert!(has_label(&deposit_labels, &addresses.btcb2_deposit));
-        assert!(has_label(&deposit_labels, "Bitcoin · minimum"));
-        assert!(has_label(&deposit_labels, "Bitcoin Blake2b · minimum"));
-        assert!(!has_label(&deposit_labels, "Broadcast Transaction"));
-        use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash as _};
-        let descriptor = require_vault_descriptor(&panel.wallet).unwrap().clone();
-        let identity = claim_workflow::WalletIdentity {
-            bitcoin_cube: "bitcoin-cube".into(),
-            fork_cube: "fork-cube".into(),
-            descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
-        };
-        let context = ClaimStep1Panel::funding_context(
-            panel.connect.as_ref().unwrap(),
-            1,
-            panel.generation.clone(),
+        drive_paired_deposits(
+            &mut panel,
+            &mut input,
+            &init,
+            resume,
+            RegtestDriverPorts {
+                datadir: &datadir,
+                dyn_daemon: &dyn_daemon,
+                daemon: &daemon,
+                fork_dyn: &fork_dyn,
+                fork_daemon: &fork_daemon,
+                fork_wallet: &fork_wallet,
+                sender: &_sender,
+                cache: &cache,
+            },
         )
-        .unwrap();
-        let saved = claim_workflow::load_claim_funding(
-            &journal_directory(&datadir, &panel.wallet),
-            &descriptor,
-            &identity,
-            &context,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(serde_json::to_value(&saved).unwrap()["released"], true);
-        emit(json!({
-            "event":"paired-deposit-addresses",
-            "bitcoin":addresses.bitcoin_deposit,
-            "btcb2":addresses.btcb2_deposit,
-            "bitcoin_minimum":addresses.bitcoin_minimum_sats,
-            "btcb2_minimum":addresses.btcb2_minimum_sats,
-            "bitcoin_index":saved.indices.bitcoin_deposit,
-            "btcb2_index":saved.indices.btcb2_deposit,
-        }));
-        let command = read(&mut input);
-        if command["action"] == "quit" {
-            return;
-        }
-        assert_eq!(command["action"], "deposited");
-        for (daemon, field) in [(&daemon, "bitcoin"), (&fork_daemon, "btcb2")] {
-            let entry = &command[field];
-            let (coin, previous) = received_coin(&descriptor, entry);
-            daemon.extra_coins.lock().unwrap().push((coin, previous));
-            daemon.live.as_ref().unwrap().height.store(
-                i32::try_from(entry["tip_height"].as_u64().unwrap()).unwrap(),
-                Ordering::SeqCst,
-            );
-        }
-        let task = panel.update(
-            Some(dyn_daemon.clone()),
-            &cache,
-            Message::View(view::Message::Claim(view::ClaimMessage::CheckFunding)),
-        );
-        drive(&mut panel, &dyn_daemon, &cache, task).await;
-        let verified = panel.funding_review().is_some() && panel.prepared_pair.is_some();
-        assert!(matches!(panel.stage, Stage::FundingDeposits(_)));
-        assert!(
-            !panel.can_sign_or_submit(),
-            "the production signer gate remains closed"
-        );
-        assert!(verified, "paired Claim funding preview was not verified");
-        if !panel.deposit_details_expanded() {
-            let task = panel.update(
-                Some(dyn_daemon.clone()),
-                &cache,
-                Message::View(view::Message::Claim(
-                    view::ClaimMessage::ToggleDepositDetails,
-                )),
-            );
-            drive(&mut panel, &dyn_daemon, &cache, task).await;
-        }
-        assert!(panel.deposit_details_expanded());
-        let preview_labels = rendered_labels(&panel, &cache).await;
-        assert!(has_label(&preview_labels, &addresses.bitcoin_deposit));
-        assert!(has_label(&preview_labels, &addresses.btcb2_deposit));
-        assert!(has_label(&preview_labels, "Transaction details"));
-        assert!(has_label(
-            &preview_labels,
-            "Bitcoin-only deposit — replay protected"
-        ));
-        assert!(has_label(
-            &preview_labels,
-            "BTCB2-only deposit — replay protected"
-        ));
-        assert!(has_label(&preview_labels, "Before fork"));
-        assert!(!has_label(&preview_labels, "OP_RETURN"));
-        let review = panel.funding_review().unwrap();
-        for row in review
-            .bitcoin
-            .shared
-            .iter()
-            .chain([&review.bitcoin.funding, &review.fork.funding])
-        {
-            assert!(has_label(&preview_labels, &row.outpoint.to_string()));
-            assert!(has_label(
-                &preview_labels,
-                &format!("{} sats", row.amount.to_sat())
-            ));
-        }
-        let destination = |output: &TxOut| {
-            Address::from_script(&output.script_pubkey, Network::Bitcoin)
-                .unwrap()
-                .to_string()
-        };
-        assert!(has_label(
-            &preview_labels,
-            &format!(
-                "Back to this Vault: {} · {} sats",
-                destination(&review.bitcoin.destination),
-                review.bitcoin.destination.value.to_sat()
-            )
-        ));
-        assert!(has_label(
-            &preview_labels,
-            &format!(
-                "Back to the paired BTCB2 Vault: {} · {} sats",
-                destination(&review.fork.destination),
-                review.fork.destination.value.to_sat()
-            )
-        ));
-        assert!(has_label(
-            &preview_labels,
-            &format!("Fee: {} sats", review.bitcoin.fee.to_sat())
-        ));
-        assert!(has_label(
-            &preview_labels,
-            &format!("Fee: {} sats", review.fork.fee.to_sat())
-        ));
-        emit(json!({
-            "event":"paired-deposits-checked",
-            "verified":verified,
-            "status":panel.funding_status,
-            "error":panel.funding_error,
-        }));
-        assert_eq!(read(&mut input)["action"], "sign_pair_stale");
-        crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
-        let task = panel.update(
-            Some(dyn_daemon.clone()),
-            &cache,
-            Message::View(view::Message::Claim(view::ClaimMessage::SignPair)),
-        );
-        drive(&mut panel, &dyn_daemon, &cache, task).await;
-        assert!(matches!(panel.stage, Stage::FundingDeposits(_)));
-        assert!(panel.funding_error.is_some());
-        emit(json!({
-            "event":"paired-signing-refused-stale",
-            "error":panel.funding_error,
-        }));
-        assert_eq!(read(&mut input)["action"], "deposited");
-        let task = panel.update(
-            Some(dyn_daemon.clone()),
-            &cache,
-            Message::View(view::Message::Claim(view::ClaimMessage::CheckFunding)),
-        );
-        drive(&mut panel, &dyn_daemon, &cache, task).await;
-        assert!(panel.funding_review().is_some() && panel.prepared_pair.is_some());
-        assert!(panel.funding_error.is_none());
-        let final_review = panel.funding_review().unwrap();
-        let shared_count = final_review.bitcoin.shared.len();
-        let expected_bitcoin_inputs: std::collections::BTreeSet<_> = final_review
-            .bitcoin
-            .shared
-            .iter()
-            .map(|row| row.outpoint)
-            .chain([final_review.bitcoin.funding.outpoint])
-            .collect();
-        let expected_btcb2_inputs: std::collections::BTreeSet<_> = final_review
-            .fork
-            .shared
-            .iter()
-            .map(|row| row.outpoint)
-            .chain([final_review.fork.funding.outpoint])
-            .collect();
-        emit(json!({"event":"paired-deposits-checked-after-stale"}));
-        let command = read(&mut input);
-        if command["action"] == "quit" {
-            return;
-        }
-        assert_eq!(command["action"], "sign_pair");
-        let task = panel.update(
-            Some(dyn_daemon.clone()),
-            &cache,
-            Message::View(view::Message::Claim(view::ClaimMessage::SignPair)),
-        );
-        drive(&mut panel, &dyn_daemon, &cache, task).await;
-        let signer = panel.wallet.signer.as_ref().unwrap().clone();
-        let (bitcoin_psbt, fork_psbt) = match &panel.stage {
-            Stage::PairedSign { bitcoin, fork, .. } => {
-                (bitcoin.tx.psbt.clone(), fork.tx.psbt.clone())
-            }
-            _ => panic!("paired signer admission failed: {:?}", panel.funding_error),
-        };
-        assert_eq!(bitcoin_psbt.unsigned_tx.input.len(), shared_count + 1);
-        assert_eq!(fork_psbt.unsigned_tx.input.len(), shared_count + 1);
-        assert_eq!(
-            bitcoin_psbt
-                .unsigned_tx
-                .input
-                .iter()
-                .map(|input| input.previous_output)
-                .collect::<std::collections::BTreeSet<_>>(),
-            expected_bitcoin_inputs
-        );
-        assert_eq!(
-            fork_psbt
-                .unsigned_tx
-                .input
-                .iter()
-                .map(|input| input.previous_output)
-                .collect::<std::collections::BTreeSet<_>>(),
-            expected_btcb2_inputs
-        );
-        let signing_labels = rendered_labels(&panel, &cache).await;
-        assert!(has_label(
-            &signing_labels,
-            "Sign both transfers with this Vault"
-        ));
-        assert!(has_label(&signing_labels, "Bitcoin transaction"));
-        assert!(has_label(&signing_labels, "Bitcoin Blake2b transaction"));
-        assert!(has_label(
-            &signing_labels,
-            "one verified chain-specific deposit"
-        ));
-        assert!(!has_label(&signing_labels, "OP_RETURN"));
-        let signed_bitcoin = signer.sign_psbt(bitcoin_psbt.clone()).unwrap();
-        let signed_fork = signer.sign_psbt(fork_psbt.clone()).unwrap();
-        emit(json!({
-            "event":"paired-signing-ready",
-            "bitcoin_unsigned":bitcoin_psbt.to_string(),
-            "btcb2_unsigned":fork_psbt.to_string(),
-            "bitcoin_signed":signed_bitcoin.to_string(),
-            "btcb2_signed":signed_fork.to_string(),
-        }));
-        let returned = read(&mut input);
-        assert_eq!(returned["action"], "return_signatures");
-        for (side, field) in [
-            (ChainId::Bitcoin, "bitcoin_signed"),
-            (ChainId::BitcoinBlake2b, "btcb2_signed"),
-        ] {
-            let psbt = returned[field].as_str().unwrap().parse::<Psbt>().unwrap();
-            let task = panel.update(
-                Some(dyn_daemon.clone()),
-                &cache,
-                Message::Claim(ClaimEvent::PairedPsbt(
-                    panel.paired_sign_seq,
-                    side,
-                    Box::new(Message::Export(
-                        crate::export::ImportExportMessage::Progress(
-                            crate::export::Progress::Psbt(psbt),
-                        ),
-                    )),
-                )),
-            );
-            drive(&mut panel, &dyn_daemon, &cache, task).await;
-        }
-        let (bitcoin_txid, btcb2_txid) = match &panel.stage {
-            Stage::PairedRecovery(recovery) => (recovery.bitcoin_txid, recovery.fork_txid),
-            Stage::PairedSign { error, .. } => panic!("paired signatures refused: {:?}", error),
-            _ => panic!("paired signing did not record the exact pair"),
-        };
-        emit(json!({
-            "event":"paired-signatures-recorded",
-            "bitcoin_txid":bitcoin_txid,
-            "btcb2_txid":btcb2_txid,
-        }));
-        let command = read(&mut input);
-        if command["action"] == "recheck_stale" || command["action"] == "recheck_spent" {
-            let task = panel.update(
-                Some(dyn_daemon.clone()),
-                &cache,
-                Message::View(view::Message::Claim(
-                    view::ClaimMessage::ReviewPairedBitcoin,
-                )),
-            );
-            drive(&mut panel, &dyn_daemon, &cache, task).await;
-            assert!(matches!(panel.stage, Stage::PairedRecovery(_)));
-            assert!(panel.restart_error.is_some());
-            emit(json!({
-                "event":if command["action"] == "recheck_spent" {
-                    "paired-review-refused-spent"
-                } else {
-                    "paired-review-refused-stale"
-                },
-                "reason":panel.restart_error,
-            }));
-            if command["action"] == "recheck_spent" {
-                let next = read(&mut input);
-                assert_eq!(next["action"], "recheck_stale");
-                let task = panel.update(
-                    Some(dyn_daemon.clone()),
-                    &cache,
-                    Message::View(view::Message::Claim(
-                        view::ClaimMessage::ReviewPairedBitcoin,
-                    )),
-                );
-                drive(&mut panel, &dyn_daemon, &cache, task).await;
-                assert!(matches!(panel.stage, Stage::PairedRecovery(_)));
-                assert!(panel.restart_error.is_some());
-                emit(json!({
-                    "event":"paired-review-refused-stale",
-                    "reason":panel.restart_error,
-                }));
-            }
-            assert_eq!(read(&mut input)["action"], "quit");
-        } else {
-            assert_eq!(command["action"], "quit");
-        }
+        .await;
         return;
     }
     if !resume {
@@ -1102,209 +1499,27 @@ async fn claim_gui_regtest_driver() {
         "signer_available":panel.wallet.signer.is_some(),
         "bitcoin_submission_calls":daemon.hits().iter().filter(|h| **h == "submit_verified_poison").count(),
         "fork_submission_calls":fork_daemon.hits().iter().filter(|h| **h == "submit_verified_claim_fork").count()}));
-    loop {
-        let cmd = read(&mut input);
-        let action = cmd["command"].as_str().unwrap();
-        let message = match action {
-            "build" => Message::View(view::Message::Claim(view::ClaimMessage::Build)),
-            "sign" => Message::View(view::Message::Claim(view::ClaimMessage::Sign)),
-            "open_signer" => Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
-            "hot_sign" => Message::View(view::Message::Spend(
-                view::SpendTxMessage::SelectMasterSigner,
-            )),
-            "second_sign" => {
-                let second = second.as_ref().expect("second software signer configured");
-                let psbt = match &panel.stage {
-                    Stage::Sign { psbt, .. } => psbt.tx.psbt.clone(),
-                    _ => panic!("second signature must start at Sign"),
-                };
-                let secp = secp256k1::Secp256k1::new();
-                Message::Signed(
-                    second.fingerprint(&secp),
-                    Ok(second.sign_psbt(psbt, &secp).unwrap()),
-                )
-            }
-            "review_reconfirmation" => Message::View(view::Message::Claim(
-                view::ClaimMessage::ReviewReconfirmation,
-            )),
-            "confirm_reconfirmation" => Message::View(view::Message::Claim(
-                view::ClaimMessage::ConfirmReconfirmation,
-            )),
-            "fork_refuse_early" => {
-                let journal = journal_directory(&datadir, &panel.wallet).join("intent.json");
-                let before = std::fs::read(&journal).unwrap();
-                let error = panel
-                    .take_fork_handoff()
-                    .expect_err("early handoff must refuse");
-                assert_eq!(std::fs::read(journal).unwrap(), before);
-                assert!(fork_panel.is_none());
-                emit(json!({"event":action,"error":error,
-                    "bitcoin_submission_calls":daemon.hits().iter().filter(|h| **h == "submit_verified_poison").count(),
-                    "fork_submission_calls":fork_daemon.hits().iter().filter(|h| **h == "submit_verified_claim_fork").count()}));
-                continue;
-            }
-            "fork_open" => {
-                let handoff = panel.take_fork_handoff().unwrap();
-                assert_eq!(handoff.fork_cube(), "fork-cube");
-                let loaded = fork_load::load(
-                    &datadir,
-                    fork_wallet.clone(),
-                    fork_dyn.clone(),
-                    panel.connect.clone().unwrap(),
-                    "bitcoin-cube",
-                    "fork-cube",
-                    1,
-                    _sender.subscribe(),
-                    5,
-                )
-                .await
-                .unwrap();
-                fork_panel = Some(
-                    ForkClaimPanel::new(
-                        datadir.clone(),
-                        fork_wallet.clone(),
-                        vec![fork_daemon.coin.clone()],
-                        loaded,
-                    )
-                    .unwrap(),
-                );
-                emit_fork(
-                    action,
-                    fork_panel.as_ref().unwrap(),
-                    &fork_daemon,
-                    &datadir,
-                    &panel.wallet,
-                );
-                continue;
-            }
-            "fork_open_signer" | "fork_hot_sign" | "fork_second_sign" | "fork_confirm"
-            | "fork_refresh" => {
-                let p = fork_panel.as_mut().unwrap();
-                let message = match action {
-                    "fork_open_signer" => {
-                        Message::View(view::Message::Spend(view::SpendTxMessage::Sign))
-                    }
-                    "fork_hot_sign" => Message::View(view::Message::Spend(
-                        view::SpendTxMessage::SelectMasterSigner,
-                    )),
-                    "fork_second_sign" => {
-                        let second = second.as_ref().expect("second software signer configured");
-                        let secp = secp256k1::Secp256k1::new();
-                        let psbt = fork_panel::tests::live_psbt(p);
-                        Message::Signed(
-                            second.fingerprint(&secp),
-                            Ok(second.sign_psbt(psbt, &secp).unwrap()),
-                        )
-                    }
-                    "fork_confirm" => {
-                        Message::View(view::Message::Claim(view::ClaimMessage::Confirm))
-                    }
-                    _ => Message::View(view::Message::Claim(view::ClaimMessage::Refresh)),
-                };
-                let task = p.update(Some(fork_dyn.clone()), &fork_cache, message);
-                drive_fork(p, &fork_dyn, &fork_cache, task).await;
-                emit_fork(action, p, &fork_daemon, &datadir, &panel.wallet);
-                continue;
-            }
-            "bitcoin_return" => {
-                assert!(fork_panel.as_ref().unwrap().can_return_to_bitcoin());
-                drop(fork_panel.take());
-                panel.return_from_fork();
-                let task = panel.reload(Some(dyn_daemon.clone()), None);
-                drive(&mut panel, &dyn_daemon, &cache, task).await;
-                Message::View(view::Message::Claim(view::ClaimMessage::Refresh))
-            }
-            "replace_backend" => {
-                let live = daemon.live.as_ref().unwrap();
-                let bound = live.bound.as_ref().unwrap();
-                let before = bound.claim_backend_binding().await.unwrap();
-                let (_, replacement) = live
-                    .transport
-                    .bound_handle(
-                        PathBuf::from(init["root"].as_str().unwrap())
-                            .join(format!("replacement-{}", uuid::Uuid::new_v4())),
-                        if init["backend"].as_str() == Some("electrum") {
-                            Some(init["electrum"].as_str().unwrap().parse().unwrap())
-                        } else {
-                            None
-                        },
-                    )
-                    .unwrap();
-                bound.replace_regtest_handle(replacement).await;
-                assert_ne!(before, bound.claim_backend_binding().await.unwrap());
-                emit(json!({"event":action,"binding_changed":true}));
-                continue;
-            }
-            "confirm" => Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
-            "refresh" => Message::View(view::Message::Claim(view::ClaimMessage::Refresh)),
-            "quit" => {
-                if let Some(bound) = daemon.live.as_ref().and_then(|live| live.bound.as_ref()) {
-                    bound.stop().await.unwrap();
-                }
-                break;
-            }
-            _ => panic!("unknown command"),
-        };
-        let task = panel.update(Some(dyn_daemon.clone()), &cache, message);
-        drive(&mut panel, &dyn_daemon, &cache, task).await;
-        let stage = match &panel.stage {
-            Stage::Plan { .. } => "plan",
-            Stage::Sign { .. } => "sign",
-            Stage::Review { .. } => "review",
-            Stage::Track { .. } => "track",
-            _ => "preconditions",
-        };
-        let (construction, selected_ancestry_input) = match &panel.stage {
-            Stage::Plan { built } => match &**built {
-                Construction::OpReturn(_) => (Some("op-return"), None),
-                Construction::Ancestry { .. } => (
-                    Some("input-ancestry"),
-                    built
-                        .selected_ancestry_input()
-                        .map(|outpoint| outpoint.to_string()),
-                ),
+    run_regtest_commands(
+        &mut panel,
+        &mut input,
+        fork_panel,
+        RegtestCommandPorts {
+            common: RegtestDriverPorts {
+                datadir: &datadir,
+                dyn_daemon: &dyn_daemon,
+                daemon: &daemon,
+                fork_dyn: &fork_dyn,
+                fork_daemon: &fork_daemon,
+                fork_wallet: &fork_wallet,
+                sender: &_sender,
+                cache: &cache,
             },
-            _ => (None, None),
-        };
-        let reviewed_route = match &panel.stage {
-            Stage::Review {
-                snapshot: Some(snapshot),
-                ..
-            } => Some(snapshot.route.label()),
-            _ => None,
-        };
-        let review_error = match &panel.stage {
-            Stage::Review { error, .. } => error.clone(),
-            _ => None,
-        };
-        let submission_outcome = match &panel.stage {
-            Stage::Track { outcome, .. } => Some(format!("{outcome:?}")),
-            _ => None,
-        };
-        let tracking = match &panel.stage {
-            Stage::Track {
-                status,
-                busy,
-                error,
-                ..
-            } => Some(json!({"status":format!("{status:?}"),"busy":busy,"error":error})),
-            _ => None,
-        };
-        let tx = daemon.submitted.lock().unwrap().clone();
-        let journal = journal_directory(&datadir, &panel.wallet).join("intent.json");
-        emit(
-            json!({"event":action,"stage":stage,"construction":construction,
-            "selected_ancestry_input":selected_ancestry_input,
-            "reviewed_route":reviewed_route,"review_error":review_error,
-            "node_submissions":daemon.hits().iter().filter(|h| **h == "submit_verified_poison_to_node").count(),
-            "connect_submissions":daemon.hits().iter().filter(|h| **h == "submit_verified_poison_to_connect").count(),
-            "tracking":tracking,"submission_outcome":submission_outcome,"reconfirmation_review":panel.reconfirmation(),"submitted":tx.map(|tx| json!({
-            "txid":tx.compute_txid(),"wtxid":tx.compute_wtxid(),
-            "raw":coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(&tx)})),
-            "submission_calls":daemon.hits().iter().filter(|h| **h == "submit_verified_poison").count(),
-            "journal":std::fs::read(&journal).ok().map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap())}),
-        );
-    }
+            fork_cache: &fork_cache,
+            second: &second,
+            init: &init,
+        },
+    )
+    .await;
 }
 
 async fn drive_fork(

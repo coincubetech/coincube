@@ -353,6 +353,23 @@ impl PreparedClaimPair {
 /// the signatures already collected on this side before the ordinary picker
 /// can merge it. Bitcoin's generic PSBT merge is intentionally permissive;
 /// Claim must reject a conflicting or altered signer return first.
+fn paired_signer_return_error(
+    pair: &PreparedClaimPair,
+    side: ChainId,
+    current: &Psbt,
+    message: &Message,
+) -> Option<String> {
+    let signer_return = match message {
+        Message::Signed(_, Ok(returned))
+        | Message::Export(crate::export::ImportExportMessage::Progress(
+            crate::export::Progress::Psbt(returned),
+        )) => Some(returned),
+        _ => None,
+    };
+    signer_return
+        .and_then(|returned| check_paired_signer_return(pair, side, current, returned).err())
+}
+
 fn check_paired_signer_return(
     pair: &PreparedClaimPair,
     side: ChainId,
@@ -511,45 +528,7 @@ fn inventory_scan_refusal(
         claim_inventory::ClaimInventoryError, foreign_split_inventory::InventoryError,
     };
     match error {
-        ClaimInventoryError::Scan(InventoryError::Scan(chain, cause)) => {
-            let chain = if chain == ChainId::Bitcoin { "Bitcoin" } else { "BTCB2" };
-            let detail = match cause {
-                ScanError::RateLimited(delay) => return match retry {
-                    ScanRetry::Automatic => format!("The indexer is rate limited. Verification will retry after the cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
-                    ScanRetry::Manual => format!("The indexer is rate limited. Try opening the split again after the cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
-                },
-                ScanError::Deadline => "the indexer did not finish the Vault scan in time",
-                ScanError::Changed(reason) => match reason {
-                    ChangedReason::TipNoLongerBest =>
-                        "the scanned block is no longer part of the current chain",
-                    ChangedReason::TipMoved => "the latest block changed during the scan",
-                    ChangedReason::AnchorMismatch =>
-                        "the indexer and network status reported different latest blocks",
-                    ChangedReason::AnchorChanged =>
-                        "the network's fork status changed during the scan",
-                    ChangedReason::AddressState =>
-                        "deposit data or history changed between reads",
-                    ChangedReason::HeightBehindUtxo =>
-                        "the indexer reported a confirmed deposit above its latest block",
-                },
-                ScanError::Http(429 | 502 | 503 | 504) | ScanError::Unavailable =>
-                    "the indexer is temporarily unavailable",
-                ScanError::AddressLimit | ScanError::RangeLimit =>
-                    "this Vault's address history exceeds the scan limit",
-                ScanError::Cancelled => "the Connect session changed",
-                ScanError::Freshness => "fresh indexer data could not be verified",
-                _ => "the indexer returned incomplete or inconsistent data",
-            };
-            if matches!(cause, ScanError::AddressLimit | ScanError::RangeLimit) {
-                format!("Could not verify the deposits on {chain}: {detail}. This Vault needs a wider scan before the Claim can proceed.")
-            } else {
-                let next = match retry {
-                    ScanRetry::Automatic => "The addresses are being watched and verification will retry automatically.",
-                    ScanRetry::Manual => "Retry this step when the indexer is available.",
-                };
-                format!("Could not verify the deposits on {chain}: {detail}. {next}")
-            }
-        }
+        ClaimInventoryError::Scan(InventoryError::Scan(chain, cause)) => inventory_chain_scan_refusal(chain, cause, retry),
         ClaimInventoryError::Scan(_) => match retry {
             ScanRetry::Automatic => "The two-chain Vault scan was inconsistent. Deposit verification will retry automatically.".into(),
             ScanRetry::Manual => "The two-chain Vault scan was inconsistent. Retry this step to verify the deposits.".into(),
@@ -562,6 +541,57 @@ fn inventory_scan_refusal(
             ScanRetry::Automatic => "The Vault's coin set changed during the deposit scan. Verification will retry automatically.".into(),
             ScanRetry::Manual => "The Vault's coin set changed during the deposit scan. Reopen the Claim and retry.".into(),
         },
+    }
+}
+
+fn inventory_chain_scan_refusal(chain: ChainId, cause: ScanError, retry: ScanRetry) -> String {
+    let chain = if chain == ChainId::Bitcoin {
+        "Bitcoin"
+    } else {
+        "BTCB2"
+    };
+    let detail = match cause {
+                ScanError::RateLimited(delay) => return match retry {
+                    ScanRetry::Automatic => format!("The indexer is rate limited. Verification will retry after the cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
+                    ScanRetry::Manual => format!("The indexer is rate limited. Try opening the split again after the cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
+                },
+                ScanError::Deadline => "the indexer did not finish the Vault scan in time",
+                ScanError::Changed(reason) => inventory_changed_detail(reason),
+                ScanError::Http(429 | 502 | 503 | 504) | ScanError::Unavailable =>
+                    "the indexer is temporarily unavailable",
+                ScanError::AddressLimit | ScanError::RangeLimit =>
+                    "this Vault's address history exceeds the scan limit",
+                ScanError::Cancelled => "the Connect session changed",
+                ScanError::Freshness => "fresh indexer data could not be verified",
+                _ => "the indexer returned incomplete or inconsistent data",
+            };
+    if matches!(cause, ScanError::AddressLimit | ScanError::RangeLimit) {
+        format!("Could not verify the deposits on {chain}: {detail}. This Vault needs a wider scan before the Claim can proceed.")
+    } else {
+        let next = match retry {
+            ScanRetry::Automatic => {
+                "The addresses are being watched and verification will retry automatically."
+            }
+            ScanRetry::Manual => "Retry this step when the indexer is available.",
+        };
+        format!("Could not verify the deposits on {chain}: {detail}. {next}")
+    }
+}
+
+fn inventory_changed_detail(reason: ChangedReason) -> &'static str {
+    match reason {
+        ChangedReason::TipNoLongerBest => {
+            "the scanned block is no longer part of the current chain"
+        }
+        ChangedReason::TipMoved => "the latest block changed during the scan",
+        ChangedReason::AnchorMismatch => {
+            "the indexer and network status reported different latest blocks"
+        }
+        ChangedReason::AnchorChanged => "the network's fork status changed during the scan",
+        ChangedReason::AddressState => "deposit data or history changed between reads",
+        ChangedReason::HeightBehindUtxo => {
+            "the indexer reported a confirmed deposit above its latest block"
+        }
     }
 }
 
@@ -2026,24 +2056,7 @@ impl ClaimStep1Panel {
                 )));
                 let observed_timing = timing.clone();
                 let timing_observer = Arc::new(move |report: AncestryTimingReport| {
-                    let mut capture = observed_timing.lock().unwrap();
-                    if report.is_progress() {
-                        capture.1[usize::from(report.chain == ChainId::BitcoinBlake2b)] =
-                            Some(report);
-                    } else {
-                        // Retain the first specific deadline and recent
-                        // outcomes even when many candidates are examined.
-                        // Only the latest progress per chain is held.
-                        if capture.0.len() == 128 {
-                            let discard = capture
-                                .0
-                                .iter()
-                                .position(|prior| !prior.is_deadline())
-                                .unwrap_or(1);
-                            capture.0.remove(discard);
-                        }
-                        capture.0.push(report);
-                    }
+                    capture_funding_timing(&observed_timing, report);
                 });
                 let mut inline_error = false;
                 let mut outer_timeout = None;
@@ -2064,18 +2077,7 @@ impl ClaimStep1Panel {
                     .get_info()
                     .await
                     .map_err(|_| "The Bitcoin Vault is unavailable.".to_string())?;
-                if !bitcoin_funding_wallet_ready(&info, &descriptor) {
-                    return Err(
-                        "The Bitcoin Vault is not ready for a two-chain deposit check.".into(),
-                    );
-                }
-                let highest = info.receive_index.max(info.change_index);
-                let end_exclusive = highest.saturating_add(128).max(256);
-                if end_exclusive > 20_000 {
-                    return Err(
-                        "The Vault's address range is too large for this bounded scan.".into(),
-                    );
-                }
+                let end_exclusive = funding_scan_end(&info, &descriptor)?;
                 phase = "Scanning the Bitcoin and BTCB2 Vaults";
                 let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                 let inventory = crate::services::claim_inventory::ClaimInventory::scan(
@@ -2125,24 +2127,8 @@ impl ClaimStep1Panel {
                 } else {
                     ((0, 0), (0, 0))
                 };
-                if !crate::services::claim_observation::session_current(&generation, expected) {
-                    return Err("The Connect session changed during the deposit check.".into());
-                }
-                let (bitcoin_eligible, btcb2_eligible) = saved
-                    .fee_eligible_candidate_presence(&inventory, &identity, &context, minimums)
-                    .map_err(|_| "The saved deposit reservation changed.".to_string())?;
-                if bitcoin_candidate && !bitcoin_eligible {
-                    return Err(format!(
-                        "No Bitcoin deposit candidate at the reserved address covers the current minimum of {} sats. A separate eligible deposit may be sent to that same address.",
-                        minimums.0
-                    ));
-                }
-                if btcb2_candidate && !btcb2_eligible {
-                    return Err(format!(
-                        "No BTCB2 deposit candidate at the reserved address covers the current minimum of {} sats. A separate eligible deposit may be sent to that same address.",
-                        minimums.1
-                    ));
-                }
+                check_funding_session(&generation, expected)?;
+                check_funding_eligibility(&saved, &inventory, &identity, &context, minimums, (bitcoin_candidate, btcb2_candidate))?;
                 let source = HttpObservationSource::new(
                     connect.client,
                     ChainId::Bitcoin,
@@ -2169,18 +2155,7 @@ impl ClaimStep1Panel {
                         minimums,
                     )
                     .await
-                    .map_err(|error| match error {
-                        claim_workflow::ClaimFundingDiscoveryError::Discovery(error) => {
-                            inline_error = funding_refusal_is_inline(error, &proofs.lock().unwrap());
-                            #[cfg(all(test, feature = "regtest-harness"))]
-                            eprintln!("disposable Claim funding discovery refused: {error:?}");
-                            funding_proof_refusal(error).to_string()
-                        }
-                        claim_workflow::ClaimFundingDiscoveryError::WalletState(_) =>
-                            "The Bitcoin Vault's coins or sync state changed. Reopen it and check deposits again.".to_string(),
-                        claim_workflow::ClaimFundingDiscoveryError::InvalidReservation(_) =>
-                            "The saved deposit reservation no longer matches this Vault and Connect session.".to_string(),
-                    })?;
+                    .map_err(|error| claim_funding_discovery_error(error, &mut inline_error, &proofs))?;
                 let (review, prepared) = if let Some(proof) = proof {
                     let fork_binding = fork_binding.as_ref().ok_or_else(|| {
                         "Open the paired BTCB2 Cube under this Connect account, then check both deposits again."
@@ -2194,11 +2169,7 @@ impl ClaimStep1Panel {
                         "The paired BTCB2 Vault closed or its Connect session changed. Reopen it and check deposits again."
                             .to_string()
                     })?;
-                    if fork_wallet.chain != ChainId::BitcoinBlake2b
-                        || fork_wallet.inheritance_descriptor() != Some(&descriptor)
-                    {
-                        return Err("The paired BTCB2 Vault no longer matches this Claim. Reopen both Cubes and check deposits again.".into());
-                    }
+                    check_funding_fork_wallet(&fork_wallet, &descriptor)?;
                     phase = "Checking the paired BTCB2 Vault’s coins";
                     let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                     inventory
@@ -2208,12 +2179,8 @@ impl ClaimStep1Panel {
                             "The paired BTCB2 Vault's complete coin set or sync state changed. Reopen it and check deposits again."
                                 .to_string()
                         })?;
-                    if !crate::services::claim_observation::session_current(&generation, expected) {
-                        return Err("The Connect session changed during the deposit check.".into());
-                    }
-                    if !fork_binding.current() {
-                        return Err("The paired BTCB2 Cube changed during the deposit check. Reopen it and check deposits again.".into());
-                    }
+                    check_funding_session(&generation, expected)?;
+                    check_funding_binding(true, Some(fork_binding))?;
                     let (fork_generation, fork_expected) = fork_binding.generation_guard();
                     phase = "Reserving return addresses in both Vaults";
                     let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
@@ -2229,17 +2196,8 @@ impl ClaimStep1Panel {
                         fork_expected,
                     )
                     .await
-                    .map_err(|error| match error {
-                        claim_workflow::ClaimChangeError::Cancelled =>
-                            "The Connect session changed before change addresses were reserved.".to_string(),
-                        claim_workflow::ClaimChangeError::WalletState =>
-                            "The paired Bitcoin or BTCB2 Vault is unavailable or changed. Reopen both Cubes and check deposits again.".to_string(),
-                        claim_workflow::ClaimChangeError::Journal(_) =>
-                            "The saved Claim reservation changed. Reopen the Claim and check deposits again.".to_string(),
-                    })?;
-                    if !fork_binding.current() {
-                        return Err("The paired BTCB2 Cube changed during the deposit check. Reopen it and check deposits again.".into());
-                    }
+                    .map_err(claim_change_error)?;
+                    check_funding_binding(true, Some(fork_binding))?;
                     let tips = claim::PreflightTips {
                         bitcoin: proof
                             .inputs
@@ -2299,16 +2257,7 @@ impl ClaimStep1Panel {
                             review_context,
                         )
                         .await
-                        .map_err(|error| match error {
-                            crate::services::claim_inventory::ClaimPairSnapshotError::WalletState =>
-                                "The Bitcoin or paired BTCB2 Vault changed while preparing the Claim preview. Check deposits again."
-                                    .to_string(),
-                            crate::services::claim_inventory::ClaimPairSnapshotError::Observation(error) =>
-                                funding_proof_refusal(crate::services::claim_observation::http::DiscoveryError::Observation(error)).to_string(),
-                            crate::services::claim_inventory::ClaimPairSnapshotError::Changed =>
-                                "The two-chain Claim proof changed while preparing the preview. Check deposits again."
-                                    .to_string(),
-                        })?;
+                        .map_err(claim_pair_snapshot_error)?;
                     let review = view::vault::ancestry_coins::VerifiedCoinPairReview::new(
                         coins,
                         proof.inputs.funding().bitcoin().block(),
@@ -2331,16 +2280,8 @@ impl ClaimStep1Panel {
                 } else {
                     (None, None)
                 };
-                if !crate::services::claim_observation::session_current(&generation, expected) {
-                    return Err("The Connect session changed during the deposit check.".into());
-                }
-                if review.is_some()
-                    && fork_binding
-                        .as_ref()
-                        .is_some_and(|binding| !binding.current())
-                {
-                    return Err("The paired BTCB2 Cube changed during the deposit check. Reopen it and check deposits again.".into());
-                }
+                check_funding_session(&generation, expected)?;
+                check_funding_binding(review.is_some(), fork_binding.as_ref())?;
                 Ok(ClaimDepositProgress {
                     bitcoin_candidate,
                     btcb2_candidate,
@@ -2354,13 +2295,7 @@ impl ClaimStep1Panel {
             });
                 let attempt = FundingAttemptTiming {
                     phase,
-                    outcome: if outer_timeout.is_some() {
-                        FundingAttemptOutcome::Deadline150s
-                    } else if result.is_err() {
-                        FundingAttemptOutcome::Failed
-                    } else {
-                        FundingAttemptOutcome::Returned
-                    },
+                    outcome: funding_attempt_outcome(outer_timeout, &result),
                     elapsed_ms: attempt_started.elapsed().as_millis() as u64,
                     proof_expired: false,
                 };
@@ -3008,32 +2943,23 @@ impl ClaimStep1Panel {
         } else {
             fork
         };
-        let signer_return = match &message {
-            Message::Signed(_, Ok(returned))
-            | Message::Export(crate::export::ImportExportMessage::Progress(
-                crate::export::Progress::Psbt(returned),
-            )) => Some(returned),
-            _ => None,
-        };
-        if let Some(returned) = signer_return {
-            if let Err(reason) = check_paired_signer_return(pair, side, &state.tx.psbt, returned) {
-                *error = Some(reason.clone());
-                return match message {
-                    Message::Signed(fingerprint, _) => state
-                        .update(
-                            Arc::new(SigningOnlyDaemon(daemon)),
-                            cache,
-                            Message::Signed(
-                                fingerprint,
-                                Err(crate::app::error::Error::Unexpected(reason)),
-                            ),
-                        )
-                        .map(move |message| {
-                            Message::Claim(ClaimEvent::PairedPsbt(session, side, Box::new(message)))
-                        }),
-                    _ => Task::done(Message::View(view::Message::ShowError(reason))),
-                };
-            }
+        if let Some(reason) = paired_signer_return_error(pair, side, &state.tx.psbt, &message) {
+            *error = Some(reason.clone());
+            return match message {
+                Message::Signed(fingerprint, _) => state
+                    .update(
+                        Arc::new(SigningOnlyDaemon(daemon)),
+                        cache,
+                        Message::Signed(
+                            fingerprint,
+                            Err(crate::app::error::Error::Unexpected(reason)),
+                        ),
+                    )
+                    .map(move |message| {
+                        Message::Claim(ClaimEvent::PairedPsbt(session, side, Box::new(message)))
+                    }),
+                _ => Task::done(Message::View(view::Message::ShowError(reason))),
+            };
         }
         let signing: Arc<dyn Daemon + Sync + Send> = Arc::new(SigningOnlyDaemon(daemon));
         let task = state.update(signing, cache, message).map({
@@ -3707,179 +3633,981 @@ impl ClaimStep1Panel {
         }
     }
 
+    fn apply_deposit_status_checked(
+        &mut self,
+        seq: u64,
+        generation: u64,
+        revocations: u64,
+        status: DepositStatus,
+    ) -> Task<Message> {
+        if seq != self.deposit_poll_seq || !matches!(self.stage, Stage::FundingDeposits(_)) {
+            return Task::none();
+        }
+        self.deposit_polling = false;
+        if self.authorized(generation, revocations) && self.backend_ready() {
+            self.deposit_status = Some(status);
+        } else {
+            self.deposit_status = None;
+        }
+        Task::none()
+    }
+    fn apply_paired_bitcoin_reviewed(
+        &mut self,
+        seq: u64,
+        generation: u64,
+        revocations: u64,
+        result: Result<InitialPairReviewSnapshot, String>,
+    ) -> Task<Message> {
+        if seq != self.paired_broadcast_seq {
+            return Task::none();
+        }
+        let Stage::PairedBitcoinReviewing(recovery) = &self.stage else {
+            return Task::none();
+        };
+        if !self.authorized(generation, revocations) {
+            self.restart_pending = true;
+            self.stage = Stage::Preconditions;
+            return Task::none();
+        }
+        let recovery = recovery.clone();
+        match result {
+            Ok(review) => self.stage = Stage::PairedBitcoinReview(recovery, review),
+            Err(reason) => {
+                self.restart_error = Some(reason);
+                self.stage = Stage::PairedRecovery(recovery);
+            }
+        }
+        Task::none()
+    }
+    fn apply_paired_bitcoin_submitted(
+        &mut self,
+        seq: u64,
+        generation: u64,
+        revocations: u64,
+        result: Result<InitialPairSubmissionOutcome, String>,
+    ) -> Task<Message> {
+        if seq != self.paired_broadcast_seq {
+            return Task::none();
+        }
+        let Stage::PairedBitcoinSubmitting(recovery) = &self.stage else {
+            return Task::none();
+        };
+        if !self.authorized(generation, revocations) {
+            self.restart_pending = true;
+            self.stage = Stage::Preconditions;
+            return Task::none();
+        }
+        let mut recovery = recovery.clone();
+        match result {
+            Ok(_) => {
+                recovery.bitcoin_unattempted = false;
+                self.restart_error = Some(
+                    "The Bitcoin send was recorded. Check both chains for its current status."
+                        .into(),
+                );
+            }
+            Err(reason) => self.restart_error = Some(reason),
+        }
+        self.stage = Stage::PairedRecovery(recovery);
+        Task::none()
+    }
+    fn apply_paired_fork_reviewed(
+        &mut self,
+        seq: u64,
+        generation: u64,
+        revocations: u64,
+        result: Result<InitialPairReviewSnapshot, String>,
+    ) -> Task<Message> {
+        if seq != self.paired_broadcast_seq {
+            return Task::none();
+        }
+        let Stage::PairedForkReviewing(recovery) = &self.stage else {
+            return Task::none();
+        };
+        if !self.authorized(generation, revocations) {
+            self.restart_pending = true;
+            self.stage = Stage::Preconditions;
+            return Task::none();
+        }
+        let recovery = recovery.clone();
+        match result {
+            Ok(review) => self.stage = Stage::PairedForkReview(recovery, review),
+            Err(reason) => {
+                self.restart_error = Some(reason);
+                self.stage = Stage::PairedRecovery(recovery);
+            }
+        }
+        Task::none()
+    }
+    fn apply_paired_fork_submitted(
+        &mut self,
+        seq: u64,
+        generation: u64,
+        revocations: u64,
+        result: Result<InitialPairSubmissionOutcome, String>,
+    ) -> Task<Message> {
+        if seq != self.paired_broadcast_seq {
+            return Task::none();
+        }
+        let Stage::PairedForkSubmitting(recovery) = &self.stage else {
+            return Task::none();
+        };
+        if !self.authorized(generation, revocations) {
+            self.restart_pending = true;
+            self.stage = Stage::Preconditions;
+            return Task::none();
+        }
+        let mut recovery = recovery.clone();
+        match result {
+            Ok(_) => {
+                recovery.fork_ready_for_review = false;
+                self.restart_error = Some(
+                    "The BTCB2 send was recorded. Check both chains for its current status.".into(),
+                );
+            }
+            Err(reason) => self.restart_error = Some(reason),
+        }
+        self.stage = Stage::PairedRecovery(recovery);
+        Task::none()
+    }
+    fn apply_paired_signed(
+        &mut self,
+        session: u64,
+        generation: u64,
+        revocations: u64,
+        result: Result<SignedPairDetails, String>,
+    ) -> Task<Message> {
+        if session != self.paired_sign_seq {
+            return Task::none();
+        }
+        let authorized = self.authorized(generation, revocations);
+        let Stage::PairedSign {
+            recording, error, ..
+        } = &mut self.stage
+        else {
+            return Task::none();
+        };
+        *recording = false;
+        if !authorized {
+            self.restart_pending = true;
+            self.stage = Stage::Preconditions;
+            return Task::none();
+        }
+        match result {
+            Ok(details) => {
+                self.stage = Stage::PairedRecovery(PairedClaimRecovery {
+                    bitcoin_unattempted: true,
+                    fork_ready_for_review: false,
+                    bitcoin_txid: Some(details.bitcoin_txid),
+                    fork_txid: Some(details.fork_txid),
+                    bitcoin_output: details.bitcoin_output,
+                    fork_output: details.fork_output,
+                    bitcoin_status:
+                        "Signed and recorded; no Bitcoin broadcast attempt has been made.".into(),
+                    fork_status: "Signed and recorded; no BTCB2 broadcast attempt has been made."
+                        .into(),
+                });
+                Task::none()
+            }
+            Err(reason) => {
+                *error = Some(reason.clone());
+                Task::done(Message::View(view::Message::ShowError(reason)))
+            }
+        }
+    }
+    fn apply_paired_signing_prepared(
+        &mut self,
+        seq: u64,
+        generation: u64,
+        revocations: u64,
+        result: Result<(), String>,
+    ) -> Task<Message> {
+        if seq != self.paired_sign_seq {
+            return Task::none();
+        }
+        self.paired_signing_pending = false;
+        if !matches!(self.stage, Stage::FundingDeposits(_))
+            || !self.authorized(generation, revocations)
+            || self.funding_review().is_none()
+        {
+            return Task::none();
+        }
+        match result.and_then(|()| self.install_paired_signing()) {
+            Ok(()) => Task::none(),
+            Err(error) => {
+                self.funding_error = Some(error.clone());
+                Task::done(Message::View(view::Message::ShowError(error)))
+            }
+        }
+    }
+    fn apply_paired_permit_checked(
+        &mut self,
+        seq: u64,
+        generation: u64,
+        revocations: u64,
+        side: ChainId,
+        message: Box<Message>,
+        result: Result<
+            crate::services::claim_workflow::paired_signing_permit::PairedSigningPermit,
+            String,
+        >,
+    ) -> Task<Message> {
+        if seq != self.paired_dispatch_seq
+            || !self.authorized(generation, revocations)
+            || !self.backend_ready()
+        {
+            return Task::none();
+        }
+        let Stage::PairedSign {
+            bitcoin,
+            fork,
+            error,
+            ..
+        } = &mut self.stage
+        else {
+            return Task::none();
+        };
+        match result {
+            Ok(permit) => {
+                let state = if side == ChainId::Bitcoin {
+                    bitcoin
+                } else if side == ChainId::BitcoinBlake2b {
+                    fork
+                } else {
+                    return Task::none();
+                };
+                if !state.set_paired_signing_permit(permit) {
+                    *error = Some("The signer PSBT changed during the two-chain check.".into());
+                    return Task::none();
+                }
+                *error = None;
+                Task::done(Message::Claim(ClaimEvent::PairedAuthorizedPsbt(
+                    self.paired_sign_seq,
+                    side,
+                    message,
+                )))
+            }
+            Err(reason) => {
+                *error = Some(reason.clone());
+                Task::done(Message::View(view::Message::ShowError(reason)))
+            }
+        }
+    }
+    fn apply_funding_check_progress(
+        &mut self,
+        seq: u64,
+        generation: u64,
+        revocations: u64,
+        phase: &'static str,
+    ) -> Task<Message> {
+        if seq == self.check_seq
+            && self.funding_checking
+            && matches!(self.stage, Stage::FundingDeposits(_))
+            && self.authorized(generation, revocations)
+            && self.backend_ready()
+        {
+            self.funding_status = Some(format!("{phase}…"));
+        }
+        Task::none()
+    }
+    fn apply_funding_checked(
+        &mut self,
+        seq: u64,
+        generation: u64,
+        revocations: u64,
+        mut result: Result<ClaimDepositProgress, String>,
+    ) -> Task<Message> {
+        if seq != self.check_seq || !matches!(self.stage, Stage::FundingDeposits(_)) {
+            return Task::none();
+        }
+        self.funding_task = None;
+        self.funding_checking = false;
+        // Space automatic retries from the completed scan. A slow
+        // timeout must not trigger another full scan immediately.
+        self.last_full_check = Some(Instant::now());
+        if !self.authorized(generation, revocations) || !self.backend_ready() {
+            self.stage = Stage::Preconditions;
+            self.funding_status = None;
+            self.funding_review = None;
+            self.funding_proofs = [FundingProofStatus::Pending; 2];
+            self.funding_timing.clear();
+            self.funding_attempt = None;
+            self.funding_inline_error = false;
+            self.prepared_pair = None;
+            self.funding_error = Some("The Claim session changed during the deposit check.".into());
+            return Task::none();
+        }
+        let proof_complete = matches!(&result, Ok(progress) if progress.both_verified);
+        if proof_complete && !self.fork_pair_current() {
+            self.funding_review = None;
+            self.funding_proofs = [FundingProofStatus::Pending; 2];
+            self.funding_timing.clear();
+            self.funding_attempt = None;
+            self.funding_inline_error = false;
+            self.prepared_pair = None;
+            self.funding_status = None;
+            self.funding_error = Some(
+                        "The paired BTCB2 Cube changed during the deposit check. Reopen it and check both deposits again."
+                            .into(),
+                    );
+            return Task::none();
+        }
+        self.funding_review = result
+            .as_ref()
+            .ok()
+            .and_then(|progress| progress.review.clone());
+        self.prepared_pair = result
+            .as_mut()
+            .ok()
+            .and_then(|progress| progress.prepared.take());
+        match result {
+            Ok(progress) => {
+                self.funding_status = Some(format!(
+                    "Bitcoin deposit: {}. Bitcoin Blake2b deposit: {}. {}",
+                    if progress.bitcoin_candidate {
+                        "post-fork candidate found"
+                    } else {
+                        "no confirmed candidate at the reserved address"
+                    },
+                    if progress.btcb2_candidate {
+                        "post-fork candidate found"
+                    } else {
+                        "no confirmed candidate at the reserved address"
+                    },
+                    if progress.both_verified {
+                        "Both deposits have current two-chain ancestry proofs."
+                    } else {
+                        "Candidates are not yet spend authority."
+                    }
+                ))
+            }
+            Err(reason) => {
+                self.funding_status = None;
+                self.funding_error = Some(reason);
+            }
+        }
+        if proof_complete {
+            Task::perform(
+                async { tokio::time::sleep(std::time::Duration::from_secs(30)).await },
+                move |()| {
+                    Message::Claim(ClaimEvent::FundingProofExpired(
+                        seq,
+                        generation,
+                        revocations,
+                    ))
+                },
+            )
+        } else {
+            Task::none()
+        }
+    }
+    fn apply_funding_proof_expired(
+        &mut self,
+        seq: u64,
+        generation: u64,
+        revocations: u64,
+    ) -> Task<Message> {
+        if seq == self.check_seq
+            && matches!(self.stage, Stage::FundingDeposits(_))
+            && self.authorized(generation, revocations)
+        {
+            self.funding_review = None;
+            self.funding_proofs = [FundingProofStatus::Pending; 2];
+            // Keep the completed attempt's read-only diagnostics for
+            // copying, but label them historical after proof expiry.
+            if let Some(attempt) = self.funding_attempt.as_mut() {
+                attempt.proof_expired = true;
+            }
+            self.funding_inline_error = false;
+            self.prepared_pair = None;
+            self.funding_status = Some(
+                        "The deposit proof has expired. Watching the deposits and refreshing verification automatically."
+                            .into(),
+                    );
+            self.last_full_check = None;
+        }
+        Task::none()
+    }
+    fn apply_funding_prepared(
+        &mut self,
+        seq: u64,
+        generation: u64,
+        revocations: u64,
+        result: Result<claim_workflow::CheckedClaimFundingAddresses, String>,
+    ) -> Task<Message> {
+        if seq != self.check_seq || !matches!(self.stage, Stage::FundingChecking) {
+            return Task::none();
+        }
+        if !self.authorized(generation, revocations) || !self.backend_ready() {
+            self.stage = Stage::Preconditions;
+            self.funding_error = Some("The Claim session changed during the address check.".into());
+            return Task::none();
+        }
+        self.funding_task = None;
+        match result {
+            Ok(addresses) => {
+                self.stage = Stage::FundingDeposits(addresses);
+                self.funding_proofs = [FundingProofStatus::Pending; 2];
+                self.funding_timing.clear();
+                self.funding_attempt = None;
+                self.funding_inline_error = false;
+                self.deposit_status = None;
+                self.deposit_details_override = None;
+                self.deposit_polling = false;
+                self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
+                self.funding_status = None;
+                return Task::done(Message::Claim(ClaimEvent::DepositPoll));
+            }
+            Err(reason) => {
+                self.stage = Stage::Preconditions;
+                self.funding_error = Some(reason);
+            }
+        }
+        Task::none()
+    }
+    fn apply_restarted(
+        &mut self,
+        id: u64,
+        result: Result<RestartedClaim, String>,
+    ) -> Task<Message> {
+        let Some(attempt) = self.restarting.filter(|a| a.id == id) else {
+            return Task::none();
+        };
+        self.restarting = None;
+        self.pre.checking = false;
+        if !self.authorized(attempt.generation, attempt.revocations) || !self.backend_ready() {
+            self.restart_error = Some(self.ended_copy());
+            return Task::none();
+        }
+        let restored = match result {
+            Ok(restored) if restored.context.generation == attempt.generation => restored,
+            Ok(_) => {
+                self.restart_error = Some(SESSION_ENDED.into());
+                return Task::none();
+            }
+            Err(error) => {
+                self.restart_error = Some(error.clone());
+                if let Stage::Track { error: slot, .. } = &mut self.stage {
+                    *slot = Some(error);
+                }
+                return Task::none();
+            }
+        };
+        self.restart_error = None;
+        self.resuming = true;
+        match restored.state {
+            RestartedState::Intent(built) => {
+                self.restart_pending = false;
+                self.stage = Stage::Plan { built };
+            }
+            RestartedState::Bound(session) => {
+                self.restart_pending = false;
+                self.revoked = false;
+                self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
+                let tx = session.recovered.as_ref().expect("restored witness");
+                let outcome = Outcome::Uncertain {
+                    txid: tx.compute_txid(),
+                    wtxid: tx.compute_wtxid(),
+                };
+                self.stage = Stage::Track {
+                    session: Some(session),
+                    outcome,
+                    status: None,
+                    busy: false,
+                    error: None,
+                };
+                return self.reconcile();
+            }
+            RestartedState::Unavailable(txid, error) => {
+                self.stage = Stage::Track {
+                    session: None,
+                    outcome: Outcome::Recorded { txid },
+                    status: None,
+                    busy: false,
+                    error: Some(error),
+                };
+            }
+            RestartedState::PairedRecovery(recovery) => {
+                self.restart_pending = false;
+                self.stage = Stage::PairedRecovery(recovery);
+            }
+            RestartedState::PairedFunding(addresses) => {
+                self.restart_pending = false;
+                self.deposit_status = None;
+                self.deposit_details_override = None;
+                self.deposit_polling = false;
+                self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
+                self.funding_review = None;
+                self.funding_proofs = [FundingProofStatus::Pending; 2];
+                self.funding_timing.clear();
+                self.funding_attempt = None;
+                self.funding_inline_error = false;
+                self.prepared_pair = None;
+                self.funding_status = Some(
+                            "The recorded Claim pair is unsigned. Watching both deposits and refreshing verification before signing."
+                                .into(),
+                        );
+                self.stage = Stage::FundingDeposits(addresses);
+                return Task::done(Message::Claim(ClaimEvent::DepositPoll));
+            }
+        }
+        Task::none()
+    }
+
+    fn apply_signing_checked(
+        &mut self,
+        id: u64,
+        built: Box<Construction>,
+        result: Result<signing::CheckedInputs, String>,
+    ) -> Task<Message> {
+        let Stage::CheckingSign(attempt) = self.stage else {
+            return Task::none();
+        };
+        if attempt.id != id {
+            return Task::none();
+        }
+        let authorized =
+            self.authorized(attempt.generation, attempt.revocations) && self.backend_ready();
+        self.stage = Stage::Plan { built };
+        if !authorized {
+            return Task::done(Message::View(view::Message::ShowError(
+                SESSION_ENDED.into(),
+            )));
+        }
+        match result {
+            Ok(checked) => {
+                let Stage::Plan { built } = &self.stage else {
+                    unreachable!()
+                };
+                let coins = match checked.consume(
+                    built,
+                    &self.wallet,
+                    self.connect.as_ref(),
+                    *self.generation.borrow(),
+                ) {
+                    Ok(coins) => coins,
+                    Err(error) => {
+                        return Task::done(Message::View(view::Message::ShowError(error)))
+                    }
+                };
+                let Stage::Plan { built } =
+                    std::mem::replace(&mut self.stage, Stage::Preconditions)
+                else {
+                    unreachable!()
+                };
+                self.install_signing(built, coins);
+                Task::none()
+            }
+            Err(error) => Task::done(Message::View(view::Message::ShowError(error))),
+        }
+    }
+    fn apply_built(&mut self, id: u64, result: Result<Box<Construction>, String>) -> Task<Message> {
+        let Some(attempt) = self.building.filter(|attempt| attempt.id == id) else {
+            return Task::none();
+        };
+        self.building = None;
+        self.pre.checking = false;
+        if !self.authorized(attempt.generation, attempt.revocations) || !self.backend_ready() {
+            return Task::none();
+        }
+        match result {
+            Ok(built) if matches!(self.stage, Stage::Preconditions) => {
+                self.stage = Stage::Plan { built };
+            }
+            Ok(_) => {}
+            Err(reason) => {
+                return Task::done(Message::View(view::Message::ShowError(format!(
+                    "Couldn't build the transaction: {reason}"
+                ))));
+            }
+        }
+        Task::none()
+    }
+    fn install_ready_claim(
+        &mut self,
+        mut session: Box<ClaimSession>,
+        authorized: bool,
+    ) -> Task<Message> {
+        if !authorized {
+            if let Some(coordinator) = &mut session.coordinator {
+                coordinator.invalidate();
+            }
+        }
+        self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
+        self.revoked = !authorized;
+        let ended = self.ended_copy();
+        if let Some(outcome) = session
+            .coordinator
+            .as_ref()
+            .and_then(|c| c.recorded_outcome())
+        {
+            self.stage = Stage::Track {
+                session: Some(session),
+                outcome,
+                status: None,
+                busy: false,
+                error: (!authorized).then_some(ended),
+            };
+            return if authorized {
+                self.reconcile()
+            } else {
+                Task::none()
+            };
+        }
+        self.stage = Stage::Review {
+            session: Some(session),
+            snapshot: None,
+            busy: false,
+            error: (!authorized).then_some(ended),
+        };
+        if authorized {
+            self.prepare_review()
+        } else {
+            Task::none()
+        }
+    }
+
+    fn apply_ready(
+        &mut self,
+        id: u64,
+        result: Result<Box<ClaimSession>, (Box<Construction>, String)>,
+    ) -> Task<Message> {
+        let attempt = match &self.stage {
+            Stage::Sign {
+                finalizing: Some(attempt),
+                ..
+            } if attempt.id == id => Some(*attempt),
+            _ => None,
+        };
+        match result {
+            Ok(session) => {
+                // The intent is journaled, so from here the session
+                // is the record whether or not it may be driven: a
+                // result whose context ended in flight is installed
+                // revoked, to be re-bound, never reviewed.
+                let authorized =
+                    attempt.is_some_and(|a| self.authorized(a.generation, a.revocations));
+                self.install_ready_claim(session, authorized)
+            }
+            Err((built, reason)) => {
+                // A refusal for a superseded attempt has nothing to
+                // restore into (unreachable while cancel is refused
+                // during a finalisation; kept as the guard).
+                if attempt.is_none() {
+                    return Task::none();
+                }
+                if let Stage::Sign {
+                    built: slot,
+                    finalizing,
+                    error,
+                    ..
+                } = &mut self.stage
+                {
+                    *slot = Some(built);
+                    *finalizing = None;
+                    *error = Some(reason.clone());
+                }
+                Task::done(Message::View(view::Message::ShowError(reason)))
+            }
+        }
+    }
+    fn apply_rebound(
+        &mut self,
+        revocations: u64,
+        mut session: Box<ClaimSession>,
+        result: Result<(), String>,
+    ) -> Task<Message> {
+        let bound = result.is_ok();
+        let authorized = bound && self.authorized(session.context.generation, revocations);
+        if bound && !authorized {
+            // Bound under a context that ended while the re-bind ran.
+            if let Some(coordinator) = &mut session.coordinator {
+                coordinator.invalidate();
+            }
+        }
+        if bound {
+            self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
+        }
+        let error = match result {
+            Err(reason) => Some(reason),
+            Ok(()) if authorized => None,
+            Ok(()) => Some(self.ended_copy()),
+        };
+        match &mut self.stage {
+            Stage::Review {
+                session: slot,
+                snapshot,
+                busy,
+                error: slot_error,
+            } => {
+                *slot = Some(session);
+                *snapshot = None;
+                *busy = false;
+                *slot_error = error;
+            }
+            Stage::Track {
+                session: slot,
+                busy,
+                error: slot_error,
+                ..
+            } => {
+                *slot = Some(session);
+                *busy = false;
+                *slot_error = error;
+            }
+            _ => return Task::none(),
+        }
+        if !authorized {
+            return Task::none();
+        }
+        self.revoked = false;
+        match &self.stage {
+            Stage::Review { .. } => self.prepare_review(),
+            _ => self.reconcile(),
+        }
+    }
+    fn apply_reviewed(
+        &mut self,
+        revocations: u64,
+        mut session: Box<ClaimSession>,
+        result: Result<ReviewSnapshot, String>,
+    ) -> Task<Message> {
+        // A review whose context ended while it ran (a sign-out, a
+        // revocation) is never shown as something to confirm, and
+        // never erases what the stage says about that end: the
+        // session comes back, the review token inside it goes.
+        let authorized = self.authorized(session.context.generation, revocations);
+        let ended = self.ended_copy();
+        if !authorized {
+            session.review = None;
+            session.reconfirmation = None;
+            session.resubmission = None;
+        }
+        if let Stage::Review {
+            session: slot,
+            snapshot,
+            busy,
+            error,
+        } = &mut self.stage
+        {
+            *slot = Some(session);
+            *busy = false;
+            match result {
+                Ok(fresh) if authorized => {
+                    *snapshot = Some(fresh);
+                    *error = None;
+                }
+                Ok(_) => {
+                    *snapshot = None;
+                    if error.is_none() {
+                        *error = Some(ended);
+                    }
+                }
+                Err(reason) => {
+                    *snapshot = None;
+                    if authorized || error.is_none() {
+                        *error = Some(reason);
+                    }
+                }
+            }
+        }
+        Task::none()
+    }
+    fn apply_submitted(
+        &mut self,
+        revocations: u64,
+        session: Box<ClaimSession>,
+        result: Result<Outcome, String>,
+    ) -> Task<Message> {
+        let authorized = self.authorized(session.context.generation, revocations);
+        // A recorded submission still belongs in Track, even when
+        // its context ended while the completion was queued. Keep
+        // the current hold instruction and wait for a rebind before
+        // asking the revoked coordinator for status.
+        let held = if authorized {
+            None
+        } else {
+            let current = match &self.stage {
+                Stage::Review { error, .. } | Stage::Track { error, .. } => error.clone(),
+                _ => None,
+            };
+            Some(current.unwrap_or_else(|| self.ended_copy()))
+        };
+        match result {
+            Ok(outcome) => {
+                self.stage = Stage::Track {
+                    session: Some(session),
+                    outcome,
+                    status: None,
+                    busy: false,
+                    error: held,
+                };
+                if authorized {
+                    return self.reconcile();
+                }
+            }
+            Err(reason) => {
+                if let Stage::Review {
+                    session: slot,
+                    snapshot,
+                    busy,
+                    error,
+                } = &mut self.stage
+                {
+                    // A refused submission consumed the review; the
+                    // next confirmation needs a fresh one.
+                    *slot = Some(session);
+                    *snapshot = None;
+                    *busy = false;
+                    *error = held.or(Some(reason));
+                }
+            }
+        }
+        Task::none()
+    }
+    fn apply_resubmitted(
+        &mut self,
+        revocations: u64,
+        mut session: Box<ClaimSession>,
+        result: Result<Option<Outcome>, String>,
+    ) -> Task<Message> {
+        let authorized = self.authorized(session.context.generation, revocations);
+        let submitted = matches!(&result, Ok(Some(_)));
+        let ended = self.ended_copy();
+        if !authorized {
+            session.resubmission = None;
+        }
+        if let Stage::Track {
+            session: slot,
+            busy,
+            status,
+            error,
+            outcome,
+        } = &mut self.stage
+        {
+            *slot = Some(session);
+            *busy = false;
+            match result {
+                Ok(Some(sent)) => {
+                    *outcome = sent;
+                    *status = None;
+                    if authorized {
+                        *error = None;
+                    }
+                }
+                Ok(None) if authorized => *error = None,
+                Err(reason) if authorized => *error = Some(reason),
+                _ => {}
+            }
+            if !authorized && error.is_none() {
+                *error = Some(ended);
+            }
+        }
+        if submitted && authorized {
+            self.reconcile()
+        } else {
+            Task::none()
+        }
+    }
+    fn apply_reconfirmed(
+        &mut self,
+        revocations: u64,
+        mut session: Box<ClaimSession>,
+        result: Result<(), String>,
+        confirmed: bool,
+    ) -> Task<Message> {
+        let authorized = self.authorized(session.context.generation, revocations);
+        let success = authorized && confirmed && result.is_ok();
+        let ended = self.ended_copy();
+        if !authorized {
+            session.reconfirmation = None;
+            session.resubmission = None;
+        }
+        if let Stage::Track {
+            session: slot,
+            busy,
+            status,
+            error,
+            ..
+        } = &mut self.stage
+        {
+            *slot = Some(session);
+            *busy = false;
+            if authorized {
+                *error = result.err();
+                if success {
+                    *status = Some(Status::Unchecked);
+                }
+            } else if error.is_none() {
+                *error = Some(ended);
+            }
+        }
+        if success {
+            self.reconcile()
+        } else {
+            Task::none()
+        }
+    }
+    fn apply_tracked(
+        &mut self,
+        revocations: u64,
+        session: Box<ClaimSession>,
+        result: Result<Status, String>,
+    ) -> Task<Message> {
+        // A status read is information whichever context it came
+        // from; what the stage says about a context that ended stays.
+        let authorized = self.authorized(session.context.generation, revocations);
+        if let Stage::Track {
+            session: slot,
+            status,
+            busy,
+            error,
+            ..
+        } = &mut self.stage
+        {
+            *slot = Some(session);
+            *busy = false;
+            match result {
+                Ok(fresh) => {
+                    *status = Some(fresh);
+                    if authorized {
+                        *error = None;
+                    }
+                }
+                Err(reason) => {
+                    if authorized || error.is_none() {
+                        *error = Some(reason);
+                    }
+                }
+            }
+        }
+        Task::none()
+    }
     /// Every completion carries what it needs; none needs the daemon, so a
     /// session travelling inside one is never dropped for want of it.
     fn apply(&mut self, event: ClaimEvent) -> Task<Message> {
         match event {
             ClaimEvent::DepositPoll => Task::none(),
             ClaimEvent::DepositStatusChecked(seq, generation, revocations, status) => {
-                if seq != self.deposit_poll_seq || !matches!(self.stage, Stage::FundingDeposits(_))
-                {
-                    return Task::none();
-                }
-                self.deposit_polling = false;
-                if self.authorized(generation, revocations) && self.backend_ready() {
-                    self.deposit_status = Some(status);
-                } else {
-                    self.deposit_status = None;
-                }
-                Task::none()
+                self.apply_deposit_status_checked(seq, generation, revocations, status)
             }
             ClaimEvent::PairedBitcoinReviewed(seq, generation, revocations, result) => {
-                if seq != self.paired_broadcast_seq {
-                    return Task::none();
-                }
-                let Stage::PairedBitcoinReviewing(recovery) = &self.stage else {
-                    return Task::none();
-                };
-                if !self.authorized(generation, revocations) {
-                    self.restart_pending = true;
-                    self.stage = Stage::Preconditions;
-                    return Task::none();
-                }
-                let recovery = recovery.clone();
-                match result {
-                    Ok(review) => self.stage = Stage::PairedBitcoinReview(recovery, review),
-                    Err(reason) => {
-                        self.restart_error = Some(reason);
-                        self.stage = Stage::PairedRecovery(recovery);
-                    }
-                }
-                Task::none()
+                self.apply_paired_bitcoin_reviewed(seq, generation, revocations, result)
             }
             ClaimEvent::PairedBitcoinSubmitted(seq, generation, revocations, result) => {
-                if seq != self.paired_broadcast_seq {
-                    return Task::none();
-                }
-                let Stage::PairedBitcoinSubmitting(recovery) = &self.stage else {
-                    return Task::none();
-                };
-                if !self.authorized(generation, revocations) {
-                    self.restart_pending = true;
-                    self.stage = Stage::Preconditions;
-                    return Task::none();
-                }
-                let mut recovery = recovery.clone();
-                match result {
-                    Ok(_) => {
-                        recovery.bitcoin_unattempted = false;
-                        self.restart_error = Some(
-                            "The Bitcoin send was recorded. Check both chains for its current status."
-                                .into(),
-                        );
-                    }
-                    Err(reason) => self.restart_error = Some(reason),
-                }
-                self.stage = Stage::PairedRecovery(recovery);
-                Task::none()
+                self.apply_paired_bitcoin_submitted(seq, generation, revocations, result)
             }
             ClaimEvent::PairedForkReviewed(seq, generation, revocations, result) => {
-                if seq != self.paired_broadcast_seq {
-                    return Task::none();
-                }
-                let Stage::PairedForkReviewing(recovery) = &self.stage else {
-                    return Task::none();
-                };
-                if !self.authorized(generation, revocations) {
-                    self.restart_pending = true;
-                    self.stage = Stage::Preconditions;
-                    return Task::none();
-                }
-                let recovery = recovery.clone();
-                match result {
-                    Ok(review) => self.stage = Stage::PairedForkReview(recovery, review),
-                    Err(reason) => {
-                        self.restart_error = Some(reason);
-                        self.stage = Stage::PairedRecovery(recovery);
-                    }
-                }
-                Task::none()
+                self.apply_paired_fork_reviewed(seq, generation, revocations, result)
             }
             ClaimEvent::PairedForkSubmitted(seq, generation, revocations, result) => {
-                if seq != self.paired_broadcast_seq {
-                    return Task::none();
-                }
-                let Stage::PairedForkSubmitting(recovery) = &self.stage else {
-                    return Task::none();
-                };
-                if !self.authorized(generation, revocations) {
-                    self.restart_pending = true;
-                    self.stage = Stage::Preconditions;
-                    return Task::none();
-                }
-                let mut recovery = recovery.clone();
-                match result {
-                    Ok(_) => {
-                        recovery.fork_ready_for_review = false;
-                        self.restart_error = Some(
-                            "The BTCB2 send was recorded. Check both chains for its current status."
-                                .into(),
-                        );
-                    }
-                    Err(reason) => self.restart_error = Some(reason),
-                }
-                self.stage = Stage::PairedRecovery(recovery);
-                Task::none()
+                self.apply_paired_fork_submitted(seq, generation, revocations, result)
             }
             ClaimEvent::PairedSigned(session, generation, revocations, result) => {
-                if session != self.paired_sign_seq {
-                    return Task::none();
-                }
-                let authorized = self.authorized(generation, revocations);
-                let Stage::PairedSign {
-                    recording, error, ..
-                } = &mut self.stage
-                else {
-                    return Task::none();
-                };
-                *recording = false;
-                if !authorized {
-                    self.restart_pending = true;
-                    self.stage = Stage::Preconditions;
-                    return Task::none();
-                }
-                match result {
-                    Ok(details) => {
-                        self.stage = Stage::PairedRecovery(PairedClaimRecovery {
-                            bitcoin_unattempted: true,
-                            fork_ready_for_review: false,
-                            bitcoin_txid: Some(details.bitcoin_txid),
-                            fork_txid: Some(details.fork_txid),
-                            bitcoin_output: details.bitcoin_output,
-                            fork_output: details.fork_output,
-                            bitcoin_status:
-                                "Signed and recorded; no Bitcoin broadcast attempt has been made."
-                                    .into(),
-                            fork_status:
-                                "Signed and recorded; no BTCB2 broadcast attempt has been made."
-                                    .into(),
-                        });
-                        Task::none()
-                    }
-                    Err(reason) => {
-                        *error = Some(reason.clone());
-                        Task::done(Message::View(view::Message::ShowError(reason)))
-                    }
-                }
+                self.apply_paired_signed(session, generation, revocations, result)
             }
             ClaimEvent::PairedSigningPrepared(seq, generation, revocations, result) => {
-                if seq != self.paired_sign_seq {
-                    return Task::none();
-                }
-                self.paired_signing_pending = false;
-                if !matches!(self.stage, Stage::FundingDeposits(_))
-                    || !self.authorized(generation, revocations)
-                    || self.funding_review().is_none()
-                {
-                    return Task::none();
-                }
-                match result.and_then(|()| self.install_paired_signing()) {
-                    Ok(()) => Task::none(),
-                    Err(error) => {
-                        self.funding_error = Some(error.clone());
-                        Task::done(Message::View(view::Message::ShowError(error)))
-                    }
-                }
+                self.apply_paired_signing_prepared(seq, generation, revocations, result)
             }
             ClaimEvent::PairedPermitChecked(
                 seq,
@@ -3888,60 +4616,17 @@ impl ClaimStep1Panel {
                 side,
                 message,
                 result,
-            ) => {
-                if seq != self.paired_dispatch_seq
-                    || !self.authorized(generation, revocations)
-                    || !self.backend_ready()
-                {
-                    return Task::none();
-                }
-                let Stage::PairedSign {
-                    bitcoin,
-                    fork,
-                    error,
-                    ..
-                } = &mut self.stage
-                else {
-                    return Task::none();
-                };
-                match result {
-                    Ok(permit) => {
-                        let state = if side == ChainId::Bitcoin {
-                            bitcoin
-                        } else if side == ChainId::BitcoinBlake2b {
-                            fork
-                        } else {
-                            return Task::none();
-                        };
-                        if !state.set_paired_signing_permit(permit) {
-                            *error =
-                                Some("The signer PSBT changed during the two-chain check.".into());
-                            return Task::none();
-                        }
-                        *error = None;
-                        Task::done(Message::Claim(ClaimEvent::PairedAuthorizedPsbt(
-                            self.paired_sign_seq,
-                            side,
-                            message,
-                        )))
-                    }
-                    Err(reason) => {
-                        *error = Some(reason.clone());
-                        Task::done(Message::View(view::Message::ShowError(reason)))
-                    }
-                }
-            }
+            ) => self.apply_paired_permit_checked(
+                seq,
+                generation,
+                revocations,
+                side,
+                message,
+                result,
+            ),
             ClaimEvent::PairedPsbt(..) | ClaimEvent::PairedAuthorizedPsbt(..) => Task::none(),
             ClaimEvent::FundingCheckProgress(seq, generation, revocations, phase) => {
-                if seq == self.check_seq
-                    && self.funding_checking
-                    && matches!(self.stage, Stage::FundingDeposits(_))
-                    && self.authorized(generation, revocations)
-                    && self.backend_ready()
-                {
-                    self.funding_status = Some(format!("{phase}…"));
-                }
-                Task::none()
+                self.apply_funding_check_progress(seq, generation, revocations, phase)
             }
             ClaimEvent::FundingProofChecked(
                 seq,
@@ -3965,232 +4650,16 @@ impl ClaimStep1Panel {
                 }
                 Task::none()
             }
-            ClaimEvent::FundingChecked(seq, generation, revocations, mut result) => {
-                if seq != self.check_seq || !matches!(self.stage, Stage::FundingDeposits(_)) {
-                    return Task::none();
-                }
-                self.funding_task = None;
-                self.funding_checking = false;
-                // Space automatic retries from the completed scan. A slow
-                // timeout must not trigger another full scan immediately.
-                self.last_full_check = Some(Instant::now());
-                if !self.authorized(generation, revocations) || !self.backend_ready() {
-                    self.stage = Stage::Preconditions;
-                    self.funding_status = None;
-                    self.funding_review = None;
-                    self.funding_proofs = [FundingProofStatus::Pending; 2];
-                    self.funding_timing.clear();
-                    self.funding_attempt = None;
-                    self.funding_inline_error = false;
-                    self.prepared_pair = None;
-                    self.funding_error =
-                        Some("The Claim session changed during the deposit check.".into());
-                    return Task::none();
-                }
-                let proof_complete = matches!(&result, Ok(progress) if progress.both_verified);
-                if proof_complete && !self.fork_pair_current() {
-                    self.funding_review = None;
-                    self.funding_proofs = [FundingProofStatus::Pending; 2];
-                    self.funding_timing.clear();
-                    self.funding_attempt = None;
-                    self.funding_inline_error = false;
-                    self.prepared_pair = None;
-                    self.funding_status = None;
-                    self.funding_error = Some(
-                        "The paired BTCB2 Cube changed during the deposit check. Reopen it and check both deposits again."
-                            .into(),
-                    );
-                    return Task::none();
-                }
-                self.funding_review = result
-                    .as_ref()
-                    .ok()
-                    .and_then(|progress| progress.review.clone());
-                self.prepared_pair = result
-                    .as_mut()
-                    .ok()
-                    .and_then(|progress| progress.prepared.take());
-                match result {
-                    Ok(progress) => {
-                        self.funding_status = Some(format!(
-                            "Bitcoin deposit: {}. Bitcoin Blake2b deposit: {}. {}",
-                            if progress.bitcoin_candidate {
-                                "post-fork candidate found"
-                            } else {
-                                "no confirmed candidate at the reserved address"
-                            },
-                            if progress.btcb2_candidate {
-                                "post-fork candidate found"
-                            } else {
-                                "no confirmed candidate at the reserved address"
-                            },
-                            if progress.both_verified {
-                                "Both deposits have current two-chain ancestry proofs."
-                            } else {
-                                "Candidates are not yet spend authority."
-                            }
-                        ))
-                    }
-                    Err(reason) => {
-                        self.funding_status = None;
-                        self.funding_error = Some(reason);
-                    }
-                }
-                if proof_complete {
-                    Task::perform(
-                        async { tokio::time::sleep(std::time::Duration::from_secs(30)).await },
-                        move |()| {
-                            Message::Claim(ClaimEvent::FundingProofExpired(
-                                seq,
-                                generation,
-                                revocations,
-                            ))
-                        },
-                    )
-                } else {
-                    Task::none()
-                }
+            ClaimEvent::FundingChecked(seq, generation, revocations, result) => {
+                self.apply_funding_checked(seq, generation, revocations, result)
             }
             ClaimEvent::FundingProofExpired(seq, generation, revocations) => {
-                if seq == self.check_seq
-                    && matches!(self.stage, Stage::FundingDeposits(_))
-                    && self.authorized(generation, revocations)
-                {
-                    self.funding_review = None;
-                    self.funding_proofs = [FundingProofStatus::Pending; 2];
-                    // Keep the completed attempt's read-only diagnostics for
-                    // copying, but label them historical after proof expiry.
-                    if let Some(attempt) = self.funding_attempt.as_mut() {
-                        attempt.proof_expired = true;
-                    }
-                    self.funding_inline_error = false;
-                    self.prepared_pair = None;
-                    self.funding_status = Some(
-                        "The deposit proof has expired. Watching the deposits and refreshing verification automatically."
-                            .into(),
-                    );
-                    self.last_full_check = None;
-                }
-                Task::none()
+                self.apply_funding_proof_expired(seq, generation, revocations)
             }
             ClaimEvent::FundingPrepared(seq, generation, revocations, result) => {
-                if seq != self.check_seq || !matches!(self.stage, Stage::FundingChecking) {
-                    return Task::none();
-                }
-                if !self.authorized(generation, revocations) || !self.backend_ready() {
-                    self.stage = Stage::Preconditions;
-                    self.funding_error =
-                        Some("The Claim session changed during the address check.".into());
-                    return Task::none();
-                }
-                self.funding_task = None;
-                match result {
-                    Ok(addresses) => {
-                        self.stage = Stage::FundingDeposits(addresses);
-                        self.funding_proofs = [FundingProofStatus::Pending; 2];
-                        self.funding_timing.clear();
-                        self.funding_attempt = None;
-                        self.funding_inline_error = false;
-                        self.deposit_status = None;
-                        self.deposit_details_override = None;
-                        self.deposit_polling = false;
-                        self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
-                        self.funding_status = None;
-                        return Task::done(Message::Claim(ClaimEvent::DepositPoll));
-                    }
-                    Err(reason) => {
-                        self.stage = Stage::Preconditions;
-                        self.funding_error = Some(reason);
-                    }
-                }
-                Task::none()
+                self.apply_funding_prepared(seq, generation, revocations, result)
             }
-            ClaimEvent::Restarted(id, result) => {
-                let Some(attempt) = self.restarting.filter(|a| a.id == id) else {
-                    return Task::none();
-                };
-                self.restarting = None;
-                self.pre.checking = false;
-                if !self.authorized(attempt.generation, attempt.revocations)
-                    || !self.backend_ready()
-                {
-                    self.restart_error = Some(self.ended_copy());
-                    return Task::none();
-                }
-                let restored = match result {
-                    Ok(restored) if restored.context.generation == attempt.generation => restored,
-                    Ok(_) => {
-                        self.restart_error = Some(SESSION_ENDED.into());
-                        return Task::none();
-                    }
-                    Err(error) => {
-                        self.restart_error = Some(error.clone());
-                        if let Stage::Track { error: slot, .. } = &mut self.stage {
-                            *slot = Some(error);
-                        }
-                        return Task::none();
-                    }
-                };
-                self.restart_error = None;
-                self.resuming = true;
-                match restored.state {
-                    RestartedState::Intent(built) => {
-                        self.restart_pending = false;
-                        self.stage = Stage::Plan { built };
-                    }
-                    RestartedState::Bound(session) => {
-                        self.restart_pending = false;
-                        self.revoked = false;
-                        self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
-                        let tx = session.recovered.as_ref().expect("restored witness");
-                        let outcome = Outcome::Uncertain {
-                            txid: tx.compute_txid(),
-                            wtxid: tx.compute_wtxid(),
-                        };
-                        self.stage = Stage::Track {
-                            session: Some(session),
-                            outcome,
-                            status: None,
-                            busy: false,
-                            error: None,
-                        };
-                        return self.reconcile();
-                    }
-                    RestartedState::Unavailable(txid, error) => {
-                        self.stage = Stage::Track {
-                            session: None,
-                            outcome: Outcome::Recorded { txid },
-                            status: None,
-                            busy: false,
-                            error: Some(error),
-                        };
-                    }
-                    RestartedState::PairedRecovery(recovery) => {
-                        self.restart_pending = false;
-                        self.stage = Stage::PairedRecovery(recovery);
-                    }
-                    RestartedState::PairedFunding(addresses) => {
-                        self.restart_pending = false;
-                        self.deposit_status = None;
-                        self.deposit_details_override = None;
-                        self.deposit_polling = false;
-                        self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
-                        self.funding_review = None;
-                        self.funding_proofs = [FundingProofStatus::Pending; 2];
-                        self.funding_timing.clear();
-                        self.funding_attempt = None;
-                        self.funding_inline_error = false;
-                        self.prepared_pair = None;
-                        self.funding_status = Some(
-                            "The recorded Claim pair is unsigned. Watching both deposits and refreshing verification before signing."
-                                .into(),
-                        );
-                        self.stage = Stage::FundingDeposits(addresses);
-                        return Task::done(Message::Claim(ClaimEvent::DepositPoll));
-                    }
-                }
-                Task::none()
-            }
+            ClaimEvent::Restarted(id, result) => self.apply_restarted(id, result),
             ClaimEvent::Checked(seq, checked) => {
                 if seq != self.check_seq {
                     return Task::none();
@@ -4208,387 +4677,27 @@ impl ClaimStep1Panel {
                 }
             }
             ClaimEvent::SigningChecked(id, built, result) => {
-                let Stage::CheckingSign(attempt) = self.stage else {
-                    return Task::none();
-                };
-                if attempt.id != id {
-                    return Task::none();
-                }
-                let authorized = self.authorized(attempt.generation, attempt.revocations)
-                    && self.backend_ready();
-                self.stage = Stage::Plan { built };
-                if !authorized {
-                    return Task::done(Message::View(view::Message::ShowError(
-                        SESSION_ENDED.into(),
-                    )));
-                }
-                match result {
-                    Ok(checked) => {
-                        let Stage::Plan { built } = &self.stage else {
-                            unreachable!()
-                        };
-                        let coins = match checked.consume(
-                            built,
-                            &self.wallet,
-                            self.connect.as_ref(),
-                            *self.generation.borrow(),
-                        ) {
-                            Ok(coins) => coins,
-                            Err(error) => {
-                                return Task::done(Message::View(view::Message::ShowError(error)))
-                            }
-                        };
-                        let Stage::Plan { built } =
-                            std::mem::replace(&mut self.stage, Stage::Preconditions)
-                        else {
-                            unreachable!()
-                        };
-                        self.install_signing(built, coins);
-                        Task::none()
-                    }
-                    Err(error) => Task::done(Message::View(view::Message::ShowError(error))),
-                }
+                self.apply_signing_checked(id, built, result)
             }
-            ClaimEvent::Built(id, result) => {
-                let Some(attempt) = self.building.filter(|attempt| attempt.id == id) else {
-                    return Task::none();
-                };
-                self.building = None;
-                self.pre.checking = false;
-                if !self.authorized(attempt.generation, attempt.revocations)
-                    || !self.backend_ready()
-                {
-                    return Task::none();
-                }
-                match result {
-                    Ok(built) if matches!(self.stage, Stage::Preconditions) => {
-                        self.stage = Stage::Plan { built };
-                    }
-                    Ok(_) => {}
-                    Err(reason) => {
-                        return Task::done(Message::View(view::Message::ShowError(format!(
-                            "Couldn't build the transaction: {reason}"
-                        ))));
-                    }
-                }
-                Task::none()
+            ClaimEvent::Built(id, result) => self.apply_built(id, result),
+            ClaimEvent::Ready(id, result) => self.apply_ready(id, result),
+            ClaimEvent::Rebound(revocations, session, result) => {
+                self.apply_rebound(revocations, session, result)
             }
-            ClaimEvent::Ready(id, result) => {
-                let attempt = match &self.stage {
-                    Stage::Sign {
-                        finalizing: Some(attempt),
-                        ..
-                    } if attempt.id == id => Some(*attempt),
-                    _ => None,
-                };
-                match result {
-                    Ok(mut session) => {
-                        // The intent is journaled, so from here the session
-                        // is the record whether or not it may be driven: a
-                        // result whose context ended in flight is installed
-                        // revoked, to be re-bound, never reviewed.
-                        let authorized =
-                            attempt.is_some_and(|a| self.authorized(a.generation, a.revocations));
-                        if !authorized {
-                            if let Some(coordinator) = &mut session.coordinator {
-                                coordinator.invalidate();
-                            }
-                        }
-                        self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
-                        self.revoked = !authorized;
-                        let ended = self.ended_copy();
-                        if let Some(outcome) = session
-                            .coordinator
-                            .as_ref()
-                            .and_then(|c| c.recorded_outcome())
-                        {
-                            self.stage = Stage::Track {
-                                session: Some(session),
-                                outcome,
-                                status: None,
-                                busy: false,
-                                error: (!authorized).then_some(ended),
-                            };
-                            return if authorized {
-                                self.reconcile()
-                            } else {
-                                Task::none()
-                            };
-                        }
-                        self.stage = Stage::Review {
-                            session: Some(session),
-                            snapshot: None,
-                            busy: false,
-                            error: (!authorized).then_some(ended),
-                        };
-                        if authorized {
-                            self.prepare_review()
-                        } else {
-                            Task::none()
-                        }
-                    }
-                    Err((built, reason)) => {
-                        // A refusal for a superseded attempt has nothing to
-                        // restore into (unreachable while cancel is refused
-                        // during a finalisation; kept as the guard).
-                        if attempt.is_none() {
-                            return Task::none();
-                        }
-                        if let Stage::Sign {
-                            built: slot,
-                            finalizing,
-                            error,
-                            ..
-                        } = &mut self.stage
-                        {
-                            *slot = Some(built);
-                            *finalizing = None;
-                            *error = Some(reason.clone());
-                        }
-                        Task::done(Message::View(view::Message::ShowError(reason)))
-                    }
-                }
-            }
-            ClaimEvent::Rebound(revocations, mut session, result) => {
-                let bound = result.is_ok();
-                let authorized = bound && self.authorized(session.context.generation, revocations);
-                if bound && !authorized {
-                    // Bound under a context that ended while the re-bind ran.
-                    if let Some(coordinator) = &mut session.coordinator {
-                        coordinator.invalidate();
-                    }
-                }
-                if bound {
-                    self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
-                }
-                let error = match result {
-                    Err(reason) => Some(reason),
-                    Ok(()) if authorized => None,
-                    Ok(()) => Some(self.ended_copy()),
-                };
-                match &mut self.stage {
-                    Stage::Review {
-                        session: slot,
-                        snapshot,
-                        busy,
-                        error: slot_error,
-                    } => {
-                        *slot = Some(session);
-                        *snapshot = None;
-                        *busy = false;
-                        *slot_error = error;
-                    }
-                    Stage::Track {
-                        session: slot,
-                        busy,
-                        error: slot_error,
-                        ..
-                    } => {
-                        *slot = Some(session);
-                        *busy = false;
-                        *slot_error = error;
-                    }
-                    _ => return Task::none(),
-                }
-                if !authorized {
-                    return Task::none();
-                }
-                self.revoked = false;
-                match &self.stage {
-                    Stage::Review { .. } => self.prepare_review(),
-                    _ => self.reconcile(),
-                }
-            }
-            ClaimEvent::Reviewed(revocations, mut session, result) => {
-                // A review whose context ended while it ran (a sign-out, a
-                // revocation) is never shown as something to confirm, and
-                // never erases what the stage says about that end: the
-                // session comes back, the review token inside it goes.
-                let authorized = self.authorized(session.context.generation, revocations);
-                let ended = self.ended_copy();
-                if !authorized {
-                    session.review = None;
-                    session.reconfirmation = None;
-                    session.resubmission = None;
-                }
-                if let Stage::Review {
-                    session: slot,
-                    snapshot,
-                    busy,
-                    error,
-                } = &mut self.stage
-                {
-                    *slot = Some(session);
-                    *busy = false;
-                    match result {
-                        Ok(fresh) if authorized => {
-                            *snapshot = Some(fresh);
-                            *error = None;
-                        }
-                        Ok(_) => {
-                            *snapshot = None;
-                            if error.is_none() {
-                                *error = Some(ended);
-                            }
-                        }
-                        Err(reason) => {
-                            *snapshot = None;
-                            if authorized || error.is_none() {
-                                *error = Some(reason);
-                            }
-                        }
-                    }
-                }
-                Task::none()
+            ClaimEvent::Reviewed(revocations, session, result) => {
+                self.apply_reviewed(revocations, session, result)
             }
             ClaimEvent::Submitted(revocations, session, result) => {
-                let authorized = self.authorized(session.context.generation, revocations);
-                // A recorded submission still belongs in Track, even when
-                // its context ended while the completion was queued. Keep
-                // the current hold instruction and wait for a rebind before
-                // asking the revoked coordinator for status.
-                let held = if authorized {
-                    None
-                } else {
-                    let current = match &self.stage {
-                        Stage::Review { error, .. } | Stage::Track { error, .. } => error.clone(),
-                        _ => None,
-                    };
-                    Some(current.unwrap_or_else(|| self.ended_copy()))
-                };
-                match result {
-                    Ok(outcome) => {
-                        self.stage = Stage::Track {
-                            session: Some(session),
-                            outcome,
-                            status: None,
-                            busy: false,
-                            error: held,
-                        };
-                        if authorized {
-                            return self.reconcile();
-                        }
-                    }
-                    Err(reason) => {
-                        if let Stage::Review {
-                            session: slot,
-                            snapshot,
-                            busy,
-                            error,
-                        } = &mut self.stage
-                        {
-                            // A refused submission consumed the review; the
-                            // next confirmation needs a fresh one.
-                            *slot = Some(session);
-                            *snapshot = None;
-                            *busy = false;
-                            *error = held.or(Some(reason));
-                        }
-                    }
-                }
-                Task::none()
+                self.apply_submitted(revocations, session, result)
             }
-            ClaimEvent::Resubmitted(revocations, mut session, result) => {
-                let authorized = self.authorized(session.context.generation, revocations);
-                let submitted = matches!(&result, Ok(Some(_)));
-                let ended = self.ended_copy();
-                if !authorized {
-                    session.resubmission = None;
-                }
-                if let Stage::Track {
-                    session: slot,
-                    busy,
-                    status,
-                    error,
-                    outcome,
-                } = &mut self.stage
-                {
-                    *slot = Some(session);
-                    *busy = false;
-                    match result {
-                        Ok(Some(sent)) => {
-                            *outcome = sent;
-                            *status = None;
-                            if authorized {
-                                *error = None;
-                            }
-                        }
-                        Ok(None) if authorized => *error = None,
-                        Err(reason) if authorized => *error = Some(reason),
-                        _ => {}
-                    }
-                    if !authorized && error.is_none() {
-                        *error = Some(ended);
-                    }
-                }
-                if submitted && authorized {
-                    self.reconcile()
-                } else {
-                    Task::none()
-                }
+            ClaimEvent::Resubmitted(revocations, session, result) => {
+                self.apply_resubmitted(revocations, session, result)
             }
-            ClaimEvent::Reconfirmed(revocations, mut session, result, confirmed) => {
-                let authorized = self.authorized(session.context.generation, revocations);
-                let success = authorized && confirmed && result.is_ok();
-                let ended = self.ended_copy();
-                if !authorized {
-                    session.reconfirmation = None;
-                    session.resubmission = None;
-                }
-                if let Stage::Track {
-                    session: slot,
-                    busy,
-                    status,
-                    error,
-                    ..
-                } = &mut self.stage
-                {
-                    *slot = Some(session);
-                    *busy = false;
-                    if authorized {
-                        *error = result.err();
-                        if success {
-                            *status = Some(Status::Unchecked);
-                        }
-                    } else if error.is_none() {
-                        *error = Some(ended);
-                    }
-                }
-                if success {
-                    self.reconcile()
-                } else {
-                    Task::none()
-                }
+            ClaimEvent::Reconfirmed(revocations, session, result, confirmed) => {
+                self.apply_reconfirmed(revocations, session, result, confirmed)
             }
             ClaimEvent::Tracked(revocations, session, result) => {
-                // A status read is information whichever context it came
-                // from; what the stage says about a context that ended stays.
-                let authorized = self.authorized(session.context.generation, revocations);
-                if let Stage::Track {
-                    session: slot,
-                    status,
-                    busy,
-                    error,
-                    ..
-                } = &mut self.stage
-                {
-                    *slot = Some(session);
-                    *busy = false;
-                    match result {
-                        Ok(fresh) => {
-                            *status = Some(fresh);
-                            if authorized {
-                                *error = None;
-                            }
-                        }
-                        Err(reason) => {
-                            if authorized || error.is_none() {
-                                *error = Some(reason);
-                            }
-                        }
-                    }
-                }
-                Task::none()
+                self.apply_tracked(revocations, session, result)
             }
         }
     }
@@ -4654,11 +4763,6 @@ impl State for ClaimStep1Panel {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
-        let node_unavailable = || {
-            Task::done(Message::View(view::Message::ShowError(
-                NODE_UNAVAILABLE.to_string(),
-            )))
-        };
         match message {
             Message::View(view::Message::ClaimPairedSigner(session, side, inner)) => {
                 if session != self.paired_sign_seq {
@@ -4666,129 +4770,7 @@ impl State for ClaimStep1Panel {
                 }
                 self.update_paired_psbt(daemon, cache, side, Message::View(*inner), false)
             }
-            Message::View(view::Message::Claim(intent)) => {
-                if intent == view::ClaimMessage::Refresh {
-                    self.handoff_pending = false;
-                }
-                match intent {
-                    view::ClaimMessage::ToggleSetupDetails => {
-                        self.setup_details_expanded = !self.setup_details_expanded;
-                        Task::none()
-                    }
-                    view::ClaimMessage::ToggleDepositDetails => {
-                        self.deposit_details_override = Some(!self.deposit_details_expanded());
-                        Task::none()
-                    }
-                    view::ClaimMessage::ReviewPairedBitcoin => match daemon {
-                        Some(daemon) => self.review_paired_bitcoin(daemon),
-                        None => node_unavailable(),
-                    },
-                    view::ClaimMessage::ConfirmPairedBitcoin => match daemon {
-                        Some(daemon) => self.confirm_paired_bitcoin(daemon),
-                        None => node_unavailable(),
-                    },
-                    view::ClaimMessage::BackPairedBitcoin => {
-                        if let Stage::PairedBitcoinReview(recovery, _) = &self.stage {
-                            self.stage = Stage::PairedRecovery(recovery.clone());
-                        }
-                        Task::none()
-                    }
-                    view::ClaimMessage::ReviewPairedFork => match daemon {
-                        Some(daemon) => self.review_paired_fork(daemon),
-                        None => node_unavailable(),
-                    },
-                    view::ClaimMessage::ConfirmPairedFork => match daemon {
-                        Some(daemon) => self.confirm_paired_fork(daemon),
-                        None => node_unavailable(),
-                    },
-                    view::ClaimMessage::BackPairedFork => {
-                        if let Stage::PairedForkReview(recovery, _) = &self.stage {
-                            self.stage = Stage::PairedRecovery(recovery.clone());
-                        }
-                        Task::none()
-                    }
-                    view::ClaimMessage::StartFunding => match daemon {
-                        Some(daemon) => self.prepare_funding(daemon),
-                        None => node_unavailable(),
-                    },
-                    view::ClaimMessage::CheckFunding => match daemon {
-                        Some(daemon) => self.check_funding(daemon),
-                        None => node_unavailable(),
-                    },
-                    view::ClaimMessage::CopyVerificationReport => self
-                        .verification_report()
-                        .map(|report| {
-                            Task::done(Message::View(view::Message::CopyWithToast(
-                                report,
-                                "Copied verification timing report".into(),
-                            )))
-                        })
-                        .unwrap_or_else(Task::none),
-                    view::ClaimMessage::SignPair => match daemon {
-                        Some(daemon) => self.request_paired_signing(daemon),
-                        None => node_unavailable(),
-                    },
-                    view::ClaimMessage::ShowPairBitcoin => {
-                        if let Stage::PairedSign { active, .. } = &mut self.stage {
-                            *active = ChainId::Bitcoin;
-                        }
-                        Task::none()
-                    }
-                    view::ClaimMessage::ShowPairBtcb2 => {
-                        if let Stage::PairedSign { active, .. } = &mut self.stage {
-                            *active = ChainId::BitcoinBlake2b;
-                        }
-                        Task::none()
-                    }
-                    view::ClaimMessage::Recheck => match daemon {
-                        Some(daemon) => self.probe(daemon),
-                        None => node_unavailable(),
-                    },
-                    view::ClaimMessage::Build => match daemon {
-                        Some(daemon) => self.build(daemon),
-                        None => node_unavailable(),
-                    },
-                    view::ClaimMessage::Sign => match daemon {
-                        Some(daemon) => self.request_signing(daemon),
-                        None => node_unavailable(),
-                    },
-                    view::ClaimMessage::Confirm => self.confirm(),
-                    view::ClaimMessage::ReviewResubmission => self.resubmit(false),
-                    view::ClaimMessage::ConfirmResubmission => self.resubmit(true),
-                    view::ClaimMessage::ReviewReconfirmation => self.reconfirm(false),
-                    view::ClaimMessage::ConfirmReconfirmation => self.reconfirm(true),
-                    view::ClaimMessage::Refresh if self.restart_pending => match daemon {
-                        Some(daemon) => self.recover(Some(daemon)),
-                        None => node_unavailable(),
-                    },
-                    view::ClaimMessage::Refresh
-                        if matches!(self.stage, Stage::PairedRecovery(_)) =>
-                    {
-                        match daemon {
-                            Some(daemon) => self.restart(daemon),
-                            None => node_unavailable(),
-                        }
-                    }
-                    view::ClaimMessage::Refresh => match &self.stage {
-                        Stage::Review { .. } | Stage::Track { .. } if self.revoked => {
-                            match (self.backend.copy(), daemon) {
-                                // Held by the App's backend state: say so, bind nothing.
-                                (Some(copy), _) => Task::done(Message::View(
-                                    view::Message::ShowError(copy.to_string()),
-                                )),
-                                (None, Some(daemon)) => self.recover(Some(daemon)),
-                                (None, None) => node_unavailable(),
-                            }
-                        }
-                        Stage::Review { .. } => self.prepare_review(),
-                        _ => self.reconcile(),
-                    },
-                    view::ClaimMessage::Cancel => {
-                        self.cancel();
-                        Task::none()
-                    }
-                }
-            }
+            Message::View(view::Message::Claim(intent)) => self.update_claim_intent(daemon, intent),
             Message::Claim(ClaimEvent::PairedPsbt(session, side, message)) => {
                 if session != self.paired_sign_seq {
                     return Task::none();
@@ -4824,27 +4806,7 @@ impl State for ClaimStep1Panel {
                 completed
             }
             Message::Claim(event) => self.apply(event),
-            other => {
-                let Stage::Sign { psbt, error, .. } = &mut self.stage else {
-                    return Task::none();
-                };
-                let Some(daemon) = daemon else {
-                    // The signing flow cannot be driven without a daemon;
-                    // the construction and every signature are kept.
-                    if error.as_deref() != Some(NODE_UNAVAILABLE) {
-                        *error = Some(NODE_UNAVAILABLE.to_string());
-                    }
-                    return Task::none();
-                };
-                // The signing flow talks to a daemon that cannot store or
-                // broadcast: the claim PSBT never enters the Vault's spend
-                // list, so the PSBTs panel can never offer it a Broadcast
-                // button of its own.
-                let signing: Arc<dyn Daemon + Sync + Send> =
-                    Arc::new(SigningOnlyDaemon(daemon.clone()));
-                let task = psbt.update(signing, cache, other);
-                Task::batch([task, self.maybe_finalize(daemon)])
-            }
+            other => self.update_single_signer(daemon, cache, other),
         }
     }
 
@@ -4890,6 +4852,155 @@ impl State for ClaimStep1Panel {
             | Stage::Plan { .. }
             | Stage::CheckingSign(_)
             | Stage::Review { .. } => Task::none(),
+        }
+    }
+}
+
+impl ClaimStep1Panel {
+    fn update_claim_intent(
+        &mut self,
+        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        intent: view::ClaimMessage,
+    ) -> Task<Message> {
+        if intent == view::ClaimMessage::Refresh {
+            self.handoff_pending = false;
+        }
+        match intent {
+            view::ClaimMessage::ToggleSetupDetails => {
+                self.setup_details_expanded = !self.setup_details_expanded;
+                Task::none()
+            }
+            view::ClaimMessage::ToggleDepositDetails => {
+                self.deposit_details_override = Some(!self.deposit_details_expanded());
+                Task::none()
+            }
+            view::ClaimMessage::ReviewPairedBitcoin => {
+                self.with_claim_daemon(daemon, Self::review_paired_bitcoin)
+            }
+            view::ClaimMessage::ConfirmPairedBitcoin => {
+                self.with_claim_daemon(daemon, Self::confirm_paired_bitcoin)
+            }
+            view::ClaimMessage::BackPairedBitcoin => {
+                if let Stage::PairedBitcoinReview(recovery, _) = &self.stage {
+                    self.stage = Stage::PairedRecovery(recovery.clone());
+                }
+                Task::none()
+            }
+            view::ClaimMessage::ReviewPairedFork => {
+                self.with_claim_daemon(daemon, Self::review_paired_fork)
+            }
+            view::ClaimMessage::ConfirmPairedFork => {
+                self.with_claim_daemon(daemon, Self::confirm_paired_fork)
+            }
+            view::ClaimMessage::BackPairedFork => {
+                if let Stage::PairedForkReview(recovery, _) = &self.stage {
+                    self.stage = Stage::PairedRecovery(recovery.clone());
+                }
+                Task::none()
+            }
+            view::ClaimMessage::StartFunding => {
+                self.with_claim_daemon(daemon, Self::prepare_funding)
+            }
+            view::ClaimMessage::CheckFunding => self.with_claim_daemon(daemon, Self::check_funding),
+            view::ClaimMessage::CopyVerificationReport => self
+                .verification_report()
+                .map(|report| {
+                    Task::done(Message::View(view::Message::CopyWithToast(
+                        report,
+                        "Copied verification timing report".into(),
+                    )))
+                })
+                .unwrap_or_else(Task::none),
+            view::ClaimMessage::SignPair => {
+                self.with_claim_daemon(daemon, Self::request_paired_signing)
+            }
+            view::ClaimMessage::ShowPairBitcoin => {
+                if let Stage::PairedSign { active, .. } = &mut self.stage {
+                    *active = ChainId::Bitcoin;
+                }
+                Task::none()
+            }
+            view::ClaimMessage::ShowPairBtcb2 => {
+                if let Stage::PairedSign { active, .. } = &mut self.stage {
+                    *active = ChainId::BitcoinBlake2b;
+                }
+                Task::none()
+            }
+            view::ClaimMessage::Recheck => self.with_claim_daemon(daemon, Self::probe),
+            view::ClaimMessage::Build => self.with_claim_daemon(daemon, Self::build),
+            view::ClaimMessage::Sign => self.with_claim_daemon(daemon, Self::request_signing),
+            view::ClaimMessage::Confirm => self.confirm(),
+            view::ClaimMessage::ReviewResubmission => self.resubmit(false),
+            view::ClaimMessage::ConfirmResubmission => self.resubmit(true),
+            view::ClaimMessage::ReviewReconfirmation => self.reconfirm(false),
+            view::ClaimMessage::ConfirmReconfirmation => self.reconfirm(true),
+            view::ClaimMessage::Refresh => self.refresh_claim(daemon),
+            view::ClaimMessage::Cancel => {
+                self.cancel();
+                Task::none()
+            }
+        }
+    }
+    fn refresh_claim(&mut self, daemon: Option<Arc<dyn Daemon + Sync + Send>>) -> Task<Message> {
+        if self.restart_pending {
+            return self.with_claim_daemon(daemon, |panel, daemon| panel.recover(Some(daemon)));
+        }
+        if matches!(self.stage, Stage::PairedRecovery(_)) {
+            return self.with_claim_daemon(daemon, Self::restart);
+        }
+        match &self.stage {
+            Stage::Review { .. } | Stage::Track { .. } if self.revoked => {
+                match (self.backend.copy(), daemon) {
+                    // Held by the App's backend state: say so, bind nothing.
+                    (Some(copy), _) => {
+                        Task::done(Message::View(view::Message::ShowError(copy.to_string())))
+                    }
+                    (None, Some(daemon)) => self.recover(Some(daemon)),
+                    (None, None) => Self::node_unavailable(),
+                }
+            }
+            Stage::Review { .. } => self.prepare_review(),
+            _ => self.reconcile(),
+        }
+    }
+    fn update_single_signer(
+        &mut self,
+        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        cache: &Cache,
+        other: Message,
+    ) -> Task<Message> {
+        let Stage::Sign { psbt, error, .. } = &mut self.stage else {
+            return Task::none();
+        };
+        let Some(daemon) = daemon else {
+            // The signing flow cannot be driven without a daemon;
+            // the construction and every signature are kept.
+            if error.as_deref() != Some(NODE_UNAVAILABLE) {
+                *error = Some(NODE_UNAVAILABLE.to_string());
+            }
+            return Task::none();
+        };
+        // The signing flow talks to a daemon that cannot store or
+        // broadcast: the claim PSBT never enters the Vault's spend
+        // list, so the PSBTs panel can never offer it a Broadcast
+        // button of its own.
+        let signing: Arc<dyn Daemon + Sync + Send> = Arc::new(SigningOnlyDaemon(daemon.clone()));
+        let task = psbt.update(signing, cache, other);
+        Task::batch([task, self.maybe_finalize(daemon)])
+    }
+    fn node_unavailable() -> Task<Message> {
+        Task::done(Message::View(view::Message::ShowError(
+            NODE_UNAVAILABLE.to_string(),
+        )))
+    }
+    fn with_claim_daemon(
+        &mut self,
+        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        action: impl FnOnce(&mut Self, Arc<dyn Daemon + Sync + Send>) -> Task<Message>,
+    ) -> Task<Message> {
+        match daemon {
+            Some(daemon) => action(self, daemon),
+            None => Self::node_unavailable(),
         }
     }
 }
@@ -5202,6 +5313,151 @@ async fn build_legacy_for_test(
     .map_err(|e| e.to_string())
 }
 
+type FundingTimingCapture = (Vec<AncestryTimingReport>, [Option<AncestryTimingReport>; 2]);
+fn capture_funding_timing(
+    observed_timing: &std::sync::Mutex<FundingTimingCapture>,
+    report: AncestryTimingReport,
+) {
+    let mut capture = observed_timing.lock().unwrap();
+    if report.is_progress() {
+        capture.1[usize::from(report.chain == ChainId::BitcoinBlake2b)] = Some(report);
+    } else {
+        // Retain the first specific deadline and recent
+        // outcomes even when many candidates are examined.
+        // Only the latest progress per chain is held.
+        if capture.0.len() == 128 {
+            let discard = capture
+                .0
+                .iter()
+                .position(|prior| !prior.is_deadline())
+                .unwrap_or(1);
+            capture.0.remove(discard);
+        }
+        capture.0.push(report);
+    }
+}
+fn funding_scan_end(
+    info: &model::GetInfoResult,
+    descriptor: &CoincubeDescriptor,
+) -> Result<u32, String> {
+    if !bitcoin_funding_wallet_ready(info, descriptor) {
+        return Err("The Bitcoin Vault is not ready for a two-chain deposit check.".into());
+    }
+    let highest = info.receive_index.max(info.change_index);
+    let end_exclusive = highest.saturating_add(128).max(256);
+    if end_exclusive > 20_000 {
+        return Err("The Vault's address range is too large for this bounded scan.".into());
+    }
+    Ok(end_exclusive)
+}
+fn check_funding_session(generation: &watch::Receiver<u64>, expected: u64) -> Result<(), String> {
+    if !crate::services::claim_observation::session_current(generation, expected) {
+        return Err("The Connect session changed during the deposit check.".into());
+    }
+    Ok(())
+}
+fn check_funding_eligibility(
+    saved: &claim_workflow::ClaimFundingReservation,
+    inventory: &crate::services::claim_inventory::ClaimInventory,
+    identity: &claim_workflow::WalletIdentity,
+    context: &Context,
+    minimums: (u64, u64),
+    candidates: (bool, bool),
+) -> Result<(), String> {
+    let (bitcoin_candidate, btcb2_candidate) = candidates;
+    let (bitcoin_eligible, btcb2_eligible) = saved
+        .fee_eligible_candidate_presence(inventory, identity, context, minimums)
+        .map_err(|_| "The saved deposit reservation changed.".to_string())?;
+    if bitcoin_candidate && !bitcoin_eligible {
+        return Err(format!(
+                        "No Bitcoin deposit candidate at the reserved address covers the current minimum of {} sats. A separate eligible deposit may be sent to that same address.",
+                        minimums.0
+                    ));
+    }
+    if btcb2_candidate && !btcb2_eligible {
+        return Err(format!(
+                        "No BTCB2 deposit candidate at the reserved address covers the current minimum of {} sats. A separate eligible deposit may be sent to that same address.",
+                        minimums.1
+                    ));
+    }
+    Ok(())
+}
+fn claim_funding_discovery_error(
+    error: claim_workflow::ClaimFundingDiscoveryError,
+    inline_error: &mut bool,
+    proofs: &std::sync::Mutex<[FundingProofStatus; 2]>,
+) -> String {
+    match error {
+        claim_workflow::ClaimFundingDiscoveryError::Discovery(error) => {
+            *inline_error = funding_refusal_is_inline(error, &proofs.lock().unwrap());
+            #[cfg(all(test, feature = "regtest-harness"))]
+            eprintln!("disposable Claim funding discovery refused: {error:?}");
+            funding_proof_refusal(error).to_string()
+        }
+        claim_workflow::ClaimFundingDiscoveryError::WalletState(_) => {
+            "The Bitcoin Vault's coins or sync state changed. Reopen it and check deposits again."
+                .to_string()
+        }
+        claim_workflow::ClaimFundingDiscoveryError::InvalidReservation(_) => {
+            "The saved deposit reservation no longer matches this Vault and Connect session."
+                .to_string()
+        }
+    }
+}
+fn claim_change_error(error: claim_workflow::ClaimChangeError) -> String {
+    match error {
+claim_workflow::ClaimChangeError::Cancelled =>
+    "The Connect session changed before change addresses were reserved.".to_string(),
+claim_workflow::ClaimChangeError::WalletState =>
+    "The paired Bitcoin or BTCB2 Vault is unavailable or changed. Reopen both Cubes and check deposits again.".to_string(),
+claim_workflow::ClaimChangeError::Journal(_) =>
+    "The saved Claim reservation changed. Reopen the Claim and check deposits again.".to_string(),
+    }
+}
+fn claim_pair_snapshot_error(
+    error: crate::services::claim_inventory::ClaimPairSnapshotError,
+) -> String {
+    match error {
+crate::services::claim_inventory::ClaimPairSnapshotError::WalletState =>
+    "The Bitcoin or paired BTCB2 Vault changed while preparing the Claim preview. Check deposits again."
+        .to_string(),
+crate::services::claim_inventory::ClaimPairSnapshotError::Observation(error) =>
+    funding_proof_refusal(crate::services::claim_observation::http::DiscoveryError::Observation(error)).to_string(),
+crate::services::claim_inventory::ClaimPairSnapshotError::Changed =>
+    "The two-chain Claim proof changed while preparing the preview. Check deposits again."
+        .to_string(),
+    }
+}
+fn check_funding_binding(reviewed: bool, binding: Option<&ClaimForkBinding>) -> Result<(), String> {
+    if reviewed && binding.is_some_and(|binding| !binding.current()) {
+        return Err("The paired BTCB2 Cube changed during the deposit check. Reopen it and check deposits again.".into());
+    }
+    Ok(())
+}
+fn check_funding_fork_wallet(
+    fork_wallet: &Wallet,
+    descriptor: &CoincubeDescriptor,
+) -> Result<(), String> {
+    if fork_wallet.chain != ChainId::BitcoinBlake2b
+        || fork_wallet.inheritance_descriptor() != Some(descriptor)
+    {
+        return Err("The paired BTCB2 Vault no longer matches this Claim. Reopen both Cubes and check deposits again.".into());
+    }
+    Ok(())
+}
+fn funding_attempt_outcome(
+    outer_timeout: Option<&str>,
+    result: &Result<ClaimDepositProgress, String>,
+) -> FundingAttemptOutcome {
+    if outer_timeout.is_some() {
+        FundingAttemptOutcome::Deadline150s
+    } else if result.is_err() {
+        FundingAttemptOutcome::Failed
+    } else {
+        FundingAttemptOutcome::Returned
+    }
+}
+
 /// Where this Vault's claim journal lives: beside the daemon's own data for
 /// the wallet, owner-only, as the journal requires.
 pub fn journal_directory(datadir: &CoincubeDirectory, wallet: &Wallet) -> PathBuf {
@@ -5210,6 +5466,14 @@ pub fn journal_directory(datadir: &CoincubeDirectory, wallet: &Wallet) -> PathBu
         .coincubed_data_directory(&wallet.id())
         .path()
         .join("claim")
+}
+
+fn check_claim_generation(generation: &watch::Receiver<u64>, expected: u64) -> Result<(), String> {
+    if !crate::services::claim_observation::session_current(generation, expected) {
+        Err(SESSION_ENDED.to_string())
+    } else {
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5237,11 +5501,170 @@ async fn restore_recorded_claim(
         fork_cube: fork_cube.clone(),
         descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
     };
-    let mut controller =
+    let controller =
         claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
             .await
             .map_err(|error| describe(claim_coordinator::Error::Journal(error)))?;
     if controller.is_paired_ancestry_claim() {
+        return PairedClaimReload {
+            controller,
+            directory,
+            descriptor,
+            identity,
+            context,
+            connect,
+            daemon,
+            expected,
+            generation,
+        }
+        .read()
+        .await;
+    }
+    drop(controller);
+    if daemon
+        .config()
+        .is_none_or(|c| c.main_descriptor.as_vault() != Some(descriptor))
+    {
+        return Err("The recorded claim does not match this Bitcoin Vault.".into());
+    }
+    let production = Production::new(
+        connect.client,
+        daemon.clone(),
+        connect.account,
+        expected,
+        generation.clone(),
+    )
+    .map_err(describe_production)?;
+    let context = production.context().clone();
+    let identity = claim_workflow::WalletIdentity {
+        bitcoin_cube: bitcoin_cube.clone(),
+        fork_cube: fork_cube.clone(),
+        descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+    };
+    let mut controller =
+        claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|e| describe(claim_coordinator::Error::Journal(e)))?;
+    let plan = controller.plan();
+    let change_hint = controller.recorded_bitcoin_change_index();
+    let phase = controller.phase();
+    let txid = controller.signed_txid();
+    let stored_transaction = controller.recorded_bitcoin_transaction().cloned();
+    let check = || check_claim_generation(&generation, expected);
+    check()?;
+    // An unavailable recorded submission must remain a hold even when its inputs
+    // have already disappeared from the wallet's unspent set.
+    let recovered = if let Some(txid) = txid {
+        let transaction = if stored_transaction.is_some() {
+            stored_transaction
+        } else {
+            daemon.list_txs(&[txid]).await.ok().and_then(|result| {
+                result
+                    .transactions
+                    .into_iter()
+                    .find(|entry| entry.tx.compute_txid() == txid)
+                    .map(|entry| entry.tx)
+            })
+        };
+        check()?;
+        let Some(transaction) = transaction else {
+            return Ok(RestartedClaim { context, state: RestartedState::Unavailable(txid,
+                "The recorded transaction is not available from the Bitcoin service yet. Read again to track it; no submission will be retried.".into()) });
+        };
+        Some(transaction)
+    } else {
+        None
+    };
+    let built = if plan.poison == claim::Poison::InputAncestry {
+        construction::restore_ancestry(
+            &mut controller,
+            &context,
+            daemon,
+            &wallet,
+            expected,
+            &generation,
+        )
+        .await
+    } else {
+        reconstruct_recorded_claim(daemon, &wallet, &plan, change_hint, expected, &generation).await
+    };
+    drop(controller);
+    check()?;
+    let built = match built {
+        Ok(built) => built,
+        Err(error) => {
+            return match txid {
+                Some(txid) => Ok(RestartedClaim {
+                    context,
+                    state: RestartedState::Unavailable(txid, error),
+                }),
+                None => Err(error),
+            }
+        }
+    };
+    if phase == Phase::Intent {
+        return Ok(RestartedClaim {
+            context,
+            state: RestartedState::Intent(built),
+        });
+    }
+    let transaction =
+        recovered.ok_or_else(|| "The journal is missing its recorded transaction.".to_string())?;
+    let verified = built.verify(built.psbt(), Some(&transaction))?;
+    let coordinator = built.open(
+        &directory,
+        bitcoin_cube,
+        fork_cube,
+        verified,
+        production,
+        true,
+    )?;
+    let signed = built.psbt().clone();
+    Ok(RestartedClaim {
+        context: context.clone(),
+        state: RestartedState::Bound(Box::new(ClaimSession {
+            phase: coordinator.phase(),
+            coordinator: Some(coordinator),
+            context,
+            review: None,
+            reconfirmation: None,
+            resubmission: None,
+            built,
+            signed,
+            recovered: Some(transaction),
+        })),
+    })
+}
+
+/// A paired journal keeps its owner while reading status. This read phase
+/// preserves the unsigned-deposit and signed-reconciliation paths separately
+/// from the historical Coincubed reconstruction below.
+struct PairedClaimReload<'a> {
+    controller: claim_workflow::Controller,
+    directory: PathBuf,
+    descriptor: &'a CoincubeDescriptor,
+    identity: claim_workflow::WalletIdentity,
+    context: Context,
+    connect: ConnectSession,
+    daemon: Arc<dyn Daemon + Sync + Send>,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+}
+
+impl PairedClaimReload<'_> {
+    async fn read(self) -> Result<RestartedClaim, String> {
+        let Self {
+            mut controller,
+            directory,
+            descriptor,
+            identity,
+            context,
+            connect,
+            daemon,
+            expected,
+            generation,
+        } = self;
+
         if controller.recorded_signed_ancestry_pair().is_none() {
             let shared_count = controller.plan().claimed_prevouts.len();
             drop(controller);
@@ -5329,7 +5752,7 @@ async fn restore_recorded_claim(
         if !crate::services::claim_observation::session_current(&generation, expected) {
             return Err(SESSION_ENDED.into());
         }
-        return Ok(RestartedClaim {
+        Ok(RestartedClaim {
             context,
             state: RestartedState::PairedRecovery(PairedClaimRecovery {
                 bitcoin_unattempted,
@@ -5341,128 +5764,8 @@ async fn restore_recorded_claim(
                 bitcoin_status,
                 fork_status,
             }),
-        });
+        })
     }
-    drop(controller);
-    if daemon
-        .config()
-        .is_none_or(|c| c.main_descriptor.as_vault() != Some(descriptor))
-    {
-        return Err("The recorded claim does not match this Bitcoin Vault.".into());
-    }
-    let production = Production::new(
-        connect.client,
-        daemon.clone(),
-        connect.account,
-        expected,
-        generation.clone(),
-    )
-    .map_err(describe_production)?;
-    let context = production.context().clone();
-    let identity = claim_workflow::WalletIdentity {
-        bitcoin_cube: bitcoin_cube.clone(),
-        fork_cube: fork_cube.clone(),
-        descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
-    };
-    let mut controller =
-        claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
-            .await
-            .map_err(|e| describe(claim_coordinator::Error::Journal(e)))?;
-    let plan = controller.plan();
-    let change_hint = controller.recorded_bitcoin_change_index();
-    let phase = controller.phase();
-    let txid = controller.signed_txid();
-    let stored_transaction = controller.recorded_bitcoin_transaction().cloned();
-    let check = || {
-        if !crate::services::claim_observation::session_current(&generation, expected) {
-            Err(SESSION_ENDED.to_string())
-        } else {
-            Ok(())
-        }
-    };
-    check()?;
-    // An unavailable recorded submission must remain a hold even when its inputs
-    // have already disappeared from the wallet's unspent set.
-    let recovered = if let Some(txid) = txid {
-        let transaction = if stored_transaction.is_some() {
-            stored_transaction
-        } else {
-            daemon.list_txs(&[txid]).await.ok().and_then(|result| {
-                result
-                    .transactions
-                    .into_iter()
-                    .find(|entry| entry.tx.compute_txid() == txid)
-                    .map(|entry| entry.tx)
-            })
-        };
-        check()?;
-        let Some(transaction) = transaction else {
-            return Ok(RestartedClaim { context, state: RestartedState::Unavailable(txid,
-                "The recorded transaction is not available from the Bitcoin service yet. Read again to track it; no submission will be retried.".into()) });
-        };
-        Some(transaction)
-    } else {
-        None
-    };
-    let built = if plan.poison == claim::Poison::InputAncestry {
-        construction::restore_ancestry(
-            &mut controller,
-            &context,
-            daemon,
-            &wallet,
-            expected,
-            &generation,
-        )
-        .await
-    } else {
-        reconstruct_recorded_claim(daemon, &wallet, &plan, change_hint, expected, &generation).await
-    };
-    drop(controller);
-    check()?;
-    let built = match built {
-        Ok(built) => built,
-        Err(error) => {
-            return match txid {
-                Some(txid) => Ok(RestartedClaim {
-                    context,
-                    state: RestartedState::Unavailable(txid, error),
-                }),
-                None => Err(error),
-            }
-        }
-    };
-    if phase == Phase::Intent {
-        return Ok(RestartedClaim {
-            context,
-            state: RestartedState::Intent(built),
-        });
-    }
-    let transaction =
-        recovered.ok_or_else(|| "The journal is missing its recorded transaction.".to_string())?;
-    let verified = built.verify(built.psbt(), Some(&transaction))?;
-    let coordinator = built.open(
-        &directory,
-        bitcoin_cube,
-        fork_cube,
-        verified,
-        production,
-        true,
-    )?;
-    let signed = built.psbt().clone();
-    Ok(RestartedClaim {
-        context: context.clone(),
-        state: RestartedState::Bound(Box::new(ClaimSession {
-            phase: coordinator.phase(),
-            coordinator: Some(coordinator),
-            context,
-            review: None,
-            reconfirmation: None,
-            resubmission: None,
-            built,
-            signed,
-            recovered: Some(transaction),
-        })),
-    })
 }
 
 async fn reconstruct_recorded_claim(
@@ -5524,39 +5827,12 @@ async fn reconstruct_recorded_claim(
         .output
         .get(1)
         .ok_or_else(|| "The recorded claim has no change output.".to_string())?;
-    let mut cursor = None;
     let change = if let Some(index) = change_hint {
         // The journal index is only a hint. The core builder below derives the
         // owned script and verifies the entire recorded transaction and inputs.
         index
     } else {
-        loop {
-            if !crate::services::claim_observation::session_current(generation, expected) {
-                return Err(SESSION_ENDED.into());
-            }
-            let page = daemon
-                .list_revealed_addresses(true, false, 100, cursor)
-                .await
-                .map_err(|e| e.to_string())?;
-            if let Some(entry) = page
-                .addresses
-                .iter()
-                .find(|entry| entry.address.script_pubkey() == output.script_pubkey)
-            {
-                break entry.index;
-            }
-            match page.continue_from {
-                Some(next) if cursor.is_none_or(|old| next < old) && !next.is_hardened() => {
-                    cursor = Some(next)
-                }
-                _ => {
-                    return Err(
-                        "The recorded change address is not a revealed address of this Vault."
-                            .into(),
-                    )
-                }
-            }
-        }
+        find_recorded_change(&*daemon, output, expected, generation).await?
     };
     if !crate::services::claim_observation::session_current(generation, expected) {
         return Err(SESSION_ENDED.into());
@@ -5572,6 +5848,41 @@ async fn reconstruct_recorded_claim(
     )
     .map(|built| Box::new(Construction::OpReturn(built)))
     .map_err(|e| e.to_string())
+}
+
+async fn find_recorded_change(
+    daemon: &(dyn Daemon + Sync + Send),
+    output: &coincube_core::miniscript::bitcoin::TxOut,
+    expected: u64,
+    generation: &watch::Receiver<u64>,
+) -> Result<ChildNumber, String> {
+    let mut cursor = None;
+    loop {
+        if !crate::services::claim_observation::session_current(generation, expected) {
+            return Err(SESSION_ENDED.into());
+        }
+        let page = daemon
+            .list_revealed_addresses(true, false, 100, cursor)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(entry) = page
+            .addresses
+            .iter()
+            .find(|entry| entry.address.script_pubkey() == output.script_pubkey)
+        {
+            return Ok(entry.index);
+        }
+        match page.continue_from {
+            Some(next) if cursor.is_none_or(|old| next < old) && !next.is_hardened() => {
+                cursor = Some(next)
+            }
+            _ => {
+                return Err(
+                    "The recorded change address is not a revealed address of this Vault.".into(),
+                )
+            }
+        }
+    }
 }
 
 /// Finalise and journal under the context captured at dispatch (`expected`).

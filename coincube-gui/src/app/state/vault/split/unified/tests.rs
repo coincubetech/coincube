@@ -921,20 +921,43 @@ async fn unified_port_is_built_per_session_and_revoked() {
 /// cache; the seed newtype's `Debug` is written by hand and redacts; the
 /// view's only text inputs are the seed inputs, each `.secure(true)`, and
 /// they carry their text straight into [`SeedText`].
-#[test]
-fn split_unified_holds_seeds_only_zeroized() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let read = |path: &str| std::fs::read_to_string(src.join(path)).unwrap();
-    let unified = read("app/state/vault/split/unified.rs");
-    let unified = &unified[..unified
-        .find("\n#[cfg(all(test, unix))]\nmod tests;")
-        .unwrap()];
-    let view = read("app/view/vault/split.rs");
-    let seed_text = read("app/state/vault/split/unified/seed_text.rs");
+fn unified_production_sources(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    out: &mut Vec<(String, String)>,
+) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if path.is_dir() {
+            if name != "tests" {
+                unified_production_sources(&path, root, out);
+            }
+        } else if name.ends_with(".rs") && name != "tests.rs" {
+            let text = std::fs::read_to_string(&path)
+                .unwrap()
+                .replace("\r\n", "\n");
+            // Production text: up to an inline test module.
+            let cut = ["\n#[cfg(test)]\nmod ", "\n#[cfg(all(test"]
+                .iter()
+                .filter_map(|marker| text.find(marker))
+                .min()
+                .unwrap_or(text.len());
+            let file = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((file, text[..cut].to_string()));
+        }
+    }
+}
+
+fn assert_unified_source_is_memory_only(unified: &str, seed_text: &str, view: &str) {
     for (file, text) in [
         ("unified.rs", unified),
-        ("seed_text.rs", seed_text.as_str()),
-        ("view", view.as_str()),
+        ("seed_text.rs", seed_text),
+        ("view", view),
     ] {
         for token in [
             "fs::",
@@ -947,6 +970,19 @@ fn split_unified_holds_seeds_only_zeroized() {
             assert!(!text.contains(token), "{} names {}", file, token);
         }
     }
+}
+
+#[test]
+fn split_unified_holds_seeds_only_zeroized() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let read = |path: &str| std::fs::read_to_string(src.join(path)).unwrap();
+    let unified = read("app/state/vault/split/unified.rs");
+    let unified = &unified[..unified
+        .find("\n#[cfg(all(test, unix))]\nmod tests;")
+        .unwrap()];
+    let view = read("app/view/vault/split.rs");
+    let seed_text = read("app/state/vault/split/unified/seed_text.rs");
+    assert_unified_source_is_memory_only(unified, &seed_text, &view);
     // Reviewer-660661e D2 (structural): `SeedText` lives in a private module
     // of `unified`, with a private field, so nothing outside its impl can
     // read the buffer (`.0`): the compiler refuses it. Its module exports
@@ -983,35 +1019,9 @@ fn split_unified_holds_seeds_only_zeroized() {
     // calls; the buffers are lent only through `typed_words` and
     // `typed_passphrase`, which only the view's seed stage calls. Every
     // non-test source file under `src` is scanned.
-    fn sources(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, String)>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_string_lossy().to_string();
-            if path.is_dir() {
-                if name != "tests" {
-                    sources(&path, root, out);
-                }
-            } else if name.ends_with(".rs") && name != "tests.rs" {
-                let text = std::fs::read_to_string(&path)
-                    .unwrap()
-                    .replace("\r\n", "\n");
-                // Production text: up to an inline test module.
-                let cut = ["\n#[cfg(test)]\nmod ", "\n#[cfg(all(test"]
-                    .iter()
-                    .filter_map(|marker| text.find(marker))
-                    .min()
-                    .unwrap_or(text.len());
-                let file = path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                out.push((file, text[..cut].to_string()));
-            }
-        }
-    }
+
     let mut all = Vec::new();
-    sources(&src, &src, &mut all);
+    unified_production_sources(&src, &src, &mut all);
     assert!(all.len() > 100, "{}", all.len());
     for (token, sites) in [
         (

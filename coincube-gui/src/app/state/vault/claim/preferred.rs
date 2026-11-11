@@ -114,22 +114,7 @@ pub(super) async fn build_preferred(
             .block_height;
         current()?;
         wallet.apply_coin_overrides(&mut fresh);
-        let actual: BTreeSet<_> = fresh.iter().map(|c| c.outpoint).collect();
-        if actual != expected_inputs
-            || fresh.len() != expected_inputs.len()
-            || fresh.iter().any(|c| {
-                c.spend_info.is_some()
-                    || c.is_immature
-                    || c.block_height.is_none_or(|h| {
-                        h < 0
-                            || h > tip
-                            || if c.outpoint == selected {
-                                (h as u64) < window.fork_height
-                            } else {
-                                h as u64 >= window.fork_height
-                            }
-                    })
-            })
+        if preferred_inputs_changed(&fresh, &expected_inputs, selected, tip, &window)
         {
             return Err(
                 "Claim inputs changed, are spent, or are not yet mature. Read the Vault again."
@@ -217,4 +202,29 @@ pub(super) async fn build_preferred(
     })
     .await
     .map_err(|_| "The Claim input search timed out. Read the Vault again.".to_string())?
+}
+
+fn preferred_inputs_changed(
+    fresh: &[Coin],
+    expected_inputs: &BTreeSet<OutPoint>,
+    selected: OutPoint,
+    tip: i32,
+    window: &ForkWindow,
+) -> bool {
+    let actual: BTreeSet<_> = fresh.iter().map(|c| c.outpoint).collect();
+    actual != *expected_inputs
+        || fresh.len() != expected_inputs.len()
+        || fresh.iter().any(|c| {
+            c.spend_info.is_some()
+                || c.is_immature
+                || c.block_height.is_none_or(|h| {
+                    h < 0
+                        || h > tip
+                        || if c.outpoint == selected {
+                            (h as u64) < window.fork_height
+                        } else {
+                            h as u64 >= window.fork_height
+                        }
+                })
+        })
 }
