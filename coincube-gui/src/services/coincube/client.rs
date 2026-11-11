@@ -4282,3 +4282,69 @@ mod owner_keychain_recovery_tests {
         ));
     }
 }
+
+impl CoincubeClient {
+    pub async fn get_worldview(
+        &self,
+    ) -> Result<super::worldview::Snapshot, super::worldview::Error> {
+        self.worldview_request(reqwest::Method::GET, None, None)
+            .await
+    }
+
+    pub async fn share_worldview(
+        &self,
+        current: &super::worldview::Snapshot,
+        selection: Option<super::worldview::Selection>,
+    ) -> Result<super::worldview::Snapshot, super::worldview::Error> {
+        use super::worldview::Error;
+        let method = if selection.is_some() {
+            reqwest::Method::PUT
+        } else {
+            reqwest::Method::DELETE
+        };
+        let next = self
+            .worldview_request(method, Some(&current.etag), selection)
+            .await?;
+        if next.account_uuid != current.account_uuid
+            || Some(next.revision) != current.revision.checked_add(1)
+            || next.selection != selection
+        {
+            return Err(Error::Unavailable);
+        }
+        Ok(next)
+    }
+
+    async fn worldview_request(
+        &self,
+        method: reqwest::Method,
+        etag: Option<&str>,
+        selection: Option<super::worldview::Selection>,
+    ) -> Result<super::worldview::Snapshot, super::worldview::Error> {
+        use super::worldview::{Error, Snapshot};
+        let mut request = self.client.request(
+            method,
+            format!("{}/api/v1/connect/worldview", self.base_url),
+        );
+        if let Some(etag) = etag {
+            request = request.header(reqwest::header::IF_MATCH, etag);
+        }
+        if let Some(selection) = selection {
+            request = request.json(&selection);
+        }
+        let response = request.send().await.map_err(|_| Error::Unavailable)?;
+        match response.status().as_u16() {
+            200 => {}
+            412 | 428 => return Err(Error::Conflict),
+            423 => return Err(Error::Locked),
+            _ => return Err(Error::Unavailable),
+        }
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .ok_or(Error::Unavailable)?
+            .to_owned();
+        let body = response.bytes().await.map_err(|_| Error::Unavailable)?;
+        Snapshot::decode(&body, &etag)
+    }
+}

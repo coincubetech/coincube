@@ -19,6 +19,7 @@ use coincube_ui::widget::{action, Element};
 mod cache;
 pub mod pane;
 pub mod tab;
+mod worldview;
 
 use crate::{
     app::{
@@ -1032,6 +1033,15 @@ pub enum Message {
     ToggleTheme,
     SystemTheme(iced::theme::Mode),
     PreferencesSheet(preferences_view::Message),
+    Worldview(
+        OverlayOrigin,
+        (u32, u64, u64),
+        uuid::Uuid,
+        Result<
+            crate::services::coincube::worldview::Snapshot,
+            crate::services::coincube::worldview::Error,
+        >,
+    ),
     ConnectSheet(ConnectSheetMessage),
     Preferences(SaveRequest, Result<PreferencesReceipt, String>),
 }
@@ -1591,6 +1601,7 @@ impl GUI {
                 .preferences_sheet
                 .as_ref()
                 .and_then(|sheet| sheet.worldview_changed),
+            worldview_sharing: self.worldview_view(),
             diagnostics: preferences_view::Diagnostics::default(),
             about: preferences_view::About::default(),
             max_zoom: self.zoom.screen_width.map(Zoom::largest_for_screen),
@@ -2017,6 +2028,15 @@ impl GUI {
                     sheet.page.toggle_registration_repair();
                 }
                 Task::none()
+            }
+            ViewMessage::Action(Action::RefreshWorldview) => {
+                self.worldview_action(worldview::Action::Refresh)
+            }
+            ViewMessage::Action(Action::PublishWorldview) => {
+                self.worldview_action(worldview::Action::Publish)
+            }
+            ViewMessage::Action(Action::RevokeWorldview) => {
+                self.worldview_action(worldview::Action::Revoke)
             }
             ViewMessage::Action(Action::Close) => self.close_preferences_sheet(),
             ViewMessage::Action(Action::RetryLoad) => self.retry_preferences(),
@@ -3363,12 +3383,18 @@ impl GUI {
                     origin,
                     page: PreferencesPageState::default(),
                     worldview_changed: None,
+                    worldview_sharing: worldview::Sharing::default(),
                 });
                 self.connect_sheet = None;
                 self.publish_preferences_sheet();
-                iced_runtime::task::widget(iced::advanced::widget::operation::focusable::focus(
-                    iced::advanced::widget::Id::new("tenshu.preferences.close"),
-                ))
+                Task::batch([
+                    iced_runtime::task::widget(
+                        iced::advanced::widget::operation::focusable::focus(
+                            iced::advanced::widget::Id::new("tenshu.preferences.close"),
+                        ),
+                    ),
+                    self.worldview_action(worldview::Action::Refresh),
+                ])
             }
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
                 if matches!(
@@ -3898,6 +3924,10 @@ impl GUI {
                 self.publish_appearance();
                 Task::none()
             }
+            Message::Worldview(origin, context, request, result) => {
+                self.worldview_complete(origin, context, request, result);
+                Task::none()
+            }
             Message::PreferencesSheet(message) => self.preferences_sheet_message(message),
             Message::ConnectSheet(message) => self.connect_sheet_message(message),
             Message::Tick => {
@@ -4217,6 +4247,7 @@ struct PreferencesSheet {
     origin: OverlayOrigin,
     page: PreferencesPageState,
     worldview_changed: Option<coincube_ui::theme::WorldviewMode>,
+    worldview_sharing: worldview::Sharing,
 }
 
 struct ConnectSheet {
@@ -4461,7 +4492,7 @@ mod app_preferences_sheet_tests {
         }
     }
 
-    fn launcher_gui(root: &CoincubeDirectory) -> GUI {
+    pub(super) fn launcher_gui(root: &CoincubeDirectory) -> GUI {
         let (home, startup) = home::Home::new_for_chain(root.clone(), None);
         drop(startup);
         let pane = pane::Pane::new_with_tab(tab::State::Home(home));
