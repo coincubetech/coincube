@@ -28,6 +28,9 @@ fn main() {
 
 #[cfg(feature = "integration-tests")]
 mod run {
+    mod sponsor {
+        include!("testnet4_provision/sponsor.rs");
+    }
     mod bootstrap {
         include!("testnet4_provision/bootstrap.rs");
     }
@@ -101,6 +104,10 @@ mod run {
         profile_dir: PathBuf,
         run_dir: PathBuf,
         run_id: String,
+        sponsor_intent_file: Option<PathBuf>,
+        sponsor_evidence_file: Option<PathBuf>,
+        sponsor_receipt_file: Option<PathBuf>,
+        sponsor_intent_sha256: Option<String>,
         target_key_id: Option<String>,
         target_fingerprint: Option<String>,
         phone_key_file: Option<PathBuf>,
@@ -274,6 +281,7 @@ mod run {
                     | "secret_get"
                     | "secret_put"
                     | "bootstrap_auth"
+                    | "sponsor"
             ),
             "invalid_action",
         )?;
@@ -1229,6 +1237,11 @@ mod run {
 
     async fn execute(input: Input) -> Result<Value> {
         validate_input(&input)?;
+        // Sponsoring is a separate, read-only operation over completed runs.
+        // Never create a run lock, migrate secrets or update provisioning here.
+        if input.action == "sponsor" {
+            return sponsor::execute(&input, &secret_store::Keychain);
+        }
         let _lock = lock_run(&input)?;
         if input.action.starts_with("secret_") {
             let locator = secret_store::locator(
@@ -1451,6 +1464,10 @@ mod run {
                 profile_dir: dir.0.join("profile"),
                 run_dir: dir.0.clone(),
                 run_id: uuid::Uuid::new_v4().to_string(),
+                sponsor_intent_file: None,
+                sponsor_evidence_file: None,
+                sponsor_receipt_file: None,
+                sponsor_intent_sha256: None,
                 target_key_id: None,
                 target_fingerprint: None,
                 phone_key_file: None,
