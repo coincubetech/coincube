@@ -3,9 +3,14 @@
 //! Rendered **below the Spark Receive two-card selector**, in place of the
 //! Bitcoin rail form — the THEY SEND card shows which asset was picked, so this
 //! body carries only what the swap adds: a refund-address field, a third-party
-//! disclosure, and the deposit address once a shift is live. Copy always says
-//! **bitcoin arrives**, never "receive USDT". No standalone title / asset
-//! picker / Back button — navigation happens via the cards + THEY SEND modal.
+//! disclosure, and, once a shift is live, a progress tracker over a body that
+//! follows SideShift's status — the deposit address while waiting, what came in
+//! and what's on its way while converting, and where the money goes back to on
+//! the refund path. Copy always says **bitcoin arrives**, never "receive USDT".
+//! No standalone title / asset picker / Back button — navigation happens via
+//! the cards + THEY SEND modal.
+
+use std::cmp::Ordering;
 
 use coincube_core::miniscript::bitcoin::Amount;
 use coincube_ui::locale::copy as localized_copy;
@@ -17,19 +22,19 @@ use coincube_ui::{
         button,
         text::*,
     },
-    icon::clipboard_icon,
+    icon::{check_circle_icon, check_icon, clipboard_icon, clock_icon, reload_icon, warning_icon},
     theme,
     widget::Element,
 };
 use iced::{
-    widget::{qr_code, scrollable, Column, Container, Row, Space, TextInput},
-    Alignment, Length,
+    widget::{container, qr_code, rule, text::Wrapping, Column, Container, Row, Space, TextInput},
+    Alignment, Background, Length,
 };
 
 use crate::app::state::spark::esplora::DEPOSIT_MATURITY_CONFIRMATIONS;
 use crate::app::state::spark::sideshift_receive::{SparkShiftPhase, SparkSideshiftReceiveFlow};
 use crate::app::view::SparkSideshiftReceiveMessage as Msg;
-use crate::services::sideshift::{ShiftResponse, ShiftStatusKind};
+use crate::services::sideshift::{DepositOption, ShiftResponse, ShiftStatusKind};
 
 pub fn spark_sideshift_receive_view(
     flow: &SparkSideshiftReceiveFlow,
@@ -130,7 +135,7 @@ fn setup_body(flow: &SparkSideshiftReceiveFlow) -> Element<'_, Msg> {
     col.push(generate_btn).into()
 }
 
-// ── Active shift: deposit address + status ──────────────────────────────────
+// ── Active shift: progress tracker + the body for the current status ────────
 
 fn active_body(
     flow: &SparkSideshiftReceiveFlow,
@@ -140,142 +145,764 @@ fn active_body(
     let Some(shift) = flow.shift() else {
         return error_body(Some("Shift data missing."));
     };
-    let selected = flow.selected();
-    let status = flow.shift_status();
+    active_shift_body(
+        &ActiveShift {
+            shift,
+            selected: flow.selected(),
+            status: flow.shift_status(),
+            qr: flow.qr_data(),
+            refund_address: flow.refund_address(),
+            polled_deposit_amount: flow.deposit_amount(),
+            settle_amount_sat: flow.settle_amount_sat(),
+        },
+        bitcoin_unit,
+        mask_amounts,
+    )
+}
+
+/// What a live shift's view needs, lifted off the flow so the view can be
+/// rendered (and tested) without a Spark backend.
+struct ActiveShift<'a> {
+    shift: &'a ShiftResponse,
+    selected: DepositOption,
+    status: Option<&'a ShiftStatusKind>,
+    qr: Option<&'a qr_code::Data>,
+    refund_address: &'a str,
+    polled_deposit_amount: Option<&'a str>,
+    settle_amount_sat: Option<u64>,
+}
+
+impl<'a> ActiveShift<'a> {
+    /// The deposit SideShift has seen: the latest poll's figure, else the one
+    /// on the shift itself.
+    fn deposit_amount(&self) -> Option<&'a str> {
+        self.polled_deposit_amount
+            .or(self.shift.deposit_amount.as_deref())
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+    }
+}
+
+fn active_shift_body<'a>(
+    v: &ActiveShift<'a>,
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+) -> Element<'a, Msg> {
+    let mut col = Column::new().spacing(18).width(Length::Fill);
+
+    // Expired has no progress to show — nothing was ever deposited.
+    if let Some(steps) = tracker_steps(false, v.status) {
+        col = col.push(tracker(&steps));
+        // Refunded's own body says where the money went; the shared sentence
+        // would only repeat it.
+        if v.status != Some(&ShiftStatusKind::Refunded) {
+            col = col.push(guidance_text(spark_shift_guidance(v.status, &v.selected)));
+        }
+        col = col.push(rule::horizontal(1));
+    }
+
+    let body: Element<Msg> = match v.status {
+        None | Some(ShiftStatusKind::Waiting) | Some(ShiftStatusKind::Unknown(_)) => {
+            deposit_section(v)
+        }
+        Some(
+            st @ (ShiftStatusKind::Pending
+            | ShiftStatusKind::Processing
+            | ShiftStatusKind::Settling
+            | ShiftStatusKind::Settled),
+        ) => in_flight_section(v, st, bitcoin_unit, mask_amounts),
+        Some(
+            st @ (ShiftStatusKind::Review | ShiftStatusKind::Error | ShiftStatusKind::Refunding),
+        ) => refund_section(v, st, mask_amounts),
+        Some(ShiftStatusKind::Refunded) => refunded_section(v, mask_amounts),
+        Some(ShiftStatusKind::Expired) => expired_section(),
+    };
+
+    col.push(body)
+        .push(rule::horizontal(1))
+        .push(details_list(v))
+        .into()
+}
+
+// ── Progress tracker ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepMark {
+    Done,
+    /// Done, but not a success worth a green check — the "Swap stopped" step on
+    /// the refund path once the refund has moved past it.
+    DoneMuted,
+    Current,
+    /// Current and stuck: on hold for review, or failed. Not animated, not
+    /// orange — the user has to act (review) or the refund is about to start.
+    Halted,
+    Todo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrackerStep {
+    label: &'static str,
+    mark: StepMark,
+}
+
+const CONVERT_STEPS: [&str; 4] = [
+    "Waiting for deposit",
+    "Deposit detected",
+    "Converting",
+    "Arriving in Spark",
+];
+
+/// The four tracker steps for where the swap is. The convert path runs
+/// waiting → detected → converting → arriving; once SideShift stops a swap the
+/// labels switch to the refund path (received → stopped → refunding →
+/// refunded) so the user always sees where their money is going. `None` for an
+/// expired shift: nothing was deposited, so there is no progress to show.
+fn tracker_steps(arrived: bool, status: Option<&ShiftStatusKind>) -> Option<[TrackerStep; 4]> {
+    let refund = |stop: &'static str| ["Deposit received", stop, "Refunding", "Refunded"];
+    let (labels, current, halted) = if arrived {
+        (CONVERT_STEPS, None, false)
+    } else {
+        match status {
+            None | Some(ShiftStatusKind::Waiting) | Some(ShiftStatusKind::Unknown(_)) => {
+                (CONVERT_STEPS, Some(0), false)
+            }
+            Some(ShiftStatusKind::Pending) => (CONVERT_STEPS, Some(1), false),
+            Some(ShiftStatusKind::Processing) => (CONVERT_STEPS, Some(2), false),
+            Some(ShiftStatusKind::Settling | ShiftStatusKind::Settled) => {
+                (CONVERT_STEPS, Some(3), false)
+            }
+            Some(ShiftStatusKind::Review) => (refund("On hold for review"), Some(1), true),
+            Some(ShiftStatusKind::Error) => (refund("Swap failed"), Some(1), true),
+            Some(ShiftStatusKind::Refunding) => (refund("Swap stopped"), Some(2), false),
+            Some(ShiftStatusKind::Refunded) => (refund("Swap stopped"), None, false),
+            Some(ShiftStatusKind::Expired) => return None,
+        }
+    };
+    let refund_path = labels[0] == "Deposit received";
+    Some(std::array::from_fn(|i| {
+        let mark = match current {
+            Some(c) if i == c => {
+                if halted {
+                    StepMark::Halted
+                } else {
+                    StepMark::Current
+                }
+            }
+            Some(c) if i > c => StepMark::Todo,
+            _ if refund_path && i == 1 => StepMark::DoneMuted,
+            _ => StepMark::Done,
+        };
+        TrackerStep {
+            label: labels[i],
+            mark,
+        }
+    }))
+}
+
+fn tracker<'a>(steps: &[TrackerStep; 4]) -> Element<'a, Msg> {
+    let mut row = Row::new().spacing(8).width(Length::Fill);
+    for step in steps {
+        let mark = step.mark;
+        let bar = Container::new(Space::new().height(Length::Fixed(3.0)))
+            .width(Length::Fill)
+            .style(move |t: &theme::Theme| {
+                let shell = &t.colors.shell;
+                let color = match mark {
+                    StepMark::Done => shell.good,
+                    StepMark::DoneMuted => shell.muted,
+                    StepMark::Current => shell.accent,
+                    StepMark::Halted => shell.bad,
+                    StepMark::Todo => shell.line,
+                };
+                container::Style {
+                    background: Some(Background::Color(color)),
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            });
+        let mut label = text(localized_copy(step.label)).size(CAPTION_SIZE + 1);
+        label = match mark {
+            StepMark::Current => label.bold().style(theme::text::primary),
+            StepMark::Halted => label
+                .bold()
+                .style(|t: &theme::Theme| iced::widget::text::Style {
+                    color: Some(t.colors.shell.bad),
+                }),
+            _ => label.style(theme::text::secondary),
+        };
+        let mut caption = Row::new().spacing(6).align_y(Alignment::Center);
+        if matches!(mark, StepMark::Done | StepMark::DoneMuted) {
+            caption = caption.push(check_icon().size(12).style(move |t: &theme::Theme| {
+                iced::widget::text::Style {
+                    color: Some(if mark == StepMark::Done {
+                        t.colors.shell.good
+                    } else {
+                        t.colors.shell.muted
+                    }),
+                }
+            }));
+        }
+        row = row.push(
+            Column::new()
+                .spacing(8)
+                .width(Length::FillPortion(1))
+                .push(bar)
+                .push(caption.push(label)),
+        );
+    }
+    row.into()
+}
+
+fn guidance_text<'a>(copy: String) -> Element<'a, Msg> {
+    text(copy).size(P2_SIZE).style(theme::text::primary).into()
+}
+
+/// Spark-specific status guidance. Diverges from the shared
+/// [`ShiftStatusKind::guidance`] where the Spark flow knows more:
+///
+/// - `Waiting` names the asset and chain, since the deposit address sits just
+///   below.
+/// - `Pending` / `Processing` are separate tracker steps here, so each says
+///   which half of the swap is running.
+/// - `Settled`: a Spark settle lands as on-chain BTC in the wallet's static
+///   deposit address, so it *hasn't* arrived in the spendable balance yet —
+///   it's confirming, and gets added automatically once it matures. The shared
+///   copy says "has arrived", which sent users looking for a transaction that
+///   wasn't there yet.
+fn spark_shift_guidance(status: Option<&ShiftStatusKind>, selected: &DepositOption) -> String {
+    match status {
+        None | Some(ShiftStatusKind::Waiting) => localized_format!(
+            "Send {} on {} to the address below. This page updates when the deposit is seen.",
+            "Envía {} en {} a la dirección de abajo. Esta página se actualiza cuando se detecte el depósito.",
+            selected.coin.to_uppercase(),
+            selected.network.network_name(),
+        ),
+        Some(ShiftStatusKind::Pending) => localized_copy(
+            "SideShift has seen your deposit and is confirming it before converting.",
+        )
+        .to_owned(),
+        Some(ShiftStatusKind::Processing) => localized_copy(
+            "Converting your deposit to bitcoin. The final amount is set when the conversion \
+             finishes.",
+        )
+        .to_owned(),
+        Some(ShiftStatusKind::Settled) => localized_copy(
+            "Converting complete. Your bitcoin is arriving on-chain and will be added to your \
+             wallet automatically after about 3 confirmations — ~30 minutes.",
+        )
+        .to_owned(),
+        Some(other) => localized_copy(other.guidance()).to_owned(),
+    }
+}
+
+// ── Waiting: where to send ──────────────────────────────────────────────────
+
+fn deposit_section<'a>(v: &ActiveShift<'a>) -> Element<'a, Msg> {
+    let qr: Element<Msg> = match v.qr {
+        Some(data) => Container::new(qr_code(data).cell_size(4))
+            .padding(12)
+            .style(|_: &theme::Theme| container::Style {
+                background: Some(Background::Color(color::WHITE)),
+                border: iced::Border {
+                    radius: 10.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into(),
+        None => Space::new().width(Length::Fixed(0.0)).into(),
+    };
+
+    let address = Column::new()
+        .spacing(8)
+        .push(
+            text(localized_copy("Deposit address"))
+                .size(CAPTION_SIZE + 1)
+                .style(theme::text::secondary),
+        )
+        .push(
+            text(v.shift.deposit_address.as_str())
+                .size(P2_SIZE)
+                .font(iced::Font::MONOSPACE)
+                .width(Length::Fill)
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+        .push(
+            button::secondary_compact(Some(clipboard_icon()), localized_copy("Copy address"))
+                .on_press(Msg::Copy),
+        );
 
     // Sending the wrong asset or chain to this address loses it, and sending an
     // amount outside SideShift's min/max gets it refunded rather than converted.
     // Neither can be caught at input — the deposit is an external send — so both
-    // constraints are restated here, next to the address, where the quiet
-    // "Limits" row in the details card below is easy to miss.
-    let mut warning_lines = Column::new().spacing(2).align_x(Alignment::Center).push(
+    // constraints sit right next to the address, once, in a calm note rather
+    // than an alarm.
+    let chain = if v.selected.network.standard_label() == v.selected.network.network_name() {
+        v.selected.network.network_name().to_owned()
+    } else {
+        format!(
+            "{} ({})",
+            v.selected.network.network_name(),
+            v.selected.network.standard_label()
+        )
+    };
+    let mut rules = Column::new().spacing(4).push(
         text(localized_format!(
-            "Only send {} on {} ({})",
-            "Sólo envía {} sobre {} ({})",
-            selected.coin.to_uppercase(),
-            selected.network.network_name(),
-            selected.network.standard_label(),
+            "Only send {} on {}.",
+            "Sólo envía {} en {}.",
+            v.selected.coin.to_uppercase(),
+            chain,
         ))
-        .size(P2_SIZE),
+        .size(CAPTION_SIZE + 1)
+        .bold()
+        .style(theme::text::primary),
     );
-    if let (Some(min), Some(max)) = (&shift.deposit_min, &shift.deposit_max) {
-        warning_lines = warning_lines.push(
+    if let (Some(min), Some(max)) = (&v.shift.deposit_min, &v.shift.deposit_max) {
+        rules = rules.push(
             text(localized_format!(
-                "Send between {min} and {max} {} — amounts outside this range are refunded.",
-                "Enviar entre {min} y {max} {} — cantidades fuera de este rango se reembolsan.",
-                selected.coin.to_uppercase(),
+                "Send between {min} and {max} {}. Amounts outside this range are refunded.",
+                "Enviar entre {min} y {max} {}. Cantidades fuera de este rango se reembolsan.",
+                v.selected.coin.to_uppercase(),
             ))
-            .size(P2_SIZE),
+            .size(CAPTION_SIZE + 1)
+            .style(theme::text::primary),
         );
     }
-    let warning_badge = Container::new(
-        Container::new(warning_lines)
-            .padding([6, 12])
-            .style(theme::pill::warning),
-    )
-    .center_x(Length::Fill);
+    let note = tinted_note(Tone::Warn, warning_icon(), rules.into());
 
-    let qr_section: Element<Msg> = if let Some(data) = flow.qr_data() {
-        Container::new(
-            Container::new(qr_code(data).cell_size(10))
-                .padding(20)
-                .style(theme::card::simple),
-        )
-        .center_x(Length::Fill)
-        .into()
-    } else {
-        Space::new().height(Length::Fixed(0.0)).into()
-    };
-
-    // The address is a ~100-char monospace string; bound the row to `Fill` and
-    // let it scroll horizontally so it stays inside the card and the copy button
-    // stays visible (see `liquid::receive` / `vault::receive`).
-    let address_row = Row::new()
-        .spacing(8)
-        .align_y(Alignment::Center)
+    Row::new()
+        .spacing(24)
+        .align_y(Alignment::Start)
         .width(Length::Fill)
+        .push(qr)
         .push(
-            Container::new(
-                scrollable(
-                    Column::new()
-                        .push(Space::new().height(Length::Fixed(4.0)))
-                        .push(
-                            text(&shift.deposit_address)
-                                .size(P2_SIZE)
-                                .font(iced::Font::MONOSPACE),
-                        )
-                        .push(Space::new().height(Length::Fixed(4.0))),
-                )
-                .direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::new().width(2).scroller_width(2),
-                )),
+            Column::new()
+                .spacing(16)
+                .width(Length::Fill)
+                .push(address)
+                .push(note),
+        )
+        .into()
+}
+
+// ── Detected → arriving: what came in and what's on its way ────────────────
+
+fn in_flight_section<'a>(
+    v: &ActiveShift<'a>,
+    status: &ShiftStatusKind,
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+) -> Element<'a, Msg> {
+    let settled = matches!(status, ShiftStatusKind::Settling | ShiftStatusKind::Settled);
+    let deposit = deposit_tile(v, mask_amounts);
+    let (label, sub) = if settled {
+        ("Bitcoin on the way", "Confirming on-chain")
+    } else {
+        ("You will receive about", "Estimate from SideShift")
+    };
+    let amount: Element<Msg> = match v.settle_amount_sat {
+        Some(sats) => observed_settlement_amount(sats, status, bitcoin_unit, mask_amounts),
+        None => text(localized_copy("Set after conversion"))
+            .size(P1_SIZE)
+            .style(theme::text::secondary)
+            .into(),
+    };
+    let receive = tile(
+        settled,
+        Column::new()
+            .spacing(4)
+            .push(
+                text(localized_copy(label))
+                    .size(CAPTION_SIZE + 1)
+                    .style(theme::text::secondary),
             )
-            .padding([8, 12])
-            .style(theme::card::simple)
-            .width(Length::Fill),
+            .push(amount)
+            .push(
+                text(localized_copy(sub))
+                    .size(CAPTION_SIZE + 1)
+                    .style(theme::text::secondary),
+            )
+            .into(),
+    );
+    tile_pair(deposit, text("→"), receive)
+}
+
+// ── Refund path: on hold, failed, refunding ─────────────────────────────────
+
+fn refund_section<'a>(
+    v: &ActiveShift<'a>,
+    status: &ShiftStatusKind,
+    mask_amounts: bool,
+) -> Element<'a, Msg> {
+    let deposit = deposit_tile(v, mask_amounts);
+    let back_to = tile(
+        false,
+        Column::new()
+            .spacing(4)
+            .push(
+                text(localized_copy("Refund goes back to"))
+                    .size(CAPTION_SIZE + 1)
+                    .style(theme::text::secondary),
+            )
+            .push(
+                text(short_address(v.refund_address))
+                    .size(P1_SIZE)
+                    .font(iced::Font::MONOSPACE),
+            )
+            .push(
+                text(localized_format!(
+                    "your {} address, as {}",
+                    "su dirección de {}, como {}",
+                    v.selected.network.network_name(),
+                    v.selected.coin.to_uppercase(),
+                ))
+                .size(CAPTION_SIZE + 1)
+                .style(theme::text::secondary),
+            )
+            .into(),
+    );
+
+    let mut col = Column::new()
+        .spacing(16)
+        .push(tile_pair(deposit, reload_icon(), back_to));
+
+    if *status == ShiftStatusKind::Refunding {
+        if let Some(reason) = out_of_range_reason(v, mask_amounts) {
+            col = col.push(tinted_note(
+                Tone::Warn,
+                clock_icon(),
+                text(reason)
+                    .size(CAPTION_SIZE + 1)
+                    .style(theme::text::primary)
+                    .into(),
+            ));
+        }
+    }
+    // A held shift only moves when the user contacts SideShift, and the shift
+    // ID is what they'll be asked for — put it one click away.
+    if *status == ShiftStatusKind::Review {
+        col = col.push(
+            button::secondary_compact(Some(clipboard_icon()), localized_copy("Copy shift ID"))
+                .on_press(Msg::CopyShiftId),
+        );
+    }
+    col.into()
+}
+
+fn refunded_section<'a>(v: &ActiveShift<'a>, mask_amounts: bool) -> Element<'a, Msg> {
+    let mut col = Column::new()
+        .spacing(10)
+        .align_x(Alignment::Center)
+        .width(Length::Fill)
+        .push(reload_icon().size(28).style(theme::text::secondary))
+        .push(
+            text(localized_copy("Refunded"))
+                .size(P1_SIZE)
+                .bold()
+                .style(theme::text::primary),
+        );
+    if let Some(amount) = v.deposit_amount() {
+        col = col.push(
+            text(passive_shift_amount(
+                format!("{} {}", amount, v.selected.coin.to_uppercase()),
+                mask_amounts,
+            ))
+            .size(H3_SIZE)
+            .bold(),
+        );
+    }
+    let mut returned = localized_format!(
+        "Returned to {} on {}.",
+        "Devuelto a {} en {}.",
+        short_address(v.refund_address),
+        v.selected.network.network_name(),
+    );
+    if let Some(reason) = out_of_range_reason(v, mask_amounts) {
+        returned = format!("{returned} {reason}");
+    }
+    col.push(
+        text(returned)
+            .size(P2_SIZE)
+            .align_x(iced::alignment::Horizontal::Center)
+            .style(theme::text::secondary),
+    )
+    .push(Space::new().height(Length::Fixed(6.0)))
+    .push(
+        button::primary(None, localized_copy("Done"))
+            .on_press(Msg::Reset)
+            .width(Length::Fixed(160.0)),
+    )
+    .into()
+}
+
+fn expired_section<'a>() -> Element<'a, Msg> {
+    Column::new()
+        .spacing(10)
+        .align_x(Alignment::Center)
+        .width(Length::Fill)
+        .push(clock_icon().size(28).style(theme::text::secondary))
+        .push(
+            text(localized_copy("Deposit address expired"))
+                .size(P1_SIZE)
+                .bold()
+                .style(theme::text::primary),
         )
         .push(
-            iced::widget::button(clipboard_icon().size(16))
-                .on_press(Msg::Copy)
-                .style(theme::button::transparent_border),
-        );
-
-    let status_section: Element<Msg> = if let Some(status) = status {
-        let (label, style_color) = status_badge(status);
-        let mut col = Column::new()
-            .spacing(8)
-            .align_x(Alignment::Center)
-            .width(Length::Fill)
-            .push(
-                Container::new(text(label).size(P2_SIZE).color(style_color))
-                    .padding([4, 10])
-                    .style(theme::pill::simple),
-            );
-        // Once SideShift reports the settle output, show how much bitcoin is on
-        // the way — in whichever unit the user has chosen. Shown from the moment
-        // a deposit is detected through settle; before settle it's SideShift's
-        // moving estimate, so it's labelled "≈", and it firms up as "arriving"
-        // under the "Bitcoin arriving" badge.
-        if matches!(
-            status,
-            ShiftStatusKind::Pending
-                | ShiftStatusKind::Processing
-                | ShiftStatusKind::Settling
-                | ShiftStatusKind::Settled
-        ) {
-            if let Some(sats) = flow.settle_amount_sat() {
-                col = col.push(observed_settlement_amount(
-                    sats,
-                    status,
-                    bitcoin_unit,
-                    mask_amounts,
-                ));
-            }
-        }
-        col.push(
-            text(spark_shift_guidance(status))
+            text(localized_copy(ShiftStatusKind::Expired.guidance()))
                 .size(P2_SIZE)
+                .align_x(iced::alignment::Horizontal::Center)
                 .style(theme::text::secondary),
         )
+        .push(Space::new().height(Length::Fixed(6.0)))
+        .push(button::primary(None, localized_copy("Get a new address")).on_press(Msg::Reset))
         .into()
-    } else {
-        Space::new().height(Length::Fixed(0.0)).into()
-    };
+}
 
-    Container::new(
-        Column::new()
-            .spacing(18)
-            .width(Length::Fill)
-            .push(warning_badge)
-            .push(qr_section)
-            .push(address_row)
-            .push(info_card(shift, &selected))
-            .push(status_section),
-    )
-    .padding(16)
-    .width(Length::Fill)
-    .style(theme::card::simple)
+// ── Shift details ────────────────────────────────────────────────────────────
+
+fn details_list<'a>(v: &ActiveShift<'a>) -> Element<'a, Msg> {
+    let mut rows = Column::new().spacing(8).push(detail_row(
+        localized_copy("Shift ID"),
+        text(v.shift.id.as_str())
+            .size(P2_SIZE)
+            .font(iced::Font::MONOSPACE)
+            .into(),
+        Some(Msg::CopyShiftId),
+    ));
+    if !v.refund_address.trim().is_empty() {
+        rows = rows.push(detail_row(
+            localized_copy("Refunds go to"),
+            text(short_address(v.refund_address))
+                .size(P2_SIZE)
+                .font(iced::Font::MONOSPACE)
+                .into(),
+            Some(Msg::CopyRefundAddress),
+        ));
+    }
+    rows.push(detail_row(
+        localized_copy("Converted by"),
+        text(localized_copy("SideShift (third party)"))
+            .size(P2_SIZE)
+            .into(),
+        None,
+    ))
     .into()
+}
+
+const COPY_BUTTON_WIDTH: f32 = 28.0;
+
+fn detail_row<'a>(label: &'a str, value: Element<'a, Msg>, copy: Option<Msg>) -> Element<'a, Msg> {
+    let mut row = Row::new()
+        .spacing(8)
+        .height(Length::Fixed(COPY_BUTTON_WIDTH))
+        .align_y(Alignment::Center)
+        .push(text(label).size(P2_SIZE).style(theme::text::secondary))
+        .push(Space::new().width(Length::Fill))
+        .push(value);
+    // Rows without a copy button keep the same right edge as rows with one.
+    row = match copy {
+        Some(msg) => row.push(
+            iced::widget::button(clipboard_icon().size(14))
+                .padding(6)
+                .width(Length::Fixed(COPY_BUTTON_WIDTH))
+                .on_press(msg)
+                .style(theme::button::transparent_border),
+        ),
+        None => row.push(Space::new().width(Length::Fixed(COPY_BUTTON_WIDTH))),
+    };
+    row.into()
+}
+
+// ── Shared pieces ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+enum Tone {
+    Warn,
+}
+
+/// A soft, tinted note (8% fill, 35% border) — for rules the user must follow
+/// or a reason something happened. Never a solid colour block: that reads as
+/// an error and shouts over the address it's annotating.
+fn tinted_note<'a>(
+    tone: Tone,
+    icon: coincube_ui::widget::Text<'a>,
+    body: Element<'a, Msg>,
+) -> Element<'a, Msg> {
+    let tint = move |t: &theme::Theme| match tone {
+        Tone::Warn => t.colors.shell.warn,
+    };
+    Container::new(
+        Row::new()
+            .spacing(10)
+            .align_y(Alignment::Start)
+            .push(
+                icon.size(16)
+                    .style(move |t: &theme::Theme| iced::widget::text::Style {
+                        color: Some(tint(t)),
+                    }),
+            )
+            .push(body),
+    )
+    .padding([12, 14])
+    .width(Length::Fill)
+    .style(move |t: &theme::Theme| {
+        let c = tint(t);
+        container::Style {
+            background: Some(Background::Color(iced::Color { a: 0.08, ..c })),
+            border: iced::Border {
+                color: iced::Color { a: 0.35, ..c },
+                width: 1.0,
+                radius: 10.0.into(),
+            },
+            ..Default::default()
+        }
+    })
+    .into()
+}
+
+fn tile<'a>(highlight: bool, body: Element<'a, Msg>) -> Element<'a, Msg> {
+    Container::new(body)
+        .padding(16)
+        .width(Length::Fill)
+        .style(move |t: &theme::Theme| {
+            let shell = &t.colors.shell;
+            container::Style {
+                background: Some(Background::Color(shell.background)),
+                border: iced::Border {
+                    color: if highlight { shell.accent } else { shell.line },
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
+fn tile_pair<'a>(
+    left: Element<'a, Msg>,
+    icon: coincube_ui::widget::Text<'a>,
+    right: Element<'a, Msg>,
+) -> Element<'a, Msg> {
+    Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .push(Container::new(left).width(Length::FillPortion(1)))
+        .push(icon.size(18).style(theme::text::secondary))
+        .push(Container::new(right).width(Length::FillPortion(1)))
+        .into()
+}
+
+fn deposit_tile<'a>(v: &ActiveShift<'a>, mask_amounts: bool) -> Element<'a, Msg> {
+    let coin = v.selected.coin.to_uppercase();
+    let headline = match v.deposit_amount() {
+        Some(amount) => passive_shift_amount(format!("{amount} {coin}"), mask_amounts),
+        None => coin,
+    };
+    tile(
+        false,
+        Column::new()
+            .spacing(4)
+            .push(
+                Row::new()
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .push(check_icon().size(12).style(|t: &theme::Theme| {
+                        iced::widget::text::Style {
+                            color: Some(t.colors.shell.good),
+                        }
+                    }))
+                    .push(
+                        text(localized_copy("Deposit received"))
+                            .size(CAPTION_SIZE + 1)
+                            .style(theme::text::secondary),
+                    ),
+            )
+            .push(text(headline).size(P1_SIZE).bold())
+            .push(
+                text(localized_format!(
+                    "on {}",
+                    "en {}",
+                    v.selected.network.network_name()
+                ))
+                .size(CAPTION_SIZE + 1)
+                .style(theme::text::secondary),
+            )
+            .into(),
+    )
+}
+
+/// Why a deposit is being refunded, when the amounts say so. SideShift's status
+/// carries no reason, but a deposit outside the shift's own min/max is refunded
+/// by rule — so when that's what happened we can say it plainly.
+///
+/// With amounts masked the sentence still gives the reason, but names "the
+/// deposit" instead of its value; the swap's limits are SideShift's, not the
+/// user's, so they stay.
+fn out_of_range_reason(v: &ActiveShift<'_>, mask_amounts: bool) -> Option<String> {
+    let amount = v.deposit_amount()?;
+    let coin = v.selected.coin.to_uppercase();
+    let what = if mask_amounts {
+        localized_copy("The deposit").to_owned()
+    } else {
+        format!("{amount} {coin}")
+    };
+    if let Some(min) = v.shift.deposit_min.as_deref() {
+        if cmp_decimal(amount, min)? == Ordering::Less {
+            return Some(localized_format!(
+                "{what} is below the {min} {coin} minimum, so nothing was converted.",
+                "{what} está por debajo del mínimo de {min} {coin}, así que no se convirtió nada.",
+            ));
+        }
+    }
+    if let Some(max) = v.shift.deposit_max.as_deref() {
+        if cmp_decimal(amount, max)? == Ordering::Greater {
+            return Some(localized_format!(
+                "{what} is above the {max} {coin} maximum, so nothing was converted.",
+                "{what} está por encima del máximo de {max} {coin}, así que no se convirtió nada.",
+            ));
+        }
+    }
+    None
+}
+
+/// Compare two non-negative decimal strings exactly ("25.08" vs "12"), without
+/// a float round-trip. `None` if either isn't a plain decimal.
+fn cmp_decimal(a: &str, b: &str) -> Option<Ordering> {
+    fn split(s: &str) -> Option<(&str, &str)> {
+        let s = s.trim();
+        let (int, frac) = s.split_once('.').unwrap_or((s, ""));
+        let digits = |p: &str| p.bytes().all(|c| c.is_ascii_digit());
+        if (int.is_empty() && frac.is_empty()) || !digits(int) || !digits(frac) {
+            return None;
+        }
+        Some((int.trim_start_matches('0'), frac.trim_end_matches('0')))
+    }
+    let (ai, af) = split(a)?;
+    let (bi, bf) = split(b)?;
+    Some(
+        ai.len()
+            .cmp(&bi.len())
+            .then_with(|| ai.cmp(bi))
+            .then_with(|| af.cmp(bf)),
+    )
+}
+
+/// `lq1qqgp7…x7d2`: enough to recognise an address the user typed, short
+/// enough for a details row. The copy button next to it copies the whole thing.
+fn short_address(address: &str) -> String {
+    let address = address.trim();
+    let chars: Vec<char> = address.chars().collect();
+    if chars.len() <= 14 {
+        return address.to_owned();
+    }
+    let head: String = chars[..8].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 // ── Arrived: the swap's bitcoin has landed and been claimed ──────────────────
@@ -285,59 +912,48 @@ fn arrived_body(
     bitcoin_unit: BitcoinDisplayUnit,
     mask_amounts: bool,
 ) -> Element<'_, Msg> {
-    let mut col = Column::new()
-        .spacing(12)
-        .align_x(Alignment::Center)
-        .width(Length::Fill)
-        .push(
-            Container::new(
-                text(localized_copy("Bitcoin arrived"))
-                    .size(P2_SIZE)
-                    .color(color::GREEN),
-            )
-            .padding([4, 10])
-            .style(theme::pill::simple),
-        );
-
-    if let Some(sats) = flow.arrived_amount_sat() {
-        col = col.push(observed_arrival_amount(sats, bitcoin_unit, mask_amounts));
+    let mut col = Column::new().spacing(18).width(Length::Fill);
+    if let Some(steps) = tracker_steps(true, None) {
+        col = col.push(tracker(&steps)).push(rule::horizontal(1));
     }
 
-    Container::new(
-        col.push(
+    let mut done =
+        Column::new()
+            .spacing(10)
+            .align_x(Alignment::Center)
+            .width(Length::Fill)
+            .push(check_circle_icon().size(32).style(|t: &theme::Theme| {
+                iced::widget::text::Style {
+                    color: Some(t.colors.shell.good),
+                }
+            }))
+            .push(
+                text(localized_copy("Bitcoin arrived"))
+                    .size(P1_SIZE)
+                    .bold()
+                    .style(|t: &theme::Theme| iced::widget::text::Style {
+                        color: Some(t.colors.shell.good),
+                    }),
+            );
+    if let Some(sats) = flow.arrived_amount_sat() {
+        done = done.push(observed_arrival_amount(sats, bitcoin_unit, mask_amounts));
+    }
+    col.push(
+        done.push(
             text(localized_copy(
                 "Your bitcoin has been added to your Spark wallet.",
             ))
             .size(P2_SIZE)
             .style(theme::text::secondary),
         )
+        .push(Space::new().height(Length::Fixed(6.0)))
         .push(
             button::primary(None, localized_copy("Done"))
                 .on_press(Msg::Reset)
                 .width(Length::Fixed(160.0)),
         ),
     )
-    .padding(24)
-    .width(Length::Fill)
-    .center_x(Length::Fill)
-    .style(theme::card::simple)
     .into()
-}
-
-/// Spark-specific status guidance. Diverges from the shared
-/// [`ShiftStatusKind::guidance`] at `Settled`: a Spark settle lands as on-chain
-/// BTC in the wallet's static deposit address, so it *hasn't* arrived in the
-/// spendable balance yet — it's confirming, and gets added automatically once it
-/// matures. The shared copy says "has arrived", which is what sent users looking
-/// for a transaction that wasn't there yet.
-fn spark_shift_guidance(status: &ShiftStatusKind) -> &'static str {
-    match status {
-        ShiftStatusKind::Settled => {
-            "Converting complete. Your bitcoin is arriving on-chain and will be added to your \
-             wallet automatically after about 3 confirmations — ~30 minutes."
-        }
-        other => other.guidance(),
-    }
 }
 
 fn settle_amount_display(
@@ -345,10 +961,12 @@ fn settle_amount_display(
     status: &ShiftStatusKind,
     bitcoin_unit: BitcoinDisplayUnit,
 ) -> String {
-    let settled = matches!(status, ShiftStatusKind::Settled);
+    // Once SideShift is settling it has fixed the bitcoin output, so the
+    // figure is firm — the same point the tile switches to "Bitcoin on the way".
+    let firm = matches!(status, ShiftStatusKind::Settling | ShiftStatusKind::Settled);
     format!(
         "{}{} {}",
-        if settled { "" } else { "≈ " },
+        if firm { "" } else { "≈ " },
         Amount::from_sat(sats).to_formatted_string_with_unit(bitcoin_unit),
         bitcoin_unit_label(bitcoin_unit),
     )
@@ -394,7 +1012,7 @@ fn observed_arrival_amount(
         arrived_amount_display(sats, bitcoin_unit),
         mask_amounts,
     ))
-    .size(H4_SIZE)
+    .size(H3_SIZE)
     .bold()
     .into()
 }
@@ -407,60 +1025,6 @@ fn bitcoin_unit_label(bitcoin_unit: BitcoinDisplayUnit) -> &'static str {
     }
 }
 
-fn status_badge(status: &ShiftStatusKind) -> (&'static str, iced::Color) {
-    match status {
-        ShiftStatusKind::Waiting => ("Waiting for deposit", color::GREY_3),
-        ShiftStatusKind::Pending | ShiftStatusKind::Processing => {
-            ("Deposit detected", color::ORANGE)
-        }
-        ShiftStatusKind::Settling => ("Settling…", color::ORANGE),
-        // Not "received": a Spark settle is on-chain BTC into the wallet's
-        // static deposit address, so at this point it's confirming, not yet
-        // spendable. Orange (in-progress), not green (done) — the green
-        // "arrived" moment is the celebration that fires once it's claimed.
-        ShiftStatusKind::Settled => ("Bitcoin arriving", color::ORANGE),
-        ShiftStatusKind::Expired => ("Expired", color::RED),
-        // Not a spinner: a held shift stays here until the user acts.
-        ShiftStatusKind::Review => ("On hold for review", color::RED),
-        ShiftStatusKind::Refunding => ("Refunding…", color::ORANGE),
-        ShiftStatusKind::Refunded => ("Refunded", color::GREY_3),
-        ShiftStatusKind::Error => ("Failed", color::RED),
-        ShiftStatusKind::Unknown(_) => ("Checking…", color::GREY_3),
-    }
-}
-
-fn info_card<'a>(
-    shift: &'a ShiftResponse,
-    selected: &crate::services::sideshift::DepositOption,
-) -> Element<'a, Msg> {
-    let mut rows = Column::new()
-        .spacing(8)
-        .push(kv(localized_copy("Shift ID"), shift.id.clone()))
-        .push(kv(localized_copy("You send"), selected.label.to_string()))
-        .push(kv(
-            localized_copy("You receive"),
-            "Bitcoin (BTC)".to_string(),
-        ));
-
-    if let (Some(min), Some(max)) = (&shift.deposit_min, &shift.deposit_max) {
-        rows = rows.push(kv("Limits", format!("{min} – {max}")));
-    }
-
-    Container::new(rows)
-        .padding([12, 16])
-        .width(Length::Fill)
-        .style(theme::card::border)
-        .into()
-}
-
-fn kv<'a>(label: &'a str, value: String) -> Element<'a, Msg> {
-    Row::new()
-        .push(text(label).size(P2_SIZE).style(theme::text::secondary))
-        .push(Space::new().width(Length::Fill))
-        .push(text(value).size(P2_SIZE))
-        .into()
-}
-
 // ── Loading / error ─────────────────────────────────────────────────────────
 
 fn loading_body<'a>(label: &'a str) -> Element<'a, Msg> {
@@ -468,7 +1032,6 @@ fn loading_body<'a>(label: &'a str) -> Element<'a, Msg> {
         .padding(24)
         .width(Length::Fill)
         .center_x(Length::Fill)
-        .style(theme::card::simple)
         .into()
 }
 
@@ -506,6 +1069,309 @@ mod tests {
     use crate::app::cache::Cache;
     use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
     use crate::app::view::shared::landing::capture;
+
+    fn marks(steps: [TrackerStep; 4]) -> [StepMark; 4] {
+        steps.map(|s| s.mark)
+    }
+    fn labels(steps: [TrackerStep; 4]) -> [&'static str; 4] {
+        steps.map(|s| s.label)
+    }
+
+    #[test]
+    fn tracker_walks_the_convert_path_one_step_per_status() {
+        use StepMark::*;
+        for (status, expected) in [
+            (None, [Current, Todo, Todo, Todo]),
+            (Some(ShiftStatusKind::Waiting), [Current, Todo, Todo, Todo]),
+            (Some(ShiftStatusKind::Pending), [Done, Current, Todo, Todo]),
+            (
+                Some(ShiftStatusKind::Processing),
+                [Done, Done, Current, Todo],
+            ),
+            (Some(ShiftStatusKind::Settling), [Done, Done, Done, Current]),
+            (Some(ShiftStatusKind::Settled), [Done, Done, Done, Current]),
+        ] {
+            let steps = tracker_steps(false, status.as_ref()).unwrap();
+            assert_eq!(labels(steps), CONVERT_STEPS);
+            assert_eq!(marks(steps), expected, "{:?}", status);
+        }
+        let arrived = tracker_steps(true, None).unwrap();
+        assert_eq!(marks(arrived), [Done; 4]);
+    }
+
+    #[test]
+    fn tracker_switches_to_the_refund_path_once_a_swap_stops() {
+        use StepMark::*;
+        let review = tracker_steps(false, Some(&ShiftStatusKind::Review)).unwrap();
+        assert_eq!(
+            labels(review),
+            [
+                "Deposit received",
+                "On hold for review",
+                "Refunding",
+                "Refunded"
+            ]
+        );
+        assert_eq!(marks(review), [Done, Halted, Todo, Todo]);
+
+        let failed = tracker_steps(false, Some(&ShiftStatusKind::Error)).unwrap();
+        assert_eq!(failed[1].label, "Swap failed");
+        assert_eq!(marks(failed), [Done, Halted, Todo, Todo]);
+
+        let refunding = tracker_steps(false, Some(&ShiftStatusKind::Refunding)).unwrap();
+        assert_eq!(refunding[1].label, "Swap stopped");
+        assert_eq!(marks(refunding), [Done, DoneMuted, Current, Todo]);
+
+        let refunded = tracker_steps(false, Some(&ShiftStatusKind::Refunded)).unwrap();
+        assert_eq!(marks(refunded), [Done, DoneMuted, Done, Done]);
+
+        assert!(tracker_steps(false, Some(&ShiftStatusKind::Expired)).is_none());
+    }
+
+    fn liquid_usdt() -> DepositOption {
+        crate::services::sideshift::deposit_options()
+            .iter()
+            .copied()
+            .find(|o| o.coin == "usdt" && o.network.network_name() == "Liquid")
+            .expect("USDt on Liquid is a deposit option")
+    }
+
+    fn sample_shift() -> ShiftResponse {
+        ShiftResponse {
+            id: "057b58372a64a80defb8".into(),
+            deposit_address: "lq1qqgp7u5wmv7na5rrr2fqensxelf93yj3cm3dvleyhksk3vqhh4ke7x6ngc5mwz0k8h2tm3l4a0y6c9xqvwdu5x2hqnf7yjr5gdpkaz8e3".into(),
+            deposit_coin: Some("USDT".into()),
+            deposit_network: Some("liquid".into()),
+            settle_address: None,
+            settle_coin: Some("BTC".into()),
+            settle_network: Some("bitcoin".into()),
+            deposit_min: Some("25.08".into()),
+            deposit_max: Some("30000".into()),
+            deposit_amount: None,
+            settle_amount: None,
+            rate: None,
+            expires_at: None,
+            created_at: None,
+            status: None,
+            affiliate_fee_percent: None,
+            network_fee_usd: None,
+        }
+    }
+
+    /// Every status mounts the body it should — and only that body — with the
+    /// shift details always underneath. `R06A_CAPTURE_DIR` saves each one.
+    #[test]
+    fn every_shift_status_renders_its_own_body_with_details() {
+        let shift = sample_shift();
+        let qr = iced::widget::qr_code::Data::new(&shift.deposit_address).unwrap();
+        let refund = "lq1qqvq9d3fkk0x2l5ffhaw5hm7r3w0yq0t5p4yq9ax7d2";
+        for (name, status, deposit, settle, present, absent) in [
+            (
+                "waiting",
+                Some(ShiftStatusKind::Waiting),
+                None,
+                None,
+                vec![
+                    "Waiting for deposit",
+                    "Deposit address",
+                    "Copy address",
+                    "Only send USDT on Liquid.",
+                    "Send between 25.08 and 30000 USDT. Amounts outside this range are refunded.",
+                ],
+                vec!["Deposit received", "Refund goes back to"],
+            ),
+            (
+                "detected",
+                Some(ShiftStatusKind::Pending),
+                Some("50.00"),
+                Some(31_250),
+                vec![
+                    "Deposit received",
+                    "50.00 USDT",
+                    "You will receive about",
+                    "≈ 31,250 SATS",
+                ],
+                vec!["Copy address", "Refund goes back to"],
+            ),
+            (
+                "converting",
+                Some(ShiftStatusKind::Processing),
+                Some("50.00"),
+                None,
+                vec![
+                    "Converting",
+                    "Set after conversion",
+                    "Estimate from SideShift",
+                ],
+                vec!["Copy address"],
+            ),
+            (
+                "arriving",
+                Some(ShiftStatusKind::Settled),
+                Some("50.00"),
+                Some(31_250),
+                vec!["Bitcoin on the way", "31,250 SATS", "Confirming on-chain"],
+                vec!["≈ 31,250 SATS", "Copy address"],
+            ),
+            (
+                "review",
+                Some(ShiftStatusKind::Review),
+                Some("50.00"),
+                None,
+                vec!["On hold for review", "Refund goes back to", "Copy shift ID"],
+                vec!["Copy address", "minimum"],
+            ),
+            (
+                "failed",
+                Some(ShiftStatusKind::Error),
+                Some("50.00"),
+                None,
+                vec!["Swap failed", "Refund goes back to"],
+                vec!["Copy shift ID"],
+            ),
+            (
+                "refunding",
+                Some(ShiftStatusKind::Refunding),
+                Some("12.00"),
+                None,
+                vec![
+                    "Swap stopped",
+                    "Refund goes back to",
+                    "12.00 USDT is below the 25.08 USDT minimum, so nothing was converted.",
+                ],
+                vec!["Copy address"],
+            ),
+            (
+                "refunded",
+                Some(ShiftStatusKind::Refunded),
+                Some("12.00"),
+                None,
+                vec!["Refunded", "12.00 USDT", "Done"],
+                vec!["Copy address", "Refund goes back to"],
+            ),
+            (
+                "expired",
+                Some(ShiftStatusKind::Expired),
+                None,
+                None,
+                vec!["Deposit address expired", "Get a new address"],
+                vec!["Waiting for deposit", "Copy address"],
+            ),
+        ] {
+            let view = ActiveShift {
+                shift: &shift,
+                selected: liquid_usdt(),
+                status: status.as_ref(),
+                qr: Some(&qr),
+                refund_address: refund,
+                polled_deposit_amount: deposit,
+                settle_amount_sat: settle,
+            };
+            for (appearance, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                let mounted = capture::inspect_wide_content(
+                    &format!("spark-shift-{name}"),
+                    active_shift_body(&view, BitcoinDisplayUnit::Sats, false),
+                    (1440, 900),
+                    appearance,
+                    theme,
+                    632,
+                );
+                for label in present.iter().chain(
+                    [
+                        "Shift ID",
+                        "057b58372a64a80defb8",
+                        "Refunds go to",
+                        "lq1qqvq9…x7d2",
+                    ]
+                    .iter(),
+                ) {
+                    assert!(
+                        mounted.contains(label),
+                        "{}/{}: missing {}",
+                        name,
+                        appearance,
+                        label
+                    );
+                }
+                for label in &absent {
+                    assert!(
+                        !mounted.contains(label),
+                        "{}/{}: unexpected {}",
+                        name,
+                        appearance,
+                        label
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn refund_reason_hides_the_deposit_amount_when_amounts_are_masked() {
+        let mut shift = sample_shift();
+        shift.deposit_amount = Some("12.00".into());
+        let view = ActiveShift {
+            shift: &shift,
+            selected: liquid_usdt(),
+            status: Some(&ShiftStatusKind::Refunding),
+            qr: None,
+            refund_address: "lq1qqvq9d3fkk0x2l5ffhaw5hm7r3w0yq0t5p4yq9ax7d2",
+            polled_deposit_amount: None,
+            settle_amount_sat: None,
+        };
+        assert_eq!(
+            out_of_range_reason(&view, false).as_deref(),
+            Some("12.00 USDT is below the 25.08 USDT minimum, so nothing was converted.")
+        );
+        let masked = out_of_range_reason(&view, true).unwrap();
+        assert_eq!(
+            masked,
+            "The deposit is below the 25.08 USDT minimum, so nothing was converted."
+        );
+        assert!(!masked.contains("12.00"));
+
+        for status in [ShiftStatusKind::Refunding, ShiftStatusKind::Refunded] {
+            let view = ActiveShift {
+                status: Some(&status),
+                ..view
+            };
+            let mounted = capture::inspect_wide_content(
+                "spark-shift-refund-masked",
+                active_shift_body(&view, BitcoinDisplayUnit::Sats, true),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+                632,
+            );
+            assert!(!mounted.contains("12.00"), "{:?} leaked the amount", status);
+            assert!(mounted.contains("The deposit is below the 25.08 USDT minimum"));
+        }
+    }
+
+    #[test]
+    fn decimal_comparison_is_exact_and_rejects_non_decimals() {
+        assert_eq!(cmp_decimal("12.00", "25.08"), Some(Ordering::Less));
+        assert_eq!(cmp_decimal("25.08", "25.080"), Some(Ordering::Equal));
+        assert_eq!(cmp_decimal("30000.01", "30000"), Some(Ordering::Greater));
+        assert_eq!(cmp_decimal("100", "99.999"), Some(Ordering::Greater));
+        assert_eq!(cmp_decimal("0.5", ".5"), Some(Ordering::Equal));
+        assert_eq!(cmp_decimal("007", "7"), Some(Ordering::Equal));
+        assert_eq!(cmp_decimal("1e3", "2"), None);
+        assert_eq!(cmp_decimal("", "2"), None);
+        assert_eq!(cmp_decimal("-1", "2"), None);
+    }
+
+    #[test]
+    fn short_address_keeps_head_and_tail() {
+        assert_eq!(
+            short_address("lq1qqgp7u5wmv7na5rrr2fqensxelf93yj3cm3dx7d2"),
+            "lq1qqgp7…x7d2"
+        );
+        assert_eq!(short_address(" bc1qshort "), "bc1qshort");
+    }
 
     #[test]
     fn observed_settle_and_arrival_amounts_follow_passive_privacy_authority() {
@@ -559,23 +1425,36 @@ mod tests {
     }
 
     #[test]
-    fn settled_guidance_uses_spark_confirming_copy() {
-        let spark_copy = spark_shift_guidance(&ShiftStatusKind::Settled);
-        let shared_copy = ShiftStatusKind::Settled.guidance();
+    fn spark_guidance_overrides_the_statuses_it_knows_more_about() {
+        let usdt = crate::services::sideshift::deposit_options()
+            .iter()
+            .copied()
+            .find(|o| o.coin == "usdt")
+            .unwrap();
 
-        assert_ne!(spark_copy, shared_copy);
-        assert!(spark_copy.contains("arriving on-chain"));
-        assert!(spark_copy.contains("automatically"));
-        assert!(spark_copy.contains("3 confirmations"));
-        assert!(!spark_copy.contains("has arrived"));
+        let waiting = spark_shift_guidance(Some(&ShiftStatusKind::Waiting), &usdt);
+        assert!(waiting.contains("USDT on "));
+        assert!(waiting.contains("address below"));
+
+        let settled = spark_shift_guidance(Some(&ShiftStatusKind::Settled), &usdt);
+        assert_ne!(settled, ShiftStatusKind::Settled.guidance());
+        assert!(settled.contains("arriving on-chain"));
+        assert!(settled.contains("automatically"));
+        assert!(settled.contains("3 confirmations"));
+        assert!(!settled.contains("has arrived"));
+
+        for status in [ShiftStatusKind::Pending, ShiftStatusKind::Processing] {
+            assert_ne!(
+                spark_shift_guidance(Some(&status), &usdt),
+                status.guidance()
+            );
+        }
     }
 
     #[test]
-    fn non_settled_guidance_delegates_to_shared_status_copy() {
+    fn refund_and_stopped_guidance_delegates_to_shared_status_copy() {
+        let usdt = crate::services::sideshift::deposit_options()[0];
         for status in [
-            ShiftStatusKind::Waiting,
-            ShiftStatusKind::Pending,
-            ShiftStatusKind::Processing,
             ShiftStatusKind::Settling,
             ShiftStatusKind::Expired,
             ShiftStatusKind::Review,
@@ -583,62 +1462,23 @@ mod tests {
             ShiftStatusKind::Refunded,
             ShiftStatusKind::Error,
         ] {
-            assert_eq!(spark_shift_guidance(&status), status.guidance());
+            assert_eq!(
+                spark_shift_guidance(Some(&status), &usdt),
+                status.guidance()
+            );
         }
     }
 
     #[test]
-    fn status_badges_distinguish_arriving_review_and_done_states() {
-        let (settled_label, settled_color) = status_badge(&ShiftStatusKind::Settled);
-        assert_eq!(settled_label, "Bitcoin arriving");
-        assert_eq!(settled_color, color::ORANGE);
-
-        let (review_label, review_color) = status_badge(&ShiftStatusKind::Review);
-        assert_eq!(review_label, "On hold for review");
-        assert_eq!(review_color, color::RED);
-
-        let (refunded_label, refunded_color) = status_badge(&ShiftStatusKind::Refunded);
-        assert_eq!(refunded_label, "Refunded");
-        assert_eq!(refunded_color, color::GREY_3);
-
-        let (unknown_label, unknown_color) =
-            status_badge(&ShiftStatusKind::Unknown("future".to_string()));
-        assert_eq!(unknown_label, "Checking…");
-        assert_eq!(unknown_color, color::GREY_3);
-    }
-
-    #[test]
-    fn status_badges_cover_waiting_in_flight_and_failed_states() {
-        for status in [ShiftStatusKind::Pending, ShiftStatusKind::Processing] {
-            let (label, color) = status_badge(&status);
-            assert_eq!(label, "Deposit detected");
-            assert_eq!(color, color::ORANGE);
-        }
-
+    fn settle_amount_display_is_approx_until_settling_and_uses_selected_unit() {
         assert_eq!(
-            status_badge(&ShiftStatusKind::Waiting),
-            ("Waiting for deposit", color::GREY_3)
+            settle_amount_display(
+                123_456_789,
+                &ShiftStatusKind::Settling,
+                BitcoinDisplayUnit::Sats
+            ),
+            "123,456,789 SATS"
         );
-        assert_eq!(
-            status_badge(&ShiftStatusKind::Settling),
-            ("Settling…", color::ORANGE)
-        );
-        assert_eq!(
-            status_badge(&ShiftStatusKind::Expired),
-            ("Expired", color::RED)
-        );
-        assert_eq!(
-            status_badge(&ShiftStatusKind::Refunding),
-            ("Refunding…", color::ORANGE)
-        );
-        assert_eq!(
-            status_badge(&ShiftStatusKind::Error),
-            ("Failed", color::RED)
-        );
-    }
-
-    #[test]
-    fn settle_amount_display_is_approx_until_settled_and_uses_selected_unit() {
         assert_eq!(
             settle_amount_display(
                 123_456_789,
