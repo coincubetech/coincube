@@ -84,6 +84,10 @@ pub struct SparkSideshiftReceiveFlow {
     /// deposit is detected), not the create-time estimate. Shown next to the
     /// "Bitcoin arriving" status so the user sees how much is on the way.
     settle_amount_sat: Option<u64>,
+    /// The deposit SideShift has seen, in the deposit coin, as the decimal
+    /// string it reports. Shown on the "Deposit received" tile and used to say
+    /// why a refund happened when the amount was outside the shift's limits.
+    deposit_amount: Option<String>,
     /// The actual amount claimed into the wallet on arrival (post network fee),
     /// in sats. Set when the flow reaches [`SparkShiftPhase::Arrived`].
     arrived_amount_sat: Option<u64>,
@@ -109,6 +113,7 @@ impl SparkSideshiftReceiveFlow {
             shift: None,
             shift_status: None,
             settle_amount_sat: None,
+            deposit_amount: None,
             arrived_amount_sat: None,
             qr_data: None,
             loading: false,
@@ -150,6 +155,9 @@ impl SparkSideshiftReceiveFlow {
     pub fn settle_amount_sat(&self) -> Option<u64> {
         self.settle_amount_sat
     }
+    pub fn deposit_amount(&self) -> Option<&str> {
+        self.deposit_amount.as_deref()
+    }
     pub fn arrived_amount_sat(&self) -> Option<u64> {
         self.arrived_amount_sat
     }
@@ -174,6 +182,7 @@ impl SparkSideshiftReceiveFlow {
         self.shift = None;
         self.shift_status = None;
         self.settle_amount_sat = None;
+        self.deposit_amount = None;
         self.arrived_amount_sat = None;
         self.qr_data = None;
         self.loading = false;
@@ -380,6 +389,14 @@ impl SparkSideshiftReceiveFlow {
                     if settle_sat.is_some() {
                         self.settle_amount_sat = settle_sat;
                     }
+                    if let Some(amount) = status
+                        .deposit_amount
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|a| !a.is_empty())
+                    {
+                        self.deposit_amount = Some(amount.to_string());
+                    }
                     if settled {
                         // The bitcoin has landed at Spark's on-chain deposit
                         // address, which means it shows up as an *unclaimed
@@ -429,6 +446,33 @@ impl SparkSideshiftReceiveFlow {
                     Task::done(Message::View(view::Message::ShowToast(
                         log::Level::Info,
                         "Copied deposit address to clipboard".to_string(),
+                    ))),
+                ])
+            }
+
+            Msg::CopyShiftId => {
+                let Some(shift) = &self.shift else {
+                    return Task::none();
+                };
+                Task::batch([
+                    clipboard::write(shift.id.clone()),
+                    Task::done(Message::View(view::Message::ShowToast(
+                        log::Level::Info,
+                        "Copied shift ID to clipboard".to_string(),
+                    ))),
+                ])
+            }
+
+            Msg::CopyRefundAddress => {
+                let address = self.refund_address.trim();
+                if address.is_empty() {
+                    return Task::none();
+                }
+                Task::batch([
+                    clipboard::write(address.to_string()),
+                    Task::done(Message::View(view::Message::ShowToast(
+                        log::Level::Info,
+                        "Copied refund address to clipboard".to_string(),
                     ))),
                 ])
             }

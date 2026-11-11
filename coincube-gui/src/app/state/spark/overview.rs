@@ -507,7 +507,11 @@ fn save_lightning_qr(address: String) -> Task<Message> {
             else {
                 return Ok(false);
             };
-            std::fs::write(handle.path(), png).map_err(|e| e.to_string())?;
+            let path = handle.path().to_path_buf();
+            tokio::task::spawn_blocking(move || std::fs::write(path, png))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
             Ok(true)
         },
         |result: Result<bool, String>| result,

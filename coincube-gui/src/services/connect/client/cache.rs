@@ -106,16 +106,22 @@ async fn open_owner_cache(path: &std::path::Path) -> std::io::Result<tokio::fs::
     let mut opts = OpenOptions::new();
     opts.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
-    if !path.exists() {
+    if !tokio::fs::try_exists(path).await.unwrap_or(false) {
         // Create owner-only before the tokio open. Tokio's OpenOptions on
         // this toolchain cannot set the mode itself.
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(path)?;
+        let owned = path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(owned)
+                .map(drop)
+        })
+        .await
+        .map_err(std::io::Error::other)??;
     }
     let file = opts.open(path).await?;
     #[cfg(unix)]

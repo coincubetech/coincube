@@ -943,6 +943,10 @@ pub enum SparkSideshiftReceiveMessage {
     },
     /// Copy the deposit address.
     Copy,
+    /// Copy the shift ID (what SideShift support asks for).
+    CopyShiftId,
+    /// Copy the refund address the user gave.
+    CopyRefundAddress,
     Back,
     Reset,
 }
