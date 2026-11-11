@@ -944,6 +944,20 @@ class FreshRunner(Runner):
         self.stage_phone()
         return True
 
+    def review_incoming_discovery(self):
+        # A known notification can appear before or after the phone's remote
+        # guard. Recheck credential/markers and the exact session before any UI.
+        try:
+            return self.require_pending_discovery()
+        except Blocked as error:
+            result = getattr(self, "last_collection", {})
+            if (not isinstance(error, Failed) and error.code == "REQUEST_DISCOVERY_ADVANCED"
+                    and result.get("ready") is False and type(result.get("status")) is int
+                    and result["status"] in (2, 3) and type(result.get("submitted_signature_count")) is int
+                    and result["submitted_signature_count"] == 0):
+                return True
+            raise
+
     def continue_request_discovery(self):
         if "request_discovery_restart" in self.artifacts:
             self.validate_discovery_restart()  # An incomplete attempt always blocks before navigation.
@@ -952,6 +966,8 @@ class FreshRunner(Runner):
                 return False
             return self.restart_request_discovery()
         except Blocked as error:
+            if not isinstance(error, Failed) and error.code == "REQUEST_DISCOVERY_INCOMING":
+                return self.review_incoming_discovery()
             result = getattr(self, "last_collection", {})
             if (not isinstance(error, Failed) and error.code == "REQUEST_DISCOVERY_ADVANCED"
                     and result.get("ready") is False and type(result.get("status")) is int

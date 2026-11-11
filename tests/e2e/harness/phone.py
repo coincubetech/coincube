@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "diagnostics"))
 import ios_usb_wda as usb
 
 BUNDLE = "io.coincube.keychainApp"
+INCOMING_TRANSACTION = frozenset({"Incoming transaction", "Review the details before approving", "View transaction", "Not now"})
 
 
 def device_query(*args):
@@ -341,7 +342,7 @@ class Phone:
         leaves[0].click()
 
     def dismiss_incoming(self, labels):
-        if {"Incoming transaction", "Review the details before approving", "View transaction", "Not now"} <= labels:
+        if INCOMING_TRANSACTION <= labels:
             # The app's onDismiss only pops this notification sheet. It does
             # not reject the session. Select the exact run note from the
             # authenticated queue instead of assuming this modal is our request.
@@ -456,6 +457,13 @@ class Phone:
                          "Pick a cube on the testnet4 network."}
             modals = self.driver.find_elements(AppiumBy.IOS_PREDICATE,
                 'visible == true AND (type == "XCUIElementTypeAlert" OR type == "XCUIElementTypeSheet")')
+            if INCOMING_TRANSACTION <= labels:
+                self.reject_pin_error(labels)
+            if (INCOMING_TRANSACTION <= labels and not labels & (forbidden - INCOMING_TRANSACTION)
+                    and not modals and len(self.matching_controls("Not now")) == 1):
+                # This existing notification contract has an ordinary, exact
+                # queue-review path. Do not dismiss it or consume a restart here.
+                raise Blocked("REQUEST_DISCOVERY_INCOMING", "The known incoming-transaction notification is ready for ordinary request discovery.")
             if not {"Home", "Cubes", "Settings", "Add signer key"} <= labels or labels & forbidden or modals:
                 raise Blocked("REQUEST_DISCOVERY_HOME", "Discovery restart requires public Home with no modal or authentication challenge.")
         require_home()

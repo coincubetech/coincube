@@ -1493,3 +1493,74 @@ def test_advanced_session_review_timeout_stops_without_a_second_discovery_pass(r
     assert error.value.code == 'REQUEST_DELIVERY'
     assert calls == ['ordinary-review']
     assert 'request_discovery_restart' not in runner.artifacts
+
+
+@pytest.mark.parametrize('after_remote', [False, True])
+@pytest.mark.parametrize('status', [1, 2, 3])
+def test_known_incoming_refusal_routes_fresh_guarded_ordinary_review(runner, status, after_remote):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    result = {'ready': False, 'status': 1, 'submitted_signature_count': 0}
+    runner.native_call = lambda *a, **k: dict(result)
+    def incoming(journal, receipt, *, before_restart):
+        if after_remote: assert before_restart()
+        result['status'] = status
+        raise Blocked('REQUEST_DISCOVERY_INCOMING', 'Synthetic exact notification')
+    runner.phone.restart_for_request_discovery = incoming
+    runner.stage_sign()
+    assert calls == ['ordinary-review']
+    assert 'request_discovery_restart' not in runner.artifacts
+    assert 'approval_started' not in runner.artifacts
+
+
+@pytest.mark.parametrize('mutation', ['approval_started', 'approval_context', 'pin_resume_probe', 'pin_dispatch_started',
+                                     'pending_attempt', 'reservation', 'unverified', 'foreign-credential'])
+def test_known_incoming_cannot_bypass_new_input_or_credential_markers(runner, mutation):
+    state, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    def incoming(journal, receipt, *, before_restart):
+        if mutation == 'pending_attempt': state[mutation] = 'sign:' + runner.request_id
+        elif mutation == 'reservation': state['key_generation_reservation'] = {'status': 'reserved'}
+        elif mutation == 'unverified': state['verified'] = False
+        elif mutation == 'foreign-credential': state['identity'] = 'other'
+        else: runner.artifacts[mutation] = True
+        raise Blocked('REQUEST_DISCOVERY_INCOMING', 'Synthetic exact notification')
+    runner.phone.restart_for_request_discovery = incoming
+    with pytest.raises(Blocked) as error: runner.stage_sign()
+    assert error.value.code == 'REQUEST_DISCOVERY_INPUT'
+    assert calls == [] and 'request_discovery_restart' not in runner.artifacts
+
+
+@pytest.mark.parametrize('status,count', [(4, 0), (6, 0), (99, 0), (1, 1), (3, None)])
+def test_known_incoming_cannot_bypass_fresh_session_state_guard(runner, status, count):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    def incoming(journal, receipt, *, before_restart):
+        runner.native_call = lambda *a, **k: {'ready': False, 'status': status, 'submitted_signature_count': count}
+        raise Blocked('REQUEST_DISCOVERY_INCOMING', 'Synthetic exact notification')
+    runner.phone.restart_for_request_discovery = incoming
+    with pytest.raises(Blocked) as error: runner.stage_sign()
+    assert error.value.code == 'REQUEST_DISCOVERY_ADVANCED'
+    assert calls == [] and 'request_discovery_restart' not in runner.artifacts
+
+
+def test_unknown_home_refusal_is_not_rerouted_to_review(runner):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    def unknown(*a, **k): raise Blocked('REQUEST_DISCOVERY_HOME', 'Synthetic unknown modal')
+    runner.phone.restart_for_request_discovery = unknown
+    with pytest.raises(Blocked) as error: runner.stage_sign()
+    assert error.value.code == 'REQUEST_DISCOVERY_HOME'
+    assert calls == [] and 'request_discovery_restart' not in runner.artifacts
+
+
+def test_signature_arrival_after_known_incoming_moves_to_collection(runner):
+    _, calls = discovery_case(runner)
+    runner.archive_discovery_timeout(runner.journal.data['stages']['sign'])
+    def incoming(*a, **k):
+        runner.native_call = lambda *a, **k: {'ready': True, 'status': 6, 'submitted_signature_count': 1, 'signature_count_min': 2}
+        raise Blocked('REQUEST_DISCOVERY_INCOMING', 'Synthetic exact notification')
+    runner.phone.restart_for_request_discovery = incoming
+    runner.stage_sign()
+    assert calls == [] and runner.artifacts['signature_count_min'] == 2
+    assert 'request_discovery_restart' not in runner.artifacts

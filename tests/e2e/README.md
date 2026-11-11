@@ -163,6 +163,10 @@ If the exact session advances to DELIVERED or VIEWED with zero submissions,
 the runner proceeds to ordinary exact-request review without restarting or
 consuming the restart allowance. Approved, terminal, unknown, or nonzero-submission
 states cannot use this path; a verified signature proceeds to collection.
+The exact known incoming-transaction notification also routes to ordinary queue
+review after fresh idle-credential and session checks, without consuming a
+restart. Partial, ambiguous, authentication, and unknown modal screens remain
+blocked; the notification itself is never treated as the selected request.
 No request, approval, or PIN marker is reset or replaced. This is a bounded
 discovery repair, not evidence that the underlying delivery cause is resolved.
 

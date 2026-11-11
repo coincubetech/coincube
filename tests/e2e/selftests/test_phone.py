@@ -763,3 +763,43 @@ def test_modal_arriving_during_remote_guard_prevents_discovery_restart():
         phone.restart_for_request_discovery(journal, receipt, before_restart=incoming)
     assert error.value.code == 'REQUEST_DISCOVERY_HOME'
     assert calls == [] and not journal.data['artifacts']
+
+
+@pytest.mark.parametrize('after_remote', [False, True])
+def test_known_incoming_notification_selects_ordinary_discovery_without_restart(after_remote):
+    phone, journal, receipt, calls = discovery_phone()
+    phone.matching_controls = lambda label: [object()] if label == 'Not now' else []
+    phone.labels = lambda: HOME | {'Add signer key'} if after_remote else INCOMING
+    def remote():
+        assert after_remote
+        phone.labels = lambda: INCOMING
+        return True
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=remote)
+    assert error.value.code == 'REQUEST_DISCOVERY_INCOMING'
+    assert calls == [] and not journal.data['artifacts']
+
+
+@pytest.mark.parametrize('case', ['partial', 'ambiguous', 'missing-button', 'auth', 'unknown-modal', 'unrelated'])
+def test_incoming_restart_refusal_is_narrow_and_never_excuses_other_screens(case):
+    phone, journal, receipt, calls = discovery_phone(modal=case == 'unknown-modal')
+    labels = set(INCOMING)
+    if case == 'partial': labels.remove('Review the details before approving')
+    if case == 'auth': labels.add('Enter PIN')
+    if case == 'unrelated': labels = {'Signer store needs repair', 'Not now'}
+    phone.labels = lambda: labels
+    phone.matching_controls = lambda label: [object()] * (2 if case == 'ambiguous' else 0 if case == 'missing-button' else 1)
+    with pytest.raises(Blocked) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: pytest.fail('Unknown UI must block first'))
+    assert error.value.code == 'REQUEST_DISCOVERY_HOME'
+    assert calls == [] and not journal.data['artifacts']
+
+
+def test_known_incoming_does_not_hide_a_pin_rejection():
+    phone, journal, receipt, calls = discovery_phone()
+    phone.labels = lambda: INCOMING | {'Incorrect PIN', '2 attempts remaining'}
+    phone.matching_controls = lambda label: [object()]
+    with pytest.raises(Failed) as error:
+        phone.restart_for_request_discovery(journal, receipt, before_restart=lambda: pytest.fail('PIN rejection must block first'))
+    assert error.value.code == 'PIN_REJECTED'
+    assert calls == [] and not journal.data['artifacts']
