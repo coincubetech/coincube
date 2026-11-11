@@ -74,7 +74,7 @@ fn other(asset: WalletAsset) -> WalletAsset {
 }
 
 /// `dollars` with cents and thousands separators: "82,700.00".
-fn dollars(dollars: f64) -> String {
+pub fn dollars(dollars: f64) -> String {
     format_token_display_u128((dollars.max(0.0) * 100.0).round() as u128, 2)
 }
 
@@ -105,9 +105,14 @@ fn converted_at(amount: AssetAmount, price: f64, usdb_decimals: u32) -> AssetAmo
 
 /// The estimate's own rate: dollars per bitcoin, from its two amounts.
 pub fn estimated_rate(ok: &PrepareSwapOk, usdb_decimals: u32) -> Option<f64> {
-    let (btc, usdb) = match ok.quote.amount_in.asset {
-        WalletAsset::Bitcoin => (ok.quote.amount_in.amount, ok.quote.amount_out.amount),
-        WalletAsset::Usdb => (ok.quote.amount_out.amount, ok.quote.amount_in.amount),
+    quote_rate(&ok.quote, usdb_decimals)
+}
+
+/// A conversion quote's rate, dollars per bitcoin. Send's Review shows it.
+pub fn quote_rate(quote: &ConversionQuote, usdb_decimals: u32) -> Option<f64> {
+    let (btc, usdb) = match quote.amount_in.asset {
+        WalletAsset::Bitcoin => (quote.amount_in.amount, quote.amount_out.amount),
+        WalletAsset::Usdb => (quote.amount_out.amount, quote.amount_in.amount),
     };
     (btc > 0)
         .then(|| (usdb as f64 / 10_f64.powi(usdb_decimals as i32)) / (btc as f64 / 100_000_000.0))
@@ -121,7 +126,11 @@ pub fn fee_line(ok: &PrepareSwapOk, usdb_decimals: u32) -> String {
 /// A conversion quote's fee, with its share of the amount converted when
 /// both are in the same asset. Send's Review shows it too.
 pub fn quote_fee_line(quote: &ConversionQuote, usdb_decimals: u32) -> String {
-    let fee = format_asset(quote.fee.asset, quote.fee.amount, usdb_decimals);
+    let mut fee = format_asset(quote.fee.asset, quote.fee.amount, usdb_decimals);
+    // A fee under a cent would read as free: say it is under a cent.
+    if quote.fee.asset == WalletAsset::Usdb && quote.fee.amount > 0 && fee.starts_with("0.00 ") {
+        fee = "< 0.01 USDB".to_owned();
+    }
     if quote.amount_in.amount == 0 || quote.fee.asset != quote.amount_in.asset {
         return fee;
     }
@@ -954,6 +963,9 @@ mod tests {
         // 1,000.00 USDB for 1,246,560 sats, 1.00 USDB fee.
         let to_btc = quote(WalletAsset::Usdb, 1_000_000_000, 1_246_560, 1_000_000);
         assert_eq!(fee_line(&to_btc, 6), "1.00 USDB (0.10%)");
+        // A fee under a cent never reads as free.
+        let tiny = quote(WalletAsset::Usdb, 750_000, 1_012, 750);
+        assert_eq!(fee_line(&tiny, 6), "< 0.01 USDB (0.10%)");
         assert_eq!(price_change(50), "0.5%");
         assert_eq!(price_change(100), "1%");
     }

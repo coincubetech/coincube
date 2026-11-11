@@ -1079,6 +1079,7 @@ impl State for SparkSend {
                 | SparkSendMessage::SetReceiveTarget(_)
                 | SparkSendMessage::SelectPayFrom(_)
                 | SparkSendMessage::PrepareRequested
+                | SparkSendMessage::EditDetails
                 | SparkSendMessage::Reset
         ) {
             return Task::none();
@@ -1628,6 +1629,15 @@ impl State for SparkSend {
                 Task::done(Message::View(crate::app::view::Message::SparkSend(
                     SparkSendMessage::PrepareRequested,
                 )))
+            }
+            SparkSendMessage::EditDetails => {
+                // Only a quote has details to go back to. The quote, its
+                // recipient lookup and its payment key go: Prepare asks again.
+                if matches!(self.phase, SparkSendPhase::Prepared(_)) {
+                    self.phase = SparkSendPhase::Idle;
+                    self.abandon_payment_intent();
+                }
+                Task::none()
             }
             SparkSendMessage::Reset => {
                 self.invalidate_recipient_identity();
@@ -3361,6 +3371,27 @@ mod tests {
             panel,
             SparkSendMessage::CrossChainRoutesLoaded(generation, Ok(routes)),
         );
+    }
+
+    /// Review's Back returns to the form with what was typed, and drops the
+    /// quote and its payment key so Prepare quotes again.
+    #[test]
+    fn back_from_review_keeps_what_was_typed() {
+        let mut panel = SparkSend::new(None);
+        panel.destination_input = "lnbc15u1synthetic".to_owned();
+        panel.amount_input = "1500".to_owned();
+        panel.phase = SparkSendPhase::Prepared(plain_prepare("review"));
+        panel.send_idempotency_key = Some("review-key".to_owned());
+        drop(send(&mut panel, SparkSendMessage::EditDetails));
+        assert!(matches!(panel.phase, SparkSendPhase::Idle));
+        assert_eq!(panel.destination_input, "lnbc15u1synthetic");
+        assert_eq!(panel.amount_input, "1500");
+        assert!(panel.send_idempotency_key.is_none());
+
+        // Outside Review there is nothing to go back to.
+        panel.phase = SparkSendPhase::Sending;
+        drop(send(&mut panel, SparkSendMessage::EditDetails));
+        assert!(matches!(panel.phase, SparkSendPhase::Sending));
     }
 
     fn plain_prepare(handle: &str) -> PrepareSendOk {
