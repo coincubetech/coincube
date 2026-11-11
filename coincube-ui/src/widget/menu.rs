@@ -321,6 +321,42 @@ where
     class: &'a <Theme as Catalog>::Class<'b>,
 }
 
+impl<'a, 'b, Message, Theme, Renderer> List<'a, 'b, Message, Theme, Renderer>
+where
+    Theme: Catalog,
+    Renderer: text::Renderer,
+{
+    fn select_hovered_option(
+        &mut self,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+    ) {
+        if let Some(index) = *self.hovered_option {
+            if let Some(option) = self.options.get(index) {
+                *self.hovered_option = None;
+                let content = match option {
+                    Command::Copy => {
+                        clipboard.write(clipboard::Kind::Standard, self.value.clone());
+                        None
+                    }
+                    Command::Paste => {
+                        let content: String = clipboard
+                            .read(clipboard::Kind::Standard)
+                            .unwrap_or_default()
+                            .chars()
+                            .filter(|c| !c.is_control())
+                            .collect();
+                        Some(content)
+                    }
+                };
+                if let Some(msg) = (self.on_select)(content) {
+                    shell.publish(msg);
+                }
+            }
+        }
+    }
+}
+
 impl<'a, 'b, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
     for List<'a, 'b, Message, Theme, Renderer>
 where
@@ -372,29 +408,7 @@ where
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if cursor.is_over(layout.bounds()) {
-                    if let Some(index) = *self.hovered_option {
-                        if let Some(option) = self.options.get(index) {
-                            *self.hovered_option = None;
-                            let content = match option {
-                                Command::Copy => {
-                                    clipboard.write(clipboard::Kind::Standard, self.value.clone());
-                                    None
-                                }
-                                Command::Paste => {
-                                    let content: String = clipboard
-                                        .read(clipboard::Kind::Standard)
-                                        .unwrap_or_default()
-                                        .chars()
-                                        .filter(|c| !c.is_control())
-                                        .collect();
-                                    Some(content)
-                                }
-                            };
-                            if let Some(msg) = (self.on_select)(content) {
-                                shell.publish(msg);
-                            }
-                        }
-                    }
+                    self.select_hovered_option(clipboard, shell);
                 }
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
@@ -419,29 +433,7 @@ where
 
                     *self.hovered_option = Some((cursor_position.y / option_height) as usize);
 
-                    if let Some(index) = *self.hovered_option {
-                        if let Some(option) = self.options.get(index) {
-                            *self.hovered_option = None;
-                            let content = match option {
-                                Command::Copy => {
-                                    clipboard.write(clipboard::Kind::Standard, self.value.clone());
-                                    None
-                                }
-                                Command::Paste => {
-                                    let content: String = clipboard
-                                        .read(clipboard::Kind::Standard)
-                                        .unwrap_or_default()
-                                        .chars()
-                                        .filter(|c| !c.is_control())
-                                        .collect();
-                                    Some(content)
-                                }
-                            };
-                            if let Some(msg) = (self.on_select)(content) {
-                                shell.publish(msg);
-                            }
-                        }
-                    }
+                    self.select_hovered_option(clipboard, shell);
                 }
             }
             _ => {}
