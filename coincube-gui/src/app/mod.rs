@@ -38,7 +38,7 @@ use tokio::runtime::Handle;
 use tracing::{error, info, warn};
 
 pub use coincube_core::miniscript::bitcoin;
-use coincube_ui::{component::network_banner, theme as ui_theme, widget::Element};
+use coincube_ui::{component::network_banner, widget::Element};
 pub use coincubed::{
     commands::CoinStatus,
     config::{BitcoindRpcAuth, Config as DaemonConfig},
@@ -11721,13 +11721,10 @@ impl App {
         // Overlay toast at bottom if present
         let content: Element<'_, Message> = match self.errors.is_empty() {
             true => content,
-            false => {
-                let theme = ui_theme::Theme::default();
-                iced::widget::Stack::new()
-                    .push(content)
-                    .push(view::toast_overlay(self.displayed_toasts(), &theme).map(Message::View))
-                    .into()
-            }
+            false => iced::widget::Stack::new()
+                .push(content)
+                .push(view::toast_overlay(self.displayed_toasts()).map(Message::View))
+                .into(),
         };
 
         // One-time recovery-alerts consent prompt overlays everything (PR 3).
@@ -17381,10 +17378,7 @@ mod incoming_liquid_toast_privacy_tests {
         let mounted = |app: &super::App| {
             capture::inspect(
                 "incoming-liquid-waiting-toast",
-                super::view::toast_overlay(
-                    app.displayed_toasts(),
-                    &coincube_ui::theme::Theme::dark(),
-                ),
+                super::view::toast_overlay(app.displayed_toasts()),
                 (1024, 768),
                 "dark",
                 coincube_ui::theme::Theme::dark(),
@@ -17545,6 +17539,7 @@ mod hidden_liquid_receive_tests {
 mod settings_navigation_integration_tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
+    use coincube_ui::theme as ui_theme;
 
     #[test]
     fn bare_vault_settings_route_mounts_the_selected_wallet_section() {
