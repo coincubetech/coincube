@@ -90,15 +90,7 @@ pub fn verify(selected: OutPoint, links: &[Link<'_>]) -> Result<CoinbaseDependen
     if links.is_empty() || links.len() > MAX_PATH_TRANSACTIONS {
         return Err(Error::PathLimit);
     }
-    let mut bytes = 0usize;
-    for link in links {
-        bytes = bytes
-            .checked_add(link.transaction.len())
-            .ok_or(Error::ByteLimit)?;
-        if link.transaction.len() > MAX_TRANSACTION_BYTES || bytes > MAX_PATH_BYTES {
-            return Err(Error::ByteLimit);
-        }
-    }
+    validate_path_bytes(links)?;
     let mut expected = selected;
     let mut seen = BTreeSet::new();
     let mut txids = Vec::with_capacity(links.len());
@@ -140,6 +132,19 @@ pub fn verify(selected: OutPoint, links: &[Link<'_>]) -> Result<CoinbaseDependen
         expected = parent;
     }
     Err(Error::IncompletePath)
+}
+
+fn validate_path_bytes(links: &[Link<'_>]) -> Result<(), Error> {
+    let mut bytes = 0usize;
+    for link in links {
+        bytes = bytes
+            .checked_add(link.transaction.len())
+            .ok_or(Error::ByteLimit)?;
+        if link.transaction.len() > MAX_TRANSACTION_BYTES || bytes > MAX_PATH_BYTES {
+            return Err(Error::ByteLimit);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

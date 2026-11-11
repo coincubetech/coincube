@@ -1079,38 +1079,8 @@ fn verify_retained_witness<C: secp256k1::Verification>(
     }
     let mut counts = Vec::with_capacity(transaction.input.len());
     for (index, input) in transaction.input.iter().enumerate() {
-        let interpreter = Interpreter::from_txdata(
-            &prevouts[index].script_pubkey,
-            &input.script_sig,
-            &input.witness,
-            input.sequence,
-            transaction.lock_time,
-        )
-        .map_err(|_| FinalizeError::InvalidWitness)?;
-        let mut signatures = 0;
-        for constraint in interpreter.iter(secp, transaction, index, &Prevouts::All(prevouts)) {
-            let pair = match constraint.map_err(|_| FinalizeError::InvalidWitness)? {
-                SatisfiedConstraint::PublicKey { key_sig }
-                | SatisfiedConstraint::PublicKeyHash { key_sig, .. } => Some(key_sig),
-                _ => None,
-            };
-            if let Some(pair) = pair {
-                match pair {
-                    KeySigPair::Ecdsa(key, sig)
-                        if sig.sighash_type == EcdsaSighashType::All
-                            && original.inputs[index]
-                                .bip32_derivation
-                                .contains_key(&key.inner) =>
-                    {
-                        signatures += 1
-                    }
-                    _ => return Err(FinalizeError::InvalidWitness),
-                }
-            }
-        }
-        if signatures == 0 {
-            return Err(FinalizeError::InvalidWitness);
-        }
+        let signatures =
+            verify_retained_input(transaction, original, prevouts, secp, index, input)?;
         counts.push(signatures);
     }
     Ok(counts)
@@ -1144,3 +1114,46 @@ pub use unified::{
 #[cfg(test)]
 #[path = "foreign_split/tests.rs"]
 mod tests;
+
+fn verify_retained_input<C: secp256k1::Verification>(
+    transaction: &Transaction,
+    original: &Psbt,
+    prevouts: &[bitcoin::TxOut],
+    secp: &secp256k1::Secp256k1<C>,
+    index: usize,
+    input: &bitcoin::TxIn,
+) -> Result<usize, FinalizeError> {
+    let interpreter = Interpreter::from_txdata(
+        &prevouts[index].script_pubkey,
+        &input.script_sig,
+        &input.witness,
+        input.sequence,
+        transaction.lock_time,
+    )
+    .map_err(|_| FinalizeError::InvalidWitness)?;
+    let mut signatures = 0;
+    for constraint in interpreter.iter(secp, transaction, index, &Prevouts::All(prevouts)) {
+        let pair = match constraint.map_err(|_| FinalizeError::InvalidWitness)? {
+            SatisfiedConstraint::PublicKey { key_sig }
+            | SatisfiedConstraint::PublicKeyHash { key_sig, .. } => Some(key_sig),
+            _ => None,
+        };
+        if let Some(pair) = pair {
+            match pair {
+                KeySigPair::Ecdsa(key, sig)
+                    if sig.sighash_type == EcdsaSighashType::All
+                        && original.inputs[index]
+                            .bip32_derivation
+                            .contains_key(&key.inner) =>
+                {
+                    signatures += 1
+                }
+                _ => return Err(FinalizeError::InvalidWitness),
+            }
+        }
+    }
+    if signatures == 0 {
+        return Err(FinalizeError::InvalidWitness);
+    }
+    Ok(signatures)
+}

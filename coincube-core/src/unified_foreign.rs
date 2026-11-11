@@ -231,30 +231,7 @@ pub(crate) fn sign_foreign_unified<C: secp256k1::Signing + secp256k1::Verificati
     let contexts = validate_inputs(psbt)?;
     verify_with_contexts(psbt, secp, &contexts)?;
 
-    let fingerprint = signer.fingerprint(secp);
-    let mut wanted = Vec::new();
-    for (input_index, input) in psbt.psbt().inputs.iter().enumerate() {
-        for (raw_public_key, (origin, path)) in &input.bip32_derivation {
-            if *origin != fingerprint {
-                continue;
-            }
-            let public_key = PublicKey::new(*raw_public_key);
-            if signer.public_key_at(path, secp).ok() != Some(*raw_public_key) {
-                return Err(ForeignUnifiedError::DerivedPublicKeyMismatch {
-                    input: input_index,
-                    public_key,
-                });
-            }
-            if !contexts[input_index].uses_key(&public_key) {
-                return Err(ForeignUnifiedError::KeyNotInScript {
-                    input: input_index,
-                    public_key,
-                });
-            }
-            require_compatible_sighash(input_index, input.sighash_type)?;
-            wanted.push((input_index, public_key, path.clone()));
-        }
-    }
+    let wanted = signing_keys(signer, psbt, &contexts, secp)?;
     if wanted.is_empty() {
         return Err(ForeignUnifiedError::NothingToSign);
     }
@@ -322,61 +299,12 @@ pub fn finalize_foreign_unified<C: secp256k1::Verification>(
     let mut reports = Vec::with_capacity(contexts.len());
 
     for (input_index, context) in contexts.iter().enumerate() {
-        let mut mine = records.iter().filter(|r| r.input_index == input_index);
-        let txin = &mut transaction.input[input_index];
-        let used = match &context.keys {
-            Keys::Hash { .. } => {
-                // Verified records all hash to the one key, so at most one.
-                let record = mine.next().ok_or(ForeignUnifiedError::Unsatisfiable {
-                    input: input_index,
-                    have: 0,
-                    need: 1,
-                })?;
-                let key = record.public_key.to_bytes();
-                if context.script_type == SCRIPT_TYPE_BASE {
-                    txin.script_sig = Builder::new()
-                        .push_slice(push_bytes(record.signature.clone()))
-                        .push_slice(push_bytes(key))
-                        .into_script();
-                } else {
-                    if let Some(redeem) = &context.script {
-                        txin.script_sig = Builder::new()
-                            .push_slice(push_bytes(redeem.to_bytes()))
-                            .into_script();
-                    }
-                    txin.witness = Witness::from_slice(&[record.signature.clone(), key]);
-                }
-                1
-            }
-            Keys::Multi { threshold, keys } => {
-                // CHECKMULTISIG consumes signatures in key order: take the
-                // first `threshold` signed keys in script order.
-                let mut elements: Vec<Vec<u8>> = vec![Vec::new()];
-                for key in keys {
-                    if elements.len() > *threshold {
-                        break;
-                    }
-                    if let Some(record) = records
-                        .iter()
-                        .find(|r| r.input_index == input_index && r.public_key == *key)
-                    {
-                        elements.push(record.signature.clone());
-                    }
-                }
-                let have = elements.len() - 1;
-                if have < *threshold {
-                    return Err(ForeignUnifiedError::Unsatisfiable {
-                        input: input_index,
-                        have,
-                        need: *threshold,
-                    });
-                }
-                let script = context.script.as_ref().expect("P2WSH context has a script");
-                elements.push(script.to_bytes());
-                txin.witness = Witness::from_slice(&elements);
-                have
-            }
-        };
+        let used = finalize_input(
+            input_index,
+            context,
+            &records,
+            &mut transaction.input[input_index],
+        )?;
         reports.push(InputWitnessReport {
             unified_used: used,
             legacy_used: 0,
@@ -424,21 +352,7 @@ fn classify(
     if spk.is_p2tr() {
         return Err(ForeignUnifiedError::TaprootScanOnly { input: input_index });
     }
-    let tap_fields = input.tap_key_sig.is_some()
-        || !input.tap_script_sigs.is_empty()
-        || !input.tap_scripts.is_empty()
-        || !input.tap_key_origins.is_empty()
-        || input.tap_internal_key.is_some()
-        || input.tap_merkle_root.is_some();
-    if tap_fields {
-        return Err(unsupported("non-Taproot input carries Taproot fields"));
-    }
-    if input.final_script_sig.is_some() || input.final_script_witness.is_some() {
-        return Err(unsupported("input is already finalised"));
-    }
-    if !input.partial_sigs.is_empty() {
-        return Err(ForeignUnifiedError::LegacySignature { input: input_index });
-    }
+    validate_foreign_metadata(input_index, input)?;
 
     // Single key: scriptCode is the P2PKH script of the key hash, which for a
     // P2PKH output is the scriptPubKey itself (script type 0).
@@ -587,3 +501,127 @@ fn proprietary_key(public_key: &PublicKey) -> ProprietaryKey {
 #[cfg(test)]
 #[path = "unified_foreign/tests.rs"]
 mod tests;
+
+fn signing_keys<C: secp256k1::Signing + secp256k1::Verification>(
+    signer: &SessionSigner,
+    psbt: &UnifiedPsbt,
+    contexts: &[InputContext],
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<Vec<(usize, PublicKey, miniscript::bitcoin::bip32::DerivationPath)>, ForeignUnifiedError>
+{
+    let fingerprint = signer.fingerprint(secp);
+    let mut wanted = Vec::new();
+    for (input_index, input) in psbt.psbt().inputs.iter().enumerate() {
+        for (raw_public_key, (origin, path)) in &input.bip32_derivation {
+            if *origin != fingerprint {
+                continue;
+            }
+            let public_key = PublicKey::new(*raw_public_key);
+            if signer.public_key_at(path, secp).ok() != Some(*raw_public_key) {
+                return Err(ForeignUnifiedError::DerivedPublicKeyMismatch {
+                    input: input_index,
+                    public_key,
+                });
+            }
+            if !contexts[input_index].uses_key(&public_key) {
+                return Err(ForeignUnifiedError::KeyNotInScript {
+                    input: input_index,
+                    public_key,
+                });
+            }
+            require_compatible_sighash(input_index, input.sighash_type)?;
+            wanted.push((input_index, public_key, path.clone()));
+        }
+    }
+    Ok(wanted)
+}
+
+fn finalize_input(
+    input_index: usize,
+    context: &InputContext,
+    records: &[UnifiedSignature],
+    txin: &mut miniscript::bitcoin::TxIn,
+) -> Result<usize, ForeignUnifiedError> {
+    let mut mine = records.iter().filter(|r| r.input_index == input_index);
+    let used = match &context.keys {
+        Keys::Hash { .. } => {
+            // Verified records all hash to the one key, so at most one.
+            let record = mine.next().ok_or(ForeignUnifiedError::Unsatisfiable {
+                input: input_index,
+                have: 0,
+                need: 1,
+            })?;
+            let key = record.public_key.to_bytes();
+            if context.script_type == SCRIPT_TYPE_BASE {
+                txin.script_sig = Builder::new()
+                    .push_slice(push_bytes(record.signature.clone()))
+                    .push_slice(push_bytes(key))
+                    .into_script();
+            } else {
+                if let Some(redeem) = &context.script {
+                    txin.script_sig = Builder::new()
+                        .push_slice(push_bytes(redeem.to_bytes()))
+                        .into_script();
+                }
+                txin.witness = Witness::from_slice(&[record.signature.clone(), key]);
+            }
+            1
+        }
+        Keys::Multi { threshold, keys } => {
+            // CHECKMULTISIG consumes signatures in key order: take the
+            // first `threshold` signed keys in script order.
+            let mut elements: Vec<Vec<u8>> = vec![Vec::new()];
+            for key in keys {
+                if elements.len() > *threshold {
+                    break;
+                }
+                if let Some(record) = records
+                    .iter()
+                    .find(|r| r.input_index == input_index && r.public_key == *key)
+                {
+                    elements.push(record.signature.clone());
+                }
+            }
+            let have = elements.len() - 1;
+            if have < *threshold {
+                return Err(ForeignUnifiedError::Unsatisfiable {
+                    input: input_index,
+                    have,
+                    need: *threshold,
+                });
+            }
+            let script = context.script.as_ref().expect("P2WSH context has a script");
+            elements.push(script.to_bytes());
+            txin.witness = Witness::from_slice(&elements);
+            have
+        }
+    };
+    Ok(used)
+}
+
+fn validate_foreign_metadata(
+    input_index: usize,
+    input: &psbt::Input,
+) -> Result<(), ForeignUnifiedError> {
+    let unsupported = |reason: &str| ForeignUnifiedError::UnsupportedScript {
+        input: input_index,
+        reason: reason.to_string(),
+    };
+    let tap_fields = input.tap_key_sig.is_some()
+        || !input.tap_script_sigs.is_empty()
+        || !input.tap_scripts.is_empty()
+        || !input.tap_key_origins.is_empty()
+        || input.tap_internal_key.is_some()
+        || input.tap_merkle_root.is_some();
+    if tap_fields {
+        return Err(unsupported("non-Taproot input carries Taproot fields"));
+    }
+    if input.final_script_sig.is_some() || input.final_script_witness.is_some() {
+        return Err(unsupported("input is already finalised"));
+    }
+    if !input.partial_sigs.is_empty() {
+        return Err(ForeignUnifiedError::LegacySignature { input: input_index });
+    }
+
+    Ok(())
+}

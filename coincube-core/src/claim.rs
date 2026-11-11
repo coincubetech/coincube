@@ -219,13 +219,12 @@ pub fn assess_deployment(
                 return Err(Assessment::Deployment(DeploymentState::Malformed));
             }
             if !active {
-                return Err(if fork.median_time_past >= expiry_time {
-                    Assessment::RdtsExpired
-                } else if next_height < height {
-                    Assessment::RdtsScheduled
-                } else {
-                    Assessment::RdtsInactive
-                });
+                return Err(inactive_deployment(
+                    fork.median_time_past,
+                    expiry_time,
+                    next_height,
+                    height,
+                ));
             }
             if expiry_time
                 .checked_sub(fork.median_time_past)
@@ -315,17 +314,7 @@ pub fn assess(
     {
         return Assessment::WrongChain;
     }
-    let claimed: BTreeSet<_> = plan.claimed_prevouts.iter().copied().collect();
-    let actual: BTreeSet<_> = plan.step1.input.iter().map(|i| i.previous_output).collect();
-    if claimed.is_empty()
-        || claimed.len() != plan.claimed_prevouts.len()
-        || actual.len() != plan.step1.input.len()
-        || !claimed.is_subset(&actual)
-        || plan.step1.input.iter().any(|i| i.previous_output.is_null())
-        || plan.step1.output.is_empty()
-        || policy.max_observation_age_seconds <= 0
-        || (plan.poison != Poison::InputAncestry && policy.expiry_margin_seconds <= 0)
-    {
+    if invalid_plan(plan, policy) {
         return Assessment::InvalidPlan;
     }
     if !fresh(bitcoin.observed_at, now, policy.max_observation_age_seconds)
@@ -377,6 +366,34 @@ pub fn assess(
         return Assessment::NeedsPreflightRecheck;
     }
     Assessment::ObservationsEligibleForPreflight
+}
+
+fn inactive_deployment(
+    median_time_past: i64,
+    expiry_time: i64,
+    next_height: u64,
+    height: u64,
+) -> Assessment {
+    if median_time_past >= expiry_time {
+        Assessment::RdtsExpired
+    } else if next_height < height {
+        Assessment::RdtsScheduled
+    } else {
+        Assessment::RdtsInactive
+    }
+}
+
+fn invalid_plan(plan: &ClaimPlan, policy: Policy) -> bool {
+    let claimed: BTreeSet<_> = plan.claimed_prevouts.iter().copied().collect();
+    let actual: BTreeSet<_> = plan.step1.input.iter().map(|i| i.previous_output).collect();
+    claimed.is_empty()
+        || claimed.len() != plan.claimed_prevouts.len()
+        || actual.len() != plan.step1.input.len()
+        || !claimed.is_subset(&actual)
+        || plan.step1.input.iter().any(|i| i.previous_output.is_null())
+        || plan.step1.output.is_empty()
+        || policy.max_observation_age_seconds <= 0
+        || (plan.poison != Poison::InputAncestry && policy.expiry_margin_seconds <= 0)
 }
 
 #[cfg(test)]

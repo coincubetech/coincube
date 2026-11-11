@@ -581,26 +581,7 @@ pub fn combine_ancestry_split_pair<C: secp256k1::Verification>(
             if !matches!(checked, Ok(()) | Err(FinalizeError::Unsatisfied)) {
                 return Err(CombineAncestrySplitError::Invalid(checked.unwrap_err()));
             }
-            for (index, (input, supplied)) in aggregate
-                .inputs
-                .iter_mut()
-                .zip(&returned.inputs)
-                .enumerate()
-            {
-                for (key, signature) in &supplied.partial_sigs {
-                    if input
-                        .partial_sigs
-                        .get(key)
-                        .is_some_and(|old| old != signature)
-                    {
-                        return Err(CombineAncestrySplitError::ConflictingSignature {
-                            chain,
-                            input: index,
-                        });
-                    }
-                    input.partial_sigs.insert(*key, *signature);
-                }
-            }
+            merge_returned_signatures(chain, aggregate, returned)?;
         }
     }
     validate_ancestry_split_pair_signing(
@@ -652,4 +633,32 @@ fn check_bound(
     } else {
         Err(FinalizeError::CoinsChanged)
     }
+}
+
+fn merge_returned_signatures(
+    chain: ChainId,
+    aggregate: &mut Psbt,
+    returned: &Psbt,
+) -> Result<(), CombineAncestrySplitError> {
+    for (index, (input, supplied)) in aggregate
+        .inputs
+        .iter_mut()
+        .zip(&returned.inputs)
+        .enumerate()
+    {
+        for (key, signature) in &supplied.partial_sigs {
+            if input
+                .partial_sigs
+                .get(key)
+                .is_some_and(|old| old != signature)
+            {
+                return Err(CombineAncestrySplitError::ConflictingSignature {
+                    chain,
+                    input: index,
+                });
+            }
+            input.partial_sigs.insert(*key, *signature);
+        }
+    }
+    Ok(())
 }

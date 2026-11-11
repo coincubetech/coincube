@@ -569,30 +569,13 @@ pub(crate) fn select_coins_for_spend(
             e
         );
 
-        selector.sort_candidates_by_descending_value_pwu();
-        // Select more coins until target is met and change condition satisfied.
-        loop {
-            let drain = selector.drain(target, change_policy);
-            if selector.is_target_met_with_drain(target, drain)
-                && (drain.is_some() || !must_have_change)
-            {
-                break;
-            }
-            if !selector.select_next() {
-                // If the solution must have change, we calculate how much is missing from the current
-                // selection in order for there to be a change output with the smallest possible value.
-                let drain = if must_have_change {
-                    bdk_coin_select::Drain {
-                        weights: drain_weights,
-                        value: DUST_OUTPUT_SATS,
-                    }
-                } else {
-                    drain
-                };
-                let missing = selector.excess(target, drain).unsigned_abs();
-                return Err(InsufficientFunds { missing });
-            }
-        }
+        select_descending(
+            &mut selector,
+            target,
+            change_policy,
+            must_have_change,
+            drain_weights,
+        )?;
     }
     // By now, selection is complete and we can check how much change to give according to our policy.
     let drain = selector.drain(target, change_policy);
@@ -969,8 +952,71 @@ pub(crate) fn create_spend_with_poison(
     }
 
     // Iterate through selected coins and add necessary information to the PSBT inputs.
+    let psbt_ins = selected_psbt_inputs(main_descriptor, secp, tx_getter, &selected, &mut tx)?;
+
+    // Finally, create the PSBT with all inputs and outputs, sanity check it and return it.
+    let psbt = Psbt {
+        unsigned_tx: tx,
+        version: 0,
+        xpub: BTreeMap::new(),
+        proprietary: BTreeMap::new(),
+        unknown: BTreeMap::new(),
+        inputs: psbt_ins,
+        outputs: psbt_outs,
+    };
+    sanity_check_psbt(main_descriptor, &psbt, use_primary_path)?;
+    // TODO: maybe check for common standardness rules (max size, ..)?
+
+    Ok(CreateSpendRes {
+        psbt,
+        has_change,
+        warnings,
+    })
+}
+
+fn select_descending(
+    selector: &mut CoinSelector<'_>,
+    target: Target,
+    change_policy: ChangePolicy,
+    must_have_change: bool,
+    drain_weights: DrainWeights,
+) -> Result<(), InsufficientFunds> {
+    selector.sort_candidates_by_descending_value_pwu();
+    // Select more coins until target is met and change condition satisfied.
+    loop {
+        let drain = selector.drain(target, change_policy);
+        if selector.is_target_met_with_drain(target, drain)
+            && (drain.is_some() || !must_have_change)
+        {
+            break;
+        }
+        if !selector.select_next() {
+            // If the solution must have change, we calculate how much is missing from the current
+            // selection in order for there to be a change output with the smallest possible value.
+            let drain = if must_have_change {
+                bdk_coin_select::Drain {
+                    weights: drain_weights,
+                    value: DUST_OUTPUT_SATS,
+                }
+            } else {
+                drain
+            };
+            let missing = selector.excess(target, drain).unsigned_abs();
+            return Err(InsufficientFunds { missing });
+        }
+    }
+    Ok(())
+}
+
+fn selected_psbt_inputs(
+    main_descriptor: &descriptors::CoincubeDescriptor,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    selected: &[CandidateCoin],
+    tx: &mut bitcoin::Transaction,
+) -> Result<Vec<PsbtIn>, SpendCreationError> {
     let mut psbt_ins = Vec::with_capacity(selected.len());
-    for cand in &selected {
+    for cand in selected {
         let sequence = cand
             .sequence
             .unwrap_or(bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME);
@@ -1017,24 +1063,7 @@ pub(crate) fn create_spend_with_poison(
         psbt_ins.push(psbt_in);
     }
 
-    // Finally, create the PSBT with all inputs and outputs, sanity check it and return it.
-    let psbt = Psbt {
-        unsigned_tx: tx,
-        version: 0,
-        xpub: BTreeMap::new(),
-        proprietary: BTreeMap::new(),
-        unknown: BTreeMap::new(),
-        inputs: psbt_ins,
-        outputs: psbt_outs,
-    };
-    sanity_check_psbt(main_descriptor, &psbt, use_primary_path)?;
-    // TODO: maybe check for common standardness rules (max size, ..)?
-
-    Ok(CreateSpendRes {
-        psbt,
-        has_change,
-        warnings,
-    })
+    Ok(psbt_ins)
 }
 
 #[cfg(test)]

@@ -565,13 +565,7 @@ fn satisfy_preferring_unified(
             if r.unified_used == 0 {
                 continue;
             }
-            let better = match &best {
-                None => true,
-                Some((bw, br)) => {
-                    r.unified_used > br.unified_used
-                        || (r.unified_used == br.unified_used && w.size() < bw.size())
-                }
-            };
+            let better = better_unified_witness(&w, &r, best.as_ref());
             if better {
                 best = Some((w, r));
             }
@@ -848,3 +842,17 @@ pub fn spent_amount(psbt: &UnifiedPsbt, input_index: usize) -> Option<Amount> {
 #[cfg(test)]
 #[path = "unified_finalize/tests.rs"]
 mod tests;
+
+fn better_unified_witness(
+    w: &Witness,
+    r: &InputWitnessReport,
+    best: Option<&(Witness, InputWitnessReport)>,
+) -> bool {
+    match best {
+        None => true,
+        Some((bw, br)) => {
+            r.unified_used > br.unified_used
+                || (r.unified_used == br.unified_used && w.size() < bw.size())
+        }
+    }
+}

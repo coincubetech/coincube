@@ -357,75 +357,78 @@ fn fork_fixture(chain: ChainId) -> (crate::claim_spend::ClaimForkSweep, Vec<Mast
 
 #[test]
 fn fork_sweep_finalization_reports_actual_unified_mixed_and_legacy_witnesses() {
+    for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
+        check_fork_sweep_witnesses(chain);
+    }
+}
+
+fn check_fork_sweep_witnesses(chain: ChainId) {
     use crate::{psbt_unified::UnifiedPsbt, unified_signing::sign_p2wsh_all_unified};
     let secp = secp256k1::Secp256k1::new();
-    for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
-        let (sweep, signers) = fork_fixture(chain);
-        for unified_count in 0..=2 {
-            let mut signed = UnifiedPsbt::from_psbt(sweep.psbt().clone()).unwrap();
-            assert!(finalize_claim_fork_sweep(&sweep, &signed, &secp).is_err());
-            for (i, signer) in signers[..2].iter().enumerate() {
-                signed = if i < unified_count {
-                    sign_p2wsh_all_unified(signer, &signed, &secp).unwrap()
-                } else {
-                    // Legacy signers cannot consume the unified sighash request.
-                    // Collect their signatures on the original ordinary PSBT and
-                    // merge signatures only, preserving unified records already held.
-                    let delta = UnifiedPsbt::from_psbt(
-                        signer.sign_psbt(sweep.psbt().clone(), &secp).unwrap(),
-                    )
-                    .unwrap();
-                    crate::psbt_unified::merge_signatures(&mut signed, &delta).unwrap();
-                    signed
-                };
-                if i == 0 {
-                    assert!(finalize_claim_fork_sweep(&sweep, &signed, &secp).is_err());
-                }
+    let (sweep, signers) = fork_fixture(chain);
+    for unified_count in 0..=2 {
+        let mut signed = UnifiedPsbt::from_psbt(sweep.psbt().clone()).unwrap();
+        assert!(finalize_claim_fork_sweep(&sweep, &signed, &secp).is_err());
+        for (i, signer) in signers[..2].iter().enumerate() {
+            signed = if i < unified_count {
+                sign_p2wsh_all_unified(signer, &signed, &secp).unwrap()
+            } else {
+                // Legacy signers cannot consume the unified sighash request.
+                // Collect their signatures on the original ordinary PSBT and
+                // merge signatures only, preserving unified records already held.
+                let delta =
+                    UnifiedPsbt::from_psbt(signer.sign_psbt(sweep.psbt().clone(), &secp).unwrap())
+                        .unwrap();
+                crate::psbt_unified::merge_signatures(&mut signed, &delta).unwrap();
+                signed
+            };
+            if i == 0 {
+                assert!(finalize_claim_fork_sweep(&sweep, &signed, &secp).is_err());
             }
-            let verified = finalize_claim_fork_sweep(&sweep, &signed, &secp).unwrap();
-            let restored =
-                verify_claim_fork_transaction(&sweep, verified.transaction(), &secp).unwrap();
-            assert_eq!(restored.transaction(), verified.transaction());
-            assert_eq!(restored.inputs(), verified.inputs());
-            assert_eq!(restored.fee(), verified.fee());
-            for mutation in 0..6 {
-                let mut bad = verified.transaction().clone();
-                let mut witness = bad.input[0].witness.to_vec();
-                match mutation {
-                    0 => witness.clear(),
-                    1 => witness[1][4] ^= 1,
-                    2 => {
-                        let last = witness[1].len() - 1;
-                        witness[1][last] = 0x81;
-                    }
-                    3 => witness.insert(0, vec![]),
-                    4 => bad.output[0].value = Amount::from_sat(1),
-                    _ => witness.swap(1, 2),
-                }
-                bad.input[0].witness = bitcoin::Witness::from_slice(&witness);
-                assert!(
-                    verify_claim_fork_transaction(&sweep, &bad, &secp).is_err(),
-                    "mutation {}",
-                    mutation
-                );
-            }
-            assert_eq!(verified.chain(), sweep.chain());
-            assert_eq!(verified.bitcoin_step1(), sweep.bitcoin_step1());
-            assert_eq!(verified.fee(), sweep.psbt().fee().unwrap());
-            assert_eq!(
-                verified.transaction().compute_txid(),
-                sweep.psbt().unsigned_tx.compute_txid()
-            );
-            assert!(verified
-                .inputs()
-                .iter()
-                .all(|r| r.unified_used == unified_count && r.legacy_used == 2 - unified_count));
-            assert!(verified
-                .transaction()
-                .input
-                .iter()
-                .all(|i| !i.witness.is_empty()));
         }
+        let verified = finalize_claim_fork_sweep(&sweep, &signed, &secp).unwrap();
+        let restored =
+            verify_claim_fork_transaction(&sweep, verified.transaction(), &secp).unwrap();
+        assert_eq!(restored.transaction(), verified.transaction());
+        assert_eq!(restored.inputs(), verified.inputs());
+        assert_eq!(restored.fee(), verified.fee());
+        for mutation in 0..6 {
+            let mut bad = verified.transaction().clone();
+            let mut witness = bad.input[0].witness.to_vec();
+            match mutation {
+                0 => witness.clear(),
+                1 => witness[1][4] ^= 1,
+                2 => {
+                    let last = witness[1].len() - 1;
+                    witness[1][last] = 0x81;
+                }
+                3 => witness.insert(0, vec![]),
+                4 => bad.output[0].value = Amount::from_sat(1),
+                _ => witness.swap(1, 2),
+            }
+            bad.input[0].witness = bitcoin::Witness::from_slice(&witness);
+            assert!(
+                verify_claim_fork_transaction(&sweep, &bad, &secp).is_err(),
+                "mutation {}",
+                mutation
+            );
+        }
+        assert_eq!(verified.chain(), sweep.chain());
+        assert_eq!(verified.bitcoin_step1(), sweep.bitcoin_step1());
+        assert_eq!(verified.fee(), sweep.psbt().fee().unwrap());
+        assert_eq!(
+            verified.transaction().compute_txid(),
+            sweep.psbt().unsigned_tx.compute_txid()
+        );
+        assert!(verified
+            .inputs()
+            .iter()
+            .all(|r| r.unified_used == unified_count && r.legacy_used == 2 - unified_count));
+        assert!(verified
+            .transaction()
+            .input
+            .iter()
+            .all(|i| !i.witness.is_empty()));
     }
 }
 
