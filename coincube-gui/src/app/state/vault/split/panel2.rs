@@ -492,150 +492,27 @@ impl SplitPanel {
         }
         let seq = self.seq;
         match message {
-            SplitMessage::EnterStep2 if self.can_enter_step2() => {
-                let (Some(port), Some(verified), Some((_, directory))) = (
-                    self.step2_port.clone(),
-                    self.step1_verified(),
-                    self.journal.clone(),
-                ) else {
-                    return Task::none();
-                };
-                // #626: the step-1 driver is released before the
-                // preparation opens (inside `enter_step2`).
-                let Some(driver) = self.driver.take() else {
-                    return Task::none();
-                };
-                self.revoke = None;
-                let fork_height = self
-                    .construction
-                    .as_deref()
-                    .map(|c| c.fork_height())
-                    .unwrap_or_default();
-                let target_cube = self.target_cube.clone();
-                self.stage = Stage::Working(Work::Entering);
-                self.spawn(
-                    async move {
-                        let (construction, verified) = match verified.await {
-                            Ok(pair) => pair,
-                            Err(reason) => {
-                                drop(driver);
-                                return Err(Step2Refusal {
-                                    reason,
-                                    retry: true,
-                                    recovery: step2::Step2Recovery::None,
-                                });
-                            }
-                        };
-                        step2::enter_step2(
-                            driver,
-                            port,
-                            Step2Open {
-                                directory,
-                                target_cube,
-                                construction,
-                                verified,
-                                fork_height,
-                            },
-                        )
-                        .await
-                        .map(Prep)
-                    },
-                    SplitEvent::Step2Entered,
-                )
-            }
+            SplitMessage::EnterStep2 if self.can_enter_step2() => self.step2_action_enter_step2(),
             SplitMessage::LeaveStep2
                 if matches!(
                     self.stage,
                     Stage::Step2(Step2Stage::Ready | Step2Stage::Sign)
                 ) =>
             {
-                let (Some(verified), Some((_, directory))) =
-                    (self.step1_verified(), self.journal.clone())
-                else {
-                    return Task::none();
-                };
-                let Some((prep, connect)) = self.take_prep(Work::Leaving) else {
-                    return Task::none();
-                };
-                self.step2_revoke = None;
-                self.replay = None;
-                let target_cube = self.target_cube.clone();
-                let fork_height = self
-                    .construction
-                    .as_deref()
-                    .map(|c| c.fork_height())
-                    .unwrap_or_default();
-                self.spawn(
-                    async move {
-                        let (construction, verified) = match verified.await {
-                            Ok(pair) => pair,
-                            Err(reason) => {
-                                drop(prep);
-                                return Err(Refusal::retry(reason));
-                            }
-                        };
-                        step2::leave_for_step1(
-                            prep,
-                            connect,
-                            OpenRequest {
-                                directory,
-                                target_cube,
-                                construction,
-                                verified,
-                                fork_height,
-                                resume: true,
-                            },
-                        )
-                        .await
-                        .map(Driver)
-                    },
-                    SplitEvent::Step2Left,
-                )
+                self.step2_action_leave_step2()
             }
             SplitMessage::Step2Check if self.stage == Stage::Step2(Step2Stage::Ready) => {
-                // A new check supersedes the last label whatever its result.
-                self.replay = None;
-                let Some((mut prep, connect)) = self.take_prep(Work::Step2Checking) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let result = prep.check(&connect.context()).await;
-                        (Prep(prep), result)
-                    },
-                    |seq, (prep, result)| SplitEvent::Step2Checked(seq, prep, result),
-                )
+                self.step2_action_step2_check()
             }
             SplitMessage::Step2Reserve if self.stage == Stage::Step2(Step2Stage::Ready) => {
-                let Some((mut prep, connect)) = self.take_prep(Work::Reserving) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let result = prep.ensure_target(&connect.context()).await;
-                        (Prep(prep), result)
-                    },
-                    |seq, (prep, result)| SplitEvent::Step2Reserved(seq, prep, result),
-                )
+                self.step2_action_step2_reserve()
             }
             SplitMessage::Step2Build
                 if self.stage == Stage::Step2(Step2Stage::Ready)
                     && self.target_index.is_some()
                     && self.replay_label().is_some() =>
             {
-                let coins = self.coins.clone();
-                let Some((mut prep, connect)) = self.take_prep(Work::Step2Building) else {
-                    return Task::none();
-                };
-                // The build redeems the check's token: the label goes with it.
-                self.replay = None;
-                self.spawn(
-                    async move {
-                        let result = prep.build(&connect.context(), coins).await;
-                        (Prep(prep), result)
-                    },
-                    |seq, (prep, result)| SplitEvent::Step2Built(seq, prep, result),
-                )
+                self.step2_action_step2_build()
             }
             SplitMessage::Step2Export(encoding) if self.stage == Stage::Step2(Step2Stage::Sign) => {
                 let name = match encoding {
@@ -674,16 +551,7 @@ impl SplitPanel {
                 )
             }
             SplitMessage::Step2RetryHandoff if self.can_retry_step2_handoff() => {
-                let Some(base) = self.step2_psbt.as_ref() else {
-                    return Task::none();
-                };
-                match combine(base, &self.step2_files) {
-                    Ok(signed) => self.finish(signed),
-                    Err(reason) => {
-                        self.notice = Some(reason.reason);
-                        Task::none()
-                    }
-                }
+                self.step2_action_step2_retry_handoff()
             }
             SplitMessage::Step2Review
                 if matches!(
@@ -691,30 +559,10 @@ impl SplitPanel {
                     Stage::Step2(Step2Stage::Signed | Step2Stage::Review)
                 ) =>
             {
-                self.step2_review = None;
-                let Some((mut coord, connect)) = self.take_coord(Work::Step2Reviewing) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let result = coord.review(&connect.context()).await;
-                        (Coord(coord), result)
-                    },
-                    |seq, (coord, result)| SplitEvent::Step2Reviewed(seq, coord, result),
-                )
+                self.step2_action_step2_review()
             }
             SplitMessage::Step2Confirm if self.stage == Stage::Step2(Step2Stage::Review) => {
-                self.step2_review = None;
-                let Some((mut coord, connect)) = self.take_coord(Work::Step2Submitting) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let result = coord.submit(&connect.context()).await;
-                        (Coord(coord), result)
-                    },
-                    |seq, (coord, result)| SplitEvent::Step2Submitted(seq, coord, result),
-                )
+                self.step2_action_step2_confirm()
             }
             // The live coordinator after a submission, or the one a restart
             // reopened for a resend (P3-3). A reconcile drops any resend
@@ -724,109 +572,28 @@ impl SplitPanel {
                     || (self.stage == Stage::Step2(Step2Stage::Reconcile)
                         && self.coord.is_some()) =>
             {
-                let Stage::Step2(back) = self.stage else {
-                    return Task::none();
-                };
-                self.step2_resend = None;
-                self.reconfirmation = None;
-                let Some((mut coord, connect)) = self.take_coord(Work::Step2Reconciling) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let result = coord.reconcile(&connect.context()).await;
-                        (Coord(coord), result)
-                    },
-                    move |seq, (coord, result)| {
-                        SplitEvent::Step2Reconciled(seq, coord, result, back)
-                    },
-                )
+                self.step2_action_step2_reconcile()
             }
             SplitMessage::Step2ReviewResend if self.can_review_resend() => {
-                self.step2_resend = None;
-                self.reconfirmation = None;
-                let Some((mut coord, connect)) = self.take_coord(Work::Step2ResendReviewing) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let result = coord.review_resend(&connect.context()).await;
-                        (Coord(coord), result)
-                    },
-                    |seq, (coord, result)| SplitEvent::Step2ResendReviewed(seq, coord, result),
-                )
+                self.step2_action_step2_review_resend()
             }
             // Exactly the live review on screen, once: it is used up here
             // whatever the result.
             SplitMessage::Step2ConfirmResend
                 if self.can_review_resend() && self.step2_resend_review().is_some() =>
             {
-                self.step2_resend = None;
-                let Some((mut coord, connect)) = self.take_coord(Work::Step2Resending) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let result = coord.confirm_resend(&connect.context()).await;
-                        (Coord(coord), result)
-                    },
-                    |seq, (coord, result)| SplitEvent::Step2Resent(seq, coord, result),
-                )
+                self.step2_action_step2_confirm_resend()
             }
             // #568 S4b, O1: a review of step 1's new block, then exactly
             // that review acknowledged (used up here whatever the result),
             // on whichever handle the panel holds.
             SplitMessage::Step2ReviewReconfirmation if self.can_review_reconfirmation() => {
-                self.reconfirmation = None;
-                let Some((held, connect, back)) =
-                    self.take_held(Work::Step2ReconfirmationReviewing)
-                else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let (held, result) = match held {
-                            Held::Coord(Coord(mut coord)) => {
-                                let result = coord.review_reconfirmation(&connect.context()).await;
-                                (Held::Coord(Coord(coord)), result)
-                            }
-                            Held::Recon(Recon(mut recon)) => {
-                                let result = recon.review_reconfirmation(&connect.context()).await;
-                                (Held::Recon(Recon(recon)), result)
-                            }
-                        };
-                        (held, result, back)
-                    },
-                    |seq, (held, result, back)| {
-                        SplitEvent::Step2ReconfirmationReviewed(seq, held, result, back)
-                    },
-                )
+                self.step2_action_step2_review_reconfirmation()
             }
             SplitMessage::Step2ConfirmReconfirmation
                 if self.can_review_reconfirmation() && self.reconfirmation_review().is_some() =>
             {
-                self.reconfirmation = None;
-                let Some((held, connect, back)) = self.take_held(Work::Step2Reconfirming) else {
-                    return Task::none();
-                };
-                self.spawn(
-                    async move {
-                        let (held, result) = match held {
-                            Held::Coord(Coord(mut coord)) => {
-                                let result = coord.confirm_reconfirmation(&connect.context()).await;
-                                (Held::Coord(Coord(coord)), result)
-                            }
-                            Held::Recon(Recon(mut recon)) => {
-                                let result = recon.confirm_reconfirmation(&connect.context()).await;
-                                (Held::Recon(Recon(recon)), result)
-                            }
-                        };
-                        (held, result, back)
-                    },
-                    |seq, (held, result, back)| {
-                        SplitEvent::Step2Reconfirmed(seq, held, result, back)
-                    },
-                )
+                self.step2_action_step2_confirm_reconfirmation()
             }
             SplitMessage::Step2Reconcile if self.stage == Stage::Step2(Step2Stage::Reconcile) => {
                 let (Some(connect), Some(mut recon)) = (self.connect.clone(), self.recon.take())
@@ -844,45 +611,7 @@ impl SplitPanel {
                 )
             }
             SplitMessage::Step2Complete if self.can_complete() => {
-                let Some(connect) = self.connect.clone() else {
-                    return Task::none();
-                };
-                let context = connect.context();
-                if let Some(mut recon) = self.recon.take() {
-                    self.stage = Stage::Working(Work::Step2Completing);
-                    return self.spawn(
-                        async move {
-                            let result = recon.complete(&context).await;
-                            (Some(Recon(recon)), result)
-                        },
-                        |seq, (recon, result)| SplitEvent::Step2Completed(seq, recon, result),
-                    );
-                }
-                // The coordinator has no completion check: it is dropped,
-                // releasing the journal, and the reconciler completes.
-                let (Some(port), Some((digest, directory))) =
-                    (self.recon_port.clone(), self.journal.clone())
-                else {
-                    return Task::none();
-                };
-                let Some(coord) = self.coord.take() else {
-                    return Task::none();
-                };
-                self.step2_resend = None;
-                let slot = step2::RevokeSlot::default();
-                self.step2_revoke = Some(slot.handle());
-                let target = self.target_cube.clone();
-                self.stage = Stage::Working(Work::Step2Completing);
-                self.spawn(
-                    async move {
-                        let (recon, result) = step2::complete_from_coordinator(
-                            coord, port, directory, target, digest, context, slot,
-                        )
-                        .await;
-                        (recon.map(Recon), result)
-                    },
-                    |seq, (recon, result)| SplitEvent::Step2Completed(seq, recon, result),
-                )
+                self.step2_action_step2_complete()
             }
             // D17: a completed split's Refresh asks whether the completion
             // still stands.
@@ -964,6 +693,310 @@ impl SplitPanel {
     }
 
     /// Save the unsigned step 2 to `path`.
+    fn step2_action_enter_step2(&mut self) -> Task<Message> {
+        let (Some(port), Some(verified), Some((_, directory))) = (
+            self.step2_port.clone(),
+            self.step1_verified(),
+            self.journal.clone(),
+        ) else {
+            return Task::none();
+        };
+        // #626: the step-1 driver is released before the
+        // preparation opens (inside `enter_step2`).
+        let Some(driver) = self.driver.take() else {
+            return Task::none();
+        };
+        self.revoke = None;
+        let fork_height = self
+            .construction
+            .as_deref()
+            .map(|c| c.fork_height())
+            .unwrap_or_default();
+        let target_cube = self.target_cube.clone();
+        self.stage = Stage::Working(Work::Entering);
+        self.spawn(
+            async move {
+                let (construction, verified) = match verified.await {
+                    Ok(pair) => pair,
+                    Err(reason) => {
+                        drop(driver);
+                        return Err(Step2Refusal {
+                            reason,
+                            retry: true,
+                            recovery: step2::Step2Recovery::None,
+                        });
+                    }
+                };
+                step2::enter_step2(
+                    driver,
+                    port,
+                    Step2Open {
+                        directory,
+                        target_cube,
+                        construction,
+                        verified,
+                        fork_height,
+                    },
+                )
+                .await
+                .map(Prep)
+            },
+            SplitEvent::Step2Entered,
+        )
+    }
+    fn step2_action_leave_step2(&mut self) -> Task<Message> {
+        let (Some(verified), Some((_, directory))) = (self.step1_verified(), self.journal.clone())
+        else {
+            return Task::none();
+        };
+        let Some((prep, connect)) = self.take_prep(Work::Leaving) else {
+            return Task::none();
+        };
+        self.step2_revoke = None;
+        self.replay = None;
+        let target_cube = self.target_cube.clone();
+        let fork_height = self
+            .construction
+            .as_deref()
+            .map(|c| c.fork_height())
+            .unwrap_or_default();
+        self.spawn(
+            async move {
+                let (construction, verified) = match verified.await {
+                    Ok(pair) => pair,
+                    Err(reason) => {
+                        drop(prep);
+                        return Err(Refusal::retry(reason));
+                    }
+                };
+                step2::leave_for_step1(
+                    prep,
+                    connect,
+                    OpenRequest {
+                        directory,
+                        target_cube,
+                        construction,
+                        verified,
+                        fork_height,
+                        resume: true,
+                    },
+                )
+                .await
+                .map(Driver)
+            },
+            SplitEvent::Step2Left,
+        )
+    }
+    fn step2_action_step2_check(&mut self) -> Task<Message> {
+        // A new check supersedes the last label whatever its result.
+        self.replay = None;
+        let Some((mut prep, connect)) = self.take_prep(Work::Step2Checking) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let result = prep.check(&connect.context()).await;
+                (Prep(prep), result)
+            },
+            |seq, (prep, result)| SplitEvent::Step2Checked(seq, prep, result),
+        )
+    }
+    fn step2_action_step2_reserve(&mut self) -> Task<Message> {
+        let Some((mut prep, connect)) = self.take_prep(Work::Reserving) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let result = prep.ensure_target(&connect.context()).await;
+                (Prep(prep), result)
+            },
+            |seq, (prep, result)| SplitEvent::Step2Reserved(seq, prep, result),
+        )
+    }
+    fn step2_action_step2_build(&mut self) -> Task<Message> {
+        let coins = self.coins.clone();
+        let Some((mut prep, connect)) = self.take_prep(Work::Step2Building) else {
+            return Task::none();
+        };
+        // The build redeems the check's token: the label goes with it.
+        self.replay = None;
+        self.spawn(
+            async move {
+                let result = prep.build(&connect.context(), coins).await;
+                (Prep(prep), result)
+            },
+            |seq, (prep, result)| SplitEvent::Step2Built(seq, prep, result),
+        )
+    }
+    fn step2_action_step2_retry_handoff(&mut self) -> Task<Message> {
+        let Some(base) = self.step2_psbt.as_ref() else {
+            return Task::none();
+        };
+        match combine(base, &self.step2_files) {
+            Ok(signed) => self.finish(signed),
+            Err(reason) => {
+                self.notice = Some(reason.reason);
+                Task::none()
+            }
+        }
+    }
+    fn step2_action_step2_review(&mut self) -> Task<Message> {
+        self.step2_review = None;
+        let Some((mut coord, connect)) = self.take_coord(Work::Step2Reviewing) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let result = coord.review(&connect.context()).await;
+                (Coord(coord), result)
+            },
+            |seq, (coord, result)| SplitEvent::Step2Reviewed(seq, coord, result),
+        )
+    }
+    fn step2_action_step2_confirm(&mut self) -> Task<Message> {
+        self.step2_review = None;
+        let Some((mut coord, connect)) = self.take_coord(Work::Step2Submitting) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let result = coord.submit(&connect.context()).await;
+                (Coord(coord), result)
+            },
+            |seq, (coord, result)| SplitEvent::Step2Submitted(seq, coord, result),
+        )
+    }
+    fn step2_action_step2_reconcile(&mut self) -> Task<Message> {
+        let Stage::Step2(back) = self.stage else {
+            return Task::none();
+        };
+        self.step2_resend = None;
+        self.reconfirmation = None;
+        let Some((mut coord, connect)) = self.take_coord(Work::Step2Reconciling) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let result = coord.reconcile(&connect.context()).await;
+                (Coord(coord), result)
+            },
+            move |seq, (coord, result)| SplitEvent::Step2Reconciled(seq, coord, result, back),
+        )
+    }
+    fn step2_action_step2_review_resend(&mut self) -> Task<Message> {
+        self.step2_resend = None;
+        self.reconfirmation = None;
+        let Some((mut coord, connect)) = self.take_coord(Work::Step2ResendReviewing) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let result = coord.review_resend(&connect.context()).await;
+                (Coord(coord), result)
+            },
+            |seq, (coord, result)| SplitEvent::Step2ResendReviewed(seq, coord, result),
+        )
+    }
+    fn step2_action_step2_confirm_resend(&mut self) -> Task<Message> {
+        self.step2_resend = None;
+        let Some((mut coord, connect)) = self.take_coord(Work::Step2Resending) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let result = coord.confirm_resend(&connect.context()).await;
+                (Coord(coord), result)
+            },
+            |seq, (coord, result)| SplitEvent::Step2Resent(seq, coord, result),
+        )
+    }
+    fn step2_action_step2_review_reconfirmation(&mut self) -> Task<Message> {
+        self.reconfirmation = None;
+        let Some((held, connect, back)) = self.take_held(Work::Step2ReconfirmationReviewing) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let (held, result) = match held {
+                    Held::Coord(Coord(mut coord)) => {
+                        let result = coord.review_reconfirmation(&connect.context()).await;
+                        (Held::Coord(Coord(coord)), result)
+                    }
+                    Held::Recon(Recon(mut recon)) => {
+                        let result = recon.review_reconfirmation(&connect.context()).await;
+                        (Held::Recon(Recon(recon)), result)
+                    }
+                };
+                (held, result, back)
+            },
+            |seq, (held, result, back)| {
+                SplitEvent::Step2ReconfirmationReviewed(seq, held, result, back)
+            },
+        )
+    }
+    fn step2_action_step2_confirm_reconfirmation(&mut self) -> Task<Message> {
+        self.reconfirmation = None;
+        let Some((held, connect, back)) = self.take_held(Work::Step2Reconfirming) else {
+            return Task::none();
+        };
+        self.spawn(
+            async move {
+                let (held, result) = match held {
+                    Held::Coord(Coord(mut coord)) => {
+                        let result = coord.confirm_reconfirmation(&connect.context()).await;
+                        (Held::Coord(Coord(coord)), result)
+                    }
+                    Held::Recon(Recon(mut recon)) => {
+                        let result = recon.confirm_reconfirmation(&connect.context()).await;
+                        (Held::Recon(Recon(recon)), result)
+                    }
+                };
+                (held, result, back)
+            },
+            |seq, (held, result, back)| SplitEvent::Step2Reconfirmed(seq, held, result, back),
+        )
+    }
+    fn step2_action_step2_complete(&mut self) -> Task<Message> {
+        let Some(connect) = self.connect.clone() else {
+            return Task::none();
+        };
+        let context = connect.context();
+        if let Some(mut recon) = self.recon.take() {
+            self.stage = Stage::Working(Work::Step2Completing);
+            return self.spawn(
+                async move {
+                    let result = recon.complete(&context).await;
+                    (Some(Recon(recon)), result)
+                },
+                |seq, (recon, result)| SplitEvent::Step2Completed(seq, recon, result),
+            );
+        }
+        // The coordinator has no completion check: it is dropped,
+        // releasing the journal, and the reconciler completes.
+        let (Some(port), Some((digest, directory))) =
+            (self.recon_port.clone(), self.journal.clone())
+        else {
+            return Task::none();
+        };
+        let Some(coord) = self.coord.take() else {
+            return Task::none();
+        };
+        self.step2_resend = None;
+        let slot = step2::RevokeSlot::default();
+        self.step2_revoke = Some(slot.handle());
+        let target = self.target_cube.clone();
+        self.stage = Stage::Working(Work::Step2Completing);
+        self.spawn(
+            async move {
+                let (recon, result) = step2::complete_from_coordinator(
+                    coord, port, directory, target, digest, context, slot,
+                )
+                .await;
+                (recon.map(Recon), result)
+            },
+            |seq, (recon, result)| SplitEvent::Step2Completed(seq, recon, result),
+        )
+    }
     pub fn step2_export_to(&mut self, path: PathBuf, encoding: Encoding) -> Task<Message> {
         let Some(psbt) = self.step2_psbt.clone() else {
             return Task::none();
@@ -1161,7 +1194,7 @@ impl SplitPanel {
         }
     }
 
-    pub(super) fn apply_step2(&mut self, event: SplitEvent) -> Task<Message> {
+    fn apply_step2_restarted(&mut self, event: SplitEvent) -> Task<Message> {
         match event {
             SplitEvent::Restarted(_, Ok(Restarted::PairedFunding(source, addresses))) => {
                 self.funding_source = Some(source);
@@ -1237,7 +1270,6 @@ impl SplitPanel {
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
                 Task::none()
             }
-            // B4b-3c: a fork-only record opens by kind.
             SplitEvent::Restarted(_, Ok(Restarted::Unified(record))) => {
                 self.restart_unified(record)
             }
@@ -1255,6 +1287,11 @@ impl SplitPanel {
                 self.stage = Stage::Refused(refusal(reason));
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_closed(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Closed(_, Ok(())) => {
                 self.ending = None;
                 self.dead_end = None;
@@ -1268,6 +1305,11 @@ impl SplitPanel {
                 self.stage = Stage::Refused(Refusal::retry(reason));
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_entered(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Entered(_, Ok(Prep(prep))) => {
                 self.notice = None;
                 // A new preparation has proven no target yet, whatever an
@@ -1286,6 +1328,11 @@ impl SplitPanel {
                 self.stage = Stage::Refused(refusal(reason));
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_left(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Left(_, Ok(Driver(driver))) => {
                 self.bind(driver);
                 self.target_index = None;
@@ -1299,6 +1346,11 @@ impl SplitPanel {
                 self.stage = Stage::Refused(reason);
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_checked(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Checked(_, Prep(prep), result) => {
                 self.bind_prep(prep);
                 match result {
@@ -1314,6 +1366,11 @@ impl SplitPanel {
                 self.stage = Stage::Step2(Step2Stage::Ready);
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_reserved(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Reserved(_, Prep(prep), result) => {
                 self.bind_prep(prep);
                 match result {
@@ -1329,6 +1386,11 @@ impl SplitPanel {
                 self.stage = Stage::Step2(Step2Stage::Ready);
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_built(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Built(_, Prep(prep), result) => {
                 self.bind_prep(prep);
                 match result {
@@ -1352,13 +1414,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
-            SplitEvent::Step2ExportChosen(_, Some(path), encoding) => {
-                self.step2_export_to(path, encoding)
-            }
-            SplitEvent::Step2ImportChosen(_, Some(paths)) if !paths.is_empty() => {
-                self.step2_import_from(paths)
-            }
-            SplitEvent::Step2ExportChosen(..) | SplitEvent::Step2ImportChosen(..) => Task::none(),
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_exported(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Exported(_, result) => {
                 match result {
                     Ok(path) => self.step2_exported = path.or(self.step2_exported.take()),
@@ -1367,6 +1427,11 @@ impl SplitPanel {
                 self.stage = Stage::Step2(Step2Stage::Sign);
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_imported(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Imported(_, None, result) => {
                 let reason = result.err().map(|r| r.reason).unwrap_or_default();
                 self.stage = Stage::Refused(Refusal::retry(reason));
@@ -1397,6 +1462,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_finished(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Finished(_, Ok(Coord(coord))) => {
                 self.notice = None;
                 self.bind_coord(coord);
@@ -1429,6 +1499,11 @@ impl SplitPanel {
                 self.stage = Stage::Refused(refusal(reason));
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_reviewed(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Reviewed(_, Coord(coord), result) => {
                 self.bind_coord(coord);
                 match result {
@@ -1444,6 +1519,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_submitted(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Submitted(_, Coord(coord), result) => {
                 let recorded = coord.recorded_outcome();
                 self.bind_coord(coord);
@@ -1463,6 +1543,11 @@ impl SplitPanel {
                 };
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_reconciled(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Reconciled(_, Coord(coord), result, back) => {
                 self.bind_coord(coord);
                 let succeeded = result.is_ok();
@@ -1473,6 +1558,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_recon_reconciled(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::ReconReconciled(_, Recon(recon), result) => {
                 self.bind_recon(recon);
                 let succeeded = result.is_ok();
@@ -1483,6 +1573,11 @@ impl SplitPanel {
                 }
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_resend_reviewed(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2ResendReviewed(_, Coord(coord), result) => {
                 self.bind_coord(coord);
                 match result {
@@ -1501,6 +1596,11 @@ impl SplitPanel {
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_resent(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Resent(_, Coord(coord), result) => {
                 // Whatever happened, the review was used up; anything but
                 // the route's exact acceptance is uncertain again and only
@@ -1529,6 +1629,11 @@ impl SplitPanel {
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_reconfirmation_reviewed(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2ReconfirmationReviewed(_, held, result, back) => {
                 self.bind_held(held);
                 match result {
@@ -1553,6 +1658,11 @@ impl SplitPanel {
                 self.stage = Stage::Step2(back);
                 Task::none()
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_reconfirmed(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Reconfirmed(_, held, result, back) => {
                 self.bind_held(held);
                 self.reconfirmation = None;
@@ -1575,6 +1685,11 @@ impl SplitPanel {
                     }
                 }
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_completed(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2Completed(_, Some(Recon(recon)), result) => {
                 // The coordinator, if completion started from it, is gone:
                 // the reconciler holds the journal now.
@@ -1611,6 +1726,11 @@ impl SplitPanel {
                 };
                 self.restart_step2(Some(reason))
             }
+            _ => Task::none(),
+        }
+    }
+    fn apply_step2_step2_completion_rechecked(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
             SplitEvent::Step2CompletionRechecked(_, Recon(recon), result) => {
                 self.bind_recon(recon);
                 match result {
@@ -1642,6 +1762,52 @@ impl SplitPanel {
                     }
                 }
                 Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
+    pub(super) fn apply_step2(&mut self, event: SplitEvent) -> Task<Message> {
+        match event {
+            event @ SplitEvent::Restarted(..) => self.apply_step2_restarted(event),
+
+            // B4b-3c: a fork-only record opens by kind.
+            event @ SplitEvent::Closed(..) => self.apply_step2_closed(event),
+
+            event @ SplitEvent::Step2Entered(..) => self.apply_step2_step2_entered(event),
+
+            event @ SplitEvent::Step2Left(..) => self.apply_step2_step2_left(event),
+
+            event @ SplitEvent::Step2Checked(..) => self.apply_step2_step2_checked(event),
+            event @ SplitEvent::Step2Reserved(..) => self.apply_step2_step2_reserved(event),
+            event @ SplitEvent::Step2Built(..) => self.apply_step2_step2_built(event),
+            SplitEvent::Step2ExportChosen(_, Some(path), encoding) => {
+                self.step2_export_to(path, encoding)
+            }
+            SplitEvent::Step2ImportChosen(_, Some(paths)) if !paths.is_empty() => {
+                self.step2_import_from(paths)
+            }
+            SplitEvent::Step2ExportChosen(..) | SplitEvent::Step2ImportChosen(..) => Task::none(),
+            event @ SplitEvent::Step2Exported(..) => self.apply_step2_step2_exported(event),
+            event @ SplitEvent::Step2Imported(..) => self.apply_step2_step2_imported(event),
+
+            event @ SplitEvent::Step2Finished(..) => self.apply_step2_step2_finished(event),
+
+            event @ SplitEvent::Step2Reviewed(..) => self.apply_step2_step2_reviewed(event),
+            event @ SplitEvent::Step2Submitted(..) => self.apply_step2_step2_submitted(event),
+            event @ SplitEvent::Step2Reconciled(..) => self.apply_step2_step2_reconciled(event),
+            event @ SplitEvent::ReconReconciled(..) => self.apply_step2_recon_reconciled(event),
+            event @ SplitEvent::Step2ResendReviewed(..) => {
+                self.apply_step2_step2_resend_reviewed(event)
+            }
+            event @ SplitEvent::Step2Resent(..) => self.apply_step2_step2_resent(event),
+            event @ SplitEvent::Step2ReconfirmationReviewed(..) => {
+                self.apply_step2_step2_reconfirmation_reviewed(event)
+            }
+            event @ SplitEvent::Step2Reconfirmed(..) => self.apply_step2_step2_reconfirmed(event),
+            event @ SplitEvent::Step2Completed(..) => self.apply_step2_step2_completed(event),
+
+            event @ SplitEvent::Step2CompletionRechecked(..) => {
+                self.apply_step2_step2_completion_rechecked(event)
             }
             _ => Task::none(),
         }

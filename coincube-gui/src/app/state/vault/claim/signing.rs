@@ -952,29 +952,7 @@ pub(super) async fn check_inputs(
                     .into(),
             );
         }
-        let secp = secp256k1::Secp256k1::verification_only();
-        for coin in &coins {
-            let index = requested
-                .iter()
-                .position(|p| *p == coin.outpoint)
-                .ok_or("A Claim input is missing.")?;
-            let prevout = transfer.psbt().inputs[index]
-                .witness_utxo
-                .as_ref()
-                .ok_or("A Claim prevout is missing.")?;
-            if coin.derivation_index.is_hardened() {
-                return Err("The Claim input derivation is invalid.".into());
-            }
-            let derived = if coin.is_change {
-                descriptor.change_descriptor()
-            } else {
-                descriptor.receive_descriptor()
-            }
-            .derive(coin.derivation_index, &secp);
-            if coin.amount != prevout.value || derived.script_pubkey() != prevout.script_pubkey {
-                return Err("The owned Claim input metadata changed. Read the Vault again.".into());
-            }
-        }
+        verify_owned_claim_inputs(&coins, &requested, transfer, descriptor)?;
         let plan = claim::ClaimPlan {
             bitcoin_chain: wallet.chain,
             fork_chain: ChainId::BitcoinBlake2b,
@@ -1040,6 +1018,38 @@ pub(super) async fn check_inputs(
     })
     .await
     .map_err(|_| "Checking the Claim inputs timed out. Read the Vault again.".to_string())?
+}
+
+fn verify_owned_claim_inputs(
+    coins: &[Coin],
+    requested: &[OutPoint],
+    transfer: &AncestrySelfTransfer,
+    descriptor: &CoincubeDescriptor,
+) -> Result<(), String> {
+    let secp = secp256k1::Secp256k1::verification_only();
+    for coin in coins {
+        let index = requested
+            .iter()
+            .position(|p| *p == coin.outpoint)
+            .ok_or("A Claim input is missing.")?;
+        let prevout = transfer.psbt().inputs[index]
+            .witness_utxo
+            .as_ref()
+            .ok_or("A Claim prevout is missing.")?;
+        if coin.derivation_index.is_hardened() {
+            return Err("The Claim input derivation is invalid.".into());
+        }
+        let derived = if coin.is_change {
+            descriptor.change_descriptor()
+        } else {
+            descriptor.receive_descriptor()
+        }
+        .derive(coin.derivation_index, &secp);
+        if coin.amount != prevout.value || derived.script_pubkey() != prevout.script_pubkey {
+            return Err("The owned Claim input metadata changed. Read the Vault again.".into());
+        }
+    }
+    Ok(())
 }
 
 // Match the coordinator's conservative allowance for UNIX-second quantization.

@@ -806,11 +806,20 @@ fn claim_funding_results_require_the_current_panel_and_session() {
 }
 
 #[cfg(unix)]
+async fn apply_saved_funding_outputs(p: &mut ClaimStep1Panel, task: Task<Message>) {
+    use iced::futures::StreamExt;
+    let mut stream = iced_runtime::task::into_stream(task).unwrap();
+    while let Some(action) = stream.next().await {
+        if let iced_runtime::Action::Output(Message::Claim(event)) = action {
+            drop(p.apply(event));
+        }
+    }
+}
+
 #[tokio::test]
 async fn reopening_saved_deposits_does_not_repeat_the_full_vault_scan() {
     use coincube_core::miniscript::bitcoin::hashes::sha256;
     use httpmock::prelude::*;
-    use iced::futures::StreamExt;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     for status in [503, 429] {
         let server = MockServer::start();
@@ -859,23 +868,13 @@ async fn reopening_saved_deposits_does_not_repeat_the_full_vault_scan() {
         // Recording panics on wallet reads. A resumed reservation must go straight
         // to its small address-history check, not another full descriptor scan.
         let task = p.prepare_funding(Arc::new(Recording::default()));
-        let mut stream = iced_runtime::task::into_stream(task).unwrap();
-        while let Some(action) = stream.next().await {
-            if let iced_runtime::Action::Output(Message::Claim(event)) = action {
-                drop(p.apply(event));
-            }
-        }
+        apply_saved_funding_outputs(&mut p, task).await;
         assert!(matches!(p.stage, Stage::Preconditions));
         if status == 429 {
             assert!(p.funding_error().unwrap().contains("rate limited"));
             assert!(p.funding_error().unwrap().contains("2 minutes"));
             let task = p.prepare_funding(Arc::new(Recording::default()));
-            let mut stream = iced_runtime::task::into_stream(task).unwrap();
-            while let Some(action) = stream.next().await {
-                if let iced_runtime::Action::Output(Message::Claim(event)) = action {
-                    drop(p.apply(event));
-                }
-            }
+            apply_saved_funding_outputs(&mut p, task).await;
             assert!(p.funding_error().unwrap().contains("rate limited"));
         } else {
             assert!(p
@@ -5578,6 +5577,58 @@ mod flow {
     }
 
     #[cfg(any(unix, windows))]
+    async fn route_held_auth_completions(
+        gui: &mut crate::gui::GUI,
+        completions: Vec<crate::gui::Message>,
+    ) -> usize {
+        let mut routed = 0;
+        for message in completions {
+            if crate::gui::GUI::reviewer_is_set_session(&message) {
+                routed += 1;
+                let loaded = gui.update(message);
+                for follow in gui_outputs(loaded).await {
+                    // Deliver the real queued SessionLoaded too; omit unrelated network bootstrap.
+                    if matches!(&follow, crate::gui::Message::Pane(_, crate::gui::pane::Message::Tab(_, inner))
+                    if matches!(inner.as_ref(), crate::gui::tab::Message::Run(Message::View(
+                        view::Message::ConnectAccount(
+                            view::ConnectAccountMessage::SessionLoaded { .. }
+                        )))))
+                    {
+                        drop(gui.update(follow));
+                    }
+                }
+            }
+        }
+
+        routed
+    }
+
+    async fn route_fresh_auth_completions(
+        gui: &mut crate::gui::GUI,
+        completions: Vec<crate::gui::Message>,
+    ) -> usize {
+        let mut routed = 0;
+        for message in completions {
+            if crate::gui::GUI::reviewer_is_set_session(&message) {
+                routed += 1;
+                let mut queue =
+                    std::collections::VecDeque::from(gui_outputs(gui.update(message)).await);
+                while let Some(follow) = queue.pop_front() {
+                    if matches!(&follow, crate::gui::Message::Pane(_, crate::gui::pane::Message::Tab(_, inner))
+                    if matches!(inner.as_ref(), crate::gui::tab::Message::Run(
+                        Message::Claim(_) | Message::View(view::Message::ConnectAccount(
+                            view::ConnectAccountMessage::SessionLoaded { .. }
+                        )))))
+                    {
+                        queue.extend(gui_outputs(gui.update(follow)).await);
+                    }
+                }
+            }
+        }
+
+        routed
+    }
+
     #[tokio::test]
     async fn round4_real_refresh_and_otp_capture_spawn_epoch_across_two_holds() {
         use crate::app::state::connect::account::ConnectFlowStep;
@@ -5624,24 +5675,7 @@ mod flow {
                 );
                 drop(gui.reviewer_account(2, view::ConnectAccountMessage::LogOut));
                 let completions = gui_outputs(task).await;
-                let mut routed = 0;
-                for message in completions {
-                    if crate::gui::GUI::reviewer_is_set_session(&message) {
-                        routed += 1;
-                        let loaded = gui.update(message);
-                        for follow in gui_outputs(loaded).await {
-                            // Deliver the real queued SessionLoaded too; omit unrelated network bootstrap.
-                            if matches!(&follow, crate::gui::Message::Pane(_, crate::gui::pane::Message::Tab(_, inner))
-                            if matches!(inner.as_ref(), crate::gui::tab::Message::Run(Message::View(
-                                view::Message::ConnectAccount(
-                                    view::ConnectAccountMessage::SessionLoaded { .. }
-                                )))))
-                            {
-                                drop(gui.update(follow));
-                            }
-                        }
-                    }
-                }
+                let routed = route_held_auth_completions(&mut gui, completions).await;
                 assert_eq!(routed, 1);
                 assert!(
                     gui.reviewer_app_mut(0).claim_session_invalidated,
@@ -5680,24 +5714,7 @@ mod flow {
                     }
                 },
             );
-            let mut routed = 0;
-            for message in gui_outputs(task).await {
-                if crate::gui::GUI::reviewer_is_set_session(&message) {
-                    routed += 1;
-                    let mut queue =
-                        std::collections::VecDeque::from(gui_outputs(gui.update(message)).await);
-                    while let Some(follow) = queue.pop_front() {
-                        if matches!(&follow, crate::gui::Message::Pane(_, crate::gui::pane::Message::Tab(_, inner))
-                        if matches!(inner.as_ref(), crate::gui::tab::Message::Run(
-                            Message::Claim(_) | Message::View(view::Message::ConnectAccount(
-                                view::ConnectAccountMessage::SessionLoaded { .. }
-                            )))))
-                        {
-                            queue.extend(gui_outputs(gui.update(follow)).await);
-                        }
-                    }
-                }
-            }
+            let routed = route_fresh_auth_completions(&mut gui, gui_outputs(task).await).await;
             assert_eq!(routed, 1);
             assert!(
                 !gui.reviewer_app_mut(0).claim_session_invalidated,
@@ -6260,27 +6277,218 @@ fn closed_gate_candidates_are_refused_independently_of_rdts_window() {
     }
 }
 
-#[tokio::test]
-async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded() {
-    use iced::advanced::{
-        layout,
-        renderer::Headless,
-        widget::{Id, Operation, Tree},
-        Layout,
-    };
-    #[derive(Default)]
-    struct Labels(Vec<String>, Option<iced::Point>);
-    impl Operation for Labels {
-        fn traverse(&mut self, f: &mut dyn FnMut(&mut dyn Operation)) {
-            f(self);
-        }
-        fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
-            self.0.push(value.to_owned());
-            if value == "Check again" {
-                self.1 = Some(bounds.center());
-            }
+use iced::advanced::widget::{Id, Operation};
+#[derive(Default)]
+struct FundedWizardLabels(Vec<String>, Option<iced::Point>);
+impl Operation for FundedWizardLabels {
+    fn traverse(&mut self, f: &mut dyn FnMut(&mut dyn Operation)) {
+        f(self);
+    }
+    fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
+        self.0.push(value.to_owned());
+        if value == "Check again" {
+            self.1 = Some(bounds.center());
         }
     }
+}
+
+fn configure_funded_wizard_case(
+    p: &mut ClaimStep1Panel,
+    scenario: &str,
+    expanded: bool,
+    addresses: &claim_workflow::CheckedClaimFundingAddresses,
+    paired: (
+        &Arc<dyn Daemon + Send + Sync>,
+        &Arc<Wallet>,
+        &watch::Receiver<u64>,
+    ),
+) {
+    let (paired_daemon, paired_wallet, paired_generation) = paired;
+    p.stage = match scenario {
+        scenario if scenario == "deposits" || scenario.starts_with("proof-") => {
+            Stage::FundingDeposits(addresses.clone())
+        }
+        "loading" => Stage::FundingChecking,
+        _ => Stage::Preconditions,
+    };
+    p.connect = (scenario != "signed-out").then(|| ConnectSession {
+        client: CoincubeClient::new(),
+        account: "test-account".into(),
+    });
+    p.backend = match scenario {
+        "switching" => BackendState::Switching,
+        "unavailable" => BackendState::Unavailable,
+        "unknown" => BackendState::Unknown,
+        _ => BackendState::Ready,
+    };
+    p.restart_pending = scenario == "recorded";
+    p.pre.target = Some("fork-cube".into());
+    p.pre.shape = None;
+    p.pre.checked = (scenario != "unchecked").then(|| checked_ok(1_000_000));
+    p.pre.checking = scenario == "setup";
+    p.funding_error = (scenario == "error")
+        .then(|| "Bitcoin indexer unavailable. Retry loading deposits when it recovers.".to_owned())
+        .or_else(|| {
+            [
+                "signed-out",
+                "switching",
+                "unavailable",
+                "unknown",
+                "recorded",
+            ]
+            .contains(&scenario)
+            .then(|| "An older deposit check failed.".to_owned())
+        });
+    p.deposit_details_override = Some(expanded);
+    p.bind_fork_daemon(
+        (scenario == "deposits" || scenario.starts_with("proof-")).then(|| {
+            ClaimForkBinding::new(paired_daemon, paired_wallet, paired_generation.clone())
+        }),
+    );
+    p.funding_checking = scenario == "deposits";
+    use crate::services::claim_observation::http::DiscoveryError;
+    let failed = FundingProofStatus::Failed(DiscoveryError::Structural(
+        coincube_core::claim_ancestry::Error::IncompletePath,
+    ));
+    p.funding_proofs = match scenario {
+        "proof-bitcoin" => [failed, FundingProofStatus::PathFound],
+        "proof-btcb2" => [FundingProofStatus::PathFound, failed],
+        "proof-paths" => [FundingProofStatus::PathFound; 2],
+        "proof-both" => [failed; 2],
+        "proof-service" => [
+            FundingProofStatus::Failed(DiscoveryError::Observation(
+                crate::services::claim_observation::FailureKind::Http(503),
+            )),
+            FundingProofStatus::Pending,
+        ],
+        "proof-bounded" => [
+            FundingProofStatus::Pending,
+            FundingProofStatus::Failed(DiscoveryError::Structural(
+                coincube_core::claim_ancestry::Error::PathLimit,
+            )),
+        ],
+        "proof-none" => [FundingProofStatus::NoQualifyingAncestry; 2],
+        _ => [FundingProofStatus::Pending; 2],
+    };
+    p.funding_inline_error = scenario.starts_with("proof-");
+    if p.funding_inline_error {
+        p.funding_error = Some("Ambiguous global deposit error".into());
+    }
+}
+fn assert_funded_deposit_labels(labels: &FundedWizardLabels, expanded: bool) {
+    for expected in [
+        "Verifying replay protection",
+        "Funds received at both addresses",
+        "Available after both deposits are verified.",
+    ] {
+        assert!(
+            labels.0.iter().any(|label| label.contains(expected)),
+            "Missing {expected}: {:?}",
+            labels.0
+        );
+    }
+    let details_control = if expanded {
+        "Hide deposit addresses"
+    } else {
+        "Deposit addresses"
+    };
+    assert!(labels.0.iter().any(|label| label == details_control));
+    for expected in ["Bitcoin · minimum", "Bitcoin Blake2b · minimum"] {
+        assert_eq!(
+            labels.0.iter().any(|label| label.contains(expected)),
+            expanded,
+            "{expected}: {:?}",
+            labels.0
+        );
+    }
+    assert_eq!(
+        labels
+            .0
+            .iter()
+            .any(|label| label.contains("bc1q-example-bitcoin-deposit")),
+        expanded
+    );
+    assert_eq!(
+        labels
+            .0
+            .iter()
+            .any(|label| label.contains("bc1q-example-btcb2-deposit")),
+        expanded
+    );
+}
+fn assert_funded_proof_labels(p: &ClaimStep1Panel, labels: &FundedWizardLabels, scenario: &str) {
+    assert!(p.paired_vault_ready());
+    assert!(!labels
+        .0
+        .iter()
+        .any(|label| label.contains("Open and unlock the paired")));
+    assert!(labels.0.iter().any(|label| label == "Retry verification"));
+    assert!(!labels
+        .0
+        .iter()
+        .any(|label| label.contains("Ambiguous global")));
+    assert!(!labels
+        .0
+        .iter()
+        .any(|label| label.contains("replay protected")));
+    let failures = labels
+        .0
+        .iter()
+        .filter(|label| label.contains("Could not verify a link to a post-fork mining reward"))
+        .count();
+    if ["proof-bitcoin", "proof-btcb2"].contains(&scenario) {
+        assert_eq!(failures, 1);
+    }
+    if scenario == "proof-both" {
+        assert_eq!(failures, 2);
+    }
+    if scenario == "proof-service" {
+        assert!(labels
+            .0
+            .iter()
+            .any(|label| label.contains("Fresh indexer data is unavailable")));
+    }
+    if scenario == "proof-bounded" {
+        assert!(labels
+            .0
+            .iter()
+            .any(|label| label.contains("Search limit reached")));
+    }
+    if scenario == "proof-none" {
+        assert!(labels
+            .0
+            .iter()
+            .any(|label| label.contains("post-fork mining reward unique to this chain")));
+    }
+}
+fn assert_funded_scenario_labels(
+    p: &ClaimStep1Panel,
+    labels: &FundedWizardLabels,
+    scenario: &str,
+    expanded: bool,
+) {
+    if scenario == "deposits" {
+        assert_funded_deposit_labels(labels, expanded);
+    } else if scenario.starts_with("proof-") {
+        assert_funded_proof_labels(p, labels, scenario);
+    } else if scenario == "error" {
+        assert!(labels
+            .0
+            .iter()
+            .any(|label| label.contains("Bitcoin indexer unavailable")));
+        assert!(labels
+            .0
+            .iter()
+            .any(|label| label == "Retry loading deposits"));
+    } else if scenario == "setup" {
+        assert!(labels.0.iter().any(|label| label == "Wallet details"));
+        assert!(!labels.0.iter().any(|label| label == "Node backend"));
+    }
+}
+
+#[tokio::test]
+async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded() {
+    use iced::advanced::{layout, renderer::Headless, widget::Tree, Layout};
     for bytes in [
         coincube_ui::font::REGULAR_BYTES,
         coincube_ui::font::BOLD_BYTES,
@@ -6353,78 +6561,13 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
         (1400, false, "unchecked"),
         (1400, false, "ready"),
     ] {
-        p.stage = match scenario {
-            scenario if scenario == "deposits" || scenario.starts_with("proof-") => {
-                Stage::FundingDeposits(addresses.clone())
-            }
-            "loading" => Stage::FundingChecking,
-            _ => Stage::Preconditions,
-        };
-        p.connect = (scenario != "signed-out").then(|| ConnectSession {
-            client: CoincubeClient::new(),
-            account: "test-account".into(),
-        });
-        p.backend = match scenario {
-            "switching" => BackendState::Switching,
-            "unavailable" => BackendState::Unavailable,
-            "unknown" => BackendState::Unknown,
-            _ => BackendState::Ready,
-        };
-        p.restart_pending = scenario == "recorded";
-        p.pre.target = Some("fork-cube".into());
-        p.pre.shape = None;
-        p.pre.checked = (scenario != "unchecked").then(|| checked_ok(1_000_000));
-        p.pre.checking = scenario == "setup";
-        p.funding_error = (scenario == "error")
-            .then(|| {
-                "Bitcoin indexer unavailable. Retry loading deposits when it recovers.".to_owned()
-            })
-            .or_else(|| {
-                [
-                    "signed-out",
-                    "switching",
-                    "unavailable",
-                    "unknown",
-                    "recorded",
-                ]
-                .contains(&scenario)
-                .then(|| "An older deposit check failed.".to_owned())
-            });
-        p.deposit_details_override = Some(expanded);
-        p.bind_fork_daemon(
-            (scenario == "deposits" || scenario.starts_with("proof-")).then(|| {
-                ClaimForkBinding::new(&paired_daemon, &paired_wallet, paired_generation.clone())
-            }),
+        configure_funded_wizard_case(
+            &mut p,
+            scenario,
+            expanded,
+            &addresses,
+            (&paired_daemon, &paired_wallet, &paired_generation),
         );
-        p.funding_checking = scenario == "deposits";
-        use crate::services::claim_observation::http::DiscoveryError;
-        let failed = FundingProofStatus::Failed(DiscoveryError::Structural(
-            coincube_core::claim_ancestry::Error::IncompletePath,
-        ));
-        p.funding_proofs = match scenario {
-            "proof-bitcoin" => [failed, FundingProofStatus::PathFound],
-            "proof-btcb2" => [FundingProofStatus::PathFound, failed],
-            "proof-paths" => [FundingProofStatus::PathFound; 2],
-            "proof-both" => [failed; 2],
-            "proof-service" => [
-                FundingProofStatus::Failed(DiscoveryError::Observation(
-                    crate::services::claim_observation::FailureKind::Http(503),
-                )),
-                FundingProofStatus::Pending,
-            ],
-            "proof-bounded" => [
-                FundingProofStatus::Pending,
-                FundingProofStatus::Failed(DiscoveryError::Structural(
-                    coincube_core::claim_ancestry::Error::PathLimit,
-                )),
-            ],
-            "proof-none" => [FundingProofStatus::NoQualifyingAncestry; 2],
-            _ => [FundingProofStatus::Pending; 2],
-        };
-        p.funding_inline_error = scenario.starts_with("proof-");
-        if p.funding_inline_error {
-            p.funding_error = Some("Ambiguous global deposit error".into());
-        }
         if expanded {
             drop(p.apply(ClaimEvent::FundingProofExpired(p.check_seq, 1, 0)));
             assert!(p.funding_status().unwrap().contains("expired"));
@@ -6450,7 +6593,7 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
             &renderer,
             &layout::Limits::new(iced::Size::ZERO, size),
         );
-        let mut labels = Labels::default();
+        let mut labels = FundedWizardLabels::default();
         element
             .as_widget_mut()
             .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
@@ -6478,105 +6621,7 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
             .0
             .iter()
             .any(|label| label.contains("post-fork candidate")));
-        if scenario == "deposits" {
-            for expected in [
-                "Verifying replay protection",
-                "Funds received at both addresses",
-                "Available after both deposits are verified.",
-            ] {
-                assert!(
-                    labels.0.iter().any(|label| label.contains(expected)),
-                    "Missing {expected}: {:?}",
-                    labels.0
-                );
-            }
-            let details_control = if expanded {
-                "Hide deposit addresses"
-            } else {
-                "Deposit addresses"
-            };
-            assert!(labels.0.iter().any(|label| label == details_control));
-            for expected in ["Bitcoin · minimum", "Bitcoin Blake2b · minimum"] {
-                assert_eq!(
-                    labels.0.iter().any(|label| label.contains(expected)),
-                    expanded,
-                    "{expected}: {:?}",
-                    labels.0
-                );
-            }
-            assert_eq!(
-                labels
-                    .0
-                    .iter()
-                    .any(|label| label.contains("bc1q-example-bitcoin-deposit")),
-                expanded
-            );
-            assert_eq!(
-                labels
-                    .0
-                    .iter()
-                    .any(|label| label.contains("bc1q-example-btcb2-deposit")),
-                expanded
-            );
-        } else if scenario.starts_with("proof-") {
-            assert!(p.paired_vault_ready());
-            assert!(!labels
-                .0
-                .iter()
-                .any(|label| label.contains("Open and unlock the paired")));
-            assert!(labels.0.iter().any(|label| label == "Retry verification"));
-            assert!(!labels
-                .0
-                .iter()
-                .any(|label| label.contains("Ambiguous global")));
-            assert!(!labels
-                .0
-                .iter()
-                .any(|label| label.contains("replay protected")));
-            let failures = labels
-                .0
-                .iter()
-                .filter(|label| {
-                    label.contains("Could not verify a link to a post-fork mining reward")
-                })
-                .count();
-            if ["proof-bitcoin", "proof-btcb2"].contains(&scenario) {
-                assert_eq!(failures, 1);
-            }
-            if scenario == "proof-both" {
-                assert_eq!(failures, 2);
-            }
-            if scenario == "proof-service" {
-                assert!(labels
-                    .0
-                    .iter()
-                    .any(|label| label.contains("Fresh indexer data is unavailable")));
-            }
-            if scenario == "proof-bounded" {
-                assert!(labels
-                    .0
-                    .iter()
-                    .any(|label| label.contains("Search limit reached")));
-            }
-            if scenario == "proof-none" {
-                assert!(labels
-                    .0
-                    .iter()
-                    .any(|label| label.contains("post-fork mining reward unique to this chain")));
-            }
-        } else if scenario == "error" {
-            assert!(labels
-                .0
-                .iter()
-                .any(|label| label.contains("Bitcoin indexer unavailable")));
-            assert!(labels
-                .0
-                .iter()
-                .any(|label| label == "Retry loading deposits"));
-        } else if scenario == "setup" {
-            assert!(labels.0.iter().any(|label| label == "Wallet details"));
-            assert!(!labels.0.iter().any(|label| label == "Node backend"));
-        }
+        assert_funded_scenario_labels(&p, &labels, scenario, expanded);
         if [
             "signed-out",
             "switching",

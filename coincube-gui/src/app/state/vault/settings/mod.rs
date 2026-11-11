@@ -279,30 +279,12 @@ impl State for ImportExportSettingsState {
             Message::View(view::Message::Settings(
                 view::SettingsMessage::ExportEncryptedDescriptor,
             )) => {
-                if self.modal.is_none() {
-                    let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
-                        return Task::none();
-                    };
-                    let modal = VaultExportModal::new(
-                        Some(daemon),
-                        ImportExportType::ExportEncryptedDescriptor(Box::new(descriptor)),
-                    );
-                    launch!(self, modal, true);
-                }
+                return self.export_encrypted_descriptor(daemon);
             }
             Message::View(view::Message::Settings(
                 view::SettingsMessage::ExportPlaintextDescriptor,
             )) => {
-                if self.modal.is_none() {
-                    let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
-                        return Task::none();
-                    };
-                    let modal = VaultExportModal::new(
-                        Some(daemon),
-                        ImportExportType::Descriptor(descriptor),
-                    );
-                    launch!(self, modal, true);
-                }
+                return self.export_plaintext_descriptor(daemon);
             }
             Message::View(view::Message::Settings(view::SettingsMessage::ExportTransactions)) => {
                 if self.modal.is_none() {
@@ -347,6 +329,41 @@ impl State for ImportExportSettingsState {
                 launch!(self, modal, false);
             }
             _ => {}
+        }
+
+        Task::none()
+    }
+}
+
+impl ImportExportSettingsState {
+    fn export_encrypted_descriptor(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+    ) -> Task<Message> {
+        if self.modal.is_none() {
+            let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
+                return Task::none();
+            };
+            let modal = VaultExportModal::new(
+                Some(daemon),
+                ImportExportType::ExportEncryptedDescriptor(Box::new(descriptor)),
+            );
+            launch!(self, modal, true);
+        }
+
+        Task::none()
+    }
+    fn export_plaintext_descriptor(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+    ) -> Task<Message> {
+        if self.modal.is_none() {
+            let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
+                return Task::none();
+            };
+            let modal =
+                VaultExportModal::new(Some(daemon), ImportExportType::Descriptor(descriptor));
+            launch!(self, modal, true);
         }
 
         Task::none()

@@ -746,27 +746,12 @@ pub async fn check_reserved_funding_addresses(
     let [bitcoin_deposit, btcb2_deposit, bitcoin_return] = saved
         .addresses()
         .map_err(|_| "The saved funding addresses are invalid.".to_string())?;
-    let addresses = [
-        bitcoin_deposit.as_str(),
-        btcb2_deposit.as_str(),
-        bitcoin_return.as_str(),
-    ];
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        for address in addresses {
-            for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
-                let used = connect
-                    .address_used(chain, address)
-                    .await
-                    .map_err(|_| "Address history could not be checked on both chains.".to_string())?;
-                if used && !saved.is_released() {
-                    return Err("A reserved address already has chain history. Review the funding plan before sending coins.".to_string());
-                }
-            }
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|_| "Checking both chains' address history timed out.".to_string())??;
+    check_funding_address_history(
+        connect,
+        [&bitcoin_deposit, &btcb2_deposit, &bitcoin_return],
+        saved.is_released(),
+    )
+    .await?;
     let fee_quote = tokio::time::timeout(
         std::time::Duration::from_secs(45),
         connect.funding_fee_quote(&source, &saved),
@@ -807,6 +792,30 @@ pub async fn check_reserved_funding_addresses(
         bitcoin_return,
         fee_quote,
     })
+}
+
+async fn check_funding_address_history(
+    connect: &dyn SplitConnect,
+    addresses: [&str; 3],
+    released: bool,
+) -> Result<(), String> {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        for address in addresses {
+            for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+                let used = connect
+                    .address_used(chain, address)
+                    .await
+                    .map_err(|_| "Address history could not be checked on both chains.".to_string())?;
+                if used && !released {
+                    return Err("A reserved address already has chain history. Review the funding plan before sending coins.".to_string());
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| "Checking both chains' address history timed out.".to_string())??;
+    Ok(())
 }
 
 /// Reopen the funding-only stage after restart. Discovery never reveals the
@@ -903,7 +912,128 @@ pub struct ProductionConnect {
     claim_root: Option<CoincubeDirectory>,
 }
 
+type SplitDepositPreviewResult = (
+    Option<crate::app::view::vault::ancestry_coins::VerifiedCoinPairReview>,
+    Option<Box<PreparedSplitPair>>,
+);
+
+struct SplitDepositPreview<'a> {
+    inventory: &'a foreign_split_inventory::SplitInventory,
+    source: &'a SplitSource,
+    reservation: &'a claim_workflow::SplitFundingReservation,
+    target_vault: Option<&'a (WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
+    target_script: coincube_core::miniscript::bitcoin::ScriptBuf,
+    rates: (u64, u64),
+    context: &'a Context,
+}
+
 impl ProductionConnect {
+    async fn prepare_split_deposit_preview(
+        &self,
+        found: OwnedSplitFunding,
+        preview: SplitDepositPreview<'_>,
+    ) -> Result<SplitDepositPreviewResult, String> {
+        let SplitDepositPreview {
+            inventory,
+            source,
+            reservation,
+            target_vault,
+            target_script,
+            rates: (bitcoin_rate, fork_rate),
+            context,
+        } = preview;
+        let tips = coincube_core::claim::PreflightTips {
+            bitcoin: found
+                .inputs
+                .funding()
+                .bitcoin()
+                .ancestry()
+                .pair()
+                .bitcoin()
+                .tip,
+            fork: found.inputs.funding().fork().ancestry().pair().fork().tip,
+        };
+        let context = crate::services::claim_observation::http::FundingContext {
+            provider: &context.provider,
+            generation: context.generation,
+            now: self.observation.now(),
+            max_age_seconds: CHECK_POLICY.observations.max_observation_age_seconds,
+            tips,
+        };
+        let (bitcoin, fork) = found
+            .construct_split_pair(
+                inventory,
+                source,
+                reservation.indices.bitcoin_return,
+                target_script.as_script(),
+                target_vault.and_then(|(_, descriptor)| descriptor.as_imported()).and_then(|_| reservation.target_binding.as_ref().map(|binding| binding.receive_index())),
+                bitcoin_rate,
+                fork_rate,
+                context,
+            )
+            .map_err(|error| {
+                match error {
+                    crate::services::claim_observation::http::SplitPairError::InvalidConstruction(
+                        coincube_core::foreign_split::Error::FundingBelowFee(ChainId::Bitcoin),
+                    ) => "The selected Bitcoin-only coin cannot cover the current Bitcoin transaction fee. It cannot be used for this attempt; retry when fees fall or after a separate eligible deposit is confirmed.".to_string(),
+                    crate::services::claim_observation::http::SplitPairError::InvalidConstruction(
+                        coincube_core::foreign_split::Error::FundingBelowFee(ChainId::BitcoinBlake2b),
+                    ) => "The selected BTCB2-only coin cannot cover the current BTCB2 transaction fee. It cannot be used for this attempt; retry when fees fall or after a separate eligible deposit is confirmed.".to_string(),
+                    _ => format!("The exact split transactions could not be reviewed: {error:?}"),
+                }
+            })?;
+        let coins = crate::app::view::vault::ancestry_coins::CoinPairReview::from_psbts(
+            bitcoin.psbt(),
+            fork.psbt(),
+            bitcoin.claimed_prevouts(),
+            bitcoin.funding_prevout(),
+            fork.funding_prevout(),
+        )
+        .map_err(str::to_owned)?;
+        // Constructing both transactions and their review can outlive
+        // the observations that qualified the deposits. A new block
+        // or an aged proof requires a fresh paired scan before the UI
+        // may describe either funding input as verified.
+        let (bitcoin_tip, fork_tip) = tokio::try_join!(
+            self.observation.tip(ChainId::Bitcoin),
+            self.observation.tip(ChainId::BitcoinBlake2b),
+        )
+        .map_err(|_| {
+            "The chain tips could not be refreshed for the split preview. Check deposits again."
+                .to_string()
+        })?;
+        let proof_age = self
+            .observation
+            .now()
+            .checked_sub(found.inputs.observed_at());
+        if bitcoin_tip.value() != &tips.bitcoin
+            || fork_tip.value() != &tips.fork
+            || !proof_age.is_some_and(|age| {
+                (0..=CHECK_POLICY.observations.max_observation_age_seconds).contains(&age)
+            })
+        {
+            return Err("The two-chain split proof changed or expired while preparing the preview. Check deposits again.".into());
+        }
+        let review = crate::app::view::vault::ancestry_coins::VerifiedCoinPairReview::new(
+            coins,
+            found.inputs.funding().bitcoin().block(),
+            tips.bitcoin,
+            found.inputs.funding().fork().block(),
+            tips.fork,
+        )
+        .map_err(str::to_owned)?;
+        Ok((
+            Some(review),
+            Some(Box::new(PreparedSplitPair {
+                bitcoin,
+                fork,
+                funding: found,
+                bitcoin_rate_vb: bitcoin_rate,
+                fork_rate_vb: fork_rate,
+            })),
+        ))
+    }
+
     pub(crate) fn with_claim_root(mut self, root: Option<CoincubeDirectory>) -> Self {
         self.claim_root = root;
         self
@@ -1842,96 +1972,19 @@ impl SplitConnect for ProductionConnect {
                         "The saved deposit reservation no longer matches this source and target Cube.".to_string(),
                 })?;
             if let Some(found) = found {
-                let tips = coincube_core::claim::PreflightTips {
-                    bitcoin: found
-                        .inputs
-                        .funding()
-                        .bitcoin()
-                        .ancestry()
-                        .pair()
-                        .bitcoin()
-                        .tip,
-                    fork: found.inputs.funding().fork().ancestry().pair().fork().tip,
-                };
-                let context = crate::services::claim_observation::http::FundingContext {
-                    provider: &context.provider,
-                    generation: context.generation,
-                    now: self.observation.now(),
-                    max_age_seconds: CHECK_POLICY.observations.max_observation_age_seconds,
-                    tips,
-                };
-                let (bitcoin, fork) = found
-                    .construct_split_pair(
-                        &scan.inventory,
+                self.prepare_split_deposit_preview(
+                    found,
+                    SplitDepositPreview {
+                        inventory: &scan.inventory,
                         source,
-                        reservation.indices.bitcoin_return,
-                        target_script.as_script(),
-                        target_vault.and_then(|(_, descriptor)| descriptor.as_imported()).and_then(|_| reservation.target_binding.as_ref().map(|binding| binding.receive_index())),
-                        bitcoin_rate,
-                        fork_rate,
-                        context,
-                    )
-                    .map_err(|error| {
-                        match error {
-                            crate::services::claim_observation::http::SplitPairError::InvalidConstruction(
-                                coincube_core::foreign_split::Error::FundingBelowFee(ChainId::Bitcoin),
-                            ) => "The selected Bitcoin-only coin cannot cover the current Bitcoin transaction fee. It cannot be used for this attempt; retry when fees fall or after a separate eligible deposit is confirmed.".to_string(),
-                            crate::services::claim_observation::http::SplitPairError::InvalidConstruction(
-                                coincube_core::foreign_split::Error::FundingBelowFee(ChainId::BitcoinBlake2b),
-                            ) => "The selected BTCB2-only coin cannot cover the current BTCB2 transaction fee. It cannot be used for this attempt; retry when fees fall or after a separate eligible deposit is confirmed.".to_string(),
-                            _ => format!("The exact split transactions could not be reviewed: {error:?}"),
-                        }
-                    })?;
-                let coins = crate::app::view::vault::ancestry_coins::CoinPairReview::from_psbts(
-                    bitcoin.psbt(),
-                    fork.psbt(),
-                    bitcoin.claimed_prevouts(),
-                    bitcoin.funding_prevout(),
-                    fork.funding_prevout(),
+                        reservation: &reservation,
+                        target_vault,
+                        target_script,
+                        rates: (bitcoin_rate, fork_rate),
+                        context: &context,
+                    },
                 )
-                .map_err(str::to_owned)?;
-                // Constructing both transactions and their review can outlive
-                // the observations that qualified the deposits. A new block
-                // or an aged proof requires a fresh paired scan before the UI
-                // may describe either funding input as verified.
-                let (bitcoin_tip, fork_tip) = tokio::try_join!(
-                    self.observation.tip(ChainId::Bitcoin),
-                    self.observation.tip(ChainId::BitcoinBlake2b),
-                )
-                .map_err(|_| {
-                    "The chain tips could not be refreshed for the split preview. Check deposits again."
-                        .to_string()
-                })?;
-                let proof_age = self
-                    .observation
-                    .now()
-                    .checked_sub(found.inputs.observed_at());
-                if bitcoin_tip.value() != &tips.bitcoin
-                    || fork_tip.value() != &tips.fork
-                    || !proof_age.is_some_and(|age| {
-                        (0..=CHECK_POLICY.observations.max_observation_age_seconds).contains(&age)
-                    })
-                {
-                    return Err("The two-chain split proof changed or expired while preparing the preview. Check deposits again.".into());
-                }
-                let review = crate::app::view::vault::ancestry_coins::VerifiedCoinPairReview::new(
-                    coins,
-                    found.inputs.funding().bitcoin().block(),
-                    tips.bitcoin,
-                    found.inputs.funding().fork().block(),
-                    tips.fork,
-                )
-                .map_err(str::to_owned)?;
-                (
-                    Some(review),
-                    Some(Box::new(PreparedSplitPair {
-                        bitcoin,
-                        fork,
-                        funding: found,
-                        bitcoin_rate_vb: bitcoin_rate,
-                        fork_rate_vb: fork_rate,
-                    })),
-                )
+                .await?
             } else {
                 (None, None)
             }

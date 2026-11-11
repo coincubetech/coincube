@@ -1959,6 +1959,23 @@ fn split_panel_start_is_reached_only_from_the_review_overlay_under_the_flag() {
 /// #568 W1: the entry-point guard reads a CRLF checkout (Git for Windows)
 /// of the sources the same way, so its line-spanning markers are still
 /// found.
+fn walk_split_start_sources(dir: &Path, files: &mut Vec<(String, String)>, root: &Path) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            walk_split_start_sources(&path, files, root);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            files.push((
+                path.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                std::fs::read_to_string(&path).unwrap(),
+            ));
+        }
+    }
+}
+
 #[test]
 fn split_entry_point_guard_reads_a_crlf_checkout() {
     assert_reads_crlf(crate::utils::source_text::as_crlf);
@@ -1981,24 +1998,9 @@ fn assert_reads_crlf(checkout: fn(&str) -> String) {
 /// `checkout` is the text a checkout of each source file reads as.
 fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    fn walk(dir: &Path, files: &mut Vec<(String, String)>, root: &Path) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                walk(&path, files, root);
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                files.push((
-                    path.strip_prefix(root)
-                        .unwrap()
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                    std::fs::read_to_string(&path).unwrap(),
-                ));
-            }
-        }
-    }
+
     let mut files = Vec::new();
-    walk(&root, &mut files, &root);
+    walk_split_start_sources(&root, &mut files, &root);
     let files: Vec<(String, String)> = files
         .into_iter()
         .map(|(file, text)| (file, crate::utils::source_text::lf_only(&checkout(&text))))
@@ -2234,6 +2236,22 @@ fn split_ui_blocking_guard_reads_a_crlf_checkout() {
 }
 
 /// `checkout` is the text a checkout of each source file reads as.
+fn split_token_is_spawned(text: &str, at: usize) -> bool {
+    text[..at].rfind("spawn_blocking(").is_some_and(|open| {
+        let start = open + "spawn_blocking(".len();
+        // Closed once its depth reaches zero, for good.
+        let mut depth = 1i32;
+        text[start..at].chars().all(|c| {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            depth > 0
+        })
+    })
+}
+
 fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let read = |path: &str| {
@@ -2376,19 +2394,7 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
             // Every occurrence must sit inside a `spawn_blocking(...)`
             // argument: after one, with its parentheses still open.
             for (at, _) in text.match_indices(token) {
-                let inside = text[..at].rfind("spawn_blocking(").is_some_and(|open| {
-                    let start = open + "spawn_blocking(".len();
-                    // Closed once its depth reaches zero, for good.
-                    let mut depth = 1i32;
-                    text[start..at].chars().all(|c| {
-                        match c {
-                            '(' => depth += 1,
-                            ')' => depth -= 1,
-                            _ => {}
-                        }
-                        depth > 0
-                    })
-                });
+                let inside = split_token_is_spawned(text, at);
                 assert!(inside, "{} calls {} on the UI thread", name, token);
             }
         }

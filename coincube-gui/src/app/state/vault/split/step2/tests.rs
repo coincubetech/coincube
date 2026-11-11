@@ -1301,26 +1301,27 @@ fn cannot_replay_label_comes_only_from_live_check_evidence() {
 /// (itself started only from the sweep review, or resumed from its journal,
 /// `split_panel_start_is_reached_only_from_the_review_overlay_under_the_flag`),
 /// and the App only hands the panel its port. Whole identifiers.
-#[test]
-fn step2_panel_layer_is_reached_only_through_the_split_panel() {
-    fn walk(dir: &Path, files: &mut Vec<(String, String)>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                walk(&path, files);
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                files.push((
-                    path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                        .unwrap()
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                    std::fs::read_to_string(&path).unwrap(),
-                ));
-            }
+fn walk_step2_sources(dir: &Path, files: &mut Vec<(String, String)>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            walk_step2_sources(&path, files);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            files.push((
+                path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                std::fs::read_to_string(&path).unwrap(),
+            ));
         }
     }
+}
+
+#[test]
+fn step2_panel_layer_is_reached_only_through_the_split_panel() {
     let mut files = Vec::new();
-    walk(
+    walk_step2_sources(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
         &mut files,
     );

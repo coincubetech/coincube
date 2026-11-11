@@ -395,44 +395,9 @@ impl SplitPanel {
                 }
             }
             DeviceMessage::Sign(id) => {
-                let (Some(step), Some(listing)) =
-                    (self.device_step(), self.device.listing.as_ref())
-                else {
+                let Some((step, psbt, signing)) = self.prepare_device_signing(id) else {
                     return Task::none();
                 };
-                if self.device.step != Some(step) {
-                    return Task::none();
-                }
-                let psbt = match step {
-                    DeviceStep::Step1 => self.construction.as_deref().map(|c| c.psbt().clone()),
-                    DeviceStep::Step2 => self.step2_psbt.clone(),
-                    DeviceStep::PairedBitcoin => self
-                        .paired_signing
-                        .as_ref()
-                        .map(|signing| signing.bitcoin_current.clone()),
-                    DeviceStep::PairedFork => self
-                        .paired_signing
-                        .as_ref()
-                        .map(|signing| signing.fork_current.clone()),
-                };
-                let Some(psbt) = psbt else {
-                    return Task::none();
-                };
-                let signing = match DeviceSigning::prepare_with(
-                    &listing.devices,
-                    &id,
-                    &listing.policy,
-                    &psbt,
-                    self.device.opener.clone(),
-                ) {
-                    Ok(signing) => signing,
-                    Err(error) => {
-                        self.notice = Some(error.to_string());
-                        return Task::none();
-                    }
-                };
-                self.notice = None;
-                self.stage = Stage::Working(Work::SigningOnDevice);
                 if let DeviceStep::PairedBitcoin | DeviceStep::PairedFork = step {
                     let (Some(connect), Some(source), Some((_, directory)), Some(pair)) = (
                         self.connect.clone(),
@@ -504,6 +469,53 @@ impl SplitPanel {
             }
             _ => Task::none(),
         }
+    }
+
+    // Keep the actual async run and paired admission visible at update_device's
+    // source-audited dispatch boundary; preparation only selects this session's device.
+    fn prepare_device_signing(
+        &mut self,
+        id: String,
+    ) -> Option<(
+        DeviceStep,
+        coincube_core::miniscript::bitcoin::Psbt,
+        DeviceSigning,
+    )> {
+        let (Some(step), Some(listing)) = (self.device_step(), self.device.listing.as_ref()) else {
+            return None;
+        };
+        if self.device.step != Some(step) {
+            return None;
+        }
+        let psbt = match step {
+            DeviceStep::Step1 => self.construction.as_deref().map(|c| c.psbt().clone()),
+            DeviceStep::Step2 => self.step2_psbt.clone(),
+            DeviceStep::PairedBitcoin => self
+                .paired_signing
+                .as_ref()
+                .map(|signing| signing.bitcoin_current.clone()),
+            DeviceStep::PairedFork => self
+                .paired_signing
+                .as_ref()
+                .map(|signing| signing.fork_current.clone()),
+        };
+        let psbt = psbt?;
+        let signing = match DeviceSigning::prepare_with(
+            &listing.devices,
+            &id,
+            &listing.policy,
+            &psbt,
+            self.device.opener.clone(),
+        ) {
+            Ok(signing) => signing,
+            Err(error) => {
+                self.notice = Some(error.to_string());
+                return None;
+            }
+        };
+        self.notice = None;
+        self.stage = Stage::Working(Work::SigningOnDevice);
+        Some((step, psbt, signing))
     }
 
     /// A device task's result. Stale ones were dropped by sequence.

@@ -384,6 +384,30 @@ async fn device_signing_feeds_verified_import_step1_and_step2() {
 /// Bitcoin" warnings; a multisig device row adds what its registration
 /// means there (session-only on a Ledger, kept on the device otherwise).
 /// Only a supported device that holds a key of the wallet can sign.
+async fn assert_device_signing_copy(panel: &SplitPanel, step: DeviceStep, multisig: bool) {
+    let labels = rendered_labels(panel).await;
+    for line in step_copy(step) {
+        assert_eq!(
+            labels.iter().filter(|l| l == line).count(),
+            1,
+            "{step:?}: {line}"
+        );
+    }
+    let other = match step {
+        DeviceStep::Step1 => STEP2_DEVICE_SHOWS_BITCOIN_WARNING,
+        DeviceStep::Step2 => STEP1_DATA_OUTPUT_NOTE,
+        DeviceStep::PairedBitcoin | DeviceStep::PairedFork => unreachable!(),
+    };
+    assert!(!labels.iter().any(|l| l == other), "{:?}", step);
+    for (notice, rows) in [
+        (REGISTRATION_NOTICE_SESSION, 1),
+        (REGISTRATION_NOTICE_ON_DEVICE, 2),
+    ] {
+        let shown = labels.iter().filter(|l| *l == notice).count();
+        assert_eq!(shown, if multisig { rows } else { 0 }, "{step:?} {notice}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn device_signing_copy_per_step_and_registration_notice() {
     assert_eq!(step_copy(DeviceStep::Step1), &[STEP1_DATA_OUTPUT_NOTE]);
@@ -460,27 +484,7 @@ async fn device_signing_copy_per_step_and_registration_notice() {
             );
 
             // What the view renders: the step's copy, each notice once.
-            let labels = rendered_labels(&panel).await;
-            for line in step_copy(step) {
-                assert_eq!(
-                    labels.iter().filter(|l| l == line).count(),
-                    1,
-                    "{step:?}: {line}"
-                );
-            }
-            let other = match step {
-                DeviceStep::Step1 => STEP2_DEVICE_SHOWS_BITCOIN_WARNING,
-                DeviceStep::Step2 => STEP1_DATA_OUTPUT_NOTE,
-                DeviceStep::PairedBitcoin | DeviceStep::PairedFork => unreachable!(),
-            };
-            assert!(!labels.iter().any(|l| l == other), "{:?}", step);
-            for (notice, rows) in [
-                (REGISTRATION_NOTICE_SESSION, 1),
-                (REGISTRATION_NOTICE_ON_DEVICE, 2),
-            ] {
-                let shown = labels.iter().filter(|l| *l == notice).count();
-                assert_eq!(shown, if multisig { rows } else { 0 }, "{step:?} {notice}");
-            }
+            assert_device_signing_copy(&panel, step, multisig).await;
         }
     }
     assert_empty(&root);
