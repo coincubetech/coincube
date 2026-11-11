@@ -316,12 +316,16 @@ impl<'a> SparkSendView<'a> {
         // The steps are on the head's rule; the side panel lists what the
         // payment can come from.
         let aside: Element<'a, Message> = match self.phase {
-            SparkSendPhase::Prepared(ok) if is_review(self.phase) => Column::new()
-                .spacing(20)
-                .push(self.balances.view())
-                .push(iced::widget::rule::horizontal(1))
-                .push(after_payment(&self, ok))
-                .into(),
+            // A mismatch blocks the payment: no balances after a send that
+            // must not happen.
+            SparkSendPhase::Prepared(ok) if is_review(self.phase) && !self.recipient_mismatch => {
+                Column::new()
+                    .spacing(20)
+                    .push(self.balances.view())
+                    .push(iced::widget::rule::horizontal(1))
+                    .push(after_payment(&self, ok))
+                    .into()
+            }
             _ => self.balances.view(),
         };
         // The title, the Cube line, Back to Spark and the steps are in the
@@ -3989,7 +3993,12 @@ mod tests {
                     crate::services::branta::MISMATCH_MESSAGE,
                     "Replace payment request",
                 ],
-                absent: &["Confirm and send", "Total you send", "Payment details"],
+                absent: &[
+                    "Confirm and send",
+                    "Total you send",
+                    "Payment details",
+                    "After this payment",
+                ],
             },
             Case {
                 scenario: "quote-valid",
