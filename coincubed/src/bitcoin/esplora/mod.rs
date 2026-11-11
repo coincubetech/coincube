@@ -230,6 +230,102 @@ impl Esplora {
         self.polls_since_full_sync = 0;
     }
 
+    /// Skip an unchanged tip only while the bounded idle-poll allowance remains.
+    fn can_skip_sync(&mut self, eager: bool) -> Result<bool, EsploraError> {
+        // Tip-guard. A single `chain_tip` request is cheap enough
+        // (one HTTP call vs. ~80 for the SPK walk) that we always
+        // pay it; the savings come from skipping the walk when the
+        // tip is unchanged. Only applies when we're not in a
+        // forced full-scan, an eager sync wasn't requested, and
+        // there's a `last_synced_tip` to compare against — first-
+        // poll has no baseline.
+        if self.is_rescanning() || eager {
+            return Ok(false);
+        }
+        let Some(last_tip) = self.last_synced_tip else {
+            return Ok(false);
+        };
+        let current_tip = self.client.chain_tip().map_err(|e| {
+            if let client::Error::HeightOutOfRange(height) = e {
+                log::warn!(
+                    "Refused the Esplora chain tip: the server reported block height {}, \
+                     which is out of range. The wallet stays at its last tip and the \
+                     next poll retries.",
+                    height
+                );
+            }
+            EsploraError::Client(e)
+        })?;
+        if current_tip == last_tip {
+            // Counting the *prospective* skip first so the
+            // boundary fires exactly on the
+            // `MAX_POLLS_BEFORE_FORCED_RESCAN`th unchanged
+            // poll (the staleness cap documented on the
+            // constant). The pre-fix shape incremented
+            // *after* the comparison, which let one extra
+            // tick of staleness through before the forced
+            // rescan — every Nth+1 poll instead of every
+            // Nth. We only persist the increment when we
+            // actually skip; on the boundary tick we fall
+            // through to a full sync, which resets the
+            // counter to 0 at its success-return below.
+            let prospective = self.polls_since_full_sync.saturating_add(1);
+            if prospective < MAX_POLLS_BEFORE_FORCED_RESCAN {
+                self.polls_since_full_sync = prospective;
+                log::debug!(
+                    "Esplora tip unchanged ({}), skipping per-SPK rescan \
+                     (forced rescan in {} more polls)",
+                    current_tip,
+                    MAX_POLLS_BEFORE_FORCED_RESCAN.saturating_sub(prospective),
+                );
+                return Ok(true);
+            }
+            log::debug!(
+                "Esplora tip unchanged ({}) but forced-rescan boundary reached \
+                 after {} skipped polls; performing full rescan",
+                current_tip,
+                self.polls_since_full_sync,
+            );
+        } else {
+            log::debug!(
+                "Esplora tip advanced from {} to {}; performing full sync",
+                last_tip,
+                current_tip,
+            );
+        }
+
+        Ok(false)
+    }
+
+    /// Build a fresh request and restart progress for each attempted server.
+    fn full_scan_request(
+        wallet: &BdkWallet,
+        tip: CheckPoint,
+        history_sync: &Option<std::sync::Arc<crate::bitcoin::HistorySyncCache>>,
+        expected_addresses: u64,
+    ) -> FullScanRequest<wallet::KeychainType> {
+        let mut request = FullScanRequest::from_chain_tip(tip);
+        // Rebuilt for every server the client tries, so the count
+        // restarts with each attempt.
+        if let Some(cache) = history_sync {
+            cache.begin_full_scan(expected_addresses);
+        }
+        for (k, spks) in wallet.index().all_unbounded_spk_iters() {
+            let change = matches!(k, super::electrum::wallet::KeychainType::Change);
+            request = match history_sync {
+                Some(cache) => {
+                    let cache = cache.clone();
+                    request.set_spks_for_keychain(
+                        k,
+                        spks.inspect(move |_| cache.branch_address_checked(change)),
+                    )
+                }
+                None => request.set_spks_for_keychain(k, spks),
+            };
+        }
+        request
+    }
+
     /// Sync the wallet with the Esplora server. If there was any reorg since the last poll, this
     /// returns the first common ancestor between the previous and the new chain.
     ///
@@ -268,64 +364,8 @@ impl Esplora {
             log::debug!("Esplora eager sync requested; bypassing tip-guard");
         }
 
-        // Tip-guard. A single `chain_tip` request is cheap enough
-        // (one HTTP call vs. ~80 for the SPK walk) that we always
-        // pay it; the savings come from skipping the walk when the
-        // tip is unchanged. Only applies when we're not in a
-        // forced full-scan, an eager sync wasn't requested, and
-        // there's a `last_synced_tip` to compare against — first-
-        // poll has no baseline.
-        if !self.is_rescanning() && !eager {
-            if let Some(last_tip) = self.last_synced_tip {
-                let current_tip = self.client.chain_tip().map_err(|e| {
-                    if let client::Error::HeightOutOfRange(height) = e {
-                        log::warn!(
-                            "Refused the Esplora chain tip: the server reported block height {}, \
-                             which is out of range. The wallet stays at its last tip and the \
-                             next poll retries.",
-                            height
-                        );
-                    }
-                    EsploraError::Client(e)
-                })?;
-                if current_tip == last_tip {
-                    // Counting the *prospective* skip first so the
-                    // boundary fires exactly on the
-                    // `MAX_POLLS_BEFORE_FORCED_RESCAN`th unchanged
-                    // poll (the staleness cap documented on the
-                    // constant). The pre-fix shape incremented
-                    // *after* the comparison, which let one extra
-                    // tick of staleness through before the forced
-                    // rescan — every Nth+1 poll instead of every
-                    // Nth. We only persist the increment when we
-                    // actually skip; on the boundary tick we fall
-                    // through to a full sync, which resets the
-                    // counter to 0 at its success-return below.
-                    let prospective = self.polls_since_full_sync.saturating_add(1);
-                    if prospective < MAX_POLLS_BEFORE_FORCED_RESCAN {
-                        self.polls_since_full_sync = prospective;
-                        log::debug!(
-                            "Esplora tip unchanged ({}), skipping per-SPK rescan \
-                             (forced rescan in {} more polls)",
-                            current_tip,
-                            MAX_POLLS_BEFORE_FORCED_RESCAN.saturating_sub(prospective),
-                        );
-                        return Ok(None);
-                    }
-                    log::debug!(
-                        "Esplora tip unchanged ({}) but forced-rescan boundary reached \
-                         after {} skipped polls; performing full rescan",
-                        current_tip,
-                        self.polls_since_full_sync,
-                    );
-                } else {
-                    log::debug!(
-                        "Esplora tip advanced from {} to {}; performing full sync",
-                        last_tip,
-                        current_tip,
-                    );
-                }
-            }
+        if self.can_skip_sync(eager)? {
+            return Ok(None);
         }
 
         // Lowered from 4 to 2 to play nicer with mempool.space's
@@ -383,26 +423,12 @@ impl Esplora {
                 .client
                 .full_scan(
                     || {
-                        let mut request = FullScanRequest::from_chain_tip(local_chain_tip.clone());
-                        // Rebuilt for every server the client tries, so the count
-                        // restarts with each attempt.
-                        if let Some(cache) = &history_sync {
-                            cache.begin_full_scan(expected_addresses);
-                        }
-                        for (k, spks) in bdk_wallet.index().all_unbounded_spk_iters() {
-                            let change = matches!(k, super::electrum::wallet::KeychainType::Change);
-                            request = match &history_sync {
-                                Some(cache) => {
-                                    let cache = cache.clone();
-                                    request.set_spks_for_keychain(
-                                        k,
-                                        spks.inspect(move |_| cache.branch_address_checked(change)),
-                                    )
-                                }
-                                None => request.set_spks_for_keychain(k, spks),
-                            };
-                        }
-                        request
+                        Self::full_scan_request(
+                            bdk_wallet,
+                            local_chain_tip.clone(),
+                            &history_sync,
+                            expected_addresses,
+                        )
                     },
                     self.full_scan_gap,
                     PARALLEL_REQUESTS,

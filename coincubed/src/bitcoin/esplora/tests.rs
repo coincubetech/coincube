@@ -30,6 +30,37 @@ const DESCRIPTOR: &str = concat!(
 
 const OUT_OF_RANGE: &str = "out-of-range block height";
 
+fn serve_connection(stream: std::net::TcpStream, answer: impl Fn(&str) -> Option<String>) {
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() {
+        return;
+    }
+    // Read the rest of the head: a GET has no body.
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => return,
+            Ok(_) if line == "\r\n" => break,
+            Ok(_) => {}
+        }
+    }
+    let path = request_line.split_whitespace().nth(1).unwrap_or("");
+    let (status, body) = match answer(path) {
+        Some(body) => ("200 OK", body),
+        None => ("404 Not Found", "not found".to_string()),
+    };
+    let _ = write!(
+        writer,
+        "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status,
+        body.len(),
+        body
+    );
+    let _ = writer.flush();
+}
+
 /// An HTTP server answering every `GET path` with `answer(path)`: a status and a
 /// body, or `None` for a 404. One request per connection.
 fn scripted_server(
@@ -67,34 +98,7 @@ fn scripted_server(
             let answer = answer.clone();
             // The client sends requests in parallel during a scan.
             thread::spawn(move || {
-                let mut writer = stream.try_clone().unwrap();
-                let mut reader = BufReader::new(stream);
-                let mut request_line = String::new();
-                if reader.read_line(&mut request_line).is_err() {
-                    return;
-                }
-                // Read the rest of the head: a GET has no body.
-                loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
-                        Ok(0) | Err(_) => return,
-                        Ok(_) if line == "\r\n" => break,
-                        Ok(_) => {}
-                    }
-                }
-                let path = request_line.split_whitespace().nth(1).unwrap_or("");
-                let (status, body) = match answer(path) {
-                    Some(body) => ("200 OK", body),
-                    None => ("404 Not Found", "not found".to_string()),
-                };
-                let _ = write!(
-                    writer,
-                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    status,
-                    body.len(),
-                    body
-                );
-                let _ = writer.flush();
+                serve_connection(stream, |path| answer(path));
             });
         }
     })
