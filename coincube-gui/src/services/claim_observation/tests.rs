@@ -137,6 +137,25 @@ impl Fixture {
             sender,
         }
     }
+    fn transaction_value(&self, chain: ChainId, id: Txid, n: usize) -> TransactionObservation {
+        if chain.is_blake2b() {
+            if n == 3 && matches!(self.fault, Fault::PresenceRace) {
+                TransactionObservation::Unconfirmed { txid: id }
+            } else {
+                TransactionObservation::Absent
+            }
+        } else if let Some(states) = self.bitcoin_states {
+            states[(n / 2).min(1)]
+        } else {
+            TransactionObservation::Confirmed {
+                txid: id,
+                block: BlockRef {
+                    height: 100,
+                    hash: hash(5),
+                },
+            }
+        }
+    }
     fn context(&self) -> CollectionContext {
         CollectionContext {
             expected_generation: 7,
@@ -217,23 +236,7 @@ impl ObservationSource for Fixture {
         } else {
             id
         };
-        let value = if chain.is_blake2b() {
-            if n == 3 && matches!(self.fault, Fault::PresenceRace) {
-                TransactionObservation::Unconfirmed { txid: id }
-            } else {
-                TransactionObservation::Absent
-            }
-        } else if let Some(states) = self.bitcoin_states {
-            states[(n / 2).min(1)]
-        } else {
-            TransactionObservation::Confirmed {
-                txid: id,
-                block: BlockRef {
-                    height: 100,
-                    hash: hash(5),
-                },
-            }
-        };
+        let value = self.transaction_value(chain, id, n);
         Ok(response(chain, value, 10_000))
     }
     async fn hash_at_height(

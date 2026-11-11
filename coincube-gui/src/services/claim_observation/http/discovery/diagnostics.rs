@@ -371,6 +371,172 @@ mod tests {
         });
     }
 
+    #[derive(Clone, Copy)]
+    struct PairedGraphFixture<'a> {
+        negative_chain: Option<ChainId>,
+        read_delay: Duration,
+        frontier_block: &'a String,
+        bitcoin_selected_block: &'a String,
+        fork_selected_block: &'a String,
+        selected: &'a Transaction,
+        bitcoin_positive: &'a Transaction,
+        fork_positive: &'a Transaction,
+        leaves: &'a [Transaction],
+        large_leaf: &'a Transaction,
+        large_metadata: &'a String,
+        shared_tx: &'a Transaction,
+    }
+    impl PairedGraphFixture<'_> {
+        fn install_chain(
+            &self,
+            server: &MockServer,
+            chain: ChainId,
+            tip: &str,
+            block: &str,
+            coinbase: &Transaction,
+        ) {
+            let Self {
+                negative_chain,
+                read_delay,
+                frontier_block,
+                bitcoin_selected_block,
+                fork_selected_block,
+                selected,
+                bitcoin_positive,
+                fork_positive,
+                leaves,
+                large_leaf,
+                large_metadata,
+                shared_tx,
+            } = *self;
+            let tip = tip.to_owned();
+            let block = block.to_owned();
+
+            let base = format!(
+                "/api/v1/esplora/{}",
+                HttpObservationSource::prefix(chain).unwrap()
+            );
+            fresh(
+                server,
+                format!("{base}/blocks/tip/hash"),
+                tip.clone(),
+                Duration::ZERO,
+            );
+            fresh(
+                server,
+                format!("{base}/block/{tip}/status"),
+                json!({"in_best_chain":true,"height":961840}).to_string(),
+                Duration::ZERO,
+            );
+            fresh(
+                server,
+                format!("{base}/block-height/961840"),
+                tip.clone(),
+                Duration::ZERO,
+            );
+            fresh(
+                server,
+                format!("{base}/block-height/961640"),
+                block.clone(),
+                Duration::ZERO,
+            );
+            fresh(
+                server,
+                format!("{base}/block-height/227931"),
+                "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8".into(),
+                Duration::ZERO,
+            );
+            fresh(
+                server,
+                format!("{base}/block/{block}/txid/0"),
+                coinbase.compute_txid().to_string(),
+                Duration::ZERO,
+            );
+            raw(
+                server,
+                format!("{base}/tx/{}/hex", coinbase.compute_txid()),
+                coinbase,
+                Duration::ZERO,
+            );
+            fresh(
+                server,
+                format!("{base}/tx/{}", coinbase.compute_txid()),
+                json!({"txid":coinbase.compute_txid(),"status":{"confirmed":true,
+                        "block_height":961640,"block_hash":block}})
+                .to_string(),
+                Duration::ZERO,
+            );
+            fresh(
+                server,
+                format!("{base}/block-height/961600"),
+                frontier_block.clone(),
+                Duration::ZERO,
+            );
+            let selected_block = if chain == ChainId::Bitcoin {
+                bitcoin_selected_block
+            } else {
+                fork_selected_block
+            };
+            fresh(
+                server,
+                format!("{base}/block-height/961660"),
+                selected_block.clone(),
+                Duration::ZERO,
+            );
+            let graph_selected = if Some(chain) == negative_chain {
+                selected
+            } else if chain == ChainId::Bitcoin {
+                bitcoin_positive
+            } else {
+                fork_positive
+            };
+            for (tx, height, hash) in std::iter::once((graph_selected, 961660, selected_block))
+                .chain(leaves.iter().map(|leaf| (leaf, 961600, frontier_block)))
+            {
+                raw(
+                    server,
+                    format!("{base}/tx/{}/hex", tx.compute_txid()),
+                    tx,
+                    read_delay,
+                );
+                fresh(
+                    server,
+                    format!("{base}/tx/{}", tx.compute_txid()),
+                    if tx.compute_txid() == large_leaf.compute_txid() {
+                        large_metadata.clone()
+                    } else {
+                        json!({"txid":tx.compute_txid(),"status":{"confirmed":true,
+                                    "block_height":height,"block_hash":hash}})
+                        .to_string()
+                    },
+                    read_delay,
+                );
+            }
+            raw(
+                server,
+                format!("{base}/tx/{}/hex", shared_tx.compute_txid()),
+                shared_tx,
+                Duration::ZERO,
+            );
+            fresh(
+                server,
+                format!("{base}/tx/{}", shared_tx.compute_txid()),
+                json!({"txid":shared_tx.compute_txid(),"status":{"confirmed":true,
+                    "block_height":961600,"block_hash":frontier_block}})
+                .to_string(),
+                Duration::ZERO,
+            );
+            for txid in [graph_selected.compute_txid(), shared_tx.compute_txid()] {
+                fresh(
+                    server,
+                    format!("{base}/tx/{txid}/outspend/0"),
+                    json!({"spent":false}).to_string(),
+                    Duration::ZERO,
+                );
+            }
+        }
+    }
+
     async fn paired_fixture(
         negative_chain: Option<ChainId>,
         read_delay: Duration,
@@ -458,132 +624,25 @@ mod tests {
                 }
             }}));
         });
+        let graph_fixture = PairedGraphFixture {
+            negative_chain,
+            read_delay,
+            frontier_block: &frontier_block,
+            bitcoin_selected_block: &bitcoin_selected_block,
+            fork_selected_block: &fork_selected_block,
+            selected: &selected,
+            bitcoin_positive: &bitcoin_positive,
+            fork_positive: &fork_positive,
+            leaves: &leaves,
+            large_leaf: &large_leaf,
+            large_metadata: &large_metadata,
+            shared_tx: &shared_tx,
+        };
         for (chain, tip, block, coinbase) in [
             (ChainId::Bitcoin, &bitcoin_tip, &bitcoin_block, &bitcoin),
             (ChainId::BitcoinBlake2b, &fork_tip, &fork_block, &fork),
         ] {
-            let base = format!(
-                "/api/v1/esplora/{}",
-                HttpObservationSource::prefix(chain).unwrap()
-            );
-            fresh(
-                &server,
-                format!("{base}/blocks/tip/hash"),
-                tip.clone(),
-                Duration::ZERO,
-            );
-            fresh(
-                &server,
-                format!("{base}/block/{tip}/status"),
-                json!({"in_best_chain":true,"height":961840}).to_string(),
-                Duration::ZERO,
-            );
-            fresh(
-                &server,
-                format!("{base}/block-height/961840"),
-                tip.clone(),
-                Duration::ZERO,
-            );
-            fresh(
-                &server,
-                format!("{base}/block-height/961640"),
-                block.clone(),
-                Duration::ZERO,
-            );
-            fresh(
-                &server,
-                format!("{base}/block-height/227931"),
-                "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8".into(),
-                Duration::ZERO,
-            );
-            fresh(
-                &server,
-                format!("{base}/block/{block}/txid/0"),
-                coinbase.compute_txid().to_string(),
-                Duration::ZERO,
-            );
-            raw(
-                &server,
-                format!("{base}/tx/{}/hex", coinbase.compute_txid()),
-                coinbase,
-                Duration::ZERO,
-            );
-            fresh(
-                &server,
-                format!("{base}/tx/{}", coinbase.compute_txid()),
-                json!({"txid":coinbase.compute_txid(),"status":{"confirmed":true,
-                        "block_height":961640,"block_hash":block}})
-                .to_string(),
-                Duration::ZERO,
-            );
-            fresh(
-                &server,
-                format!("{base}/block-height/961600"),
-                frontier_block.clone(),
-                Duration::ZERO,
-            );
-            let selected_block = if chain == ChainId::Bitcoin {
-                &bitcoin_selected_block
-            } else {
-                &fork_selected_block
-            };
-            fresh(
-                &server,
-                format!("{base}/block-height/961660"),
-                selected_block.clone(),
-                Duration::ZERO,
-            );
-            let graph_selected = if Some(chain) == negative_chain {
-                &selected
-            } else if chain == ChainId::Bitcoin {
-                &bitcoin_positive
-            } else {
-                &fork_positive
-            };
-            for (tx, height, hash) in std::iter::once((graph_selected, 961660, selected_block))
-                .chain(leaves.iter().map(|leaf| (leaf, 961600, &frontier_block)))
-            {
-                raw(
-                    &server,
-                    format!("{base}/tx/{}/hex", tx.compute_txid()),
-                    tx,
-                    read_delay,
-                );
-                fresh(
-                    &server,
-                    format!("{base}/tx/{}", tx.compute_txid()),
-                    if tx.compute_txid() == large_leaf.compute_txid() {
-                        large_metadata.clone()
-                    } else {
-                        json!({"txid":tx.compute_txid(),"status":{"confirmed":true,
-                                    "block_height":height,"block_hash":hash}})
-                        .to_string()
-                    },
-                    read_delay,
-                );
-            }
-            raw(
-                &server,
-                format!("{base}/tx/{}/hex", shared_tx.compute_txid()),
-                &shared_tx,
-                Duration::ZERO,
-            );
-            fresh(
-                &server,
-                format!("{base}/tx/{}", shared_tx.compute_txid()),
-                json!({"txid":shared_tx.compute_txid(),"status":{"confirmed":true,
-                    "block_height":961600,"block_hash":frontier_block}})
-                .to_string(),
-                Duration::ZERO,
-            );
-            for txid in [graph_selected.compute_txid(), shared_tx.compute_txid()] {
-                fresh(
-                    &server,
-                    format!("{base}/tx/{txid}/outspend/0"),
-                    json!({"spent":false}).to_string(),
-                    Duration::ZERO,
-                );
-            }
+            graph_fixture.install_chain(&server, chain, tip, block, coinbase);
         }
         let shared = [out(&shared_tx)];
         let bitcoin_candidate = if negative_chain == Some(ChainId::Bitcoin) {

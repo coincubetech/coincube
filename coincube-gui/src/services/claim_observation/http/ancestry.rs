@@ -102,6 +102,176 @@ mod tests {
     use httpmock::prelude::*;
     use serde_json::json;
 
+    fn canonical_case_transaction(case: &str) -> Transaction {
+        let (_, raw) = ancestry_fixture();
+        let mut tx: Transaction = deserialize(&raw).unwrap();
+        tx.input[0].script_sig = Builder::new()
+            .push_int(if case == "wrong-height" { 18 } else { 17 })
+            .push_int(1)
+            .into_script();
+        if case == "ordinary-tx" {
+            tx.input[0].previous_output.txid = Txid::from_str(&"33".repeat(32)).unwrap();
+        }
+        tx
+    }
+    fn canonical_case_chain<'a>(
+        server: &'a MockServer,
+        prefix: &str,
+        tip: &str,
+        block: &str,
+    ) -> Vec<httpmock::Mock<'a>> {
+        let tip = tip.to_owned();
+        let block = block.to_owned();
+        let mut observations = Vec::new();
+        for (path, body) in [
+            ("blocks/tip/hash".to_owned(), tip.clone()),
+            (
+                format!("block/{}/status", tip),
+                json!({"in_best_chain":true,"height":100}).to_string(),
+            ),
+            ("block-height/100".to_owned(), tip.clone()),
+            ("block-height/17".to_owned(), block.clone()),
+        ] {
+            observations.push(server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!("{}/{}", prefix, path))
+                    .header("x-coincube-observation", "fresh");
+                then.status(200)
+                    .header("x-coincube-observation", "fresh")
+                    .header("x-cache", "BYPASS")
+                    .header("cache-control", "no-store")
+                    .body(body);
+            }));
+        }
+
+        observations
+    }
+    fn canonical_case_position<'a>(
+        server: &'a MockServer,
+        case: &str,
+        prefix: &str,
+        block: &str,
+        requested: &str,
+    ) -> httpmock::Mock<'a> {
+        server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("{}/block/{}/txid/0", prefix, block));
+            let then = then
+                .status(if case == "missing" { 404 } else { 200 })
+                .header("x-cache", if case == "cached" { "HIT" } else { "BYPASS" })
+                .header("x-coincube-observation", "fresh")
+                .header("cache-control", "no-store");
+            then.body(if case == "bad-id" {
+                "not-a-txid".to_owned()
+            } else {
+                requested.to_owned()
+            });
+        })
+    }
+    async fn disrupt_canonical_case(
+        server: &MockServer,
+        case: &str,
+        sender: &watch::Sender<u64>,
+        raw_mock: &httpmock::Mock<'_>,
+        observations: &mut [httpmock::Mock<'_>],
+        prefix: &str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while raw_mock.hits_async().await == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("collector must reach raw transaction read");
+        if case == "revoked" {
+            sender.send_replace(5);
+        } else {
+            observations[3].delete_async().await;
+            server.mock(|when, then| {
+                when.method(GET).path(format!("{}/block-height/17", prefix));
+                then.status(200)
+                    .header("x-coincube-observation", "fresh")
+                    .header("x-cache", "BYPASS")
+                    .header("cache-control", "no-store")
+                    .body("55".repeat(32));
+            });
+        }
+    }
+    async fn assert_canonical_coinbase_case(chain: ChainId, case: &str) {
+        let server = MockServer::start();
+        let (source, sender) = source(&server);
+        let prefix = format!(
+            "/api/v1/esplora/{}",
+            HttpObservationSource::prefix(chain).unwrap()
+        );
+        let tip = "11".repeat(32);
+        let block = "22".repeat(32);
+        let tx = canonical_case_transaction(case);
+        let txid = tx.compute_txid();
+        let requested = if case == "wrong-txid" {
+            "44".repeat(32)
+        } else {
+            txid.to_string()
+        };
+        let mut observations = canonical_case_chain(&server, &prefix, &tip, &block);
+        let position = canonical_case_position(&server, case, &prefix, &block, &requested);
+        let raw_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("{}/tx/{}/hex", prefix, requested));
+            then.status(200)
+                .delay(Duration::from_millis(
+                    if matches!(case, "changed-mapping" | "revoked") {
+                        200
+                    } else {
+                        0
+                    },
+                ))
+                .header("x-cache", "HIT")
+                .body(hex::encode(serialize(&tx)));
+        });
+        let collect = source.canonical_coinbase(chain, if case == "future" { 101 } else { 17 });
+        let result = if matches!(case, "changed-mapping" | "revoked") {
+            let disrupt = disrupt_canonical_case(
+                &server,
+                case,
+                &sender,
+                &raw_mock,
+                &mut observations,
+                &prefix,
+            );
+            let (result, ()) = tokio::join!(collect, disrupt);
+            result
+        } else {
+            collect.await
+        };
+        match case {
+            "valid" => {
+                let result = result.unwrap();
+                assert_eq!(result.chain, chain);
+                assert_eq!(
+                    result.value.block,
+                    BlockRef {
+                        height: 17,
+                        hash: BlockHash::from_str(&block).unwrap()
+                    }
+                );
+                assert_eq!(result.value.tip.height, 100);
+                assert_eq!(result.value.txid, txid);
+                assert_eq!(result.value.transaction, serialize(&tx));
+                assert_eq!(result.value.generation, 4);
+                assert!(result.observed_at <= source.now());
+            }
+            "changed-mapping" => assert_eq!(result.unwrap_err(), FailureKind::Changed),
+            "revoked" => assert_eq!(result.unwrap_err(), FailureKind::Cancelled),
+            "missing" => assert_eq!(result.unwrap_err(), FailureKind::Http(404)),
+            "cached" => assert_eq!(result.unwrap_err(), FailureKind::FreshnessUnverified),
+            _ => assert_eq!(result.unwrap_err(), FailureKind::Malformed),
+        }
+        if case == "future" {
+            position.assert_hits(0);
+        }
+    }
+
     #[tokio::test]
     async fn canonical_coinbase_requires_positive_fresh_structural_evidence() {
         for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
@@ -117,134 +287,7 @@ mod tests {
                 "changed-mapping",
                 "revoked",
             ] {
-                let server = MockServer::start();
-                let (source, sender) = source(&server);
-                let prefix = format!(
-                    "/api/v1/esplora/{}",
-                    HttpObservationSource::prefix(chain).unwrap()
-                );
-                let tip = "11".repeat(32);
-                let block = "22".repeat(32);
-                let (_, raw) = ancestry_fixture();
-                let mut tx: Transaction = deserialize(&raw).unwrap();
-                tx.input[0].script_sig = Builder::new()
-                    .push_int(if case == "wrong-height" { 18 } else { 17 })
-                    .push_int(1)
-                    .into_script();
-                if case == "ordinary-tx" {
-                    tx.input[0].previous_output.txid = Txid::from_str(&"33".repeat(32)).unwrap();
-                }
-                let txid = tx.compute_txid();
-                let requested = if case == "wrong-txid" {
-                    "44".repeat(32)
-                } else {
-                    txid.to_string()
-                };
-                let mut observations = Vec::new();
-                for (path, body) in [
-                    ("blocks/tip/hash".to_owned(), tip.clone()),
-                    (
-                        format!("block/{}/status", tip),
-                        json!({"in_best_chain":true,"height":100}).to_string(),
-                    ),
-                    ("block-height/100".to_owned(), tip.clone()),
-                    ("block-height/17".to_owned(), block.clone()),
-                ] {
-                    observations.push(server.mock(|when, then| {
-                        when.method(GET)
-                            .path(format!("{}/{}", prefix, path))
-                            .header("x-coincube-observation", "fresh");
-                        then.status(200)
-                            .header("x-coincube-observation", "fresh")
-                            .header("x-cache", "BYPASS")
-                            .header("cache-control", "no-store")
-                            .body(body);
-                    }));
-                }
-                let position = server.mock(|when, then| {
-                    when.method(GET)
-                        .path(format!("{}/block/{}/txid/0", prefix, block));
-                    let then = then
-                        .status(if case == "missing" { 404 } else { 200 })
-                        .header("x-cache", if case == "cached" { "HIT" } else { "BYPASS" })
-                        .header("x-coincube-observation", "fresh")
-                        .header("cache-control", "no-store");
-                    then.body(if case == "bad-id" {
-                        "not-a-txid".to_owned()
-                    } else {
-                        requested.clone()
-                    });
-                });
-                let raw_mock = server.mock(|when, then| {
-                    when.method(GET)
-                        .path(format!("{}/tx/{}/hex", prefix, requested));
-                    then.status(200)
-                        .delay(Duration::from_millis(
-                            if matches!(case, "changed-mapping" | "revoked") {
-                                200
-                            } else {
-                                0
-                            },
-                        ))
-                        .header("x-cache", "HIT")
-                        .body(hex::encode(serialize(&tx)));
-                });
-                let collect =
-                    source.canonical_coinbase(chain, if case == "future" { 101 } else { 17 });
-                let result = if matches!(case, "changed-mapping" | "revoked") {
-                    let disrupt = async {
-                        tokio::time::timeout(Duration::from_secs(1), async {
-                            while raw_mock.hits_async().await == 0 {
-                                tokio::task::yield_now().await;
-                            }
-                        })
-                        .await
-                        .expect("collector must reach raw transaction read");
-                        if case == "revoked" {
-                            sender.send_replace(5);
-                        } else {
-                            observations[3].delete_async().await;
-                            server.mock(|when, then| {
-                                when.method(GET).path(format!("{}/block-height/17", prefix));
-                                then.status(200)
-                                    .header("x-coincube-observation", "fresh")
-                                    .header("x-cache", "BYPASS")
-                                    .header("cache-control", "no-store")
-                                    .body("55".repeat(32));
-                            });
-                        }
-                    };
-                    let (result, ()) = tokio::join!(collect, disrupt);
-                    result
-                } else {
-                    collect.await
-                };
-                match case {
-                    "valid" => {
-                        let result = result.unwrap();
-                        assert_eq!(result.chain, chain);
-                        assert_eq!(
-                            result.value.block,
-                            BlockRef {
-                                height: 17,
-                                hash: BlockHash::from_str(&block).unwrap()
-                            }
-                        );
-                        assert_eq!(result.value.tip.height, 100);
-                        assert_eq!(result.value.txid, txid);
-                        assert_eq!(result.value.transaction, serialize(&tx));
-                        assert_eq!(result.value.generation, 4);
-                        assert!(result.observed_at <= source.now());
-                    }
-                    "changed-mapping" => assert_eq!(result.unwrap_err(), FailureKind::Changed),
-                    "revoked" => assert_eq!(result.unwrap_err(), FailureKind::Cancelled),
-                    "missing" => assert_eq!(result.unwrap_err(), FailureKind::Http(404)),
-                    "cached" => assert_eq!(result.unwrap_err(), FailureKind::FreshnessUnverified),
-                    _ => assert_eq!(result.unwrap_err(), FailureKind::Malformed),
-                }
-                if case == "future" {
-                    position.assert_hits(0);
-                }
+                assert_canonical_coinbase_case(chain, case).await;
             }
         }
     }

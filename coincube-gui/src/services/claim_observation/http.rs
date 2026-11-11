@@ -232,90 +232,127 @@ impl HttpObservationSource {
         } else {
             discovery::diagnostics::Stage::ChainView
         };
-        self.bounded(async {
-            if crate::services::esplora_backoff::remaining(&self.base).is_some() {
-                return Err(FailureKind::Http(429));
+        self.bounded(self.read_body_response(chain, prefix, path, fresh, body_limit))
+            .await
+            .map_err(|error| {
+                if error == FailureKind::Deadline {
+                    if let Some(trace) = &self.ancestry_trace {
+                        trace.emit_with_stage(
+                            chain,
+                            discovery::diagnostics::Outcome::RequestDeadline5s,
+                            Some(request_stage),
+                        );
+                    }
+                }
+                (error, false)
+            })?
+            .map_err(|()| (FailureKind::Malformed, true))
+    }
+
+    /// Keep request admission, freshness checks and response streaming within
+    /// the caller's existing cancellation/deadline boundary.
+    async fn read_body_response(
+        &self,
+        chain: ChainId,
+        prefix: &str,
+        path: &str,
+        fresh: bool,
+        body_limit: usize,
+    ) -> Result<Result<(u16, Vec<u8>, HeaderMap, i64), ()>, FailureKind> {
+        if crate::services::esplora_backoff::remaining(&self.base).is_some() {
+            return Err(FailureKind::Http(429));
+        }
+        let stamp = self.now();
+        if let Some(budget) = &self.budget {
+            budget.charge_request(0)?;
+        }
+        if let Some(trace) = &self.ancestry_trace {
+            trace.request(chain, 0);
+        }
+        let mut request = self
+            .anonymous
+            .get(format!("{}/api/v1/esplora/{}/{}", self.base, prefix, path))
+            .header(CACHE_CONTROL, "no-cache");
+        if fresh {
+            request = request.header("X-Coincube-Observation", "fresh");
+        }
+        let response = request.send().await.map_err(|error| {
+            if error.is_timeout() {
+                FailureKind::Deadline
+            } else {
+                FailureKind::Unavailable
             }
-            let stamp = self.now();
+        })?;
+        let status = response.status().as_u16();
+        if status == 429 {
+            crate::services::esplora_backoff::record(&self.base, response.headers());
+        }
+        if status != 200 && status != 404 {
+            return Err(FailureKind::Http(status));
+        }
+        let headers = response.headers().clone();
+        if fresh {
+            Self::check_fresh_headers(chain, stamp, &headers)?;
+        }
+        let bytes = match self
+            .read_response_bytes(chain, response, body_limit)
+            .await?
+        {
+            Ok(bytes) => bytes,
+            Err(()) => return Ok(Err(())),
+        };
+        Ok(Ok((status, bytes, headers, stamp)))
+    }
+    fn check_fresh_headers(
+        chain: ChainId,
+        stamp: i64,
+        headers: &HeaderMap,
+    ) -> Result<(), FailureKind> {
+        let mut markers = headers.get_all("x-coincube-observation").iter();
+        if markers.next().and_then(|v| v.to_str().ok()) != Some("fresh") || markers.next().is_some()
+        {
+            return Err(FailureKind::FreshnessUnverified);
+        }
+        FreshRead::from_response(chain, (), stamp, headers)?;
+
+        Ok(())
+    }
+    /// Charge shared bytes before applying the local body cap, as before.
+    async fn read_response_bytes(
+        &self,
+        chain: ChainId,
+        mut response: reqwest::Response,
+        body_limit: usize,
+    ) -> Result<Result<Vec<u8>, ()>, FailureKind> {
+        if response
+            .content_length()
+            .is_some_and(|n| n > body_limit as u64)
+        {
+            return Ok(Err(()));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            if error.is_timeout() {
+                FailureKind::Deadline
+            } else {
+                FailureKind::Unavailable
+            }
+        })? {
             if let Some(budget) = &self.budget {
-                budget.charge_request(0)?;
+                budget.charge_bytes(chunk.len())?;
             }
             if let Some(trace) = &self.ancestry_trace {
-                trace.request(chain, 0);
+                trace.bytes(chain, chunk.len());
             }
-            let mut request = self
-                .anonymous
-                .get(format!("{}/api/v1/esplora/{}/{}", self.base, prefix, path))
-                .header(CACHE_CONTROL, "no-cache");
-            if fresh {
-                request = request.header("X-Coincube-Observation", "fresh");
-            }
-            let mut response = request.send().await.map_err(|error| {
-                if error.is_timeout() {
-                    FailureKind::Deadline
-                } else {
-                    FailureKind::Unavailable
-                }
-            })?;
-            let status = response.status().as_u16();
-            if status == 429 {
-                crate::services::esplora_backoff::record(&self.base, response.headers());
-            }
-            if status != 200 && status != 404 {
-                return Err(FailureKind::Http(status));
-            }
-            let headers = response.headers().clone();
-            if fresh {
-                let mut markers = headers.get_all("x-coincube-observation").iter();
-                if markers.next().and_then(|v| v.to_str().ok()) != Some("fresh")
-                    || markers.next().is_some()
-                {
-                    return Err(FailureKind::FreshnessUnverified);
-                }
-                FreshRead::from_response(chain, (), stamp, &headers)?;
-            }
-            if response
-                .content_length()
-                .is_some_and(|n| n > body_limit as u64)
-            {
+            if chunk.len() > body_limit.saturating_sub(bytes.len()) {
                 return Ok(Err(()));
             }
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response.chunk().await.map_err(|error| {
-                if error.is_timeout() {
-                    FailureKind::Deadline
-                } else {
-                    FailureKind::Unavailable
-                }
-            })? {
-                if let Some(budget) = &self.budget {
-                    budget.charge_bytes(chunk.len())?;
-                }
-                if let Some(trace) = &self.ancestry_trace {
-                    trace.bytes(chain, chunk.len());
-                }
-                if chunk.len() > body_limit.saturating_sub(bytes.len()) {
-                    return Ok(Err(()));
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            Ok(Ok((status, bytes, headers, stamp)))
-        })
-        .await
-        .map_err(|error| {
-            if error == FailureKind::Deadline {
-                if let Some(trace) = &self.ancestry_trace {
-                    trace.emit_with_stage(
-                        chain,
-                        discovery::diagnostics::Outcome::RequestDeadline5s,
-                        Some(request_stage),
-                    );
-                }
-            }
-            (error, false)
-        })?
-        .map_err(|()| (FailureKind::Malformed, true))
+            bytes.extend_from_slice(&chunk);
+        }
+
+        Ok(Ok(bytes))
     }
+
     /// Fetch one bounded ancestry link using the anonymous immutable-data route.
     /// Txid authentication permits cache hits, but proves neither canonical
     /// inclusion nor witness validity. These bytes must never become FreshRead
@@ -621,42 +658,46 @@ mod tests {
     use httpmock::prelude::*;
     use serde_json::json;
 
+    async fn assert_outspend_case(chain: ChainId, case: &str, outpoint: OutPoint) {
+        let server = MockServer::start();
+        let (source, _sender) = source(&server);
+        let path = format!(
+            "/api/v1/esplora/{}/tx/{}/outspend/2",
+            HttpObservationSource::prefix(chain).unwrap(),
+            outpoint.txid,
+        );
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path(path)
+                .header("x-coincube-observation", "fresh");
+            then.status(if case == "missing" { 404 } else { 200 })
+                .header("x-coincube-observation", "fresh")
+                .header("x-cache", if case == "cached" { "HIT" } else { "BYPASS" })
+                .header("cache-control", "no-store")
+                .body(match case {
+                    "spent" => r#"{"spent":true}"#,
+                    "malformed" => r#"{"other":false}"#,
+                    _ => r#"{"spent":false}"#,
+                });
+        });
+        let result = source.outspend(chain, outpoint).await;
+        match case {
+            "unspent" => assert!(!result.unwrap().value().spent),
+            "spent" => assert!(result.unwrap().value().spent),
+            "missing" => assert_eq!(result.unwrap_err(), FailureKind::Http(404)),
+            "cached" => assert_eq!(result.unwrap_err(), FailureKind::FreshnessUnverified),
+            "malformed" => assert_eq!(result.unwrap_err(), FailureKind::Malformed),
+            _ => unreachable!(),
+        }
+        mock.assert_hits(1);
+    }
+
     #[tokio::test]
     async fn outspend_requires_fresh_explicit_status_on_each_chain() {
         let outpoint = OutPoint::new(Txid::from_str(&"11".repeat(32)).unwrap(), 2);
         for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
             for case in ["unspent", "spent", "missing", "cached", "malformed"] {
-                let server = MockServer::start();
-                let (source, _sender) = source(&server);
-                let path = format!(
-                    "/api/v1/esplora/{}/tx/{}/outspend/2",
-                    HttpObservationSource::prefix(chain).unwrap(),
-                    outpoint.txid,
-                );
-                let mock = server.mock(|when, then| {
-                    when.method(GET)
-                        .path(path)
-                        .header("x-coincube-observation", "fresh");
-                    then.status(if case == "missing" { 404 } else { 200 })
-                        .header("x-coincube-observation", "fresh")
-                        .header("x-cache", if case == "cached" { "HIT" } else { "BYPASS" })
-                        .header("cache-control", "no-store")
-                        .body(match case {
-                            "spent" => r#"{"spent":true}"#,
-                            "malformed" => r#"{"other":false}"#,
-                            _ => r#"{"spent":false}"#,
-                        });
-                });
-                let result = source.outspend(chain, outpoint).await;
-                match case {
-                    "unspent" => assert!(!result.unwrap().value().spent),
-                    "spent" => assert!(result.unwrap().value().spent),
-                    "missing" => assert_eq!(result.unwrap_err(), FailureKind::Http(404)),
-                    "cached" => assert_eq!(result.unwrap_err(), FailureKind::FreshnessUnverified),
-                    "malformed" => assert_eq!(result.unwrap_err(), FailureKind::Malformed),
-                    _ => unreachable!(),
-                }
-                mock.assert_hits(1);
+                assert_outspend_case(chain, case, outpoint).await;
             }
         }
     }
