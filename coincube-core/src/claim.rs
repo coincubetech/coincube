@@ -304,14 +304,7 @@ pub fn assess(
     now: i64,
     preflight: Option<PreflightTips>,
 ) -> Assessment {
-    if !matches!(
-        (plan.bitcoin_chain, plan.fork_chain),
-        (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
-            | (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4)
-    ) || bitcoin.chain != plan.bitcoin_chain
-        || fork.chain != plan.fork_chain
-        || deployment.chain != plan.fork_chain
-    {
+    if wrong_chain(plan, bitcoin.chain, fork.chain, deployment.chain) {
         return Assessment::WrongChain;
     }
     if invalid_plan(plan, policy) {
@@ -394,6 +387,21 @@ fn invalid_plan(plan: &ClaimPlan, policy: Policy) -> bool {
         || plan.step1.output.is_empty()
         || policy.max_observation_age_seconds <= 0
         || (plan.poison != Poison::InputAncestry && policy.expiry_margin_seconds <= 0)
+}
+
+fn wrong_chain(
+    plan: &ClaimPlan,
+    bitcoin_chain: ChainId,
+    fork_chain: ChainId,
+    deployment_chain: ChainId,
+) -> bool {
+    !matches!(
+        (plan.bitcoin_chain, plan.fork_chain),
+        (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
+            | (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4)
+    ) || bitcoin_chain != plan.bitcoin_chain
+        || fork_chain != plan.fork_chain
+        || deployment_chain != plan.fork_chain
 }
 
 #[cfg(test)]

@@ -648,15 +648,7 @@ impl CoincubePolicy {
                 // 1-of-N multisig. In this case the policy is normalized from `thresh(1, thresh(1,
                 // pk(A), pk(B)), thresh(2, older(42), pk(C)))` to `thresh(1, pk(A), pk(B),
                 // thresh(2, older(42), pk(C)))`.
-                if let Some(prim_path) = primary_path {
-                    if let SemanticPolicy::Key(key) = sub {
-                        primary_path = Some(prim_path.with_added_key(key.clone()));
-                    } else {
-                        return Err(CoincubePolicyError::IncompatibleDesc);
-                    }
-                } else {
-                    primary_path = Some(PathInfo::from_primary_path(sub)?);
-                }
+                primary_path = Some(Self::add_primary_path(primary_path, sub)?);
             } else {
                 // If it's not a simple (multi)key check, it must be (one of) the timelocked
                 // recovery path(s).
@@ -680,6 +672,21 @@ impl CoincubePolicy {
             is_taproot,
             /* compile = */ false,
         )
+    }
+
+    fn add_primary_path(
+        primary: Option<PathInfo>,
+        sub: SemanticPolicy<descriptor::DescriptorPublicKey>,
+    ) -> Result<PathInfo, CoincubePolicyError> {
+        if let Some(primary) = primary {
+            if let SemanticPolicy::Key(key) = sub {
+                Ok(primary.with_added_key(key.clone()))
+            } else {
+                Err(CoincubePolicyError::IncompatibleDesc)
+            }
+        } else {
+            PathInfo::from_primary_path(sub)
+        }
     }
 
     pub fn primary_path(&self) -> &PathInfo {

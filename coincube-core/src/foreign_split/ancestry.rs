@@ -593,17 +593,18 @@ pub fn combine_ancestry_split_pair<C: secp256k1::Verification>(
         &fork_signed,
     )
     .map_err(CombineAncestrySplitError::Invalid)?;
-    let bitcoin_complete =
-        match finalize_ancestry_split_step1(bitcoin, bitcoin_inputs, &bitcoin_signed, secp) {
-            Ok(_) => true,
-            Err(FinalizeError::Unsatisfied) => false,
-            Err(error) => return Err(CombineAncestrySplitError::Invalid(error)),
-        };
-    let fork_complete = match finalize_ancestry_split_step2(fork, fork_inputs, &fork_signed, secp) {
-        Ok(_) => true,
-        Err(FinalizeError::Unsatisfied) => false,
-        Err(error) => return Err(CombineAncestrySplitError::Invalid(error)),
-    };
+    let bitcoin_complete = split_complete(finalize_ancestry_split_step1(
+        bitcoin,
+        bitcoin_inputs,
+        &bitcoin_signed,
+        secp,
+    ))?;
+    let fork_complete = split_complete(finalize_ancestry_split_step2(
+        fork,
+        fork_inputs,
+        &fork_signed,
+        secp,
+    ))?;
     Ok(CombinedAncestrySplitPair {
         bitcoin: bitcoin_signed,
         fork: fork_signed,
@@ -661,4 +662,12 @@ fn merge_returned_signatures(
         }
     }
     Ok(())
+}
+
+fn split_complete<T>(result: Result<T, FinalizeError>) -> Result<bool, CombineAncestrySplitError> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(FinalizeError::Unsatisfied) => Ok(false),
+        Err(error) => Err(CombineAncestrySplitError::Invalid(error)),
+    }
 }

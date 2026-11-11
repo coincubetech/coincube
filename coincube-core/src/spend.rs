@@ -841,16 +841,7 @@ pub(crate) fn create_spend_with_poison(
         });
         // If it's an address of ours, signal it as change to signing devices by adding the
         // BIP32 derivation path to the PSBT output.
-        let mut psbt_out = PsbtOut::default();
-        if let Some(AddrInfo { index, is_change }) = address.info {
-            let desc = if is_change {
-                main_descriptor.change_descriptor()
-            } else {
-                main_descriptor.receive_descriptor()
-            };
-            desc.derive(index, secp)
-                .update_change_psbt_out(&mut psbt_out)
-        }
+        let psbt_out = output_metadata(main_descriptor, secp, address.info);
         psbt_outs.push(psbt_out);
     }
     assert_eq!(tx.output.is_empty(), is_self_send);
@@ -924,16 +915,7 @@ pub(crate) fn create_spend_with_poison(
 
         // If the change address is ours, tell the signers by setting the BIP32 derivations in the
         // PSBT output.
-        let mut psbt_out = PsbtOut::default();
-        if let Some(AddrInfo { index, is_change }) = change_addr.info {
-            let desc = if is_change {
-                main_descriptor.change_descriptor()
-            } else {
-                main_descriptor.receive_descriptor()
-            };
-            desc.derive(index, secp)
-                .update_change_psbt_out(&mut psbt_out);
-        }
+        let psbt_out = output_metadata(main_descriptor, secp, change_addr.info);
 
         // TODO: shuffle once we have Taproot
         change_txo.value = change_amount;
@@ -1064,6 +1046,24 @@ fn selected_psbt_inputs(
     }
 
     Ok(psbt_ins)
+}
+
+fn output_metadata(
+    main_descriptor: &descriptors::CoincubeDescriptor,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    info: Option<AddrInfo>,
+) -> PsbtOut {
+    let mut psbt_out = PsbtOut::default();
+    if let Some(AddrInfo { index, is_change }) = info {
+        let desc = if is_change {
+            main_descriptor.change_descriptor()
+        } else {
+            main_descriptor.receive_descriptor()
+        };
+        desc.derive(index, secp)
+            .update_change_psbt_out(&mut psbt_out)
+    }
+    psbt_out
 }
 
 #[cfg(test)]

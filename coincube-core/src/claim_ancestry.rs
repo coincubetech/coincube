@@ -95,19 +95,7 @@ pub fn verify(selected: OutPoint, links: &[Link<'_>]) -> Result<CoinbaseDependen
     let mut seen = BTreeSet::new();
     let mut txids = Vec::with_capacity(links.len());
     for (index, link) in links.iter().enumerate() {
-        // deserialize rejects trailing bytes, unlike partial decoding.
-        let transaction: Transaction =
-            deserialize(link.transaction).map_err(|_| Error::InvalidTransaction)?;
-        let txid = transaction.compute_txid();
-        if !seen.insert(txid) {
-            return Err(Error::RepeatedTransaction);
-        }
-        if txid != expected.txid {
-            return Err(Error::WrongTransaction);
-        }
-        if transaction.output.get(expected.vout as usize).is_none() {
-            return Err(Error::InvalidOutput);
-        }
+        let (transaction, txid) = authenticated_link(link, expected, &mut seen)?;
         txids.push(txid);
         if transaction.is_coinbase() {
             if link.parent_input.is_some() || index + 1 != links.len() {
@@ -145,6 +133,27 @@ fn validate_path_bytes(links: &[Link<'_>]) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+fn authenticated_link(
+    link: &Link<'_>,
+    expected: OutPoint,
+    seen: &mut BTreeSet<miniscript::bitcoin::Txid>,
+) -> Result<(Transaction, miniscript::bitcoin::Txid), Error> {
+    // deserialize rejects trailing bytes, unlike partial decoding.
+    let transaction: Transaction =
+        deserialize(link.transaction).map_err(|_| Error::InvalidTransaction)?;
+    let txid = transaction.compute_txid();
+    if !seen.insert(txid) {
+        return Err(Error::RepeatedTransaction);
+    }
+    if txid != expected.txid {
+        return Err(Error::WrongTransaction);
+    }
+    if transaction.output.get(expected.vout as usize).is_none() {
+        return Err(Error::InvalidOutput);
+    }
+    Ok((transaction, txid))
 }
 
 #[cfg(test)]

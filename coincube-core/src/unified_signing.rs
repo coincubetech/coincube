@@ -693,30 +693,42 @@ fn signing_keys(
                 continue;
             }
             let public_key = PublicKey::new(*raw_public_key);
-            if path.len() > usize::from(u8::MAX) {
-                return Err(UnifiedSigningError::DerivationPathTooDeep {
-                    input: input_index,
-                    public_key,
-                    depth: path.len(),
-                });
-            }
-            let derived = signer.xpriv_at(path, secp).to_priv().public_key(secp);
-            if derived != public_key {
-                return Err(UnifiedSigningError::DerivedPublicKeyMismatch {
-                    input: input_index,
-                    public_key,
-                });
-            }
-            if !script_uses_key(&context.miniscript, &public_key) {
-                return Err(UnifiedSigningError::KeyNotInWitnessScript {
-                    input: input_index,
-                    public_key,
-                });
-            }
+            validate_signing_key(signer, secp, input_index, public_key, path, context)?;
             require_compatible_sighash(input_index, input.sighash_type)?;
             signatures.push((input_index, public_key, path.clone()));
         }
     }
 
     Ok(signatures)
+}
+
+fn validate_signing_key(
+    signer: &MasterSigner,
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+    input_index: usize,
+    public_key: PublicKey,
+    path: &miniscript::bitcoin::bip32::DerivationPath,
+    context: &InputContext,
+) -> Result<(), UnifiedSigningError> {
+    if path.len() > usize::from(u8::MAX) {
+        return Err(UnifiedSigningError::DerivationPathTooDeep {
+            input: input_index,
+            public_key,
+            depth: path.len(),
+        });
+    }
+    let derived = signer.xpriv_at(path, secp).to_priv().public_key(secp);
+    if derived != public_key {
+        return Err(UnifiedSigningError::DerivedPublicKeyMismatch {
+            input: input_index,
+            public_key,
+        });
+    }
+    if !script_uses_key(&context.miniscript, &public_key) {
+        return Err(UnifiedSigningError::KeyNotInWitnessScript {
+            input: input_index,
+            public_key,
+        });
+    }
+    Ok(())
 }

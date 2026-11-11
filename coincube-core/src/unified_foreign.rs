@@ -378,13 +378,14 @@ fn classify(
                 "single-key output carries a redeem or witness script",
             ));
         }
-        Ok(if spk.is_p2wpkh() {
+        return Ok(if spk.is_p2wpkh() {
             single(&spk.as_bytes()[2..22], SCRIPT_TYPE_WITNESS_V0, None)
         } else {
             single(&spk.as_bytes()[3..23], SCRIPT_TYPE_BASE, None)
-        })
-    } else if spk.is_p2sh() {
-        match scripts {
+        });
+    }
+    if spk.is_p2sh() {
+        return match scripts {
             (Some(redeem), None) if redeem.to_p2sh() == spk && redeem.is_p2wpkh() => {
                 let program = redeem.as_bytes()[2..22].to_vec();
                 Ok(single(&program, SCRIPT_TYPE_WITNESS_V0, Some(redeem)))
@@ -392,32 +393,10 @@ fn classify(
             _ => Err(unsupported(
                 "only a committed P2SH-wrapped P2WPKH is supported",
             )),
-        }
-    } else if spk.is_p2wsh() {
-        let witness_script = match scripts {
-            (None, Some(script)) if script.to_p2wsh() == spk => script,
-            _ => {
-                return Err(unsupported(
-                    "P2WSH needs exactly its committed witness script",
-                ))
-            }
         };
-        let miniscript =
-            Miniscript::<PublicKey, Segwitv0>::parse_with_ext(&witness_script, &ExtParams::sane())
-                .map_err(|err| unsupported(&err.to_string()))?;
-        let Terminal::Multi(thresh) = &miniscript.node else {
-            return Err(unsupported("P2WSH witness script is not a top-level multi"));
-        };
-        Ok(InputContext {
-            spent_output,
-            script_code: witness_script.clone(),
-            script_type: SCRIPT_TYPE_WITNESS_V0,
-            keys: Keys::Multi {
-                threshold: thresh.k(),
-                keys: thresh.data().to_vec(),
-            },
-            script: Some(witness_script),
-        })
+    }
+    if spk.is_p2wsh() {
+        classify_multisig(input_index, spent_output, scripts)
     } else {
         Err(unsupported("not P2WPKH, P2SH-P2WPKH, P2PKH or P2WSH multi"))
     }
@@ -551,20 +530,7 @@ fn finalize_input(
                 have: 0,
                 need: 1,
             })?;
-            let key = record.public_key.to_bytes();
-            if context.script_type == SCRIPT_TYPE_BASE {
-                txin.script_sig = Builder::new()
-                    .push_slice(push_bytes(record.signature.clone()))
-                    .push_slice(push_bytes(key))
-                    .into_script();
-            } else {
-                if let Some(redeem) = &context.script {
-                    txin.script_sig = Builder::new()
-                        .push_slice(push_bytes(redeem.to_bytes()))
-                        .into_script();
-                }
-                txin.witness = Witness::from_slice(&[record.signature.clone(), key]);
-            }
+            finalize_single_key(context, record, txin);
             1
         }
         Keys::Multi { threshold, keys } => {
@@ -624,4 +590,61 @@ fn validate_foreign_metadata(
     }
 
     Ok(())
+}
+
+fn finalize_single_key(
+    context: &InputContext,
+    record: &UnifiedSignature,
+    txin: &mut miniscript::bitcoin::TxIn,
+) {
+    let key = record.public_key.to_bytes();
+    if context.script_type == SCRIPT_TYPE_BASE {
+        txin.script_sig = Builder::new()
+            .push_slice(push_bytes(record.signature.clone()))
+            .push_slice(push_bytes(key))
+            .into_script();
+    } else {
+        if let Some(redeem) = &context.script {
+            txin.script_sig = Builder::new()
+                .push_slice(push_bytes(redeem.to_bytes()))
+                .into_script();
+        }
+        txin.witness = Witness::from_slice(&[record.signature.clone(), key]);
+    }
+}
+
+fn classify_multisig(
+    input_index: usize,
+    spent_output: TxOut,
+    scripts: (Option<ScriptBuf>, Option<ScriptBuf>),
+) -> Result<InputContext, ForeignUnifiedError> {
+    let spk = &spent_output.script_pubkey;
+    let unsupported = |reason: &str| ForeignUnifiedError::UnsupportedScript {
+        input: input_index,
+        reason: reason.to_string(),
+    };
+    let witness_script = match scripts {
+        (None, Some(script)) if script.to_p2wsh() == *spk => script,
+        _ => {
+            return Err(unsupported(
+                "P2WSH needs exactly its committed witness script",
+            ))
+        }
+    };
+    let miniscript =
+        Miniscript::<PublicKey, Segwitv0>::parse_with_ext(&witness_script, &ExtParams::sane())
+            .map_err(|err| unsupported(&err.to_string()))?;
+    let Terminal::Multi(thresh) = &miniscript.node else {
+        return Err(unsupported("P2WSH witness script is not a top-level multi"));
+    };
+    Ok(InputContext {
+        spent_output,
+        script_code: witness_script.clone(),
+        script_type: SCRIPT_TYPE_WITNESS_V0,
+        keys: Keys::Multi {
+            threshold: thresh.k(),
+            keys: thresh.data().to_vec(),
+        },
+        script: Some(witness_script),
+    })
 }

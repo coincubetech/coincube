@@ -561,14 +561,14 @@ fn satisfy_preferring_unified(
                 subset.insert(**key, legacy[*key].clone());
             }
         }
-        if let Ok((w, r)) = satisfy_input(input_index, context, &subset, locks) {
-            if r.unified_used == 0 {
-                continue;
-            }
-            let better = better_unified_witness(&w, &r, best.as_ref());
-            if better {
-                best = Some((w, r));
-            }
+        let Ok((w, r)) = satisfy_input(input_index, context, &subset, locks) else {
+            continue;
+        };
+        if r.unified_used == 0 {
+            continue;
+        }
+        if better_unified_witness(&w, &r, best.as_ref()) {
+            best = Some((w, r));
         }
     }
     Ok(best.unwrap_or((witness, report)))
