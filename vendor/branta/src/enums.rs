@@ -1,18 +1,21 @@
-//! Enums shared across the SDK: server base URL, ZK privacy mode, and payment destination type.
+//! Server environment, destination type, and verify status.
 
 use serde::{Deserialize, Serialize};
 
-/// Which Branta server environment to talk to.
+/// Which Branta server to talk to.
+///
+/// `None` on a per-call override means "leave the service default". A missing
+/// default uses staging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BrantaServerBaseUrl {
+pub enum BrantaEnvironment {
     Staging,
     Production,
     Localhost,
 }
 
-impl BrantaServerBaseUrl {
-    /// The base URL for this server environment (no trailing slash).
-    pub fn url(&self) -> &'static str {
+impl BrantaEnvironment {
+    /// The base URL for this environment, with no trailing slash.
+    pub fn url(self) -> &'static str {
         match self {
             Self::Staging => "https://staging.guardrail.branta.pro",
             Self::Production => "https://guardrail.branta.pro",
@@ -21,34 +24,36 @@ impl BrantaServerBaseUrl {
     }
 }
 
-/// Controls whether plain-text (non zero-knowledge) lookups and destinations are permitted.
+/// A destination `add_payment` can encrypt.
 ///
-/// `Strict` is the default and should be used unless a QR scanner is unavailable and
-/// zero-knowledge encryption is therefore impossible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
-pub enum PrivacyMode {
-    /// Forbid plain-text on-chain lookups and non-ZK destinations. Never serialized over the wire.
-    #[default]
-    Strict,
-    /// No zero-knowledge restrictions.
-    Loose,
-}
-
-/// The type of a payment destination (on-chain address, Lightning invoice, etc).
-///
-/// Wire format is snake_case and MUST match every other Branta SDK exactly for cross-SDK
-/// interoperability.
+/// Wire format is snake_case and must match every other Branta SDK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DestinationType {
     BitcoinAddress,
     Bolt11,
-    Bolt12,
-    LnUrl,
-    TetherAddress,
-    LnAddress,
     ArkAddress,
     SilentPayment,
+}
+
+/// The result of [`crate::BrantaService::verify`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VerifyStatus {
+    Match,
+    Unknown,
+    Tampered,
+    Incomplete,
+}
+
+impl VerifyStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Match => "match",
+            Self::Unknown => "unknown",
+            Self::Tampered => "tampered",
+            Self::Incomplete => "incomplete",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -58,40 +63,27 @@ mod tests {
     #[test]
     fn base_urls_match_reference() {
         assert_eq!(
-            BrantaServerBaseUrl::Staging.url(),
+            BrantaEnvironment::Staging.url(),
             "https://staging.guardrail.branta.pro"
         );
         assert_eq!(
-            BrantaServerBaseUrl::Production.url(),
+            BrantaEnvironment::Production.url(),
             "https://guardrail.branta.pro"
         );
-        assert_eq!(
-            BrantaServerBaseUrl::Localhost.url(),
-            "http://localhost:3000"
-        );
-    }
-
-    #[test]
-    fn privacy_mode_defaults_to_strict() {
-        assert_eq!(PrivacyMode::default(), PrivacyMode::Strict);
+        assert_eq!(BrantaEnvironment::Localhost.url(), "http://localhost:3000");
     }
 
     #[test]
     fn destination_type_wire_format_is_exact() {
-        // These string literals must match every sibling SDK byte-for-byte.
         let cases = [
             (DestinationType::BitcoinAddress, "\"bitcoin_address\""),
             (DestinationType::Bolt11, "\"bolt11\""),
-            (DestinationType::Bolt12, "\"bolt12\""),
-            (DestinationType::LnUrl, "\"ln_url\""),
-            (DestinationType::TetherAddress, "\"tether_address\""),
-            (DestinationType::LnAddress, "\"ln_address\""),
             (DestinationType::ArkAddress, "\"ark_address\""),
             (DestinationType::SilentPayment, "\"silent_payment\""),
         ];
         for (variant, expected) in cases {
             let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, expected, "wire format mismatch for {variant:?}");
+            assert_eq!(json, expected);
             let round_tripped: DestinationType = serde_json::from_str(expected).unwrap();
             assert_eq!(round_tripped, variant);
         }

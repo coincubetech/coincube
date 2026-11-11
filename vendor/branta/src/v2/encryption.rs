@@ -28,7 +28,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// Encrypts `value` with a key derived from `secret`.
 ///
 /// When `deterministic_nonce` is true, the same `(value, secret)` pair always produces the same
-/// ciphertext — used for hash-ZK destination lookups, where the lookup value must be
+/// ciphertext — used for derived-key destination lookups, where the lookup value must be
 /// reconstructible without a stored secret.
 pub fn encrypt(
     value: &str,

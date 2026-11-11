@@ -1,35 +1,23 @@
 //! Wire models exchanged with the Branta API.
-//!
-//! Field names on the wire are snake_case and must match every other Branta SDK exactly.
-//! `is_encrypted` and `is_metadata_decrypted` are client-side-only derived state and are never
-//! serialized (`#[serde(skip)]`), mirroring `[JsonIgnore]`/`@Transient` in the sibling SDKs.
 
+use serde::de::{self, Deserializer, MapAccess, Visitor};
+use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
-use crate::enums::DestinationType;
-use crate::error::BrantaError;
+use crate::enums::{DestinationType, VerifyStatus};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A payment destination.
+///
+/// `id` is sent as `zk_id`. Serialization always sends `zk: true`.
+/// On a GET, `zk: true` attempts decrypt. A missing or false `zk` skips decrypt.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Destination {
     pub value: String,
-
-    #[serde(rename = "primary", default)]
     pub is_primary: bool,
-
-    #[serde(rename = "zk", default)]
-    pub is_zk: bool,
-
-    /// Client-side only: true while `value` still holds ciphertext. Never sent or received.
-    #[serde(skip)]
     pub is_encrypted: bool,
-
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub r#type: Option<DestinationType>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub zk_id: Option<String>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub encrypted_dek: Option<String>,
 }
 
@@ -38,12 +26,84 @@ impl Destination {
         Self {
             value: value.into(),
             is_primary: false,
-            is_zk: false,
             is_encrypted: false,
             r#type,
-            zk_id: None,
+            id: None,
             encrypted_dek: None,
         }
+    }
+}
+
+impl Serialize for Destination {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut len = 3;
+        if self.r#type.is_some() {
+            len += 1;
+        }
+        if self.id.is_some() {
+            len += 1;
+        }
+        if self.encrypted_dek.is_some() {
+            len += 1;
+        }
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("value", &self.value)?;
+        map.serialize_entry("primary", &self.is_primary)?;
+        map.serialize_entry("zk", &true)?;
+        if let Some(r#type) = self.r#type {
+            map.serialize_entry("type", &r#type)?;
+        }
+        if let Some(id) = &self.id {
+            map.serialize_entry("zk_id", id)?;
+        }
+        if let Some(dek) = &self.encrypted_dek {
+            map.serialize_entry("encrypted_dek", dek)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Destination {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct DestVisitor;
+        impl<'de> Visitor<'de> for DestVisitor {
+            type Value = Destination;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a destination object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut value = None;
+                let mut is_primary = false;
+                let mut zk: Option<bool> = None;
+                let mut r#type = None;
+                let mut id = None;
+                let mut encrypted_dek = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "value" => value = Some(map.next_value()?),
+                        "primary" => is_primary = map.next_value().unwrap_or(false),
+                        "zk" => zk = map.next_value().ok(),
+                        "type" => r#type = map.next_value().ok(),
+                        "zk_id" => id = map.next_value().ok(),
+                        "encrypted_dek" => encrypted_dek = map.next_value().ok(),
+                        _ => {
+                            let _ = map.next_value::<de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(Destination {
+                    value: value.unwrap_or_default(),
+                    is_primary,
+                    is_encrypted: zk == Some(true),
+                    r#type,
+                    id,
+                    encrypted_dek,
+                })
+            }
+        }
+        deserializer.deserialize_map(DestVisitor)
     }
 }
 
@@ -51,78 +111,56 @@ impl Destination {
 pub struct Platform {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logo_url: Option<String>,
-
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logo_light_url: Option<String>,
 }
 
+fn is_zero(value: &i32) -> bool {
+    *value == 0
+}
+
+/// A payment exchanged with Guardrail.
+///
+/// `description` is not a plaintext API field. `add_payment` folds it into
+/// encrypted metadata, and `verify` lifts it back after metadata decrypts.
+/// `parent_platform` is set by the server and is never sent on a POST.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Payment {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     pub description: Option<String>,
-
     #[serde(default)]
     pub destinations: Vec<Destination>,
-
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
-
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub ttl: i32,
-
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<String>,
-
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
-
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_logo_url: Option<String>,
-
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_logo_light_url: Option<String>,
-
-    /// Deserialize-only: set by the server, never sent on a POST.
-    #[serde(default, skip_serializing, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub parent_platform: Option<Platform>,
-
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_platform: Option<Platform>,
-
-    /// NOTE: the majority wire name across sibling SDKs (dotnet/js/python/dart). `branta-kotlin`
-    /// alone uses `btcpay_server_plugin_version` (no underscore) — a pre-existing cross-SDK
-    /// inconsistency, not something to replicate here. See CLAUDE.md.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub btc_pay_server_plugin_version: Option<String>,
-
-    /// Client-side only: true once `metadata` has been decrypted. Never sent or received.
     #[serde(skip)]
     pub is_metadata_decrypted: bool,
 }
 
-impl Payment {
-    /// The value of the first destination, or an error if the payment has none.
-    pub fn get_default_value(&self) -> Result<&str, BrantaError> {
-        self.destinations
-            .first()
-            .map(|d| d.value.as_str())
-            .ok_or(BrantaError::NoDestinations)
-    }
-}
-
-/// Result of `BrantaService::get_payments` / `get_payments_by_qr_code`.
-///
-/// `verify_url` is always populated, even when `payments` is empty.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct PaymentsResult {
+/// What [`crate::BrantaService::verify`] returns. `payments` is set only for a match.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifyResult {
+    pub status: VerifyStatus,
     pub payments: Vec<Payment>,
     pub verify_url: String,
 }
 
-/// Result of `BrantaService::add_payment`.
+/// The result of [`crate::BrantaService::add_payment`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct AddPaymentResult {
     pub payment: Payment,
@@ -135,17 +173,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn destination_wire_format() {
-        let d = Destination {
+    fn destination_wire_always_sends_zk_true() {
+        let destination = Destination {
             value: "abc".into(),
             is_primary: true,
-            is_zk: true,
-            is_encrypted: true, // must not appear in the JSON
+            is_encrypted: false,
             r#type: Some(DestinationType::BitcoinAddress),
-            zk_id: Some("zk-1".into()),
+            id: Some("zk-1".into()),
             encrypted_dek: Some("dek".into()),
         };
-        let json = serde_json::to_value(&d).unwrap();
+        let json = serde_json::to_value(&destination).unwrap();
         assert_eq!(
             json,
             serde_json::json!({
@@ -160,84 +197,43 @@ mod tests {
     }
 
     #[test]
-    fn destination_optional_fields_omitted_when_none() {
-        let d = Destination::new("abc", None);
-        let json = serde_json::to_value(&d).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({"value": "abc", "primary": false, "zk": false})
-        );
+    fn missing_or_false_zk_skips_decrypt() {
+        let missing: Destination = serde_json::from_str(r#"{"value":"abc"}"#).unwrap();
+        assert!(!missing.is_encrypted);
+        let falsy: Destination = serde_json::from_str(r#"{"value":"abc","zk":false}"#).unwrap();
+        assert!(!falsy.is_encrypted);
+        let truthy: Destination =
+            serde_json::from_str(r#"{"value":"abc","zk":true,"zk_id":"zk-1"}"#).unwrap();
+        assert!(truthy.is_encrypted);
+        assert_eq!(truthy.id.as_deref(), Some("zk-1"));
     }
 
     #[test]
-    fn destination_deserialize_defaults() {
-        let d: Destination = serde_json::from_str(r#"{"value": "abc"}"#).unwrap();
-        assert!(!d.is_primary);
-        assert!(!d.is_zk);
-        assert!(!d.is_encrypted);
-        assert_eq!(d.r#type, None);
-    }
-
-    #[test]
-    fn payment_wire_format_field_names() {
+    fn payment_omits_description_parent_and_unset_ttl() {
         let payment = Payment {
             description: Some("desc".into()),
             destinations: vec![Destination::new("abc", None)],
-            created_at: Some("2026-01-01T00:00:00Z".into()),
-            ttl: 600,
-            metadata: Some("{}".into()),
-            platform: Some("Acme".into()),
-            platform_logo_url: Some("https://example.com/logo.png".into()),
-            platform_logo_light_url: Some("https://example.com/logo-light.png".into()),
+            ttl: 0,
             parent_platform: Some(Platform {
                 name: Some("Parent".into()),
-                ..Default::default()
+                ..Platform::default()
             }),
-            child_platform: Some(Platform {
-                name: Some("Child".into()),
-                ..Default::default()
-            }),
-            btc_pay_server_plugin_version: Some("1.0.0".into()),
-            is_metadata_decrypted: true, // must not appear in the JSON
+            ..Payment::default()
         };
         let json = serde_json::to_value(&payment).unwrap();
-        let obj = json.as_object().unwrap();
-        assert_eq!(obj.get("created_at").unwrap(), "2026-01-01T00:00:00Z");
-        assert_eq!(obj.get("btc_pay_server_plugin_version").unwrap(), "1.0.0");
-        assert_eq!(obj.get("child_platform").unwrap()["name"], "Child");
-        assert!(!obj.contains_key("is_metadata_decrypted"));
-        // parent_platform is deserialize-only: never present on serialize.
-        assert!(!obj.contains_key("parent_platform"));
+        assert!(json.get("description").is_none());
+        assert!(json.get("parent_platform").is_none());
+        assert!(json.get("ttl").is_none());
+        assert_eq!(json["destinations"][0]["zk"], true);
     }
 
     #[test]
-    fn payment_parent_platform_round_trips_on_deserialize() {
-        let json = serde_json::json!({
-            "destinations": [],
-            "parent_platform": {"name": "Parent"}
-        });
-        let payment: Payment = serde_json::from_value(json).unwrap();
-        assert_eq!(payment.parent_platform.unwrap().name.unwrap(), "Parent");
-    }
-
-    #[test]
-    fn get_default_value_errors_on_no_destinations() {
-        let payment = Payment::default();
-        assert!(matches!(
-            payment.get_default_value(),
-            Err(BrantaError::NoDestinations)
-        ));
-    }
-
-    #[test]
-    fn get_default_value_returns_first_destination() {
+    fn payment_sends_ttl_when_set() {
         let payment = Payment {
-            destinations: vec![
-                Destination::new("first", None),
-                Destination::new("second", None),
-            ],
-            ..Default::default()
+            ttl: 600,
+            ..Payment::default()
         };
-        assert_eq!(payment.get_default_value().unwrap(), "first");
+        let json = serde_json::to_value(&payment).unwrap();
+        assert_eq!(json["ttl"], 600);
     }
 }

@@ -1,6 +1,6 @@
 # Recipient identity checks
 
-Tenshu performs optional, send-only Branta Strict lookups during preparation of
+Tenshu performs optional, send-only Branta lookups during preparation of
 external Spark BOLT11 payments and VAULT Bitcoin/BIP21 requests containing both
 `branta_id` and `branta_secret`. No lookup runs on typing, internal-transfer paths,
 Liquid, Spark-native addresses/invoices, stablecoin/cross-chain sends, plain
@@ -15,9 +15,12 @@ hides old identity results across tabs. No lookup or logo client starts while
 disabled. Turning it on enables future preparation only. No account synchronization,
 check/result/preference telemetry, API key, HMAC secret or payment registration.
 
-Strict mode does not send plaintext destinations or payment amounts. The SDK
-processes the original payload locally and sends an encrypted lookup token over
-HTTPS. BOLT11 tokens are deterministic and repeated lookups are linkable. Branta
+Lookups never send plaintext destinations or payment amounts. The SDK (4.0.0)
+processes the original payload locally: on-chain requests send only their
+`branta_id`, BOLT11 requests send an encrypted token derived from the invoice,
+and plain addresses make no request at all. BOLT11 tokens are deterministic and
+repeated lookups are linkable. Lookups do not follow redirects, and response
+bodies are capped (see *SDK provenance*). Branta
 can observe lookup timing and the connecting network address. Only an explicit
 "View with Branta" click opens the SDK verification URL; the secret-bearing URL
 is neither displayed nor logged. Opening Branta's privacy link is also an explicit
@@ -70,17 +73,26 @@ optional logos begin, so slow images cannot prevent later recipient checks. Logo
 exhausting their remaining budget preserves the already-bound identity. A VAULT batch shares one deadline
 and has at most three outstanding lookups. Unsupported input, empty response,
 transport/parsing/decryption error or timeout shows nothing and does not block
-sending. Positive identity requires a successfully decrypted ZK destination equal
-to the prepared destination. Identity attribution makes no claim of payment safety.
+sending. Positive identity requires a `match` from the SDK, which returns only payments
+bound by decryption, and a returned destination of the same type equal to the
+prepared destination. Identity attribution makes no claim of payment safety.
 
-Only `BrantaError::Tampered` blocks sending and requires replacing the request.
-In SDK 3.2.1 it is reachable only for authenticated on-chain BIP21 address mismatch,
-not BOLT11. Wrong secrets and ordinary failures are silent, so absence of a block
-is not a safety claim. The known bad destination stays blocked for the current form despite preference
+Only a `tampered` verdict from the SDK's `verify` blocks sending and requires
+replacing the request. In SDK 4.0.0 it covers an on-chain BIP21 address that does
+not match the address decrypted from `branta_id`, and on-chain addresses in one
+request (path, `bc=`, `tb=`) that disagree. It is not reachable for BOLT11. VAULT
+pays only the path address, so Tenshu passes the SDK only the path address,
+`branta_id`, `branta_secret` and any `bc=`/`tb=`. Other legs (`pay=`, `lno=`,
+`lightning=`, `bolt12`, ...) are dropped first: the SDK would otherwise return
+`unknown` for an unbindable leg before decrypting `branta_id`, which would hide a
+swapped path address. Tab, CR and LF are removed first, as the wallet's parser and
+the SDK both do, and only the path and the forwarded parameters are checked for
+spaces, controls or bad encoding, so noise in a `label=` cannot skip the lookup. Identity therefore covers exactly the address being paid. `unknown`, `incomplete`
+(Branta unreachable, 5xx or 429), wrong secrets and ordinary failures are silent,
+so absence of a block is not a safety claim. The known bad destination stays blocked for the current form despite preference
 changes, metadata/encoding changes, or edits to another recipient. Replace or
-remove the affected destination to continue. Uppercase testnet bech32 URIs are skipped
-for lookup because the SDK normalizes case only for mainnet bech32; wallet address
-validation continues normally. Non-ASCII or ambiguous SDK payloads are skipped.
+remove the affected destination to continue. Non-ASCII or ambiguous SDK payloads
+are skipped.
 
 ## What a hit actually identifies, and how to test one
 
@@ -98,10 +110,12 @@ was never posted to Branta."
 Branta's two published Lightning fixtures cover disjoint halves of this pipeline,
 and **neither one can demonstrate a success in the send panel**:
 
-| Fixture | Strict (hash-ZK) lookup | Payable? |
+| Fixture | Derived-key lookup | Payable? |
 |---|---|---|
 | zk-lightning | resolves — platform "Peony Lane" | **no** — signed by a node with no channels and no `r` route hints, so the SSP answers `NO_PATH_FOUND` |
-| lightning | 404 — registered **plaintext-only**, findable only by a Loose-mode lookup, and `get_payments` never falls back from Strict | yes |
+| lightning | 404 — registered **plaintext-only**; SDK 4.0.0 has no plaintext lookup mode | yes |
+
+Fixture behavior was recorded against SDK 3.2.1; re-check it after any SDK upgrade.
 
 So the fixture that resolves cannot be prepared, and preparation failure discards
 the identity (identity binds to a prepared handle — see *Payment correctness*).
@@ -112,18 +126,20 @@ Branta, i.e. one from a `btcpay` list instance.
 
 ## SDK provenance and dependencies
 
-Official Branta 3.2.1 source is vendored from reviewed commit
-`ba5e510a3189f32d11cb57e10267284b7109cb39` (same tree as published source commit
-`dff65e0f65c1970273a7cdc198ece63019692c76`), with version requirement `=3.2.1`.
-The sole upstream manifest adjustment reuses reqwest `0.12.18` with `rustls-tls` (a resolution fix; see below for the runtime TLS backend).
-No SDK Rust source was changed. See [provenance](../vendor/branta/TENSHU_PROVENANCE.md)
-and enforced source hashes in `vendor/branta/UPSTREAM_SHA256.json`.
+Official Branta 4.0.0 source is vendored from reviewed commit
+`6292bbd0c6a720e5c9273a4f4e8b827097db6e5e` (tag `v4.0.0`), with version requirement
+`=4.0.0`. Two documented adapters are applied, both hash-pinned in
+`vendor/branta/UPSTREAM_SHA256.json` and enforced by the `vendor_integrity` test:
+the manifest reuses reqwest `0.12.18` with `rustls-tls` (a resolution fix; see
+below for the runtime TLS backend), and `src/v2/client.rs` disables redirects and
+caps lookup response bodies. No other SDK source was changed.
+See [provenance](../vendor/branta/TENSHU_PROVENANCE.md).
 
-The vendored README has an upstream inconsistency about plain on-chain copy/paste
-lookups: `get_payments(address, None, ...)` in Strict mode returns
-`PrivacyModeViolation`; the raw-QR unsupported-input path returns an empty result.
-Tenshu excludes plain on-chain lookups before either call and treats ordinary SDK
-errors silently. The vendored README is preserved as part of the pinned artifact.
+4.0.0 returns one of `match`, `unknown`, `tampered` or `incomplete` from `verify`.
+Tenshu maps `match` with a bound destination to an identity, `tampered` to a block,
+and everything else to silence. Descriptions now come only from encrypted payment
+metadata, so older registrations that stored a plaintext description show their
+platform without a description.
 
 Upstream reqwest 0.13 uses platform-verifier, whose Apple dependency conflicts
 with Breez's exact iOS build-dependency pin even on desktop because Cargo resolves
@@ -133,34 +149,17 @@ Declaring `rustls-tls` does not select rustls at runtime. Cargo unifies reqwest
 `0.12.18` features across the workspace, and Breez (`breez-sdk-liquid`,
 `sdk-common`, `esplora-client` defaults) also enables `default-tls` (native-tls)
 and `system-proxy`. With `default-tls` present, reqwest's `TlsBackend::default()`
-is native-tls, and neither the SDK lookup client (`reqwest::Client::new()`) nor
-the logo client calls `use_rustls_tls()`. Both therefore use the OS TLS stack and
-trust store (Security.framework on macOS, including admin/user-added roots;
-OpenSSL system roots on Linux; SChannel on Windows), and both honour
-`HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` and the macOS/Windows system proxy
+is native-tls, and neither the SDK lookup client (`reqwest::Client::builder()`,
+patched only to disable redirects) nor the logo client calls `use_rustls_tls()`.
+Both therefore use the OS TLS stack and trust store (Security.framework on macOS,
+including admin/user-added roots; OpenSSL system roots on Linux; SChannel on
+Windows), and both honour `HTTP(S)_PROXY`/`ALL_PROXY`/`NO_PROXY` and the macOS/Windows system proxy
 settings. Confirm with `cargo tree -e features -i reqwest@0.12.18`.
 
-Compared with the original lockfile:
-
-| Dependency | Before | After |
-|---|---|---|
-| reqwest | 0.11.27 / 0.12.12 / 0.12.18 | unchanged |
-| rustls | 0.20.9 / 0.21.12 / 0.23.37 | unchanged |
-| aes-gcm | 0.10.3 | + 0.11.1 |
-| base64 | 0.13.1 / 0.21.7 / 0.22.1 | + 0.23.1 |
-| hmac | 0.12.1 | + 0.13.0 |
-| digest, sha2 | existing multiple versions | unchanged |
-| serde | 1.0.228 | 1.0.229 |
-| serde_json | 1.0.149 | 1.0.151 |
-| async-trait | 0.1.89 | 0.1.92 |
-| tokio | 1.50.0 | 1.53.1 |
-| uuid | 1.22.0 | 1.26.1 |
-| thiserror 2 | 2.0.18 | 2.0.20 |
-
-The lookup client's upstream redirect policy and unlimited response-body allocation
-are retained to preserve reviewed source. The wrapper bounds elapsed time. A future
-upstream client configuration option or separately reviewed source patch can disable
-redirects/cap bodies. Logo fetching rejects redirects and validates HTTPS and exact origin for both variants.
+The lookup client follows no redirects: a 3xx response is treated as `incomplete`,
+so a redirect target never receives the lookup token. Lookup response bodies are
+capped and an oversized response is `incomplete`. The wrapper also bounds elapsed
+time. Logo fetching rejects redirects and validates HTTPS and exact origin for both variants.
 Branta Active Storage blob redirect URLs use its same-origin proxy route, avoiding
 requests to object storage. Responses are limited to 256 KiB and PNG/JPEG only.
 Decoding checks the actual format, caps each dimension at 5000 pixels and decoder
@@ -174,12 +173,12 @@ a timeout of the other variant. All logo errors are silent. SVG and other image 
 
 ## Validation
 
-All integration tests use fakes or SDK dependencies injected with a fake HTTP
-client. The SDK unit suite is run with `--lib`; its live integration examples are
-never run. Implementation starts at base `66d65369554c4abbdc40610430bcf009c246a32c`.
-Validation commands/results are recorded in the task handoff. Local Homebrew Rust
-is 1.94.0, whereas the repository pin is 1.97.1; cross-platform/pinned-toolchain
-validation cannot be claimed from that local run.
+Wrapper tests use a fake `LookupBackend`. SDK 4.0.0 keeps its HTTP client trait
+private, so the real `verify` is exercised only on paths that finish before any
+request (conflicting on-chain addresses, plain and unbindable destinations). The
+vendored SDK's own unit suite runs offline against local mock servers with
+`cargo test --manifest-path vendor/branta/Cargo.toml --lib`; its examples and live
+integration tests are never run.
 
 References: [SDK](https://github.com/BrantaOps/branta-rust),
 [send-side pricing](https://branta.pro/pricing),
