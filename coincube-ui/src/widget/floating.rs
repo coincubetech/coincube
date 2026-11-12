@@ -110,6 +110,13 @@ fn content_limits_within(width: f32, height: f32) -> layout::Limits {
 /// The margin kept between fitted content and the window's edges.
 const WINDOW_MARGIN: f32 = 8.0;
 
+/// Where content `height` tall, anchored at `top`, starts so its bottom stays
+/// inside a window `window_height` tall (never above the top margin).
+fn fitted_top(window_height: f32, top: f32, height: f32) -> f32 {
+    top.min(window_height - height - WINDOW_MARGIN)
+        .max(WINDOW_MARGIN)
+}
+
 /// The height content anchored at `top` may take in a window `window_height`
 /// tall: what is left below it, but never less than `min`.
 fn fitted_height(window_height: f32, top: f32, min: f32) -> f32 {
@@ -252,6 +259,13 @@ impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, 
                     .y
                     .clamp(8.0, (bounds.height - content.size().height - 8.0).max(8.0)),
             )
+        } else if self.fit_height.is_some() {
+            // Near the window's bottom edge the minimum height is taller than
+            // the room below, so slide the content up to keep it on screen.
+            Point::new(
+                self.position.x,
+                fitted_top(bounds.height, self.position.y, content.size().height),
+            )
         } else {
             self.position
         };
@@ -383,5 +397,15 @@ mod tests {
     fn fitted_height_takes_the_room_below_but_never_less_than_min() {
         assert_eq!(fitted_height(900.0, 300.0, 220.0), 592.0);
         assert_eq!(fitted_height(500.0, 300.0, 220.0), 220.0);
+    }
+
+    #[test]
+    fn fitted_top_slides_up_only_when_the_content_would_run_off_the_bottom() {
+        // Room below: stays where it is anchored.
+        assert_eq!(fitted_top(900.0, 300.0, 400.0), 300.0);
+        // Anchored 100px from the bottom with the 220px floor: slides up.
+        assert_eq!(fitted_top(900.0, 800.0, 220.0), 672.0);
+        // Never above the top margin.
+        assert_eq!(fitted_top(200.0, 150.0, 220.0), 8.0);
     }
 }
