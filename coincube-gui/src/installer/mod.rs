@@ -3795,12 +3795,21 @@ mod testnet4_seed_resume_tests {
     }
 
     fn rewrite(path: &std::path::Path, bytes: &[u8]) {
-        // Seed files are created mode 0o400, so a later test write must be
-        // granted by the test. The verifier itself must not need that.
+        // `restrict_permissions` seals seed files (mode 0o400 on Unix, the
+        // read-only attribute on Windows), so a later test write must be
+        // granted by the test on every platform. The verifier itself must not
+        // need that.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            std::fs::set_permissions(path, permissions).unwrap();
         }
         std::fs::write(path, bytes).unwrap();
     }
