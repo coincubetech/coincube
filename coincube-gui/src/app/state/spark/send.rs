@@ -639,6 +639,20 @@ impl SparkSend {
     /// when the USDB covers it). The fees are known only once prepared, and
     /// the bridge refuses a USDB that can't cover them, so this checks the
     /// amount at the BTC/USD quote.
+    /// Whether US Dollar can be picked as the balance to pay from. Picking it
+    /// only needs a USDB balance: whether that balance covers this send is
+    /// checked at Prepare ([`Self::usdb_covers`]), which says why when it
+    /// doesn't — so US Dollar can be chosen before an amount is typed.
+    pub fn usdb_selectable(&self) -> Result<(), &'static str> {
+        if self.receive_target.is_stablecoin() {
+            return Err("Stablecoin sends are paid from bitcoin.");
+        }
+        match self.usdb_balance.as_ref() {
+            Some(usdb) if usdb.balance > 0 => Ok(()),
+            _ => Err("You have no USDB."),
+        }
+    }
+
     pub fn usdb_covers(&self, cache: &Cache) -> Result<(), &'static str> {
         if self.receive_target.is_stablecoin() {
             return Err("Stablecoin sends are paid from bitcoin.");
@@ -1011,7 +1025,7 @@ impl State for SparkSend {
                     self.usdb_balance.as_ref(),
                 ),
                 pay_from: self.pay_from,
-                usdb_unavailable: self.usdb_covers(cache).err(),
+                usdb_unavailable: self.usdb_selectable().err(),
                 paid_from: self.prepared_pay_from,
                 conversion: self.prepared_conversion.as_deref(),
                 token_payment: self.prepared_token_payment.as_ref(),
@@ -1058,7 +1072,7 @@ impl State for SparkSend {
                 content,
                 crate::app::view::spark::send::pay_from_picker_modal(
                     self.pay_from,
-                    self.usdb_covers(cache).err(),
+                    self.usdb_selectable().err(),
                     crate::app::view::spark::SparkBalances::new(
                         cache,
                         self.btc_balance_sats,
@@ -1199,7 +1213,7 @@ impl State for SparkSend {
                 Task::none()
             }
             SparkSendMessage::SelectPayFrom(asset) => {
-                if asset == WalletAsset::Usdb && self.usdb_covers(cache).is_err() {
+                if asset == WalletAsset::Usdb && self.usdb_selectable().is_err() {
                     return Task::none();
                 }
                 if self
@@ -3386,21 +3400,46 @@ mod tests {
         );
     }
 
+    /// US Dollar can be picked whenever there is a USDB balance — before an
+    /// amount is typed, and even for one it won't cover: Prepare checks the
+    /// amount and says why. With no USDB it can't be picked.
     #[test]
-    fn choosing_the_pay_from_balance() {
+    fn us_dollar_is_selectable_with_any_usdb_balance() {
         let mut panel = SparkSend::new(None);
-        panel.usdb_balance = Some(usdb_dollars(10));
-        panel.amount_input = "30000".into();
-        drop(send_priced(&mut panel, SparkSendMessage::OpenPayFromPicker));
-        assert!(panel.pay_from_picker_open);
-        // Not covered: US Dollar can't be picked.
+        assert_eq!(panel.usdb_selectable(), Err("You have no USDB."));
         drop(send_priced(
             &mut panel,
             SparkSendMessage::SelectPayFrom(WalletAsset::Usdb),
         ));
         assert_eq!(panel.pay_from, WalletAsset::Bitcoin);
-        assert!(panel.pay_from_picker_open);
+
+        panel.usdb_balance = Some(usdb_dollars(10));
+        assert_eq!(panel.usdb_selectable(), Ok(()));
+        // No amount yet, and then one USDB doesn't cover: still selectable.
+        for amount in ["", "30000"] {
+            panel.amount_input = amount.into();
+            panel.pay_from = WalletAsset::Bitcoin;
+            drop(send_priced(
+                &mut panel,
+                SparkSendMessage::SelectPayFrom(WalletAsset::Usdb),
+            ));
+            assert_eq!(panel.pay_from, WalletAsset::Usdb, "amount {:?}", amount);
+        }
+        // Stablecoin sends stay bitcoin-funded.
+        panel.receive_target = SparkSendTarget::Usdt;
+        assert_eq!(
+            panel.usdb_selectable(),
+            Err("Stablecoin sends are paid from bitcoin.")
+        );
+    }
+
+    #[test]
+    fn choosing_the_pay_from_balance() {
+        let mut panel = SparkSend::new(None);
+        panel.usdb_balance = Some(usdb_dollars(10));
         panel.amount_input = "10000".into();
+        drop(send_priced(&mut panel, SparkSendMessage::OpenPayFromPicker));
+        assert!(panel.pay_from_picker_open);
         panel.phase = SparkSendPhase::Prepared(plain_prepare("bitcoin-preview"));
         drop(send_priced(
             &mut panel,

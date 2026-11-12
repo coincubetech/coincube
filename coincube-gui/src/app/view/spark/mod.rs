@@ -24,6 +24,73 @@ pub use settings::{SparkSettingsStatus, SparkSettingsView};
 pub use sideshift_receive::spark_sideshift_receive_view;
 pub use transactions::{SparkTransactionsStatus, SparkTransactionsView};
 
+/// The inside of a slim route tile, shared by Send and Receive: the asset
+/// logo (its network badge composited in the lower-right corner), a small
+/// sentence-case label with an optional right-aligned hint, "**Asset** where",
+/// and — on a tile that opens a picker — a chevron. The caller draws the
+/// tile's surface (a plain container, or the button that makes it tappable).
+pub(crate) fn route_tile_body<'a, M: 'a>(
+    logo: coincube_ui::widget::Element<'a, M>,
+    label: &'static str,
+    hint: Option<&'static str>,
+    asset: String,
+    place: String,
+    chevron: bool,
+) -> coincube_ui::widget::Element<'a, M> {
+    use coincube_ui::component::text::*;
+    use coincube_ui::theme;
+    use coincube_ui::widget::{Column, Container, Row};
+    use iced::widget::Space;
+    use iced::{Alignment, Length};
+
+    let mut caption = Row::new().spacing(8).align_y(Alignment::Center).push(
+        text(localized_copy(label))
+            .size(CAPTION_SIZE + 1)
+            .style(theme::text::secondary),
+    );
+    if let Some(hint) = hint {
+        caption = caption.push(Space::new().width(Length::Fill)).push(
+            text(localized_copy(hint))
+                .size(CAPTION_SIZE + 1)
+                .style(theme::text::secondary),
+        );
+    }
+    let mut row = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .push(logo)
+        .push(
+            Column::new()
+                .spacing(2)
+                .width(Length::Fill)
+                .push(caption)
+                .push(
+                    Row::new()
+                        .spacing(5)
+                        .align_y(Alignment::End)
+                        .push(
+                            text(asset)
+                                .size(P1_SIZE + 2)
+                                .bold()
+                                .style(theme::text::primary),
+                        )
+                        .push(text(place).size(P1_SIZE + 2).style(theme::text::secondary)),
+                ),
+        );
+    if chevron {
+        row = row.push(
+            coincube_ui::icon::down_icon()
+                .size(16)
+                .style(theme::text::secondary),
+        );
+    }
+    Container::new(row)
+        .padding([12, 14])
+        .width(Length::Fill)
+        .into()
+}
+
 /// The pinned head of a Spark sub-page such as Send or Receive: `title`, the
 /// wallet line, then Back to Spark as the last action.
 pub fn sub_page_head<'a>(
@@ -438,6 +505,21 @@ pub enum SparkReceiveMessage {
     OpenSenderPicker,
     /// Dismiss the "THEY SEND" picker without changing the selection.
     CloseSenderPicker,
+    /// Open the "YOU RECEIVE" picker: keep bitcoin, or convert it to USDB as
+    /// it arrives (the wallet's auto-convert setting).
+    OpenReceiverPicker,
+    /// Dismiss the "YOU RECEIVE" picker without changing anything.
+    CloseReceiverPicker,
+    /// Picked in the "YOU RECEIVE" picker: `true` for US Dollar (auto-convert
+    /// on), `false` for Bitcoin (off). Saved through the shared Settings
+    /// owner, the same path Overview's switch uses.
+    SelectReceiveAs(bool),
+    /// The wallet's auto-convert state, read on reload. `None` if it
+    /// couldn't be read.
+    AutoConvertLoaded(Option<bool>),
+    /// Ask Spark for a fresh on-chain deposit address instead of the static
+    /// one (for a payer who shouldn't see the reused address).
+    NewOnchainAddress,
     /// Picked a Bitcoin rail (Lightning / on-chain / Spark) in the picker —
     /// sets the receive method and closes the modal.
     SelectSenderRail(crate::app::state::spark::receive::SparkReceiveMethod),

@@ -9125,14 +9125,11 @@ impl App {
                     .lightning_address
                     .as_ref()
                     .and_then(|la| {
-                        la.lightning_address.as_ref().map(|addr| {
-                            if addr.contains('@') {
-                                addr.clone()
-                            } else {
-                                format!("{}{}", addr, "@coincube.io")
-                            }
-                        })
+                        crate::services::coincube::display_lightning_address(
+                            la.lightning_address.as_deref(),
+                        )
                     });
+                self.cache.lightning_address_setup = self.panels.connect.cube.ln_auto.clone();
                 self.panels.spark_receive.sync_lightning_address_qr(
                     self.cache
                         .connect_authenticated
@@ -9369,7 +9366,16 @@ impl App {
                         view::SparkSettingsMessage::StableBalanceSaved(Ok(enabled)),
                     )),
                 );
-                return Task::batch([record, panel, self.panels.spark_overview.reload(None, None)]);
+                let receive = self
+                    .panels
+                    .spark_receive
+                    .stable_balance_settled(Some(enabled));
+                return Task::batch([
+                    record,
+                    panel,
+                    self.panels.spark_overview.reload(None, None),
+                    receive,
+                ]);
             }
             // Overview shares the same Settings save owner. Route both the
             // request and failed settlement there even when Overview is active.
@@ -9483,6 +9489,7 @@ impl App {
                 return Task::batch([
                     panel,
                     self.panels.spark_overview.reload(None, None),
+                    self.panels.spark_receive.stable_balance_settled(None),
                     Task::done(Message::View(view::Message::ShowError(err))),
                 ]);
             }

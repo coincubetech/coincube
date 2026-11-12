@@ -332,6 +332,10 @@ pub struct Cache {
     /// The pulsing Connect light's dim phase, flipped by a slow tick only
     /// while it pulses.
     pub connect_light_dim: bool,
+    /// Progress of giving this Cube a Lightning address automatically (a
+    /// random name such as `orangezebra@coincube.io`), mirrored from the
+    /// Connect Cube panel for Receive.
+    pub lightning_address_setup: LightningAddressSetup,
     /// Presentation input for the shared top-bar balance eye. `None` until the
     /// GUI preferences owner publishes a resolved or unresolved privacy state.
     pub balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
@@ -514,6 +518,7 @@ impl std::default::Default for Cache {
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             reduce_motion: false,
             connect_light_dim: false,
+            lightning_address_setup: LightningAddressSetup::Idle,
             balance_privacy: None,
             cube_switcher_open: false,
             connect_panel_open: false,
@@ -1673,4 +1678,16 @@ mod btcb2_fiat_tests {
         assert!(cache.clear_btcb2_fiat() || cache.display_mode == DisplayMode::BitcoinNative);
         assert_eq!(cache.display_mode, DisplayMode::BitcoinNative);
     }
+}
+
+/// Where automatic Lightning address assignment stands for this Cube.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LightningAddressSetup {
+    /// Not started (or the Cube has an address).
+    #[default]
+    Idle,
+    /// Picking a free random name and claiming it.
+    Assigning,
+    /// The last attempt failed; the message says why.
+    Failed(String),
 }
