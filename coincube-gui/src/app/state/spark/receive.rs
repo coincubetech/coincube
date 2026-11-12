@@ -463,6 +463,9 @@ impl State for SparkReceive {
 
         match msg {
             SparkReceiveMessage::OpenSenderPicker => {
+                // One menu at a time: the other tile is still reachable from
+                // the keyboard while a menu is open.
+                self.receiver_picker_open = false;
                 self.sender_picker_open = true;
                 Task::none()
             }
@@ -470,6 +473,7 @@ impl State for SparkReceive {
                 // US Dollar exists where conversions run (mainnet); elsewhere
                 // Bitcoin is the only thing Spark receives, so nothing to pick.
                 if crate::app::state::spark::swap::swap_available(cache.network) {
+                    self.sender_picker_open = false;
                     self.receiver_picker_open = true;
                 }
                 Task::none()
@@ -1764,6 +1768,14 @@ mod tests {
 
         update(&mut panel, SparkReceiveMessage::CloseSenderPicker);
         assert!(!panel.sender_picker_open);
+
+        // One menu at a time, whichever tile opens it.
+        update(&mut panel, SparkReceiveMessage::OpenSenderPicker);
+        update(&mut panel, SparkReceiveMessage::OpenReceiverPicker);
+        assert!(panel.receiver_picker_open && !panel.sender_picker_open);
+        update(&mut panel, SparkReceiveMessage::OpenSenderPicker);
+        assert!(panel.sender_picker_open && !panel.receiver_picker_open);
+        update(&mut panel, SparkReceiveMessage::CloseSenderPicker);
 
         update(&mut panel, SparkReceiveMessage::OpenSenderPicker);
         update(

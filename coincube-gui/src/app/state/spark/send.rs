@@ -1167,6 +1167,9 @@ impl State for SparkSend {
                 Task::none()
             }
             SparkSendMessage::OpenReceivePicker => {
+                // One menu at a time: the other tile is still reachable from
+                // the keyboard while a menu is open.
+                self.pay_from_picker_open = false;
                 self.receive_picker_open = true;
                 Task::none()
             }
@@ -1178,6 +1181,7 @@ impl State for SparkSend {
                 // A stablecoin send is BTC-funded cross-chain and a US Dollar
                 // send moves US Dollar: no choice.
                 if self.receive_target.fixed_pay_from().is_none() {
+                    self.receive_picker_open = false;
                     self.pay_from_picker_open = true;
                 }
                 Task::none()
@@ -4273,6 +4277,18 @@ mod tests {
         assert!(!panel.receive_picker_open);
         assert!(matches!(panel.phase, SparkSendPhase::Idle));
         assert_eq!(panel.receive_target, SparkSendTarget::Lightning);
+    }
+
+    /// The route menus are dropdowns, so the other tile stays reachable from
+    /// the keyboard while one is open: opening it closes the first.
+    #[test]
+    fn opening_one_route_menu_closes_the_other() {
+        let mut panel = SparkSend::new(None);
+        let _ = send(&mut panel, SparkSendMessage::OpenReceivePicker);
+        let _ = send(&mut panel, SparkSendMessage::OpenPayFromPicker);
+        assert!(panel.pay_from_picker_open && !panel.receive_picker_open);
+        let _ = send(&mut panel, SparkSendMessage::OpenReceivePicker);
+        assert!(panel.receive_picker_open && !panel.pay_from_picker_open);
     }
 
     #[test]
