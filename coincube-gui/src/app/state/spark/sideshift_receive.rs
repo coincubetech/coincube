@@ -94,6 +94,10 @@ pub struct SparkSideshiftReceiveFlow {
     /// SideShift's settle txid once it has sent the bitcoin; matched against
     /// the wallet's pending deposits to show confirmation progress.
     settle_hash: Option<String>,
+    /// The settle transaction's confirmations as last seen among the wallet's
+    /// pending deposits. Kept once the deposit is claimed and leaves that list,
+    /// so the bar doesn't fall back to "0 of 3" before `Arrived` lands.
+    last_settle_confirmations: Option<u32>,
     /// The in-progress step's pulse phase (dim half), flipped by a slow tick
     /// while a shift is moving. The view holds it steady under reduce-motion.
     pulse_dim: bool,
@@ -124,6 +128,7 @@ impl SparkSideshiftReceiveFlow {
             settle_amount_sat: None,
             deposit_amount: None,
             settle_hash: None,
+            last_settle_confirmations: None,
             pulse_dim: false,
             arrived_amount_sat: None,
             qr_data: None,
@@ -175,6 +180,26 @@ impl SparkSideshiftReceiveFlow {
     pub fn pulse_dim(&self) -> bool {
         self.pulse_dim
     }
+    /// SideShift has sent (or is sending) the bitcoin, so a pending deposit
+    /// can be this swap's settle output. Before that, any amount match would
+    /// be some other deposit.
+    pub fn settle_output_live(&self) -> bool {
+        self.phase == SparkShiftPhase::Active
+            && matches!(
+                self.shift_status,
+                Some(ShiftStatusKind::Settling | ShiftStatusKind::Settled)
+            )
+    }
+    pub fn last_settle_confirmations(&self) -> Option<u32> {
+        self.last_settle_confirmations
+    }
+    /// Record the settle transaction's confirmations when they were found;
+    /// `None` (not among pending deposits) keeps the last value.
+    pub fn note_settle_confirmations(&mut self, confirmations: Option<u32>) {
+        if confirmations.is_some() {
+            self.last_settle_confirmations = confirmations;
+        }
+    }
     pub fn arrived_amount_sat(&self) -> Option<u64> {
         self.arrived_amount_sat
     }
@@ -201,6 +226,7 @@ impl SparkSideshiftReceiveFlow {
         self.settle_amount_sat = None;
         self.deposit_amount = None;
         self.settle_hash = None;
+        self.last_settle_confirmations = None;
         self.pulse_dim = false;
         self.arrived_amount_sat = None;
         self.qr_data = None;

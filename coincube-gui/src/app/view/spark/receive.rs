@@ -290,7 +290,10 @@ impl<'a> SparkReceiveView<'a> {
         // refreshes automatically on `DepositsChanged` events from
         // the bridge, so the card appears the moment the SDK
         // observes an incoming deposit (no manual refresh needed).
-        let swap_deposit = self.swap_deposit;
+        // A card-level claim error may be about the swap's own deposit, so
+        // then nothing is left out and its row (with Retry) stays visible.
+        let claim_error = self.claim_error;
+        let swap_deposit = self.swap_deposit.filter(|_| claim_error.is_none());
         let is_swap_deposit = move |d: &DepositInfo| {
             swap_deposit.is_some_and(|(txid, vout)| d.txid == txid && d.vout == vout)
         };
@@ -302,7 +305,7 @@ impl<'a> SparkReceiveView<'a> {
         if other_deposits > 0 || self.claim_error.is_some() {
             content = content.push(pending_deposits_card(
                 self.pending_deposits,
-                self.swap_deposit,
+                swap_deposit,
                 self.claiming,
                 self.claim_error,
                 self.claim_notices,
