@@ -14,7 +14,7 @@ use coincube_ui::{
     component::{
         amount::{BitcoinDisplayUnit, DisplayAmount},
         button,
-        tenshu::{segment, segmented, ActionButton, ActionKind},
+        tenshu::{ActionButton, ActionKind},
         text::*,
     },
     icon,
@@ -274,10 +274,11 @@ impl<'a> SparkSendView<'a> {
                             Row::new()
                                 .spacing(12)
                                 .align_y(Alignment::Center)
+                                // Bitcoin rail, US Dollar or stablecoin is all
+                                // picked from the THEY RECEIVE tile.
                                 .push(
                                     h4_bold(localized_copy("Payment details")).width(Length::Fill),
-                                )
-                                .push(send_kind_selector(self.receive_target, self.network)),
+                                ),
                         )
                         .padding([16, 24])
                         .width(Length::Fill),
@@ -285,7 +286,6 @@ impl<'a> SparkSendView<'a> {
                     .push(iced::widget::rule::horizontal(1))
                     .push(card_section(spark_send_cards(
                         self.receive_target,
-                        self.destination_input.is_empty(),
                         self.pay_from,
                     )))
                     .push(iced::widget::rule::horizontal(1))
@@ -379,41 +379,6 @@ pub fn send_step(phase: &SparkSendPhase) -> usize {
         | SparkSendPhase::CrossChainRoutes
         | SparkSendPhase::Error(_) => 0,
     }
-}
-
-fn send_kind_selector(target: SparkSendTarget, network: Network) -> Element<'static, Message> {
-    let stablecoin = target.is_stablecoin();
-    // US Dollar over Spark is neither a bitcoin rail nor cross-chain.
-    let usd = target == SparkSendTarget::SparkUsd;
-    segmented(
-        [
-            segment("spark-send-kind-bitcoin", false, "Bitcoin"),
-            segment(
-                "spark-send-kind-stablecoin",
-                true,
-                localized_copy("Stablecoin (cross-chain)"),
-            )
-            .enabled(cross_chain::supported_on(network)),
-        ],
-        (!usd).then_some(stablecoin),
-        Message::FocusAction,
-    )
-    .on_select(move |choice| {
-        Message::SparkSend(SparkSendMessage::SetReceiveTarget(if choice {
-            if stablecoin {
-                target
-            } else {
-                SparkSendTarget::Usdt
-            }
-        } else {
-            if stablecoin || usd {
-                SparkSendTarget::Lightning
-            } else {
-                target
-            }
-        }))
-    })
-    .into()
 }
 
 fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
@@ -1866,7 +1831,12 @@ pub fn pay_from_picker_modal<'a>(
                             Row::new()
                                 .spacing(8)
                                 .align_y(Alignment::Center)
-                                .push(text(pay_from_label(asset)).size(P1_SIZE).bold())
+                                .push(
+                                    text(pay_from_label(asset))
+                                        .size(P1_SIZE)
+                                        .bold()
+                                        .style(theme::text::primary),
+                                )
                                 .push(orange_badge(badge)),
                         )
                         .push(text(line).size(P2_SIZE).style(theme::text::secondary)),
@@ -1904,10 +1874,7 @@ pub fn pay_from_picker_modal<'a>(
         .push(option(
             WalletAsset::Usdb,
             PAY_FROM_USDB_ID,
-            asset_logo("usdb")
-                .width(Length::Fixed(36.0))
-                .height(Length::Fixed(36.0))
-                .into(),
+            asset_network_logo("usdb", "spark", 36.0),
             "USDB",
         ))
         .push(p2_regular(PAY_FROM_BITCOIN_NOTE).style(theme::text::secondary))
@@ -2050,60 +2017,44 @@ fn compose_footer<'a>(status: &'static str, prepare: Option<Message>) -> Element
         .into()
 }
 
-/// The "YOU SEND (Bitcoin) → THEY RECEIVE (target)" pair. YOU SEND is fixed —
-/// the Spark wallet always spends bitcoin — so only THEY RECEIVE is an Action,
-/// and it opens the real rail picker.
+/// Where a send target's asset travels, as it reads after the asset on the
+/// THEY RECEIVE tile ("Bitcoin on Lightning", "USDt cross-chain").
+fn target_place(target: SparkSendTarget) -> &'static str {
+    match target {
+        SparkSendTarget::Lightning => "on Lightning",
+        SparkSendTarget::OnChain => "on-chain",
+        SparkSendTarget::Spark | SparkSendTarget::SparkUsd => "on Spark",
+        SparkSendTarget::Usdt | SparkSendTarget::Usdc => "cross-chain",
+    }
+}
+
+/// The "YOU SEND → THEY RECEIVE" pair, as slim tiles like Receive's. THEY
+/// RECEIVE always opens the rail picker; YOU SEND opens the balance picker
+/// only where the target leaves a choice (bitcoin rails). A chevron and the
+/// hover outline mark each tappable tile.
 fn spark_send_cards<'a>(
     target: SparkSendTarget,
-    destination_empty: bool,
     pay_from: coincube_spark_protocol::WalletAsset,
 ) -> Element<'a, Message> {
-    let tile_caption =
-        |label: &'static str| text(label).size(P2_SIZE).style(theme::text::secondary);
-    let asset = |logo: Element<'a, Message>, label: &'static str| {
-        Row::new()
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .push(logo)
-            .push(text(label).size(H5_SIZE).bold().style(theme::text::primary))
-    };
-
     // A stablecoin send is BTC-funded cross-chain and US Dollar over Spark
     // moves US Dollar, so only bitcoin rails offer a choice of balance (S4).
     let choose = target.fixed_pay_from().is_none();
     let pay_from = target.fixed_pay_from().unwrap_or(pay_from);
-    let (logo, label, badge): (Element<'a, Message>, &'static str, &'static str) = match pay_from {
+    let (logo, label): (Element<'a, Message>, &'static str) = match pay_from {
         coincube_spark_protocol::WalletAsset::Usdb => (
-            asset_logo("usdb")
-                .width(Length::Fixed(40.0))
-                .height(Length::Fixed(40.0))
-                .into(),
-            "US Dollar",
-            "USDB",
+            asset_network_logo("usdb", "spark", 36.0),
+            localized_copy("US Dollar"),
         ),
-        _ => (asset_network_logo("btc", "spark", 40.0), "Bitcoin", "SPARK"),
+        _ => (asset_network_logo("btc", "spark", 36.0), "Bitcoin"),
     };
-    let you_send_body = Container::new(
-        Column::new()
-            .spacing(8)
-            .push(
-                Row::new()
-                    .push(tile_caption(coincube_ui::locale::copy("You send")))
-                    .push(Space::new().width(Length::Fill))
-                    .push_maybe(choose.then(|| {
-                        text(localized_copy("Change")).size(P2_SIZE).style(
-                            |theme: &theme::Theme| iced::widget::text::Style {
-                                color: Some(theme.colors.shell.accent_ink),
-                            },
-                        )
-                    })),
-            )
-            .push(asset(logo, label))
-            .push(orange_badge(badge)),
-    )
-    .padding([14, 16])
-    .width(Length::Fill)
-    .height(Length::Fixed(ROUTE_TILE_HEIGHT));
+    let you_send_body = super::route_tile_body(
+        logo,
+        "You send",
+        None,
+        label.to_string(),
+        localized_copy("in Spark").to_string(),
+        choose,
+    );
     let you_send: Element<'a, Message> = if choose {
         Action::new(PAY_FROM_ACTION_ID, you_send_body, Message::FocusAction)
             .style(receive_tile_button_style)
@@ -2113,58 +2064,39 @@ fn spark_send_cards<'a>(
             .on_press(Message::SparkSend(SparkSendMessage::OpenPayFromPicker))
             .into()
     } else {
-        you_send_body.style(fixed_tile_style).into()
+        Container::new(you_send_body)
+            .width(Length::Fill)
+            .style(fixed_tile_style)
+            .into()
     };
 
-    let they_receive =
-        Action::new(
-            RECEIVE_TARGET_ACTION_ID,
-            Container::new(
-                Column::new()
-                    .spacing(8)
-                    .push(
-                        Row::new()
-                            .push(tile_caption(coincube_ui::locale::copy("They receive")))
-                            .push(Space::new().width(Length::Fill))
-                            .push(text(localized_copy("Change")).size(P2_SIZE).style(
-                                |theme: &theme::Theme| iced::widget::text::Style {
-                                    color: Some(theme.colors.shell.accent_ink),
-                                },
-                            )),
-                    )
-                    .push(asset(target_logo(target, 40.0), target.label()))
-                    .push(
-                        Row::new()
-                            .spacing(10)
-                            .align_y(Alignment::Center)
-                            .push(orange_badge(localized_copy(target.badge())))
-                            .push_maybe(destination_empty.then(|| {
-                                tile_caption(coincube_ui::locale::copy("Add a destination"))
-                            })),
-                    ),
-            )
-            .padding([14, 16])
-            .width(Length::Fill)
-            .height(Length::Fixed(ROUTE_TILE_HEIGHT)),
-            Message::FocusAction,
-        )
-        .style(receive_tile_button_style)
-        .padding(0)
-        .width(Length::Fill)
-        .focus_radius(8.0)
-        .on_press(Message::SparkSend(SparkSendMessage::OpenReceivePicker));
+    let they_receive = Action::new(
+        RECEIVE_TARGET_ACTION_ID,
+        super::route_tile_body(
+            target_logo(target, 36.0),
+            "They receive",
+            None,
+            localized_copy(target.label()).to_string(),
+            localized_copy(target_place(target)).to_string(),
+            true,
+        ),
+        Message::FocusAction,
+    )
+    .style(receive_tile_button_style)
+    .padding(0)
+    .width(Length::Fill)
+    .focus_radius(8.0)
+    .on_press(Message::SparkSend(SparkSendMessage::OpenReceivePicker));
 
     Row::new()
-        .spacing(16)
+        .spacing(12)
         .align_y(Alignment::Center)
         .width(Length::Fill)
         .push(Container::new(you_send).width(Length::FillPortion(1)))
-        .push(text("→").size(H5_SIZE).style(theme::text::secondary))
+        .push(text("→").size(P1_SIZE + 2).style(theme::text::secondary))
         .push(Container::new(they_receive).width(Length::FillPortion(1)))
         .into()
 }
-
-const ROUTE_TILE_HEIGHT: f32 = 132.0;
 
 /// One rail in the THEY RECEIVE picker: logo, asset, rail badge and — for the
 /// current selection — a check on a tinted surface. Selection is styling only;
@@ -2359,29 +2291,6 @@ mod tests {
         "0xsynthetic-r07b-usdc-cross-chain-address-not-payable";
     const SYNTHETIC_HINT: &str = "Your bitcoin balance is 25,053 sats; the rest is converted \
                                   from your synthetic USDB at the time of sending.";
-
-    #[test]
-    fn master_bitcoin_reselection_preserves_the_selected_subrail_for_keyboard_and_pointer() {
-        for target in [
-            SparkSendTarget::Lightning,
-            SparkSendTarget::Spark,
-            SparkSendTarget::OnChain,
-        ] {
-            for pointer in [false, true] {
-                let messages = capture::activate(
-                    send_kind_selector(target, Network::Bitcoin),
-                    Id::new("spark-send-kind-bitcoin"),
-                    COMPACT,
-                    pointer,
-                );
-                assert!(messages.iter().any(|message| matches!(
-                    message,
-                    Message::SparkSend(SparkSendMessage::SetReceiveTarget(selected))
-                        if *selected == target
-                )));
-            }
-        }
-    }
 
     #[test]
     fn recipient_status_uses_only_current_identity_and_device_setting() {
@@ -3444,10 +3353,9 @@ mod tests {
                         "{}: the available balance must keep the original formatting",
                         label
                     );
-                    assert_eq!(
-                        probe.contains("Add a destination"),
-                        fixture.destination.is_empty(),
-                        "{}: the destination prompt follows the actual field",
+                    assert!(
+                        !probe.contains("Add a destination"),
+                        "{}: the Destination field below needs no prompt on the tile",
                         label
                     );
                     assert!(
@@ -3455,8 +3363,15 @@ mod tests {
                         "{}: native destination input",
                         label
                     );
+                    // No Bitcoin / Stablecoin toggle: THEY RECEIVE's picker
+                    // holds every target.
                     for id in ["spark-send-kind-bitcoin", "spark-send-kind-stablecoin"] {
-                        assert!(probe.bounds(id).is_some(), "{}: missing {}", label, id);
+                        assert!(
+                            probe.bounds(id).is_none(),
+                            "{}: toggle back at {}",
+                            label,
+                            id
+                        );
                     }
                     assert!(
                         probe.input_text(AMOUNT_INPUT_ID).is_some(),
