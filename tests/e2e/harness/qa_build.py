@@ -95,6 +95,13 @@ def validate_app(app, device, minimum_build):
             "flutter_sha256": hashlib.sha256(framework).hexdigest()}
 
 
+def verify_installed(device, build, query):
+    apps = query("device", "info", "apps", "--device", device["identifier"], "--bundle-id", BUNDLE,
+                 "--include-removable-apps", "--include-default-apps")["apps"]
+    if len(apps) != 1 or str(apps[0].get("bundleVersion")) != str(build):
+        raise Blocked("QA_BUILD_CHANGED", "The installed app does not match the signed QA receipt.")
+
+
 def prepare(config, strict, device, minimum_build, query):
     """Called under the same USB lease used by the whole acceptance run."""
     build_config = validate_build_config(config)
@@ -117,10 +124,7 @@ def prepare(config, strict, device, minimum_build, query):
         observed = validate_app(app, device, minimum_build)
         if observed != receipt["app"]:
             raise Failed("QA_BUILD_CHANGED", "The saved QA application changed after installation.")
-        apps = query("device", "info", "apps", "--device", device["identifier"], "--bundle-id", BUNDLE,
-                     "--include-removable-apps", "--include-default-apps")["apps"]
-        if len(apps) != 1 or str(apps[0].get("bundleVersion")) != str(receipt["app"]["build"]):
-            raise Blocked("QA_BUILD_CHANGED", "The installed app changed; resumption cannot install or restart a pinned app.")
+        verify_installed(device, receipt["app"]["build"], query)
         return
     if "strict_process" in journal.data["artifacts"]:
         raise Failed("QA_BUILD_RESUME", "An existing strict process cannot receive a new QA build; use a fresh run.")
@@ -167,6 +171,7 @@ def prepare(config, strict, device, minimum_build, query):
     app = root / "validated/Payload/Runner.app"
     observed = validate_app(app, device, minimum_build)
     query("device", "install", "app", "--device", device["identifier"], str(app))
+    verify_installed(device, observed["build"], query)
     query("device", "process", "launch", "--device", device["identifier"], BUNDLE)
     receipt = {"binding": binding, "source": build_config["revision"], "define": DEFINE, "app": observed,
                "ipa_sha256": hashlib.sha256(ipas[0].read_bytes()).hexdigest()}

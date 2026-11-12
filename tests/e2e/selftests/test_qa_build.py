@@ -143,6 +143,18 @@ def test_missing_receipt_cannot_replace_a_pinned_process(build):
     assert not build.calls
 
 
+def test_install_success_still_requires_exact_installed_version_before_launch(build):
+    def query(*args):
+        build.calls.append(list(args))
+        return {"apps": [{"bundleVersion": "42"}]}
+    build.query = query
+    with pytest.raises(Blocked) as caught:
+        prepare(build)
+    assert caught.value.code == "QA_BUILD_CHANGED"
+    assert not any(args[:3] == ["device", "process", "launch"] for args in build.calls)
+    assert "qa_build" not in build.journal.data["artifacts"]
+
+
 @pytest.mark.parametrize("change,code", [("device", "QA_BUILD_BINDING"), ("binary", "QA_BUILD_CHANGED"),
                                         ("installed", "QA_BUILD_CHANGED")])
 def test_resume_refuses_changed_device_binary_or_installed_build(build, change, code):
