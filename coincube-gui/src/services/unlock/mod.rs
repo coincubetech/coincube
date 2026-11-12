@@ -586,11 +586,24 @@ pub(crate) fn open_seed_by_fingerprint(
     cube_id: &str,
 ) -> Result<MasterSigner, SignerError> {
     let chain = chain.into();
-    // "No entry for this Cube" is `None`, not an error — a v2 file needs no
-    // secret and must keep opening without one.
-    let secret = device_secret::load_optional(cube_id)
-        .map_err(|e| SignerError::DecryptionFailed(e.to_string()))?;
+    open_seed_by_fingerprint_with_secret_loader(
+        datadir_root,
+        chain,
+        fingerprint,
+        pin,
+        cube_id,
+        || device_secret::load_optional(cube_id),
+    )
+}
 
+fn open_seed_by_fingerprint_with_secret_loader(
+    datadir_root: &Path,
+    chain: ChainId,
+    fingerprint: Fingerprint,
+    pin: &str,
+    cube_id: &str,
+    load_secret: impl FnOnce() -> Result<Option<DeviceSecret>, UnlockError>,
+) -> Result<MasterSigner, SignerError> {
     for (path, named) in seed_files(datadir_root, chain)? {
         // The duress marker deliberately shares this filename grammar, but its
         // fingerprint field is random rather than derived (unit 6a), so it will
@@ -600,6 +613,14 @@ pub(crate) fn open_seed_by_fingerprint(
         if named != fingerprint {
             continue;
         }
+        // Only a matching v3 file needs the keystore. Legacy PIN-only files
+        // must remain readable when the keystore is locked or unavailable.
+        let data = std::fs::read(&path).map_err(SignerError::MnemonicStorage)?;
+        let secret = if seed_crypt::format_version(&data) == Some(3) {
+            load_secret().map_err(|e| SignerError::DecryptionFailed(e.to_string()))?
+        } else {
+            None
+        };
         return open_seed_at(
             &path,
             chain.bitcoin_network(),
@@ -3036,6 +3057,95 @@ mod tests {
             Err(SignerError::InvalidPassword)
         ));
 
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fingerprint_fallback_v2_never_reads_keystore() {
+        let dir = tmp_dir("fp-v2-no-keystore");
+        let cube_id = "fp-v2-no-keystore";
+        let fp = make_cube(&dir, cube_id, 1000, "1234");
+        let open = |fingerprint, pin, cube| {
+            open_seed_by_fingerprint_with_secret_loader(
+                &dir,
+                ChainId::Bitcoin,
+                fingerprint,
+                pin,
+                cube,
+                || panic!("a v2 or missing seed must not consult the keystore"),
+            )
+        };
+        assert_eq!(
+            open(fp, "1234", cube_id)
+                .unwrap()
+                .fingerprint(&Secp256k1::signing_only()),
+            fp
+        );
+        assert!(matches!(
+            open(fp, "9999", cube_id),
+            Err(SignerError::InvalidPassword)
+        ));
+        assert!(matches!(
+            open(fp, "1234", "other-cube"),
+            Err(SignerError::InvalidPassword)
+        ));
+        let missing = MasterSigner::generate(NET)
+            .unwrap()
+            .fingerprint(&Secp256k1::signing_only());
+        assert!(matches!(
+            open(missing, "1234", cube_id),
+            Err(SignerError::SignerNotFound(_))
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fingerprint_fallback_v3_preserves_keystore_errors_and_binding() {
+        let dir = tmp_dir("fp-v3-keystore-result");
+        let cube_id = "fp-v3-keystore-result";
+        let secp = Secp256k1::signing_only();
+        let signer = MasterSigner::generate(NET).unwrap();
+        let fp = signer.fingerprint(&secp);
+        let secret = Zeroizing::new([42u8; 32]);
+        signer
+            .store_encrypted(&dir, NET, &secp, None, "1234", cube_id, Some(&secret))
+            .unwrap();
+        let open = |pin, cube, secret_result| {
+            open_seed_by_fingerprint_with_secret_loader(
+                &dir,
+                ChainId::Bitcoin,
+                fp,
+                pin,
+                cube,
+                || secret_result,
+            )
+        };
+        assert!(matches!(
+            open(
+                "1234",
+                cube_id,
+                Err(UnlockError::KeystoreUnreachable("simulated outage".into()))
+            ),
+            Err(SignerError::DecryptionFailed(message)) if message.contains("simulated outage")
+        ));
+        assert!(matches!(
+            open("1234", cube_id, Ok(None)),
+            Err(SignerError::DeviceSecretRequired)
+        ));
+        assert_eq!(
+            open("1234", cube_id, Ok(Some(secret.clone())))
+                .unwrap()
+                .fingerprint(&secp),
+            fp
+        );
+        assert!(matches!(
+            open("9999", cube_id, Ok(Some(secret.clone()))),
+            Err(SignerError::InvalidPassword)
+        ));
+        assert!(matches!(
+            open("1234", "other-cube", Ok(Some(secret))),
+            Err(SignerError::InvalidPassword)
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
