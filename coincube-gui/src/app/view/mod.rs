@@ -956,10 +956,14 @@ pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
         // capped shift that keeps three cards on screen re-pairs state by
         // slot, which is why the dismiss cross acts on press (`toast_card`).
         iced::widget::keyed_column(visible_toasts(iter).map(|(id, level, content)| {
-            // `opaque` captures presses on the card and levitates the cursor
-            // for the layers below, so clicks, hover and scroll over a toast
-            // never reach the screen underneath. Only the cards are wrapped:
-            // the rest of the overlay stays click-through.
+            // `opaque` captures mouse presses on the card. It doesn't capture
+            // other events, but it reports an `Idle` interaction over the
+            // card, so the overlay's `Stack` hands the layers below a
+            // levitated cursor with no position: hover and the wheel over a
+            // toast don't act on the screen underneath (scrollables and
+            // `mouse_area` ignore a cursor that isn't over them). Global
+            // `event::listen` subscriptions still see every event. Only the
+            // cards are wrapped: the rest of the overlay stays click-through.
             let card = iced::widget::opaque(toast_card(
                 level.into(),
                 coincube_ui::locale::notice(content),
@@ -1054,7 +1058,8 @@ mod toast_overlay_tests {
                 .width(iced::Length::Fill)
                 .height(iced::Length::Fill),
         )
-        .on_press(Message::DismissToast(UNDERLAY));
+        .on_press(Message::DismissToast(UNDERLAY))
+        .on_scroll(|_| Message::DismissToast(UNDERLAY));
         let stack: coincube_ui::widget::Element<'a, Message> = iced::widget::Stack::new()
             .push(underlay)
             .push(toast_overlay(list.into_iter()))
@@ -1229,6 +1234,42 @@ mod toast_overlay_tests {
         assert!(
             !reached_underlay(&on_cross),
             "a press on the dismiss button reached the screen below"
+        );
+
+        // The wheel over a toast doesn't scroll the screen below either.
+        let wheel = mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Lines { x: 0.0, y: -3.0 },
+        };
+        let scrolled = send(
+            &mut ui,
+            &mut renderer,
+            message.center(),
+            &[
+                mouse::Event::CursorMoved {
+                    position: message.center(),
+                },
+                wheel,
+            ],
+        );
+        assert!(
+            !reached_underlay(&scrolled),
+            "the wheel over a toast reached the screen below"
+        );
+        let beside_wheel = Point::new(WINDOW.width - 20.0, 20.0);
+        let scrolled_beside = send(
+            &mut ui,
+            &mut renderer,
+            beside_wheel,
+            &[
+                mouse::Event::CursorMoved {
+                    position: beside_wheel,
+                },
+                wheel,
+            ],
+        );
+        assert!(
+            reached_underlay(&scrolled_beside),
+            "the wheel beside the toasts must reach the screen below"
         );
 
         // The overlay outside the cards stays click-through.
