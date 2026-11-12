@@ -18,8 +18,6 @@ pub mod wallet_header;
 
 pub mod vault;
 
-use std::iter::FromIterator;
-
 pub use liquid::*;
 pub use message::*;
 pub use spark::{
@@ -924,9 +922,10 @@ fn toast_card<'a>(
         .clip(true)
 }
 
-/// Most toasts shown at once. Older ones stay queued (and keep their expiry
-/// timers) until a newer one is dismissed or expires, so a burst can't grow
-/// the stack up the window.
+/// Most toasts shown at once, so a burst can't grow the stack up the window.
+/// Older toasts keep running their own expiry timers while hidden: they only
+/// come back if a newer one is dismissed first, and in a fast burst they
+/// usually expire unseen.
 const TOAST_MAX_VISIBLE: usize = 3;
 
 /// The newest `TOAST_MAX_VISIBLE` toasts, oldest first so the newest sits
@@ -945,16 +944,19 @@ pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
         iced::widget::Space::new().width(nav::shell::FULL_WIDTH),
         // center toasts horizontally
         iced::widget::Space::new().width(iced::Length::Fill),
-        iced::widget::Column::from_iter(visible_toasts(iter).map(|(id, level, content)| {
+        // Keyed by toast id so per-card widget state (a held dismiss button)
+        // follows its toast when a newer one shifts the visible slots.
+        iced::widget::keyed_column(visible_toasts(iter).map(|(id, level, content)| {
             // `opaque` captures presses on the card and levitates the cursor
             // for the layers below, so clicks, hover and scroll over a toast
             // never reach the screen underneath. Only the cards are wrapped:
             // the rest of the overlay stays click-through.
-            iced::widget::opaque(toast_card(
+            let card = iced::widget::opaque(toast_card(
                 level.into(),
                 coincube_ui::locale::notice(content),
                 Some(Message::DismissToast(id)),
-            ))
+            ));
+            (id, card)
         }))
         .spacing(8),
         iced::widget::Space::new().width(iced::Length::Fill),
@@ -1113,6 +1115,27 @@ mod toast_overlay_tests {
         assert!(
             !reached_underlay(&on_toast),
             "a press on the toast reached the screen below"
+        );
+
+        // The dismiss cross is the glyph after the message. Inside `opaque` it
+        // still gets the press first and dismisses its own toast.
+        let all = texts(&mut ui, &renderer);
+        let at = all
+            .iter()
+            .position(|(text, _)| text == "Toast number 0")
+            .expect("mounted toast message");
+        let cross = all.get(at + 1).expect("mounted dismiss cross").1;
+        assert!(cross.x > message.x, "the cross sits right of the message");
+        let on_cross = click(&mut ui, &mut renderer, cross.center());
+        assert!(
+            on_cross
+                .iter()
+                .any(|m| matches!(m, Message::DismissToast(0))),
+            "the dismiss button must still dismiss its toast"
+        );
+        assert!(
+            !reached_underlay(&on_cross),
+            "a press on the dismiss button reached the screen below"
         );
 
         // The overlay outside the cards stays click-through.
