@@ -6,6 +6,14 @@
   "connect_rest": "https://api.coincube.io",
   "connect_grpc": "https://grpc.coincube.io:443",
   "strict_acceptance": {"version": 1},
+  "qa_funding": {
+    "version": 1,
+    "sources": [{"source_run": "/absolute/path/to/completed-disposable-qa-run"}],
+    "maximum_amount_sats": 500000,
+    "fee_sats": 1000,
+    "faucet_wait_seconds": 30,
+    "register_completed": true
+  },
   "ios": {
     "minimum_build": 41,
     "qa_build": {
