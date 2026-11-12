@@ -30,11 +30,6 @@ use crate::app::cache::Cache;
 use crate::app::message::Message;
 use crate::app::wallets::SparkBackend;
 
-/// Fire a `list_payments` RPC on the Spark bridge and route the result
-/// through caller-supplied message constructors. Shared by the Send
-/// and Receive panels so the "Last transactions" feed stays identical
-/// across wallet screens — callers differ only in which panel message
-/// they wrap the response in.
 /// The latest five of `payments` as Send, Receive and Swap list them in their
 /// side panel, priced at the cache's fiat rate.
 pub(crate) fn recent_transactions_from(
@@ -71,6 +66,11 @@ pub(crate) fn test_payment(id: &str, amount_sat: i64) -> PaymentSummary {
     }
 }
 
+/// Fire a `list_payments` RPC on the Spark bridge and route the result
+/// through caller-supplied message constructors. Shared by the Send
+/// and Receive panels so the "Last transactions" feed stays identical
+/// across wallet screens — callers differ only in which panel message
+/// they wrap the response in.
 pub(crate) fn fetch_payments_task(
     backend: Option<Arc<SparkBackend>>,
     on_loaded: impl FnOnce(Vec<PaymentSummary>) -> Message + Send + 'static,
