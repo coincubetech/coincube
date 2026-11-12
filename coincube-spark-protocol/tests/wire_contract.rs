@@ -114,14 +114,16 @@ fn token_payment_succeeded_event_names_its_token() {
         amount_sat: 12_500_000,
         bolt11: None,
         token: Some(coincube_spark_protocol::PaymentToken {
+            identifier: "btkn1usdb".to_string(),
             ticker: "USDB".to_string(),
             decimals: 6,
+            usdb: true,
         }),
     };
     let value = serde_json::to_value(Frame::Event(event)).unwrap();
     assert_eq!(
         value["payload"]["token"],
-        json!({ "ticker": "USDB", "decimals": 6 })
+        json!({ "identifier": "btkn1usdb", "ticker": "USDB", "decimals": 6, "usdb": true })
     );
     let Frame::Event(Event::PaymentSucceeded { token, .. }) =
         serde_json::from_value::<Frame>(value).unwrap()

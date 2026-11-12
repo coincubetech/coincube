@@ -743,10 +743,17 @@ impl State for SparkReceive {
                 if !is_incoming {
                     return Task::none();
                 }
-                // USDB on Spark waits for a token payment; every other
-                // method for bitcoin. A token's amount is in its own base
-                // units, so it can't be counted as sats (or the reverse).
-                if token.is_some() != (self.method == SparkReceiveMethod::UsdbSpark) {
+                // USDB on Spark waits for USDB itself (by identifier, not
+                // ticker: any token can call itself USDB); every other method
+                // for bitcoin. A token's amount is in its own base units, so
+                // it can't be counted as sats (or the reverse), and another
+                // token arriving at the same address is not this payment.
+                let wanted = if self.method == SparkReceiveMethod::UsdbSpark {
+                    token.as_ref().is_some_and(|token| token.usdb)
+                } else {
+                    token.is_none()
+                };
+                if !wanted {
                     return Task::none();
                 }
 
@@ -1667,8 +1674,10 @@ mod tests {
 
     fn usdb_token() -> Option<coincube_spark_protocol::PaymentToken> {
         Some(coincube_spark_protocol::PaymentToken {
+            identifier: "btkn1usdb".to_string(),
             ticker: "USDB".to_string(),
             decimals: 6,
+            usdb: true,
         })
     }
 
@@ -1746,6 +1755,22 @@ mod tests {
                 amount_sat: 4_000,
                 bolt11: None,
                 token: None,
+            },
+        );
+        assert!(matches!(panel.phase(), SparkReceivePhase::Generated(_)));
+
+        // Another token, even one calling itself USDB, is not this payment.
+        update(
+            &mut panel,
+            SparkReceiveMessage::PaymentReceived {
+                amount_sat: 9_000_000,
+                bolt11: None,
+                token: Some(coincube_spark_protocol::PaymentToken {
+                    identifier: "btkn1other".to_string(),
+                    ticker: "USDB".to_string(),
+                    decimals: 6,
+                    usdb: false,
+                }),
             },
         );
         assert!(matches!(panel.phase(), SparkReceivePhase::Generated(_)));

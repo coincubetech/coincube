@@ -1626,13 +1626,22 @@ impl Response {
 /// Optimization and lightning-address-changed events from the SDK
 /// remain deferred until a panel needs them.
 /// The token a [`Event::PaymentSucceeded`] moved, so its amount (in the
-/// token's base units) can be read as that token.
+/// token's base units) can be read as that token. A token payment the SDK
+/// reported without its metadata still carries one, with an empty
+/// `identifier`/`ticker` and `decimals` 0: it is a token, just not one the
+/// gui can name, so it is never read as sats.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentToken {
-    /// Display ticker (e.g. "USDB").
+    /// The Spark token identifier (`btkn1…`); empty when unknown.
+    pub identifier: String,
+    /// Display ticker (e.g. "USDB"); empty when unknown.
     pub ticker: String,
     /// Decimals of the token's base units.
     pub decimals: u32,
+    /// Whether this is the wallet's USDB, by its identifier (the bridge
+    /// knows it; a ticker can be claimed by any token).
+    #[serde(default)]
+    pub usdb: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
