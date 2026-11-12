@@ -69,7 +69,8 @@ def flow(tmp_path, monkeypatch):
     vault = {'id': 23, 'cubeId': 12, 'fingerprint': '1234abcd', 'status': 'active',
              'members': [{'keyId': 34, 'role': 'keyholder'}]}
     cloud = {'cube': cube, 'vault': vault, 'key': key, 'other': [], 'deletes': [],
-             'fail_delete': None, 'pending': [], 'decrypt': [], 'residual': 89000}
+             'fail_delete': None, 'pending': [], 'decrypt': [], 'residual': 89000,
+             'shared': [], 'other_details': {}, 'other_keys': {}, 'other_vaults': {}, 'reads': []}
     def api(_, path, *, delete=False, body=None, missing=False):
         if delete:
             import fcntl, os
@@ -91,11 +92,23 @@ def flow(tmp_path, monkeypatch):
                 cloud['key'] = None; cloud['cube']['keys'] = []
             else: cloud['cube'] = None
             return None
+        cloud['reads'].append(path)
+        if path == '/connect/cubes/shared-with-me': return deepcopy(cloud['shared'])
         if path == '/keys': return {'keys': [cloud['key']] if cloud['key'] else []}
         if path == '/connect/cubes': return ([cloud['cube']] if cloud['cube'] else []) + cloud['other']
         if path == '/connect/cubes/12': return deepcopy(cloud['cube'])
         if path == '/connect/cubes/12/vault': return deepcopy(cloud['vault'])
         if path == '/connect/cubes/12/keys': return ([{'id': 34}] if cloud['key'] else []) if cloud['cube'] else None
+        if path.startswith('/connect/cubes/'):
+            parts = path.split('/')
+            cube_id = int(parts[3])
+            rows = cloud['other'] + cloud['shared']
+            row = next((row for row in rows if row.get('id') == cube_id), None)
+            if row is not None:
+                detail = cloud['other_details'].get(cube_id, row)
+                if path.endswith('/keys'): return deepcopy(cloud['other_keys'].get(cube_id, detail.get('keys', [])))
+                if path.endswith('/vault'): return deepcopy(cloud['other_vaults'].get(cube_id, detail.get('vault')))
+                return deepcopy(detail)
         raise AssertionError(path)
     def http(url, **kwargs):
         if url.endswith('/block-height/0'): return cleanup.GENESIS.encode()
@@ -670,4 +683,137 @@ def test_unknown_spend_after_last_supported_qa_hop_is_quarantined(flow, monkeypa
     runner, cloud, _, _, spends, _, child = accepted_sponsors(flow, monkeypatch, tmp_path, 2)
     spends[child] = {'spent': True, 'txid': 'e' * 64, 'vin': 0}
     with pytest.raises(Blocked, match='outside the bounded'): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []
+
+
+@pytest.mark.parametrize('flag', [False, None, 'missing'])
+def test_other_authoritative_key_inventory_protects_signer_without_has_vault_assertion(flow, flag):
+    runner, cloud, _ = flow
+    row = {'id': 99}
+    if flag != 'missing': row['hasVault'] = flag
+    cloud['other'] = [row]
+    cloud['other_keys'][99] = [{'id': 34}]
+    with pytest.raises(Failed, match='SHARED_KEY'): cleanup.ensure_capacity(runner)
+    assert '/connect/cubes/99/keys' in cloud['reads']
+    assert cloud['deletes'] == []
+
+
+def visible_other(cloud, *, shared=False, network='bitcoin'):
+    row = {'id': 99, 'hasVault': False}
+    detail = {'id': 99, 'userId': 77 if shared else 5, 'network': network,
+              'members': [], 'pendingInvites': [], 'vault': None}
+    cloud['shared' if shared else 'other'] = [row]
+    cloud['other_details'][99] = detail
+    cloud['other_keys'][99] = []
+    return row, detail
+
+
+@pytest.mark.parametrize('shared', [False, True])
+def test_owned_and_shared_discovery_scan_all_networks_before_deleting(flow, shared):
+    runner, cloud, _ = flow
+    visible_other(cloud, shared=shared, network='bitcoin')
+    cloud['other_keys'][99] = [{'id': 34}]
+    with pytest.raises(Failed, match='SHARED_KEY'): cleanup.ensure_capacity(runner)
+    assert '/connect/cubes' in cloud['reads'] and '/connect/cubes/shared-with-me' in cloud['reads']
+    assert '/connect/cubes/99/keys' in cloud['reads']
+    assert cloud['deletes'] == []
+
+
+@pytest.mark.parametrize('flag', [False, None, 'missing'])
+@pytest.mark.parametrize('shared', [False, True])
+def test_unrelated_complete_inventories_allow_retirement_without_has_vault_assertion(flow, flag, shared):
+    runner, cloud, _ = flow
+    row, _ = visible_other(cloud, shared=shared)
+    if flag == 'missing': row.pop('hasVault')
+    else: row['hasVault'] = flag
+    cleanup.ensure_capacity(runner)
+    assert '/connect/cubes/99/keys' in cloud['reads'] and '/connect/cubes/99' in cloud['reads']
+    assert ('/connect/cubes/99/vault' in cloud['reads']) is (not shared)
+    assert cloud['deletes'] == ['/connect/cubes/12/vault', '/keys/delete', '/connect/cubes/12']
+
+
+@pytest.mark.parametrize('shared', [False, True])
+@pytest.mark.parametrize('origin', ['detail_keys', 'detail_vault', 'listed_keys', 'listed_vault', 'owned_vault'])
+def test_stale_or_contradictory_other_membership_never_erases_a_reference(flow, shared, origin):
+    runner, cloud, _ = flow
+    row, detail = visible_other(cloud, shared=shared)
+    vault = {'id': 88, 'cubeId': 99, 'members': [{'id': 1, 'keyId': 34, 'role': 'keyholder'}]}
+    if origin == 'detail_keys': detail['keys'] = [{'id': 34}]
+    elif origin == 'detail_vault': detail['vault'] = vault
+    elif origin == 'listed_keys': row['keys'] = [{'id': 34}]
+    elif origin == 'listed_vault': row['vault'] = vault
+    elif shared:
+        # Shared /vault is owner-only; membership must ride the member-visible detail.
+        detail['vault'] = vault
+    else: cloud['other_vaults'][99] = vault
+    with pytest.raises(Failed, match='SHARED_KEY'): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []
+
+
+@pytest.mark.parametrize('value', [None, {}, [{'id': True}], [{'id': 0}], [None], [{'name': 'omitted ID'}]])
+def test_malformed_authoritative_other_keys_fail_before_deletion(flow, value):
+    runner, cloud, _ = flow
+    visible_other(cloud)
+    cloud['other_keys'][99] = value
+    with pytest.raises(Failed, match='OTHER_KEY_SCHEMA'): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []
+
+
+@pytest.mark.parametrize('field', ['members', 'pendingInvites', 'vault', 'userId', 'network'])
+def test_missing_other_detail_inventory_is_not_absence(flow, field):
+    runner, cloud, _ = flow
+    _, detail = visible_other(cloud)
+    detail.pop(field)
+    with pytest.raises(Failed, match='OTHER_CUBE_SCHEMA'): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []
+
+
+@pytest.mark.parametrize('path', ['/connect/cubes/shared-with-me', '/connect/cubes/99/keys',
+                                   '/connect/cubes/99', '/connect/cubes/99/vault'])
+def test_unavailable_other_inventory_stops_before_first_delete(flow, monkeypatch, path):
+    runner, cloud, _ = flow
+    visible_other(cloud)
+    original = cleanup.api
+    def unavailable(*args, **kwargs):
+        if args[1] == path: raise Blocked('SYNTHETIC_INVENTORY_UNAVAILABLE', 'synthetic inventory service failure')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(cleanup, 'api', unavailable)
+    with pytest.raises(Blocked): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []
+
+
+@pytest.mark.parametrize('shared', [False, True])
+def test_authoritative_other_keys_must_account_for_complete_detail_membership(flow, shared):
+    runner, cloud, _ = flow
+    _, detail = visible_other(cloud, shared=shared)
+    cloud['other_keys'][99] = [{'id': 77}]
+    # A positive authoritative ID with omitted attached and Vault data is not empty.
+    with pytest.raises(Failed, match='OTHER_KEY_GRAPH'): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []
+
+
+def test_shared_vault_inventory_never_uses_owner_only_404_as_absence(flow, monkeypatch):
+    runner, cloud, _ = flow
+    _, detail = visible_other(cloud, shared=True)
+    detail['vault'] = {'id': 88, 'cubeId': 99, 'members': [{'id': 1, 'keyId': 77, 'role': 'keyholder'}]}
+    cloud['other_keys'][99] = [{'id': 77}]
+    original = cleanup.api
+    def api(*args, **kwargs):
+        assert args[1] != '/connect/cubes/99/vault', 'shared owner-only 404 cannot prove Vault absence'
+        return original(*args, **kwargs)
+    monkeypatch.setattr(cleanup, 'api', api)
+    cleanup.ensure_capacity(runner)
+    assert len(cloud['deletes']) == 3
+
+
+@pytest.mark.parametrize('inventory', ['owned', 'shared'])
+def test_malformed_discovery_cannot_silently_omit_foreign_references(flow, monkeypatch, inventory):
+    runner, cloud, _ = flow
+    original = cleanup.api
+    path = '/connect/cubes' if inventory == 'owned' else '/connect/cubes/shared-with-me'
+    def api(*args, **kwargs):
+        if args[1] == path: return {'cubes': []}
+        return original(*args, **kwargs)
+    monkeypatch.setattr(cleanup, 'api', api)
+    with pytest.raises(Failed, match='CUBE_DISCOVERY'): cleanup.ensure_capacity(runner)
     assert cloud['deletes'] == []

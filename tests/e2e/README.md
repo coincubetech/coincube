@@ -618,3 +618,13 @@ v2 hop, then checks the known remaining source change (for example 1,000 sats)
 on both explorers. Usable unspent change remains protected as a funding source.
 An unknown, conflicting, missing, deeper or unindexed spend blocks retirement;
 cleanup neither constructs a transaction nor broadens the sponsorship protocol.
+
+Shared-key protection discovers both owned Cubes and `shared-with-me` Cubes across
+all networks. Every other discovered Cube requires a fresh, typed `/keys`
+inventory and complete Cube detail before any DELETE; nullable `hasVault` and
+omitted list projections never prove that no references exist. Owned Cube vaults
+are also read independently. Shared vault membership comes from the member-visible
+Cube detail and key inventory because the separate `/vault` read is owner-only.
+Missing, failed, malformed or contradictory inventories block cleanup before it
+deletes the disposable fixture's own Vault, even if the API would later refuse
+signer deletion through its additional server-side reference guard.

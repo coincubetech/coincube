@@ -349,6 +349,89 @@ def retired(data, entry, enrolled=None, *, account=None, owner=None):
     return True
 
 
+def inventory_key_ids(rows):
+    require(isinstance(rows, list) and all(isinstance(row, dict) and type(row.get("id")) is int
+            and row["id"] > 0 for row in rows), "OTHER_KEY_SCHEMA")
+    ids = [row["id"] for row in rows]
+    require(len(ids) == len(set(ids)), "OTHER_KEY_SCHEMA")
+    return set(ids)
+
+
+def vault_key_ids(vault, cube_id):
+    if vault is None:
+        return set()
+    require(isinstance(vault, dict) and type(vault.get("id")) is int and vault["id"] > 0
+            and type(vault.get("cubeId")) is int and vault["cubeId"] == cube_id
+            and isinstance(vault.get("members"), list), "OTHER_VAULT_SCHEMA")
+    keys = set()
+    for member in vault["members"]:
+        require(isinstance(member, dict) and type(member.get("id")) is int and member["id"] > 0
+                and isinstance(member.get("role"), str) and member["role"], "OTHER_VAULT_SCHEMA")
+        key_id = member.get("keyId")
+        require(key_id is None or (type(key_id) is int and key_id > 0), "OTHER_VAULT_SCHEMA")
+        require(key_id is not None or (type(member.get("contactId")) is int and member["contactId"] > 0), "OTHER_VAULT_SCHEMA")
+        nested = member.get("key")
+        if nested is not None:
+            require(isinstance(nested, dict) and type(nested.get("id")) is int
+                    and nested["id"] > 0 and nested["id"] == key_id, "OTHER_VAULT_SCHEMA")
+        if key_id is not None:
+            keys.add(key_id)
+    return keys
+
+
+def protect_other_cubes(runner, record):
+    # The owned list excludes membership in another owner's Cube. Read both
+    # without a network filter; hasVault is only a nullable client assertion.
+    inventories = [api(runner, "/connect/cubes"), api(runner, "/connect/cubes/shared-with-me")]
+    require(all(isinstance(rows, list) for rows in inventories), "CUBE_DISCOVERY")
+    by_id, owned, shared = {}, set(), set()
+    for rows, ids in zip(inventories, (owned, shared)):
+        for row in rows:
+            require(isinstance(row, dict) and type(row.get("id")) is int and row["id"] > 0
+                    and row["id"] not in ids, "CUBE_DISCOVERY")
+            ids.add(row["id"])
+            by_id[row["id"]] = row
+    require(not owned.intersection(shared), "CUBE_DISCOVERY")
+    for cube_id, listed in sorted(by_id.items()):
+        if cube_id == record["cube_id"]:
+            require(cube_id in owned, "CUBE_DISCOVERY")
+            continue
+        base = "/connect/cubes/" + str(cube_id)
+        # This endpoint includes both attached keys and Vault member keys.
+        # Never substitute an omitted list field or hasVault=false for it.
+        authoritative = inventory_key_ids(api(runner, base + "/keys"))
+        require(record["key_id"] not in authoritative, "SHARED_KEY")
+        other = api(runner, base)
+        require(isinstance(other, dict) and type(other.get("id")) is int and other["id"] == cube_id
+                and type(other.get("userId")) is int and other["userId"] > 0
+                and (other["userId"] == runner.account_user_id) == (cube_id in owned)
+                and isinstance(other.get("network"), str) and other["network"]
+                and all(isinstance(other.get(k), list) and all(isinstance(row, dict) for row in other[k])
+                        for k in ("members", "pendingInvites"))
+                and "vault" in other, "OTHER_CUBE_SCHEMA")
+        require("userId" not in listed or (type(listed["userId"]) is int and listed["userId"] == other["userId"]), "OTHER_CUBE_SCHEMA")
+        attached = inventory_key_ids(other["keys"]) if "keys" in other else set()
+        members = vault_key_ids(other["vault"], cube_id)
+        require(record["key_id"] not in attached | members, "SHARED_KEY")
+        # A stale discovery projection is protective evidence, never permission
+        # to ignore references or contradict a fresh authoritative inventory.
+        listed_keys = inventory_key_ids(listed["keys"]) if "keys" in listed else None
+        listed_members = vault_key_ids(listed["vault"], cube_id) if "vault" in listed else None
+        require(record["key_id"] not in (listed_keys or set()) | (listed_members or set()), "SHARED_KEY")
+        if listed_keys is not None:
+            require(listed_keys == attached, "OTHER_CUBE_GRAPH")
+        if "vault" in listed:
+            require(listed["vault"] == other["vault"], "OTHER_CUBE_GRAPH")
+        if cube_id in owned:
+            # /vault is owner-only. A 404 can prove absence here, but would
+            # mean nothing for a shared Cube; its complete GET detail and keys
+            # above are the member-authorized Vault inventory surfaces.
+            vault = api(runner, base + "/vault", missing=True)
+            require(record["key_id"] not in vault_key_ids(vault, cube_id), "SHARED_KEY")
+            require(vault == other["vault"], "OTHER_VAULT_GRAPH")
+        require(authoritative == attached | members, "OTHER_KEY_GRAPH")
+
+
 def graph(runner, record):
     base = "/connect/cubes/" + str(record["cube_id"])
     cube = api(runner, base, missing=True)
@@ -365,15 +448,7 @@ def graph(runner, record):
         require(key.get("cubeId") == record["cube_id"] and key.get("keychainId") == record["keychain_id"]
                 and key.get("network") == "testnet4" and key.get("fingerprint") == record["fingerprint"]
                 and key.get("status") == "active" and key.get("vaultId") in (None, record["vault_id"]), "KEY_GRAPH")
-    # Scan the owner-visible Cube graph for shared/reassigned key references.
-    cubes = api(runner, "/connect/cubes")
-    require(isinstance(cubes, list), "CUBE_GRAPH")
-    for other in cubes:
-        if other.get("id") != record["cube_id"]:
-            if other.get("hasVault") and not other.get("vault"):
-                other = api(runner, "/connect/cubes/" + str(other["id"]))
-            require(not any(k.get("id") == record["key_id"] for k in other.get("keys", []))
-                    and not any(m.get("keyId") == record["key_id"] for m in (other.get("vault") or {}).get("members", [])), "SHARED_KEY")
+    protect_other_cubes(runner, record)
     if cube is not None:
         require(isinstance(cube, dict) and all(isinstance(cube.get(k), list) for k in ("members", "pendingInvites"))
                 and (isinstance(cube.get("keys"), list) or ("keys" not in cube and cube_keys == []))
