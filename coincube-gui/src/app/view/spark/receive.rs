@@ -82,6 +82,10 @@ pub struct SparkReceiveView<'a> {
     /// The cross-network asset the SideShift flow is set to (for the THEY SEND
     /// card). `None` when a Bitcoin rail is selected.
     pub cross_network_selected: Option<DepositOption>,
+    /// The pending deposit that is the active swap's own settle output. The
+    /// swap body already shows it (amount, confirmations), so the Pending
+    /// deposits card leaves it out instead of saying it twice.
+    pub swap_deposit: Option<(&'a str, u32)>,
 }
 
 impl<'a> SparkReceiveView<'a> {
@@ -286,9 +290,22 @@ impl<'a> SparkReceiveView<'a> {
         // refreshes automatically on `DepositsChanged` events from
         // the bridge, so the card appears the moment the SDK
         // observes an incoming deposit (no manual refresh needed).
-        if !self.pending_deposits.is_empty() || self.claim_error.is_some() {
+        // A card-level claim error may be about the swap's own deposit, so
+        // then nothing is left out and its row (with Retry) stays visible.
+        let claim_error = self.claim_error;
+        let swap_deposit = self.swap_deposit.filter(|_| claim_error.is_none());
+        let is_swap_deposit = move |d: &DepositInfo| {
+            swap_deposit.is_some_and(|(txid, vout)| d.txid == txid && d.vout == vout)
+        };
+        let other_deposits = self
+            .pending_deposits
+            .iter()
+            .filter(|d| !is_swap_deposit(d))
+            .count();
+        if other_deposits > 0 || self.claim_error.is_some() {
             content = content.push(pending_deposits_card(
                 self.pending_deposits,
+                swap_deposit,
                 self.claiming,
                 self.claim_error,
                 self.claim_notices,
@@ -572,8 +589,10 @@ fn payment_card_style(theme: &theme::Theme) -> container::Style {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pending_deposits_card<'a>(
     deposits: &'a [DepositInfo],
+    hidden: Option<(&'a str, u32)>,
     claiming: &'a HashSet<(String, u32)>,
     claim_error: Option<&'a str>,
     claim_notices: &'a HashMap<(String, u32), String>,
@@ -598,7 +617,10 @@ fn pending_deposits_card<'a>(
             err
         )));
     }
-    for deposit in deposits {
+    for deposit in deposits
+        .iter()
+        .filter(|d| !hidden.is_some_and(|(txid, vout)| d.txid == txid && d.vout == vout))
+    {
         let confs = confirmations
             .get(&(deposit.txid.clone(), deposit.vout))
             .copied();
@@ -736,29 +758,15 @@ fn short_error(err: &str) -> String {
 
 // ── Two-card "YOU RECEIVE ← THEY SEND" selector + picker modal ──────────────
 
-/// Badge slug (for the composited logo) + display label for a Bitcoin rail.
+/// Badge slug (for the composited logo) + where the bitcoin travels, as it
+/// reads after "Bitcoin" on the THEY SEND tile ("Bitcoin on Lightning").
 fn rail_display(method: SparkReceiveMethod) -> (&'static str, &'static str) {
     match method {
-        SparkReceiveMethod::Bolt11 => ("lightning", "Lightning"),
-        SparkReceiveMethod::LightningAddress => ("lightning", "Lightning"),
-        SparkReceiveMethod::OnchainBitcoin => ("bitcoin", "On-chain"),
-        SparkReceiveMethod::Spark => ("spark", "Spark"),
+        SparkReceiveMethod::Bolt11 => ("lightning", "on Lightning"),
+        SparkReceiveMethod::LightningAddress => ("lightning", "on Lightning"),
+        SparkReceiveMethod::OnchainBitcoin => ("bitcoin", "on-chain"),
+        SparkReceiveMethod::Spark => ("spark", "on Spark"),
     }
-}
-
-/// Small orange-outlined pill (asset network / rail label).
-fn orange_badge<'a>(label: &str) -> Element<'a, Message> {
-    Container::new(text(label.to_uppercase()).size(11).color(color::ORANGE))
-        .padding([2, 8])
-        .style(|_: &theme::Theme| container::Style {
-            border: iced::Border {
-                color: color::ORANGE,
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
 }
 
 /// Hover-highlight style shared by the tappable selector cards.
@@ -781,107 +789,106 @@ fn card_button_style(
     }
 }
 
-/// The "THEY SEND (rail) → YOU RECEIVE (Bitcoin)" pair. YOU RECEIVE is fixed —
-/// Spark only ever receives bitcoin — so only THEY SEND is tappable.
-fn spark_receive_cards<'a>(
-    method: SparkReceiveMethod,
-    cross: Option<DepositOption>,
+/// One slim route tile: the asset logo (with its network badge composited in
+/// the lower-right corner), a small sentence-case label, and "**Asset** where".
+fn route_tile<'a>(
+    logo: Element<'a, Message>,
+    label: &'static str,
+    asset: String,
+    place: String,
+    trailing: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let you_receive = Container::new(
-        Column::new()
-            .spacing(6)
-            .push(
-                text(localized_copy("YOU RECEIVE"))
-                    .size(P2_SIZE)
-                    .style(theme::text::secondary),
-            )
-            .push(
-                Row::new()
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .push(asset_network_logo("btc", "spark", 40.0))
-                    .push(
-                        text("Bitcoin")
-                            .size(H3_SIZE)
-                            .bold()
-                            .style(theme::text::primary),
-                    ),
-            )
-            // A cross-network swap has a min/max (shown next to its deposit
-            // address), so "Any amount" would be wrong there; keep the line's
-            // height so the card doesn't jump when switching.
-            .push(
-                text(if cross.is_some() {
-                    ""
-                } else {
-                    localized_copy("Any amount")
-                })
-                .size(P2_SIZE)
-                .style(theme::text::secondary),
-            )
-            .push(orange_badge("SPARK")),
-    )
-    .padding(16)
-    .width(Length::Fill)
-    .height(Length::Fixed(160.0))
-    .style(route_card_style);
-
-    // THEY SEND reflects the current pick: a Bitcoin rail, or a cross-network
-    // asset while the SideShift flow is active.
-    let (they_icon, they_label, they_badge): (Element<'a, Message>, String, String) = match cross {
-        Some(option) => (
-            cross_network_logo(&option, 40.0),
-            asset_display_name(option.coin).to_string(),
-            option.network.network_name().to_string(),
-        ),
-        None => {
-            let (net_slug, badge) = rail_display(method);
-            (
-                asset_network_logo("btc", net_slug, 40.0),
-                "Bitcoin".to_string(),
-                badge.to_string(),
-            )
-        }
-    };
-    let they_send = iced_button(
-        Container::new(
+    let mut row = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .push(logo)
+        .push(
             Column::new()
-                .spacing(6)
+                .spacing(2)
+                .width(Length::Fill)
                 .push(
-                    text(localized_copy("THEY SEND"))
-                        .size(P2_SIZE)
+                    text(localized_copy(label))
+                        .size(CAPTION_SIZE + 1)
                         .style(theme::text::secondary),
                 )
                 .push(
                     Row::new()
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .push(they_icon)
+                        .spacing(5)
+                        .align_y(Alignment::End)
                         .push(
-                            text(they_label)
-                                .size(H3_SIZE)
+                            text(asset)
+                                .size(P1_SIZE + 2)
                                 .bold()
                                 .style(theme::text::primary),
-                        ),
-                )
-                .push(Space::new().height(Length::Fixed(18.0)))
-                .push(orange_badge(&they_badge)),
-        )
-        .padding(16)
+                        )
+                        .push(text(place).size(P1_SIZE + 2).style(theme::text::secondary)),
+                ),
+        );
+    if let Some(trailing) = trailing {
+        row = row.push(trailing);
+    }
+    Container::new(row)
+        .padding([12, 14])
         .width(Length::Fill)
-        .height(Length::Fixed(160.0))
-        .style(route_card_style),
-    )
-    .padding(0)
-    .on_press_maybe(cross.map(|_| Message::SparkReceive(SparkReceiveMessage::OpenSenderPicker)))
-    .style(card_button_style);
+        .style(route_card_style)
+        .into()
+}
+
+/// The "THEY SEND (rail) → YOU RECEIVE (Bitcoin)" pair. YOU RECEIVE is fixed —
+/// Spark only ever receives bitcoin — so only THEY SEND is tappable, and only
+/// for a cross-network asset (Bitcoin rails are picked by the method row
+/// above). A tappable tile carries a chevron, the picker's usual sign, and
+/// outlines on hover; no separate "Change" button competes with the asset.
+fn spark_receive_cards<'a>(
+    method: SparkReceiveMethod,
+    cross: Option<DepositOption>,
+) -> Element<'a, Message> {
+    let you_receive = route_tile(
+        asset_network_logo("btc", "spark", 36.0),
+        "You receive",
+        "Bitcoin".to_string(),
+        localized_copy("in Spark").to_string(),
+        None,
+    );
+
+    // THEY SEND reflects the current pick: a Bitcoin rail, or a cross-network
+    // asset while the SideShift flow is active.
+    let they_send = match cross {
+        Some(option) => route_tile(
+            cross_network_logo(&option, 36.0),
+            "They send",
+            asset_display_name(option.coin).to_string(),
+            localized_format!("on {}", "en {}", option.network.network_name()),
+            Some(
+                icon::down_icon()
+                    .size(16)
+                    .style(theme::text::secondary)
+                    .into(),
+            ),
+        ),
+        None => {
+            let (net_slug, place) = rail_display(method);
+            route_tile(
+                asset_network_logo("btc", net_slug, 36.0),
+                "They send",
+                "Bitcoin".to_string(),
+                localized_copy(place).to_string(),
+                None,
+            )
+        }
+    };
+    let they_send = iced_button(they_send)
+        .padding(0)
+        .on_press_maybe(cross.map(|_| Message::SparkReceive(SparkReceiveMessage::OpenSenderPicker)))
+        .style(card_button_style);
 
     Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
         .width(Length::Fill)
         .push(Container::new(they_send).width(Length::FillPortion(1)))
-        .push(text("→").size(H3_SIZE).style(theme::text::secondary))
+        .push(text("→").size(P1_SIZE + 2).style(theme::text::secondary))
         .push(Container::new(you_receive).width(Length::FillPortion(1)))
         .into()
 }
@@ -1542,6 +1549,7 @@ mod tests {
                         mask_amounts: false,
                         sideshift_body: None,
                         cross_network_selected: None,
+                        swap_deposit: None,
                     }
                     .render(),
                     outer,
@@ -1604,7 +1612,7 @@ mod tests {
                         .1
                         .x
                 };
-                assert!(x("THEY SEND") < x("YOU RECEIVE"));
+                assert!(x("They send") < x("You receive"));
             }
         }
     }
@@ -1637,6 +1645,7 @@ mod tests {
             "spark-pending-deposit-notices",
             pending_deposits_card(
                 &deposits,
+                None,
                 &HashSet::new(),
                 None,
                 &notices,
@@ -1690,6 +1699,7 @@ mod tests {
                 "spark-pending-deposit-privacy",
                 pending_deposits_card(
                     &deposits,
+                    None,
                     &claiming,
                     None,
                     &HashMap::new(),
@@ -1775,6 +1785,7 @@ mod tests {
                     mask_amounts: cache.balance_amounts_masked(),
                     sideshift_body: None,
                     cross_network_selected: None,
+                    swap_deposit: None,
                 }
                 .render(),
                 (1440, 900),
@@ -1815,15 +1826,23 @@ mod tests {
 
     #[test]
     fn bitcoin_rail_display_labels_are_stable() {
+        // The label reads after "Bitcoin" on the THEY SEND tile.
         assert_eq!(
             rail_display(SparkReceiveMethod::Bolt11),
-            ("lightning", "Lightning")
+            ("lightning", "on Lightning")
+        );
+        assert_eq!(
+            rail_display(SparkReceiveMethod::LightningAddress),
+            ("lightning", "on Lightning")
         );
         assert_eq!(
             rail_display(SparkReceiveMethod::OnchainBitcoin),
-            ("bitcoin", "On-chain")
+            ("bitcoin", "on-chain")
         );
-        assert_eq!(rail_display(SparkReceiveMethod::Spark), ("spark", "Spark"));
+        assert_eq!(
+            rail_display(SparkReceiveMethod::Spark),
+            ("spark", "on Spark")
+        );
     }
 
     #[test]

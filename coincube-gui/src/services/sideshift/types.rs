@@ -229,6 +229,11 @@ pub struct ShiftStatus {
     pub deposit_amount: Option<String>,
     pub settle_amount: Option<String>,
     pub expires_at: Option<String>,
+    /// The settle transaction's hash, once SideShift has sent the output. For
+    /// a BTC settle this is the on-chain txid that lands at the wallet's
+    /// deposit address — how the Spark flow finds its confirmations.
+    #[serde(default)]
+    pub settle_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

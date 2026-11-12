@@ -37,6 +37,7 @@ use crate::app::view::spark::SparkRecentTransaction;
 use crate::app::view::FiatAmountConverter;
 use crate::app::wallets::SparkBackend;
 
+use super::esplora::DEPOSIT_MATURITY_CONFIRMATIONS;
 use super::sideshift_receive::SparkSideshiftReceiveFlow;
 
 /// Which receive flow the user has picked.
@@ -240,6 +241,8 @@ impl State for SparkReceive {
                         flow,
                         cache.bitcoin_unit,
                         cache.balance_amounts_masked(),
+                        self.swap_settle_confirmations(),
+                        cache.reduce_motion,
                     )
                     .map(crate::app::view::Message::SparkSideshiftReceive),
                 ),
@@ -296,6 +299,10 @@ impl State for SparkReceive {
                 mask_amounts: cache.balance_amounts_masked(),
                 sideshift_body,
                 cross_network_selected,
+                swap_deposit: self
+                    .swap_settle_deposit()
+                    .filter(|d| quietly_settling(d, &self.claim_notices))
+                    .map(|d| (d.txid.as_str(), d.vout)),
             }
             .render(),
         );
@@ -697,6 +704,7 @@ impl State for SparkReceive {
                 self.claim_notices.retain(|k, _| live_keys.contains(k));
                 self.pending_deposit_confirmations
                     .retain(|k, _| live_keys.contains(k));
+                self.remember_swap_confirmations();
                 refresh_confirmations_task(cache.network, &self.pending_deposits)
             }
             SparkReceiveMessage::PendingDepositsFailed(err) => {
@@ -729,6 +737,7 @@ impl State for SparkReceive {
                 for (key, confs) in map {
                     self.pending_deposit_confirmations.insert(key, confs);
                 }
+                self.remember_swap_confirmations();
                 Task::none()
             }
             SparkReceiveMessage::RefreshConfirmations => {
@@ -1004,6 +1013,108 @@ pub(crate) fn claim_deferral_notice(deferral: &coincube_spark_protocol::ClaimDef
     }
 }
 
+impl SparkReceive {
+    /// The pending deposit that is the active swap's settle output — only once
+    /// SideShift has sent the bitcoin; earlier, an amount match would be an
+    /// unrelated deposit.
+    fn swap_settle_deposit(&self) -> Option<&DepositInfo> {
+        let flow = self.sideshift_flow.as_ref()?;
+        if !flow.settle_output_live() {
+            return None;
+        }
+        settle_deposit(
+            flow.settle_hash(),
+            flow.settle_amount_sat(),
+            &self.pending_deposits,
+        )
+    }
+
+    /// The swap's settle confirmations: live from the pending deposits, else
+    /// the last count seen (the deposit leaves that list once claimed).
+    fn swap_settle_confirmations(&self) -> Option<u32> {
+        let flow = self.sideshift_flow.as_ref()?;
+        if !flow.settle_output_live() {
+            return None;
+        }
+        settle_confirmations(
+            flow.settle_hash(),
+            flow.settle_amount_sat(),
+            &self.pending_deposits,
+            &self.pending_deposit_confirmations,
+        )
+        .or(flow.last_settle_confirmations())
+    }
+
+    fn remember_swap_confirmations(&mut self) {
+        let live = self.sideshift_flow.as_ref().and_then(|flow| {
+            flow.settle_output_live()
+                .then(|| {
+                    settle_confirmations(
+                        flow.settle_hash(),
+                        flow.settle_amount_sat(),
+                        &self.pending_deposits,
+                        &self.pending_deposit_confirmations,
+                    )
+                })
+                .flatten()
+        });
+        if let Some(flow) = self.sideshift_flow.as_mut() {
+            flow.note_settle_confirmations(live);
+        }
+    }
+}
+
+/// Whether the swap's own pending deposit can be left out of the Pending
+/// deposits card: only while it is simply confirming. A matured deposit (with
+/// its Claim button), a failed claim (Retry) or a deferral note stays in the
+/// card — the swap body shows progress, not those actions.
+fn quietly_settling(deposit: &DepositInfo, notices: &HashMap<(String, u32), String>) -> bool {
+    !deposit.is_mature
+        && deposit.claim_error.is_none()
+        && !notices.contains_key(&(deposit.txid.clone(), deposit.vout))
+}
+
+/// The wallet's pending (unclaimed) deposit that is a cross-network swap's
+/// settle output: by SideShift's settle txid when it has reported one, else by
+/// an amount that matches exactly one deposit — never a guess between two.
+fn settle_deposit<'d>(
+    settle_hash: Option<&str>,
+    settle_amount_sat: Option<u64>,
+    deposits: &'d [DepositInfo],
+) -> Option<&'d DepositInfo> {
+    match settle_hash {
+        Some(hash) => deposits.iter().find(|d| d.txid.eq_ignore_ascii_case(hash)),
+        None => {
+            let sats = settle_amount_sat?;
+            let mut matches = deposits.iter().filter(|d| d.amount_sat == sats);
+            match (matches.next(), matches.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Confirmations on a cross-network swap's settle transaction (see
+/// [`settle_deposit`]). A matured deposit counts as fully confirmed even if its
+/// exact count hasn't been fetched. `None` until the settle shows up.
+fn settle_confirmations(
+    settle_hash: Option<&str>,
+    settle_amount_sat: Option<u64>,
+    deposits: &[DepositInfo],
+    confirmations: &HashMap<(String, u32), u32>,
+) -> Option<u32> {
+    let deposit = settle_deposit(settle_hash, settle_amount_sat, deposits)?;
+    let fetched = confirmations
+        .get(&(deposit.txid.clone(), deposit.vout))
+        .copied();
+    if deposit.is_mature {
+        Some(fetched.unwrap_or(0).max(DEPOSIT_MATURITY_CONFIRMATIONS))
+    } else {
+        Some(fetched.unwrap_or(0))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1018,6 +1129,76 @@ mod tests {
             payment_request: payment_request.to_string(),
             fee_sat: 7,
         }
+    }
+
+    #[test]
+    fn settle_confirmations_find_the_swap_deposit_by_txid_then_by_unique_amount() {
+        let mut a = deposit("aa11", 0, false);
+        a.amount_sat = 31_250;
+        let mut b = deposit("bb22", 1, false);
+        b.amount_sat = 50_000;
+        let deposits = vec![a, b];
+        let confs: HashMap<(String, u32), u32> =
+            [(("aa11".to_string(), 0), 1), (("bb22".to_string(), 1), 2)].into();
+
+        // The settle txid wins, whatever the amount says.
+        assert_eq!(
+            settle_confirmations(Some("BB22"), Some(31_250), &deposits, &confs),
+            Some(2)
+        );
+        // A txid that isn't (yet) a pending deposit: nothing to show.
+        assert_eq!(
+            settle_confirmations(Some("cc33"), Some(31_250), &deposits, &confs),
+            None
+        );
+        // No txid: a unique exact amount match.
+        assert_eq!(
+            settle_confirmations(None, Some(31_250), &deposits, &confs),
+            Some(1)
+        );
+        assert_eq!(settle_confirmations(None, None, &deposits, &confs), None);
+
+        // Two deposits of the same amount: refuse to guess.
+        let mut twin = deposit("dd44", 0, false);
+        twin.amount_sat = 31_250;
+        let ambiguous = vec![deposits[0].clone(), twin];
+        assert_eq!(
+            settle_confirmations(None, Some(31_250), &ambiguous, &confs),
+            None
+        );
+
+        // Found but not yet counted reads 0; matured reads at least the threshold.
+        assert_eq!(
+            settle_confirmations(Some("aa11"), None, &deposits, &HashMap::new()),
+            Some(0)
+        );
+        let mut mature = deposit("ee55", 0, true);
+        mature.amount_sat = 1;
+        assert_eq!(
+            settle_confirmations(Some("ee55"), None, &[mature], &HashMap::new()),
+            Some(DEPOSIT_MATURITY_CONFIRMATIONS)
+        );
+    }
+
+    #[test]
+    fn only_a_quietly_confirming_swap_deposit_leaves_the_pending_card() {
+        let confirming = deposit("aa11", 0, false);
+        assert!(quietly_settling(&confirming, &HashMap::new()));
+
+        // Matured: its Claim button has to stay reachable.
+        assert!(!quietly_settling(
+            &deposit("aa11", 0, true),
+            &HashMap::new()
+        ));
+
+        // A failed claim keeps its Retry.
+        let mut failed = deposit("aa11", 0, false);
+        failed.claim_error = Some("claim failed".into());
+        assert!(!quietly_settling(&failed, &HashMap::new()));
+
+        // A deferral note is only shown in the card.
+        let notices = HashMap::from([(("aa11".to_string(), 0), "deferred".to_string())]);
+        assert!(!quietly_settling(&confirming, &notices));
     }
 
     fn deposit(txid: &str, vout: u32, is_mature: bool) -> DepositInfo {

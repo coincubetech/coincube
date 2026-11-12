@@ -36,17 +36,28 @@ use crate::app::state::spark::sideshift_receive::{SparkShiftPhase, SparkSideshif
 use crate::app::view::SparkSideshiftReceiveMessage as Msg;
 use crate::services::sideshift::{DepositOption, ShiftResponse, ShiftStatusKind};
 
+/// `confirmations` is how many blocks the swap's settle transaction has, when
+/// the caller can match it to one of the wallet's pending deposits;
+/// `reduce_motion` holds the in-progress pulse steady.
 pub fn spark_sideshift_receive_view(
     flow: &SparkSideshiftReceiveFlow,
     bitcoin_unit: BitcoinDisplayUnit,
     mask_amounts: bool,
+    confirmations: Option<u32>,
+    reduce_motion: bool,
 ) -> Element<'_, Msg> {
     match flow.phase() {
         SparkShiftPhase::Setup => setup_body(flow),
         SparkShiftPhase::FetchingAffiliate | SparkShiftPhase::CreatingShift => {
             loading_body("Setting up your deposit address…")
         }
-        SparkShiftPhase::Active => active_body(flow, bitcoin_unit, mask_amounts),
+        SparkShiftPhase::Active => active_body(
+            flow,
+            bitcoin_unit,
+            mask_amounts,
+            confirmations,
+            flow.pulse_dim() && !reduce_motion,
+        ),
         SparkShiftPhase::Arrived => arrived_body(flow, bitcoin_unit, mask_amounts),
         SparkShiftPhase::Failed => error_body(flow.error()),
     }
@@ -141,6 +152,8 @@ fn active_body(
     flow: &SparkSideshiftReceiveFlow,
     bitcoin_unit: BitcoinDisplayUnit,
     mask_amounts: bool,
+    confirmations: Option<u32>,
+    pulse_dim: bool,
 ) -> Element<'_, Msg> {
     let Some(shift) = flow.shift() else {
         return error_body(Some("Shift data missing."));
@@ -154,6 +167,8 @@ fn active_body(
             refund_address: flow.refund_address(),
             polled_deposit_amount: flow.deposit_amount(),
             settle_amount_sat: flow.settle_amount_sat(),
+            confirmations,
+            pulse_dim,
         },
         bitcoin_unit,
         mask_amounts,
@@ -170,6 +185,10 @@ struct ActiveShift<'a> {
     refund_address: &'a str,
     polled_deposit_amount: Option<&'a str>,
     settle_amount_sat: Option<u64>,
+    /// Blocks on the settle transaction, once it's among the pending deposits.
+    confirmations: Option<u32>,
+    /// The in-progress pulse's dim half (already off under reduce-motion).
+    pulse_dim: bool,
 }
 
 impl<'a> ActiveShift<'a> {
@@ -192,7 +211,7 @@ fn active_shift_body<'a>(
 
     // Expired has no progress to show — nothing was ever deposited.
     if let Some(steps) = tracker_steps(false, v.status) {
-        col = col.push(tracker(&steps));
+        col = col.push(tracker(&steps, v.pulse_dim));
         // Refunded's own body says where the money went; the shared sentence
         // would only repeat it.
         if v.status != Some(&ShiftStatusKind::Refunded) {
@@ -299,30 +318,17 @@ fn tracker_steps(arrived: bool, status: Option<&ShiftStatusKind>) -> Option<[Tra
     }))
 }
 
-fn tracker<'a>(steps: &[TrackerStep; 4]) -> Element<'a, Msg> {
+fn tracker<'a>(steps: &[TrackerStep; 4], pulse_dim: bool) -> Element<'a, Msg> {
     let mut row = Row::new().spacing(8).width(Length::Fill);
     for step in steps {
         let mark = step.mark;
-        let bar = Container::new(Space::new().height(Length::Fixed(3.0)))
-            .width(Length::Fill)
-            .style(move |t: &theme::Theme| {
-                let shell = &t.colors.shell;
-                let color = match mark {
-                    StepMark::Done => shell.good,
-                    StepMark::DoneMuted => shell.muted,
-                    StepMark::Current => shell.accent,
-                    StepMark::Halted => shell.bad,
-                    StepMark::Todo => shell.line,
-                };
-                container::Style {
-                    background: Some(Background::Color(color)),
-                    border: iced::Border {
-                        radius: 2.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            });
+        let bar = progress_bar(3.0, move |shell| match mark {
+            StepMark::Done => shell.good,
+            StepMark::DoneMuted => shell.muted,
+            StepMark::Current => pulsed(shell.accent, pulse_dim),
+            StepMark::Halted => shell.bad,
+            StepMark::Todo => shell.line,
+        });
         let mut label = text(localized_copy(step.label)).size(CAPTION_SIZE + 1);
         label = match mark {
             StepMark::Current => label.bold().style(theme::text::primary),
@@ -354,6 +360,33 @@ fn tracker<'a>(steps: &[TrackerStep; 4]) -> Element<'a, Msg> {
         );
     }
     row.into()
+}
+
+/// One segment of a progress bar, coloured from the shell palette.
+fn progress_bar<'a>(
+    height: f32,
+    color: impl Fn(&coincube_ui::theme::palette::ShellPalette) -> iced::Color + 'a,
+) -> Element<'a, Msg> {
+    Container::new(Space::new().height(Length::Fixed(height)))
+        .width(Length::Fill)
+        .style(move |t: &theme::Theme| container::Style {
+            background: Some(Background::Color(color(&t.colors.shell))),
+            border: iced::Border {
+                radius: (height / 2.0).into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// The in-progress segment's pulse: full colour, then its dim half.
+fn pulsed(color: iced::Color, dim: bool) -> iced::Color {
+    if dim {
+        iced::Color { a: 0.4, ..color }
+    } else {
+        color
+    }
 }
 
 fn guidance_text<'a>(copy: String) -> Element<'a, Msg> {
@@ -390,8 +423,8 @@ fn spark_shift_guidance(status: Option<&ShiftStatusKind>, selected: &DepositOpti
         )
         .to_owned(),
         Some(ShiftStatusKind::Settled) => localized_copy(
-            "Converting complete. Your bitcoin is arriving on-chain and will be added to your \
-             wallet automatically after about 3 confirmations — ~30 minutes.",
+            "Converted. Your bitcoin is confirming on-chain and is added to your Spark wallet \
+             automatically after about 3 confirmations.",
         )
         .to_owned(),
         Some(other) => localized_copy(other.guidance()).to_owned(),
@@ -527,7 +560,65 @@ fn in_flight_section<'a>(
             )
             .into(),
     );
-    tile_pair(deposit, text("→"), receive)
+    let pair = tile_pair(deposit, text("→"), receive);
+    if !settled {
+        return pair;
+    }
+    Column::new()
+        .spacing(18)
+        .push(pair)
+        .push(confirmations_block(v.confirmations, v.pulse_dim))
+        .into()
+}
+
+/// The settle transaction's progress toward the wallet's claim threshold:
+/// "1 of 3", a segment per block, and roughly how long is left. Until the
+/// transaction shows up among the wallet's pending deposits it reads 0.
+fn confirmations_block<'a>(confirmations: Option<u32>, pulse_dim: bool) -> Element<'a, Msg> {
+    let required = DEPOSIT_MATURITY_CONFIRMATIONS;
+    let have = confirmations.unwrap_or(0).min(required);
+    let mut bars = Row::new().spacing(6).width(Length::Fill);
+    for i in 0..required {
+        bars = bars.push(progress_bar(6.0, move |shell| {
+            if i < have {
+                shell.good
+            } else if i == have {
+                pulsed(shell.accent, pulse_dim)
+            } else {
+                shell.line
+            }
+        }));
+    }
+    let note = if have >= required {
+        localized_copy("Confirmed. Adding it to your Spark wallet.").to_owned()
+    } else {
+        localized_format!(
+            "About {} minutes left. You can leave this page; the bitcoin is added automatically.",
+            "Faltan unos {} minutos. Puedes salir de esta página; el bitcoin se añade automáticamente.",
+            (required - have) * 10,
+        )
+    };
+    Column::new()
+        .spacing(8)
+        .push(
+            Row::new()
+                .push(
+                    text(localized_copy("Confirmations"))
+                        .size(P2_SIZE)
+                        .style(theme::text::secondary),
+                )
+                .push(Space::new().width(Length::Fill))
+                .push(
+                    text(localized_format!("{} of {}", "{} de {}", have, required)).size(P2_SIZE),
+                ),
+        )
+        .push(bars)
+        .push(
+            text(note)
+                .size(CAPTION_SIZE + 1)
+                .style(theme::text::secondary),
+        )
+        .into()
 }
 
 // ── Refund path: on hold, failed, refunding ─────────────────────────────────
@@ -914,7 +1005,7 @@ fn arrived_body(
 ) -> Element<'_, Msg> {
     let mut col = Column::new().spacing(18).width(Length::Fill);
     if let Some(steps) = tracker_steps(true, None) {
-        col = col.push(tracker(&steps)).push(rule::horizontal(1));
+        col = col.push(tracker(&steps, false)).push(rule::horizontal(1));
     }
 
     let mut done =
@@ -1210,7 +1301,14 @@ mod tests {
                 Some(ShiftStatusKind::Settled),
                 Some("50.00"),
                 Some(31_250),
-                vec!["Bitcoin on the way", "31,250 SATS", "Confirming on-chain"],
+                vec![
+                    "Bitcoin on the way",
+                    "31,250 SATS",
+                    "Confirming on-chain",
+                    "Confirmations",
+                    "1 of 3",
+                    "About 20 minutes left. You can leave this page; the bitcoin is added automatically.",
+                ],
                 vec!["≈ 31,250 SATS", "Copy address"],
             ),
             (
@@ -1266,6 +1364,8 @@ mod tests {
                 refund_address: refund,
                 polled_deposit_amount: deposit,
                 settle_amount_sat: settle,
+                confirmations: if name == "arriving" { Some(1) } else { None },
+                pulse_dim: false,
             };
             for (appearance, theme) in [
                 ("dark", theme::Theme::dark()),
@@ -1321,6 +1421,8 @@ mod tests {
             refund_address: "lq1qqvq9d3fkk0x2l5ffhaw5hm7r3w0yq0t5p4yq9ax7d2",
             polled_deposit_amount: None,
             settle_amount_sat: None,
+            confirmations: None,
+            pulse_dim: false,
         };
         assert_eq!(
             out_of_range_reason(&view, false).as_deref(),
@@ -1438,7 +1540,7 @@ mod tests {
 
         let settled = spark_shift_guidance(Some(&ShiftStatusKind::Settled), &usdt);
         assert_ne!(settled, ShiftStatusKind::Settled.guidance());
-        assert!(settled.contains("arriving on-chain"));
+        assert!(settled.contains("confirming on-chain"));
         assert!(settled.contains("automatically"));
         assert!(settled.contains("3 confirmations"));
         assert!(!settled.contains("has arrived"));

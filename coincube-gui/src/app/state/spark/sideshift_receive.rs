@@ -37,6 +37,9 @@ use crate::services::sideshift::{
 
 use view::SparkSideshiftReceiveMessage as Msg;
 
+/// Same cadence as the pulsing Connect light.
+const PULSE_INTERVAL: Duration = Duration::from_millis(800);
+
 /// Where the flow is. Mirrors the Liquid flow's `ReceivePhase`, minus the
 /// fixed-rate quote step: a BTC settle is always variable-rate here, because
 /// the user is depositing an arbitrary amount of some other asset and we can't
@@ -88,6 +91,16 @@ pub struct SparkSideshiftReceiveFlow {
     /// string it reports. Shown on the "Deposit received" tile and used to say
     /// why a refund happened when the amount was outside the shift's limits.
     deposit_amount: Option<String>,
+    /// SideShift's settle txid once it has sent the bitcoin; matched against
+    /// the wallet's pending deposits to show confirmation progress.
+    settle_hash: Option<String>,
+    /// The settle transaction's confirmations as last seen among the wallet's
+    /// pending deposits. Kept once the deposit is claimed and leaves that list,
+    /// so the bar doesn't fall back to "0 of 3" before `Arrived` lands.
+    last_settle_confirmations: Option<u32>,
+    /// The in-progress step's pulse phase (dim half), flipped by a slow tick
+    /// while a shift is moving. The view holds it steady under reduce-motion.
+    pulse_dim: bool,
     /// The actual amount claimed into the wallet on arrival (post network fee),
     /// in sats. Set when the flow reaches [`SparkShiftPhase::Arrived`].
     arrived_amount_sat: Option<u64>,
@@ -114,6 +127,9 @@ impl SparkSideshiftReceiveFlow {
             shift_status: None,
             settle_amount_sat: None,
             deposit_amount: None,
+            settle_hash: None,
+            last_settle_confirmations: None,
+            pulse_dim: false,
             arrived_amount_sat: None,
             qr_data: None,
             loading: false,
@@ -158,6 +174,32 @@ impl SparkSideshiftReceiveFlow {
     pub fn deposit_amount(&self) -> Option<&str> {
         self.deposit_amount.as_deref()
     }
+    pub fn settle_hash(&self) -> Option<&str> {
+        self.settle_hash.as_deref()
+    }
+    pub fn pulse_dim(&self) -> bool {
+        self.pulse_dim
+    }
+    /// SideShift has sent (or is sending) the bitcoin, so a pending deposit
+    /// can be this swap's settle output. Before that, any amount match would
+    /// be some other deposit.
+    pub fn settle_output_live(&self) -> bool {
+        self.phase == SparkShiftPhase::Active
+            && matches!(
+                self.shift_status,
+                Some(ShiftStatusKind::Settling | ShiftStatusKind::Settled)
+            )
+    }
+    pub fn last_settle_confirmations(&self) -> Option<u32> {
+        self.last_settle_confirmations
+    }
+    /// Record the settle transaction's confirmations when they were found;
+    /// `None` (not among pending deposits) keeps the last value.
+    pub fn note_settle_confirmations(&mut self, confirmations: Option<u32>) {
+        if confirmations.is_some() {
+            self.last_settle_confirmations = confirmations;
+        }
+    }
     pub fn arrived_amount_sat(&self) -> Option<u64> {
         self.arrived_amount_sat
     }
@@ -183,6 +225,9 @@ impl SparkSideshiftReceiveFlow {
         self.shift_status = None;
         self.settle_amount_sat = None;
         self.deposit_amount = None;
+        self.settle_hash = None;
+        self.last_settle_confirmations = None;
+        self.pulse_dim = false;
         self.arrived_amount_sat = None;
         self.qr_data = None;
         self.loading = false;
@@ -270,10 +315,15 @@ impl SparkSideshiftReceiveFlow {
     // ── View ────────────────────────────────────────────────────────────
 
     pub fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+        // Standalone, this flow has no view of the wallet's pending deposits,
+        // so the confirmations line reads from zero until the inline Spark
+        // Receive page (which has them) is the one showing it.
         let body = view::spark::spark_sideshift_receive_view(
             self,
             cache.bitcoin_unit,
             cache.balance_amounts_masked(),
+            None,
+            cache.reduce_motion,
         );
         view::dashboard(menu, cache, body.map(view::Message::SparkSideshiftReceive))
     }
@@ -397,6 +447,14 @@ impl SparkSideshiftReceiveFlow {
                     {
                         self.deposit_amount = Some(amount.to_string());
                     }
+                    if let Some(hash) = status
+                        .settle_hash
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|h| !h.is_empty())
+                    {
+                        self.settle_hash = Some(hash.to_string());
+                    }
                     if settled {
                         // The bitcoin has landed at Spark's on-chain deposit
                         // address, which means it shows up as an *unclaimed
@@ -477,6 +535,11 @@ impl SparkSideshiftReceiveFlow {
                 ])
             }
 
+            Msg::PulseTick => {
+                self.pulse_dim = !self.pulse_dim;
+                Task::none()
+            }
+
             Msg::Back | Msg::Reset => {
                 self.reset();
                 Task::none()
@@ -494,12 +557,33 @@ impl SparkSideshiftReceiveFlow {
         // `is_terminal` includes `Review` — a held shift will not advance on
         // its own, so polling it forever just burns requests and leaves the UI
         // implying progress. The status card shows a call to action instead.
-        if self.phase == SparkShiftPhase::Active && !is_terminal {
+        let poll = if self.phase == SparkShiftPhase::Active && !is_terminal {
             iced::time::every(Duration::from_secs(10))
                 .map(|_| Message::View(view::Message::SparkSideshiftReceive(Msg::PollStatus)))
         } else {
             Subscription::none()
-        }
+        };
+        // The current tracker step pulses while the swap is moving — including
+        // `Settled` ("Arriving in Spark"), which stops the status poll but is
+        // still waiting on confirmations. Held, failed and finished shifts
+        // don't pulse: nothing is happening that the user should wait on.
+        let moving = self.phase == SparkShiftPhase::Active
+            && !matches!(
+                self.shift_status,
+                Some(
+                    ShiftStatusKind::Review
+                        | ShiftStatusKind::Error
+                        | ShiftStatusKind::Expired
+                        | ShiftStatusKind::Refunded
+                )
+            );
+        let pulse = if moving {
+            iced::time::every(PULSE_INTERVAL)
+                .map(|_| Message::View(view::Message::SparkSideshiftReceive(Msg::PulseTick)))
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([poll, pulse])
     }
 }
 
