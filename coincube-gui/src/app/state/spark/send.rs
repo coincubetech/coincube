@@ -534,7 +534,7 @@ pub struct SparkSend {
     /// two-card selector, the destination placeholder, and which send path
     /// `PrepareRequested` takes.
     receive_target: SparkSendTarget,
-    /// Whether the "THEY RECEIVE" picker modal is open.
+    /// Whether the "THEY RECEIVE" menu is open under its tile.
     receive_picker_open: bool,
     /// The balance this send pays from (S4): Bitcoin by default.
     pay_from: WalletAsset,
@@ -994,7 +994,7 @@ impl State for SparkSend {
                 ),
             )
         });
-        let content = crate::app::view::dashboard_payment(
+        crate::app::view::dashboard_payment(
             menu,
             cache,
             head,
@@ -1026,6 +1026,13 @@ impl State for SparkSend {
                 ),
                 pay_from: self.pay_from,
                 usdb_unavailable: self.usdb_selectable().err(),
+                open_menu: if self.pay_from_picker_open {
+                    Some(crate::app::view::spark::send::SendMenu::PayFrom)
+                } else if self.receive_picker_open {
+                    Some(crate::app::view::spark::send::SendMenu::TheyReceive)
+                } else {
+                    None
+                },
                 paid_from: self.prepared_pay_from,
                 conversion: self.prepared_conversion.as_deref(),
                 token_payment: self.prepared_token_payment.as_ref(),
@@ -1065,40 +1072,7 @@ impl State for SparkSend {
                 theme_mode: cache.theme_mode,
             }
             .render(),
-        );
-
-        if self.pay_from_picker_open {
-            return coincube_ui::widget::modal::Modal::new(
-                content,
-                crate::app::view::spark::send::pay_from_picker_modal(
-                    self.pay_from,
-                    self.usdb_selectable().err(),
-                    crate::app::view::spark::SparkBalances::new(
-                        cache,
-                        self.btc_balance_sats,
-                        self.usdb_balance.as_ref(),
-                    ),
-                ),
-            )
-            .on_blur(Some(crate::app::view::Message::SparkSend(
-                crate::app::view::SparkSendMessage::ClosePayFromPicker,
-            )))
-            .into();
-        }
-        // The "THEY RECEIVE" picker overlays the panel when open — same pattern
-        // as the Spark Receive redesign.
-        if self.receive_picker_open {
-            let modal_content = crate::app::view::spark::send_target_picker_modal(
-                self.receive_target,
-                cache.network,
-            );
-            return coincube_ui::widget::modal::Modal::new(content, modal_content)
-                .on_blur(Some(crate::app::view::Message::SparkSend(
-                    crate::app::view::SparkSendMessage::CloseReceivePicker,
-                )))
-                .into();
-        }
-        content
+        )
     }
 
     fn reload(
