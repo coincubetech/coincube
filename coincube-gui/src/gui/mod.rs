@@ -972,6 +972,7 @@ pub struct GUI {
     connect_sheet: Option<ConnectSheet>,
     preferences: PreferencesOwner,
     zoom: ZoomState,
+    worldview_sharing: worldview::Sharing,
 }
 
 /// How long the zoom pill stays up after a shortcut. The 1 Hz tick clears
@@ -1491,6 +1492,7 @@ impl GUI {
                 connect_sheet: None,
                 preferences,
                 zoom: ZoomState::default(),
+                worldview_sharing: worldview::Sharing::default(),
             },
             Task::batch(cmds),
         )
@@ -2082,10 +2084,12 @@ impl GUI {
         }
         match self.preferences.begin_save(change) {
             Ok(request) => {
+                self.worldview_record_save(&request);
                 self.publish_balance_privacy();
                 self.run_preferences(request)
             }
             Err(BeginSaveError::Queued) => {
+                self.worldview_queue_save(change);
                 self.publish_balance_privacy();
                 Task::none()
             }
@@ -3383,7 +3387,6 @@ impl GUI {
                     origin,
                     page: PreferencesPageState::default(),
                     worldview_changed: None,
-                    worldview_sharing: worldview::Sharing::default(),
                 });
                 self.connect_sheet = None;
                 self.publish_preferences_sheet();
@@ -3888,7 +3891,9 @@ impl GUI {
                         tasks.push(self.reload_all_global_settings());
                     }
                 }
+                self.worldview_saved(&request, applied, before);
                 if let Some(next) = self.preferences.begin_next_queued_save() {
+                    self.worldview_start_queued_save(&next);
                     self.publish_balance_privacy();
                     tasks.push(self.run_preferences(next));
                 }
@@ -3904,6 +3909,7 @@ impl GUI {
                     }
                 }
                 tasks.push(self.save_pending_zoom());
+                tasks.push(self.worldview_automatic());
                 Task::batch(tasks)
             }
             Message::ToggleTheme => {
@@ -3925,8 +3931,7 @@ impl GUI {
                 Task::none()
             }
             Message::Worldview(origin, context, request, result) => {
-                self.worldview_complete(origin, context, request, result);
-                Task::none()
+                self.worldview_complete(origin, context, request, result)
             }
             Message::PreferencesSheet(message) => self.preferences_sheet_message(message),
             Message::ConnectSheet(message) => self.connect_sheet_message(message),
@@ -4247,7 +4252,6 @@ struct PreferencesSheet {
     origin: OverlayOrigin,
     page: PreferencesPageState,
     worldview_changed: Option<coincube_ui::theme::WorldviewMode>,
-    worldview_sharing: worldview::Sharing,
 }
 
 struct ConnectSheet {
@@ -4464,6 +4468,7 @@ mod app_preferences_sheet_tests {
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
                     zoom: ZoomState::default(),
+                    worldview_sharing: worldview::Sharing::default(),
                 };
                 let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
                 drop(gui.update(Message::Pane(
@@ -4513,6 +4518,7 @@ mod app_preferences_sheet_tests {
             connect_sheet: None,
             preferences: PreferencesOwner::new(GlobalSettings::path(root), &receipt),
             zoom: ZoomState::default(),
+            worldview_sharing: worldview::Sharing::default(),
         }
     }
 
@@ -5596,6 +5602,7 @@ mod fork_auth_dispatch_tests {
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
             zoom: ZoomState::default(),
+            worldview_sharing: worldview::Sharing::default(),
         };
         drop(gui.update(Message::Pane(
             pane_id,
@@ -5685,6 +5692,7 @@ mod fork_auth_dispatch_tests {
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
                     zoom: ZoomState::default(),
+                    worldview_sharing: worldview::Sharing::default(),
                 };
                 let login = LoginResponse {
                     requires_2fa: false,
@@ -6056,6 +6064,7 @@ mod fork_auth_dispatch_tests {
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
             zoom: ZoomState::default(),
+                worldview_sharing: worldview::Sharing::default(),
                     };
                     let mut cube = crate::app::settings::CubeSettings::new(
                         "Cold fork".into(),
@@ -6190,6 +6199,7 @@ mod fork_auth_dispatch_tests {
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
                     zoom: ZoomState::default(),
+                    worldview_sharing: worldview::Sharing::default(),
                 };
                 let account = |message| {
                     Message::Pane(
@@ -6371,6 +6381,7 @@ mod fork_auth_dispatch_tests {
                 connect_sheet: None,
                 preferences: unresolved_test_preferences(),
                 zoom: ZoomState::default(),
+                worldview_sharing: worldview::Sharing::default(),
             };
             let account_message = if matches!(&auth, ConnectAccountMessage::SetSession(..)) {
                 tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(auth)))
@@ -6601,6 +6612,7 @@ mod fork_auth_revocation_tests {
                 connect_sheet: None,
                 preferences: unresolved_test_preferences(),
                 zoom: ZoomState::default(),
+                worldview_sharing: worldview::Sharing::default(),
             };
             let (home, home_startup) =
                 home::Home::new_for_chain(gui.config.coincube_directory.clone(), None);
@@ -6795,6 +6807,7 @@ mod shared_adoption_generation_tests {
                 connect_sheet: None,
                 preferences: unresolved_test_preferences(),
                 zoom: ZoomState::default(),
+                worldview_sharing: worldview::Sharing::default(),
             };
             let init = || {
                 Message::Pane(
@@ -6996,6 +7009,7 @@ mod shell_escape_dispatch_tests {
                     connect_sheet: None,
                     preferences: unresolved_test_preferences(),
                     zoom: ZoomState::default(),
+                    worldview_sharing: worldview::Sharing::default(),
                 };
                 let tab_id = gui.panes.get(pane_id).unwrap().tabs[0].id;
                 drop(gui.view());
@@ -7075,6 +7089,7 @@ mod shell_escape_dispatch_tests {
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
             zoom: ZoomState::default(),
+            worldview_sharing: worldview::Sharing::default(),
         };
         let route = |intent| {
             Message::Pane(
@@ -7167,6 +7182,7 @@ mod lock_cube_dispatch_tests {
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
             zoom: ZoomState::default(),
+            worldview_sharing: worldview::Sharing::default(),
         };
         crate::app::session::open("orphaned", zeroize::Zeroizing::new("2468".into()));
         let destination = crate::app::settings::CubeSettings::new_with_raw_id(
@@ -7356,6 +7372,7 @@ mod lock_cube_dispatch_tests {
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
             zoom: ZoomState::default(),
+            worldview_sharing: worldview::Sharing::default(),
         };
         crate::app::session::open(same_cube_id.clone(), zeroize::Zeroizing::new("2468".into()));
         assert_eq!(crate::app::session::current_cube_id(), Some(same_cube_id));
@@ -7418,6 +7435,7 @@ impl GUI {
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
             zoom: ZoomState::default(),
+            worldview_sharing: worldview::Sharing::default(),
         }
     }
     /// An already-open Bitcoin Cube (tab 1) beside a Home tab (tab 2), in one pane.
@@ -7441,6 +7459,7 @@ impl GUI {
             connect_sheet: None,
             preferences: unresolved_test_preferences(),
             zoom: ZoomState::default(),
+            worldview_sharing: worldview::Sharing::default(),
         }
     }
     /// As [`Self::reviewer_app_home_gui`], with the Cube moved to its own
