@@ -449,3 +449,27 @@ The read-only standalone diagnostics remain available:
 
 References: [Appium attach to running WDA](https://appium.github.io/appium-xcuitest-driver/latest/guides/attach-to-running-wda/),
 [real-device prerequisites](https://appium.github.io/appium-xcuitest-driver/latest/preparation/real-device-config/).
+
+### Interrupted signing abort (separate evidence, no retry)
+
+`./sign-abort --source-run /absolute/original-run --config /absolute/original-config.json
+--output-dir /absolute/separate-abort-directory --native-binary /absolute/testnet4_provision
+--signing-binary /absolute/testnet4_connect --authorize-abort 'owner instruction reference'`
+
+This narrowly reconciles a saved, interrupted signing PIN dispatch. Stop the
+original runner first. The helper locks but never rewrites its run directory,
+validates its account, transaction, approval and credential bindings, then uses
+production Connect's supported Cancel RPC only for the exact unsigned active
+request (states 1–4), or verifies that same request was already cancelled (8).
+It refetches and requires cancelled status with zero submissions. Other terminal
+states, changed bindings and signature races block credential reconciliation.
+
+A durable `abort-intent.json` pins the original encrypted credential revision.
+`abort-terminal.json` is written and read back before any encrypted credential
+change. The native secret store compare-and-swap removes only that original
+pending signing purpose and appends `cancelled_signing_attempts`; the local PIN
+outcome stays **unresolved** in this retained audit. Existing key-generation
+audit and all credentials remain intact. Exact replay does not clear a newer
+pending attempt. The helper cannot sign or broadcast and does not make the old
+strict run pass. Use a new run for new acceptance evidence. After an uncertain
+RPC/CAS response, rerun with the identical inputs and output directory.
