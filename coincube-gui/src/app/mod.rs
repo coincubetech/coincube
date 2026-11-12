@@ -852,6 +852,11 @@ impl Panels {
 
 /// Interval between bitcoind sync progress polls (in seconds).
 const BITCOIND_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(10);
+/// How long a toast stays once it is on screen, unless dismissed sooner.
+const TOAST_LIFETIME: Duration = Duration::from_secs(8);
+/// Most toasts kept waiting out of view behind the shown ones; older ones in
+/// a burst are dropped unseen.
+const TOAST_MAX_WAITING: usize = 3;
 
 pub struct App {
     // Pairing records grow independently of the tab's by-value state. Keep them
@@ -891,7 +896,10 @@ pub struct App {
     /// unoptimised builds give every temporary its own stack slot, so the
     /// function's frame alone approached the 2 MiB test-thread stack.
     panels: Box<Panels>,
-    errors: Vec<(usize, std::time::Instant, log::Level, ToastContent)>,
+    /// Toasts, oldest first: id, expiry deadline, level, content. The
+    /// deadline is set only while the toast is on screen (see
+    /// `arm_toast_timers`).
+    errors: Vec<(usize, Option<std::time::Instant>, log::Level, ToastContent)>,
     current_error_id: usize,
     /// True while a check_bitcoind_sync_progress probe is in flight; prevents
     /// multiple concurrent RPC calls from piling up across subscription ticks.
@@ -6566,6 +6574,18 @@ impl App {
             }
             Message::View(view::Message::DismissToast(id)) => {
                 self.errors.retain(|(i, ..)| *i != id);
+                return self.arm_toast_timers();
+            }
+            Message::ExpireToast(id) => {
+                let now = std::time::Instant::now();
+                let due = self
+                    .errors
+                    .iter()
+                    .any(|(i, deadline, ..)| *i == id && deadline.is_some_and(|d| d <= now));
+                if due {
+                    self.errors.retain(|(i, ..)| *i != id);
+                    return self.arm_toast_timers();
+                }
             }
             Message::View(view::Message::ShowError(msg)) => {
                 // Redirect ShowError to ShowToast with Error level
@@ -6582,34 +6602,20 @@ impl App {
             }
             Message::View(view::Message::ShowToast(level, msg)) => {
                 // Show toast with specified level
-                self.errors.push((
-                    self.current_error_id,
-                    std::time::Instant::now(),
-                    level,
-                    ToastContent::Text(msg),
-                ));
+                self.errors
+                    .push((self.current_error_id, None, level, ToastContent::Text(msg)));
                 self.current_error_id += 1;
-
-                let id = self.current_error_id - 1;
-                return Task::perform(
-                    async move { tokio::time::sleep(Duration::from_secs(8)).await },
-                    move |_| Message::View(view::Message::DismissToast(id)),
-                );
+                return self.arm_toast_timers();
             }
             Message::View(view::Message::ShowIncomingLiquidWaitingToast(amount_sat)) => {
                 self.errors.push((
                     self.current_error_id,
-                    std::time::Instant::now(),
+                    None,
                     log::Level::Info,
                     ToastContent::IncomingLiquidWaiting { amount_sat },
                 ));
                 self.current_error_id += 1;
-
-                let id = self.current_error_id - 1;
-                return Task::perform(
-                    async move { tokio::time::sleep(Duration::from_secs(8)).await },
-                    move |_| Message::View(view::Message::DismissToast(id)),
-                );
+                return self.arm_toast_timers();
             }
             Message::PendingBitcoindLog(log) => {
                 if let Some(line) = log {
@@ -10876,6 +10882,39 @@ impl App {
             CopyText::HasArrived.get(),
             view::Message::DismissReceivedCelebration,
         )
+    }
+
+    /// Starts the expiry clock of each toast that has just come on screen and
+    /// stops the clock of each toast pushed out of view by
+    /// `view::TOAST_MAX_VISIBLE`, so every toast gets its full time on screen
+    /// in a burst of up to `TOAST_MAX_WAITING` more. A toast that comes back
+    /// into view starts a fresh clock. Call after every change to `errors`; timers armed
+    /// earlier are ignored by `Message::ExpireToast` once their deadline is
+    /// cleared or replaced.
+    fn arm_toast_timers(&mut self) -> Task<Message> {
+        // A burst bigger than the backlog drops its oldest toasts, so stale
+        // errors don't replay long after their cause and `errors` stays small.
+        let excess = self
+            .errors
+            .len()
+            .saturating_sub(view::TOAST_MAX_VISIBLE + TOAST_MAX_WAITING);
+        self.errors.drain(..excess);
+        let hidden = self.errors.len().saturating_sub(view::TOAST_MAX_VISIBLE);
+        let now = std::time::Instant::now();
+        let mut timers = Vec::new();
+        for (index, (id, deadline, ..)) in self.errors.iter_mut().enumerate() {
+            if index < hidden {
+                *deadline = None;
+            } else if deadline.is_none() {
+                *deadline = Some(now + TOAST_LIFETIME);
+                let id = *id;
+                timers.push(Task::perform(
+                    async move { tokio::time::sleep(TOAST_LIFETIME).await },
+                    move |_| Message::ExpireToast(id),
+                ));
+            }
+        }
+        Task::batch(timers)
     }
 
     fn displayed_toasts(&self) -> impl Iterator<Item = (usize, log::Level, String)> + '_ {
@@ -16783,6 +16822,105 @@ mod received_celebration_privacy_tests {
             coincube_ui::theme::Theme::dark(),
         );
         assert!(shown.contains("12,345 SATS"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod toast_timer_tests {
+    use std::time::{Duration, Instant};
+
+    fn show(app: &mut super::App, text: &str) {
+        drop(
+            app.update(super::Message::View(super::view::Message::ShowToast(
+                log::Level::Error,
+                text.to_owned(),
+            ))),
+        );
+    }
+
+    /// (id, armed) for each queued toast, oldest first.
+    fn clocks(app: &super::App) -> Vec<(usize, bool)> {
+        app.errors
+            .iter()
+            .map(|(id, deadline, ..)| (*id, deadline.is_some()))
+            .collect()
+    }
+
+    fn make_due(app: &mut super::App, id: usize) {
+        let toast = app.errors.iter_mut().find(|(i, ..)| *i == id).unwrap();
+        toast.1 = Some(Instant::now() - Duration::from_millis(1));
+    }
+
+    /// Only shown toasts run their clock, so a burst past the cap can't
+    /// expire unseen: hidden toasts wait, then get their full time on screen.
+    #[test]
+    fn hidden_toasts_wait_for_their_turn_on_screen() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("toast-timers-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        app.errors.clear();
+        let first = app.current_error_id;
+        for n in 0..5 {
+            show(&mut app, &format!("burst {n}"));
+        }
+        let id = |n: usize| first + n;
+        assert_eq!(
+            clocks(&app),
+            vec![
+                (id(0), false),
+                (id(1), false),
+                (id(2), true),
+                (id(3), true),
+                (id(4), true)
+            ],
+            "only the {} shown toasts are on the clock",
+            super::view::TOAST_MAX_VISIBLE
+        );
+
+        // A hidden toast's timer (e.g. armed before it was pushed out of view)
+        // and a shown toast's early or stale timer both leave it in place.
+        drop(app.update(super::Message::ExpireToast(id(0))));
+        drop(app.update(super::Message::ExpireToast(id(3))));
+        assert_eq!(app.errors.len(), 5);
+
+        // A shown toast whose time is up leaves, and the newest hidden one
+        // comes on screen with a fresh clock.
+        make_due(&mut app, id(2));
+        drop(app.update(super::Message::ExpireToast(id(2))));
+        assert_eq!(
+            clocks(&app),
+            vec![(id(0), false), (id(1), true), (id(3), true), (id(4), true)]
+        );
+
+        // Dismissing by hand brings the last waiting toast on screen.
+        drop(
+            app.update(super::Message::View(super::view::Message::DismissToast(
+                id(4),
+            ))),
+        );
+        assert_eq!(
+            clocks(&app),
+            vec![(id(0), true), (id(1), true), (id(3), true)]
+        );
+
+        // A toast pushed back out of view stops its clock again.
+        show(&mut app, "late");
+        assert_eq!(clocks(&app)[0], (id(0), false));
+
+        // A burst past the backlog drops the oldest waiting toasts.
+        for n in 0..10 {
+            show(&mut app, &format!("flood {n}"));
+        }
+        assert_eq!(
+            app.errors.len(),
+            super::view::TOAST_MAX_VISIBLE + super::TOAST_MAX_WAITING
+        );
+        assert_eq!(
+            app.errors.last().map(|(i, ..)| *i),
+            Some(app.current_error_id - 1),
+            "the newest toast is always kept"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

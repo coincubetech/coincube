@@ -34,6 +34,9 @@ use crate::{
 
 #[derive(Debug)]
 pub enum Message {
+    /// A shown toast's expiry timer fired. Ignored unless the toast is still
+    /// on screen and its deadline has passed (see `App::arm_toast_timers`).
+    ExpireToast(usize),
     /// The Cube name typed in Settings was written to this device's Cube
     /// settings (`Ok(name)`) or could not be.
     CubeNameSaved(Result<String, String>),

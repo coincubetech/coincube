@@ -893,20 +893,27 @@ fn toast_card<'a>(
         );
 
     if let Some(on_dismiss) = on_dismiss {
+        // Dismiss on press, not on release: the inner `mouse_area` publishes
+        // and captures the press before the Button sees it, so the Button
+        // keeps its hover styling but never holds a pressed state. A press
+        // can't then carry over to another toast when a new one shifts the
+        // capped stack and iced re-pairs card state by slot.
+        let cross = iced::widget::mouse_area(
+            icon::cross_icon()
+                .size(TOAST_GLYPH)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center),
+        )
+        .on_press(on_dismiss.clone());
         content = content.push(
-            iced::widget::Button::new(
-                icon::cross_icon()
-                    .size(TOAST_GLYPH)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_x(Alignment::Center)
-                    .align_y(Alignment::Center),
-            )
-            .padding(0)
-            .width(TOAST_CONTROL)
-            .height(TOAST_CONTROL)
-            .style(|t, status| action(t, status, ActionKind::Quiet, ActionShape::Icon))
-            .on_press(on_dismiss),
+            iced::widget::Button::new(cross)
+                .padding(0)
+                .width(TOAST_CONTROL)
+                .height(TOAST_CONTROL)
+                .style(|t, status| action(t, status, ActionKind::Quiet, ActionShape::Icon))
+                .on_press(on_dismiss),
         );
     }
 
@@ -923,10 +930,10 @@ fn toast_card<'a>(
 }
 
 /// Most toasts shown at once, so a burst can't grow the stack up the window.
-/// Older toasts keep running their own expiry timers while hidden: they only
-/// come back if a newer one is dismissed first, and in a fast burst they
-/// usually expire unseen.
-const TOAST_MAX_VISIBLE: usize = 3;
+/// Older toasts wait out of view with their expiry clocks stopped; as shown
+/// ones leave, the newest waiting toast comes on screen first, and a burst
+/// beyond the waiting backlog drops its oldest (`App::arm_toast_timers`).
+pub(crate) const TOAST_MAX_VISIBLE: usize = 3;
 
 /// The newest `TOAST_MAX_VISIBLE` toasts, oldest first so the newest sits
 /// nearest the bottom edge.
@@ -944,15 +951,19 @@ pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
         iced::widget::Space::new().width(nav::shell::FULL_WIDTH),
         // center toasts horizontally
         iced::widget::Space::new().width(iced::Length::Fill),
-        // Keyed by toast id so card state (a held dismiss button) follows
-        // its toast when the number shown changes, e.g. the oldest of two
-        // toasts expiring. iced only matches keys when the count changes: a
-        // capped shift that keeps three cards on screen reuses state by slot.
+        // Keyed by toast id so card state follows its toast when the number
+        // shown changes. iced only matches keys when the count changes; a
+        // capped shift that keeps three cards on screen re-pairs state by
+        // slot, which is why the dismiss cross acts on press (`toast_card`).
         iced::widget::keyed_column(visible_toasts(iter).map(|(id, level, content)| {
-            // `opaque` captures presses on the card and levitates the cursor
-            // for the layers below, so clicks, hover and scroll over a toast
-            // never reach the screen underneath. Only the cards are wrapped:
-            // the rest of the overlay stays click-through.
+            // `opaque` captures mouse presses on the card. It doesn't capture
+            // other events, but it reports an `Idle` interaction over the
+            // card, so the overlay's `Stack` hands the layers below a
+            // levitated cursor with no position: hover and the wheel over a
+            // toast don't act on the screen underneath (scrollables and
+            // `mouse_area` ignore a cursor that isn't over them). Global
+            // `event::listen` subscriptions still see every event. Only the
+            // cards are wrapped: the rest of the overlay stays click-through.
             let card = iced::widget::opaque(toast_card(
                 level.into(),
                 coincube_ui::locale::notice(content),
@@ -1032,17 +1043,28 @@ mod toast_overlay_tests {
         list: Vec<(usize, log::Level, String)>,
         renderer: &mut Renderer,
     ) -> UserInterface<'a, Message, theme::Theme, Renderer> {
+        remounted(list, UiCache::new(), renderer)
+    }
+
+    /// Rebuilds over a previous frame's cache, as iced does between updates,
+    /// so widget state carries across.
+    fn remounted<'a>(
+        list: Vec<(usize, log::Level, String)>,
+        cache: UiCache,
+        renderer: &mut Renderer,
+    ) -> UserInterface<'a, Message, theme::Theme, Renderer> {
         let underlay = iced::widget::mouse_area(
             iced::widget::Space::new()
                 .width(iced::Length::Fill)
                 .height(iced::Length::Fill),
         )
-        .on_press(Message::DismissToast(UNDERLAY));
+        .on_press(Message::DismissToast(UNDERLAY))
+        .on_scroll(|_| Message::DismissToast(UNDERLAY));
         let stack: coincube_ui::widget::Element<'a, Message> = iced::widget::Stack::new()
             .push(underlay)
             .push(toast_overlay(list.into_iter()))
             .into();
-        UserInterface::build(stack, WINDOW, UiCache::new(), renderer)
+        UserInterface::build(stack, WINDOW, cache, renderer)
     }
 
     fn texts(
@@ -1059,13 +1081,27 @@ mod toast_overlay_tests {
         renderer: &mut Renderer,
         at: Point,
     ) -> Vec<Message> {
+        send(
+            ui,
+            renderer,
+            at,
+            &[
+                mouse::Event::CursorMoved { position: at },
+                mouse::Event::ButtonPressed(mouse::Button::Left),
+                mouse::Event::ButtonReleased(mouse::Button::Left),
+            ],
+        )
+    }
+
+    fn send(
+        ui: &mut UserInterface<'_, Message, theme::Theme, Renderer>,
+        renderer: &mut Renderer,
+        at: Point,
+        events: &[mouse::Event],
+    ) -> Vec<Message> {
         let mut messages = Vec::new();
         let cursor = mouse::Cursor::Available(at);
-        for event in [
-            Event::Mouse(mouse::Event::CursorMoved { position: at }),
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
-        ] {
+        for event in events.iter().cloned().map(Event::Mouse) {
             ui.update(
                 &[event],
                 cursor,
@@ -1081,6 +1117,72 @@ mod toast_overlay_tests {
         messages
             .iter()
             .any(|m| matches!(m, Message::DismissToast(UNDERLAY)))
+    }
+
+    /// Bounds of the dismiss cross: the glyph drawn right after the message.
+    fn cross_of(
+        ui: &mut UserInterface<'_, Message, theme::Theme, Renderer>,
+        renderer: &Renderer,
+        message: &str,
+    ) -> Rectangle {
+        let all = texts(ui, renderer);
+        let at = all
+            .iter()
+            .position(|(text, _)| text == message)
+            .expect("mounted toast message");
+        let cross = all.get(at + 1).expect("mounted dismiss cross").1;
+        assert!(cross.x > all[at].1.x, "the cross sits right of the message");
+        cross
+    }
+
+    fn list(ids: &[usize]) -> Vec<(usize, log::Level, String)> {
+        ids.iter()
+            .map(|&i| (i, log::Level::Info, format!("Toast number {i}")))
+            .collect()
+    }
+
+    /// The capped stack re-pairs card state by slot when a new toast shifts
+    /// three shown toasts. A dismiss must act on press so a held press can't
+    /// land on whichever toast moves into its slot.
+    #[test]
+    fn a_held_dismiss_cannot_move_to_another_toast() {
+        let mut renderer = renderer();
+        let mut ui = mounted(list(&[4, 5, 6]), &mut renderer);
+        let cross = cross_of(&mut ui, &renderer, "Toast number 5");
+
+        let pressed = send(
+            &mut ui,
+            &mut renderer,
+            cross.center(),
+            &[
+                mouse::Event::CursorMoved {
+                    position: cross.center(),
+                },
+                mouse::Event::ButtonPressed(mouse::Button::Left),
+            ],
+        );
+        assert!(
+            pressed
+                .iter()
+                .any(|m| matches!(m, Message::DismissToast(5))),
+            "the press itself dismisses its own toast"
+        );
+
+        // Toast 7 arrives before the release (as if 5 were still shown).
+        let cache = ui.into_cache();
+        let mut ui = remounted(list(&[5, 6, 7]), cache, &mut renderer);
+        let released = send(
+            &mut ui,
+            &mut renderer,
+            cross.center(),
+            &[mouse::Event::ButtonReleased(mouse::Button::Left)],
+        );
+        assert!(
+            !released
+                .iter()
+                .any(|m| matches!(m, Message::DismissToast(_))),
+            "a release must not dismiss the toast that moved into the slot"
+        );
     }
 
     #[test]
@@ -1121,13 +1223,7 @@ mod toast_overlay_tests {
 
         // The dismiss cross is the glyph after the message. Inside `opaque` it
         // still gets the press first and dismisses its own toast.
-        let all = texts(&mut ui, &renderer);
-        let at = all
-            .iter()
-            .position(|(text, _)| text == "Toast number 0")
-            .expect("mounted toast message");
-        let cross = all.get(at + 1).expect("mounted dismiss cross").1;
-        assert!(cross.x > message.x, "the cross sits right of the message");
+        let cross = cross_of(&mut ui, &renderer, "Toast number 0");
         let on_cross = click(&mut ui, &mut renderer, cross.center());
         assert!(
             on_cross
@@ -1138,6 +1234,42 @@ mod toast_overlay_tests {
         assert!(
             !reached_underlay(&on_cross),
             "a press on the dismiss button reached the screen below"
+        );
+
+        // The wheel over a toast doesn't scroll the screen below either.
+        let wheel = mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Lines { x: 0.0, y: -3.0 },
+        };
+        let scrolled = send(
+            &mut ui,
+            &mut renderer,
+            message.center(),
+            &[
+                mouse::Event::CursorMoved {
+                    position: message.center(),
+                },
+                wheel,
+            ],
+        );
+        assert!(
+            !reached_underlay(&scrolled),
+            "the wheel over a toast reached the screen below"
+        );
+        let beside_wheel = Point::new(WINDOW.width - 20.0, 20.0);
+        let scrolled_beside = send(
+            &mut ui,
+            &mut renderer,
+            beside_wheel,
+            &[
+                mouse::Event::CursorMoved {
+                    position: beside_wheel,
+                },
+                wheel,
+            ],
+        );
+        assert!(
+            reached_underlay(&scrolled_beside),
+            "the wheel beside the toasts must reach the screen below"
         );
 
         // The overlay outside the cards stays click-through.
