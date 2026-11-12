@@ -247,7 +247,8 @@ QA build preflight; screenshot protection remains enabled.
 After a bounded faucet grace period, the runner freezes the actual target's
 public provisioning evidence and selects one unspent, explicitly authorized QA
 change output. The native sponsor reconstructs its keys locally and signs only
-the frozen Testnet4 plan: 100,000–500,000 sats, a 100–1,000-sat fee and at least
+the frozen Testnet4 plan: 100,000–500,000 sats (enough for this run's spend,
+fee and change), a 100–1,000-sat fee and at least
 1,000 sats returned to the source. A host-wide private registry locks and reserves
 the source outpoint before signing, saves signed bytes before broadcasting, and
 reconciles those exact bytes through both explorers after any uncertain response.

@@ -353,3 +353,49 @@ def test_faucet_failure_automatically_enters_fallback(flow, monkeypatch):
     assert calls == [runner]
     assert runner.artifacts['qa_faucet_failure']['code'] == 'FAUCET_UNCERTAIN'
     assert wire['native'] == 0
+
+
+def configure_large_spend(runner):
+    runner.config.update(amount_sats=100000, fee_sats=10000)
+    binding = digest(runner.config)
+    runner.journal.data['binding'] = binding
+    runner.journal.artifact('strict_acceptance', {'version': 1, 'config_binding': binding})
+
+
+def test_pool_cap_must_cover_configured_spend_fee_and_change(flow):
+    runner, wire = flow
+    runner.config['qa_funding']['maximum_amount_sats'] = 100000
+    configure_large_spend(runner)
+    with pytest.raises(Failed) as caught:
+        qa_funding.Funding(runner).execute()
+    assert caught.value.code == 'QA_FUNDING_CAPACITY'
+    assert wire['native'] == 0 and wire['posts'] == []
+
+
+def test_depleted_donor_is_skipped_before_constructing_insufficient_payment(flow, monkeypatch):
+    runner, wire = flow
+    configure_large_spend(runner)
+    metadata = qa_funding.source_metadata
+    def depleted(*args):
+        source, prior, _, binding = metadata(*args)
+        return source, prior, 110000, binding  # Only108k after funding fee+source change, below111k.
+    monkeypatch.setattr(qa_funding, 'source_metadata', depleted)
+    monkeypatch.setattr(sponsor, 'make_intent', lambda *a: pytest.fail('insufficient donor reached transaction construction'))
+    with pytest.raises(Blocked) as caught:
+        qa_funding.Funding(runner).execute()
+    assert caught.value.code == 'QA_FUNDING_EMPTY'
+    assert wire['native'] == 0 and wire['posts'] == []
+
+
+def test_impossible_pool_cap_fails_workstation_validation_before_phone_setup():
+    from harness import provisioning
+    config = {'version': 2, 'account_email': 'qa@example.invalid', 'profile_dir': '/synthetic/desktop',
+              'connect_rest': provisioning.REST, 'connect_grpc': provisioning.GRPC,
+              'strict_acceptance': {'version': 1},
+              'ios': {'minimum_build': 41, 'qa_build': {'checkout': '/synthetic/keychain',
+                       'revision': '0' * 40, 'flutter': '/synthetic/flutter'}},
+              'amount_sats': 100000, 'fee_sats': 10000,
+              'qa_funding': {'version': 1, 'sources': [], 'maximum_amount_sats': 100000}}
+    with pytest.raises(Failed) as caught:
+        provisioning.validate_config(config)
+    assert caught.value.code == 'QA_FUNDING_CAPACITY'

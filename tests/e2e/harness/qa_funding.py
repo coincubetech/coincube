@@ -187,15 +187,22 @@ def source_metadata(entry, enrolled, account, owner):
 def preflight(runner):
     config = options(runner.config["qa_funding"])
     require(runner.strict is not None, "MODE")
+    require(config["maximum_amount_sats"] >= minimum_amount(runner.config), "CAPACITY")
     with pool() as data:
         for entry, enrolled in entries(data, runner.artifacts["account_identity"], config):
             source_metadata(entry, enrolled, runner.artifacts["account_identity"], runner.account_user_id)
+
+
+def minimum_amount(config):
+    return max(100000, config["amount_sats"] + config["fee_sats"] + 1000)
 
 
 class Funding:
     def __init__(self, runner):
         self.runner = runner
         self.config = options(runner.config["qa_funding"])
+        self.minimum = minimum_amount(runner.config)
+        require(self.config["maximum_amount_sats"] >= self.minimum, "CAPACITY")
         require(runner.strict is not None and not runner.strict.requested, "MODE")
         self.live = runner.journal.directory.resolve()
         self.run_id = runner.run_id
@@ -253,8 +260,7 @@ class Funding:
     def target_output(self):
         self.guard()
         values = self.runner.core.utxos(self.core["artifacts"]["receive_address"])
-        eligible = [v for v in values if 100000 <= v[2] <= 10000000
-                    and v[2] >= self.runner.config["amount_sats"] + self.runner.config["fee_sats"] + 1000]
+        eligible = [v for v in values if self.minimum <= v[2] <= 10000000]
         require(len(eligible) <= 1, "TARGET_AMBIGUOUS")
         if eligible:
             return {"txid": eligible[0][0], "vout": eligible[0][1], "value_sats": eligible[0][2]}
@@ -285,7 +291,7 @@ class Funding:
         require(sponsor.sha(raw) == record["intent_sha256"], "RESERVATION")
         intent = json.loads(raw)
         require(intent["network"] == "testnet4" and intent["previous_vout"] == 1
-                and intent["amount_sats"] == record["amount_sats"] <= self.config["maximum_amount_sats"]
+                and self.minimum <= intent["amount_sats"] == record["amount_sats"] <= self.config["maximum_amount_sats"]
                 and intent["fee_sats"] == record["fee_sats"] == self.config["fee_sats"]
                 and intent["target_address"] == self.core["artifacts"]["receive_address"]
                 and intent["target_script"] == sponsor.p2wsh_script(intent["target_address"])
@@ -355,7 +361,7 @@ class Funding:
                 for entry, enrolled in entries(data, self.account, self.config):
                     source, prior, value, _ = source_metadata(entry, enrolled, self.account, self.owner)
                     amount = min(self.config["maximum_amount_sats"], value - self.config["fee_sats"] - 1000)
-                    if amount < 100000:
+                    if amount < self.minimum:
                         continue
                     try:
                         intent, _, _ = sponsor.make_intent(source, self.snapshot, amount, self.config["fee_sats"], prior)

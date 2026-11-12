@@ -57,9 +57,10 @@ def validate_config(config):
         raise Failed("IOS_BUILD", "A Keychain build containing #194 is required.")
     validate_mode(config)
     if "qa_funding" in config:
-        qa_funding.options(config["qa_funding"])
+        funding = qa_funding.options(config["qa_funding"])
         if not config.get("strict_acceptance") or "qa_build" not in config.get("ios", {}):
             raise Failed("QA_FUNDING_MODE", "Automatic QA funding requires strict acceptance.")
+        qa_funding.require(funding["maximum_amount_sats"] >= qa_funding.minimum_amount(config), "CAPACITY")
     if "qa_build" in ios:
         validate_build_config(ios["qa_build"])
         if not config.get("strict_acceptance"):
