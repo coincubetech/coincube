@@ -15,7 +15,7 @@ import stat
 import uuid
 
 from .clients import Native
-from .provisioning import Provision, validate_config
+from .provisioning import Provision, phone_state_root, validate_config
 from .qa_build import configure_fresh
 from .secrets import SecretStore
 from .sponsor import binary_digest, encoded, output_lock, read_run, sha
@@ -144,8 +144,7 @@ def execute(args):
         # original binding, including explicit non-strict compatibility runs.
         config = configure_fresh(config)
     config = validate_config(config)
-    require("phone_state_dir" in config, "PHONE_STORE_REQUIRED")
-    phone_root = Path(config["phone_state_dir"]).resolve()
+    phone_root = phone_state_root(config).resolve()
     with source_lock(directory), output_lock(output, [directory.resolve(), phone_root, Path(config["profile_dir"]).resolve(), Path(args.config).resolve()]):
         state, binding, snapshot, fixture = bind_source(directory, config)
         phone_dir = phone_root / binding["account_identity"]

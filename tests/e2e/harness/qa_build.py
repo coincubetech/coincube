@@ -170,9 +170,9 @@ def prepare(config, strict, device, minimum_build, query):
     command(["ditto", "-x", "-k", ipas[0], root / "validated"])
     app = root / "validated/Payload/Runner.app"
     observed = validate_app(app, device, minimum_build)
-    query("device", "install", "app", "--device", device["identifier"], str(app))
+    query("device", "install", "app", "--device", device["identifier"], str(app), timeout=180)
     verify_installed(device, observed["build"], query)
-    query("device", "process", "launch", "--device", device["identifier"], BUNDLE)
+    query("device", "process", "launch", "--device", device["identifier"], BUNDLE, timeout=60)
     receipt = {"binding": binding, "source": build_config["revision"], "define": DEFINE, "app": observed,
                "ipa_sha256": hashlib.sha256(ipas[0].read_bytes()).hexdigest()}
     journal.artifact("qa_build", receipt)

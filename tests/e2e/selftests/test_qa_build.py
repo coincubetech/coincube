@@ -87,7 +87,13 @@ def build(tmp_path, config, monkeypatch):
             (export / "Keychain.ipa").write_bytes(b"synthetic ipa")
         return b""
 
-    def query(*args):
+    def query(*args, **kwargs):
+        if args[:3] == ("device", "install", "app"):
+            assert kwargs == {"timeout": 180}
+        elif args[:3] == ("device", "process", "launch"):
+            assert kwargs == {"timeout": 60}
+        else:
+            assert not kwargs
         calls.append(list(args))
         return {"apps": [{"bundleVersion": "41"}]}
 
@@ -144,7 +150,7 @@ def test_missing_receipt_cannot_replace_a_pinned_process(build):
 
 
 def test_install_success_still_requires_exact_installed_version_before_launch(build):
-    def query(*args):
+    def query(*args, **kwargs):
         build.calls.append(list(args))
         return {"apps": [{"bundleVersion": "42"}]}
     build.query = query
@@ -289,3 +295,34 @@ def test_interrupted_request_helper_uses_the_same_default_strict_binding(config,
     with pytest.raises(Blocked) as caught:
         sign_abort.execute(args)
     assert caught.value.code == "BINDING_CHECKED"
+
+
+@pytest.mark.parametrize("timeout", [15, 60, 180])
+def test_device_command_preserves_operation_timeout(monkeypatch, timeout):
+    from harness import phone
+    calls = []
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(stdout=b'{"result":{}}')
+    monkeypatch.setattr(phone.subprocess, "run", run)
+    assert phone.device_query("device", "install", "app", timeout=timeout) == {}
+    args, options = calls[0]
+    assert args[args.index("--timeout") + 1] == str(timeout)
+    assert options["timeout"] == timeout + 5
+
+
+def test_launcher_rejects_unsupported_python_patch_without_reexec_loop(monkeypatch):
+    import runpy
+    import sys
+    import subprocess
+    import shutil
+    monkeypatch.setattr(sys, "version_info", (3, 11, 3))
+    monkeypatch.setattr(shutil, "which", lambda name: "/synthetic/" + name)
+    calls = []
+    def probe(args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=1)
+    monkeypatch.setattr(subprocess, "run", probe)
+    with pytest.raises(SystemExit, match="Python 3.11.4 or newer"):
+        runpy.run_path(str(Path(__file__).resolve().parents[1] / "run"), run_name="__main__")
+    assert len(calls) == 3

@@ -123,7 +123,7 @@ process must remain unchanged. Resume never rebuilds, reinstalls or relaunches
 the app after its strict process identity has been recorded. A changed source,
 device or installed build requires a new run directory.
 
-Install Appium 3.9.0 and XCUITest 12.22.8, plus Python 3.11+, CocoaPods, Xcode and the pinned
+Install Appium 3.9.0 and XCUITest 12.22.8, plus Python 3.11.4+, CocoaPods, Xcode and the pinned
 Rust toolchain. The launcher installs pinned Python dependencies once. Fresh
 mode builds both Rust helpers and signs the provisioning helper with the normal
 COINCUBE Developer ID/profile automatically. No TestFlight upload is required
@@ -379,7 +379,7 @@ npm install -g appium@3.9.0
 appium driver install xcuitest@12.22.8
 ```
 
-Python 3.11+ is required. `run` creates `tests/e2e/.venv` and installs the pinned
+Python 3.11.4+ is required. `run` creates `tests/e2e/.venv` and installs the pinned
 Python dependencies once. It also finds a versioned Homebrew Python when macOS
 `python3` is older. Later runs reuse that environment.
 

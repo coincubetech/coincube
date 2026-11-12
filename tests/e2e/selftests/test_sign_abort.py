@@ -97,7 +97,7 @@ def test_replay_cannot_clear_reintroduced_old_attempt():
     assert store.writes == 1
 
 
-@pytest.fixture(params=['direct', 'symlinked-parent'])
+@pytest.fixture(params=['direct', 'symlinked-parent', 'default-store'])
 def scenario(tmp_path, monkeypatch, request):
     parent = tmp_path / 'parent'
     parent.mkdir(mode=0o700)
@@ -109,6 +109,10 @@ def scenario(tmp_path, monkeypatch, request):
     run.mkdir(mode=0o700)
     config = {'account_email': 'fixture@example.invalid', 'profile_dir': str(tmp_path / 'desktop'),
               'phone_state_dir': str(tmp_path / 'phone')}
+    if request.param == 'default-store':
+        from harness import provisioning
+        del config['phone_state_dir']
+        monkeypatch.setattr(provisioning, '__file__', str(tmp_path / 'repo/tests/e2e/harness/provisioning.py'))
     run_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'coincube-fresh-testnet4/' + str(run)))
     txid = 'a' * 64
     state = dict(run_id=run_id, profile_dir=str(run / 'profile'), owner_user_id=7, cube_id=3,
@@ -130,7 +134,7 @@ def scenario(tmp_path, monkeypatch, request):
         atomic_write(run / name, value)
     config_path = tmp_path / 'config.json'
     atomic_write(config_path, json.dumps(config).encode())
-    phone_dir = tmp_path / 'phone' / artifacts['account_identity']
+    phone_dir = abort.phone_state_root(config) / artifacts['account_identity']
     phone_dir.mkdir(parents=True, mode=0o700)
     atomic_write(phone_dir / 'phone-secrets.keychain.json', b'{}')
     store = Store(dict(identity=binding['account_identity'] + ':' + binding['device'], verified=True,

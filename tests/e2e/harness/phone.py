@@ -28,13 +28,13 @@ BUNDLE = "io.coincube.keychainApp"
 INCOMING_TRANSACTION = frozenset({"Incoming transaction", "Review the details before approving", "View transaction", "Not now"})
 
 
-def device_query(*args):
+def device_query(*args, timeout=15):
     try:
-        result = subprocess.run(["xcrun", "devicectl", *args, "--timeout", "15", "--json-output", "-"],
-                                capture_output=True, timeout=20, check=True)
+        result = subprocess.run(["xcrun", "devicectl", *args, "--timeout", str(timeout), "--json-output", "-"],
+                                capture_output=True, timeout=timeout + 5, check=True)
         return json.loads(result.stdout)["result"]
     except (OSError, subprocess.SubprocessError, ValueError, KeyError):
-        raise Blocked("IOS_DEVICE", "Xcode cannot inspect the wired iPhone. Check pairing, unlock and Developer Mode.") from None
+        raise Blocked("IOS_DEVICE", "Xcode could not complete the wired iPhone command. Check pairing, unlock and Developer Mode.") from None
 
 
 def wired_device(minimum_build):
