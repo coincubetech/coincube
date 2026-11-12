@@ -47,7 +47,6 @@ use crate::app::message::Message;
 use crate::app::state::{redirect, State};
 use crate::app::view::spark::SparkRecentTransaction;
 use crate::app::view::spark::SparkSendView;
-use crate::app::view::FiatAmountConverter;
 use crate::app::wallets::SparkBackend;
 use crate::services::branta::{self, LookupRequest, LookupResult, LookupTicket, RecipientIdentity};
 
@@ -1782,18 +1781,7 @@ impl State for SparkSend {
                 Task::none()
             }
             SparkSendMessage::PaymentsLoaded(payments) => {
-                let fiat_converter: Option<FiatAmountConverter> =
-                    cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
-                self.recent_transactions = payments
-                    .iter()
-                    .take(5)
-                    .map(|p| {
-                        crate::app::state::spark::overview::payment_summary_to_recent_tx(
-                            p,
-                            fiat_converter.as_ref(),
-                        )
-                    })
-                    .collect();
+                self.recent_transactions = super::recent_transactions_from(&payments, cache);
                 Task::none()
             }
             SparkSendMessage::PaymentsFailed(err) => {

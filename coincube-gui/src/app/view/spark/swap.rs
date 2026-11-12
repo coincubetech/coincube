@@ -10,8 +10,9 @@ use coincube_spark_protocol::{
 use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::locale::Text as CopyText;
 use coincube_ui::{
-    component::tenshu::{steps, ActionButton, ActionKind},
+    component::tenshu::{icon_action, steps, ActionButton, ActionKind},
     component::text::*,
+    image::asset_network_logo,
     theme,
     widget::{Column, ColumnExt, Container, Element, Row, RowExt},
 };
@@ -25,7 +26,8 @@ use crate::app::breez_spark::assets::format_token_display_u128;
 use crate::app::cache::Cache;
 use crate::app::menu::{Menu, SparkSubMenu};
 use crate::app::state::spark::swap::{format_asset, swap_available, SparkSwap, SwapPhase};
-use crate::app::view::spark::SparkSwapMessage;
+use crate::app::view::shared::payment_columns::{payment_columns, rail_card};
+use crate::app::view::spark::{last_tx::recent_rail_section, SparkSwapMessage};
 use crate::app::view::Message;
 
 /// The flow on the head's rule.
@@ -161,17 +163,6 @@ fn card_style(theme: &theme::Theme) -> container::Style {
     }
 }
 
-fn tile_style(theme: &theme::Theme) -> container::Style {
-    container::Style {
-        border: iced::Border {
-            color: theme.colors.shell.line,
-            width: 1.0,
-            radius: 12.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
 fn kv<'a>(label: &'a str, value: String) -> Element<'a, Message> {
     Row::new()
         .spacing(12)
@@ -284,22 +275,24 @@ pub fn swap_body<'a>(cache: &'a Cache, swap: &'a SparkSwap) -> Element<'a, Messa
         )
         .view(),
     };
-    let aside = Column::new()
-        .spacing(16)
+    // The side panel, as on Send and Receive: what is in Spark (or what the
+    // swap leaves), what auto-convert does next, then Spark's latest payments.
+    let rail = Column::new()
+        .spacing(20)
         .push(aside)
-        .push_maybe(swap.auto_convert_for_view().map(auto_convert_line));
-    Row::new()
-        .spacing(40)
-        .align_y(Alignment::Start)
-        .push(
-            Container::new(card)
-                .width(Length::Fixed(680.0))
-                .style(card_style),
-        )
-        .push(Container::new(aside).width(Length::Fixed(240.0)))
-        .wrap()
-        .vertical_spacing(20)
-        .into()
+        .push_maybe(swap.auto_convert_for_view().map(auto_convert_line))
+        .push(iced::widget::rule::horizontal(1))
+        .push(recent_rail_section(
+            swap.recent_transactions_for_view(),
+            cache.bitcoin_unit,
+            cache.balance_amounts_masked(),
+            |idx| swap_message(SparkSwapMessage::SelectTransaction(idx)),
+            swap_message(SparkSwapMessage::History),
+        ));
+    payment_columns(
+        Container::new(card).width(Length::Fill).style(card_style),
+        rail_card(rail),
+    )
 }
 
 pub const WALLET_SETTINGS_ID: &str = "tenshu.spark.swap.wallet-settings";
@@ -349,17 +342,24 @@ pub fn auto_convert_line<'a>(
         .into()
 }
 
+/// A From or To tile, as compact as Send's and Receive's route tiles: the
+/// coin, the caption, "‹asset› in Spark", then `line`.
 fn asset_tile<'a>(caption: &'static str, asset: WalletAsset, line: String) -> Element<'a, Message> {
-    Container::new(
-        Column::new()
-            .spacing(6)
-            .push(p2_regular(caption).style(theme::text::secondary))
-            .push(p1_bold(asset_name(asset)))
-            .push(p2_regular(line).style(theme::text::secondary)),
-    )
-    .padding(16)
+    let logo = match asset {
+        WalletAsset::Bitcoin => asset_network_logo("btc", "spark", 36.0),
+        WalletAsset::Usdb => asset_network_logo("usdb", "spark", 36.0),
+    };
+    Container::new(super::route_tile_body_with_detail(
+        logo,
+        caption,
+        None,
+        localized_copy(asset_name(asset)).to_owned(),
+        localized_copy("in Spark").to_owned(),
+        Some(line),
+        None,
+    ))
     .width(Length::Fill)
-    .style(tile_style)
+    .style(super::send::fixed_tile_style)
     .into()
 }
 
@@ -388,10 +388,10 @@ fn details_card<'a>(
             from,
             format!("Available {}", balance(from)),
         ))
-        .push(action(
-            REVERSE_ID,
-            "⇄",
-            ActionKind::Secondary,
+        .push(icon_action(
+            Id::new(REVERSE_ID),
+            coincube_ui::icon::arrow_left_right_icon(),
+            Message::FocusAction,
             (!quoting).then(|| swap_message(SparkSwapMessage::Reverse)),
         ))
         .push(asset_tile("To", to, format!("Balance {}", balance(to))));
@@ -771,6 +771,52 @@ mod tests {
             "dark",
             theme::Theme::dark(),
         )
+    }
+
+    /// The form and the rail fill the page column, as on Send and Receive:
+    /// compact tiles, and the rail ending at the column's right edge with
+    /// Spark's latest payments.
+    #[test]
+    fn the_form_and_the_rail_fill_the_page_column() {
+        use crate::app::view::shared::payment_columns::RAIL_WIDTH;
+        let cache = mainnet();
+        let mut swap = funded();
+        swap.set_recent_payments(
+            &[crate::app::state::spark::test_payment("pay-1", 1_001)],
+            &cache,
+        );
+        let width = 1106;
+        let probe = crate::app::view::shared::landing::capture::inspect_wide_content(
+            "spark-swap-columns",
+            swap_body(&cache, &swap),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+            width,
+        );
+        for label in [
+            "in Spark",
+            "Recent in Spark",
+            "See all in Activity",
+            "1,001",
+        ] {
+            assert!(probe.contains(label), "{}", label);
+        }
+        let x = |needle: &str| {
+            probe
+                .text
+                .iter()
+                .find_map(|(value, bounds)| (value == needle).then_some(bounds.x))
+                .unwrap_or_else(|| panic!("{} not shown", needle))
+        };
+        // The rail's caption sits inside the rail card, beside the form.
+        let rail = width as f32 - RAIL_WIDTH;
+        assert!(
+            x("Available in Spark") > rail && x("Available in Spark") < rail + 40.0,
+            "rail caption at x = {}",
+            x("Available in Spark")
+        );
+        assert!(x("Swap details") < 40.0);
     }
 
     #[test]

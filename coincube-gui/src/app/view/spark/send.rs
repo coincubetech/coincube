@@ -1837,7 +1837,11 @@ pub fn pay_from_picker_menu<'a>(
                 "SPARK",
             ))
             .push(option(WalletAsset::Usdb, PAY_FROM_USDB_ID, "usdb", "USDB"))
-            .push(dropdown_note(PAY_FROM_BITCOIN_NOTE)),
+            // How a Bitcoin payment falls back to USDB; paying from US Dollar
+            // has its own note under the tiles.
+            .push_maybe(
+                (current == WalletAsset::Bitcoin).then(|| dropdown_note(PAY_FROM_BITCOIN_NOTE)),
+            ),
     )
 }
 const PREPARE_ACTION_ID: &str = "spark-send-prepare";
@@ -1894,8 +1898,8 @@ fn route_tile_style(theme: &theme::Theme, hovered: bool) -> (Background, iced::B
     )
 }
 
-/// Status-independent fill for the fixed YOU SEND tile.
-fn fixed_tile_style(theme: &theme::Theme) -> container::Style {
+/// Status-independent fill for the fixed YOU SEND tile, and Swap's tiles.
+pub(crate) fn fixed_tile_style(theme: &theme::Theme) -> container::Style {
     let (background, border) = route_tile_style(theme, false);
     container::Style {
         background: Some(background),
@@ -3094,6 +3098,18 @@ mod tests {
             theme::Theme::dark(),
         );
         assert!(covered.contains("12.40 USDB") && covered.contains("35,000 SATS"));
+        let from_usd = capture::inspect(
+            "spark-send-pay-from-usd",
+            pay_from_picker_menu(WalletAsset::Usdb, None, balances(Some(&usdb))),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(
+            from_usd.contains("YOUR SPARK BALANCES")
+                && !from_usd.contains("Bitcoin is used first."),
+            "the Bitcoin-first note shows only while Bitcoin is selected"
+        );
     }
 
     #[test]

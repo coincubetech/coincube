@@ -39,9 +39,23 @@ pub(crate) fn route_tile_body<'a, M: 'a>(
     // its menu is open.
     chevron: Option<bool>,
 ) -> coincube_ui::widget::Element<'a, M> {
+    route_tile_body_with_detail(logo, label, hint, asset, place, None, chevron)
+}
+
+/// [`route_tile_body`] with a `detail` line under the asset, such as Swap's
+/// "Available 34,034 SATS".
+pub(crate) fn route_tile_body_with_detail<'a, M: 'a>(
+    logo: coincube_ui::widget::Element<'a, M>,
+    label: &'static str,
+    hint: Option<&'static str>,
+    asset: String,
+    place: String,
+    detail: Option<String>,
+    chevron: Option<bool>,
+) -> coincube_ui::widget::Element<'a, M> {
     use coincube_ui::component::text::*;
     use coincube_ui::theme;
-    use coincube_ui::widget::{Column, Container, Row};
+    use coincube_ui::widget::{Column, ColumnExt, Container, Row};
     use iced::widget::Space;
     use iced::{Alignment, Length};
 
@@ -78,7 +92,12 @@ pub(crate) fn route_tile_body<'a, M: 'a>(
                                 .style(theme::text::primary),
                         )
                         .push(text(place).size(P1_SIZE + 2).style(theme::text::secondary)),
-                ),
+                )
+                .push_maybe(detail.map(|detail| {
+                    text(detail)
+                        .size(CAPTION_SIZE + 1)
+                        .style(theme::text::secondary)
+                })),
         );
     if let Some(open) = chevron {
         row = row.push(
@@ -269,6 +288,17 @@ pub enum SparkSwapMessage {
         request: u64,
         result: crate::app::state::spark::swap::SwapAttempt,
     },
+    /// Spark's latest payments, for the side panel's Recent in Spark.
+    /// `App` hands them to [`SparkSwap::set_recent_payments`] with the cache,
+    /// which prices them.
+    ///
+    /// [`SparkSwap::set_recent_payments`]: crate::app::state::spark::swap::SparkSwap::set_recent_payments
+    PaymentsLoaded(Vec<coincube_spark_protocol::PaymentSummary>),
+    PaymentsFailed(String),
+    /// Open the payment numbered so in Recent in Spark in Activity.
+    SelectTransaction(usize),
+    /// See all in Activity.
+    History,
 }
 
 /// View-level messages for the Spark Overview panel.
