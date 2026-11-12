@@ -210,8 +210,10 @@ class Funding:
         require(not any(p == ROOT.resolve() or ROOT.resolve() in p.parents
                         for p in (self.live, self.snapshot, self.output)), "DIRECTORY")
         self.native = runner.provision.binary
+        self.native_sha256 = sponsor.binary_digest(self.native)
 
     def guard(self):
+        require(sponsor.binary_digest(self.native) == self.native_sha256, "NATIVE_CHANGED")
         require(identity(self.live, self.run_id, self.binding) == self.core, "TARGET_CHANGED")
         cp = json.loads(private_read(self.live / "checkpoint.json"))["artifacts"]
         require(not any(k in cp for k in ("request_id", "session_id", "intent", "approval_started", "pin_dispatch_started")),
@@ -411,6 +413,7 @@ class Funding:
             raw = private_read(self.output / "sponsor-receipt.json")
             require(sponsor.sha(raw) == record["receipt_sha256"], "RECEIPT_CHANGED")
             receipt = json.loads(raw)
+            require(receipt.get("native_binary_sha256") == record["native_sha256"], "NATIVE_CHANGED")
             sponsor.validate_receipt(receipt, intent, record["intent_sha256"])
             until = time.monotonic() + self.runner.deadline
             posts = 0

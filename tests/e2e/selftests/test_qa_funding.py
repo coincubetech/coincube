@@ -188,19 +188,23 @@ def test_missing_target_identity_prevents_key_lookup(flow, field, value):
     assert wire['native'] == 0 and wire['posts'] == []
 
 
-def test_target_process_mutation_after_prepare_prevents_signature(flow, monkeypatch):
+@pytest.mark.parametrize('changed_field', ['phone', 'native'])
+def test_target_process_mutation_after_prepare_prevents_signature(flow, monkeypatch, changed_field):
     runner, wire = flow
     execute = sponsor.execute
     def changed(args):
         result = execute(args)
-        process = deepcopy(runner.artifacts['strict_process'])
-        process['process']['pid'] += 1
-        runner.journal.artifact('strict_process', process)
+        if changed_field == 'phone':
+            process = deepcopy(runner.artifacts['strict_process'])
+            process['process']['pid'] += 1
+            runner.journal.artifact('strict_process', process)
+        else:
+            atomic_write(Path(runner.provision.binary), b'replaced native candidate')
         return result
     monkeypatch.setattr(sponsor, 'execute', changed)
     with pytest.raises(Failed) as caught:
         qa_funding.Funding(runner).execute()
-    assert caught.value.code == 'QA_FUNDING_TARGET_CHANGED'
+    assert caught.value.code == ('QA_FUNDING_TARGET_CHANGED' if changed_field == 'phone' else 'QA_FUNDING_NATIVE_CHANGED')
     assert wire['native'] == 0 and wire['posts'] == []
 
 
