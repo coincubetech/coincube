@@ -32,6 +32,7 @@ pub struct Floating<'a, Message> {
     gap: f32,
     on_dismiss: Option<Message>,
     fit_to_window: bool,
+    fit_height: Option<f32>,
     dismiss_on_escape: bool,
 }
 
@@ -43,6 +44,7 @@ impl<'a, Message> Floating<'a, Message> {
             gap: 0.0,
             on_dismiss: None,
             fit_to_window: false,
+            fit_height: None,
             dismiss_on_escape: false,
         }
     }
@@ -78,6 +80,16 @@ impl<'a, Message> Floating<'a, Message> {
         }
     }
 
+    /// Caps the content's height at the room left below it in the window
+    /// (never under `min`), so a long menu with a `Shrink` scrollable scrolls
+    /// on a short window instead of running off its bottom edge.
+    pub fn fit_height_to_window(self, min: f32) -> Self {
+        Self {
+            fit_height: Some(min),
+            ..self
+        }
+    }
+
     /// Dismiss on the first Escape, even while an editor has input focus.
     pub fn dismiss_on_escape(self) -> Self {
         Self {
@@ -88,7 +100,20 @@ impl<'a, Message> Floating<'a, Message> {
 }
 
 fn content_limits(width: f32) -> layout::Limits {
-    layout::Limits::new(Size::ZERO, Size::new(width, f32::INFINITY))
+    content_limits_within(width, f32::INFINITY)
+}
+
+fn content_limits_within(width: f32, height: f32) -> layout::Limits {
+    layout::Limits::new(Size::ZERO, Size::new(width, height))
+}
+
+/// The margin kept between fitted content and the window's edges.
+const WINDOW_MARGIN: f32 = 8.0;
+
+/// The height content anchored at `top` may take in a window `window_height`
+/// tall: what is left below it, but never less than `min`.
+fn fitted_height(window_height: f32, top: f32, min: f32) -> f32 {
+    (window_height - top - WINDOW_MARGIN).max(min)
 }
 
 /// Where the content sits inside the `width` it is given.
@@ -188,6 +213,7 @@ impl<Message: Clone> Widget<Message, Theme, Renderer> for Floating<'_, Message> 
             width: bounds.width,
             on_dismiss: self.on_dismiss.as_ref(),
             fit_to_window: self.fit_to_window,
+            fit_height: self.fit_height,
             dismiss_on_escape: self.dismiss_on_escape,
         })))
     }
@@ -200,15 +226,23 @@ struct Overlay<'a, 'b, Message> {
     width: f32,
     on_dismiss: Option<&'b Message>,
     fit_to_window: bool,
+    fit_height: Option<f32>,
     dismiss_on_escape: bool,
 }
 
 impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, '_, Message> {
     fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
-        let content =
-            self.content
-                .as_widget_mut()
-                .layout(self.tree, renderer, &content_limits(self.width));
+        let limits = match self.fit_height {
+            Some(min) => content_limits_within(
+                self.width,
+                fitted_height(bounds.height, self.position.y, min),
+            ),
+            None => content_limits(self.width),
+        };
+        let content = self
+            .content
+            .as_widget_mut()
+            .layout(self.tree, renderer, &limits);
         let position = if self.fit_to_window {
             Point::new(
                 self.position
@@ -338,5 +372,16 @@ impl<Message: Clone> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, 
 impl<'a, Message: Clone + 'a> From<Floating<'a, Message>> for Element<'a, Message> {
     fn from(floating: Floating<'a, Message>) -> Self {
         Self::new(floating)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fitted_height_takes_the_room_below_but_never_less_than_min() {
+        assert_eq!(fitted_height(900.0, 300.0, 220.0), 592.0);
+        assert_eq!(fitted_height(500.0, 300.0, 220.0), 220.0);
     }
 }
