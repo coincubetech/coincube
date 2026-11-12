@@ -96,9 +96,9 @@ pub struct SparkReceive {
     sideshift_flow: Option<SparkSideshiftReceiveFlow>,
     /// Currently selected method. Toggling methods resets the phase.
     pub method: SparkReceiveMethod,
-    /// Whether the "THEY SEND" picker modal is open (overlays the panel).
+    /// Whether the "THEY SEND" menu is open under its tile.
     sender_picker_open: bool,
-    /// Whether the "YOU RECEIVE" picker modal is open.
+    /// Whether the "YOU RECEIVE" menu is open under its tile.
     receiver_picker_open: bool,
     /// The wallet's auto-convert state (incoming bitcoin → USDB), which the
     /// YOU RECEIVE tile shows and its picker changes. `None` until read.
@@ -293,7 +293,7 @@ impl State for SparkReceive {
             // What the payer sends is picked from the THEY SEND tile.
             crate::app::view::spark::sub_page_head(cache, "Receive")
         });
-        let content = crate::app::view::dashboard_payment(
+        crate::app::view::dashboard_payment(
             menu,
             cache,
             head,
@@ -332,6 +332,13 @@ impl State for SparkReceive {
                 mask_amounts: cache.balance_amounts_masked(),
                 sideshift_body,
                 cross_network_selected,
+                open_menu: if self.sender_picker_open {
+                    Some(crate::app::view::spark::receive::ReceiveMenu::TheySend)
+                } else if self.receiver_picker_open {
+                    Some(crate::app::view::spark::receive::ReceiveMenu::YouReceive)
+                } else {
+                    None
+                },
                 receive_usd: self.auto_convert == Some(true),
                 lightning_address_setup: &cache.lightning_address_setup,
                 swap_deposit: self
@@ -340,34 +347,7 @@ impl State for SparkReceive {
                     .map(|d| (d.txid.as_str(), d.vout)),
             }
             .render(),
-        );
-
-        // The "THEY SEND" picker overlays the whole panel when open — same
-        // pattern as Liquid Receive. Owned here because the open flag lives in
-        // this state.
-        if self.sender_picker_open {
-            let modal_content = crate::app::view::spark::sender_picker_modal(
-                self.method,
-                self.sideshift_flow.as_ref().map(|flow| flow.selected()),
-                cache.network,
-            );
-            return coincube_ui::widget::modal::Modal::new(content, modal_content)
-                .on_blur(Some(crate::app::view::Message::SparkReceive(
-                    crate::app::view::SparkReceiveMessage::CloseSenderPicker,
-                )))
-                .into();
-        }
-        if self.receiver_picker_open {
-            let modal_content = crate::app::view::spark::receive::receiver_picker_modal(
-                self.auto_convert == Some(true),
-            );
-            return coincube_ui::widget::modal::Modal::new(content, modal_content)
-                .on_blur(Some(crate::app::view::Message::SparkReceive(
-                    crate::app::view::SparkReceiveMessage::CloseReceiverPicker,
-                )))
-                .into();
-        }
-        content
+        )
     }
 
     fn reload(
@@ -483,6 +463,9 @@ impl State for SparkReceive {
 
         match msg {
             SparkReceiveMessage::OpenSenderPicker => {
+                // One menu at a time: the other tile is still reachable from
+                // the keyboard while a menu is open.
+                self.receiver_picker_open = false;
                 self.sender_picker_open = true;
                 Task::none()
             }
@@ -490,6 +473,7 @@ impl State for SparkReceive {
                 // US Dollar exists where conversions run (mainnet); elsewhere
                 // Bitcoin is the only thing Spark receives, so nothing to pick.
                 if crate::app::state::spark::swap::swap_available(cache.network) {
+                    self.sender_picker_open = false;
                     self.receiver_picker_open = true;
                 }
                 Task::none()
@@ -1784,6 +1768,14 @@ mod tests {
 
         update(&mut panel, SparkReceiveMessage::CloseSenderPicker);
         assert!(!panel.sender_picker_open);
+
+        // One menu at a time, whichever tile opens it.
+        update(&mut panel, SparkReceiveMessage::OpenSenderPicker);
+        update(&mut panel, SparkReceiveMessage::OpenReceiverPicker);
+        assert!(panel.receiver_picker_open && !panel.sender_picker_open);
+        update(&mut panel, SparkReceiveMessage::OpenSenderPicker);
+        assert!(panel.sender_picker_open && !panel.receiver_picker_open);
+        update(&mut panel, SparkReceiveMessage::CloseSenderPicker);
 
         update(&mut panel, SparkReceiveMessage::OpenSenderPicker);
         update(

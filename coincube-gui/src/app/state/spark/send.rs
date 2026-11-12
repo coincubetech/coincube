@@ -534,7 +534,7 @@ pub struct SparkSend {
     /// two-card selector, the destination placeholder, and which send path
     /// `PrepareRequested` takes.
     receive_target: SparkSendTarget,
-    /// Whether the "THEY RECEIVE" picker modal is open.
+    /// Whether the "THEY RECEIVE" menu is open under its tile.
     receive_picker_open: bool,
     /// The balance this send pays from (S4): Bitcoin by default.
     pay_from: WalletAsset,
@@ -994,7 +994,7 @@ impl State for SparkSend {
                 ),
             )
         });
-        let content = crate::app::view::dashboard_payment(
+        crate::app::view::dashboard_payment(
             menu,
             cache,
             head,
@@ -1026,6 +1026,13 @@ impl State for SparkSend {
                 ),
                 pay_from: self.pay_from,
                 usdb_unavailable: self.usdb_selectable().err(),
+                open_menu: if self.pay_from_picker_open {
+                    Some(crate::app::view::spark::send::SendMenu::PayFrom)
+                } else if self.receive_picker_open {
+                    Some(crate::app::view::spark::send::SendMenu::TheyReceive)
+                } else {
+                    None
+                },
                 paid_from: self.prepared_pay_from,
                 conversion: self.prepared_conversion.as_deref(),
                 token_payment: self.prepared_token_payment.as_ref(),
@@ -1065,40 +1072,7 @@ impl State for SparkSend {
                 theme_mode: cache.theme_mode,
             }
             .render(),
-        );
-
-        if self.pay_from_picker_open {
-            return coincube_ui::widget::modal::Modal::new(
-                content,
-                crate::app::view::spark::send::pay_from_picker_modal(
-                    self.pay_from,
-                    self.usdb_selectable().err(),
-                    crate::app::view::spark::SparkBalances::new(
-                        cache,
-                        self.btc_balance_sats,
-                        self.usdb_balance.as_ref(),
-                    ),
-                ),
-            )
-            .on_blur(Some(crate::app::view::Message::SparkSend(
-                crate::app::view::SparkSendMessage::ClosePayFromPicker,
-            )))
-            .into();
-        }
-        // The "THEY RECEIVE" picker overlays the panel when open — same pattern
-        // as the Spark Receive redesign.
-        if self.receive_picker_open {
-            let modal_content = crate::app::view::spark::send_target_picker_modal(
-                self.receive_target,
-                cache.network,
-            );
-            return coincube_ui::widget::modal::Modal::new(content, modal_content)
-                .on_blur(Some(crate::app::view::Message::SparkSend(
-                    crate::app::view::SparkSendMessage::CloseReceivePicker,
-                )))
-                .into();
-        }
-        content
+        )
     }
 
     fn reload(
@@ -1193,6 +1167,9 @@ impl State for SparkSend {
                 Task::none()
             }
             SparkSendMessage::OpenReceivePicker => {
+                // One menu at a time: the other tile is still reachable from
+                // the keyboard while a menu is open.
+                self.pay_from_picker_open = false;
                 self.receive_picker_open = true;
                 Task::none()
             }
@@ -1204,6 +1181,7 @@ impl State for SparkSend {
                 // A stablecoin send is BTC-funded cross-chain and a US Dollar
                 // send moves US Dollar: no choice.
                 if self.receive_target.fixed_pay_from().is_none() {
+                    self.receive_picker_open = false;
                     self.pay_from_picker_open = true;
                 }
                 Task::none()
@@ -4299,6 +4277,18 @@ mod tests {
         assert!(!panel.receive_picker_open);
         assert!(matches!(panel.phase, SparkSendPhase::Idle));
         assert_eq!(panel.receive_target, SparkSendTarget::Lightning);
+    }
+
+    /// The route menus are dropdowns, so the other tile stays reachable from
+    /// the keyboard while one is open: opening it closes the first.
+    #[test]
+    fn opening_one_route_menu_closes_the_other() {
+        let mut panel = SparkSend::new(None);
+        let _ = send(&mut panel, SparkSendMessage::OpenReceivePicker);
+        let _ = send(&mut panel, SparkSendMessage::OpenPayFromPicker);
+        assert!(panel.pay_from_picker_open && !panel.receive_picker_open);
+        let _ = send(&mut panel, SparkSendMessage::OpenReceivePicker);
+        assert!(panel.receive_picker_open && !panel.pay_from_picker_open);
     }
 
     #[test]

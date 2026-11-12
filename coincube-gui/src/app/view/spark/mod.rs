@@ -18,8 +18,8 @@ pub mod swap;
 pub mod transactions;
 
 pub use overview::{SparkOverviewView, SparkPaymentMethod, SparkRecentTransaction, SparkStatus};
-pub use receive::{sender_picker_modal, SparkReceiveView};
-pub use send::{send_target_picker_modal, SparkSendView};
+pub use receive::SparkReceiveView;
+pub use send::SparkSendView;
 pub use settings::{SparkSettingsStatus, SparkSettingsView};
 pub use sideshift_receive::spark_sideshift_receive_view;
 pub use transactions::{SparkTransactionsStatus, SparkTransactionsView};
@@ -35,7 +35,9 @@ pub(crate) fn route_tile_body<'a, M: 'a>(
     hint: Option<&'static str>,
     asset: String,
     place: String,
-    chevron: bool,
+    // `Some(open)` for a tile that opens a menu: the chevron points up while
+    // its menu is open.
+    chevron: Option<bool>,
 ) -> coincube_ui::widget::Element<'a, M> {
     use coincube_ui::component::text::*;
     use coincube_ui::theme;
@@ -78,11 +80,15 @@ pub(crate) fn route_tile_body<'a, M: 'a>(
                         .push(text(place).size(P1_SIZE + 2).style(theme::text::secondary)),
                 ),
         );
-    if chevron {
+    if let Some(open) = chevron {
         row = row.push(
-            coincube_ui::icon::down_icon()
-                .size(16)
-                .style(theme::text::secondary),
+            if open {
+                coincube_ui::icon::up_icon()
+            } else {
+                coincube_ui::icon::down_icon()
+            }
+            .size(16)
+            .style(theme::text::secondary),
         );
     }
     Container::new(row)

@@ -20,7 +20,7 @@ use coincube_ui::{
     icon,
     image::{asset_logo, asset_network_logo},
     theme,
-    widget::{action::Action, Column, ColumnExt, Container, Element, Row, RowExt},
+    widget::{action::Action, Column, ColumnExt, Container, Element, Row},
 };
 use iced::{
     widget::{container, text_input, Space},
@@ -32,7 +32,6 @@ use coincube_core::miniscript::bitcoin::{Amount, Network};
 use crate::app::breez_spark::assets::stable_token_as_sats;
 use crate::app::state::spark::cross_chain::{self, supported_on};
 use crate::app::state::spark::send::{CrossChainContext, SparkSendPhase, SparkSendTarget};
-use crate::app::view::shared::picker::{picker_modal_card, picker_row_selected};
 use crate::app::view::spark::{last_tx::last_transactions_section, SparkRecentTransaction};
 use crate::app::view::{Message, SparkSendMessage};
 
@@ -66,6 +65,8 @@ pub struct SparkSendView<'a> {
     pub pay_from: coincube_spark_protocol::WalletAsset,
     /// Why US Dollar can't pay this send, or `None` when it can.
     pub usdb_unavailable: Option<&'static str>,
+    /// The route menu open under its tile, if any.
+    pub open_menu: Option<SendMenu>,
     /// What the prepared preview pays from, and the conversion funding it.
     pub paid_from: coincube_spark_protocol::WalletAsset,
     pub conversion: Option<&'a coincube_spark_protocol::ConversionQuote>,
@@ -287,6 +288,12 @@ impl<'a> SparkSendView<'a> {
                     .push(card_section(spark_send_cards(
                         self.receive_target,
                         self.pay_from,
+                        SendMenus {
+                            open: self.open_menu,
+                            usdb_unavailable: self.usdb_unavailable,
+                            balances: self.balances,
+                            network: self.network,
+                        },
                     )))
                     .push(iced::widget::rule::horizontal(1))
                     .push(card_section(
@@ -1763,7 +1770,6 @@ const RECEIVE_TARGET_ACTION_ID: &str = "spark-send-receive-target";
 pub const PAY_FROM_ACTION_ID: &str = "spark-send-pay-from";
 pub const PAY_FROM_BITCOIN_ID: &str = "spark-send-pay-from-bitcoin";
 pub const PAY_FROM_USDB_ID: &str = "spark-send-pay-from-usdb";
-const PAY_FROM_CLOSE_ID: &str = "spark-send-pay-from-close";
 
 fn pay_from_label(asset: coincube_spark_protocol::WalletAsset) -> &'static str {
     match asset {
@@ -1796,14 +1802,17 @@ pub fn conversion_line(
     format!("{} → {}", side(quote.amount_in), side(quote.amount_out))
 }
 
-/// "You send from": Bitcoin or US Dollar, each with its balance (P-Send's
-/// pay-from picker). US Dollar is offered only when it covers the send;
-/// otherwise it says why and can't be picked.
-pub fn pay_from_picker_modal<'a>(
+/// The "YOU SEND FROM" menu: Bitcoin or US Dollar, each with its balance.
+/// US Dollar can't be picked when `usdb_unavailable` says why; that reason
+/// shows in its place.
+pub fn pay_from_picker_menu<'a>(
     current: coincube_spark_protocol::WalletAsset,
     usdb_unavailable: Option<&'static str>,
     balances: crate::app::view::spark::SparkBalances<'a>,
 ) -> Element<'a, Message> {
+    use crate::app::view::shared::picker::{
+        dropdown_heading, dropdown_menu, dropdown_note, dropdown_option, DROPDOWN_LOGO,
+    };
     use coincube_spark_protocol::WalletAsset;
     let (rows, _) = balances.rows();
     let balance_of = |name: &str| {
@@ -1812,88 +1821,37 @@ pub fn pay_from_picker_modal<'a>(
             .map(|(_, figure, unit)| format!("{} {}", figure, unit))
             .unwrap_or_else(|| "0".to_owned())
     };
-    let option =
-        |asset: WalletAsset, id: &'static str, logo: Element<'a, Message>, badge: &'static str| {
-            let enabled = asset == WalletAsset::Bitcoin || usdb_unavailable.is_none();
-            let selected = asset == current;
-            let line = match (asset, usdb_unavailable) {
-                (WalletAsset::Usdb, Some(reason)) => localized_copy(reason).to_owned(),
-                _ => balance_of(pay_from_label(asset)),
-            };
-            let row = Row::new()
-                .spacing(12)
-                .align_y(Alignment::Center)
-                .push(logo)
-                .push(
-                    Column::new()
-                        .spacing(2)
-                        .push(
-                            Row::new()
-                                .spacing(8)
-                                .align_y(Alignment::Center)
-                                .push(
-                                    text(pay_from_label(asset))
-                                        .size(P1_SIZE)
-                                        .bold()
-                                        .style(theme::text::primary),
-                                )
-                                .push(orange_badge(badge)),
-                        )
-                        .push(text(line).size(P2_SIZE).style(theme::text::secondary)),
-                )
-                .push(Space::new().width(Length::Fill))
-                .push_maybe(selected.then(|| icon::check2_icon().size(18).color(color::ORANGE)));
-            Action::new(
-                id,
-                Container::new(row)
-                    .padding([12, 16])
-                    .width(Length::Fill)
-                    .style(if selected {
-                        picker_row_selected
-                    } else {
-                        crate::app::view::shared::picker::picker_row_idle
-                    }),
-                Message::FocusAction,
-            )
-            .style(picker_action_style)
-            .padding(0)
-            .width(Length::Fill)
-            .focus_radius(8.0)
-            .on_press_maybe(
-                enabled.then_some(Message::SparkSend(SparkSendMessage::SelectPayFrom(asset))),
-            )
+    let option = |asset: WalletAsset, id: &'static str, coin: &str, chip: &str| {
+        let enabled = asset == WalletAsset::Bitcoin || usdb_unavailable.is_none();
+        let line = match (asset, usdb_unavailable) {
+            (WalletAsset::Usdb, Some(reason)) => localized_copy(reason).to_owned(),
+            _ => balance_of(pay_from_label(asset)),
         };
-    let list = Column::new()
-        .spacing(8)
-        .push(option(
-            WalletAsset::Bitcoin,
-            PAY_FROM_BITCOIN_ID,
-            asset_network_logo("btc", "spark", 36.0),
-            "SPARK",
-        ))
-        .push(option(
-            WalletAsset::Usdb,
-            PAY_FROM_USDB_ID,
-            asset_network_logo("usdb", "spark", 36.0),
-            "USDB",
-        ))
-        .push(p2_regular(PAY_FROM_BITCOIN_NOTE).style(theme::text::secondary))
-        .push(
-            Row::new().push(Space::new().width(Length::Fill)).push(
-                Action::new(
-                    PAY_FROM_CLOSE_ID,
-                    text(CopyText::Close.get()).size(P2_SIZE).bold(),
-                    Message::FocusAction,
-                )
-                .style(theme::button::transparent_border)
-                .padding([8, 18])
-                .on_press(Message::SparkSend(SparkSendMessage::ClosePayFromPicker)),
-            ),
-        );
-    picker_modal_card(coincube_ui::locale::copy("YOU SEND FROM"), list)
+        dropdown_option(
+            id,
+            asset_network_logo(coin, "spark", DROPDOWN_LOGO),
+            pay_from_label(asset),
+            chip,
+            Some(line),
+            asset == current,
+            enabled.then_some(Message::SparkSend(SparkSendMessage::SelectPayFrom(asset))),
+            Message::FocusAction,
+        )
+    };
+    dropdown_menu(
+        Column::new()
+            .push(dropdown_heading(localized_copy("Your Spark balances")))
+            .push(option(
+                WalletAsset::Bitcoin,
+                PAY_FROM_BITCOIN_ID,
+                "btc",
+                "SPARK",
+            ))
+            .push(option(WalletAsset::Usdb, PAY_FROM_USDB_ID, "usdb", "USDB"))
+            .push(dropdown_note(PAY_FROM_BITCOIN_NOTE)),
+    )
 }
 const PREPARE_ACTION_ID: &str = "spark-send-prepare";
-const TARGET_PICKER_CLOSE_ID: &str = "spark-send-target-picker-close";
 
 fn target_action_id(target: SparkSendTarget) -> &'static str {
     match target {
@@ -1976,22 +1934,6 @@ fn receive_tile_button_style(
     }
 }
 
-/// Picker rows draw their surface in the inner container (selected or not),
-/// so the button itself stays clear.
-fn picker_action_style(
-    _: &theme::Theme,
-    _: iced::widget::button::Status,
-) -> iced::widget::button::Style {
-    iced::widget::button::Style {
-        background: Some(Background::Color(color::TRANSPARENT)),
-        border: iced::Border {
-            radius: 8.0.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
 /// The card's footer while composing: one status line and Prepare. `None`
 /// renders Prepare without a press — Tab skips it and no key or pointer can
 /// activate it — rather than hiding it, so the footer keeps its shape.
@@ -2029,17 +1971,20 @@ fn target_place(target: SparkSendTarget) -> &'static str {
 }
 
 /// The "YOU SEND → THEY RECEIVE" pair, as slim tiles like Receive's. THEY
-/// RECEIVE always opens the rail picker; YOU SEND opens the balance picker
-/// only where the target leaves a choice (bitcoin rails). A chevron and the
-/// hover outline mark each tappable tile.
+/// RECEIVE always opens the rail menu; YOU SEND opens the balance menu only
+/// where the target leaves a choice (bitcoin rails). Each menu is anchored
+/// under its tile; a chevron and the hover outline mark each tappable tile.
 fn spark_send_cards<'a>(
     target: SparkSendTarget,
     pay_from: coincube_spark_protocol::WalletAsset,
+    menus: SendMenus<'a>,
 ) -> Element<'a, Message> {
+    use crate::app::view::shared::picker::anchored_dropdown;
     // A stablecoin send is BTC-funded cross-chain and US Dollar over Spark
     // moves US Dollar, so only bitcoin rails offer a choice of balance (S4).
     let choose = target.fixed_pay_from().is_none();
     let pay_from = target.fixed_pay_from().unwrap_or(pay_from);
+    let pay_from_open = choose && menus.open == Some(SendMenu::PayFrom);
     let (logo, label): (Element<'a, Message>, &'static str) = match pay_from {
         coincube_spark_protocol::WalletAsset::Usdb => (
             asset_network_logo("usdb", "spark", 36.0),
@@ -2053,16 +1998,24 @@ fn spark_send_cards<'a>(
         None,
         label.to_string(),
         localized_copy("in Spark").to_string(),
-        choose,
+        choose.then_some(pay_from_open),
     );
     let you_send: Element<'a, Message> = if choose {
-        Action::new(PAY_FROM_ACTION_ID, you_send_body, Message::FocusAction)
-            .style(receive_tile_button_style)
-            .padding(0)
-            .width(Length::Fill)
-            .focus_radius(8.0)
-            .on_press(Message::SparkSend(SparkSendMessage::OpenPayFromPicker))
-            .into()
+        anchored_dropdown(
+            Action::new(PAY_FROM_ACTION_ID, you_send_body, Message::FocusAction)
+                .style(if pay_from_open {
+                    open_tile_button_style
+                } else {
+                    receive_tile_button_style
+                })
+                .padding(0)
+                .width(Length::Fill)
+                .focus_radius(8.0)
+                .on_press(Message::SparkSend(SparkSendMessage::OpenPayFromPicker)),
+            pay_from_open
+                .then(|| pay_from_picker_menu(pay_from, menus.usdb_unavailable, menus.balances)),
+            Message::SparkSend(SparkSendMessage::ClosePayFromPicker),
+        )
     } else {
         Container::new(you_send_body)
             .width(Length::Fill)
@@ -2070,24 +2023,35 @@ fn spark_send_cards<'a>(
             .into()
     };
 
-    let they_receive = Action::new(
-        RECEIVE_TARGET_ACTION_ID,
-        super::route_tile_body(
-            target_logo(target, 36.0),
-            "They receive",
-            None,
-            localized_copy(target.label()).to_string(),
-            localized_copy(target_place(target)).to_string(),
-            true,
-        ),
-        Message::FocusAction,
-    )
-    .style(receive_tile_button_style)
-    .padding(0)
-    .width(Length::Fill)
-    .focus_radius(8.0)
-    .on_press(Message::SparkSend(SparkSendMessage::OpenReceivePicker));
+    let receive_open = menus.open == Some(SendMenu::TheyReceive);
+    let they_receive = anchored_dropdown(
+        Action::new(
+            RECEIVE_TARGET_ACTION_ID,
+            super::route_tile_body(
+                target_logo(target, 36.0),
+                "They receive",
+                None,
+                localized_copy(target.label()).to_string(),
+                localized_copy(target_place(target)).to_string(),
+                Some(receive_open),
+            ),
+            Message::FocusAction,
+        )
+        .style(if receive_open {
+            open_tile_button_style
+        } else {
+            receive_tile_button_style
+        })
+        .padding(0)
+        .width(Length::Fill)
+        .focus_radius(8.0)
+        .on_press(Message::SparkSend(SparkSendMessage::OpenReceivePicker)),
+        receive_open.then(|| send_target_picker_menu(target, menus.network)),
+        Message::SparkSend(SparkSendMessage::CloseReceivePicker),
+    );
 
+    // An open menu floats under its tile and takes no room, so the pair keeps
+    // its height and the arrow stays centred either way.
     Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
@@ -2098,57 +2062,64 @@ fn spark_send_cards<'a>(
         .into()
 }
 
-/// One rail in the THEY RECEIVE picker: logo, asset, rail badge and — for the
-/// current selection — a check on a tinted surface. Selection is styling only;
-/// every offered rail stays pressable.
-fn target_picker_row<'a>(target: SparkSendTarget, selected: bool) -> Element<'a, Message> {
-    let row = Row::new()
-        .spacing(12)
-        .align_y(Alignment::Center)
-        .push(target_logo(target, 36.0))
-        .push(
-            text(target.label())
-                .size(P1_SIZE)
-                .bold()
-                .style(theme::text::primary),
-        )
-        .push(orange_badge(localized_copy(target.badge())))
-        .push(Space::new().width(Length::Fill))
-        .push_maybe(selected.then(|| icon::check2_icon().size(18).color(color::ORANGE)));
-
-    Action::new(
-        target_action_id(target),
-        Container::new(row)
-            .padding([12, 16])
-            .width(Length::Fill)
-            .style(if selected {
-                picker_row_selected
-            } else {
-                crate::app::view::shared::picker::picker_row_idle
-            }),
-        Message::FocusAction,
-    )
-    .style(picker_action_style)
-    .padding(0)
-    .width(Length::Fill)
-    .focus_radius(8.0)
-    .on_press(Message::SparkSend(SparkSendMessage::SetReceiveTarget(
-        target,
-    )))
-    .into()
+/// Which route menu is open on Send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendMenu {
+    PayFrom,
+    TheyReceive,
 }
 
-/// The "THEY RECEIVE" picker modal: bitcoin rails, then (mainnet only) the
-/// cross-chain stablecoins. Overlaid by the state's `view()`.
-pub fn send_target_picker_modal<'a>(
+/// What the route tiles need to draw their menus.
+#[derive(Clone, Copy)]
+pub struct SendMenus<'a> {
+    pub open: Option<SendMenu>,
+    pub usdb_unavailable: Option<&'static str>,
+    pub balances: crate::app::view::spark::SparkBalances<'a>,
+    pub network: Network,
+}
+
+/// A route tile while its menu is open: the hovered tile's surface with the
+/// accent line, so the tile reads as the menu's owner.
+fn open_tile_button_style(
+    theme: &theme::Theme,
+    _: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let (background, mut border) = route_tile_style(theme, true);
+    border.color = theme.colors.shell.accent;
+    iced::widget::button::Style {
+        background: Some(background),
+        text_color: theme.colors.shell.ink,
+        border,
+        ..Default::default()
+    }
+}
+
+/// The "THEY RECEIVE" menu: bitcoin rails, then (mainnet only) US Dollar over
+/// Spark and the cross-chain stablecoins. Selection is styling only; every
+/// offered rail stays pressable.
+pub fn send_target_picker_menu<'a>(
     current: SparkSendTarget,
     network: Network,
 ) -> Element<'a, Message> {
-    let row = |target: SparkSendTarget| target_picker_row(target, current == target);
+    use crate::app::view::shared::picker::{
+        dropdown_heading, dropdown_menu, dropdown_option, DROPDOWN_LOGO,
+    };
+    let row = |target: SparkSendTarget| {
+        dropdown_option(
+            target_action_id(target),
+            target_logo(target, DROPDOWN_LOGO),
+            localized_copy(target.label()),
+            localized_copy(target.badge()),
+            None,
+            current == target,
+            Some(Message::SparkSend(SparkSendMessage::SetReceiveTarget(
+                target,
+            ))),
+            Message::FocusAction,
+        )
+    };
 
-    let mut list = Column::new()
-        .spacing(8)
-        .push(text("Bitcoin").size(P2_SIZE).style(theme::text::secondary));
+    let mut list = Column::new().push(dropdown_heading("Bitcoin"));
     for target in [
         SparkSendTarget::Lightning,
         SparkSendTarget::OnChain,
@@ -2160,44 +2131,20 @@ pub fn send_target_picker_modal<'a>(
     // USDB is a mainnet token, so US Dollar over Spark is offered there only.
     if network == Network::Bitcoin {
         list = list
-            .push(Space::new().height(Length::Fixed(6.0)))
-            .push(
-                text(localized_copy("US Dollar"))
-                    .size(P2_SIZE)
-                    .style(theme::text::secondary),
-            )
+            .push(dropdown_heading(localized_copy("US Dollar")))
             .push(row(SparkSendTarget::SparkUsd));
     }
 
     // Cross-chain stablecoins are mainnet-only (providers/chains have no test
     // deployment), so they only appear there.
     if supported_on(network) {
-        list = list.push(Space::new().height(Length::Fixed(6.0))).push(
-            text(localized_copy("Stablecoin (cross-chain)"))
-                .size(P2_SIZE)
-                .style(theme::text::secondary),
-        );
+        list = list.push(dropdown_heading(localized_copy("Stablecoin (cross-chain)")));
         for target in [SparkSendTarget::Usdt, SparkSendTarget::Usdc] {
             list = list.push(row(target));
         }
     }
 
-    // An explicit way out for keyboard users; a click outside the card still
-    // closes it through the modal's blur message.
-    list = list.push(Space::new().height(Length::Fixed(4.0))).push(
-        Row::new().push(Space::new().width(Length::Fill)).push(
-            Action::new(
-                TARGET_PICKER_CLOSE_ID,
-                text(CopyText::Close.get()).size(P2_SIZE).bold(),
-                Message::FocusAction,
-            )
-            .style(theme::button::transparent_border)
-            .padding([8, 18])
-            .on_press(Message::SparkSend(SparkSendMessage::CloseReceivePicker)),
-        ),
-    );
-
-    picker_modal_card(coincube_ui::locale::copy("THEY RECEIVE"), list)
+    dropdown_menu(list)
 }
 
 #[cfg(test)]
@@ -2275,7 +2222,7 @@ mod tests {
     use iced::advanced::widget::operation::{self, focusable, Focusable, TextInput};
     use iced::advanced::widget::{Id, Operation, Tree};
     use iced::advanced::{clipboard, layout, overlay, renderer::Headless, Layout, Shell};
-    use iced::{keyboard, mouse, Event, Rectangle, Size, Vector};
+    use iced::{keyboard, mouse, Event, Point, Rectangle, Size, Vector};
 
     const COMPACT: (u32, u32) = (1024, 768);
     const WIDE: (u32, u32) = (1440, 900);
@@ -2481,6 +2428,7 @@ mod tests {
                 usdb_conversion_hint: self.hint.clone(),
                 pay_from: self.pay_from,
                 usdb_unavailable: self.usdb_unavailable,
+                open_menu: None,
                 paid_from: self.pay_from,
                 conversion: self.conversion.as_ref(),
                 token_payment: self.token_payment.as_ref(),
@@ -2516,14 +2464,15 @@ mod tests {
     }
 
     /// The panel exactly as `SparkSend::view` builds it: the real dashboard
-    /// around the real presenter, and the real picker as a blur-closing modal.
+    /// around the real presenter, with the THEY RECEIVE menu open under its
+    /// tile when `picker_open`.
     fn screen<'a>(
         fixture: &'a Fixture,
         menu: &'a Menu,
         cache: &'a Cache,
         picker_open: bool,
     ) -> Element<'a, Message> {
-        let content = crate::app::view::dashboard_payment(
+        crate::app::view::dashboard_payment(
             menu,
             cache,
             Some(crate::app::view::spark::sub_page_head(cache, "Send").rule(
@@ -2532,19 +2481,14 @@ mod tests {
                     send_step(&fixture.phase),
                 ),
             )),
-            fixture.view().render(),
-        );
-        if picker_open {
-            return coincube_ui::widget::modal::Modal::new(
-                content,
-                send_target_picker_modal(fixture.target, cache.network),
-            )
-            .on_blur(Some(Message::SparkSend(
-                SparkSendMessage::CloseReceivePicker,
-            )))
-            .into();
-        }
-        content
+            {
+                let mut view = fixture.view();
+                if picker_open {
+                    view.open_menu = Some(SendMenu::TheyReceive);
+                }
+                view.render()
+            },
+        )
     }
 
     fn spark_send_menu() -> Menu {
@@ -2676,8 +2620,8 @@ mod tests {
             );
         }
 
-        /// The runtime's whole-tree operation: the base first, then the modal
-        /// overlay, which is where the open picker's rows live.
+        /// The runtime's whole-tree operation: the base first, then the
+        /// overlay, which is where the open menu's rows live.
         fn operate(&mut self, operation: &mut dyn Operation) {
             self.element.as_widget_mut().operate(
                 &mut self.tree,
@@ -2849,7 +2793,7 @@ mod tests {
         fn render_pixels(&mut self, scenario: &str, theme: &theme::Theme, redraw: bool) -> Vec<u8> {
             let viewport = Rectangle::with_size(self.size);
             if redraw {
-                // The picker lives in Modal's separate overlay tree. Use the
+                // The open menu is drawn as an overlay. Use the
                 // same overlay-first event route as actual pointer/key input.
                 let messages = self.send(
                     Event::Window(iced::window::Event::RedrawRequested(
@@ -2895,7 +2839,7 @@ mod tests {
                 .map(overlay::Nested::new)
             {
                 // Match UserInterface::draw: Nested supplies the renderer
-                // layer that keeps the modal above the dashboard's batches.
+                // layer that keeps the menu above the dashboard's batches.
                 let node = overlay.layout(&self.renderer, self.size);
                 overlay.draw(
                     &mut self.renderer,
@@ -3131,7 +3075,7 @@ mod tests {
         };
         let short = capture::inspect(
             "spark-send-pay-from-short",
-            pay_from_picker_modal(
+            pay_from_picker_menu(
                 WalletAsset::Bitcoin,
                 Some("Your USDB doesn't cover this amount."),
                 balances(Some(&usdb)),
@@ -3140,11 +3084,11 @@ mod tests {
             "dark",
             theme::Theme::dark(),
         );
-        assert!(short.contains("YOU SEND FROM") && short.contains("Bitcoin is used first."));
+        assert!(short.contains("YOUR SPARK BALANCES") && short.contains("Bitcoin is used first."));
         assert!(short.contains("Your USDB doesn't cover this amount."));
         assert!(!short.has_focus(iced::advanced::widget::Id::new(PAY_FROM_USDB_ID)));
         let picked = capture::activate(
-            pay_from_picker_modal(WalletAsset::Bitcoin, None, balances(Some(&usdb))),
+            pay_from_picker_menu(WalletAsset::Bitcoin, None, balances(Some(&usdb))),
             iced::advanced::widget::Id::new(PAY_FROM_USDB_ID),
             (1440, 900),
             true,
@@ -3155,7 +3099,7 @@ mod tests {
         )));
         let covered = capture::inspect(
             "spark-send-pay-from-covered",
-            pay_from_picker_modal(WalletAsset::Bitcoin, None, balances(Some(&usdb))),
+            pay_from_picker_menu(WalletAsset::Bitcoin, None, balances(Some(&usdb))),
             (1440, 900),
             "dark",
             theme::Theme::dark(),
@@ -3692,14 +3636,12 @@ mod tests {
                     SparkSendTarget::all()
                         .iter()
                         .any(|target| *id == Id::new(target_action_id(*target)))
-                        || *id == Id::new(TARGET_PICKER_CLOSE_ID)
                 })
                 .collect();
-            let mut expected: Vec<Id> = offered
+            let expected: Vec<Id> = offered
                 .iter()
                 .map(|target| Id::new(target_action_id(*target)))
                 .collect();
-            expected.push(Id::new(TARGET_PICKER_CLOSE_ID));
             assert_eq!(picker, expected, "{:?}: offered rails, in order", network);
 
             // Adjacent rows leave the four-pixel ring outset clear.
@@ -3738,12 +3680,46 @@ mod tests {
                 harness.key(keyboard::key::Named::Enter, false, false);
             }
 
+            // Escape closes the menu from its rows; there is no Close button.
             let mut harness = Harness::new(screen(&fixture, &menu, &cache, true), COMPACT);
-            harness.focus(TARGET_PICKER_CLOSE_ID);
+            harness.focus(target_action_id(offered[0]));
             assert_eq!(
-                seen(harness.key(keyboard::key::Named::Space, true, false)),
+                seen(harness.key(keyboard::key::Named::Escape, true, false)),
                 vec![Seen::ClosePicker]
             );
+        }
+    }
+
+    /// On a window too short for the whole THEY RECEIVE menu, the menu stops
+    /// above the window's bottom edge and scrolls instead of running off it.
+    #[test]
+    fn the_receive_menu_scrolls_in_a_short_window() {
+        const SHORT: (u32, u32) = (1024, 600);
+        let menu = spark_send_menu();
+        for mode in themes() {
+            let fixture = Fixture::new(SparkSendPhase::Idle).themed(mode);
+            let cache = fixture.cache();
+            let theme = fixture.theme();
+            let mut harness = Harness::new(screen(&fixture, &menu, &cache, true), SHORT);
+            // Laid out in full, the last rail would sit below the window.
+            let usdc = harness
+                .probe()
+                .bounds(target_action_id(SparkSendTarget::Usdc))
+                .expect("USDC row bounds");
+            assert!(usdc.y + usdc.height > SHORT.1 as f32);
+            // The menu's frame is drawn inside the window: its bottom line
+            // sits above the bottom margin, under the menu's own column.
+            let pixels = harness.render_pixels("picker-short", &theme, true);
+            let column = Rectangle::new(
+                Point::new(usdc.x, SHORT.1 as f32 - 4.0),
+                Size::new(usdc.width, 4.0),
+            );
+            assert!(
+                rendered_luma_range(&pixels, harness.size, column) < 12,
+                "{}: the menu must stop short of the window's bottom edge",
+                appearance(mode)
+            );
+            harness.capture("picker-short", &theme, appearance(mode));
         }
     }
 
@@ -3810,35 +3786,17 @@ mod tests {
                 harness.focus(target_action_id(focused));
                 let probe = harness.probe();
                 assert_eq!(probe.focused(), vec![Id::new(target_action_id(focused))]);
-                assert!(probe.contains("THEY RECEIVE"));
-                assert!(probe.contains("Close"));
+                assert!(probe.contains("BITCOIN"));
                 harness.assert_no_horizontal_overflow(scenario);
-                let close_bounds = probe
-                    .text
-                    .iter()
-                    .rev()
-                    .find(|(value, _)| value == "Close")
-                    .map(|(_, bounds)| *bounds)
-                    .expect("picker Close text bounds");
-                let before = harness.render_pixels(scenario, &theme, false);
-                let after = harness.render_pixels(scenario, &theme, true);
-                let initial_contrast = rendered_luma_range(&before, harness.size, close_bounds);
-                let close_contrast = rendered_luma_range(&after, harness.size, close_bounds);
+                // The menu is opaque over the form under the tiles, so the
+                // focused row reads on its own surface.
+                let row = probe
+                    .bounds(target_action_id(focused))
+                    .expect("focused rail row bounds");
+                let pixels = harness.render_pixels(scenario, &theme, false);
                 assert!(
-                    close_contrast >= 80 && close_contrast >= initial_contrast,
-                    "{} {}: redraw must leave Close readable above its card (initial luma range {}, redrawn {})",
-                    scenario,
-                    appearance(mode),
-                    initial_contrast,
-                    close_contrast
-                );
-                assert_eq!(
-                    seen(harness.click(TARGET_PICKER_CLOSE_ID)),
-                    vec![
-                        Seen::Focus(Id::new(TARGET_PICKER_CLOSE_ID)),
-                        Seen::ClosePicker
-                    ],
-                    "{} {}: visible Close must remain actionable",
+                    rendered_luma_range(&pixels, harness.size, row) >= 40,
+                    "{} {}: the focused row must read on the menu surface",
                     scenario,
                     appearance(mode)
                 );
