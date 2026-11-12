@@ -12,7 +12,9 @@ use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Vector};
 /// A widget that centers a modal element over some base element
 pub struct Modal<'a, Message, Theme, Renderer> {
     base: Element<'a, Message, Theme, Renderer>,
-    modal: Element<'a, Message, Theme, Renderer>,
+    /// `None` is a closed modal: the widget is then transparent and the base
+    /// behaves exactly as if it were mounted on its own.
+    modal: Option<Element<'a, Message, Theme, Renderer>>,
     on_blur: Option<Message>,
     cover_window: bool,
 }
@@ -26,9 +28,25 @@ impl<'a, Message, Theme, Renderer> Modal<'a, Message, Theme, Renderer> {
         base: impl Into<Element<'a, Message, Theme, Renderer>>,
         modal: impl Into<Element<'a, Message, Theme, Renderer>>,
     ) -> Self {
+        Self::optional(base, Some(modal))
+    }
+
+    /// Returns a [`Modal`] that is open only while `modal` is `Some`.
+    ///
+    /// Prefer this to choosing between `base` and `Modal::new(base, ..)`:
+    /// the base keeps the same position in the widget tree whether or not
+    /// the modal is open, so iced's tree diff preserves its widget state
+    /// (scroll offsets, text-input focus) across opening and closing.
+    pub fn optional<M>(
+        base: impl Into<Element<'a, Message, Theme, Renderer>>,
+        modal: Option<M>,
+    ) -> Self
+    where
+        M: Into<Element<'a, Message, Theme, Renderer>>,
+    {
         Self {
             base: base.into(),
-            modal: modal.into(),
+            modal: modal.map(Into::into),
             on_blur: None,
             cover_window: false,
         }
@@ -59,11 +77,19 @@ where
     Message: Clone,
 {
     fn children(&self) -> Vec<Tree> {
-        vec![Tree::new(&self.base), Tree::new(&self.modal)]
+        std::iter::once(&self.base)
+            .chain(self.modal.as_ref())
+            .map(Tree::new)
+            .collect()
     }
 
     fn diff(&self, tree: &mut Tree) {
-        tree.diff_children(&[&self.base, &self.modal]);
+        // The base is always child 0, so opening or closing the modal only
+        // adds or drops child 1 and never disturbs the base's state.
+        match &self.modal {
+            Some(modal) => tree.diff_children(&[&self.base, modal]),
+            None => tree.diff_children(&[&self.base]),
+        }
     }
 
     fn size(&self) -> Size<Length> {
@@ -83,17 +109,29 @@ where
 
     fn update(
         &mut self,
-        _state: &mut widget::Tree,
-        _event: &Event,
-        _layout: Layout<'_>,
-        _cursor: mouse::Cursor,
-        _renderer: &Renderer,
-        _clipboard: &mut dyn Clipboard,
-        _shell: &mut Shell<'_, Message>,
-        _viewport: &Rectangle,
+        state: &mut widget::Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
     ) {
         // The base is visible beneath the scrim, but cannot receive input
         // while its overlay is open, including for non-dismissible modals.
+        if self.modal.is_none() {
+            self.base.as_widget_mut().update(
+                &mut state.children[0],
+                event,
+                layout,
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            );
+        }
     }
 
     fn draw(
@@ -120,14 +158,23 @@ where
     fn overlay<'b>(
         &'b mut self,
         state: &'b mut Tree,
-        layout: Layout<'_>,
-        _renderer: &Renderer,
-        _viewport: &Rectangle,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
         translation: Vector,
     ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        let Some(modal) = self.modal.as_mut() else {
+            return self.base.as_widget_mut().overlay(
+                &mut state.children[0],
+                layout,
+                renderer,
+                viewport,
+                translation,
+            );
+        };
         Some(overlay::Element::new(Box::new(Overlay {
             position: layout.position() + translation,
-            content: &mut self.modal,
+            content: modal,
             tree: &mut state.children[1],
             size: layout.bounds().size(),
             on_blur: self.on_blur.clone(),
@@ -137,24 +184,38 @@ where
 
     fn mouse_interaction(
         &self,
-        _state: &widget::Tree,
-        _layout: Layout<'_>,
-        _cursor: mouse::Cursor,
-        _viewport: &Rectangle,
-        _renderer: &Renderer,
+        state: &widget::Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
     ) -> mouse::Interaction {
-        mouse::Interaction::default()
+        if self.modal.is_some() {
+            return mouse::Interaction::default();
+        }
+        self.base.as_widget().mouse_interaction(
+            &state.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
     }
 
     fn operate(
         &mut self,
-        _state: &mut Tree,
-        _layout: Layout<'_>,
-        _renderer: &Renderer,
-        _operation: &mut dyn widget::Operation,
+        state: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn widget::Operation,
     ) {
         // Iced operates the root before its overlay. Including the base here
         // would put hidden controls before the modal in Tab traversal.
+        if self.modal.is_none() {
+            self.base
+                .as_widget_mut()
+                .operate(&mut state.children[0], layout, renderer, operation);
+        }
     }
 }
 
@@ -481,6 +542,79 @@ mod tests {
                 assert_eq!(sheet.size(), base, "the base clips the sheet");
             }
         }
+    }
+
+    /// A closed `optional` modal is its base: focus traversal and keyboard
+    /// input reach it. Opening the modal confines both to the dialog, and
+    /// closing it again finds the base's widget state (here, its focus)
+    /// intact, because the base never moved in the tree.
+    #[test]
+    fn optional_modal_is_transparent_when_closed_and_keeps_base_state() {
+        let mut renderer = renderer();
+        let size = Size::new(400.0, 300.0);
+        let page = |open: bool| -> Element<'static, Message, Theme, crate::widget::Renderer> {
+            Modal::optional(
+                container(column![Action::new(
+                    "background",
+                    text("Background"),
+                    Message::Focus
+                )
+                .on_press(Message::Background)])
+                .width(Length::Fill)
+                .height(Length::Fill),
+                open.then(|| {
+                    column![Action::new("close", text("Close"), Message::Focus)
+                        .on_press(Message::Close)]
+                }),
+            )
+            .on_blur(Some(Message::Close))
+            .into()
+        };
+        let press_enter = |ui: &mut UserInterface<'_, Message, Theme, crate::widget::Renderer>,
+                           renderer: &mut crate::widget::Renderer| {
+            // `Action` activates on press and re-arms on release.
+            let key = keyboard::Key::Named(key::Named::Enter);
+            let release = Event::Keyboard(keyboard::Event::KeyReleased {
+                key: key.clone(),
+                modified_key: key,
+                physical_key: keyboard::key::Physical::Code(key::Code::Enter),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+            });
+            let mut messages = Vec::new();
+            ui.update(
+                &[enter(), release],
+                mouse::Cursor::Unavailable,
+                renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            messages
+        };
+
+        // Closed: the base is reachable and live.
+        let mut ui = UserInterface::build(page(false), size, Cache::new(), &mut renderer);
+        operate(&mut ui, &renderer, focusable::focus_next::<()>());
+        assert_eq!(
+            operate(&mut ui, &renderer, focusable::find_focused()),
+            Some(widget::Id::new("background")),
+        );
+        assert_eq!(press_enter(&mut ui, &mut renderer), [Message::Background]);
+        let cache = ui.into_cache();
+
+        // Open: the base is inert and outside traversal.
+        let mut ui = UserInterface::build(page(true), size, cache, &mut renderer);
+        assert_eq!(operate(&mut ui, &renderer, focusable::find_focused()), None);
+        assert!(press_enter(&mut ui, &mut renderer).is_empty());
+        let cache = ui.into_cache();
+
+        // Closed again: the base's focus survived the round trip.
+        let mut ui = UserInterface::build(page(false), size, cache, &mut renderer);
+        assert_eq!(
+            operate(&mut ui, &renderer, focusable::find_focused()),
+            Some(widget::Id::new("background")),
+        );
+        assert_eq!(press_enter(&mut ui, &mut renderer), [Message::Background]);
     }
 
     #[test]

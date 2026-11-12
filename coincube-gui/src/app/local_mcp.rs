@@ -1625,6 +1625,114 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// Opening and closing the revoke dialog must not remount the AI Access
+    /// page beneath it: `Modal::optional` keeps the page at one tree position,
+    /// so its widget state (here, focus left on the Cube-wide switch) survives
+    /// the round trip instead of being thrown away by iced's tree diff.
+    #[test]
+    fn ai_access_page_state_survives_revoke_dialog_open_and_close() {
+        use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
+        use coincube_ui::{font, theme, widget::Renderer};
+        use iced::advanced::{
+            renderer::Headless,
+            widget::{operation, operation::focusable, Id, Operation},
+        };
+        use iced::Size;
+        use iced_runtime::user_interface::{Cache as UiCache, UserInterface};
+
+        type Ui<'a> = UserInterface<'a, super::super::Message, theme::Theme, Renderer>;
+        fn apply(ui: &mut Ui<'_>, renderer: &Renderer, operation: impl Operation<()> + 'static) {
+            let mut operation: Box<dyn Operation<()>> = Box::new(operation);
+            loop {
+                ui.operate(renderer, &mut operation::black_box(operation.as_mut()));
+                match operation.finish() {
+                    operation::Outcome::None | operation::Outcome::Some(()) => break,
+                    operation::Outcome::Chain(next) => operation = next,
+                }
+            }
+        }
+        fn focused(ui: &mut Ui<'_>, renderer: &Renderer) -> Option<Id> {
+            use std::sync::{Arc, Mutex};
+            let result = Arc::new(Mutex::new(None));
+            let output = Arc::clone(&result);
+            apply(
+                ui,
+                renderer,
+                operation::map(focusable::find_focused(), move |id| {
+                    *output.lock().unwrap() = Some(id)
+                }),
+            );
+            let found = result.lock().unwrap().take();
+            found
+        }
+
+        let _guard = super::super::session::test_guard();
+        let root = std::env::temp_dir().join(format!("mcp-modal-tree-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("bitcoin")).unwrap();
+        let (mut app, wallet) = super::super::shell_tests::bitcoin_app(&root);
+        let location = pairings::Location::new(&root, wallet.chain, &app.cube_settings.id).unwrap();
+        let mut store =
+            pairings::Store::open(location.clone(), zeroize::Zeroizing::new([52; 32]), true)
+                .unwrap();
+        let id = store
+            .add(
+                "Synthetic local client".into(),
+                pairings::Scope::Read {
+                    wallet: wallet.id().to_string(),
+                    descriptor: pairings::descriptor_identity(&wallet),
+                    opaque: "synthetic-opaque".into(),
+                    capabilities: [true, false, false],
+                },
+            )
+            .unwrap();
+        app.local_mcp.enabled = true;
+        app.local_mcp.pairing_location = Some(location);
+        app.local_mcp.pairing_store = Some(store);
+        app.panels.current = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
+        app.show_recovery_alerts_prompt = false;
+
+        for bytes in font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let mut renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+            font::REGULAR,
+            16.into(),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let size = Size::new(1024.0, 768.0);
+        let switch = Id::from(presentation::ENABLE_ID);
+
+        assert!(app.local_mcp.revoke_dialog().is_none());
+        let mut ui = UserInterface::build(app.view(), size, UiCache::new(), &mut renderer);
+        apply(&mut ui, &renderer, focusable::focus::<()>(switch.clone()));
+        assert_eq!(focused(&mut ui, &renderer), Some(switch.clone()));
+        let cache = ui.into_cache();
+
+        // Open the dialog. The page is inert and outside traversal meanwhile.
+        app.local_mcp.revoke_confirmation = Some(id);
+        assert!(app.local_mcp.revoke_dialog().is_some());
+        let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+        assert_eq!(focused(&mut ui, &renderer), None);
+        let cache = ui.into_cache();
+
+        // Close it without the focus-restoring task: the page's own state
+        // must still be there.
+        app.local_mcp.revoke_confirmation = None;
+        let mut ui = UserInterface::build(app.view(), size, cache, &mut renderer);
+        assert_eq!(
+            focused(&mut ui, &renderer),
+            Some(switch),
+            "opening and closing the revoke dialog must not reset the page's widget state"
+        );
+        drop(ui);
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn history_projection_attributes_only_wallet_spending() {
         use crate::daemon::model::{Coin, HistoryTransaction};
