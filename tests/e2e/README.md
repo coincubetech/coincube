@@ -4,6 +4,12 @@
 tests/e2e/run --qa-fresh --qa-run-dir /private/qa/run-001
 ```
 
+Fresh runs use strict delivery and Home-refresh acceptance by default. Before
+the phone process is pinned, the launcher builds and installs a signed QA app
+from the exact Keychain revision in the private workstation configuration.
+Every full run then executes environment, account, saved credential/network
+and signer-capacity gates before creating a Cube or requesting funding.
+
 The fresh flow generates its Cube, recovery material, 2-of-3 vault, phone signer,
 funding request and transaction. It does not take an existing vault, descriptor,
 PSBT, address, PIN or recovery phrase as input. Repeat the **same command and
@@ -67,7 +73,7 @@ broadcast, and two independent explorers verify its acceptance.
 
 The fresh flow needs a signed-in disposable QA account shared by Tenshu and
 Keychain. Account signup/email OTP, Apple trust/unlock/Developer Mode and
-certificate provisioning remain workstation prerequisites. They are not
+access to the team's Apple signing credentials remain workstation prerequisites. They are not
 reported as successful test stages. The runner never logs out or replaces an
 existing master. An existing passkey master cannot become an unattended PIN
 signer merely by creating another key: it reports `PHONE_MASTER_NOT_OWNED`.
@@ -83,7 +89,7 @@ or vault. A legacy cache is optional: when absent, the suite reads the normal
 desktop session from macOS Keychain and performs supported device registration.
 `desktop_session_namespace` is `development` for a debug Tenshu build and
 `production` for the release app; this selects only its existing Keychain
-namespace. Both API endpoint values always remain pinned to production. `ios.minimum_build` must identify the installed
+namespace. Both API endpoint values always remain pinned to production. `ios.minimum_build` must identify the minimum
 reviewed Keychain build. Fresh onboarding also requires accessibility forwarding
 through Keychain's screenshot-protection wrapper: build 36 hides the recovery
 controls from XCTest, and cannot complete this flow. The example selects build
@@ -96,7 +102,28 @@ plan, deletes existing keys, or reuses an existing signer as a fresh fixture.
 `ios.xctestrun` can identify an already-signed WebDriverAgent
 runner so the suite starts it automatically when needed.
 
-Install Appium 3.9.0 and XCUITest 12.22.8, plus Python 3.11+, Xcode and the pinned
+Set `ios.qa_build.checkout` to an absolute clone of
+`coincubetech/keychain-app`, `revision` to the full reviewed commit SHA, and
+`flutter` to the absolute Flutter executable matching that source's `.fvmrc`.
+The example's all-zero revision is a placeholder and cannot build. The source
+is exported from Git into the private run directory, so dirty caller files and
+its `.env` are never included. The build generates production endpoint settings,
+enables `COINCUBE_QA_HOME_REFRESH=true`, archives the app, and exports a signed
+release-testing IPA using the existing COINCUBE Apple account. No release tag,
+TestFlight upload or distribution is performed by this command.
+
+The app's signature, bundle/team, minimum version, production push/passkey
+entitlements, production REST/gRPC settings, profile expiration and target
+device coverage must pass before USB installation. The receipt records the
+source revision, QA define and signed binary/IPA hashes. Compilation output
+stays in private `qa-build/build.log`. The ordinary USB lease covers the build,
+installation and entire test run, preventing another run from replacing its app.
+On resume, the receipt and installed version are checked again, and the pinned
+process must remain unchanged. Resume never rebuilds, reinstalls or relaunches
+the app after its strict process identity has been recorded. A changed source,
+device or installed build requires a new run directory.
+
+Install Appium 3.9.0 and XCUITest 12.22.8, plus Python 3.11+, CocoaPods, Xcode and the pinned
 Rust toolchain. The launcher installs pinned Python dependencies once. Fresh
 mode builds both Rust helpers and signs the provisioning helper with the normal
 COINCUBE Developer ID/profile automatically. No TestFlight upload is required
@@ -106,7 +133,8 @@ for a correctly signed build already installed over USB.
 # Synthetic tests only: no phone, network, credentials or funds.
 tests/e2e/run --self-test
 
-# Read-only environment checks; no onboarding, Cube, funding or signing.
+# Build/install the QA app and check account, PIN setup, network and capacity.
+# A fresh QA account may be onboarded; no Cube, signer key or funds are created.
 tests/e2e/run --qa-fresh --qa-run-dir /private/qa/run-001 --qa-preflight
 
 # Full live flow. Repeat this exact command after an interruption.
@@ -119,14 +147,17 @@ phone at a time; the suite holds a USB lease and exclusive run/account locks.
 
 ## Strict delivery and Home-refresh acceptance (version 1)
 
-For a **new** fresh run, add `"strict_acceptance": {"version": 1}` to the
-private version-2 workstation configuration and set `ios.minimum_build` to 39
-or newer. The installed QA build must include the opt-in
-`COINCUBE_QA_HOME_REFRESH=true` compile-time hook; its production default is
-false. Build number alone cannot prove the hook exists: missing or ambiguous
-markers block the test. Absence of `strict_acceptance` preserves normal mode;
-null, false and unsupported versions are rejected. The configuration and mode
+For a **new** fresh run, the launcher supplies `"strict_acceptance": {"version": 1}`
+when omitted. The example also records it explicitly. Set `ios.minimum_build`
+to the reviewed QA build, at least 39. The automated build enables the
+`COINCUBE_QA_HOME_REFRESH=true` compile-time hook. Build number alone cannot
+prove the hook exists: missing or ambiguous markers block the test. Null,
+false and unsupported versions are rejected. The configuration and mode
 are journal-bound, so an old or completed run cannot be relabeled strict.
+For an intentional historical non-strict replay, `--qa-compatibility` must be
+explicit and its configuration must omit both `strict_acceptance` and
+`ios.qa_build`. It produces ordinary-mode evidence and does not build/install a
+QA app. Existing old checkpoints cannot be silently upgraded to strict mode.
 
 Strict mode attaches to the already foreground app without activating it. It
 sets Appium's `defaultActiveApplication` to Keychain before binding the process,

@@ -5,7 +5,15 @@
   "profile_dir": "/absolute/path/to/signed-in-tenshu-profile",
   "connect_rest": "https://api.coincube.io",
   "connect_grpc": "https://grpc.coincube.io:443",
-  "ios": {"minimum_build": 38},
+  "strict_acceptance": {"version": 1},
+  "ios": {
+    "minimum_build": 41,
+    "qa_build": {
+      "checkout": "/absolute/path/to/keychain-app",
+      "revision": "0000000000000000000000000000000000000000",
+      "flutter": "/absolute/path/to/pinned/flutter/bin/flutter"
+    }
+  },
   "amount_sats": 10000,
   "fee_sats": 1000
 }

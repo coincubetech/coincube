@@ -19,6 +19,7 @@ from xml.etree import ElementTree
 
 from .clients import http
 from .state import Blocked, Failed, private_read
+from .qa_build import prepare as prepare_qa_build
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "diagnostics"))
 import ios_usb_wda as usb
@@ -37,11 +38,19 @@ def device_query(*args):
 
 
 def wired_device(minimum_build):
+    device = single_wired_device()
+    return device, installed_build(device, minimum_build)
+
+
+def single_wired_device():
     devices = device_query("list", "devices")["devices"]
     wired = [d for d in devices if d.get("connectionProperties", {}).get("transportType") == "wired"]
     if len(wired) != 1:
         raise Blocked("IOS_DEVICE_COUNT", "Exactly one wired iPhone is required.")
-    device = wired[0]
+    return wired[0]
+
+
+def installed_build(device, minimum_build):
     apps = device_query("device", "info", "apps", "--device", device["identifier"],
                         "--bundle-id", BUNDLE, "--include-removable-apps", "--include-default-apps")["apps"]
     if len(apps) != 1 or not str(apps[0].get("bundleVersion", "")).isdigit():
@@ -49,7 +58,7 @@ def wired_device(minimum_build):
     build = int(apps[0]["bundleVersion"])
     if build < minimum_build:
         raise Blocked("KEYCHAIN_BUILD", "Installed Keychain is older than the configured minimum build.")
-    return device, build
+    return build
 
 
 class USBProxy(socketserver.ThreadingTCPServer):
@@ -99,7 +108,6 @@ def attach(config, *, strict=None):
     from appium.options.ios import XCUITestOptions
     from appium.webdriver.client_config import AppiumClientConfig
 
-    device, build = wired_device(config["minimum_build"])
     runner = server = driver = proxy = None
     lease = os.open(Path(tempfile.gettempdir()) / ("coincube-testnet4-ios-" + str(os.getuid()) + ".lock"),
                     os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -110,6 +118,22 @@ def attach(config, *, strict=None):
             fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Blocked("PHONE_BUSY", "Another integration run owns the iPhone automation lease.") from None
+        executable = config.get("appium", "appium")
+        version = subprocess.run([executable, "--version"], capture_output=True, timeout=10, check=True).stdout.decode().strip()
+        if version != "3.9.0":
+            raise Blocked("APPIUM_VERSION", "This suite is pinned to Appium 3.9.0; install the documented tool versions.")
+        drivers = json.loads(subprocess.run([executable, "driver", "list", "--installed", "--json"],
+                                           capture_output=True, timeout=20, check=True).stdout)
+        if drivers.get("xcuitest", {}).get("version") != "12.22.8":
+            raise Blocked("XCUITEST_VERSION", "This suite is pinned to the Appium XCUITest driver 12.22.8.")
+        if "qa_build" in config:
+            if strict is None:
+                raise Failed("QA_BUILD_CONFIG", "Automatic QA installation requires strict acceptance.")
+            device = single_wired_device()
+            prepare_qa_build(config["qa_build"], strict, device, config["minimum_build"], device_query)
+            build = installed_build(device, config["minimum_build"])
+        else:
+            device, build = wired_device(config["minimum_build"])
         usb_device = usb.wired_phone()
         try:
             ready = usb.wda_get(usb_device, "/status").get("ready") is True
@@ -136,14 +160,6 @@ def attach(config, *, strict=None):
         with socket.socket() as reserve:
             reserve.bind(("127.0.0.1", 0))
             port = reserve.getsockname()[1]
-        executable = config.get("appium", "appium")
-        version = subprocess.run([executable, "--version"], capture_output=True, timeout=10, check=True).stdout.decode().strip()
-        if version != "3.9.0":
-            raise Blocked("APPIUM_VERSION", "This suite is pinned to Appium 3.9.0; install the documented tool versions.")
-        drivers = json.loads(subprocess.run([executable, "driver", "list", "--installed", "--json"],
-                                           capture_output=True, timeout=20, check=True).stdout)
-        if drivers.get("xcuitest", {}).get("version") != "12.22.8":
-            raise Blocked("XCUITEST_VERSION", "This suite is pinned to the Appium XCUITest driver 12.22.8.")
         server = subprocess.Popen([executable, "--address", "127.0.0.1", "--port", str(port), "--log-level", "error"],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         url = "http://127.0.0.1:" + str(port)

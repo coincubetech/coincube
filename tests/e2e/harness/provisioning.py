@@ -19,6 +19,7 @@ from .phone import attach
 from .runner import Runner
 from .secrets import SecretStore
 from .strict import StrictPolicy, validate_mode
+from .qa_build import validate_build_config
 from .state import Blocked, Failed, Journal, atomic_write, digest, private_read
 
 STAGES = ("environment", "authentication", "phone_setup", "cube_creation", "phone_key", "vault_creation",
@@ -44,11 +45,15 @@ def validate_config(config):
         if type(config[field]) is not int or not minimum <= config[field] <= limit:
             raise Failed("SPEND_LIMIT", "Fresh-run amount/fee must fit the bounded Testnet4 scenario.")
     ios = config["ios"]
-    if not {"minimum_build"} <= set(ios) or set(ios) - {"minimum_build", "appium", "xctestrun"}:
-        raise Failed("IOS_CONFIG", "Fresh phone configuration accepts only minimum_build, appium and xctestrun.")
+    if not {"minimum_build"} <= set(ios) or set(ios) - {"minimum_build", "appium", "xctestrun", "qa_build"}:
+        raise Failed("IOS_CONFIG", "Fresh phone configuration accepts only minimum_build, appium, xctestrun and qa_build.")
     if type(ios["minimum_build"]) is not int or ios["minimum_build"] < 35:
         raise Failed("IOS_BUILD", "A Keychain build containing #194 is required.")
     validate_mode(config)
+    if "qa_build" in ios:
+        validate_build_config(ios["qa_build"])
+        if not config.get("strict_acceptance"):
+            raise Failed("QA_BUILD_CONFIG", "Automatic QA installation requires strict acceptance.")
     return config
 
 
@@ -717,6 +722,30 @@ class FreshRunner(Runner):
             self.onboarding.wait("Testnet4")
         self.phone.click("Home")
         self.journal.artifact("phone_validation", {**self.phone_validation_identity(), "source": "settings_ui"})
+        if self.config["ios"].get("qa_build"):
+            self.preflight_capacity()
+
+    def preflight_capacity(self):
+        keys = self.keys()
+        matches = [key for key in keys if key.get("name") == self.phone_key_label() and key.get("network") == "testnet4"]
+        if matches:
+            # Resume adopts only a key whose durable creation record already
+            # exists. stage_phone_key performs the full identity reconciliation.
+            if len(matches) != 1 or not self.artifacts.get("phone_key_creation_started"):
+                raise Failed("KEY_NOT_FRESH", "A matching key has no unique recorded creation attempt.")
+            return
+        headers = {"Authorization": "Bearer " + self.account["tokens"]["access_token"]}
+        plan = json.loads(http(REST + "/api/v1/connect/plan", headers=headers))
+        keychain = json.loads(http(REST + "/api/v1/keychains/active", headers=headers))
+        active = keychain.get("data", {})
+        limit = plan.get("data", {}).get("entitlements", {}).get("personalKeyLimit")
+        count, key_limit = active.get("noOfKeys"), active.get("keyLimit")
+        if (plan.get("success") is not True or keychain.get("success") is not True
+                or active.get("userId") != self.account_user_id or active.get("network") != "testnet4"
+                or any(type(v) is not int or v < 0 for v in (limit, count, key_limit))):
+            raise Blocked("SIGNER_CAPACITY", "Authenticated QA signer capacity or active Testnet4 Keychain could not be verified.")
+        if count >= key_limit or len([key for key in keys if key.get("network") == "testnet4"]) >= limit:
+            raise Blocked("SIGNER_LIMIT", "The disposable QA account has no capacity for a fresh signer.")
 
     def stage_cube_creation(self):
         result = self.provision.call("cube")
