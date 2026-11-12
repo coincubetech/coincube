@@ -302,6 +302,7 @@ impl State for SparkReceive {
                 sideshift_body,
                 cross_network_selected,
                 receive_usd: self.auto_convert == Some(true),
+                lightning_address_setup: &cache.lightning_address_setup,
                 swap_deposit: self
                     .swap_settle_deposit()
                     .filter(|d| quietly_settling(d, &self.claim_notices))
@@ -528,6 +529,18 @@ impl State for SparkReceive {
                             .then_some(cache.lightning_address.as_deref())
                             .flatten(),
                     );
+                    // A signed-in Cube with no Lightning address gets a random
+                    // one (the Connect Cube panel decides whether it may).
+                    if let Some(assign) = auto_assign_lightning_address(cache) {
+                        if self.sideshift_flow.is_some() || self.method != method {
+                            self.sideshift_flow = None;
+                            self.method = method;
+                            self.phase = SparkReceivePhase::Idle;
+                            self.qr_data = None;
+                            self.displayed_invoice = None;
+                        }
+                        return assign;
+                    }
                 }
                 if self.sideshift_flow.is_none() && self.method == method {
                     return Task::none();
@@ -1011,6 +1024,20 @@ fn fetch_payments_task(backend: Option<Arc<SparkBackend>>) -> Task<Message> {
 }
 
 /// Spark-Receive-flavoured wrapper around [`super::fetch_balance_task`].
+/// Ask the Connect Cube panel to give this Cube a random Lightning address,
+/// when it is signed in and has none. The panel checks the rest (address
+/// known to be empty, nothing in flight, no failure awaiting a retry).
+fn auto_assign_lightning_address(cache: &Cache) -> Option<Task<Message>> {
+    (cache.connect_authenticated
+        && cache.lightning_address.is_none()
+        && cache.lightning_address_setup == crate::app::cache::LightningAddressSetup::Idle)
+        .then(|| {
+            Task::done(Message::View(crate::app::view::Message::ConnectCube(
+                crate::app::view::ConnectCubeMessage::AutoAssignLightningAddress { retry: false },
+            )))
+        })
+}
+
 /// Methods whose address is static and needs no input, so Receive fetches
 /// it as soon as the method is picked.
 pub(crate) fn auto_generates(method: SparkReceiveMethod) -> bool {

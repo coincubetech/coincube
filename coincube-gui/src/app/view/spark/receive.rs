@@ -84,6 +84,8 @@ pub struct SparkReceiveView<'a> {
     /// Auto-convert is on: what arrives is converted to US Dollar (USDB),
     /// which the YOU RECEIVE tile shows.
     pub receive_usd: bool,
+    /// Where giving this Cube a random Lightning address stands.
+    pub lightning_address_setup: &'a crate::app::cache::LightningAddressSetup,
 }
 
 impl<'a> SparkReceiveView<'a> {
@@ -150,6 +152,7 @@ impl<'a> SparkReceiveView<'a> {
                         self.connect_signed_in,
                         self.lightning_address,
                         self.lightning_address_qr,
+                        self.lightning_address_setup,
                     ))
                     .padding([18, 24]),
                 );
@@ -402,7 +405,9 @@ fn lightning_address_body<'a>(
     signed_in: bool,
     address: Option<&'a str>,
     qr: Option<&'a qr_code::Data>,
+    setup: &'a crate::app::cache::LightningAddressSetup,
 ) -> Element<'a, Message> {
+    use crate::app::cache::LightningAddressSetup;
     if !signed_in {
         return Column::new()
             .spacing(8)
@@ -413,17 +418,66 @@ fn lightning_address_body<'a>(
             .into();
     }
     let Some(address) = address else {
-        return Column::new()
-            .spacing(12)
-            .push(h4_bold(localized_copy("Claim your Lightning address")))
-            .push(p2_regular(localized_copy(
-                "Receive Bitcoin with a readable address.",
-            )))
-            .push(
-                button::primary(None, localized_copy("Claim in Settings"))
-                    .on_press(lightning_address_settings()),
-            )
-            .into();
+        let assign = Message::ConnectCube(
+            crate::app::view::ConnectCubeMessage::AutoAssignLightningAddress { retry: true },
+        );
+        return match setup {
+            // Picking a free random name and claiming it takes a few calls.
+            LightningAddressSetup::Assigning => Column::new()
+                .spacing(8)
+                .push(h4_bold(localized_copy(
+                    "Setting up your Lightning address…",
+                )))
+                .push(p2_regular(localized_copy(
+                    "We're picking a free name for you. You can change it later in Settings.",
+                ))),
+            LightningAddressSetup::Failed(error) => Column::new()
+                .spacing(10)
+                .push(h4_bold(localized_copy(
+                    "Couldn't set up your Lightning address",
+                )))
+                .push(
+                    p2_regular(coincube_ui::locale::notice(error.clone()))
+                        .style(theme::text::secondary),
+                )
+                .push(
+                    Row::new()
+                        .spacing(12)
+                        .push(button::primary(None, localized_copy("Try again")).on_press(assign))
+                        .push(
+                            button::transparent_border(
+                                None,
+                                localized_copy("Choose one in Settings"),
+                            )
+                            .on_press(lightning_address_settings()),
+                        ),
+                ),
+            // Not started: the Cube isn't registered with Connect yet, or this
+            // is the moment before the request goes out.
+            LightningAddressSetup::Idle => Column::new()
+                .spacing(12)
+                .push(h4_bold(localized_copy("Get your Lightning address")))
+                .push(p2_regular(localized_copy(
+                    "Receive Bitcoin with a readable address. We'll pick a free name; you can \
+                     change it later in Settings.",
+                )))
+                .push(
+                    Row::new()
+                        .spacing(12)
+                        .push(
+                            button::primary(None, localized_copy("Get a Lightning address"))
+                                .on_press(assign),
+                        )
+                        .push(
+                            button::transparent_border(
+                                None,
+                                localized_copy("Choose one in Settings"),
+                            )
+                            .on_press(lightning_address_settings()),
+                        ),
+                ),
+        }
+        .into();
     };
     let copy = Message::SparkReceive(SparkReceiveMessage::CopyPaymentRequest(address.to_owned()));
     let details = Column::new()
@@ -1509,7 +1563,12 @@ mod tests {
             for outer in [(1024, 768), (1440, 900)] {
                 let ready = capture::inspect_wide_content(
                     "spark-receive-lightning-address-ready",
-                    lightning_address_body(true, Some(address), Some(&qr)),
+                    lightning_address_body(
+                        true,
+                        Some(address),
+                        Some(&qr),
+                        &crate::app::cache::LightningAddressSetup::Idle,
+                    ),
                     outer,
                     appearance,
                     theme,
@@ -1539,7 +1598,12 @@ mod tests {
                 );
                 let signed_out = capture::inspect_wide_content(
                     "spark-receive-lightning-address-signed-out",
-                    lightning_address_body(false, Some(address), Some(&qr)),
+                    lightning_address_body(
+                        false,
+                        Some(address),
+                        Some(&qr),
+                        &crate::app::cache::LightningAddressSetup::Idle,
+                    ),
                     outer,
                     appearance,
                     theme,
@@ -1549,16 +1613,61 @@ mod tests {
                 assert!(!signed_out.contains("Change in Settings"));
                 let unclaimed = capture::inspect_wide_content(
                     "spark-receive-lightning-address-unclaimed",
-                    lightning_address_body(true, None, None),
+                    lightning_address_body(
+                        true,
+                        None,
+                        None,
+                        &crate::app::cache::LightningAddressSetup::Idle,
+                    ),
                     outer,
                     appearance,
                     theme,
                     outer.0 - 248 - 48,
                 );
-                assert!(unclaimed.contains("Claim in Settings"));
+                assert!(unclaimed.contains("Get a Lightning address"));
+                assert!(unclaimed.contains("Choose one in Settings"));
                 assert!(!unclaimed.contains("Change in Settings"));
             }
         }
+    }
+
+    /// While a random name is being claimed Receive says so; a failure says
+    /// why and offers Try again (an explicit retry) or Settings.
+    #[test]
+    fn automatic_lightning_address_states_on_receive() {
+        use crate::app::cache::LightningAddressSetup;
+        let assigning = capture::inspect(
+            "spark-receive-ln-assigning",
+            lightning_address_body(true, None, None, &LightningAddressSetup::Assigning),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(assigning.contains("Setting up your Lightning address…"));
+        assert!(!assigning.contains("Try again"));
+
+        let failed_state = LightningAddressSetup::Failed("Reserve failed: offline".to_string());
+        let failed = capture::inspect(
+            "spark-receive-ln-failed",
+            lightning_address_body(true, None, None, &failed_state),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(failed.contains("Couldn't set up your Lightning address"));
+        assert!(failed.contains("Try again") && failed.contains("Choose one in Settings"));
+        let messages = capture::click_text(
+            lightning_address_body(true, None, None, &failed_state),
+            "Try again",
+            0,
+            (1440, 900),
+        );
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            Message::ConnectCube(
+                crate::app::view::ConnectCubeMessage::AutoAssignLightningAddress { retry: true }
+            )
+        )));
     }
 
     /// Spark and on-chain addresses show without a button; only an invoice
@@ -1799,6 +1908,7 @@ mod tests {
                         cross_network_selected: None,
                         swap_deposit: None,
                         receive_usd: false,
+                        lightning_address_setup: &crate::app::cache::LightningAddressSetup::Idle,
                     }
                     .render(),
                     outer,
@@ -2037,6 +2147,7 @@ mod tests {
                     cross_network_selected: None,
                     swap_deposit: None,
                     receive_usd: false,
+                    lightning_address_setup: &crate::app::cache::LightningAddressSetup::Idle,
                 }
                 .render(),
                 (1440, 900),

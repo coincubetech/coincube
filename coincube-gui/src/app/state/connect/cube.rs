@@ -30,6 +30,137 @@ use crate::{
 /// Pass `spark = None` at rollback sites where the SDK register
 /// hadn't succeeded yet (i.e. rolling back only the API
 /// reservation).
+/// Why a claim of one username failed: `taken` when the API refused the
+/// name as already in use (409), so another name may succeed.
+pub(crate) struct ClaimError {
+    pub taken: bool,
+    pub message: String,
+}
+
+/// Claim `username` for the Cube: reserve it in our API, register it with the
+/// Breez-hosted LNURL server through Spark, then confirm the reservation. A
+/// failure after the reserve rolls back whatever succeeded. Shared by the
+/// manual claim and the automatic one.
+async fn claim_username(
+    client: &CoincubeClient,
+    spark: &SparkClient,
+    cube_id: &str,
+    username: &str,
+) -> Result<LightningAddress, ClaimError> {
+    // Step 1: reserve in our DB. If the username is already taken (409) the
+    // API surfaces it here.
+    if let Err(e) = client.reserve_lightning_address(cube_id, username).await {
+        let taken = matches!(
+            &e,
+            crate::services::coincube::CoincubeError::Unsuccessful(info) if info.status_code == 409
+        );
+        return Err(ClaimError {
+            taken,
+            message: format!("Reserve failed: {}", e),
+        });
+    }
+
+    // Step 2: register against the Breez-hosted LNURL server via the Spark
+    // bridge. On failure, release the reservation (SDK side never succeeded,
+    // so only roll back the API reservation).
+    if let Err(e) = spark
+        .register_lightning_address(username.to_string(), None)
+        .await
+    {
+        let rb_note = rollback_partial_claim(client, None, cube_id, username).await;
+        return Err(ClaimError {
+            taken: false,
+            message: format!("Register failed: {}{}", e, rb_note),
+        });
+    }
+
+    // Step 3: commit. The API stamps `lightning_address_confirmed_at` on the
+    // existing reservation. On failure roll back both the SDK registration
+    // and the reservation.
+    match client.confirm_lightning_address(cube_id).await {
+        Ok(ln_addr) => Ok(ln_addr),
+        Err(e) => {
+            let rb_note = rollback_partial_claim(client, Some(spark), cube_id, username).await;
+            Err(ClaimError {
+                taken: false,
+                message: format!("Confirm failed: {}{}", e, rb_note),
+            })
+        }
+    }
+}
+
+/// How many random names an automatic assignment tries before giving up.
+const AUTO_LN_ATTEMPTS: usize = 8;
+/// After this many plain `adjectiveanimal` names, add two digits.
+const AUTO_LN_PLAIN_ATTEMPTS: usize = 4;
+
+/// Give the Cube a random Lightning address: pick `adjectiveanimal` (later
+/// with two digits), skip it if either registry says it's taken, and claim it.
+/// The availability checks are hints; the reserve is the real gate, and a 409
+/// there just moves on to the next name.
+async fn auto_claim(
+    client: &CoincubeClient,
+    spark: &SparkClient,
+    cube_id: &str,
+) -> Result<LightningAddress, String> {
+    let mut rng = rand::rngs::OsRng;
+    for attempt in 0..AUTO_LN_ATTEMPTS {
+        let name = random_ln_username(&mut rng, attempt >= AUTO_LN_PLAIN_ATTEMPTS);
+        debug_assert!(validate_ln_username(&name).is_none(), "{}", name);
+        match spark.check_lightning_address_available(name.clone()).await {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => return Err(format!("Couldn't check Lightning names: {}", e)),
+        }
+        // Our API is authoritative for @coincube.io; an error here falls
+        // back to the reserve step, which refuses a taken name anyway.
+        if let Ok(false) = client
+            .check_lightning_address_available(cube_id, &name)
+            .await
+        {
+            continue;
+        }
+        match claim_username(client, spark, cube_id, &name).await {
+            Ok(address) => return Ok(address),
+            Err(e) if e.taken => continue,
+            Err(e) => return Err(e.message),
+        }
+    }
+    Err("Couldn't find a free Lightning name. Choose one in Settings.".to_string())
+}
+
+const LN_ADJECTIVES: &[&str] = &[
+    "amber", "brave", "bright", "calm", "clever", "cosmic", "crisp", "curious", "daring", "eager",
+    "fearless", "gentle", "golden", "happy", "hidden", "honest", "jolly", "keen", "kind", "lively",
+    "lucky", "mellow", "merry", "mighty", "misty", "noble", "orange", "patient", "plucky",
+    "polite", "proud", "quick", "quiet", "rapid", "rosy", "rustic", "sandy", "shiny", "silent",
+    "silver", "sleepy", "smart", "snowy", "solar", "speedy", "steady", "stellar", "sunny", "swift",
+    "tidy", "tiny", "trusty", "velvet", "vivid", "wild", "wise", "witty", "zesty",
+];
+
+const LN_ANIMALS: &[&str] = &[
+    "badger", "beaver", "bison", "bobcat", "condor", "coyote", "crane", "dolphin", "eagle",
+    "falcon", "ferret", "finch", "fox", "gecko", "gopher", "hare", "hawk", "heron", "ibex",
+    "jaguar", "koala", "lemur", "leopard", "llama", "lynx", "marmot", "marten", "moose", "narwhal",
+    "ocelot", "orca", "osprey", "otter", "owl", "panda", "panther", "pelican", "penguin", "puffin",
+    "quail", "raven", "robin", "salmon", "seal", "sparrow", "stork", "swan", "tapir", "tiger",
+    "toucan", "turtle", "walrus", "weasel", "whale", "wolf", "wombat", "yak", "zebra",
+];
+
+/// A random `adjectiveanimal` username (e.g. `orangezebra`), with two digits
+/// appended when `numbered` (e.g. `orangezebra42`). Lowercase ASCII only, so
+/// it always passes `validate_ln_username`.
+pub(crate) fn random_ln_username<R: rand::Rng + ?Sized>(rng: &mut R, numbered: bool) -> String {
+    use rand::seq::SliceRandom;
+    let adjective = LN_ADJECTIVES.choose(rng).copied().unwrap_or("orange");
+    let animal = LN_ANIMALS.choose(rng).copied().unwrap_or("zebra");
+    if numbered {
+        format!("{}{}{}", adjective, animal, rng.gen_range(10..100))
+    } else {
+        format!("{}{}", adjective, animal)
+    }
+}
+
 async fn rollback_partial_claim(
     client: &CoincubeClient,
     spark: Option<&SparkClient>,
@@ -247,6 +378,9 @@ pub struct ConnectCubePanel {
     pub ln_claim_error: Option<String>,
     pub ln_claiming: bool,
     pub ln_checking: bool,
+    /// Automatic assignment of a random Lightning address (see
+    /// `AutoAssignLightningAddress`), mirrored into the cache for Receive.
+    pub ln_auto: crate::app::cache::LightningAddressSetup,
     /// True when the claimed-address card is rendered in its in-place
     /// edit form. The unclaimed flow leaves this `false`.
     pub ln_editing: bool,
@@ -324,6 +458,7 @@ impl ConnectCubePanel {
             ln_username_error: None,
             ln_claim_error: None,
             ln_claiming: false,
+            ln_auto: crate::app::cache::LightningAddressSetup::Idle,
             ln_checking: false,
             ln_editing: false,
             ln_changing: false,
@@ -422,6 +557,7 @@ impl ConnectCubePanel {
         self.ln_username_error = None;
         self.ln_claim_error = None;
         self.ln_claiming = false;
+        self.ln_auto = crate::app::cache::LightningAddressSetup::Idle;
         self.ln_checking = false;
         self.ln_editing = false;
         self.ln_changing = false;
@@ -1155,45 +1291,9 @@ impl ConnectCubePanel {
                 };
                 return iced::Task::perform(
                     async move {
-                        // Step 1: reserve in our DB. If the username is
-                        // already taken (409) the API surfaces it here.
-                        client
-                            .reserve_lightning_address(&cube_id, &username)
+                        claim_username(&client, &spark, &cube_id, &username)
                             .await
-                            .map_err(|e| format!("Reserve failed: {}", e))?;
-
-                        // Step 2: register against the Breez-hosted LNURL
-                        // server via the Spark bridge. On failure, release
-                        // the reservation (SDK side never succeeded, so
-                        // only roll back the API reservation).
-                        let register_result = spark
-                            .register_lightning_address(username.clone(), None)
-                            .await;
-                        if let Err(e) = register_result {
-                            let rb_note =
-                                rollback_partial_claim(&client, None, &cube_id, &username).await;
-                            return Err(format!("Register failed: {}{}", e, rb_note));
-                        }
-
-                        // Step 3: commit. API stamps
-                        // `lightning_address_confirmed_at` on the
-                        // existing reservation. Empty body — the
-                        // reserve step already carried all the data
-                        // the API needs. On failure roll back both
-                        // the SDK registration and the reservation.
-                        match client.confirm_lightning_address(&cube_id).await {
-                            Ok(ln_addr) => Ok(ln_addr),
-                            Err(e) => {
-                                let rb_note = rollback_partial_claim(
-                                    &client,
-                                    Some(&spark),
-                                    &cube_id,
-                                    &username,
-                                )
-                                .await;
-                                Err(format!("Confirm failed: {}{}", e, rb_note))
-                            }
-                        }
+                            .map_err(|e| e.message)
                     },
                     move |res| match res {
                         Ok(ln_addr) => Message::View(view::Message::ConnectCube(
@@ -1207,6 +1307,85 @@ impl ConnectCubePanel {
                         )),
                     },
                 );
+            }
+
+            ConnectCubeMessage::AutoAssignLightningAddress { retry } => {
+                use crate::app::cache::LightningAddressSetup;
+                // Only once the server has answered for this Cube (so an empty
+                // address really is empty), never over an address, a claim in
+                // flight or a running attempt, and after a failure only when
+                // the user asks again.
+                let has_address = self.lightning_address.as_ref().is_some_and(|la| {
+                    crate::services::coincube::display_lightning_address(
+                        la.lightning_address.as_deref(),
+                    )
+                    .is_some()
+                });
+                let blocked = match &self.ln_auto {
+                    LightningAddressSetup::Assigning => true,
+                    LightningAddressSetup::Failed(_) => !retry,
+                    LightningAddressSetup::Idle => false,
+                };
+                if has_address
+                    || blocked
+                    || self.ln_claiming
+                    || self.ln_changing
+                    || self.server_cube_id.is_none()
+                {
+                    return iced::Task::none();
+                }
+                let (Some(client), Some(spark), Some(cube_id)) = (
+                    self.client.clone(),
+                    self.spark_client.clone(),
+                    self.api_cube_id(),
+                ) else {
+                    return iced::Task::none();
+                };
+                self.ln_auto = LightningAddressSetup::Assigning;
+                self.ln_claiming = true;
+                let generation = self.session_generation;
+                return iced::Task::perform(
+                    async move { auto_claim(&client, &spark, &cube_id).await },
+                    move |res| match res {
+                        Ok(address) => Message::View(view::Message::ConnectCube(
+                            ConnectCubeMessage::LightningAddressAutoAssigned {
+                                generation,
+                                address,
+                            },
+                        )),
+                        Err(error) => Message::View(view::Message::ConnectCube(
+                            ConnectCubeMessage::LightningAddressAutoAssignFailed {
+                                generation,
+                                error,
+                            },
+                        )),
+                    },
+                );
+            }
+
+            ConnectCubeMessage::LightningAddressAutoAssigned {
+                generation,
+                address,
+            } => {
+                if generation != self.session_generation {
+                    return iced::Task::none();
+                }
+                self.ln_claiming = false;
+                self.ln_auto = crate::app::cache::LightningAddressSetup::Idle;
+                self.lightning_address = Some(address);
+                self.ln_reconcile_needs_reregister = None;
+            }
+
+            ConnectCubeMessage::LightningAddressAutoAssignFailed { generation, error } => {
+                if generation != self.session_generation {
+                    return iced::Task::none();
+                }
+                log::warn!(
+                    "[CONNECT-CUBE] automatic Lightning address failed: {}",
+                    error
+                );
+                self.ln_claiming = false;
+                self.ln_auto = crate::app::cache::LightningAddressSetup::Failed(error);
             }
 
             ConnectCubeMessage::LightningAddressClaimed {
@@ -2037,6 +2216,86 @@ mod tests {
             "bitcoin".to_string(),
             false,
         )
+    }
+
+    #[test]
+    fn random_lightning_names_are_valid_usernames() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        for _ in 0..500 {
+            let plain = random_ln_username(&mut rng, false);
+            assert!(validate_ln_username(&plain).is_none(), "{}", plain);
+            assert!(plain.chars().all(|c| c.is_ascii_lowercase()), "{}", plain);
+            let numbered = random_ln_username(&mut rng, true);
+            assert!(validate_ln_username(&numbered).is_none(), "{}", numbered);
+            let digits: String = numbered.chars().rev().take(2).collect();
+            assert!(digits.chars().all(|c| c.is_ascii_digit()), "{}", numbered);
+        }
+        // Enough combinations that a collision retry rarely repeats a name.
+        assert!(LN_ADJECTIVES.len() * LN_ANIMALS.len() > 3_000);
+    }
+
+    /// Automatic assignment only starts for a registered Cube whose address
+    /// is known to be empty, and a failure waits for an explicit retry.
+    #[test]
+    fn automatic_lightning_address_is_guarded_and_settles_its_state() {
+        use crate::app::cache::LightningAddressSetup;
+        let mut panel = panel();
+        // Not registered with the server yet: the empty address isn't known.
+        let _ =
+            panel.update_message(ConnectCubeMessage::AutoAssignLightningAddress { retry: false });
+        assert_eq!(panel.ln_auto, LightningAddressSetup::Idle);
+        assert!(!panel.ln_claiming);
+
+        // Registered, but no API client or Spark: nothing can run.
+        panel.server_cube_id = Some(7);
+        let _ =
+            panel.update_message(ConnectCubeMessage::AutoAssignLightningAddress { retry: true });
+        assert_eq!(panel.ln_auto, LightningAddressSetup::Idle);
+
+        // A "NULL" address counts as none, a real one blocks it.
+        panel.lightning_address = Some(lightning("orangezebra@coincube.io"));
+        panel.set_client(CoincubeClient::new());
+        let _ =
+            panel.update_message(ConnectCubeMessage::AutoAssignLightningAddress { retry: true });
+        assert_eq!(panel.ln_auto, LightningAddressSetup::Idle);
+
+        // A failed attempt is reported, and only a retry may run again.
+        panel.ln_auto = LightningAddressSetup::Assigning;
+        panel.ln_claiming = true;
+        let generation = panel.session_generation;
+        let _ = panel.update_message(ConnectCubeMessage::LightningAddressAutoAssignFailed {
+            generation,
+            error: "Reserve failed: offline".to_string(),
+        });
+        assert_eq!(
+            panel.ln_auto,
+            LightningAddressSetup::Failed("Reserve failed: offline".to_string())
+        );
+        assert!(!panel.ln_claiming);
+        panel.lightning_address = None;
+        let _ =
+            panel.update_message(ConnectCubeMessage::AutoAssignLightningAddress { retry: false });
+        assert!(matches!(panel.ln_auto, LightningAddressSetup::Failed(_)));
+
+        // A result from an earlier session is ignored; the current one lands.
+        let _ = panel.update_message(ConnectCubeMessage::LightningAddressAutoAssigned {
+            generation: generation.wrapping_add(1),
+            address: lightning("stale@coincube.io"),
+        });
+        assert!(panel.lightning_address.is_none());
+        let _ = panel.update_message(ConnectCubeMessage::LightningAddressAutoAssigned {
+            generation,
+            address: lightning("orangezebra"),
+        });
+        assert_eq!(panel.ln_auto, LightningAddressSetup::Idle);
+        assert_eq!(
+            panel
+                .lightning_address
+                .as_ref()
+                .and_then(|la| la.lightning_address.as_deref()),
+            Some("orangezebra")
+        );
     }
 
     fn lightning(address: &str) -> LightningAddress {

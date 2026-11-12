@@ -1121,6 +1121,7 @@ pub async fn load_application(
         theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
         reduce_motion: false,
         connect_light_dim: false,
+        lightning_address_setup: crate::app::cache::LightningAddressSetup::Idle,
         balance_privacy: None,
         btc_usd_price: None,
         show_direction_badges: true,
