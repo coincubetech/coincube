@@ -3,6 +3,7 @@ pub mod connect_control;
 pub mod feerate_picker;
 pub mod glyph;
 pub mod landing;
+pub mod payment_columns;
 pub mod picker;
 pub mod recipient_identity;
 

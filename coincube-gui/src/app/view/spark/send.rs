@@ -32,7 +32,8 @@ use coincube_core::miniscript::bitcoin::{Amount, Network};
 use crate::app::breez_spark::assets::stable_token_as_sats;
 use crate::app::state::spark::cross_chain::{self, supported_on};
 use crate::app::state::spark::send::{CrossChainContext, SparkSendPhase, SparkSendTarget};
-use crate::app::view::spark::{last_tx::last_transactions_section, SparkRecentTransaction};
+use crate::app::view::shared::payment_columns::{payment_columns, rail_card};
+use crate::app::view::spark::{last_tx::recent_rail_section, SparkRecentTransaction};
 use crate::app::view::{Message, SparkSendMessage};
 
 pub struct SparkSendView<'a> {
@@ -321,53 +322,41 @@ impl<'a> SparkSendView<'a> {
         .width(Length::Fill)
         .style(payment_card_style);
 
-        let mut content = Column::new()
+        let content = Column::new()
             .push(card)
             // ── Phase-specific body (every phase but Idle/Preparing) ──
             .push(Column::new().push_maybe(below.map(|body| {
                 Column::new()
                     .push(Space::new().height(Length::Fixed(20.0)))
                     .push(body)
-            })))
-            .push(Space::new().height(Length::Fixed(20.0)));
+            })));
 
-        // ── Last transactions ─────────────────────────────────────────
-        content = content.push(last_transactions_section(
+        // The steps are on the head's rule. The rail lists what the payment
+        // can come from, what it leaves on Review, then Spark's latest
+        // payments (they sat under the form before, which left the right of
+        // the page empty).
+        let recent = recent_rail_section(
             self.recent_transactions,
             self.bitcoin_unit,
-            self.show_direction_badges,
             self.mask_amounts,
             |idx| Message::SparkSend(SparkSendMessage::SelectTransaction(idx)),
             Message::SparkSend(SparkSendMessage::History),
-        ));
-
-        // The steps are on the head's rule; the side panel lists what the
-        // payment can come from.
-        let aside: Element<'a, Message> = match self.phase {
+        );
+        let rail = Column::new().spacing(20).push(self.balances.view());
+        let rail = match self.phase {
             // A mismatch blocks the payment: no balances after a send that
             // must not happen.
             SparkSendPhase::Prepared(ok) if is_review(self.phase) && !self.recipient_mismatch => {
-                Column::new()
-                    .spacing(20)
-                    .push(self.balances.view())
-                    .push(iced::widget::rule::horizontal(1))
+                rail.push(iced::widget::rule::horizontal(1))
                     .push(after_payment(&self, ok))
-                    .into()
             }
-            _ => self.balances.view(),
-        };
+            _ => rail,
+        }
+        .push(iced::widget::rule::horizontal(1))
+        .push(recent);
         // The title, the Cube line, Back to Spark and the steps are in the
         // page head (`head`).
-        let page = Row::new()
-            .spacing(40)
-            .align_y(Alignment::Start)
-            .push(Container::new(content).width(Length::Fixed(680.0)))
-            .push(Container::new(aside).width(Length::Fixed(240.0)))
-            .wrap()
-            .vertical_spacing(20);
-        Container::new(Container::new(page).width(Length::Fill).max_width(960.0))
-            .width(Length::Fill)
-            .into()
+        payment_columns(content, rail_card(rail))
     }
 }
 

@@ -3250,5 +3250,15 @@
   "Share saved selection": "Compartir selección guardada",
   "Stop sharing": "Dejar de compartir",
   "Share with Keychain": "Compartir con Keychain",
-  "Once sharing is enabled, saved Worldview and artwork changes automatically update Keychain on your Connect account.": "Una vez activado el uso compartido, los cambios guardados en la Visión de Bitcoin y las ilustraciones actualizan Keychain automáticamente en tu cuenta de Connect."
+  "Once sharing is enabled, saved Worldview and artwork changes automatically update Keychain on your Connect account.": "Una vez activado el uso compartido, los cambios guardados en la Visión de Bitcoin y las ilustraciones actualizan Keychain automáticamente en tu cuenta de Connect.",
+  "Recent in Spark": "Recientes en Spark",
+  "No transactions yet.": "Aún no hay transacciones.",
+  "Available in Vault": "Disponible en Vault",
+  "This spend": "Este gasto",
+  "This recovery": "Esta recuperación",
+  "Fee rate": "Tasa de comisión",
+  "Not set": "Sin definir",
+  "Automatic": "Automática",
+  "1 selected": "1 seleccionada",
+  "selected": "seleccionadas"
 }
