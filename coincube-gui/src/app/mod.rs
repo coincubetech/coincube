@@ -854,6 +854,9 @@ impl Panels {
 const BITCOIND_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// How long a toast stays once it is on screen, unless dismissed sooner.
 const TOAST_LIFETIME: Duration = Duration::from_secs(8);
+/// Most toasts kept waiting out of view behind the shown ones; older ones in
+/// a burst are dropped unseen.
+const TOAST_MAX_WAITING: usize = 3;
 
 pub struct App {
     // Pairing records grow independently of the tab's by-value state. Keep them
@@ -10884,11 +10887,18 @@ impl App {
     /// Starts the expiry clock of each toast that has just come on screen and
     /// stops the clock of each toast pushed out of view by
     /// `view::TOAST_MAX_VISIBLE`, so every toast gets its full time on screen
-    /// however many arrive at once. A toast that comes back into view starts
-    /// a fresh clock. Call after every change to `errors`; timers armed
+    /// in a burst of up to `TOAST_MAX_WAITING` more. A toast that comes back
+    /// into view starts a fresh clock. Call after every change to `errors`; timers armed
     /// earlier are ignored by `Message::ExpireToast` once their deadline is
     /// cleared or replaced.
     fn arm_toast_timers(&mut self) -> Task<Message> {
+        // A burst bigger than the backlog drops its oldest toasts, so stale
+        // errors don't replay long after their cause and `errors` stays small.
+        let excess = self
+            .errors
+            .len()
+            .saturating_sub(view::TOAST_MAX_VISIBLE + TOAST_MAX_WAITING);
+        self.errors.drain(..excess);
         let hidden = self.errors.len().saturating_sub(view::TOAST_MAX_VISIBLE);
         let now = std::time::Instant::now();
         let mut timers = Vec::new();
@@ -16895,6 +16905,20 @@ mod toast_timer_tests {
         // A toast pushed back out of view stops its clock again.
         show(&mut app, "late");
         assert_eq!(clocks(&app)[0], (id(0), false));
+
+        // A burst past the backlog drops the oldest waiting toasts.
+        for n in 0..10 {
+            show(&mut app, &format!("flood {n}"));
+        }
+        assert_eq!(
+            app.errors.len(),
+            super::view::TOAST_MAX_VISIBLE + super::TOAST_MAX_WAITING
+        );
+        assert_eq!(
+            app.errors.last().map(|(i, ..)| *i),
+            Some(app.current_error_id - 1),
+            "the newest toast is always kept"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

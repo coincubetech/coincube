@@ -930,8 +930,9 @@ fn toast_card<'a>(
 }
 
 /// Most toasts shown at once, so a burst can't grow the stack up the window.
-/// Older toasts wait out of view with their expiry clocks stopped and come
-/// back, oldest first, as shown ones leave (`App::arm_toast_timers`).
+/// Older toasts wait out of view with their expiry clocks stopped; as shown
+/// ones leave, the newest waiting toast comes on screen first, and a burst
+/// beyond the waiting backlog drops its oldest (`App::arm_toast_timers`).
 pub(crate) const TOAST_MAX_VISIBLE: usize = 3;
 
 /// The newest `TOAST_MAX_VISIBLE` toasts, oldest first so the newest sits
