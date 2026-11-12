@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 import fcntl
 import os
+import re
 import stat
 import json
 from pathlib import Path
@@ -178,33 +179,108 @@ def pending(runner, record):
             and record["run_id"] not in reply["decrypt_cubes"], "ACTIVE_REQUEST")
 
 
-def residual(record):
-    """Require both explorers to agree on only the known completed change.
+def accepted_child(record, data, txid, previous_raw, outspend, depth, parent=None):
+    """Recognize only an already accepted bounded automatic QA sponsorship."""
+    if data is None:
+        raise Blocked("QA_CLEANUP_UNKNOWN_SPEND", "The completed change was spent outside a recorded automatic QA sponsorship.")
+    claim = data["claims"].get(txid + ":1")
+    if not isinstance(claim, dict) or claim.get("phase") != "accepted":
+        raise Blocked("QA_CLEANUP_UNKNOWN_SPEND", "The completed change has no accepted automatic QA sponsorship proof.")
+    require(claim.get("account") == record["account"] and isinstance(claim.get("entry"), dict), "SPONSOR_ACCOUNT")
+    managed = [item for item in data["accounts"].get(record["account"], []) if item.get("entry") == claim["entry"]]
+    require(len(managed) == 1, "SPONSOR_SOURCE")
+    _, prior, value, binding = qa_funding.source_metadata(claim["entry"], managed[0], record["account"], record["owner"])
+    require(binding == record["source_binding"], "SPONSOR_SOURCE")
+    require(isinstance(claim.get("authorization_roots"), list) and claim["authorization_roots"]
+            and set(claim["authorization_roots"]) <= set(managed[0].get("authorization_roots", [])), "SPONSOR_AUTHORIZATION")
+    output = Path(claim["output"])
+    require(output.is_absolute() and not output.is_symlink(), "SPONSOR_OUTPUT")
+    raw_intent = private_read(output / "sponsor-intent.json")
+    raw_receipt = private_read(output / "sponsor-receipt.json")
+    require(raw_intent == claim["intent_json"].encode() and sponsor.sha(raw_intent) == claim["intent_sha256"]
+            and sponsor.sha(raw_receipt) == claim["receipt_sha256"], "SPONSOR_CHANGED")
+    intent, receipt = json.loads(raw_intent), json.loads(raw_receipt)
+    require(type(intent.get("version")) is int and intent["version"] == depth and depth in (1, 2)
+            and intent.get("authorization_ref") == "coincube#1137:testnet4-sponsor"
+            and intent.get("network") == "testnet4" and intent.get("source") == binding
+            and intent.get("previous_txid") == txid and intent.get("previous_vout") == 1
+            and intent.get("previous_raw_sha256") == sponsor.sha(previous_raw.encode())
+            and intent.get("previous_value_sats") == value
+            and intent.get("source_script") == sponsor.p2wsh_script(verify_local(record)[0]["spend"]["change_address"])
+            and type(intent.get("amount_sats")) is int and 100000 <= intent["amount_sats"] == claim["amount_sats"] <= 500000
+            and type(intent.get("fee_sats")) is int and 100 <= intent["fee_sats"] == claim["fee_sats"] <= 1000
+            and type(intent.get("change_sats")) is int and intent["change_sats"] >= 1000
+            and receipt.get("native_binary_sha256") == claim.get("native_sha256"), "SPONSOR_BINDING")
+    if depth == 1:
+        require(prior is None and parent is None and "prior_sponsor" not in intent, "SPONSOR_DEPTH")
+    else:
+        require(prior is not None and parent is not None and isinstance(intent.get("prior_sponsor"), dict), "SPONSOR_DEPTH")
+        require(intent["prior_sponsor"]["intent_json"].encode() == parent[0]
+                and intent["prior_sponsor"]["receipt_json"].encode() == parent[1]
+                and private_read(prior / "sponsor-intent.json") == parent[0]
+                and private_read(prior / "sponsor-receipt.json") == parent[1], "SPONSOR_PARENT")
+    sponsor.validate_receipt(receipt, intent, claim["intent_sha256"])
+    sponsor.verify_snapshot(intent)
+    snapshot = Path(claim["snapshot"])
+    manifest_raw = private_read(snapshot / "manifest.json")
+    manifest = json.loads(manifest_raw)
+    target_state, target_cp, target_binding = sponsor.read_run(snapshot)
+    require(manifest.get("version") == 1 and manifest.get("directory") == claim["live"]
+            and manifest.get("identity") == claim["identity"]
+            and sponsor.sha(manifest_raw) == claim["manifest_sha256"]
+            and manifest.get("hashes") == {name: sponsor.sha(private_read(snapshot / name)) for name in qa_funding.FILES}
+            and intent.get("target") == target_binding
+            and target_state["owner_user_id"] == record["owner"] and target_state["cube_id"] != record["cube_id"]
+            and target_cp["artifacts"]["account_identity"] == record["account"]
+            and intent.get("target_address") == claim["identity"]["artifacts"]["receive_address"]
+            and intent.get("target_script") == sponsor.p2wsh_script(intent["target_address"])
+            and claim["identity"]["artifacts"]["cube_id"] == target_state["cube_id"], "SPONSOR_TARGET")
+    require(outspend["txid"] == receipt["txid"] and outspend["vin"] == 0, "SPONSOR_SPENDER")
+    return receipt, (raw_intent, raw_receipt)
 
-    This intentionally does not sweep it. Any unexpected receipt quarantines
-    the fixture for explicit investigation instead of guessing its ownership.
-    """
+
+def residual(record, data=None):
+    """Trace only accepted existing QA v1/v2 change; never infer zero from spent."""
     state, cp = verify_local(record)
     spend = state["spend"]
     raw = private_read(Path(record["directory"]) / "signed.hex").decode().strip()
-    require(sponsor.transaction(raw)["txid"] == spend["txid"] == cp["artifacts"]["broadcast_txid"], "TRANSACTION")
-    values = []
-    expected = (spend["txid"], 1, spend["change_sats"])
-    for endpoint in EXPLORERS:
-        require(http(endpoint + "/block-height/0").decode().strip() == GENESIS, "CHAIN")
-        require(http(endpoint + "/tx/" + spend["txid"] + "/hex").decode().strip() == raw, "TRANSACTION")
-        points = []
-        for address in (cp["artifacts"]["receive_address"], spend["change_address"]):
-            rows = json.loads(http(endpoint + "/address/" + address + "/utxo"))
-            require(isinstance(rows, list), "BALANCE")
-            points += [(p["txid"], p["vout"], p["value"]) for p in rows]
-        require(not points or points == [expected], "UNEXPECTED_FUNDS")
-        outspend = json.loads(http(endpoint + "/tx/" + spend["txid"] + "/outspend/1"))
-        require(type(outspend.get("spent")) is bool
-                and outspend["spent"] == (not points), "BALANCE_INDEX")
-        values.append(sum(p[2] for p in points))
-    require(values[0] == values[1], "EXPLORER_DISAGREEMENT")
-    return values[0]
+    txid, value = spend["txid"], spend["change_sats"]
+    require(sponsor.transaction(raw)["txid"] == txid == cp["artifacts"]["broadcast_txid"], "TRANSACTION")
+    parent = None
+    for depth in range(3):
+        decoded = sponsor.transaction(raw)
+        require(len(decoded["outputs"]) == 2 and decoded["outputs"][1] == {
+            "value_sats": value, "script": sponsor.p2wsh_script(spend["change_address"])}, "CHANGE_OUTPUT")
+        observed = []
+        for endpoint in EXPLORERS:
+            require(http(endpoint + "/block-height/0").decode().strip() == GENESIS, "CHAIN")
+            require(http(endpoint + "/tx/" + txid + "/hex").decode().strip() == raw, "TRANSACTION")
+            outspend = json.loads(http(endpoint + "/tx/" + txid + "/outspend/1"))
+            require(type(outspend.get("spent")) is bool, "BALANCE_INDEX")
+            if outspend["spent"]:
+                require(isinstance(outspend.get("txid"), str) and re.fullmatch(r"[0-9a-f]{64}", outspend["txid"])
+                        and type(outspend.get("vin")) is int and outspend["vin"] >= 0, "SPENDER")
+                observed.append({"spent": True, "txid": outspend["txid"], "vin": outspend["vin"]})
+            else:
+                observed.append({"spent": False})
+        require(observed[0] == observed[1], "SPENDER_DISAGREEMENT")
+        if not observed[0]["spent"]:
+            points = []
+            for endpoint in EXPLORERS:
+                entries = []
+                for address in (cp["artifacts"]["receive_address"], spend["change_address"]):
+                    rows = json.loads(http(endpoint + "/address/" + address + "/utxo"))
+                    require(isinstance(rows, list), "BALANCE")
+                    entries += [(p["txid"], p["vout"], p["value"]) for p in rows]
+                require(entries == [(txid, 1, value)], "BALANCE_INDEX")
+                points.append(entries)
+            require(points[0] == points[1], "EXPLORER_DISAGREEMENT")
+            return value
+        if depth == 2:
+            raise Blocked("QA_CLEANUP_UNKNOWN_SPEND", "Further sponsorship change is outside the bounded QA cleanup protocol.")
+        receipt, parent = accepted_child(record, data, txid, raw, observed[0], depth + 1, parent)
+        raw, txid, value = receipt["raw_tx"], receipt["txid"], receipt["change_sats"]
+    raise Failed("QA_CLEANUP_SPONSOR_DEPTH", "Unsupported QA sponsorship depth.")
 
 
 def protected_ids(runner, data):
@@ -418,7 +494,7 @@ def ensure_capacity(runner):
                 verify_local(record)
                 backup_check(runner, record)
                 pending(runner, record)
-                amount = residual(record)
+                amount = residual(record, data)
                 funding = qa_funding.options(runner.config.get("qa_funding", {"version": 1, "sources": []}))
                 require(amount < qa_funding.minimum_amount(runner.config) + funding["fee_sats"] + 1000, "FUNDING_SOURCE")
                 if "residual_sats" in record:

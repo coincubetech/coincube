@@ -226,7 +226,7 @@ def test_changed_recovery_or_history_stops_before_cloud_mutation(flow, name):
 def test_unexpected_incoming_funds_stop_retirement(flow):
     runner, cloud, _ = flow
     cloud['residual'] = 90000
-    with pytest.raises(Failed, match='UNEXPECTED_FUNDS'): cleanup.ensure_capacity(runner)
+    with pytest.raises(Failed, match='BALANCE_INDEX'): cleanup.ensure_capacity(runner)
     assert cloud['deletes'] == []
 
 
@@ -522,4 +522,152 @@ def test_unsealed_completion_requires_final_complete_passed_junit(flow, change):
     elif change == 'failure': atomic_write(path, path.read_bytes().replace(b'</testcase>', b'<failure/></testcase>', 1))
     else: atomic_write(path, path.read_bytes().replace(b'value="environment"', b'value="phone_setup"', 1))
     with pytest.raises(Blocked): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []
+
+
+@pytest.mark.parametrize('proof', ['different', 'missing', 'unknown'])
+def test_spent_change_never_means_zero_without_known_matching_spender(flow, monkeypatch, proof):
+    runner, cloud, _ = flow
+    original = cleanup.http
+    def http(url, **kwargs):
+        if url.endswith('/outspend/1'):
+            value = {'spent': True, 'txid': 'f' * 64, 'vin': 0}
+            if proof == 'different' and url.startswith(cleanup.EXPLORERS[1]): value['txid'] = 'e' * 64
+            if proof == 'missing': value.pop('txid')
+            return sponsor.encoded(value)
+        return original(url, **kwargs)
+    monkeypatch.setattr(cleanup, 'http', http)
+    with pytest.raises(Blocked): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []
+
+
+def accepted_sponsors(flow, monkeypatch, tmp_path, hops=1):
+    """Construct only public accepted v1/v2 protocol evidence, no native keys."""
+    from test_sponsor import native_reply
+    runner, cloud, record = flow
+    source = Path(record['snapshot']); live = Path(record['directory'])
+    state = json.loads(private_read(live / 'provision.json'))
+    cp = json.loads(private_read(live / 'checkpoint.json'))
+    amount = 102000 if hops == 1 else 203000
+    original_raw = raw_transaction('b' * 64, [(10000, '0014' + '11' * 20), (amount, '0020' + '22' * 32)])
+    original_txid = sponsor.transaction(original_raw)['txid']
+    state['spend'].update(txid=original_txid, change_sats=amount)
+    cp['artifacts'].update(broadcast_txid=original_txid, public_acceptance={'txid': original_txid})
+    for directory in (source, live):
+        atomic_write(directory / 'provision.json', sponsor.encoded(state))
+        atomic_write(directory / 'checkpoint.json', sponsor.encoded(cp))
+    atomic_write(live / 'signed.hex', original_raw.encode())
+    record['source_binding'] = sponsor.read_run(source)[2]
+    record['retained_files'] = cleanup.retained_tree(live)
+    root = 'c' * 64
+    previous_txid, previous_raw, previous_value = original_txid, original_raw, amount
+    parent, claims, entries, raws, spends = None, {}, [], {original_txid: original_raw}, {}
+    source_entry = {'source_run': str(source)}
+    entries.append({'kind': 'completed', 'entry': source_entry,
+                    'source_binding': record['source_binding'], 'authorization_roots': [root]})
+    for hop in range(1, hops + 1):
+        target = tmp_path / ('target-snapshot-' + str(hop)); target.mkdir(mode=0o700)
+        target_live = tmp_path / ('target-live-' + str(hop))
+        target_state = deepcopy(state)
+        target_state.update(run_id='target-' + str(hop), cube_id=100 + hop, vault_id=100 + hop,
+                            spend=None, profile_dir=str(target_live / 'profile'))
+        target_cp = deepcopy(cp)
+        target_cp['artifacts'].update(cube_id=target_state['cube_id'], vault_id=str(target_state['vault_id']),
+                                      receive_address=address(60 + hop))
+        for name, content in {'provision.json': sponsor.encoded(target_state),
+                              'checkpoint.json': sponsor.encoded(target_cp), 'descriptor.txt': b'synthetic-target-descriptor'}.items():
+            atomic_write(target / name, content)
+        binding = sponsor.read_run(target)[2]
+        identity = {'run_id': target_state['run_id'], 'binding': 'synthetic-target-config',
+                    'artifacts': {'cube_id': target_state['cube_id'], 'receive_address': address(60 + hop)}}
+        manifest = {'version': 1, 'directory': str(target_live), 'identity': identity,
+                    'hashes': {n: sponsor.sha(private_read(target / n)) for n in qa_funding.FILES}}
+        atomic_write(target / 'manifest.json', sponsor.encoded(manifest))
+        intent = {'version': hop, 'network': 'testnet4', 'authorization_ref': 'coincube#1137:testnet4-sponsor',
+            'source': record['source_binding'], 'target': binding, 'previous_txid': previous_txid,
+            'previous_vout': 1, 'previous_value_sats': previous_value,
+            'previous_raw_sha256': sponsor.sha(previous_raw.encode()), 'source_script': '0020' + '22' * 32,
+            'target_address': address(60 + hop), 'target_script': sponsor.p2wsh_script(address(60 + hop)),
+            'amount_sats': 100000, 'fee_sats': 1000, 'change_sats': previous_value - 101000}
+        if parent:
+            intent['prior_sponsor'] = {'intent_json': parent[0].decode(), 'receipt_json': parent[1].decode(), 'target': parent[2]}
+        out = tmp_path / ('sponsor-' + str(hop)); out.mkdir(mode=0o700)
+        raw_intent = sponsor.encoded(intent)
+        atomic_write(out / 'sponsor-intent.json', raw_intent)
+        receipt = native_reply({'sponsor_intent_file': str(out / 'sponsor-intent.json'),
+                                'sponsor_intent_sha256': sponsor.sha(raw_intent)})
+        receipt['native_binary_sha256'] = 'd' * 64
+        raw_receipt = sponsor.encoded(receipt)
+        atomic_write(out / 'sponsor-receipt.json', raw_receipt)
+        source_entry = {'source_run': str(source)}
+        if hop == 2: source_entry['source_sponsor_dir'] = str(parent[3])
+        claim = {'phase': 'accepted', 'account': record['account'], 'entry': source_entry,
+            'authorization_roots': [root], 'output': str(out), 'intent_json': raw_intent.decode(),
+            'intent_sha256': sponsor.sha(raw_intent), 'receipt_sha256': sponsor.sha(raw_receipt),
+            'native_sha256': 'd' * 64, 'amount_sats': 100000, 'fee_sats': 1000,
+            'snapshot': str(target), 'live': str(target_live), 'identity': identity,
+            'manifest_sha256': sponsor.sha(sponsor.encoded(manifest)), 'target_key': 'target-' + str(hop)}
+        claims[previous_txid + ':1'] = claim
+        raws[receipt['txid']] = receipt['raw_tx']
+        spends[previous_txid] = {'spent': True, 'txid': receipt['txid'], 'vin': 0}
+        if hop == 1:
+            entries.append({'kind': 'sponsor', 'entry': {'source_run': str(source), 'source_sponsor_dir': str(out)},
+                            'source_binding': record['source_binding'], 'authorization_roots': [root],
+                            'receipt_sha256': sponsor.sha(raw_receipt)})
+        parent = (raw_intent, raw_receipt, binding, out)
+        previous_txid, previous_raw, previous_value = receipt['txid'], receipt['raw_tx'], receipt['change_sats']
+    spends[previous_txid] = {'spent': False}
+    def http(url, **kwargs):
+        if url.endswith('/block-height/0'): return cleanup.GENESIS.encode()
+        if '/tx/' in url:
+            txid = url.split('/tx/')[1].split('/')[0]
+            if url.endswith('/hex'): return raws[txid].encode()
+            if url.endswith('/outspend/1'): return sponsor.encoded(spends[txid])
+        if url.endswith('/address/' + address(51) + '/utxo'): return b'[]'
+        if url.endswith('/address/' + address(34) + '/utxo'):
+            return sponsor.encoded([{'txid': previous_txid, 'vout': 1, 'value': previous_value}])
+        raise AssertionError(url)
+    def spent(*args): raise Failed('SOURCE_SPENT', 'synthetic managed donor has been consumed')
+    monkeypatch.setattr(sponsor, 'observe', spent)
+    monkeypatch.setattr(cleanup, 'http', http)
+    with qa_funding.pool() as data:
+        data['retirements']['fixture'] = deepcopy(record)
+        data['claims'] = claims
+        data['runs'] = {claim['target_key']: k for k, claim in claims.items()}
+        data['accounts'][record['account']] = entries
+        qa_funding.save_pool(data)
+    return runner, cloud, record, claims, spends, raws, previous_txid
+
+
+@pytest.mark.parametrize('hops', [1, 2])
+def test_known_accepted_qa_sponsorship_retains_exact_small_child_change(flow, monkeypatch, tmp_path, hops):
+    runner, cloud, _, _, _, _, _ = accepted_sponsors(flow, monkeypatch, tmp_path, hops)
+    cleanup.ensure_capacity(runner)
+    assert runner.artifacts['qa_cleanup']['residual_sats'] == 1000
+    assert cloud['deletes'] == ['/connect/cubes/12/vault', '/keys/delete', '/connect/cubes/12']
+
+
+@pytest.mark.parametrize('change', ['receipt_hash', 'source_binding', 'intent_hash', 'spender_raw', 'input_link', 'late_index'])
+def test_known_qa_child_requires_all_frozen_receipt_and_chain_evidence(flow, monkeypatch, tmp_path, change):
+    runner, cloud, _, claims, spends, raws, child_txid = accepted_sponsors(flow, monkeypatch, tmp_path)
+    if change in ('receipt_hash', 'source_binding', 'intent_hash'):
+        with qa_funding.pool() as data:
+            claim = next(iter(data['claims'].values()))
+            if change == 'receipt_hash': claim['receipt_sha256'] = 'wrong'
+            elif change == 'intent_hash': claim['intent_sha256'] = 'wrong'
+            else: data['accounts']['a' * 64][0]['source_binding']['state_sha256'] = 'wrong'
+            qa_funding.save_pool(data)
+    elif change == 'spender_raw': raws[child_txid] = raws[child_txid] + '00'
+    elif change == 'input_link': next(s for s in spends.values() if s['spent'])['vin'] = 1
+    else:
+        original = cleanup.http
+        monkeypatch.setattr(cleanup, 'http', lambda url, **kwargs: b'[]' if url.endswith('/utxo') else original(url, **kwargs))
+    with pytest.raises(Blocked): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []
+
+
+def test_unknown_spend_after_last_supported_qa_hop_is_quarantined(flow, monkeypatch, tmp_path):
+    runner, cloud, _, _, spends, _, child = accepted_sponsors(flow, monkeypatch, tmp_path, 2)
+    spends[child] = {'spent': True, 'txid': 'e' * 64, 'vin': 0}
+    with pytest.raises(Blocked, match='outside the bounded'): cleanup.ensure_capacity(runner)
     assert cloud['deletes'] == []

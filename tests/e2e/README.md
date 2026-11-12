@@ -571,7 +571,8 @@ at most one enrolled fixture. It first proves the native Master/Border backup
 is readable, checks pending signing **and recovery-decrypt** requests over gRPC,
 rechecks both explorers, and excludes explicit funding sources, usable unspent
 managed donors and uncertain funding-claim dependencies. Available-capacity runs
-and already-created signer resumes perform no cleanup.
+and already-created signer resumes start no new retirement; an already journaled
+cleanup finishes first.
 
 Retirement deletes cloud metadata in order **Vault → Signer → Cube**, with a
 private durable intent before every DELETE and exact-ID readback afterward.
@@ -607,3 +608,13 @@ source snapshot. Reproducible `qa-build/source`, `derived`, `Runner.xcarchive`,
 Nothing in those directories is deleted by cleanup. Any missing or changed
 retained file, malformed tombstone or inconsistent explorer outspend/UTXO view
 fails closed before further destructive work.
+
+A spent change output is never treated as a zero balance. Both explorers must
+agree on the exact spender transaction/input. Cleanup recognizes only already
+accepted automatic QA sponsorships with matching private intent/receipt hashes,
+source and target snapshots, native receipt, authorization roots and exact raw
+transaction bytes. It follows the existing v1 sponsorship and its one supported
+v2 hop, then checks the known remaining source change (for example 1,000 sats)
+on both explorers. Usable unspent change remains protected as a funding source.
+An unknown, conflicting, missing, deeper or unindexed spend blocks retirement;
+cleanup neither constructs a transaction nor broadens the sponsorship protocol.
