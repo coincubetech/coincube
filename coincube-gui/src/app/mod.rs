@@ -9365,7 +9365,16 @@ impl App {
                         view::SparkSettingsMessage::StableBalanceSaved(Ok(enabled)),
                     )),
                 );
-                return Task::batch([record, panel, self.panels.spark_overview.reload(None, None)]);
+                let receive = self
+                    .panels
+                    .spark_receive
+                    .stable_balance_settled(Some(enabled));
+                return Task::batch([
+                    record,
+                    panel,
+                    self.panels.spark_overview.reload(None, None),
+                    receive,
+                ]);
             }
             // Overview shares the same Settings save owner. Route both the
             // request and failed settlement there even when Overview is active.
@@ -9479,6 +9488,7 @@ impl App {
                 return Task::batch([
                     panel,
                     self.panels.spark_overview.reload(None, None),
+                    self.panels.spark_receive.stable_balance_settled(None),
                     Task::done(Message::View(view::Message::ShowError(err))),
                 ]);
             }

@@ -163,6 +163,37 @@ pub struct SparkReceive {
 }
 
 impl SparkReceive {
+    /// Whether a static (Spark or on-chain) address should be fetched now:
+    /// those methods show no button, only "Getting your address…".
+    fn static_address_due(&self) -> bool {
+        auto_generates(self.method)
+            && matches!(self.phase, SparkReceivePhase::Idle)
+            && self.sideshift_flow.is_none()
+    }
+
+    fn fetch_static_address_if_due(&self) -> Task<Message> {
+        if self.static_address_due() {
+            Task::done(Message::View(crate::app::view::Message::SparkReceive(
+                crate::app::view::SparkReceiveMessage::GenerateRequested,
+            )))
+        } else {
+            Task::none()
+        }
+    }
+
+    /// A Stable Balance save settled (from any panel). `Some` is the saved
+    /// value; `None` (failed or dropped) re-reads the SDK so the YOU RECEIVE
+    /// tile never shows a choice that was not saved.
+    pub fn stable_balance_settled(&mut self, saved: Option<bool>) -> Task<Message> {
+        match saved {
+            Some(enabled) => {
+                self.auto_convert = Some(enabled);
+                Task::none()
+            }
+            None => fetch_auto_convert_task(self.backend.clone()),
+        }
+    }
+
     pub fn new(backend: Option<Arc<SparkBackend>>) -> Self {
         Self {
             backend,
@@ -354,16 +385,7 @@ impl State for SparkReceive {
             fetch_auto_convert_task(self.backend.clone()),
             // A static address left on screen from before, or picked before
             // the panel was ever shown, is (re)fetched without a button.
-            if auto_generates(self.method)
-                && matches!(self.phase, SparkReceivePhase::Idle)
-                && self.sideshift_flow.is_none()
-            {
-                Task::done(Message::View(crate::app::view::Message::SparkReceive(
-                    crate::app::view::SparkReceiveMessage::GenerateRequested,
-                )))
-            } else {
-                Task::none()
-            },
+            self.fetch_static_address_if_due(),
         ])
     }
 
@@ -481,8 +503,9 @@ impl State for SparkReceive {
                     // Already that way, or not read yet.
                     return Task::none();
                 }
-                // Shown at once; a failed save is reconciled by the next read.
-                self.auto_convert = Some(usd);
+                // The tile keeps the saved value: the shared save owner may
+                // drop this request (a save already running) or fail it, and
+                // `stable_balance_settled` updates the tile when it lands.
                 Task::done(Message::View(crate::app::view::Message::SparkSettings(
                     crate::app::view::SparkSettingsMessage::StableBalanceToggled(usd),
                 )))
@@ -916,7 +939,9 @@ impl State for SparkReceive {
                 self.qr_data = None;
                 self.displayed_invoice = None;
                 self.phase = SparkReceivePhase::Idle;
-                Task::none()
+                // Spark and on-chain have no button in `Idle`; `Try again`
+                // has to fetch the address itself.
+                self.fetch_static_address_if_due()
             }
             SparkReceiveMessage::BalanceLoaded(balance) => {
                 if let Some((btc_sats, stable)) = balance {
@@ -1338,6 +1363,15 @@ mod tests {
             SparkReceiveMessage::AutoConvertLoaded(Some(false)),
         );
         update(&mut panel, SparkReceiveMessage::SelectReceiveAs(true));
+        assert_eq!(
+            panel.auto_convert,
+            Some(false),
+            "the tile waits for the save to land"
+        );
+        // A dropped or failed save leaves the saved value on the tile.
+        let _ = panel.stable_balance_settled(None);
+        assert_eq!(panel.auto_convert, Some(false));
+        let _ = panel.stable_balance_settled(Some(true));
         assert_eq!(panel.auto_convert, Some(true));
         // A failed read keeps what is known.
         update(&mut panel, SparkReceiveMessage::AutoConvertLoaded(None));
@@ -1683,6 +1717,31 @@ mod tests {
         assert!(matches!(panel.phase(), SparkReceivePhase::Idle));
         assert!(panel.qr_data.is_none());
         assert!(panel.displayed_invoice.is_none());
+        assert!(
+            !panel.static_address_due(),
+            "an invoice waits for its button"
+        );
+    }
+
+    #[test]
+    fn try_again_refetches_static_addresses() {
+        for method in [
+            SparkReceiveMethod::Spark,
+            SparkReceiveMethod::OnchainBitcoin,
+        ] {
+            let mut panel = SparkReceive::new(None);
+            panel.method = method;
+            update(
+                &mut panel,
+                SparkReceiveMessage::GenerateFailed("offline".to_string()),
+            );
+            assert!(!panel.static_address_due());
+
+            update(&mut panel, SparkReceiveMessage::Reset);
+
+            assert!(matches!(panel.phase(), SparkReceivePhase::Idle));
+            assert!(panel.static_address_due(), "{:?} fetches again", method);
+        }
     }
 
     #[test]
