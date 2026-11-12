@@ -11061,14 +11061,16 @@ impl App {
         };
         let content = view.map(Message::View);
 
-        // Overlay toast at bottom if present
-        let content: Element<'_, Message> = match self.errors.is_empty() {
-            true => content,
-            false => iced::widget::Stack::new()
-                .push(content)
-                .push(view::toast_overlay(self.displayed_toasts()).map(Message::View))
-                .into(),
-        };
+        // Toasts sit in a layer above the content. The Stack is mounted even
+        // when there are no toasts (the overlay is then empty and reports
+        // `mouse::Interaction::None`, so input reaches the content) because
+        // swapping the root between `content` and a Stack would make iced's
+        // tree diff discard the content's widget state — scroll offsets and
+        // text-input focus — when the first toast appears and the last goes.
+        let content: Element<'_, Message> = iced::widget::Stack::new()
+            .push(content)
+            .push(view::toast_overlay(self.displayed_toasts()).map(Message::View))
+            .into();
 
         // One-time recovery-alerts consent prompt overlays everything (PR 3).
         // `opaque` makes the full-screen overlay capture mouse presses so a
@@ -19090,5 +19092,153 @@ mod wallet_recent_activity_tests {
         drop(app.set_current_panel(Menu::Vault(menu::VaultSubMenu::Overview)));
         assert!(app.panels.activity.selected_id.is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod toast_layer_tree_tests {
+    use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
+    use coincube_ui::{font, theme, widget::Renderer};
+    use iced::advanced::{
+        renderer::Headless,
+        widget::{operation, operation::focusable, Id, Operation},
+    };
+    use iced::{mouse, Event, Point, Size};
+    use iced_runtime::user_interface::{Cache as UiCache, State, UserInterface};
+
+    type Ui<'a> = UserInterface<'a, super::Message, theme::Theme, Renderer>;
+
+    const SIZE: Size = Size::new(1024.0, 768.0);
+
+    fn renderer() -> Renderer {
+        for bytes in font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        iced::futures::executor::block_on(<Renderer as Headless>::new(
+            font::REGULAR,
+            16.into(),
+            Some("tiny-skia"),
+        ))
+        .unwrap()
+    }
+
+    fn apply(ui: &mut Ui<'_>, renderer: &Renderer, operation: impl Operation<()> + 'static) {
+        let mut operation: Box<dyn Operation<()>> = Box::new(operation);
+        loop {
+            ui.operate(renderer, &mut operation::black_box(operation.as_mut()));
+            match operation.finish() {
+                operation::Outcome::None | operation::Outcome::Some(()) => break,
+                operation::Outcome::Chain(next) => operation = next,
+            }
+        }
+    }
+
+    fn focused(ui: &mut Ui<'_>, renderer: &Renderer) -> Option<Id> {
+        use std::sync::{Arc, Mutex};
+        let result = Arc::new(Mutex::new(None));
+        let output = Arc::clone(&result);
+        apply(
+            ui,
+            renderer,
+            operation::map(focusable::find_focused(), move |id| {
+                *output.lock().unwrap() = Some(id)
+            }),
+        );
+        let found = result.lock().unwrap().take();
+        found
+    }
+
+    /// Showing the first toast and dismissing the last one must not remount
+    /// the content beneath the toast layer: the root keeps the same shape, so
+    /// widget state such as keyboard focus survives the tree diff.
+    #[test]
+    fn content_widget_state_survives_toast_show_and_dismiss() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("toast-layer-tree-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("bitcoin")).unwrap();
+        let (mut app, _wallet) = super::shell_tests::bitcoin_app(&root);
+        app.panels.current = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
+        app.show_recovery_alerts_prompt = false;
+        assert!(app.errors.is_empty());
+
+        let switch = Id::from("tenshu.ai-access.enable");
+        let mut renderer = renderer();
+
+        let mut ui = UserInterface::build(app.view(), SIZE, UiCache::new(), &mut renderer);
+        apply(&mut ui, &renderer, focusable::focus::<()>(switch.clone()));
+        assert_eq!(focused(&mut ui, &renderer), Some(switch.clone()));
+        let cache = ui.into_cache();
+
+        // First toast appears.
+        drop(
+            app.update(super::Message::View(super::view::Message::ShowToast(
+                log::Level::Info,
+                "Saved".into(),
+            ))),
+        );
+        assert_eq!(app.errors.len(), 1);
+        let toast_id = app.errors[0].0;
+        let mut ui = UserInterface::build(app.view(), SIZE, cache, &mut renderer);
+        assert_eq!(
+            focused(&mut ui, &renderer),
+            Some(switch.clone()),
+            "showing a toast must not reset the content's widget state"
+        );
+        let cache = ui.into_cache();
+
+        // Last toast goes.
+        drop(
+            app.update(super::Message::View(super::view::Message::DismissToast(
+                toast_id,
+            ))),
+        );
+        assert!(app.errors.is_empty());
+        let mut ui = UserInterface::build(app.view(), SIZE, cache, &mut renderer);
+        assert_eq!(
+            focused(&mut ui, &renderer),
+            Some(switch),
+            "dismissing the last toast must not reset the content's widget state"
+        );
+        drop(ui);
+        drop(app);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no toasts the always-mounted overlay layer must be transparent to
+    /// the pointer, or the Stack would levitate the cursor away from the
+    /// content beneath it.
+    #[test]
+    fn empty_toast_overlay_has_no_mouse_interaction() {
+        let mut renderer = renderer();
+        let overlay = super::view::toast_overlay(std::iter::empty());
+        let mut ui: UserInterface<'_, super::view::Message, theme::Theme, Renderer> =
+            UserInterface::build(overlay, SIZE, UiCache::new(), &mut renderer);
+        for x in [0.0, 1.0, 256.0, 512.0, 768.0, 1023.0] {
+            for y in [0.0, 1.0, 384.0, 700.0, 744.0, 767.0] {
+                let position = Point::new(x, y);
+                let mut messages = Vec::new();
+                let (state, _) = ui.update(
+                    &[Event::Mouse(mouse::Event::CursorMoved { position })],
+                    mouse::Cursor::Available(position),
+                    &mut renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut messages,
+                );
+                match state {
+                    State::Updated {
+                        mouse_interaction, ..
+                    } => assert_eq!(
+                        mouse_interaction,
+                        mouse::Interaction::None,
+                        "empty toast overlay claims the pointer at {position:?}"
+                    ),
+                    State::Outdated => panic!("empty toast overlay went outdated"),
+                }
+                assert!(messages.is_empty());
+            }
+        }
     }
 }
