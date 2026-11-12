@@ -16,6 +16,7 @@ import uuid
 
 from .clients import Native
 from .provisioning import Provision, validate_config
+from .qa_build import configure_fresh
 from .secrets import SecretStore
 from .sponsor import binary_digest, encoded, output_lock, read_run, sha
 from .state import Blocked, Failed, atomic_write, digest, private_read
@@ -136,7 +137,13 @@ def execute(args):
     require(isinstance(args.authorize_abort, str) and 0 < len(args.authorize_abort.strip()) <= 512, "AUTHORIZATION_REQUIRED")
     # Fresh runs bind the lexical absolute path, including symlinked parents.
     directory, output = Path(args.source_run).absolute(), Path(args.output_dir).resolve()
-    config = validate_config(json.loads(private_read(args.config)))
+    config = json.loads(private_read(args.config))
+    if "qa_build" in config.get("ios", {}):
+        # Use the same effective strict configuration as the fresh launcher.
+        # Historical configurations without automatic builds retain their
+        # original binding, including explicit non-strict compatibility runs.
+        config = configure_fresh(config)
+    config = validate_config(config)
     require("phone_state_dir" in config, "PHONE_STORE_REQUIRED")
     phone_root = Path(config["phone_state_dir"]).resolve()
     with source_lock(directory), output_lock(output, [directory.resolve(), phone_root, Path(config["profile_dir"]).resolve(), Path(args.config).resolve()]):

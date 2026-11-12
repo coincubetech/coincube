@@ -266,3 +266,26 @@ def test_qa_build_holds_the_phone_lease_and_releases_it_on_failure(config, tmp_p
     assert caught.value.code == "QA_BUILD" and called == [True]
     with path.open("rb") as competing:
         fcntl.flock(competing, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_interrupted_request_helper_uses_the_same_default_strict_binding(config, tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from harness import sign_abort
+    from harness.state import atomic_write, digest
+    config["phone_state_dir"] = str(tmp_path / "phone")
+    path = tmp_path / "config.json"
+    atomic_write(path, json.dumps(config).encode())
+    expected = digest(qa_build.configure_fresh(config))
+    def inspect_binding(directory, effective):
+        assert digest(effective) == expected
+        assert "strict_acceptance" not in config
+        raise Blocked("BINDING_CHECKED", "stopped before remote mutation")
+    monkeypatch.setattr(sign_abort, "source_lock", lambda *a: nullcontext())
+    monkeypatch.setattr(sign_abort, "output_lock", lambda *a: nullcontext())
+    monkeypatch.setattr(sign_abort, "bind_source", inspect_binding)
+    args = SimpleNamespace(source_run=str(tmp_path / "run"), config=str(path),
+                           output_dir=str(tmp_path / "abort"), native_binary=str(tmp_path / "native"),
+                           signing_binary=str(tmp_path / "signing"), authorize_abort="synthetic owner authorization")
+    with pytest.raises(Blocked) as caught:
+        sign_abort.execute(args)
+    assert caught.value.code == "BINDING_CHECKED"
