@@ -31,7 +31,11 @@ use crate::{
         cache::Cache,
         menu::Menu,
         view::{
-            balance_header_card, dashboard_headed, message::*, vault::coins, vault::psbt,
+            dashboard_headed,
+            message::*,
+            shared::payment_columns::{rail_card, PaymentColumns},
+            vault::coins,
+            vault::psbt,
             FiatAmountConverter,
         },
         wallet::SyncStatus,
@@ -564,6 +568,7 @@ pub fn create_spend_tx<'a>(
 ) -> Element<'a, Message> {
     let is_self_send = recipients.is_empty();
     let is_batch = recipients.len() > 1;
+    let recipient_count = recipients.len();
     let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(*balance));
     let fiat_unconfirmed = fiat_converter.map(|c| c.convert(*unconfirmed_balance));
     // Keep actual balances for draft validation; mask only passive context.
@@ -622,10 +627,10 @@ pub fn create_spend_tx<'a>(
     };
     let balance_context = Column::new()
         .spacing(10)
-        .push(balance_header_card(
+        .push(
             Column::new()
                 .spacing(8)
-                .push(h4_bold(localized_copy("Balance")))
+                .push(caption(localized_copy("Available in Vault")).style(theme::text::secondary))
                 .push(
                     if mask_amounts {
                         Column::new().push(text("••••••").size(H2_SIZE))
@@ -685,7 +690,7 @@ pub fn create_spend_tx<'a>(
                 } else {
                     None
                 }),
-        ))
+        )
         .push_maybe(
             if unconfirmed_balance.to_sat() != 0 && sync_status.is_synced() {
                 Some(
@@ -1096,15 +1101,80 @@ pub fn create_spend_tx<'a>(
         menu,
         cache,
         send_head(cache, title, 0),
-        Container::new(
-            Column::new()
-                .spacing(20)
-                .max_width(720)
-                .push(balance_context)
-                .push(compose_card),
-        )
-        .width(Length::Fill),
+        // The balance sits in the rail beside the form (it was a card above
+        // it), with what this spend has set so far.
+        PaymentColumns::new(
+            compose_card,
+            rail_card(
+                Column::new()
+                    .spacing(20)
+                    .push(balance_context)
+                    .push(iced::widget::rule::horizontal(1))
+                    .push(spend_summary(
+                        recipient_count,
+                        recovery_timelock.is_some(),
+                        feerate,
+                        custom_feerate,
+                        coins_shown.then(|| coins.iter().filter(|(_, selected)| *selected).count()),
+                        fee_amount.filter(|_| !mask_amounts),
+                    )),
+            ),
+        ),
     )
+}
+
+/// "This spend": the rail's summary of what the form has set so far. Only
+/// what the draft already knows; the fee shows once a draft has one.
+fn spend_summary<'a>(
+    recipients: usize,
+    recovery: bool,
+    feerate: &form::Value<String>,
+    custom_feerate: bool,
+    selected_coins: Option<usize>,
+    fee: Option<&Amount>,
+) -> Element<'a, Message> {
+    let line = |name: &'static str, value: String| {
+        Row::new()
+            .spacing(12)
+            .push(
+                p2_regular(localized_copy(name))
+                    .style(theme::text::secondary)
+                    .width(Length::Fill),
+            )
+            .push(p2_regular(value))
+    };
+    let rate = if feerate.value.is_empty() || !feerate.valid {
+        localized_copy("Not set").to_owned()
+    } else if custom_feerate {
+        format!("{} sat/vB · {}", feerate.value, localized_copy("Custom"))
+    } else {
+        format!("{} sat/vB", feerate.value)
+    };
+    let coins = match selected_coins {
+        None => localized_copy("Automatic").to_owned(),
+        Some(1) => localized_copy("1 selected").to_owned(),
+        Some(n) => format!("{n} {}", localized_copy("selected")),
+    };
+    Column::new()
+        .spacing(10)
+        .push(p1_bold(localized_copy(if recovery {
+            "This recovery"
+        } else {
+            "This spend"
+        })))
+        .push_maybe(
+            (!recovery && recipients > 0).then(|| line("Recipients", recipients.to_string())),
+        )
+        .push(line("Fee rate", rate))
+        .push(line("Coins", coins))
+        .push(line(
+            "Fee",
+            fee.map_or_else(
+                || localized_copy("After Prepare").to_owned(),
+                |fee| fee.to_formatted_string_with_unit(BitcoinDisplayUnit::Sats) + " sats",
+            ),
+        ))
+        .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2624,7 +2694,9 @@ mod tests {
         };
         let probe = Harness::new(compose(&fixture, &custom), TALL).probe();
         assert!(probe.inputs().contains(&"5"));
-        assert!(!probe.contains("5 sat/vB"));
+        // The form's rate line is gone; the rail's summary still names it.
+        assert!(!probe.text.iter().any(|(value, _)| value == "5 sat/vB"));
+        assert!(probe.contains("5 sat/vB · Custom"));
     }
 
     #[test]

@@ -174,10 +174,125 @@ pub fn last_transactions_section<'a, M: 'a + Clone + 'static>(
         .into()
 }
 
+/// Rows the Send and Receive rail lists before "See all in Activity".
+pub const RAIL_RECENT_ROWS: usize = 5;
+
+/// "Recent in Spark" for the Send and Receive rail: the same payments as
+/// [`last_transactions_section`], in rows narrow enough for the 352px rail
+/// (coin, label and time, amount and fiat), then a link to Activity.
+pub fn recent_rail_section<'a, M: 'a + Clone + 'static>(
+    recent: &'a [SparkRecentTransaction],
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+    on_select: impl Fn(usize) -> M + 'a,
+    on_history: M,
+) -> Element<'a, M> {
+    let see_all = iced_button(text(localized_copy("See all in Activity")).size(P2_SIZE))
+        .padding([4, 0])
+        .style(|theme: &theme::Theme, status| {
+            let mut style = theme::button::link(theme, status);
+            style.text_color = theme.colors.shell.accent_ink;
+            style
+        })
+        .on_press(on_history);
+    let mut list = Column::new().push(
+        Row::new()
+            .spacing(12)
+            .align_y(iced::Alignment::Center)
+            .push(p1_bold(localized_copy("Recent in Spark")).width(Length::Fill))
+            .push(see_all),
+    );
+    if recent.is_empty() {
+        return list
+            .spacing(8)
+            .push(p2_regular(localized_copy("No transactions yet.")).style(theme::text::secondary))
+            .into();
+    }
+    for (idx, tx) in recent.iter().take(RAIL_RECENT_ROWS).enumerate() {
+        let logo: Element<'_, M> = match tx.method {
+            SparkPaymentMethod::Lightning => asset_network_logo("btc", "lightning", 30.0),
+            SparkPaymentMethod::OnChainBitcoin => asset_network_logo("btc", "bitcoin", 30.0),
+            SparkPaymentMethod::Spark | SparkPaymentMethod::StableBalance => {
+                asset_network_logo("btc", "spark", 30.0)
+            }
+        };
+        let figure = if mask_amounts {
+            "••••••".to_owned()
+        } else if let Some(token) = tx.token_display.as_ref() {
+            token.clone()
+        } else {
+            format!(
+                "{} {}",
+                tx.display_amount()
+                    .to_formatted_string_with_unit(bitcoin_unit),
+                if matches!(bitcoin_unit, BitcoinDisplayUnit::BTC) {
+                    "BTC"
+                } else {
+                    "sats"
+                }
+            )
+        };
+        let sign = if tx.is_incoming { "+ " } else { "− " };
+        let when = if matches!(tx.status, DomainPaymentStatus::Pending) {
+            format!("{} · {}", tx.time_ago, localized_copy("Pending"))
+        } else {
+            tx.time_ago.clone()
+        };
+        let fiat = tx
+            .fiat_amount
+            .as_ref()
+            .filter(|_| !mask_amounts)
+            .map(|fiat| format!("{} {}", fiat.to_formatted_string(), fiat.currency()));
+        let row = Row::new()
+            .spacing(12)
+            .align_y(iced::Alignment::Center)
+            .push(logo)
+            .push(
+                Column::new()
+                    .spacing(2)
+                    .width(Length::Fill)
+                    .push(p2_regular(tx.description.clone()))
+                    .push(caption(when).style(theme::text::secondary)),
+            )
+            .push(
+                Column::new()
+                    .spacing(2)
+                    .align_x(iced::Alignment::End)
+                    .push(p2_regular(format!("{sign}{figure}")))
+                    .push_maybe(fiat.map(|fiat| caption(fiat).style(theme::text::secondary))),
+            );
+        list = list.push(iced::widget::rule::horizontal(1)).push(
+            iced_button(row)
+                .padding([10, 0])
+                .width(Length::Fill)
+                .style(theme::button::transparent)
+                .on_press(on_select(idx)),
+        );
+    }
+    list.spacing(6).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn hidden_rail_row_never_mounts_btc_token_or_fiat_amount() {
+        let mut payment = tx(true, 98_765_432, 0);
+        payment.token_display = Some("123456.78 USDB".into());
+        let mounted = capture::inspect(
+            "spark-hidden-rail-recent",
+            recent_rail_section(&[payment], BitcoinDisplayUnit::Sats, true, |_| 1_u8, 2_u8),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Recent in Spark"));
+        assert!(mounted.contains("••••••"));
+        assert!(!mounted.contains("98,765,432"));
+        assert!(!mounted.contains("123456.78"));
+    }
 
     fn tx(is_incoming: bool, amount_sat: u64, fees_sat: u64) -> SparkRecentTransaction {
         SparkRecentTransaction {

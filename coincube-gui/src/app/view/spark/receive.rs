@@ -23,7 +23,8 @@ use coincube_spark_protocol::DepositInfo;
 use crate::app::state::spark::cross_chain::supported_on;
 use crate::app::state::spark::esplora::DEPOSIT_MATURITY_CONFIRMATIONS;
 use crate::app::state::spark::receive::{SparkReceiveMethod, SparkReceivePhase};
-use crate::app::view::spark::{last_tx::last_transactions_section, SparkRecentTransaction};
+use crate::app::view::shared::payment_columns::{rail_card, PaymentColumns};
+use crate::app::view::spark::{last_tx::recent_rail_section, SparkRecentTransaction};
 use crate::app::view::{Message, SparkReceiveMessage};
 use crate::services::sideshift::{deposit_options, DepositOption};
 
@@ -244,34 +245,27 @@ impl<'a> SparkReceiveView<'a> {
             }
         }
 
-        let aside = Column::new()
-            .spacing(12)
-            .push(self.balances.view())
-            .push(iced::widget::rule::horizontal(1))
-            .push(
-                button::transparent_border(None, localized_copy("See all in Activity")).on_press(
-                    Message::Menu(crate::app::menu::Menu::Spark(
-                        crate::app::menu::SparkSubMenu::Transactions(None),
-                    )),
-                ),
-            );
-        let mut content = Column::new()
-            .spacing(20)
-            .width(Length::Fill)
-            // The title, the Cube line and Back to Spark are in the page head.
-            .push(
-                Row::new()
-                    .spacing(40)
-                    .align_y(Alignment::Start)
-                    .push(
-                        Container::new(form)
-                            .width(Length::Fixed(680.0))
-                            .style(payment_card_style),
-                    )
-                    .push(Container::new(aside).width(Length::Fixed(240.0)))
-                    .wrap()
-                    .vertical_spacing(20),
-            );
+        // The rail: what is in Spark, then its latest payments (they sat
+        // under the form before, which left the right of the page empty).
+        let rail = rail_card(
+            Column::new()
+                .spacing(20)
+                .push(self.balances.view())
+                .push(iced::widget::rule::horizontal(1))
+                .push(recent_rail_section(
+                    self.recent_transactions,
+                    self.bitcoin_unit,
+                    self.mask_amounts,
+                    |idx| Message::SparkReceive(SparkReceiveMessage::SelectTransaction(idx)),
+                    Message::SparkReceive(SparkReceiveMessage::History),
+                )),
+        );
+        // The title, the Cube line and Back to Spark are in the page head.
+        let mut main = Column::new().spacing(20).width(Length::Fill).push(
+            Container::new(form)
+                .width(Length::Fill)
+                .style(payment_card_style),
+        );
 
         // ── Phase 4f: pending on-chain deposits card ──────────────────
         // Renders only when there's something to show. The list
@@ -291,7 +285,7 @@ impl<'a> SparkReceiveView<'a> {
             .filter(|d| !is_swap_deposit(d))
             .count();
         if other_deposits > 0 || self.claim_error.is_some() {
-            content = content.push(pending_deposits_card(
+            main = main.push(pending_deposits_card(
                 self.pending_deposits,
                 swap_deposit,
                 self.claiming,
@@ -303,19 +297,7 @@ impl<'a> SparkReceiveView<'a> {
             ));
         }
 
-        // ── Last transactions ─────────────────────────────────────────
-        content = content.push(last_transactions_section(
-            self.recent_transactions,
-            self.bitcoin_unit,
-            self.show_direction_badges,
-            self.mask_amounts,
-            |idx| Message::SparkReceive(SparkReceiveMessage::SelectTransaction(idx)),
-            Message::SparkReceive(SparkReceiveMessage::History),
-        ));
-
-        Container::new(Container::new(content).width(Length::Fill).max_width(960.0))
-            .width(Length::Fill)
-            .into()
+        PaymentColumns::new(main, rail).into()
     }
 }
 
