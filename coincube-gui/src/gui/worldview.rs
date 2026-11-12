@@ -50,12 +50,23 @@ pub struct Sharing {
     error: Option<Error>,
     desired: Option<Selection>,
     read_ready: bool,
+    deferred_refresh: Option<Binding>,
     epoch: uuid::Uuid,
     save: Option<(SaveRequest, Option<Intent>)>,
     queued: VecDeque<(PreferenceChange, Option<Intent>)>,
 }
 
 impl Sharing {
+    fn cancel_refresh_for(&mut self, account: u32) {
+        if self
+            .deferred_refresh
+            .as_ref()
+            .is_some_and(|binding| binding.context.0 == account)
+        {
+            self.deferred_refresh = None;
+        }
+    }
+
     fn invalidate_intents(&mut self) {
         self.epoch = uuid::Uuid::new_v4();
         self.desired = None;
@@ -274,6 +285,23 @@ impl GUI {
         let Some(binding) = self.worldview_binding() else {
             return Task::none();
         };
+        let sharing = &self.worldview_sharing;
+        let current_read_or_write = sharing.in_flight.as_ref().is_some_and(|(owner, id)| {
+            owner == &binding
+                && sharing.binding.as_ref() == Some(&binding)
+                && sharing.pending == Some(*id)
+        });
+        if action == Action::Refresh
+            && !current_read_or_write
+            && (self.preferences.is_busy()
+                || self.preferences.has_queued_changes()
+                || sharing.in_flight.is_some())
+        {
+            // Opening Settings during a local read must eventually show status,
+            // without canceling an accepted edit or another origin's request.
+            self.worldview_sharing.deferred_refresh = Some(binding);
+            return Task::none();
+        }
         let view = self.worldview_view();
         let operation = match action {
             Action::Refresh if view.can_refresh => Request::Read,
@@ -287,6 +315,7 @@ impl GUI {
             _ => return Task::none(),
         };
         self.worldview_sharing.bind(&binding);
+        self.worldview_sharing.deferred_refresh = None;
         // A manual refresh/revoke cannot resurrect an earlier automatic intent.
         self.worldview_sharing.invalidate_intents();
         self.worldview_start(binding, operation)
@@ -303,6 +332,11 @@ impl GUI {
             return Task::none();
         };
         let previous = self.worldview_sharing.snapshot.clone();
+        if matches!(operation, Request::Read | Request::AutomaticRead)
+            && self.worldview_sharing.deferred_refresh.as_ref() == Some(&binding)
+        {
+            self.worldview_sharing.deferred_refresh = None;
+        }
         let request = uuid::Uuid::new_v4();
         self.worldview_sharing.pending = Some(request);
         self.worldview_sharing.in_flight = Some((binding.clone(), request));
@@ -330,22 +364,40 @@ impl GUI {
         )
     }
 
-    pub(super) fn worldview_automatic(&mut self) -> Task<Message> {
-        let sharing = &self.worldview_sharing;
-        if sharing.in_flight.is_some()
-            || sharing.error.is_some()
-            || sharing.desired.is_none()
-            || self.preferences.is_busy()
-            || self.preferences.has_queued_changes()
-        {
+    fn worldview_deferred_refresh(&mut self) -> Task<Message> {
+        let Some(binding) = self.worldview_sharing.deferred_refresh.take() else {
             return Task::none();
+        };
+        let same_sheet = self.preferences_sheet.as_ref().is_some_and(|sheet| {
+            let mut origin = sheet.origin.clone();
+            origin.focus = None;
+            origin == binding.origin
+        });
+        if !same_sheet || self.worldview_binding().as_ref() != Some(&binding) {
+            return Task::none();
+        }
+        self.worldview_action(Action::Refresh)
+    }
+
+    pub(super) fn worldview_automatic(&mut self) -> Task<Message> {
+        if self.preferences.is_busy() || self.preferences.has_queued_changes() {
+            // A GET held across local work is no longer fresh enough to write.
+            self.worldview_sharing.read_ready = false;
+            return Task::none();
+        }
+        let sharing = &self.worldview_sharing;
+        if sharing.in_flight.is_some() {
+            return Task::none();
+        }
+        if sharing.error.is_some() || sharing.desired.is_none() {
+            return self.worldview_deferred_refresh();
         }
         let Some(binding) = sharing.binding.clone() else {
             return Task::none();
         };
         if self.worldview_binding_for(&binding.origin).as_ref() != Some(&binding) {
             self.worldview_sharing.invalidate_intents();
-            return Task::none();
+            return self.worldview_deferred_refresh();
         }
         if self
             .preferences
@@ -354,7 +406,7 @@ impl GUI {
             != self.worldview_sharing.desired
         {
             self.worldview_sharing.invalidate_intents();
-            return Task::none();
+            return self.worldview_deferred_refresh();
         }
         // Re-read before every automatic write. A remotely revoked selection
         // must remain revoked, including after restart or an offline interval.
@@ -369,11 +421,11 @@ impl GUI {
             .filter(|snapshot| snapshot.selection.is_some())
         else {
             self.worldview_sharing.invalidate_intents();
-            return Task::none();
+            return self.worldview_deferred_refresh();
         };
         let selection = self.worldview_sharing.desired.take().unwrap();
         if snapshot.selection == Some(selection) {
-            return Task::none();
+            return self.worldview_deferred_refresh();
         }
         self.worldview_start(binding, Request::Publish(selection))
     }
@@ -395,6 +447,11 @@ impl GUI {
             return Task::none();
         }
         self.worldview_sharing.in_flight = None;
+        if result.is_err() {
+            // A queued status request predates this error; it is not explicit
+            // recovery consent and must not silently clear the new pause.
+            self.worldview_sharing.cancel_refresh_for(binding.context.0);
+        }
         if self.worldview_sharing.binding.as_ref() != Some(&binding)
             || self.worldview_sharing.pending != Some(request)
         {
@@ -424,7 +481,7 @@ impl GUI {
                 self.worldview_sharing.snapshot = None;
                 self.worldview_sharing.error = None;
             }
-            return Task::none();
+            return self.worldview_automatic();
         }
         if self.worldview_sharing.complete(request, result) {
             self.worldview_automatic()
@@ -648,6 +705,184 @@ mod tests {
                 super::super::tab::State::Home(home),
             ));
         gui.panes.get_mut(pane).unwrap().focused_tab = 1;
+    }
+
+    fn open_preferences(gui: &mut GUI) {
+        let pane = gui.focus.unwrap();
+        let state = gui.panes.get(pane).unwrap();
+        let tab = state.tabs[state.focused_tab].id;
+        drop(gui.update(Message::Pane(
+            pane,
+            super::super::pane::Message::tab(
+                tab,
+                super::super::tab::Message::OpenAppPreferences(
+                    super::super::tab::PreferencesSource::Home,
+                ),
+            ),
+        )));
+    }
+
+    #[test]
+    fn automatic_read_waiting_for_a_save_is_rechecked_before_publication() {
+        with_gui(|gui| {
+            use crate::app::settings::preferences::WorldviewMode::*;
+            shared(gui);
+            let original = selected(gui);
+            edit(gui, PreferenceChange::Worldview(Luke));
+            drop(gui.change_preference(PreferenceChange::Worldview(Suitcoiner)));
+            let save = gui.worldview_sharing.save.as_ref().unwrap().0.clone();
+            remote(gui, Ok(snapshot(Some(original))));
+            assert!(gui.worldview_sharing.in_flight.is_none());
+            finish_save(gui, save);
+            assert!(matches!(
+                gui.worldview_sharing.operation,
+                Some(Request::AutomaticRead)
+            ));
+            remote(gui, Ok(snapshot(None))); // Revoked while the save delayed us.
+            assert!(gui.worldview_sharing.in_flight.is_none());
+            assert!(gui.worldview_sharing.desired.is_none());
+        });
+    }
+
+    #[test]
+    fn opening_preferences_during_background_read_eventually_refreshes_sharing() {
+        with_gui(|gui| {
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            let refresh = gui.preferences.begin_refresh_if_due().unwrap();
+            open_preferences(gui);
+            assert!(gui.worldview_sharing.in_flight.is_none());
+            let receipt = super::super::GlobalSettings::load_or_initialize_preferences(
+                &gui.config.coincube_directory,
+            )
+            .unwrap();
+            drop(gui.update(Message::Preferences(refresh, Ok(receipt))));
+            assert!(matches!(
+                gui.worldview_sharing.operation,
+                Some(Request::Read)
+            ));
+            remote(gui, Ok(snapshot(None)));
+            assert!(gui.worldview_sharing.snapshot.is_some());
+            assert!(gui.worldview_sharing.in_flight.is_none());
+        });
+    }
+
+    #[test]
+    fn deferred_status_refresh_is_dropped_after_close_navigation_or_account_change() {
+        for cancellation in 0..3 {
+            with_gui(move |gui| {
+                std::thread::sleep(std::time::Duration::from_millis(1100));
+                let refresh = gui.preferences.begin_refresh_if_due().unwrap();
+                open_preferences(gui);
+                match cancellation {
+                    0 => drop(gui.close_preferences_sheet()),
+                    1 => another_home(gui, Some(7)),
+                    _ => set_account(gui, 8),
+                }
+                let receipt = super::super::GlobalSettings::load_or_initialize_preferences(
+                    &gui.config.coincube_directory,
+                )
+                .unwrap();
+                drop(gui.update(Message::Preferences(refresh, Ok(receipt))));
+                assert!(gui.worldview_sharing.in_flight.is_none());
+                assert!(gui.worldview_sharing.deferred_refresh.is_none());
+            });
+        }
+    }
+
+    #[test]
+    fn deferred_status_refresh_does_not_cancel_an_accepted_queued_edit() {
+        with_gui(|gui| {
+            use crate::app::settings::preferences::WorldviewMode::*;
+            shared(gui);
+            let original = selected(gui);
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            let refresh = gui.preferences.begin_refresh_if_due().unwrap();
+            open_preferences(gui);
+            drop(gui.change_preference(PreferenceChange::Worldview(Luke)));
+            let receipt = super::super::GlobalSettings::load_or_initialize_preferences(
+                &gui.config.coincube_directory,
+            )
+            .unwrap();
+            drop(gui.update(Message::Preferences(refresh, Ok(receipt))));
+            let save = gui.worldview_sharing.save.as_ref().unwrap().0.clone();
+            finish_save(gui, save);
+            assert!(matches!(
+                gui.worldview_sharing.operation,
+                Some(Request::AutomaticRead)
+            ));
+            assert!(gui.worldview_sharing.deferred_refresh.is_none());
+            remote(gui, Ok(snapshot(Some(original))));
+            let latest = selected(gui);
+            assert!(
+                matches!(gui.worldview_sharing.operation, Some(Request::Publish(value)) if value == latest)
+            );
+            remote(gui, Ok(snapshot(Some(latest))));
+            assert!(gui.worldview_sharing.in_flight.is_none());
+        });
+    }
+
+    #[test]
+    fn another_origins_status_refresh_waits_and_cannot_clear_a_new_same_account_error() {
+        for failure in [None, Some(Error::Conflict), Some(Error::Unavailable)] {
+            with_gui(move |gui| {
+                use crate::app::settings::preferences::WorldviewMode::*;
+                shared(gui);
+                let original = selected(gui);
+                edit(gui, PreferenceChange::Worldview(Luke));
+                let first = gui.worldview_sharing.in_flight.clone();
+                another_home(gui, Some(7));
+                open_preferences(gui);
+                assert_eq!(gui.worldview_sharing.in_flight, first);
+                assert!(gui.worldview_sharing.deferred_refresh.is_some());
+                if failure == Some(Error::Conflict) {
+                    remote(gui, Err(Error::Conflict));
+                } else {
+                    remote(gui, Ok(snapshot(Some(original))));
+                    assert!(matches!(
+                        gui.worldview_sharing.operation,
+                        Some(Request::Publish(_))
+                    ));
+                    remote(
+                        gui,
+                        failure.map_or_else(|| Ok(snapshot(Some(selected(gui)))), Err),
+                    );
+                }
+                if let Some(error) = failure {
+                    assert_eq!(gui.worldview_sharing.error, Some(error));
+                    assert!(gui.worldview_sharing.in_flight.is_none());
+                    assert!(gui.worldview_sharing.deferred_refresh.is_none());
+                } else {
+                    assert!(matches!(
+                        gui.worldview_sharing.operation,
+                        Some(Request::Read)
+                    ));
+                    assert_eq!(gui.worldview_sharing.binding, gui.worldview_binding());
+                    remote(gui, Ok(snapshot(Some(selected(gui)))));
+                    assert!(gui.worldview_sharing.in_flight.is_none());
+                    assert!(gui.worldview_view().shared_selection.is_some());
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn deferred_status_for_another_account_survives_an_unrelated_account_error() {
+        with_gui(|gui| {
+            use crate::app::settings::preferences::WorldviewMode::*;
+            shared(gui);
+            edit(gui, PreferenceChange::Worldview(Luke));
+            another_home(gui, Some(8));
+            open_preferences(gui);
+            remote(gui, Err(Error::Unavailable));
+            assert!(matches!(
+                gui.worldview_sharing.operation,
+                Some(Request::Read)
+            ));
+            assert_eq!(gui.worldview_sharing.binding.as_ref().unwrap().context.0, 8);
+            assert!(gui.worldview_sharing.desired.is_none());
+            remote(gui, Ok(snapshot(None)));
+            assert!(gui.worldview_sharing.in_flight.is_none());
+        });
     }
 
     #[test]
