@@ -119,6 +119,10 @@ async fn register_device_is_idempotent() {
             "integration-test-device".to_string(),
             "0.0.0".to_string(),
             std::env::consts::OS.to_string(),
+            // No ECIES transport key: this test only checks device_id
+            // idempotency, and an empty key is the documented "plaintext-only
+            // device" registration (see grpc/bootstrap.rs).
+            Vec::new(),
         )
         .await
         .expect("first RegisterDevice");
@@ -127,6 +131,10 @@ async fn register_device_is_idempotent() {
             "integration-test-device".to_string(),
             "0.0.0".to_string(),
             std::env::consts::OS.to_string(),
+            // No ECIES transport key: this test only checks device_id
+            // idempotency, and an empty key is the documented "plaintext-only
+            // device" registration (see grpc/bootstrap.rs).
+            Vec::new(),
         )
         .await
         .expect("second RegisterDevice");
