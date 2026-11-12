@@ -7,14 +7,15 @@ is unavailable. Bitcoin, Bitcoin Blake2b and their test networks follow this
 same rule. Mainnet/testnet account paths and xpub encodings remain unchanged;
 Bitcoin Blake2b still uses its existing unified-signature rules.
 
-For an existing Bitcoin-family Cube, construction requires its authenticated,
-Cube-ID- and fingerprint-scoped master session. An SDK client is not a source
-of Cube identity. Bitcoin Blake2b deliberately keeps its root out of that
-Bitcoin signer cache; its admitted installer reads only the Cube's chain-bound
-encrypted seed with its current scoped PIN. Revoked loaders cannot enter this
-path. Missing or inconsistent identity, credentials or seed material returns an
-error instead of generating an unrelated Vault key. Passkey Cubes use their
-authenticated master session without requiring a PIN.
+An existing Bitcoin-family Cube first uses its authenticated, Cube-ID- and
+fingerprint-scoped master cache. A PIN-only session after seed-only restore can
+read the same Cube's chain-bound encrypted seed with its current scoped PIN.
+Bitcoin Blake2b deliberately keeps its root out of the Bitcoin signer cache and
+uses this chain-bound file path after admission. Revoked loaders cannot enter
+it. Neither an SDK handle nor a missing, inconsistent or revoked source can
+substitute another root. Passkey Cubes require their authenticated master cache
+without a PIN; a cache miss never probes seed files even if a stale PIN exists.
+The lookup adds no asynchronous signer-cache writes at restore completion.
 
 A fresh standalone Bitcoin Blake2b Cube generates its single Cube master and
 requires its existing seed backup step. Ordinary Bitcoin Vault creation needs

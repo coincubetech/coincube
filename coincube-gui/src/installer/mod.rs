@@ -2335,10 +2335,22 @@ fn installer_master(
                 return Err(unavailable());
             }
             let fp = cube.master_signer_fingerprint.ok_or_else(unavailable)?;
-            let signer = if chain.is_blake2b() {
-                // Fork unlock deliberately never parks its root in the Bitcoin
-                // signer cache. Read only this admitted Cube's chain-bound file
-                // with its current session credential instead.
+            let cached = if chain.is_blake2b() {
+                // Fork unlock never parks its root in the Bitcoin signer cache.
+                None
+            } else {
+                crate::app::session::unlocked_signer(&cube.id, fp)
+            };
+            let signer = if let Some(signer) = cached {
+                signer
+            } else {
+                // Seed-only restore legitimately opens a PIN-only session.
+                // Resolve its already-persisted master without asynchronously
+                // attaching another secret to the global cache. Passkey Cubes
+                // must never treat a per-Vault file or stale PIN as their root.
+                if cube.is_passkey_cube() {
+                    return Err(unavailable());
+                }
                 let pin = crate::app::session::pin_for(&cube.id).ok_or_else(unavailable)?;
                 crate::services::unlock::open_seed_by_fingerprint(
                     datadir.path(),
@@ -2348,8 +2360,6 @@ fn installer_master(
                     &cube.id,
                 )
                 .map_err(|_| unavailable())?
-            } else {
-                crate::app::session::unlocked_signer(&cube.id, fp).ok_or_else(unavailable)?
             };
             if signer.fingerprint(&bitcoin::secp256k1::Secp256k1::new()) != fp {
                 return Err(unavailable());
@@ -2783,6 +2793,161 @@ mod cube_signer_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_seed_only_restored_cube_can_create_its_vault_in_the_first_pin_session() {
+        use crate::app::session;
+        use crate::services::recovery::{SeedBlob, SeedBlobCube, SeedBlobMnemonic, BLOB_VERSION};
+        let _guard = session::test_guard();
+        let chain = crate::chain::ChainId::Testnet4;
+        let network = chain.bitcoin_network();
+        let master = MasterSigner::generate(network).unwrap();
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let fp = master.fingerprint(&secp);
+        let path = step::descriptor::editor::key::derivation_path(
+            network,
+            bitcoin::bip32::ChildNumber::from_hardened_idx(0).unwrap(),
+        );
+        let expected_xpub = master.xpub_at(&path, &secp);
+        let expected_cek =
+            crate::services::connect::crypto::CubeEncryptionKey::derive(&master, network)
+                .public_key();
+        let cube = CubeSettings::new("restored".into(), chain).with_master_signer(fp);
+        let root =
+            std::env::temp_dir().join(format!("restored-vault-761-{}", uuid::Uuid::new_v4()));
+        let dir = CoincubeDirectory::new(root.clone());
+        let seed = SeedBlob {
+            version: BLOB_VERSION,
+            cube: SeedBlobCube {
+                uuid: cube.id.clone(),
+                name: cube.name.clone(),
+                network: chain.api_str().into(),
+                created_at: "0".into(),
+                lightning_address: None,
+            },
+            mnemonic: SeedBlobMnemonic {
+                phrase: master.words().join(" "),
+                language: "en".into(),
+            },
+        };
+        let staged = step::recovery_kit_restore::stage_restore(
+            network,
+            RestoreScope::Full,
+            Some(&seed),
+            None,
+        )
+        .unwrap();
+        let mut ctx = Context::new_for_chain(chain, dir.clone(), RemoteBackend::None, None, None);
+        ctx.recovered_signer = Some(Arc::new(staged.signer.unwrap()));
+        ctx.restore_pin = Some(zeroize::Zeroizing::new("2468".into()));
+        ctx.cube_id = Some(cube.id.clone());
+        persist_recovered_seed_only(ctx).unwrap();
+
+        // Production restore completion opens the PIN session without caching
+        // a signer. Do not manufacture a cache entry to make creation work.
+        session::close();
+        session::open(&cube.id, zeroize::Zeroizing::new("2468".into()));
+        assert!(session::unlocked_signer(&cube.id, fp).is_none());
+        for developer_mode in [false, true] {
+            let (installer, _) = Installer::try_new_for_chain(
+                dir.clone(),
+                chain,
+                None,
+                UserFlow::CreateWallet,
+                true,
+                Some(cube.clone()),
+                None,
+                None,
+                developer_mode,
+                None,
+            )
+            .expect("an authenticated seed-only restore can create its Vault without reopening");
+            assert_eq!(
+                installer.signer.lock().unwrap().get_extended_pubkey(&path),
+                expected_xpub
+            );
+            assert_eq!(
+                installer.context.cube_encryption_key.unwrap().public_key(),
+                expected_cek
+            );
+            assert_eq!(installer.developer_mode, developer_mode);
+            assert!(
+                session::unlocked_signer(&cube.id, fp).is_none(),
+                "disk lookup adds no global secret owner"
+            );
+        }
+        // The usable encrypted seed stays present for these negative controls.
+        for other in [Some("another-cube"), None] {
+            session::close();
+            if let Some(id) = other {
+                session::open(id, zeroize::Zeroizing::new("2468".into()));
+            }
+            let result = Installer::try_new_for_chain(
+                dir.clone(),
+                chain,
+                None,
+                UserFlow::CreateWallet,
+                true,
+                Some(cube.clone()),
+                None,
+                None,
+                false,
+                None,
+            );
+            assert!(
+                matches!(result, Err(Error::Unexpected(ref e)) if e.contains("Unlock this Cube"))
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_passkey_cache_miss_never_reads_a_seed_file_even_with_a_stale_pin() {
+        use crate::app::session;
+        let _guard = session::test_guard();
+        let master = Signer::generate(Network::Regtest).unwrap();
+        let fp = master.fingerprint();
+        let cube = CubeSettings::new("synthetic".into(), crate::chain::ChainId::Regtest)
+            .with_master_signer(fp)
+            .with_passkey(crate::app::settings::PasskeyMetadata {
+                credential_id: "synthetic".into(),
+                rp_id: "coincube.io".into(),
+                created_at: 0,
+                label: None,
+            });
+        let root = std::env::temp_dir().join(format!("passkey-vault-761-{}", uuid::Uuid::new_v4()));
+        let dir = CoincubeDirectory::new(root.clone());
+        // A matching per-Vault file must not turn a passkey Cube into a PIN Cube.
+        master
+            .store_encrypted(
+                &dir,
+                Network::Regtest,
+                "vault",
+                1000,
+                "2468",
+                &cube.id,
+                None,
+            )
+            .unwrap();
+        session::close();
+        session::open(&cube.id, zeroize::Zeroizing::new("2468".into()));
+        assert!(session::unlocked_signer(&cube.id, fp).is_none());
+        let result = Installer::new(
+            dir,
+            Network::Regtest,
+            None,
+            UserFlow::CreateWallet,
+            true,
+            Some(cube),
+            None,
+            None,
+            false,
+            None,
+        );
+        assert!(matches!(result, Err(Error::Unexpected(ref e)) if e.contains("Unlock this Cube")));
+        session::close();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
