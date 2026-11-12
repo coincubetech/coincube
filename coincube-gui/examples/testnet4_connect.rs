@@ -114,7 +114,7 @@ mod run {
         check(
             matches!(
                 input.action.as_str(),
-                "inspect" | "request" | "collect" | "cancel"
+                "inspect" | "request" | "collect" | "cancel" | "cleanup_audit"
             ),
             "invalid_action",
         )?;
@@ -511,6 +511,19 @@ mod run {
         Ok(merged)
     }
 
+    fn cleanup_inventory(
+        input: &Input,
+        owner: u32,
+        pending: &ListPendingSessionsResponse,
+        decrypt: &ListPendingDecryptRequestsResponse,
+    ) -> Value {
+        json!({"ok":true,"network":"testnet4","txid":input.expected_txid,
+            "owner_user_id":owner,
+            "sessions":pending.sessions.iter().map(|s| json!({"vault_id":s.vault_id,
+                "key_ids":s.targets.iter().map(|t| t.key_id.clone()).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+            "decrypt_cubes":decrypt.requests.iter().map(|r| r.cube_id.clone()).collect::<Vec<_>>() })
+    }
+
     async fn execute(input: Input) -> Result<Value> {
         validate_input(&input)?;
         let (descriptor, psbt, fingerprint) = fixture(&input)?;
@@ -553,6 +566,22 @@ mod run {
                 hex::encode(Sha256::digest(private_read(&input.psbt_file)?)) == binding.psbt_sha256,
                 "abort_psbt_mismatch",
             )?;
+        }
+        if input.action == "cleanup_audit" {
+            let owner = rest.get_user().await.map_err(rest_error)?;
+            let channel = grpc::create_channel(GRPC)
+                .await
+                .map_err(|_| "connect_unavailable")?;
+            let mut client = GrpcSessionClient::new(
+                channel,
+                AuthInterceptor::with_device_id(&account.tokens.access_token, device.clone()),
+            );
+            let pending = client.list_pending_sessions().await.map_err(rpc_error)?;
+            let decrypt = client
+                .list_pending_decrypt_requests()
+                .await
+                .map_err(rpc_error)?;
+            return Ok(cleanup_inventory(&input, owner.id, &pending, &decrypt));
         }
         let cube = rest.get_cube(input.cube_id).await.map_err(rest_error)?;
         check(cube.network == "testnet4", "connect_cube_wrong_network")?;
@@ -771,6 +800,42 @@ mod run {
 
         fn input() -> Input {
             serde_json::from_value(json!({"action":"inspect","network":"testnet4","profile_dir":"/private/fixture","psbt_file":"/private/draft.psbt","descriptor_file":"/private/descriptor","expected_txid":"ab".repeat(32),"cube_id":1,"vault_id":"1","target_key_id":"2","target_fingerprint":"12345678","request_id":"12345678-1234-4234-8234-123456789abc"})).unwrap()
+        }
+
+        #[test]
+        fn cleanup_inventory_retains_all_active_references_without_payloads() {
+            let mut request = input();
+            request.action = "cleanup_audit".into();
+            assert!(validate_input(&request).is_ok());
+            let sessions = ListPendingSessionsResponse {
+                sessions: vec![SigningSession {
+                    vault_id: "42".into(),
+                    psbt: b"private opaque payload".to_vec(),
+                    targets: vec![SignerTarget {
+                        key_id: "7".into(),
+                        device_id: "private-device".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+            };
+            let decrypt = ListPendingDecryptRequestsResponse {
+                requests: vec![DecryptRequestedEvent {
+                    cube_id: "99".into(),
+                    ephemeral_pubkey: b"opaque key".to_vec(),
+                    ..Default::default()
+                }],
+            };
+            let value = cleanup_inventory(&request, 5, &sessions, &decrypt);
+            assert_eq!(
+                value["sessions"],
+                json!([{"vault_id":"42", "key_ids":["7"]}])
+            );
+            assert_eq!(value["decrypt_cubes"], json!(["99"]));
+            assert_eq!(value["owner_user_id"], 5);
+            assert!(!value.to_string().contains("private"));
+            assert!(!value.to_string().contains("opaque"));
+            assert!(value.get("psbt").is_none());
         }
 
         #[test]

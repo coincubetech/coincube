@@ -79,6 +79,16 @@ impl GrpcSessionClient {
             .map(|r| r.into_inner())
     }
 
+    /// Read pending recovery requests without releasing any recovery payload.
+    pub async fn list_pending_decrypt_requests(
+        &mut self,
+    ) -> Result<super::connect_v1::ListPendingDecryptRequestsResponse, tonic::Status> {
+        self.inner
+            .list_pending_decrypt_requests(super::connect_v1::ListPendingDecryptRequestsRequest {})
+            .await
+            .map(|r| r.into_inner())
+    }
+
     /// Cancel an in-flight signing session.
     /// Only allowed from: PENDING, DELIVERED, VIEWED, APPROVED.
     pub async fn cancel_signing_session(

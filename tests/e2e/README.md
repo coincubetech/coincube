@@ -551,3 +551,39 @@ audit and all credentials remain intact. Exact replay does not clear a newer
 pending attempt. The helper cannot sign or broadcast and does not make the old
 strict run pass. Use a new run for new acceptance evidence. After an uncertain
 RPC/CAS response, rerun with the identical inputs and output directory.
+
+### Repeatable disposable fixture retirement
+
+The workstation template enables `qa_cleanup: {"version": 1, "preserve_runs": []}`.
+This is separate authorization from `qa_funding`; configurations that omit it
+remain read-only at the signer limit. Add **every historical QA funding source**
+not already listed in `qa_funding.sources` to `preserve_runs` by absolute run
+path. These protected paths are resolved to exact Cube/key provenance, including
+recovered signers whose labels differ from their run UUID. Personal or shared
+objects are never discovered or deleted by a `QA` name prefix.
+
+A fully passed strict run enrolls its exact owner, Cube UUID/ID, vault descriptor
+fingerprint, signer ID/fingerprint, immutable public snapshot and retained local
+recovery files in the same private host registry used for funding. Older runs
+are not auto-discovered: their one-time retirement requires a separate explicit
+audit. At authenticated Testnet4 signer capacity, the next strict run can retire
+at most one enrolled fixture. It first proves the native Master/Border backup
+is readable, checks pending signing **and recovery-decrypt** requests over gRPC,
+rechecks both explorers, and excludes explicit funding sources, usable unspent
+managed donors and uncertain funding-claim dependencies. Available-capacity runs
+and already-created signer resumes perform no cleanup.
+
+Retirement deletes cloud metadata in order **Vault → Signer → Cube**, with a
+private durable intent before every DELETE and exact-ID readback afterward.
+Interrupted cleanup reconciles that same fixture and cannot select a second one
+for the same consumer run. A failure deleting the signer prevents Cube deletion.
+New shared members, key references, pending requests, unexpected funds, changed
+balance or missing recovery material stop cleanup. Screenshot protection and
+strict phone-process acceptance remain enforced.
+
+No coins are swept and no local profile, checkpoint, descriptor, encrypted native
+backup, signed transaction or sponsorship evidence is deleted. A small residual
+(for example 89,000 Testnet4 sats) is explicitly recorded as still recoverable
+with the retained Master and Border keys. A cloud tombstone excludes the retired
+managed donor from future funding selection without invalidating its local
+transaction/recovery history. Keep those local files and macOS Keychain items.

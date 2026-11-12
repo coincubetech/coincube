@@ -141,6 +141,9 @@ def entries(data, account, config):
     roots = root_keys(config)
     result = []
     for e in managed:
+        from .qa_cleanup import retired
+        if retired(data, e["entry"]):
+            continue
         require(isinstance(e, dict) and e.get("kind") in ("completed", "sponsor") and isinstance(e.get("entry"), dict), "REGISTRY")
         if not roots.intersection(e.get("authorization_roots", [])):
             continue
@@ -500,10 +503,10 @@ def add_source(data, account, item):
     save_pool(data)
 
 
-def register_completed(runner):
+def register_completed(runner, *, cleanup_only=False):
     from .provisioning import STAGES
-    config = options(runner.config["qa_funding"])
-    if not config["register_completed"]:
+    config = options(runner.config.get("qa_funding", {"version": 1, "sources": []}))
+    if not cleanup_only and not config["register_completed"]:
         return
     directory = runner.journal.directory.resolve()
     state, cp, binding = sponsor.read_run(directory)
@@ -552,6 +555,8 @@ def register_completed(runner):
                 and saved_cp.get("binding") == cp["binding"] and saved_artifacts == current_artifacts
                 and set(saved_cp.get("stages", {})) == set(STAGES)
                 and all(v.get("status") == "passed" for v in saved_cp["stages"].values()), "SOURCE_CHANGED")
+        if cleanup_only:
+            return
         key = digest({"directory": str(directory), "run_id": runner.run_id,
                       "binding": runner.journal.data["binding"]})
         claim = data["claims"].get(data["runs"].get(key))

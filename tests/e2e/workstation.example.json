@@ -5,10 +5,16 @@
   "profile_dir": "/absolute/path/to/signed-in-tenshu-profile",
   "connect_rest": "https://api.coincube.io",
   "connect_grpc": "https://grpc.coincube.io:443",
-  "strict_acceptance": {"version": 1},
+  "strict_acceptance": {
+    "version": 1
+  },
   "qa_funding": {
     "version": 1,
-    "sources": [{"source_run": "/absolute/path/to/completed-disposable-qa-run"}],
+    "sources": [
+      {
+        "source_run": "/absolute/path/to/completed-disposable-qa-run"
+      }
+    ],
     "maximum_amount_sats": 500000,
     "fee_sats": 1000,
     "faucet_wait_seconds": 30,
@@ -23,5 +29,9 @@
     }
   },
   "amount_sats": 10000,
-  "fee_sats": 1000
+  "fee_sats": 1000,
+  "qa_cleanup": {
+    "version": 1,
+    "preserve_runs": []
+  }
 }
