@@ -2233,6 +2233,21 @@ pub enum ConnectCubeMessage {
         version: u32,
     },
     ClaimLightningAddress,
+    /// Give a Cube with no Lightning address a random one (e.g.
+    /// `orangezebra`): checked free, reserved, registered and confirmed like
+    /// a manual claim. Only runs once the Cube's (empty) address is known;
+    /// after a failure only an explicit `retry` runs it again.
+    AutoAssignLightningAddress {
+        retry: bool,
+    },
+    LightningAddressAutoAssigned {
+        generation: u64,
+        address: crate::services::coincube::LightningAddress,
+    },
+    LightningAddressAutoAssignFailed {
+        generation: u64,
+        error: String,
+    },
     LightningAddressClaimed {
         generation: u64,
         address: crate::services::coincube::LightningAddress,
