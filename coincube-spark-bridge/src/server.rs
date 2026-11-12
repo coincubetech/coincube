@@ -491,6 +491,7 @@ impl EventListener for BridgeEventListener {
                 Some(ProtocolEvent::PaymentSucceeded {
                     amount_sat: payment.amount as i64,
                     bolt11: extract_bolt11(&payment),
+                    token: payment_token(&payment),
                     id: payment.id,
                 })
             }
@@ -740,6 +741,33 @@ fn cross_chain_leg_description(info: Option<&breez_sdk_spark::ConversionInfo>) -
         None => chain.clone(),
     };
     Some(format!("Sent {asset} on {chain}"))
+}
+
+/// The token a token payment moved, for the `PaymentSucceeded` event: its
+/// amount is then in that token's base units, not sats.
+///
+/// A token payment without its metadata still gets a (nameless) token, so
+/// its base units are never read as sats.
+fn payment_token(p: &breez_sdk_spark::Payment) -> Option<coincube_spark_protocol::PaymentToken> {
+    match &p.details {
+        Some(PaymentDetails::Token { metadata, .. }) => {
+            Some(coincube_spark_protocol::PaymentToken {
+                identifier: metadata.identifier.clone(),
+                ticker: metadata.ticker.clone(),
+                decimals: metadata.decimals,
+                usdb: metadata.identifier == crate::sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER,
+            })
+        }
+        _ if matches!(p.method, breez_sdk_spark::PaymentMethod::Token) => {
+            Some(coincube_spark_protocol::PaymentToken {
+                identifier: String::new(),
+                ticker: String::new(),
+                decimals: 0,
+                usdb: false,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn payment_to_summary(p: breez_sdk_spark::Payment) -> PaymentSummary {
@@ -5264,6 +5292,79 @@ mod auto_convert_handler_tests {
             serde_json::from_slice(&std::fs::read(dir.0.join(auto_convert::STATE_FILE)).unwrap())
                 .unwrap();
         assert_eq!(json["pending_sats"], 4_000, "saved on arrival");
+    }
+
+    /// A token payment's event names its token, so the gui reads its amount
+    /// as token base units, not sats; a bitcoin payment's names none.
+    #[tokio::test]
+    async fn payment_events_name_the_token_a_token_payment_moved() {
+        let dir = TempDir::new();
+        let (listener, _ac, mut frames, _wakes) = listener(&dir);
+
+        let mut usdb = received("usdb", 12_500_000);
+        usdb.method = breez_sdk_spark::PaymentMethod::Token;
+        usdb.details = Some(PaymentDetails::Token {
+            metadata: breez_sdk_spark::TokenMetadata {
+                identifier: crate::sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
+                issuer_public_key: "02issuer".to_string(),
+                name: "USDB".to_string(),
+                ticker: "USDB".to_string(),
+                decimals: 6,
+                max_supply: u128::MAX,
+                is_freezable: false,
+            },
+            tx_hash: "tx".to_string(),
+            tx_type: breez_sdk_spark::TokenTransactionType::Transfer,
+            invoice_details: None,
+            conversion_info: None,
+        });
+        listener
+            .on_event(SdkEvent::PaymentSucceeded { payment: usdb })
+            .await;
+        match frames.try_recv() {
+            Ok(Frame::Event(ProtocolEvent::PaymentSucceeded {
+                amount_sat, token, ..
+            })) => {
+                assert_eq!(amount_sat, 12_500_000);
+                assert_eq!(
+                    token,
+                    Some(coincube_spark_protocol::PaymentToken {
+                        identifier: crate::sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
+                        ticker: "USDB".to_string(),
+                        decimals: 6,
+                        usdb: true,
+                    })
+                );
+            }
+            other => panic!("expected a payment event, got {other:?}"),
+        }
+
+        // A token payment the SDK sent without metadata is still a token
+        // (never sats), just not one that can be named, and not USDB.
+        let mut bare = received("bare", 7_000_000);
+        bare.method = breez_sdk_spark::PaymentMethod::Token;
+        listener
+            .on_event(SdkEvent::PaymentSucceeded { payment: bare })
+            .await;
+        match frames.try_recv() {
+            Ok(Frame::Event(ProtocolEvent::PaymentSucceeded {
+                token: Some(token), ..
+            })) => assert!(!token.usdb && token.ticker.is_empty()),
+            other => panic!("expected a token payment event, got {other:?}"),
+        }
+
+        listener
+            .on_event(SdkEvent::PaymentSucceeded {
+                payment: received("btc", 4_000),
+            })
+            .await;
+        assert!(matches!(
+            frames.try_recv(),
+            Ok(Frame::Event(ProtocolEvent::PaymentSucceeded {
+                token: None,
+                ..
+            }))
+        ));
     }
 
     /// A converter whose send, once committed, waits to be released.

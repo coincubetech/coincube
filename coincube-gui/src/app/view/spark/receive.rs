@@ -136,7 +136,7 @@ impl<'a> SparkReceiveView<'a> {
                         self.network,
                         self.open_menu,
                     ))
-                    .push(arrival_note(self.network, self.receive_usd)),
+                    .push(arrival_note(self.network, self.method, self.receive_usd)),
             )
             .padding([18, 24]),
         );
@@ -334,10 +334,23 @@ fn note_link<'a>(
     .into()
 }
 
-fn arrival_note<'a>(network: Network, receive_usd: bool) -> Element<'a, Message> {
+/// With USDB picked under THEY SEND: the token arrives as itself.
+pub(crate) const ARRIVAL_NOTE_USDB: &str =
+    "USDB sent to this Spark address arrives as USDB. Ask the payer to send USDB on Spark.";
+
+fn arrival_note<'a>(
+    network: Network,
+    method: SparkReceiveMethod,
+    receive_usd: bool,
+) -> Element<'a, Message> {
     use crate::app::menu::{Menu, SparkSettingsOption, SparkSubMenu};
     // Conversions, and so USDB, exist where Swap does.
     let usd = crate::app::state::spark::swap::swap_available(network);
+    if usd && method == SparkReceiveMethod::UsdbSpark {
+        return p2_regular(localized_copy(ARRIVAL_NOTE_USDB))
+            .style(theme::text::secondary)
+            .into();
+    }
     if usd && receive_usd {
         return Column::new()
             .spacing(2)
@@ -694,7 +707,7 @@ fn rail_display(method: SparkReceiveMethod) -> (&'static str, &'static str) {
         SparkReceiveMethod::Bolt11 => ("lightning", "on Lightning"),
         SparkReceiveMethod::LightningAddress => ("lightning", "on Lightning"),
         SparkReceiveMethod::OnchainBitcoin => ("bitcoin", "on-chain"),
-        SparkReceiveMethod::Spark => ("spark", "on Spark"),
+        SparkReceiveMethod::Spark | SparkReceiveMethod::UsdbSpark => ("spark", "on Spark"),
     }
 }
 
@@ -734,9 +747,11 @@ fn spark_receive_cards<'a>(
     let sender_open = open == Some(ReceiveMenu::TheySend);
     // Where conversions run, YOU RECEIVE is a choice too: keep bitcoin, or
     // convert it to US Dollar as it arrives (auto-convert).
-    let choosable = crate::app::state::spark::swap::swap_available(network);
+    let usdb_sent = method == SparkReceiveMethod::UsdbSpark && cross.is_none();
+    // USDB sent stays USDB, so there is nothing to choose then.
+    let choosable = crate::app::state::spark::swap::swap_available(network) && !usdb_sent;
     let receiver_open = choosable && open == Some(ReceiveMenu::YouReceive);
-    let receive_usd = receive_usd && choosable;
+    let receive_usd = (receive_usd && choosable) || usdb_sent;
     let you_receive_body = Container::new(super::route_tile_body(
         if receive_usd {
             asset_network_logo("usdb", "spark", 36.0)
@@ -797,11 +812,16 @@ fn spark_receive_cards<'a>(
         ),
         None => {
             let (net_slug, place) = rail_display(method);
+            let (asset, name) = if method == SparkReceiveMethod::UsdbSpark {
+                ("usdb", localized_copy("US Dollar"))
+            } else {
+                ("btc", "Bitcoin")
+            };
             super::route_tile_body(
-                asset_network_logo("btc", net_slug, 36.0),
+                asset_network_logo(asset, net_slug, 36.0),
                 "They send",
                 None,
-                "Bitcoin".to_string(),
+                name.to_string(),
                 localized_copy(place).to_string(),
                 Some(sender_open),
             )
@@ -912,6 +932,7 @@ fn rail_picker_id(method: SparkReceiveMethod) -> &'static str {
         SparkReceiveMethod::Bolt11 => "spark-receive-method-lightning",
         SparkReceiveMethod::LightningAddress => "spark-receive-method-lightning-address",
         SparkReceiveMethod::Spark => "spark-receive-method-spark",
+        SparkReceiveMethod::UsdbSpark => "spark-receive-method-usdb",
         SparkReceiveMethod::OnchainBitcoin => "spark-receive-method-deposit",
     }
 }
@@ -921,7 +942,7 @@ fn rail_picker_label(method: SparkReceiveMethod) -> (&'static str, &'static str)
     match method {
         SparkReceiveMethod::Bolt11 => ("lightning", "Lightning invoice"),
         SparkReceiveMethod::LightningAddress => ("lightning", "Lightning address"),
-        SparkReceiveMethod::Spark => ("spark", "Spark address"),
+        SparkReceiveMethod::Spark | SparkReceiveMethod::UsdbSpark => ("spark", "Spark address"),
         SparkReceiveMethod::OnchainBitcoin => ("bitcoin", "On-chain address"),
     }
 }
@@ -975,8 +996,9 @@ fn asset_display_name(coin: &str) -> &str {
     }
 }
 
-/// The "THEY SEND" menu: the Bitcoin rails, then the stablecoins from the
-/// validated SideShift deposit list (mainnet only).
+/// The "THEY SEND" menu: the Bitcoin rails, then US Dollar (USDB) sent on
+/// Spark, then the stablecoins from the validated SideShift deposit list
+/// (both mainnet only).
 ///
 /// `cross` is the cross-network asset a running SideShift flow is set to. While
 /// one is up it — not the Bitcoin rail underneath — is what the panel is
@@ -1009,6 +1031,27 @@ pub fn sender_picker_menu<'a>(
             )),
             Message::FocusAction,
         ));
+    }
+
+    // USDB is a Spark token: sent straight to the Spark address, it stays
+    // USDB. It exists where conversions run.
+    if crate::app::state::spark::swap::swap_available(network) {
+        let method = SparkReceiveMethod::UsdbSpark;
+        let (_, rail) = rail_picker_label(method);
+        list = list
+            .push(dropdown_heading(localized_copy("US Dollar")))
+            .push(dropdown_option(
+                rail_picker_id(method),
+                asset_network_logo("usdb", "spark", DROPDOWN_LOGO),
+                "USDB",
+                localized_copy(rail),
+                Some(localized_copy("Kept as USDB").to_string()),
+                cross.is_none() && current == method,
+                Some(Message::SparkReceive(
+                    SparkReceiveMessage::SelectSenderRail(method),
+                )),
+                Message::FocusAction,
+            ));
     }
 
     list = list.push(dropdown_heading(localized_copy("Stablecoin (cross-chain)")));
@@ -1106,6 +1149,10 @@ fn phase_body<'a>(
                     localized_copy("Spark address"),
                     localized_copy("Share this address to receive Bitcoin from another Spark wallet."),
                 ),
+                SparkReceiveMethod::UsdbSpark => (
+                    localized_copy("Spark address"),
+                    localized_copy("Share this address to receive USDB from another Spark wallet."),
+                ),
                 SparkReceiveMethod::OnchainBitcoin => (
                     localized_copy("Bitcoin deposit address"),
                     localized_copy("Deposits arrive in Spark after on-chain confirmation."),
@@ -1183,7 +1230,9 @@ fn phase_body<'a>(
                         Message::SparkReceive(SparkReceiveMessage::NewOnchainAddress),
                     ),
                 ),
-                SparkReceiveMethod::Spark | SparkReceiveMethod::LightningAddress => None,
+                SparkReceiveMethod::Spark
+                | SparkReceiveMethod::UsdbSpark
+                | SparkReceiveMethod::LightningAddress => None,
             };
             Container::new(
                 Column::new()
@@ -1273,6 +1322,73 @@ mod tests {
         assert!(regtest.contains("ON-CHAIN ADDRESS"));
         assert!(regtest.contains("Stablecoin deposits require Bitcoin mainnet."));
         assert!(!regtest.contains("USDt"));
+        assert!(
+            !regtest.contains("USDB"),
+            "USDB exists where conversions run"
+        );
+    }
+
+    /// USDB sent on Spark is a THEY SEND choice on mainnet, and picking it
+    /// sets both tiles to US Dollar: what arrives stays USDB, so YOU RECEIVE
+    /// is not a choice then.
+    #[test]
+    fn usdb_on_spark_is_sent_and_received_as_us_dollar() {
+        let menu = capture::inspect(
+            "spark-receive-picker-usdb",
+            sender_picker_menu(SparkReceiveMethod::UsdbSpark, None, Network::Bitcoin),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(menu.contains("US DOLLAR"));
+        assert!(menu.contains("USDB"));
+        assert!(menu.contains("Kept as USDB"));
+        let messages = capture::activate(
+            sender_picker_menu(SparkReceiveMethod::Bolt11, None, Network::Bitcoin),
+            iced::advanced::widget::Id::new("spark-receive-method-usdb"),
+            (1440, 900),
+            false,
+        );
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            Message::SparkReceive(SparkReceiveMessage::SelectSenderRail(
+                SparkReceiveMethod::UsdbSpark
+            ))
+        )));
+
+        // Auto-convert off makes no difference: USDB stays USDB.
+        let cards = capture::inspect(
+            "spark-receive-cards-usdb",
+            spark_receive_cards(
+                SparkReceiveMethod::UsdbSpark,
+                None,
+                false,
+                Network::Bitcoin,
+                None,
+            ),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        let us_dollar = cards
+            .text
+            .iter()
+            .filter(|(value, _)| value.contains("US Dollar"))
+            .count();
+        assert_eq!(us_dollar, 2, "both tiles say US Dollar: {:?}", cards.text);
+        assert!(!cards.contains("Bitcoin"), "{:?}", cards.text);
+        assert!(cards.contains("on Spark") && cards.contains("in Spark"));
+        assert!(!cards.has_focus(iced::advanced::widget::Id::new(RECEIVER_PICKER_ACTION_ID)));
+
+        let note = capture::inspect(
+            "spark-receive-note-usdb",
+            arrival_note(Network::Bitcoin, SparkReceiveMethod::UsdbSpark, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(note.contains(ARRIVAL_NOTE_USDB));
+        assert!(!note.contains(ARRIVAL_NOTE));
     }
 
     /// Master I4: Receive never implies native stablecoin receive. Off
@@ -1281,14 +1397,14 @@ mod tests {
     fn the_arrival_note_says_payments_arrive_as_bitcoin() {
         let mainnet = capture::inspect(
             "spark-receive-note-mainnet",
-            arrival_note(Network::Bitcoin, false),
+            arrival_note(Network::Bitcoin, SparkReceiveMethod::Bolt11, false),
             (1024, 768),
             "dark",
             theme::Theme::dark(),
         );
         assert!(mainnet.contains(ARRIVAL_NOTE) && mainnet.contains(ARRIVAL_NOTE_USD));
         let messages = capture::activate(
-            arrival_note(Network::Bitcoin, false),
+            arrival_note(Network::Bitcoin, SparkReceiveMethod::Bolt11, false),
             iced::advanced::widget::Id::new(WALLET_SETTINGS_ID),
             (1024, 768),
             true,
@@ -1302,7 +1418,7 @@ mod tests {
             ))
         )));
         let messages = capture::activate(
-            arrival_note(Network::Bitcoin, false),
+            arrival_note(Network::Bitcoin, SparkReceiveMethod::Bolt11, false),
             iced::advanced::widget::Id::new(SWAP_ID),
             (1024, 768),
             true,
@@ -1316,7 +1432,7 @@ mod tests {
         for network in [Network::Testnet, Network::Signet, Network::Regtest] {
             let note = capture::inspect(
                 "spark-receive-note-test-network",
-                arrival_note(network, false),
+                arrival_note(network, SparkReceiveMethod::Bolt11, false),
                 (1024, 768),
                 "dark",
                 theme::Theme::dark(),

@@ -1625,6 +1625,25 @@ impl Response {
 ///
 /// Optimization and lightning-address-changed events from the SDK
 /// remain deferred until a panel needs them.
+/// The token a [`Event::PaymentSucceeded`] moved, so its amount (in the
+/// token's base units) can be read as that token. A token payment the SDK
+/// reported without its metadata still carries one, with an empty
+/// `identifier`/`ticker` and `decimals` 0: it is a token, just not one the
+/// gui can name, so it is never read as sats.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentToken {
+    /// The Spark token identifier (`btkn1…`); empty when unknown.
+    pub identifier: String,
+    /// Display ticker (e.g. "USDB"); empty when unknown.
+    pub ticker: String,
+    /// Decimals of the token's base units.
+    pub decimals: u32,
+    /// Whether this is the wallet's USDB, by its identifier (the bridge
+    /// knows it; a ticker can be claimed by any token).
+    #[serde(default)]
+    pub usdb: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", content = "payload", rename_all = "snake_case")]
 pub enum Event {
@@ -1635,12 +1654,18 @@ pub enum Event {
     /// incoming, negative for outgoing (mirrors the [`PaymentSummary`]
     /// convention). `bolt11` is the BOLT11 invoice string for
     /// Lightning payments — `None` for on-chain / Spark-native /
-    /// non-Lightning payments.
+    /// non-Lightning payments. For a token payment (`token` is `Some`),
+    /// `amount_sat` is not sats: it carries the token's base units, as
+    /// Spark's `Payment.amount` does.
     PaymentSucceeded {
         id: String,
         amount_sat: i64,
         #[serde(default)]
         bolt11: Option<String>,
+        /// The token a token payment moved (e.g. USDB); `None` for a
+        /// bitcoin payment and from a bridge that predates the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<PaymentToken>,
     },
     /// A payment entered the pending state (broadcast but not yet
     /// confirmed, or lightning htlc in flight).
@@ -1936,6 +1961,7 @@ mod tests {
             id,
             amount_sat,
             bolt11,
+            token,
         }) = parsed
         else {
             panic!("expected payment succeeded event");
@@ -1943,6 +1969,7 @@ mod tests {
         assert_eq!(id, "payment-1");
         assert_eq!(amount_sat, 42);
         assert_eq!(bolt11, None);
+        assert_eq!(token, None);
 
         assert_eq!(
             serde_json::to_value(Frame::Event(Event::DepositsChanged)).expect("serialize"),

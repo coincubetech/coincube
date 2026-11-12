@@ -9697,21 +9697,32 @@ impl App {
 
                 match event {
                     SparkEvent::PaymentSucceeded {
-                        amount_sat, bolt11, ..
+                        amount_sat,
+                        bolt11,
+                        token,
+                        ..
                     } => {
                         // Phase 4f: forward the BOLT11 field so the
                         // Receive panel can correlate against its
-                        // currently displayed invoice.
+                        // currently displayed invoice. A token payment's
+                        // amount is in token base units, so its token goes
+                        // along to be read with it.
+                        let is_token = token.is_some();
                         tasks.push(Task::done(Message::View(view::Message::SparkReceive(
-                            view::SparkReceiveMessage::PaymentReceived { amount_sat, bolt11 },
+                            view::SparkReceiveMessage::PaymentReceived {
+                                amount_sat,
+                                bolt11,
+                                token,
+                            },
                         ))));
                         // An auto-claim accepted before maturity settles
                         // through this event; Home needs the settled amount
-                        // to complete its indicator and fire the splash.
+                        // to complete its indicator and fire the splash. A
+                        // token payment carries no sats.
                         if let Ok(amount_sat) =
                             <u64 as std::convert::TryFrom<i64>>::try_from(amount_sat)
                         {
-                            if amount_sat > 0 {
+                            if amount_sat > 0 && !is_token {
                                 tasks.push(Task::done(Message::View(view::Message::Home(
                                     view::HomeMessage::SparkPaymentSucceeded { amount_sat },
                                 ))));
@@ -18953,6 +18964,7 @@ mod wallet_recent_activity_tests {
                 id: "pay-1".into(),
                 amount_sat: 1_000,
                 bolt11: None,
+                token: None,
             },
         );
         assert_eq!(app.panels.activity.spark_refresh_requests, before + 1);

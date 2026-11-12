@@ -3261,5 +3261,8 @@
   "Automatic": "Automática",
   "1 selected": "1 seleccionada",
   "selected": "seleccionadas",
+  "Share this address to receive USDB from another Spark wallet.": "Comparte esta dirección para recibir USDB de otra cartera de Spark.",
+  "USDB sent to this Spark address arrives as USDB. Ask the payer to send USDB on Spark.": "Los USDB enviados a esta dirección Spark llegan como USDB. Pide al pagador que envíe USDB en Spark.",
+  "Kept as USDB": "Se mantiene en USDB",
   "in Spark": "en Spark"
 }

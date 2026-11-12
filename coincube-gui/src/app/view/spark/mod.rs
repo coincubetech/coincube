@@ -323,6 +323,9 @@ pub enum SparkOverviewMessage {
     /// The US Dollar row's Send: Spark's Send, paying from US Dollar.
     SendUsdb,
     ReceiveBtc,
+    /// The US Dollar row's Receive: Spark's Receive with USDB sent and
+    /// received.
+    ReceiveUsdb,
     History,
     SelectTransaction(String),
     /// Use the existing Spark Settings handler for an in-place landing toggle.
@@ -556,8 +559,12 @@ pub enum SparkReceiveMessage {
     /// Ask Spark for a fresh on-chain deposit address instead of the static
     /// one (for a payer who shouldn't see the reused address).
     NewOnchainAddress,
-    /// Picked a Bitcoin rail (Lightning / on-chain / Spark) in the picker —
-    /// sets the receive method and closes the modal.
+    /// Opened from a Spark balance row's Receive: USDB sets USDB sent on
+    /// Spark; Bitcoin leaves that for the default Bitcoin rail and keeps any
+    /// other Bitcoin rail already picked.
+    StartFrom(coincube_spark_protocol::WalletAsset),
+    /// Picked a Bitcoin rail (Lightning / on-chain / Spark) or USDB on Spark
+    /// in the picker — sets the receive method and closes the modal.
     SelectSenderRail(crate::app::state::spark::receive::SparkReceiveMethod),
     /// Picked a cross-network asset (by `DepositOption` key) in the picker —
     /// launches the SideShift flow pre-selected to that asset. Mainnet only.
@@ -578,6 +585,9 @@ pub enum SparkReceiveMessage {
     PaymentReceived {
         amount_sat: i64,
         bolt11: Option<String>,
+        /// The token a token payment moved; its `amount_sat` is then that
+        /// token's base units. `None` for bitcoin.
+        token: Option<coincube_spark_protocol::PaymentToken>,
     },
     /// Phase 4f: a `Method::ListUnclaimedDeposits` RPC came back with
     /// a fresh deposit list.

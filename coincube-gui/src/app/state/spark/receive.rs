@@ -45,6 +45,10 @@ pub enum SparkReceiveMethod {
     LightningAddress,
     OnchainBitcoin,
     Spark,
+    /// US Dollar (USDB) sent to the Spark address. It is the same address
+    /// as [`Self::Spark`], but the payer sends the USDB token, which stays
+    /// USDB whatever auto-convert says. Where conversions run (mainnet) only.
+    UsdbSpark,
 }
 
 impl SparkReceiveMethod {
@@ -54,6 +58,7 @@ impl SparkReceiveMethod {
             Self::LightningAddress => "Lightning address",
             Self::OnchainBitcoin => "On-chain Bitcoin",
             Self::Spark => "Spark",
+            Self::UsdbSpark => "US Dollar (USDB) on Spark",
         }
     }
 }
@@ -446,6 +451,7 @@ impl State for SparkReceive {
                     | SparkReceiveMessage::SelectReceiveAs(_)
                     | SparkReceiveMessage::AutoConvertLoaded(_)
                     | SparkReceiveMessage::SelectSenderRail(_)
+                    | SparkReceiveMessage::StartFrom(_)
                     | SparkReceiveMessage::SelectSenderCrossNetwork(_)
                     | SparkReceiveMessage::ClaimDepositRequested { .. }
                     | SparkReceiveMessage::RefreshConfirmations
@@ -523,10 +529,36 @@ impl State for SparkReceive {
                 self.sender_picker_open = false;
                 Task::none()
             }
+            SparkReceiveMessage::StartFrom(asset) => {
+                let method = match asset {
+                    coincube_spark_protocol::WalletAsset::Usdb => SparkReceiveMethod::UsdbSpark,
+                    coincube_spark_protocol::WalletAsset::Bitcoin
+                        if self.method == SparkReceiveMethod::UsdbSpark =>
+                    {
+                        SparkReceiveMethod::Bolt11
+                    }
+                    // A Bitcoin rail (or a stablecoin swap) already set stays.
+                    coincube_spark_protocol::WalletAsset::Bitcoin => return Task::none(),
+                };
+                self.update(
+                    None,
+                    cache,
+                    Message::View(crate::app::view::Message::SparkReceive(
+                        SparkReceiveMessage::SelectSenderRail(method),
+                    )),
+                )
+            }
             SparkReceiveMessage::SelectSenderRail(method) => {
-                // A Bitcoin rail: clear any cross-network flow, set the method,
-                // close the picker.
+                // A Bitcoin rail (or USDB on Spark): clear any cross-network
+                // flow, set the method, close the picker.
                 self.sender_picker_open = false;
+                // USDB exists where conversions run; the picker hides it
+                // elsewhere and this is the backstop.
+                if method == SparkReceiveMethod::UsdbSpark
+                    && !crate::app::state::spark::swap::swap_available(cache.network)
+                {
+                    return Task::none();
+                }
                 if method == SparkReceiveMethod::LightningAddress {
                     self.sync_lightning_address_qr(
                         cache
@@ -646,7 +678,8 @@ impl State for SparkReceive {
                             )),
                         },
                     ),
-                    SparkReceiveMethod::Spark => {
+                    // USDB is sent to the same Spark address as bitcoin.
+                    SparkReceiveMethod::Spark | SparkReceiveMethod::UsdbSpark => {
                         Task::perform(async move { backend.receive_spark().await }, |result| {
                             match result {
                                 Ok(ok) => Message::View(crate::app::view::Message::SparkReceive(
@@ -687,7 +720,11 @@ impl State for SparkReceive {
                 self.phase = SparkReceivePhase::Error(err);
                 Task::none()
             }
-            SparkReceiveMessage::PaymentReceived { amount_sat, bolt11 } => {
+            SparkReceiveMessage::PaymentReceived {
+                amount_sat,
+                bolt11,
+                token,
+            } => {
                 // Accept events while either showing an invoice
                 // (`Generated`) — first arrival — or already on the
                 // celebration screen (`Received`) — back-to-back
@@ -704,6 +741,19 @@ impl State for SparkReceive {
                 // negative amounts are skipped.
                 let is_incoming = amount_sat > 0;
                 if !is_incoming {
+                    return Task::none();
+                }
+                // USDB on Spark waits for USDB itself (by identifier, not
+                // ticker: any token can call itself USDB); every other method
+                // for bitcoin. A token's amount is in its own base units, so
+                // it can't be counted as sats (or the reverse), and another
+                // token arriving at the same address is not this payment.
+                let wanted = if self.method == SparkReceiveMethod::UsdbSpark {
+                    token.as_ref().is_some_and(|token| token.usdb)
+                } else {
+                    token.is_none()
+                };
+                if !wanted {
                     return Task::none();
                 }
 
@@ -758,15 +808,31 @@ impl State for SparkReceive {
                     } => (prev.saturating_add(amount_sat), count.saturating_add(1)),
                     _ => (amount_sat, 1),
                 };
-                self.received_amount_display = if count > 1 {
-                    coincube_ui::localized_format!(
+                self.received_amount_display = match &token {
+                    Some(token) => {
+                        let amount = crate::app::breez_spark::assets::format_token_display_u128(
+                            u128::from(running_total.unsigned_abs()),
+                            token.decimals,
+                        );
+                        if count > 1 {
+                            coincube_ui::localized_format!(
+                                "+{} {} ({} deposits)",
+                                "+{} {} ({} depósitos)",
+                                amount,
+                                token.ticker,
+                                count
+                            )
+                        } else {
+                            format!("+{} {}", amount, token.ticker)
+                        }
+                    }
+                    None if count > 1 => coincube_ui::localized_format!(
                         "+{} sats ({} deposits)",
                         "+{} sats ({} depósitos)",
                         running_total.unsigned_abs(),
                         count
-                    )
-                } else {
-                    format!("+{} sats", running_total.unsigned_abs())
+                    ),
+                    None => format!("+{} sats", running_total.unsigned_abs()),
                 };
                 // Pick celebration image based on receive method.
                 // Only re-roll the quote on the first arrival so the
@@ -986,7 +1052,9 @@ impl State for SparkReceive {
                     SparkReceiveMethod::Bolt11 => "Copied Lightning invoice to clipboard",
                     SparkReceiveMethod::LightningAddress => "Copied Lightning address to clipboard",
                     SparkReceiveMethod::OnchainBitcoin => "Copied Bitcoin address to clipboard",
-                    SparkReceiveMethod::Spark => "Copied Spark address to clipboard",
+                    SparkReceiveMethod::Spark | SparkReceiveMethod::UsdbSpark => {
+                        "Copied Spark address to clipboard"
+                    }
                 };
                 Task::batch([
                     iced::clipboard::write(text),
@@ -1039,7 +1107,9 @@ fn auto_assign_lightning_address(cache: &Cache) -> Option<Task<Message>> {
 pub(crate) fn auto_generates(method: SparkReceiveMethod) -> bool {
     matches!(
         method,
-        SparkReceiveMethod::Spark | SparkReceiveMethod::OnchainBitcoin
+        SparkReceiveMethod::Spark
+            | SparkReceiveMethod::UsdbSpark
+            | SparkReceiveMethod::OnchainBitcoin
     )
 }
 
@@ -1602,6 +1672,140 @@ mod tests {
         assert!(panel.displayed_invoice.is_none());
     }
 
+    fn usdb_token() -> Option<coincube_spark_protocol::PaymentToken> {
+        Some(coincube_spark_protocol::PaymentToken {
+            identifier: "btkn1usdb".to_string(),
+            ticker: "USDB".to_string(),
+            decimals: 6,
+            usdb: true,
+        })
+    }
+
+    /// The US Dollar row's Receive opens USDB → USDB on mainnet; the Bitcoin
+    /// row's leaves it for Lightning but keeps a Bitcoin rail already picked.
+    #[test]
+    fn start_from_a_balance_row_picks_what_the_payer_sends() {
+        let mainnet = Cache {
+            network: Network::Bitcoin,
+            ..Cache::default()
+        };
+        let mut panel = SparkReceive::new(None);
+        update_with_cache(
+            &mut panel,
+            &mainnet,
+            SparkReceiveMessage::StartFrom(coincube_spark_protocol::WalletAsset::Usdb),
+        );
+        assert_eq!(panel.method, SparkReceiveMethod::UsdbSpark);
+        assert!(auto_generates(panel.method), "the Spark address is fetched");
+
+        update_with_cache(
+            &mut panel,
+            &mainnet,
+            SparkReceiveMessage::StartFrom(coincube_spark_protocol::WalletAsset::Bitcoin),
+        );
+        assert_eq!(panel.method, SparkReceiveMethod::Bolt11);
+
+        update_with_cache(
+            &mut panel,
+            &mainnet,
+            SparkReceiveMessage::SelectSenderRail(SparkReceiveMethod::Spark),
+        );
+        update_with_cache(
+            &mut panel,
+            &mainnet,
+            SparkReceiveMessage::StartFrom(coincube_spark_protocol::WalletAsset::Bitcoin),
+        );
+        assert_eq!(panel.method, SparkReceiveMethod::Spark);
+
+        // USDB exists where conversions run: not on testnet.
+        let testnet = Cache {
+            network: Network::Testnet,
+            ..Cache::default()
+        };
+        let mut panel = SparkReceive::new(None);
+        update_with_cache(
+            &mut panel,
+            &testnet,
+            SparkReceiveMessage::StartFrom(coincube_spark_protocol::WalletAsset::Usdb),
+        );
+        assert_eq!(panel.method, SparkReceiveMethod::Bolt11);
+    }
+
+    /// USDB on Spark celebrates the token in its own units and ignores
+    /// bitcoin; the bitcoin rails ignore token payments.
+    #[test]
+    fn payment_received_reads_a_token_payment_as_its_token() {
+        let mainnet = Cache {
+            network: Network::Bitcoin,
+            ..Cache::default()
+        };
+        let mut panel = SparkReceive::new(None);
+        update_with_cache(
+            &mut panel,
+            &mainnet,
+            SparkReceiveMessage::SelectSenderRail(SparkReceiveMethod::UsdbSpark),
+        );
+        update(
+            &mut panel,
+            SparkReceiveMessage::GenerateSucceeded(receive_ok("sp1qaddress")),
+        );
+        update(
+            &mut panel,
+            SparkReceiveMessage::PaymentReceived {
+                amount_sat: 4_000,
+                bolt11: None,
+                token: None,
+            },
+        );
+        assert!(matches!(panel.phase(), SparkReceivePhase::Generated(_)));
+
+        // Another token, even one calling itself USDB, is not this payment.
+        update(
+            &mut panel,
+            SparkReceiveMessage::PaymentReceived {
+                amount_sat: 9_000_000,
+                bolt11: None,
+                token: Some(coincube_spark_protocol::PaymentToken {
+                    identifier: "btkn1other".to_string(),
+                    ticker: "USDB".to_string(),
+                    decimals: 6,
+                    usdb: false,
+                }),
+            },
+        );
+        assert!(matches!(panel.phase(), SparkReceivePhase::Generated(_)));
+
+        update(
+            &mut panel,
+            SparkReceiveMessage::PaymentReceived {
+                amount_sat: 12_500_000,
+                bolt11: None,
+                token: usdb_token(),
+            },
+        );
+        assert!(matches!(panel.phase(), SparkReceivePhase::Received { .. }));
+        assert_eq!(panel.received_amount_display, "+12.50 USDB");
+
+        let mut panel = SparkReceive::new(None);
+        update(
+            &mut panel,
+            SparkReceiveMessage::SelectSenderRail(SparkReceiveMethod::Spark),
+        );
+        update(
+            &mut panel,
+            SparkReceiveMessage::GenerateSucceeded(receive_ok("sp1qaddress")),
+        );
+        update(
+            &mut panel,
+            SparkReceiveMessage::PaymentReceived {
+                amount_sat: 12_500_000,
+                bolt11: None,
+                token: usdb_token(),
+            },
+        );
+        assert!(matches!(panel.phase(), SparkReceivePhase::Generated(_)));
+    }
+
     #[test]
     fn payment_received_ignores_idle_outgoing_and_unrelated_events() {
         let mut panel = SparkReceive::new(None);
@@ -1611,6 +1815,7 @@ mod tests {
             SparkReceiveMessage::PaymentReceived {
                 amount_sat: 100,
                 bolt11: None,
+                token: None,
             },
         );
         assert!(matches!(panel.phase(), SparkReceivePhase::Idle));
@@ -1624,6 +1829,7 @@ mod tests {
             SparkReceiveMessage::PaymentReceived {
                 amount_sat: -100,
                 bolt11: Some("lnbc1invoice".to_string()),
+                token: None,
             },
         );
         assert!(matches!(panel.phase(), SparkReceivePhase::Generated(_)));
@@ -1633,6 +1839,7 @@ mod tests {
             SparkReceiveMessage::PaymentReceived {
                 amount_sat: 100,
                 bolt11: Some("lnbc1other".to_string()),
+                token: None,
             },
         );
         assert!(matches!(panel.phase(), SparkReceivePhase::Generated(_)));
@@ -1651,6 +1858,7 @@ mod tests {
             SparkReceiveMessage::PaymentReceived {
                 amount_sat: 321,
                 bolt11: Some("lnbc1invoice".to_string()),
+                token: None,
             },
         );
 
@@ -1681,6 +1889,7 @@ mod tests {
             SparkReceiveMessage::PaymentReceived {
                 amount_sat: 100,
                 bolt11: None,
+                token: None,
             },
         );
         update(
@@ -1688,6 +1897,7 @@ mod tests {
             SparkReceiveMessage::PaymentReceived {
                 amount_sat: 50,
                 bolt11: None,
+                token: None,
             },
         );
 
