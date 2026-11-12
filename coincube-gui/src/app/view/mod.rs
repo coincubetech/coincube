@@ -944,8 +944,10 @@ pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
         iced::widget::Space::new().width(nav::shell::FULL_WIDTH),
         // center toasts horizontally
         iced::widget::Space::new().width(iced::Length::Fill),
-        // Keyed by toast id so per-card widget state (a held dismiss button)
-        // follows its toast when a newer one shifts the visible slots.
+        // Keyed by toast id so card state (a held dismiss button) follows
+        // its toast when the number shown changes, e.g. the oldest of two
+        // toasts expiring. iced only matches keys when the count changes: a
+        // capped shift that keeps three cards on screen reuses state by slot.
         iced::widget::keyed_column(visible_toasts(iter).map(|(id, level, content)| {
             // `opaque` captures presses on the card and levitates the cursor
             // for the layers below, so clicks, hover and scroll over a toast
