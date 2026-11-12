@@ -157,7 +157,7 @@ pub(super) const CAUTION: &str =
 
 /// The Cube-wide switch. Turning it on is allowed only where a client could
 /// be paired; turning it off (pausing every client) is always allowed.
-fn enable_row(settings: &Settings, available: bool) -> Ui<'_> {
+fn enable_row(settings: &Settings, available: bool, switchable: bool) -> Ui<'_> {
     let row = page::row(localized_copy("Allow AI clients"))
         .description(localized_copy(if !available {
             UNSUPPORTED
@@ -171,9 +171,7 @@ fn enable_row(settings: &Settings, available: bool) -> Ui<'_> {
         .control(
             toggle(ENABLE_ID, settings.enabled, view::Message::FocusAction)
                 .state_words(localized_copy("On"), localized_copy("Off"))
-                .on_toggle_maybe(
-                    (available || settings.enabled).then_some(|on| message(Message::Enable(on))),
-                ),
+                .on_toggle_maybe(switchable.then_some(|on| message(Message::Enable(on)))),
         );
     if available {
         row.into()
@@ -202,7 +200,9 @@ pub(super) fn view_for_cube(settings: &Settings, supported: bool) -> Ui<'_> {
     // Vault is never tagged UNSUPPORTED beside an enabled Pair action.
     let available =
         cfg!(any(unix, windows)) && supported && cube_chain(settings).is_none_or(chain_supported);
-    let mut cube = vec![enable_row(settings, available)];
+    let switchable =
+        cfg!(any(unix, windows)) && settings.switch_focusable(supported) || settings.enabled;
+    let mut cube = vec![enable_row(settings, available, switchable)];
     if available {
         cube.extend(vault_row(settings));
     }
@@ -1233,11 +1233,22 @@ fn access_off_note<'a>() -> Ui<'a> {
         muted(localized_copy(
             "AI access is off. Turning it on resumes existing clients and grants no new access.",
         )),
-        Some(page::button(
-            FORM_ENABLE_ID,
-            localized_copy("Turn on"),
-            Some(message(Message::TurnOnFromForm)),
-        )),
+        Some(
+            row![
+                page::button(
+                    FORM_ENABLE_ID,
+                    localized_copy("Turn on"),
+                    Some(message(Message::TurnOnFromForm)),
+                ),
+                page::button(
+                    CANCEL_ID,
+                    localized_copy("Cancel"),
+                    Some(message(Message::TogglePairing)),
+                ),
+            ]
+            .spacing(8)
+            .into(),
+        ),
     )
 }
 
@@ -1397,7 +1408,9 @@ fn pairing_card(settings: &Settings) -> Ui<'_> {
     }
     body = body.push(access);
 
-    let can_pair = settings.wallet_allowed
+    // Pairing is a no-op after a storage failure, so the action says so.
+    let can_pair = !settings.pairing_poisoned
+        && settings.wallet_allowed
         && (settings.capabilities.iter().any(|allowed| *allowed)
             || settings.transaction_selection())
         && !settings.client_name.trim().is_empty();
@@ -1507,7 +1520,7 @@ pub(super) fn setup_view(settings: &Settings) -> Ui<'_> {
     page_frame(
         settings,
         SETUP_INTRO,
-        vec![enable_row(settings, true)],
+        vec![enable_row(settings, true, true)],
         clients.into(),
         kinds_of_access(true),
     )
@@ -1550,7 +1563,8 @@ fn setup_card(settings: &Settings) -> Ui<'_> {
                     .on_select(choose),
             ),
     );
-    let can_pair = (settings.proposals_allowed || settings.creation_allowed)
+    let can_pair = !settings.pairing_poisoned
+        && (settings.proposals_allowed || settings.creation_allowed)
         && !settings.client_name.trim().is_empty();
     body = body.push(pair_actions("Pair setup client until revoked", can_pair));
     body = legacy_and_failure(settings, body);

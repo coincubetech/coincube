@@ -477,3 +477,118 @@ fn undocumented_chain_is_not_offered_for_pairing() {
     }
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// On a Vault the runtime still serves outside the documented chains, a
+/// Cube with stored clients can turn AI access back on: that only resumes
+/// their stored access. Pairing a new client stays unavailable.
+#[test]
+fn switch_resumes_stored_clients_on_an_undocumented_chain() {
+    let root = std::env::temp_dir().join(format!("mcp-gallery-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join(crate::chain::ChainId::Signet.dir_name())).unwrap();
+    let location =
+        pairings::Location::new(&root, crate::chain::ChainId::Signet, "signet-paired").unwrap();
+    let mut store =
+        pairings::Store::open(location.clone(), zeroize::Zeroizing::new([71; 32]), true).unwrap();
+    store
+        .add("Synthetic client".into(), pairings::Scope::Proposal)
+        .unwrap();
+    let settings = Settings {
+        pairing_location: Some(location),
+        pairing_store: Some(store),
+        ..Settings::default()
+    };
+    let page = capture::inspect(
+        "ai-access-signet-paired",
+        view_for_cube(&settings, true),
+        (1024, 768),
+        "dark",
+        theme::Theme::dark(),
+    );
+    assert!(page.has_focus(iced::advanced::widget::Id::new(ENABLE_ID)));
+    assert!(!page.has_focus(iced::advanced::widget::Id::new(PAIR_OPEN_ID)));
+    let emitted = capture::activate(
+        view_for_cube(&settings, true),
+        iced::advanced::widget::Id::new(ENABLE_ID),
+        (1024, 768),
+        true,
+    );
+    assert!(emitted
+        .iter()
+        .any(|m| matches!(m, view::Message::LocalMcp(Message::Enable(true)))));
+    // Without runtime support nothing can be turned on.
+    let inert = capture::inspect(
+        "ai-access-signet-unsupported",
+        view_for_cube(&settings, false),
+        (1024, 768),
+        "dark",
+        theme::Theme::dark(),
+    );
+    assert!(!inert.has_focus(iced::advanced::widget::Id::new(ENABLE_ID)));
+    drop(settings);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The access-off form can be closed without turning AI access on, and an
+/// open form cannot pair after a storage failure.
+#[test]
+fn pairing_form_has_an_exit_and_respects_storage_failure() {
+    let off = Settings {
+        pairing_open: true,
+        ..Settings::default()
+    };
+    let emitted = capture::activate(
+        view_for_cube(&off, true),
+        iced::advanced::widget::Id::new(CANCEL_ID),
+        (1024, 768),
+        true,
+    );
+    assert!(emitted
+        .iter()
+        .any(|m| matches!(m, view::Message::LocalMcp(Message::TogglePairing))));
+    let poisoned = Settings {
+        enabled: true,
+        pairing_open: true,
+        pairing_poisoned: true,
+        wallet_allowed: true,
+        capabilities: [true, false, false],
+        client_name: "Synthetic client".into(),
+        ..Settings::default()
+    };
+    let page = capture::inspect(
+        "ai-access-poisoned-form",
+        view_for_cube(&poisoned, true),
+        (1024, 768),
+        "dark",
+        theme::Theme::dark(),
+    );
+    assert!(!page.has_focus(iced::advanced::widget::Id::new(PAIR_ID)));
+    let ready = Settings {
+        pairing_poisoned: false,
+        ..poisoned
+    };
+    let page = capture::inspect(
+        "ai-access-ready-form",
+        view_for_cube(&ready, true),
+        (1024, 768),
+        "dark",
+        theme::Theme::dark(),
+    );
+    assert!(page.has_focus(iced::advanced::widget::Id::new(PAIR_ID)));
+}
+
+/// Choosing read access clears wallet-preparation choices left over from an
+/// empty-Cube form, so the Read choice shows as selected.
+#[test]
+fn read_choice_clears_setup_choices() {
+    let mut settings = Settings {
+        enabled: true,
+        ..Settings::default()
+    };
+    settings.update(Message::Creation(true), None, None, true, "read");
+    assert_eq!(chosen_access(&settings), Some(Access::Creation));
+    settings.update(Message::ChooseRead, None, None, true, "read");
+    assert_eq!(chosen_access(&settings), Some(Access::Read));
+    settings.update(Message::Proposals(true), None, None, true, "read");
+    settings.update(Message::Capability(2, true), None, None, true, "read");
+    assert_eq!(chosen_access(&settings), Some(Access::Read));
+}

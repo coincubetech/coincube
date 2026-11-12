@@ -203,16 +203,23 @@ impl Settings {
         }
     }
 
-    /// Whether the Cube-wide switch can take focus on the read-access page:
-    /// it is enabled while on, or while a Vault on a documented chain can pair.
+    /// Whether the Cube-wide switch is enabled (and so can take focus) on the
+    /// read-access page. Turning it off is always allowed. Turning it on is
+    /// allowed where a Vault on a documented chain can pair, and also where
+    /// the runtime serves this Vault and clients are already paired: that
+    /// only resumes their stored access and grants nothing new.
     pub(crate) fn switch_focusable(&self, supported: bool) -> bool {
         self.enabled
             || (supported
-                && self
+                && (self
                     .pairing_location
                     .as_ref()
                     .and_then(pairings::Location::chain)
-                    .is_none_or(presentation::chain_supported))
+                    .is_none_or(presentation::chain_supported)
+                    || self
+                        .pairing_store
+                        .as_ref()
+                        .is_some_and(|store| !store.clients().is_empty())))
     }
 
     pub(crate) fn pending_revoke(&self) -> Option<(&str, &str)> {
@@ -229,6 +236,20 @@ impl Settings {
     pub(crate) fn revoke_dialog(&self) -> Option<Element<'_, view::Message>> {
         let (name, id) = self.pending_revoke()?;
         Some(presentation::revoke_confirmation(name, id))
+    }
+
+    /// Read access is its own pairing: choosing it clears transaction and
+    /// wallet-preparation choices left from an earlier form.
+    fn clear_other_scopes(&mut self) {
+        #[cfg(feature = "mcp-transactions")]
+        {
+            self.transactions_allowed = false;
+        }
+        #[cfg(feature = "mcp-proposals")]
+        {
+            self.proposals_allowed = false;
+            self.creation_allowed = false;
+        }
     }
 
     fn clear_pairing_selection(&mut self) {
@@ -696,16 +717,14 @@ impl Settings {
             Message::ChooseRead => {
                 self.revoke_legacy();
                 self.read_chosen = true;
-                #[cfg(feature = "mcp-transactions")]
-                {
-                    self.transactions_allowed = false;
-                }
+                self.clear_other_scopes();
             }
             Message::Capability(index, value) if index < 3 => {
                 self.revoke_legacy();
                 self.capabilities[index] = value;
                 if value {
                     self.read_chosen = true;
+                    self.clear_other_scopes();
                 }
                 #[cfg(feature = "mcp-transactions")]
                 if value {
