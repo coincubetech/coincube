@@ -1894,8 +1894,8 @@ fn route_tile_style(theme: &theme::Theme, hovered: bool) -> (Background, iced::B
     )
 }
 
-/// Status-independent fill for the fixed YOU SEND tile.
-fn fixed_tile_style(theme: &theme::Theme) -> container::Style {
+/// Status-independent fill for the fixed YOU SEND tile, and Swap's tiles.
+pub(crate) fn fixed_tile_style(theme: &theme::Theme) -> container::Style {
     let (background, border) = route_tile_style(theme, false);
     container::Style {
         background: Some(background),

@@ -30,7 +30,7 @@ use crate::app::menu::Menu;
 use crate::app::message::Message;
 use crate::app::state::State;
 use crate::app::view;
-use crate::app::view::spark::SparkSwapMessage;
+use crate::app::view::spark::{SparkRecentTransaction, SparkSwapMessage};
 use crate::app::wallets::SparkBackend;
 
 /// USDB's precision when the wallet holds none yet, so nothing reports its
@@ -137,6 +137,9 @@ pub struct SparkSwap {
     /// The swap's result arrived while another page was showing, so the
     /// user hasn't seen it: the next visit shows it instead of a new form.
     result_unseen: bool,
+    /// Spark's latest payments, as Send and Receive show them in the side
+    /// panel.
+    recent_transactions: Vec<SparkRecentTransaction>,
 }
 
 impl SparkSwap {
@@ -155,7 +158,29 @@ impl SparkSwap {
             auto_convert: None,
             auto_convert_read: 0,
             result_unseen: false,
+            recent_transactions: Vec::new(),
         }
+    }
+
+    pub fn recent_transactions_for_view(&self) -> &[SparkRecentTransaction] {
+        &self.recent_transactions
+    }
+
+    /// Keep the latest five of `payments`, priced at the cache's fiat rate,
+    /// as Send and Receive do.
+    pub fn set_recent_payments(
+        &mut self,
+        payments: &[coincube_spark_protocol::PaymentSummary],
+        cache: &Cache,
+    ) {
+        use std::convert::TryInto;
+        let fiat: Option<crate::app::view::FiatAmountConverter> =
+            cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
+        self.recent_transactions = payments
+            .iter()
+            .take(5)
+            .map(|p| super::overview::payment_summary_to_recent_tx(p, fiat.as_ref()))
+            .collect();
     }
 
     pub fn from(&self) -> WalletAsset {
@@ -297,6 +322,22 @@ impl SparkSwap {
                 balance,
             )))
         })
+    }
+
+    fn fetch_payments(&self) -> Task<Message> {
+        super::fetch_payments_task(
+            self.backend.clone(),
+            |payments| {
+                Message::View(view::Message::SparkSwap(SparkSwapMessage::PaymentsLoaded(
+                    payments,
+                )))
+            },
+            |err| {
+                Message::View(view::Message::SparkSwap(SparkSwapMessage::PaymentsFailed(
+                    err,
+                )))
+            },
+        )
     }
 
     fn fetch_auto_convert(&self) -> Task<Message> {
@@ -483,7 +524,11 @@ impl SparkSwap {
                 // result shows none until a read sent from here succeeds.
                 self.auto_convert = None;
                 self.auto_convert_read += 1;
-                Task::batch([self.fetch_balance(), self.fetch_auto_convert()])
+                Task::batch([
+                    self.fetch_balance(),
+                    self.fetch_auto_convert(),
+                    self.fetch_payments(),
+                ])
             }
             SparkSwapMessage::SwapAgain => {
                 if matches!(
@@ -515,6 +560,30 @@ impl SparkSwap {
                 }
                 Task::none()
             }
+            // Pricing needs the cache: `App` and `update` route a load to
+            // `set_recent_payments` before it gets here.
+            SparkSwapMessage::PaymentsLoaded(_) => Task::none(),
+            SparkSwapMessage::PaymentsFailed(err) => {
+                tracing::warn!("spark swap list_payments failed: {}", err);
+                self.recent_transactions.clear();
+                Task::none()
+            }
+            SparkSwapMessage::SelectTransaction(idx) => {
+                let Some(payment) = self.recent_transactions.get(idx).cloned() else {
+                    return Task::none();
+                };
+                Task::batch(vec![
+                    crate::app::state::redirect(Menu::Spark(
+                        crate::app::menu::SparkSubMenu::Transactions(None),
+                    )),
+                    Task::done(Message::View(view::Message::SparkTransactions(
+                        view::SparkTransactionsMessage::Preselect(payment),
+                    ))),
+                ])
+            }
+            SparkSwapMessage::History => crate::app::state::redirect(Menu::Spark(
+                crate::app::menu::SparkSubMenu::Transactions(None),
+            )),
             SparkSwapMessage::AutoConvertLoaded { read, line } => {
                 // An unread state keeps the last one rather than guessing.
                 if read == self.auto_convert_read && line.is_some() {
@@ -534,10 +603,14 @@ impl State for SparkSwap {
     fn update(
         &mut self,
         _daemon: Option<Arc<dyn crate::daemon::Daemon + Sync + Send>>,
-        _cache: &Cache,
+        cache: &Cache,
         message: Message,
     ) -> Task<Message> {
         match message {
+            Message::View(view::Message::SparkSwap(SparkSwapMessage::PaymentsLoaded(payments))) => {
+                self.set_recent_payments(&payments, cache);
+                Task::none()
+            }
             Message::View(view::Message::SparkSwap(message)) => self.deliver(message, true),
             _ => Task::none(),
         }
@@ -571,6 +644,7 @@ impl State for SparkSwap {
             self.fetch_balance(),
             self.fetch_limits(),
             self.fetch_auto_convert(),
+            self.fetch_payments(),
         ])
     }
 }
@@ -1112,5 +1186,36 @@ mod tests {
             swap_available(Network::Bitcoin),
             crate::feature_flags::SPARK_SWAP
         );
+    }
+
+    #[test]
+    fn recent_payments_keep_five_and_clear_when_the_load_fails() {
+        let cache = Cache::default();
+        let mut swap = SparkSwap::new(None);
+        let payment = |n: i64| coincube_spark_protocol::PaymentSummary {
+            id: format!("pay-{}", n),
+            amount_sat: n,
+            fees_sat: 0,
+            token_amount: None,
+            token_decimals: None,
+            token_ticker: None,
+            timestamp: 1_700_000_000,
+            status: "completed".to_string(),
+            direction: "incoming".to_string(),
+            method: "lightning".to_string(),
+            description: None,
+            details: Default::default(),
+        };
+        drop(State::update(
+            &mut swap,
+            None,
+            &cache,
+            Message::View(view::Message::SparkSwap(SparkSwapMessage::PaymentsLoaded(
+                (1..=7).map(payment).collect(),
+            ))),
+        ));
+        assert_eq!(swap.recent_transactions_for_view().len(), 5);
+        drop(swap.on_message(SparkSwapMessage::PaymentsFailed("offline".into())));
+        assert!(swap.recent_transactions_for_view().is_empty());
     }
 }

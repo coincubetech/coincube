@@ -177,6 +177,17 @@ pub fn eye_action<'a, M: Clone + 'static>(
     } else {
         icon::eye_slash_icon()
     };
+    icon_action(id, glyph, focus_intent, on_toggle)
+}
+
+/// A square secondary action holding only `glyph`, such as the eye toggle or
+/// Swap's reverse arrows.
+pub fn icon_action<'a, M: Clone + 'static>(
+    id: impl Into<Id>,
+    glyph: Text<'a>,
+    focus_intent: fn(Id) -> M,
+    on_press: Option<M>,
+) -> Element<'a, M> {
     let content = Container::new(glyph.size(size::ICON))
         .width(Length::Fill)
         .height(Length::Fill)
@@ -190,7 +201,7 @@ pub fn eye_action<'a, M: Clone + 'static>(
         .height(Length::Fixed(size::ICON_ACTION))
         .padding(0.0)
         .focus_radius(ActionShape::Icon.radius(ActionKind::Secondary))
-        .on_press_maybe(on_toggle)
+        .on_press_maybe(on_press)
         .into()
 }
 

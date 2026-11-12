@@ -9359,6 +9359,13 @@ impl App {
 
             // Swap's answers reach its panel whichever page is showing, so a
             // swap that settles while the user is elsewhere keeps its result.
+            Message::View(view::Message::SparkSwap(
+                view::spark::SparkSwapMessage::PaymentsLoaded(payments),
+            )) => {
+                self.panels
+                    .spark_swap
+                    .set_recent_payments(&payments, &self.cache);
+            }
             Message::View(view::Message::SparkSwap(msg)) => {
                 let on_screen = self.panels.current == Menu::Spark(menu::SparkSubMenu::Swap);
                 return self.panels.spark_swap.deliver(msg, on_screen);
