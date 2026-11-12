@@ -3,13 +3,7 @@ use super::{view, wallet::Wallet};
 use crate::daemon::Daemon;
 #[cfg(any(unix, windows))]
 use coincube_mcp as wire;
-#[cfg(feature = "mcp-proposals")]
-use coincube_ui::component::text::{h3, text};
-#[cfg(feature = "mcp-proposals")]
-use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::widget::Element;
-#[cfg(feature = "mcp-proposals")]
-use iced::widget::{button, checkbox, column, text_input};
 use std::sync::Arc;
 #[cfg(any(unix, windows))]
 use std::time::Duration;
@@ -70,10 +64,16 @@ pub enum Message {
     TogglePairing,
     /// Enable or disable MCP for the current unlocked session.
     Enable(bool),
+    /// The pairing form's Turn on: `Enable(true)`, after which focus moves
+    /// to the form's first field because the pressed control disappears.
+    TurnOnFromForm,
     /// Select whether the current Vault may be shared.
     Wallet(bool),
     /// Edit balance, history or policy access by capability index.
     Capability(usize, bool),
+    /// Choose read access for the next client before picking its parts.
+    /// Grants nothing until a capability is selected and the client is paired.
+    ChooseRead,
     /// Set the local display label; it is not a client authentication identity.
     ClientName(String),
     /// Mint a fresh, expiring grant after validating the current selection.
@@ -120,6 +120,14 @@ pub enum Message {
     #[cfg(feature = "mcp-proposals")]
     ReviewPairedProposal(String),
 }
+/// A trusted AI access action whose control disappears once it is handled.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FocusAfter {
+    Pair,
+    TogglePairing,
+    Enable,
+}
+
 /// Native consent and active endpoints. The default grants no access.
 /// Durable authorization is encrypted; runtime access requires an unlocked Cube.
 #[derive(Default)]
@@ -152,6 +160,10 @@ pub struct Settings {
     managing: Option<String>,
     /// Whether the pairing form is open on AI access.
     pairing_open: bool,
+    /// The pairing form's read choice, before any read capability is on.
+    read_chosen: bool,
+    /// The client whose private configuration was copied last, for feedback.
+    copied: Option<String>,
 }
 pub(crate) struct PairingContext<'a> {
     pub root: &'a std::path::Path,
@@ -166,19 +178,48 @@ pub(crate) struct PairingContext<'a> {
     pub last_poll_at_startup: Option<u32>,
 }
 impl Settings {
-    #[cfg(feature = "mcp-proposals")]
-    fn enable_action(&self) -> Element<'_, view::Message> {
-        coincube_ui::widget::action::Action::new(
-            "tenshu.ai-access.enable",
-            iced::widget::text(format!(
-                "{} {}",
-                if self.enabled { "☑" } else { "☐" },
-                localized_copy("Enable AI access for this Cube")
-            )),
-            view::Message::FocusAction,
-        )
-        .on_press(view::Message::LocalMcp(Message::Enable(!self.enabled)))
-        .into()
+    /// Where keyboard focus goes after an action removed its own control.
+    pub(crate) fn focus_after(&self, after: FocusAfter) -> Option<iced::advanced::widget::Id> {
+        use iced::advanced::widget::Id;
+        match after {
+            // A successful pairing closes the form and opens the new client.
+            FocusAfter::Pair => self
+                .managing
+                .as_ref()
+                .filter(|_| !self.pairing_open)
+                .map(|id| Id::from(format!("tenshu.ai-access.client.{id}.manage"))),
+            FocusAfter::TogglePairing if self.pairing_open => Some(Id::from(if self.enabled {
+                presentation::NAME_ID
+            } else {
+                presentation::FORM_ENABLE_ID
+            })),
+            // Pair a client is disabled after a storage failure.
+            FocusAfter::TogglePairing if self.pairing_poisoned => None,
+            FocusAfter::TogglePairing => Some(Id::from(presentation::PAIR_OPEN_ID)),
+            FocusAfter::Enable if self.pairing_open && self.enabled => {
+                Some(Id::from(presentation::NAME_ID))
+            }
+            FocusAfter::Enable => None,
+        }
+    }
+
+    /// Whether the Cube-wide switch is enabled (and so can take focus) on the
+    /// read-access page. Turning it off is always allowed. Turning it on is
+    /// allowed where a Vault on a documented chain can pair, and also where
+    /// the runtime serves this Vault and clients are already paired: that
+    /// only resumes their stored access and grants nothing new.
+    pub(crate) fn switch_focusable(&self, supported: bool) -> bool {
+        self.enabled
+            || (supported
+                && (self
+                    .pairing_location
+                    .as_ref()
+                    .and_then(pairings::Location::chain)
+                    .is_none_or(presentation::chain_supported)
+                    || self
+                        .pairing_store
+                        .as_ref()
+                        .is_some_and(|store| !store.clients().is_empty())))
     }
 
     pub(crate) fn pending_revoke(&self) -> Option<(&str, &str)> {
@@ -197,9 +238,24 @@ impl Settings {
         Some(presentation::revoke_confirmation(name, id))
     }
 
+    /// Read access is its own pairing: choosing it clears transaction and
+    /// wallet-preparation choices left from an earlier form.
+    fn clear_other_scopes(&mut self) {
+        #[cfg(feature = "mcp-transactions")]
+        {
+            self.transactions_allowed = false;
+        }
+        #[cfg(feature = "mcp-proposals")]
+        {
+            self.proposals_allowed = false;
+            self.creation_allowed = false;
+        }
+    }
+
     fn clear_pairing_selection(&mut self) {
         self.wallet_allowed = false;
         self.capabilities = [false; 3];
+        self.read_chosen = false;
         #[cfg(feature = "mcp-proposals")]
         {
             self.proposals_allowed = false;
@@ -211,14 +267,11 @@ impl Settings {
         }
     }
 
-    #[cfg(feature = "mcp-proposals")]
-    fn paired_clients_view(&self) -> Element<'_, view::Message> {
-        presentation::paired_clients(self)
-    }
     /// Stop the server and clear its approved display label synchronously.
     pub fn revoke(&mut self) {
         // Runtime suspension only. Explicit durable revocation is RevokePair.
         self.revoke_confirmation = None;
+        self.copied = None;
         self.paired.clear();
         self.revoke_legacy();
     }
@@ -589,9 +642,14 @@ impl Settings {
                 );
             }
             Some(Err(pairings::AddError::Uncertain)) => self.persistence_failed(),
-            Some(Ok(_)) => {
+            Some(Ok(id)) => {
                 self.pairing_error = None;
                 self.client_name.clear();
+                // Close the form and open the new client's row, where its
+                // private configuration can be copied.
+                self.pairing_open = false;
+                self.managing = Some(id);
+                self.read_chosen = false;
                 // Every new client must receive its own explicit wallet and
                 // capability choices; the previous grant is not a template.
                 self.wallet_allowed = false;
@@ -621,6 +679,7 @@ impl Settings {
     ) -> Option<String> {
         match message {
             Message::ManageClient(id) => {
+                self.copied = None;
                 self.managing = if self.managing.as_deref() == Some(id.as_str()) {
                     None
                 } else {
@@ -636,7 +695,11 @@ impl Settings {
             Message::ReviewTransaction { .. } | Message::ReviewTransactionChecked { .. } => {
                 return None;
             }
+            Message::TurnOnFromForm => {
+                return self.update(Message::Enable(true), wallet, daemon, supported, cube_id);
+            }
             Message::Enable(value) => {
+                self.copied = None;
                 self.revoke();
                 self.clear_pairing_selection();
                 self.client_name.clear();
@@ -651,9 +714,18 @@ impl Settings {
                 self.revoke_legacy();
                 self.wallet_allowed = value;
             }
+            Message::ChooseRead => {
+                self.revoke_legacy();
+                self.read_chosen = true;
+                self.clear_other_scopes();
+            }
             Message::Capability(index, value) if index < 3 => {
                 self.revoke_legacy();
                 self.capabilities[index] = value;
+                if value {
+                    self.read_chosen = true;
+                    self.clear_other_scopes();
+                }
                 #[cfg(feature = "mcp-transactions")]
                 if value {
                     self.transactions_allowed = false;
@@ -685,6 +757,7 @@ impl Settings {
                 self.transactions_allowed = value;
                 if value {
                     self.capabilities = [false; 3];
+                    self.read_chosen = false;
                 }
             }
             Message::Revoke => self.revoke(),
@@ -698,6 +771,7 @@ impl Settings {
                     return None;
                 }
                 self.revoke_confirmation = None;
+                self.copied = None;
                 self.paired.retain(|runtime| runtime.id != id);
                 if let Some(store) = &mut self.pairing_store {
                     if store.remove(&id).is_err() {
@@ -747,10 +821,14 @@ impl Settings {
                     .ok()?
                     .parent()?
                     .join(format!("tenshu-mcp{}", std::env::consts::EXE_SUFFIX));
-                return serde_json::to_string_pretty(&serde_json::json!({"mcpServers": {"tenshu": {
+                let config = serde_json::to_string_pretty(&serde_json::json!({"mcpServers": {"tenshu": {
                     "command": executable,
                     "env": {"TENSHU_MCP_PAIRING": store.location.locator(&id), "TENSHU_MCP_CREDENTIAL": client.credential}
                 }}})).ok();
+                if config.is_some() {
+                    self.copied = Some(id);
+                }
+                return config;
             }
             Message::Approve => {
                 self.revoke_legacy();
@@ -968,82 +1046,7 @@ impl Settings {
 #[cfg(feature = "mcp-proposals")]
 impl Settings {
     fn proposal_view(&self) -> Element<'_, view::Message> {
-        let msg = |m| view::Message::LocalMcp(m);
-        let mut content = column![h3(localized_copy("AI wallet preparation")),
-            text(localized_copy("Choose topology-only access, or allow the assistant to assemble public account keys for a 3-of-5 wallet with explicitly chosen recovery. Your AI provider may receive the public keys you give it. Neither permission allows secrets, signing, sending coins or creation approval.")),
-            text(localized_copy("Tenshu validates the descriptor and fills its builder. You verify keys on the source devices, handle hardware, seed backups and PIN/passkey steps, and authorize creation here. Pairing survives lock and restart; each draft ends on lock/close or creation admission. Wallet reads require their own permission.")),
-            self.enable_action()].spacing(16);
-        if self.enabled {
-            content = content
-                .push(
-                    text_input(
-                        localized_copy("Client label (for your reference)"),
-                        &self.client_name,
-                    )
-                    .on_input(move |v| msg(Message::ClientName(v))),
-                )
-                .push(
-                    checkbox(self.proposals_allowed)
-                        .label(localized_copy(
-                            "Allow this client to prepare a wallet proposal",
-                        ))
-                        .on_toggle(move |v| msg(Message::Proposals(v))),
-                )
-                .push(
-                    checkbox(self.creation_allowed)
-                        .label(localized_copy(
-                            "Allow this client to prepare a wallet using public account keys",
-                        ))
-                        .on_toggle(move |v| msg(Message::Creation(v))),
-                )
-                .push(
-                    button(localized_copy("Pair setup client until revoked")).on_press_maybe(
-                        ((self.proposals_allowed || self.creation_allowed)
-                            && !self.client_name.trim().is_empty())
-                        .then(|| msg(Message::Pair)),
-                    ),
-                );
-            if let Some(server) = &self.server {
-                content = content
-                    .push(text(localized_copy(if server.grant.active() {
-                        "Proposal client authorized"
-                    } else {
-                        "Inactive — approve again"
-                    })))
-                    .push(
-                        button(localized_copy("Revoke access now")).on_press(msg(Message::Revoke)),
-                    );
-                if server.grant.active() {
-                    content = content.push(button(localized_copy("Copy private client configuration")).on_press(msg(Message::CopyConfig)))
-                        .push(text(localized_copy("Save the temporary grant only in your client's private local configuration. Never paste it into chat.")));
-                    if let Some(proposal) = self
-                        .proposals
-                        .as_ref()
-                        .and_then(|s| s.pending().ok())
-                        .flatten()
-                    {
-                        content = content.push(text(coincube_ui::localized_format!("3-of-5 primary; recovery {}-of-{} after {} blocks. Actual keys and descriptor are not selected yet.", "Principal 3 de 5; recuperación {} de {} después de {} bloques. Aún no se seleccionaron las claves ni el descriptor reales.", proposal.topology.recovery.quorum.threshold, proposal.topology.recovery.quorum.key_count, proposal.topology.recovery.relative_delay_blocks)))
-                            .push(button(localized_copy("Review proposal and select keys in Tenshu")).on_press(msg(Message::ReviewProposal)));
-                    } else {
-                        content = content.push(text(localized_copy(
-                            "Waiting for a proposal from your client.",
-                        )));
-                    }
-                }
-            } else if self
-                .pairing_store
-                .as_ref()
-                .is_none_or(|s| s.clients().is_empty())
-            {
-                content = content.push(text(localized_copy("No proposal client is authorized.")));
-            }
-        }
-        if self.failed {
-            content = content.push(text(localized_copy(
-                "Could not start local MCP. No access was granted.",
-            )));
-        }
-        content.push(self.paired_clients_view()).into()
+        presentation::setup_view(self)
     }
 }
 
@@ -1611,9 +1614,11 @@ mod tests {
             &mut renderer,
         );
         apply_task(&mut ui, &renderer, confirm);
+        // Focus returns to the Cube-wide switch, which is present whether or
+        // not the pairing form is open and after a storage failure.
         assert_eq!(
             focused(&mut ui, &renderer),
-            Some(Id::from("tenshu.ai-access.open"))
+            Some(Id::from("tenshu.ai-access.enable"))
         );
         drop(ui);
         drop(app);
@@ -1857,6 +1862,10 @@ mod tests {
             last_poll_at_startup: None,
         });
         assert_eq!(paired.paired.len(), 1);
+        // Pairing closed the form and opened the new client; reopen the form
+        // as a user pairing another client would.
+        assert!(!paired.pairing_open);
+        paired.pairing_open = true;
         paired.managing = Some(
             paired.pairing_store.as_ref().unwrap().clients()[0]
                 .id
@@ -1877,8 +1886,8 @@ mod tests {
                     palette,
                 );
                 assert!(inspection.contains("Paired clients"));
-                assert!(inspection.contains("Local is not private."));
-                assert!(inspection.contains("Shared with the client"));
+                assert!(inspection.contains("Local isn't private."));
+                assert!(inspection.contains("Only the parts you allow."));
                 assert!(inspection.contains("Never shared"));
                 assert!(!inspection.contains("Your AI provider may receive financial information"));
                 assert!(!inspection.contains("TENSHU_MCP_CREDENTIAL"));
@@ -2360,9 +2369,11 @@ mod tests {
             &mut renderer,
         );
         apply_task(&mut ui, &renderer, confirm);
+        // Focus returns to the Cube-wide switch, which is present whether or
+        // not the pairing form is open and after a storage failure.
         assert_eq!(
             focused(&mut ui, &renderer),
-            Some(Id::from("tenshu.ai-access.open"))
+            Some(Id::from("tenshu.ai-access.enable"))
         );
         drop(ui);
         drop(app);
