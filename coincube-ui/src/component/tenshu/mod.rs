@@ -6,6 +6,7 @@
 //! `component` are unchanged for screens that have not been ported.
 
 pub mod action;
+pub mod arranged;
 pub mod asset_row;
 pub mod balance;
 pub mod bleed;
@@ -31,6 +32,7 @@ pub mod top_bar;
 mod gallery;
 
 pub use action::{chip_action, eye_action, transfer_action, ActionButton};
+pub use arranged::{arranged, Arrange, Arranged};
 pub use asset_row::asset_row;
 pub use balance::{balance, AmountVisibility, BalanceTier, BalanceValue, Figure, MASK};
 pub use bleed::{bleed, Bleed};

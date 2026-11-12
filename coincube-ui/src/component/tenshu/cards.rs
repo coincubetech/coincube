@@ -4,14 +4,10 @@
 //! The breakpoint is the width the cards are given, not the window's: the
 //! same cards stack in a narrow pane however wide the window is.
 
-use iced::advanced::{
-    layout, mouse, overlay, renderer,
-    widget::{Operation, Tree},
-    Clipboard, Layout, Shell, Widget,
-};
-use iced::{Event, Length, Rectangle, Size, Vector};
+use iced::advanced::{layout, widget::Tree};
+use iced::{Length, Size};
 
-use crate::theme::Theme;
+use super::arranged::arranged;
 use crate::widget::{Element, Renderer};
 
 /// The narrowest a card may be beside another: two of them fill the 960px
@@ -36,183 +32,63 @@ pub struct Cards<'a, M> {
     children: Vec<Element<'a, M>>,
 }
 
-impl<M> Widget<M, Theme, Renderer> for Cards<'_, M> {
-    fn children(&self) -> Vec<Tree> {
-        self.children.iter().map(Tree::new).collect()
-    }
-
-    fn diff(&self, tree: &mut Tree) {
-        tree.diff_children(&self.children);
-    }
-
-    fn size(&self) -> Size<Length> {
-        Size::new(Length::Fill, Length::Shrink)
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        let width = limits.max().width;
-        let width = if width.is_finite() {
-            width
-        } else {
-            2.0 * CARD_MIN_WIDTH + CARD_GAP
-        };
-        let per_row = if two_columns(width) { 2 } else { 1 };
-        let column = (width - CARD_GAP * (per_row - 1) as f32) / per_row as f32;
-        let mut nodes = Vec::with_capacity(self.children.len());
-        let mut top = 0.0;
-        for (row, trees) in self
-            .children
-            .chunks_mut(per_row)
-            .zip(tree.children.chunks_mut(per_row))
-        {
-            // The cards' own heights, then each laid out again at the row's
-            // height so the shorter card's surface reaches the row's bottom.
-            let height = row
-                .iter_mut()
-                .zip(trees.iter_mut())
-                .map(|(card, tree)| {
-                    card.as_widget_mut()
-                        .layout(
+impl<'a, M: 'a> From<Cards<'a, M>> for Element<'a, M> {
+    fn from(cards: Cards<'a, M>) -> Self {
+        arranged(
+            cards.children,
+            Size::new(Length::Fill, Length::Shrink),
+            |children: &mut [Element<'a, M>],
+             trees: &mut [Tree],
+             renderer: &Renderer,
+             limits: &layout::Limits| {
+                let width = limits.max().width;
+                let width = if width.is_finite() {
+                    width
+                } else {
+                    2.0 * CARD_MIN_WIDTH + CARD_GAP
+                };
+                let per_row = if two_columns(width) { 2 } else { 1 };
+                let column = (width - CARD_GAP * (per_row - 1) as f32) / per_row as f32;
+                let mut nodes = Vec::with_capacity(children.len());
+                let mut top = 0.0;
+                for (row, trees) in children.chunks_mut(per_row).zip(trees.chunks_mut(per_row)) {
+                    // The cards' own heights, then each laid out again at the row's
+                    // height so the shorter card's surface reaches the row's bottom.
+                    let height = row
+                        .iter_mut()
+                        .zip(trees.iter_mut())
+                        .map(|(card, tree)| {
+                            card.as_widget_mut()
+                                .layout(
+                                    tree,
+                                    renderer,
+                                    &layout::Limits::new(
+                                        Size::new(column, 0.0),
+                                        Size::new(column, f32::INFINITY),
+                                    ),
+                                )
+                                .size()
+                                .height
+                        })
+                        .fold(0.0, f32::max);
+                    for (index, (card, tree)) in row.iter_mut().zip(trees.iter_mut()).enumerate() {
+                        let node = card.as_widget_mut().layout(
                             tree,
                             renderer,
                             &layout::Limits::new(
-                                Size::new(column, 0.0),
-                                Size::new(column, f32::INFINITY),
+                                Size::new(column, height),
+                                Size::new(column, height),
                             ),
-                        )
-                        .size()
-                        .height
-                })
-                .fold(0.0, f32::max);
-            for (index, (card, tree)) in row.iter_mut().zip(trees.iter_mut()).enumerate() {
-                let node = card.as_widget_mut().layout(
-                    tree,
-                    renderer,
-                    &layout::Limits::new(Size::new(column, height), Size::new(column, height)),
-                );
-                nodes.push(node.move_to((index as f32 * (column + CARD_GAP), top)));
-            }
-            top += height + CARD_GAP;
-        }
-        let height = (top - CARD_GAP).max(0.0);
-        layout::Node::with_children(Size::new(width, height), nodes)
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn Operation,
-    ) {
-        operation.container(None, layout.bounds());
-        operation.traverse(&mut |operation| {
-            for ((child, state), layout) in self
-                .children
-                .iter_mut()
-                .zip(&mut tree.children)
-                .zip(layout.children())
-            {
-                child
-                    .as_widget_mut()
-                    .operate(state, layout, renderer, operation);
-            }
-        });
-    }
-
-    fn update(
-        &mut self,
-        tree: &mut Tree,
-        event: &Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &Renderer,
-        clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, M>,
-        viewport: &Rectangle,
-    ) {
-        for ((child, state), layout) in self
-            .children
-            .iter_mut()
-            .zip(&mut tree.children)
-            .zip(layout.children())
-        {
-            child.as_widget_mut().update(
-                state, event, layout, cursor, renderer, clipboard, shell, viewport,
-            );
-        }
-    }
-
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
-        self.children
-            .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-            .map(|((child, state), layout)| {
-                child
-                    .as_widget()
-                    .mouse_interaction(state, layout, cursor, viewport, renderer)
-            })
-            .max()
-            .unwrap_or_default()
-    }
-
-    fn draw(
-        &self,
-        tree: &Tree,
-        renderer: &mut Renderer,
-        theme: &Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        for ((child, state), layout) in self
-            .children
-            .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-        {
-            child
-                .as_widget()
-                .draw(state, renderer, theme, style, layout, cursor, viewport);
-        }
-    }
-
-    fn overlay<'b>(
-        &'b mut self,
-        tree: &'b mut Tree,
-        layout: Layout<'b>,
-        renderer: &Renderer,
-        viewport: &Rectangle,
-        translation: Vector,
-    ) -> Option<overlay::Element<'b, M, Theme, Renderer>> {
-        overlay::from_children(
-            &mut self.children,
-            tree,
-            layout,
-            renderer,
-            viewport,
-            translation,
+                        );
+                        nodes.push(node.move_to((index as f32 * (column + CARD_GAP), top)));
+                    }
+                    top += height + CARD_GAP;
+                }
+                let height = (top - CARD_GAP).max(0.0);
+                layout::Node::with_children(Size::new(width, height), nodes)
+            },
         )
-    }
-}
-
-impl<'a, M: 'a> From<Cards<'a, M>> for Element<'a, M> {
-    fn from(cards: Cards<'a, M>) -> Self {
-        Element::new(cards)
+        .into()
     }
 }
 
@@ -221,6 +97,8 @@ mod tests {
     use super::*;
     use crate::widget::{Column, Container};
     use iced::advanced::renderer::Headless;
+    use iced::advanced::Layout;
+    use iced::Rectangle;
 
     fn renderer() -> Renderer {
         iced::futures::executor::block_on(<Renderer as Headless>::new(

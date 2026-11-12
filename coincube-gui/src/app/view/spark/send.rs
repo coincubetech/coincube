@@ -32,7 +32,7 @@ use coincube_core::miniscript::bitcoin::{Amount, Network};
 use crate::app::breez_spark::assets::stable_token_as_sats;
 use crate::app::state::spark::cross_chain::{self, supported_on};
 use crate::app::state::spark::send::{CrossChainContext, SparkSendPhase, SparkSendTarget};
-use crate::app::view::shared::payment_columns::{rail_card, PaymentColumns};
+use crate::app::view::shared::payment_columns::{payment_columns, rail_card};
 use crate::app::view::spark::{last_tx::recent_rail_section, SparkRecentTransaction};
 use crate::app::view::{Message, SparkSendMessage};
 
@@ -356,7 +356,7 @@ impl<'a> SparkSendView<'a> {
         .push(recent);
         // The title, the Cube line, Back to Spark and the steps are in the
         // page head (`head`).
-        PaymentColumns::new(content, rail_card(rail)).into()
+        payment_columns(content, rail_card(rail))
     }
 }
 

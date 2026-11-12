@@ -12,13 +12,13 @@
 
 use iced::advanced::text::Shaping;
 use iced::advanced::{
-    layout, mouse, overlay, renderer,
-    widget::{Id, Operation, Tree},
-    Clipboard, Layout, Shell, Widget,
+    layout,
+    widget::{Id, Tree},
 };
 use iced::widget::text::{IntoFragment, LineHeight, Wrapping};
-use iced::{alignment, Alignment, Background, Event, Length, Padding, Rectangle, Size, Vector};
+use iced::{alignment, Alignment, Background, Length, Padding, Size};
 
+use super::arranged::arranged;
 use super::page::{page, PageWidth};
 use crate::font;
 use crate::icon;
@@ -246,202 +246,91 @@ fn actions_beside(width: f32, title_width: f32, actions_width: f32) -> bool {
     title_width + ROW_GAP + actions_width <= width
 }
 
-impl<M> Widget<M, Theme, Renderer> for HeadRow<'_, M> {
-    fn children(&self) -> Vec<Tree> {
-        self.children.iter().map(Tree::new).collect()
-    }
-
-    fn diff(&self, tree: &mut Tree) {
-        tree.diff_children(&self.children);
-    }
-
-    fn size(&self) -> Size<Length> {
-        Size::new(Length::Fill, Length::Shrink)
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        let width = limits.max().width;
-        let bounded = |width: f32| layout::Limits::new(Size::ZERO, Size::new(width, f32::INFINITY));
-        let (title, rest) = self.children.split_first_mut().expect("a title");
-        let (title_tree, rest_tree) = tree.children.split_first_mut().expect("a title");
-        let Some((actions, actions_tree)) = rest.first_mut().zip(rest_tree.first_mut()) else {
-            let title = title
-                .as_widget_mut()
-                .layout(title_tree, renderer, &bounded(width));
-            let size = title.size();
-            let width = if width.is_finite() { width } else { size.width };
-            return layout::Node::with_children(Size::new(width, size.height), vec![title]);
-        };
-        // The one-line widths: laid out with no bound, neither the title nor
-        // the actions' wrapping row breaks a line. At the column's bound the
-        // actions report only their widest wrapped line, which would put a
-        // stack of them beside a short title.
-        let one_line = title
-            .as_widget_mut()
-            .layout(title_tree, renderer, &bounded(f32::INFINITY))
-            .size()
-            .width;
-        let actions_one_line = actions
-            .as_widget_mut()
-            .layout(actions_tree, renderer, &bounded(f32::INFINITY))
-            .size()
-            .width;
-        let width = if width.is_finite() {
-            width
-        } else {
-            one_line + ROW_GAP + actions_one_line
-        };
-        // Then at the column's bound: on one line beside the title, wrapped
-        // under it.
-        let actions_node = actions
-            .as_widget_mut()
-            .layout(actions_tree, renderer, &bounded(width));
-        let actions_size = actions_node.size();
-        let (title_node, actions_node, height) =
-            if actions_beside(width, one_line, actions_one_line) {
-                let title_node = title.as_widget_mut().layout(
-                    title_tree,
-                    renderer,
-                    &bounded(width - ROW_GAP - actions_size.width),
-                );
-                let title_height = title_node.size().height;
-                let height = title_height.max(actions_size.height);
-                (
-                    title_node.move_to((0.0, height - title_height)),
-                    actions_node
-                        .move_to((width - actions_size.width, height - actions_size.height)),
-                    height,
-                )
-            } else {
-                let title_node =
-                    title
-                        .as_widget_mut()
-                        .layout(title_tree, renderer, &bounded(width));
-                let top = title_node.size().height + ROW_GAP;
-                (
-                    title_node,
-                    actions_node.move_to((0.0, top)),
-                    top + actions_size.height,
-                )
-            };
-        layout::Node::with_children(Size::new(width, height), vec![title_node, actions_node])
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn Operation,
-    ) {
-        operation.container(None, layout.bounds());
-        operation.traverse(&mut |operation| {
-            for ((child, state), layout) in self
-                .children
-                .iter_mut()
-                .zip(&mut tree.children)
-                .zip(layout.children())
-            {
-                child
-                    .as_widget_mut()
-                    .operate(state, layout, renderer, operation);
-            }
-        });
-    }
-
-    fn update(
-        &mut self,
-        tree: &mut Tree,
-        event: &Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &Renderer,
-        clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, M>,
-        viewport: &Rectangle,
-    ) {
-        for ((child, state), layout) in self
-            .children
-            .iter_mut()
-            .zip(&mut tree.children)
-            .zip(layout.children())
-        {
-            child.as_widget_mut().update(
-                state, event, layout, cursor, renderer, clipboard, shell, viewport,
-            );
-        }
-    }
-
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
-        self.children
-            .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-            .map(|((child, state), layout)| {
-                child
-                    .as_widget()
-                    .mouse_interaction(state, layout, cursor, viewport, renderer)
-            })
-            .max()
-            .unwrap_or_default()
-    }
-
-    fn draw(
-        &self,
-        tree: &Tree,
-        renderer: &mut Renderer,
-        theme: &Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        for ((child, state), layout) in self
-            .children
-            .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-        {
-            child
-                .as_widget()
-                .draw(state, renderer, theme, style, layout, cursor, viewport);
-        }
-    }
-
-    fn overlay<'b>(
-        &'b mut self,
-        tree: &'b mut Tree,
-        layout: Layout<'b>,
-        renderer: &Renderer,
-        viewport: &Rectangle,
-        translation: Vector,
-    ) -> Option<overlay::Element<'b, M, Theme, Renderer>> {
-        overlay::from_children(
-            &mut self.children,
-            tree,
-            layout,
-            renderer,
-            viewport,
-            translation,
-        )
-    }
-}
-
 impl<'a, M: 'a> From<HeadRow<'a, M>> for Element<'a, M> {
     fn from(row: HeadRow<'a, M>) -> Self {
-        Element::new(row)
+        arranged(
+            row.children,
+            Size::new(Length::Fill, Length::Shrink),
+            |children: &mut [Element<'a, M>],
+             trees: &mut [Tree],
+             renderer: &Renderer,
+             limits: &layout::Limits| {
+                let width = limits.max().width;
+                let bounded =
+                    |width: f32| layout::Limits::new(Size::ZERO, Size::new(width, f32::INFINITY));
+                let (title, rest) = children.split_first_mut().expect("a title");
+                let (title_tree, rest_tree) = trees.split_first_mut().expect("a title");
+                let Some((actions, actions_tree)) = rest.first_mut().zip(rest_tree.first_mut())
+                else {
+                    let title = title
+                        .as_widget_mut()
+                        .layout(title_tree, renderer, &bounded(width));
+                    let size = title.size();
+                    let width = if width.is_finite() { width } else { size.width };
+                    return layout::Node::with_children(Size::new(width, size.height), vec![title]);
+                };
+                // The one-line widths: laid out with no bound, neither the title nor
+                // the actions' wrapping row breaks a line. At the column's bound the
+                // actions report only their widest wrapped line, which would put a
+                // stack of them beside a short title.
+                let one_line = title
+                    .as_widget_mut()
+                    .layout(title_tree, renderer, &bounded(f32::INFINITY))
+                    .size()
+                    .width;
+                let actions_one_line = actions
+                    .as_widget_mut()
+                    .layout(actions_tree, renderer, &bounded(f32::INFINITY))
+                    .size()
+                    .width;
+                let width = if width.is_finite() {
+                    width
+                } else {
+                    one_line + ROW_GAP + actions_one_line
+                };
+                // Then at the column's bound: on one line beside the title, wrapped
+                // under it.
+                let actions_node =
+                    actions
+                        .as_widget_mut()
+                        .layout(actions_tree, renderer, &bounded(width));
+                let actions_size = actions_node.size();
+                let (title_node, actions_node, height) =
+                    if actions_beside(width, one_line, actions_one_line) {
+                        let title_node = title.as_widget_mut().layout(
+                            title_tree,
+                            renderer,
+                            &bounded(width - ROW_GAP - actions_size.width),
+                        );
+                        let title_height = title_node.size().height;
+                        let height = title_height.max(actions_size.height);
+                        (
+                            title_node.move_to((0.0, height - title_height)),
+                            actions_node.move_to((
+                                width - actions_size.width,
+                                height - actions_size.height,
+                            )),
+                            height,
+                        )
+                    } else {
+                        let title_node =
+                            title
+                                .as_widget_mut()
+                                .layout(title_tree, renderer, &bounded(width));
+                        let top = title_node.size().height + ROW_GAP;
+                        (
+                            title_node,
+                            actions_node.move_to((0.0, top)),
+                            top + actions_size.height,
+                        )
+                    };
+                layout::Node::with_children(
+                    Size::new(width, height),
+                    vec![title_node, actions_node],
+                )
+            },
+        )
+        .into()
     }
 }
 
@@ -451,6 +340,9 @@ mod tests {
     use crate::component::tenshu::{ActionButton, PAGE_MAX};
     use iced::advanced::renderer::Headless;
     use iced::advanced::widget::operation::Focusable;
+    use iced::advanced::widget::Operation;
+    use iced::advanced::Layout;
+    use iced::Rectangle;
 
     #[derive(Debug, Clone)]
     #[allow(dead_code)]

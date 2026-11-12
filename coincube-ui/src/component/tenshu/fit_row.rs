@@ -4,14 +4,10 @@
 //! group is ever squeezed, so a long balance can't push the actions out of a
 //! half-width card.
 
-use iced::advanced::{
-    layout, mouse, overlay, renderer,
-    widget::{Operation, Tree},
-    Clipboard, Layout, Shell, Widget,
-};
-use iced::{Event, Length, Rectangle, Size, Vector};
+use iced::advanced::{layout, widget::Tree};
+use iced::{Length, Size};
 
-use crate::theme::Theme;
+use super::arranged::arranged;
 use crate::widget::{Element, Renderer};
 
 /// `lead` at the left and `trail` at the right, side by side while both fit
@@ -41,168 +37,49 @@ impl<M> FitRow<'_, M> {
     }
 }
 
-impl<M> Widget<M, Theme, Renderer> for FitRow<'_, M> {
-    fn children(&self) -> Vec<Tree> {
-        self.children.iter().map(Tree::new).collect()
-    }
-
-    fn diff(&self, tree: &mut Tree) {
-        tree.diff_children(&self.children);
-    }
-
-    fn size(&self) -> Size<Length> {
-        Size::new(Length::Fill, Length::Shrink)
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        let max = limits.max();
-        let own = layout::Limits::new(Size::ZERO, max);
-        let mut nodes: Vec<layout::Node> = self
-            .children
-            .iter_mut()
-            .zip(tree.children.iter_mut())
-            .map(|(child, tree)| child.as_widget_mut().layout(tree, renderer, &own))
-            .collect();
-        let (lead, trail) = (nodes[0].size(), nodes[1].size());
-        let beside = lead.width + self.gap + trail.width;
-        let width = if max.width.is_finite() {
-            max.width
-        } else {
-            beside
-        };
-        let height = if beside <= width {
-            let height = lead.height.max(trail.height);
-            nodes[0] = nodes[0]
-                .clone()
-                .move_to((0.0, (height - lead.height) / 2.0));
-            nodes[1] = nodes[1]
-                .clone()
-                .move_to((width - trail.width, (height - trail.height) / 2.0));
-            height
-        } else {
-            nodes[1] = nodes[1]
-                .clone()
-                .move_to((width - trail.width, lead.height + self.gap));
-            lead.height + self.gap + trail.height
-        };
-        layout::Node::with_children(Size::new(width, height), nodes)
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn Operation,
-    ) {
-        operation.container(None, layout.bounds());
-        operation.traverse(&mut |operation| {
-            for ((child, state), layout) in self
-                .children
-                .iter_mut()
-                .zip(&mut tree.children)
-                .zip(layout.children())
-            {
-                child
-                    .as_widget_mut()
-                    .operate(state, layout, renderer, operation);
-            }
-        });
-    }
-
-    fn update(
-        &mut self,
-        tree: &mut Tree,
-        event: &Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &Renderer,
-        clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, M>,
-        viewport: &Rectangle,
-    ) {
-        for ((child, state), layout) in self
-            .children
-            .iter_mut()
-            .zip(&mut tree.children)
-            .zip(layout.children())
-        {
-            child.as_widget_mut().update(
-                state, event, layout, cursor, renderer, clipboard, shell, viewport,
-            );
-        }
-    }
-
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
-        self.children
-            .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-            .map(|((child, state), layout)| {
-                child
-                    .as_widget()
-                    .mouse_interaction(state, layout, cursor, viewport, renderer)
-            })
-            .max()
-            .unwrap_or_default()
-    }
-
-    fn draw(
-        &self,
-        tree: &Tree,
-        renderer: &mut Renderer,
-        theme: &Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        for ((child, state), layout) in self
-            .children
-            .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-        {
-            child
-                .as_widget()
-                .draw(state, renderer, theme, style, layout, cursor, viewport);
-        }
-    }
-
-    fn overlay<'b>(
-        &'b mut self,
-        tree: &'b mut Tree,
-        layout: Layout<'b>,
-        renderer: &Renderer,
-        viewport: &Rectangle,
-        translation: Vector,
-    ) -> Option<overlay::Element<'b, M, Theme, Renderer>> {
-        overlay::from_children(
-            &mut self.children,
-            tree,
-            layout,
-            renderer,
-            viewport,
-            translation,
-        )
-    }
-}
-
 impl<'a, M: 'a> From<FitRow<'a, M>> for Element<'a, M> {
     fn from(row: FitRow<'a, M>) -> Self {
-        Element::new(row)
+        let gap = row.gap;
+        arranged(
+            row.children,
+            Size::new(Length::Fill, Length::Shrink),
+            move |children: &mut [Element<'a, M>],
+                  trees: &mut [Tree],
+                  renderer: &Renderer,
+                  limits: &layout::Limits| {
+                let max = limits.max();
+                let own = layout::Limits::new(Size::ZERO, max);
+                let mut nodes: Vec<layout::Node> = children
+                    .iter_mut()
+                    .zip(trees.iter_mut())
+                    .map(|(child, tree)| child.as_widget_mut().layout(tree, renderer, &own))
+                    .collect();
+                let (lead, trail) = (nodes[0].size(), nodes[1].size());
+                let beside = lead.width + gap + trail.width;
+                let width = if max.width.is_finite() {
+                    max.width
+                } else {
+                    beside
+                };
+                let height = if beside <= width {
+                    let height = lead.height.max(trail.height);
+                    nodes[0] = nodes[0]
+                        .clone()
+                        .move_to((0.0, (height - lead.height) / 2.0));
+                    nodes[1] = nodes[1]
+                        .clone()
+                        .move_to((width - trail.width, (height - trail.height) / 2.0));
+                    height
+                } else {
+                    nodes[1] = nodes[1]
+                        .clone()
+                        .move_to((width - trail.width, lead.height + gap));
+                    lead.height + gap + trail.height
+                };
+                layout::Node::with_children(Size::new(width, height), nodes)
+            },
+        )
+        .into()
     }
 }
 
@@ -210,7 +87,9 @@ impl<'a, M: 'a> From<FitRow<'a, M>> for Element<'a, M> {
 mod tests {
     use super::*;
     use iced::advanced::renderer::Headless;
+    use iced::advanced::Layout;
     use iced::widget::Space;
+    use iced::Rectangle;
 
     /// The two groups' bounds in a row `width` wide.
     fn lay_out(lead: f32, trail: f32, width: f32) -> (Rectangle, Rectangle, Size) {

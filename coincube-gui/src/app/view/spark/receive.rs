@@ -23,7 +23,7 @@ use coincube_spark_protocol::DepositInfo;
 use crate::app::state::spark::cross_chain::supported_on;
 use crate::app::state::spark::esplora::DEPOSIT_MATURITY_CONFIRMATIONS;
 use crate::app::state::spark::receive::{SparkReceiveMethod, SparkReceivePhase};
-use crate::app::view::shared::payment_columns::{rail_card, PaymentColumns};
+use crate::app::view::shared::payment_columns::{payment_columns, rail_card};
 use crate::app::view::spark::{last_tx::recent_rail_section, SparkRecentTransaction};
 use crate::app::view::{Message, SparkReceiveMessage};
 use crate::services::sideshift::{deposit_options, DepositOption};
@@ -297,7 +297,7 @@ impl<'a> SparkReceiveView<'a> {
             ));
         }
 
-        PaymentColumns::new(main, rail).into()
+        payment_columns(main, rail)
     }
 }
 

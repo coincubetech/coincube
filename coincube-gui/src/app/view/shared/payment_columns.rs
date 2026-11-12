@@ -8,15 +8,11 @@
 //! wrapping row can't help because a `Fill` child takes a whole line.
 
 use crate::app::view::Message;
-use coincube_ui::{theme, widget::Element};
+use coincube_ui::{component::tenshu::arranged, theme, widget::Element};
 use iced::{
-    advanced::{
-        layout, mouse, overlay, renderer,
-        widget::{Operation, Tree},
-        Clipboard, Layout, Shell, Widget,
-    },
+    advanced::{layout, widget::Tree},
     widget::container,
-    Background, Event, Length, Rectangle, Size, Vector,
+    Background, Length, Size,
 };
 
 /// The rail's width beside the form.
@@ -80,181 +76,47 @@ pub fn rail_card_style(theme: &theme::Theme) -> container::Style {
     }
 }
 
-pub struct PaymentColumns<'a> {
-    /// The form, then the rail: also the focus order.
-    children: [Element<'a, Message>; 2],
+/// The form, then the rail (also the focus order), placed by [`columns`].
+pub fn payment_columns<'a>(
+    form: impl Into<Element<'a, Message>>,
+    rail: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    arranged(
+        vec![form.into(), rail.into()],
+        Size::new(Length::Fill, Length::Shrink),
+        arrange,
+    )
+    .into()
 }
 
-impl<'a> PaymentColumns<'a> {
-    pub fn new(
-        form: impl Into<Element<'a, Message>>,
-        rail: impl Into<Element<'a, Message>>,
-    ) -> Self {
-        Self {
-            children: [form.into(), rail.into()],
-        }
-    }
-}
-
-impl Widget<Message, theme::Theme, iced::Renderer> for PaymentColumns<'_> {
-    fn children(&self) -> Vec<Tree> {
-        self.children.iter().map(Tree::new).collect()
-    }
-
-    fn diff(&self, tree: &mut Tree) {
-        tree.diff_children(&self.children);
-    }
-
-    fn size(&self) -> Size<Length> {
-        Size::new(Length::Fill, Length::Shrink)
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &iced::Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        let width = limits.max().width;
-        let max_height = limits.max().height;
-        let at = |w: f32| layout::Limits::new(Size::new(w, 0.0), Size::new(w, max_height));
-        let cols = columns(width);
-        let form = self.children[0].as_widget_mut().layout(
-            &mut tree.children[0],
-            renderer,
-            &at(cols.form_width),
-        );
-        let rail_y = if cols.stacked {
-            form.size().height + GAP
-        } else {
-            0.0
-        };
-        let rail = self.children[1]
-            .as_widget_mut()
-            .layout(&mut tree.children[1], renderer, &at(cols.rail_width))
-            .move_to((cols.rail_x, rail_y));
-        let height = if cols.stacked {
-            rail_y + rail.size().height
-        } else {
-            form.size().height.max(rail.size().height)
-        };
-        layout::Node::with_children(Size::new(width, height), vec![form, rail])
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        renderer: &iced::Renderer,
-        operation: &mut dyn Operation,
-    ) {
-        operation.container(None, layout.bounds());
-        operation.traverse(&mut |operation| {
-            for ((child, state), layout) in self
-                .children
-                .iter_mut()
-                .zip(&mut tree.children)
-                .zip(layout.children())
-            {
-                child
-                    .as_widget_mut()
-                    .operate(state, layout, renderer, operation);
-            }
-        });
-    }
-
-    fn update(
-        &mut self,
-        tree: &mut Tree,
-        event: &Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &iced::Renderer,
-        clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Message>,
-        viewport: &Rectangle,
-    ) {
-        for ((child, state), layout) in self
-            .children
-            .iter_mut()
-            .zip(&mut tree.children)
-            .zip(layout.children())
-        {
-            // Every child sees every event, as in iced's `Column` and `Row`.
-            child.as_widget_mut().update(
-                state, event, layout, cursor, renderer, clipboard, shell, viewport,
-            );
-        }
-    }
-
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &iced::Renderer,
-    ) -> mouse::Interaction {
-        self.children
-            .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-            .map(|((child, state), layout)| {
-                child
-                    .as_widget()
-                    .mouse_interaction(state, layout, cursor, viewport, renderer)
-            })
-            .find(|interaction| *interaction != mouse::Interaction::None)
-            .unwrap_or_default()
-    }
-
-    fn draw(
-        &self,
-        tree: &Tree,
-        renderer: &mut iced::Renderer,
-        theme: &theme::Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        for ((child, state), layout) in self
-            .children
-            .iter()
-            .zip(&tree.children)
-            .zip(layout.children())
-        {
-            if layout.bounds().intersection(viewport).is_some() {
-                child
-                    .as_widget()
-                    .draw(state, renderer, theme, style, layout, cursor, viewport);
-            }
-        }
-    }
-
-    fn overlay<'b>(
-        &'b mut self,
-        tree: &'b mut Tree,
-        layout: Layout<'b>,
-        renderer: &iced::Renderer,
-        viewport: &Rectangle,
-        translation: Vector,
-    ) -> Option<overlay::Element<'b, Message, theme::Theme, iced::Renderer>> {
-        overlay::from_children(
-            &mut self.children,
-            tree,
-            layout,
-            renderer,
-            viewport,
-            translation,
-        )
-    }
-}
-
-impl<'a> From<PaymentColumns<'a>> for Element<'a, Message> {
-    fn from(columns: PaymentColumns<'a>) -> Self {
-        Element::new(columns)
-    }
+fn arrange(
+    children: &mut [Element<'_, Message>],
+    trees: &mut [Tree],
+    renderer: &iced::Renderer,
+    limits: &layout::Limits,
+) -> layout::Node {
+    let width = limits.max().width;
+    let max_height = limits.max().height;
+    let at = |w: f32| layout::Limits::new(Size::new(w, 0.0), Size::new(w, max_height));
+    let cols = columns(width);
+    let form = children[0]
+        .as_widget_mut()
+        .layout(&mut trees[0], renderer, &at(cols.form_width));
+    let rail_y = if cols.stacked {
+        form.size().height + GAP
+    } else {
+        0.0
+    };
+    let rail = children[1]
+        .as_widget_mut()
+        .layout(&mut trees[1], renderer, &at(cols.rail_width))
+        .move_to((cols.rail_x, rail_y));
+    let height = if cols.stacked {
+        rail_y + rail.size().height
+    } else {
+        form.size().height.max(rail.size().height)
+    };
+    layout::Node::with_children(Size::new(width, height), vec![form, rail])
 }
 
 #[cfg(test)]
@@ -276,11 +138,10 @@ mod tests {
         let body = |width: u32| {
             capture::inspect_wide_content(
                 "payment-columns",
-                PaymentColumns::new(
+                payment_columns(
                     container(iced::widget::text("FORM")).width(Length::Fill),
                     container(iced::widget::text("RAIL")).width(Length::Fill),
-                )
-                .into(),
+                ),
                 (1440, 900),
                 "dark",
                 theme::Theme::dark(),

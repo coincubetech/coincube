@@ -33,7 +33,7 @@ use crate::{
         view::{
             dashboard_headed,
             message::*,
-            shared::payment_columns::{rail_card, PaymentColumns},
+            shared::payment_columns::{payment_columns, rail_card},
             vault::coins,
             vault::psbt,
             FiatAmountConverter,
@@ -1103,7 +1103,7 @@ pub fn create_spend_tx<'a>(
         send_head(cache, title, 0),
         // The balance sits in the rail beside the form (it was a card above
         // it), with what this spend has set so far.
-        PaymentColumns::new(
+        payment_columns(
             compose_card,
             rail_card(
                 Column::new()
