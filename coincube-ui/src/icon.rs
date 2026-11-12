@@ -328,6 +328,10 @@ pub fn arrow_down_up_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F127}')
 }
 
+pub fn arrow_left_right_icon<'a>() -> Text<'a> {
+    bootstrap_icon('\u{F12B}')
+}
+
 pub fn cash_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F247}')
 }

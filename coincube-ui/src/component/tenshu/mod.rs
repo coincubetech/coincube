@@ -31,7 +31,7 @@ pub mod top_bar;
 #[cfg(test)]
 mod gallery;
 
-pub use action::{chip_action, eye_action, transfer_action, ActionButton};
+pub use action::{chip_action, eye_action, icon_action, transfer_action, ActionButton};
 pub use arranged::{arranged, Arrange, Arranged};
 pub use asset_row::asset_row;
 pub use balance::{balance, AmountVisibility, BalanceTier, BalanceValue, Figure, MASK};

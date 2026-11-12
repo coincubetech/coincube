@@ -9357,6 +9357,15 @@ impl App {
                 log::warn!("could not re-apply Spark Stable Balance preference: {e}");
             }
 
+            // Swap's recent payments are priced with the cache, which
+            // `deliver` doesn't have.
+            Message::View(view::Message::SparkSwap(
+                view::spark::SparkSwapMessage::PaymentsLoaded(payments),
+            )) => {
+                self.panels
+                    .spark_swap
+                    .set_recent_payments(&payments, &self.cache);
+            }
             // Swap's answers reach its panel whichever page is showing, so a
             // swap that settles while the user is elsewhere keeps its result.
             Message::View(view::Message::SparkSwap(msg)) => {
