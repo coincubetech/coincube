@@ -72,6 +72,8 @@ def pool():
         data = json.loads(private_read(path)) if path.exists() else {"version": 1, "accounts": {}, "claims": {}, "runs": {}}
         require(isinstance(data, dict) and type(data.get("version")) is int and data["version"] == 1
                 and all(isinstance(data.get(k), dict) for k in ("accounts", "claims", "runs")), "REGISTRY")
+        data.setdefault("external", {})
+        require(isinstance(data["external"], dict) and not set(data["external"]).intersection(data["runs"]), "REGISTRY_INDEX")
         require(all(isinstance(v, dict) and data["runs"].get(v.get("target_key")) == k
                     for k, v in data["claims"].items())
                 and all(k in data["claims"] and data["claims"][k].get("target_key") == r
@@ -258,8 +260,19 @@ class Funding:
         return sponsor.sha(manifest_raw)
 
     def target_output(self):
-        self.guard()
-        values = self.runner.core.utxos(self.core["artifacts"]["receive_address"])
+        until = time.monotonic() + self.runner.deadline
+        while True:
+            self.guard()
+            try:
+                values = self.runner.core.utxos(self.core["artifacts"]["receive_address"])
+                break
+            except Blocked as error:
+                if (isinstance(error, Failed) or error.code != "FUNDING_PROPAGATION"
+                        or time.monotonic() >= until):
+                    raise
+                # Disagreement is never proof of an empty address. Wait for
+                # agreement before reserving, signing or broadcasting a donor.
+                time.sleep(1)
         eligible = [v for v in values if self.minimum <= v[2] <= 10000000]
         require(len(eligible) <= 1, "TARGET_AMBIGUOUS")
         if eligible:
@@ -331,10 +344,27 @@ class Funding:
                           "amount_sats": intent["amount_sats"], "fee_sats": intent["fee_sats"],
                           "receipt_sha256": record["receipt_sha256"]})
 
+    def external(self, data, key, record, point, *, fresh=False):
+        # Only a reservation made in this invocation, with no helper output,
+        # proves that no signed bytes could have escaped before a crash.
+        if fresh and not self.output.exists() and not self.output.is_symlink():
+            data["external"][self.key] = {"identity": self.core, "point": point}
+            del data["claims"][key]
+            del data["runs"][self.key]
+        else:
+            record.update(phase="external", external_point=point)
+        save_pool(data)  # Save the target outcome and both indices atomically.
+        self.adopt(point)
+
     def execute(self):
         # Wait for a late faucet before reserving/signing any source. Existing
         # reservations bypass this grace and always reconcile their own bytes.
         with pool() as data:
+            outcome = data["external"].get(self.key)
+            if outcome is not None:
+                require(outcome.get("identity") == self.core and self.target_output() == outcome.get("point"), "TARGET_CHANGED")
+                self.adopt(outcome["point"])
+                return
             existing = data["runs"].get(self.key)
         if existing is None:
             start = self.runner.artifacts.get("funding_claim_at")
@@ -351,6 +381,7 @@ class Funding:
                     break
                 time.sleep(1)
         with pool() as data:
+            fresh_reservation = False
             manifest_hash = self.freeze()
             key = data["runs"].get(self.key)
             if key is None:
@@ -384,6 +415,7 @@ class Funding:
                     data["claims"][key] = record
                     data["runs"][self.key] = key
                     save_pool(data)  # Before native key lookup, even across crashes.
+                    fresh_reservation = not self.output.exists() and not self.output.is_symlink()
                     break
                 else:
                     key = None
@@ -403,9 +435,7 @@ class Funding:
             if record["phase"] == "reserved":
                 point = self.target_output()
                 if point:
-                    record.update(phase="external", external_point=point)
-                    save_pool(data)
-                    self.adopt(point)
+                    self.external(data, key, record, point, fresh=fresh_reservation)
                     return
                 args = self.arguments(record)
                 require(sponsor.execute(args)["intent_sha256"] == record["intent_sha256"], "PLAN_CHANGED")
@@ -435,9 +465,7 @@ class Funding:
                     if record["phase"] == "signed":
                         point = self.target_output()
                         if point:
-                            record.update(phase="external", external_point=point)
-                            save_pool(data)
-                            self.adopt(point)
+                            self.external(data, key, record, point)
                             return
                     self.guard()
                     require(len(record["attempts"]) < 64, "RETRY_LIMIT")

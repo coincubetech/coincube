@@ -912,7 +912,7 @@ class FreshRunner(Runner):
             with qa_funding.pool() as data:
                 key = digest({"directory": str(self.journal.directory.resolve()), "run_id": self.run_id,
                               "binding": self.journal.data["binding"]})
-                reserved = key in data["runs"]
+                reserved = key in data["runs"] or key in data["external"]
             if reserved:
                 qa_funding.Funding(self).execute()
                 return

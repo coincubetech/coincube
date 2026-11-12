@@ -269,6 +269,18 @@ missing credentials, unavailable USB hardware or failed strict acceptance stop
 the flow with a specific blocker. Signing, spend broadcast and final txid
 verification continue through the normal strict stages after funding.
 
+A late faucet releases a donor only when this invocation created its reservation
+and has not invoked the helper or created helper output. The external funding
+outcome and both reservation indices are saved atomically, so a crash cannot
+reacquire that donor for the same target. Signed and resumed reservations remain
+quarantined: an unspent outpoint does not prove that valid signed bytes cannot
+still be broadcast. Explorer propagation disagreement is retried within the run
+deadline, never treated as an empty address. Source account, descriptor and
+binding failures deliberately stop the pool rather than silently switch donors.
+Keep explicitly configured historical seed runs unchanged; their native parent
+receipts bind exact public evidence. New completed-source snapshots isolate
+ordinary verification updates without weakening those bindings.
+
 A PIN attempt is recorded before entry and blocks further attempts across
 process restarts and different run directories until the exact key/signature
 is verified through Connect. A delayed signature is polled without reopening
