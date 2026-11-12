@@ -9125,13 +9125,9 @@ impl App {
                     .lightning_address
                     .as_ref()
                     .and_then(|la| {
-                        la.lightning_address.as_ref().map(|addr| {
-                            if addr.contains('@') {
-                                addr.clone()
-                            } else {
-                                format!("{}{}", addr, "@coincube.io")
-                            }
-                        })
+                        crate::services::coincube::display_lightning_address(
+                            la.lightning_address.as_deref(),
+                        )
                     });
                 self.panels.spark_receive.sync_lightning_address_qr(
                     self.cache

@@ -1324,7 +1324,39 @@ pub struct ApiResponse<T> {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LightningAddress {
+    /// The Cube's username, or `None` when it has none. A blank value or the
+    /// literal string `null` / `NULL` is read as none (see
+    /// [`display_lightning_address`]), so no screen shows `NULL@coincube.io`.
+    #[serde(default, deserialize_with = "deserialize_lightning_username")]
     pub lightning_address: Option<String>,
+}
+
+fn deserialize_lightning_username<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.filter(|name| display_lightning_address(Some(name)).is_some()))
+}
+
+/// The Lightning address to show for a Cube's stored username, or `None`
+/// when it has none. A blank username, or the literal `null` / `NULL` the API
+/// has been seen to return for "not set", is *no* address: turning it into
+/// `NULL@coincube.io` would put a payable-looking QR code on Receive for an
+/// address nobody owns.
+pub fn display_lightning_address(username: Option<&str>) -> Option<String> {
+    let name = username?.trim();
+    if name.is_empty() || name.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    if name.contains('@') {
+        let local = name.split('@').next().unwrap_or_default().trim();
+        if local.is_empty() || local.eq_ignore_ascii_case("null") {
+            return None;
+        }
+        return Some(name.to_string());
+    }
+    Some(format!("{name}@coincube.io"))
 }
 
 /// Response of `GET /api/v1/connect/cubes/{id}/lightning-address/check`.
@@ -4702,5 +4734,44 @@ mod user_error_mapping_tests {
         let user: UserError = (&err).into();
         assert!(user.retryable);
         assert_eq!(user.reference, "SERVICE_UNAVAILABLE");
+    }
+}
+
+#[cfg(test)]
+mod lightning_address_tests {
+    use super::*;
+
+    #[test]
+    fn a_null_or_blank_username_is_no_lightning_address() {
+        for raw in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("null"),
+            Some("NULL"),
+            Some("null@coincube.io"),
+        ] {
+            assert_eq!(display_lightning_address(raw), None, "{:?}", raw);
+        }
+        assert_eq!(
+            display_lightning_address(Some("orangezebra")).as_deref(),
+            Some("orangezebra@coincube.io")
+        );
+        assert_eq!(
+            display_lightning_address(Some("satoshi@coincube.io")).as_deref(),
+            Some("satoshi@coincube.io")
+        );
+        for body in [
+            r#"{"lightningAddress":"NULL"}"#,
+            r#"{"lightningAddress":null}"#,
+            r#"{"lightningAddress":""}"#,
+            r#"{}"#,
+        ] {
+            let parsed: LightningAddress = serde_json::from_str(body).unwrap();
+            assert_eq!(parsed.lightning_address, None, "{}", body);
+        }
+        let parsed: LightningAddress =
+            serde_json::from_str(r#"{"lightningAddress":"orangezebra"}"#).unwrap();
+        assert_eq!(parsed.lightning_address.as_deref(), Some("orangezebra"));
     }
 }
