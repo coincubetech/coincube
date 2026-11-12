@@ -20,6 +20,7 @@ from .runner import Runner
 from .secrets import SecretStore
 from .strict import StrictPolicy, validate_mode
 from .qa_build import validate_build_config
+from . import qa_funding
 from .state import Blocked, Failed, Journal, atomic_write, digest, private_read
 
 STAGES = ("environment", "authentication", "phone_setup", "cube_creation", "phone_key", "vault_creation",
@@ -34,7 +35,7 @@ def phone_state_root(config):
 
 def validate_config(config):
     required = {"version", "account_email", "profile_dir", "connect_rest", "connect_grpc", "ios", "amount_sats", "fee_sats"}
-    optional = {"native_binary", "signing_binary", "phone_state_dir", "desktop_session_namespace", "strict_acceptance"}
+    optional = {"native_binary", "signing_binary", "phone_state_dir", "desktop_session_namespace", "strict_acceptance", "qa_funding"}
     if not required <= set(config) or set(config) - required - optional or config["version"] != 2:
         raise Failed("CONFIG_SCHEMA", "Fresh-run configuration must use schema version 2 without vault or PSBT fixtures.")
     if config["connect_rest"] != REST or config["connect_grpc"] != GRPC:
@@ -55,6 +56,10 @@ def validate_config(config):
     if type(ios["minimum_build"]) is not int or ios["minimum_build"] < 35:
         raise Failed("IOS_BUILD", "A Keychain build containing #194 is required.")
     validate_mode(config)
+    if "qa_funding" in config:
+        qa_funding.options(config["qa_funding"])
+        if not config.get("strict_acceptance") or "qa_build" not in config.get("ios", {}):
+            raise Failed("QA_FUNDING_MODE", "Automatic QA funding requires strict acceptance.")
     if "qa_build" in ios:
         validate_build_config(ios["qa_build"])
         if not config.get("strict_acceptance"):
@@ -150,6 +155,7 @@ def faucet_claim(address, journal):
         raise Blocked("FUNDING_PENDING", "A faucet claim was already attempted; reconcile its address rather than claim again.")
     if time.time() < artifacts.get("faucet_retry_at", 0):
         raise Blocked("FAUCET_RATE_LIMIT", "The faucet retry window has not elapsed; no claim was sent.")
+    journal.artifact("funding_claim_at", int(time.time()))
     journal.artifact("funding_claim_started", True)
     request = Request(FAUCET, data=json.dumps({"network": "btc-testnet", "address": address}).encode(),
                       headers={"Content-Type": "application/json", "User-Agent": "COINCUBE-Testnet4-QA/1.0"})
@@ -209,6 +215,20 @@ class FreshRunner(Runner):
     def close(self):
         self.stack.close()
         self.journal.close()
+
+    def run(self, stage):
+        super().run(stage)
+        if stage == "verify" and "qa_funding" in self.config:
+            try:
+                qa_funding.register_completed(self)
+            except Blocked as error:
+                self.stop = True
+                self.journal.outcome(stage, "failed" if isinstance(error, Failed) else "blocked", error.code)
+                raise
+            except Exception:
+                self.stop = True
+                self.journal.outcome(stage, "failed", "QA_FUNDING_REGISTRY")
+                raise Failed("QA_FUNDING_REGISTRY", "Completed QA source registration failed; evidence remains private.") from None
 
     def pin_artifact(self, name, value):
         previous = self.artifacts.get(name)
@@ -728,6 +748,8 @@ class FreshRunner(Runner):
         self.journal.artifact("phone_validation", {**self.phone_validation_identity(), "source": "settings_ui"})
         if self.config["ios"].get("qa_build"):
             self.preflight_capacity()
+        if "qa_funding" in self.config:
+            qa_funding.preflight(self)
 
     def preflight_capacity(self):
         keys = self.keys()
@@ -884,6 +906,15 @@ class FreshRunner(Runner):
     def stage_funding(self):
         if self.artifacts.get("funding_outpoint"):
             return  # Native prepare revalidates the exact saved raw transaction.
+        if "qa_funding" in self.config:
+            # Existing reservations must reconcile before any faucet retry.
+            with qa_funding.pool() as data:
+                key = digest({"directory": str(self.journal.directory.resolve()), "run_id": self.run_id,
+                              "binding": self.journal.data["binding"]})
+                reserved = key in data["runs"]
+            if reserved:
+                qa_funding.Funding(self).execute()
+                return
         address = self.artifacts["receive_address"]
         if not isinstance(address, str) or not re.fullmatch(r"tb1q[a-z0-9]{58}", address):
             raise Failed("FUNDING_ADDRESS", "Native provisioning must return a Testnet4 P2WSH funding address.")
@@ -909,11 +940,22 @@ class FreshRunner(Runner):
                 if outputs == []:
                     # Only two agreeing, empty explorers authorize a new claim.
                     # A prior external QA deposit must be adopted above instead.
-                    faucet_claim(address, self.journal)
+                    try:
+                        faucet_claim(address, self.journal)
+                    except Blocked as error:
+                        if (isinstance(error, Failed) or "qa_funding" not in self.config
+                                or error.code not in ("FAUCET_UNCERTAIN", "FAUCET_RESPONSE", "FAUCET_RATE_LIMIT")):
+                            raise
+                        self.journal.artifact("qa_faucet_failure", {"code": error.code, "at": int(time.time())})
+                        qa_funding.Funding(self).execute()
+                        return
                     continue
                 if outputs:
                     raise Blocked("FUNDING_UNSUITABLE", "Existing funding is outside this run's limits; no faucet claim was sent.")
             if time.monotonic() >= until:
+                if "qa_funding" in self.config:
+                    qa_funding.Funding(self).execute()
+                    return
                 raise Blocked("FUNDING_PENDING", "The faucet payment is not yet visible in both Testnet4 explorers.")
             time.sleep(3)
 

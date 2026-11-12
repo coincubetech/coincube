@@ -46,7 +46,8 @@ remain separate. The Keychain steps operate the actual iPhone interface.
    Install a primary **2-of-3 Master / Keychain / Border Wallet** vault with a
    delayed Border Wallet recovery path through the production installer. Verify
    its Cube appears on the phone through Connect.
-6. Request Testnet4 faucet funding once, then require two independent explorers
+6. Request Testnet4 faucet funding once. If it is unavailable or delayed, use
+   the configured disposable QA funding pool automatically. Require two independent explorers
    to agree on the funded outpoint and raw previous transaction. No prepared
    funding transaction or local Bitcoin Core synchronization is required.
 7. Generate a recoverable test recipient and change address, construct a full
@@ -230,9 +231,42 @@ pipe; do not invoke them with stdout forwarded to a terminal or log.
 A faucet timeout leaves a durable claim intent. A rerun checks that address
 instead of requesting another payment. Explicit empty/rate-limit responses
 retain the service's retry window. The public faucet can be unavailable; that
-is `BLOCKED`, not successful funding. Its developer API uses `btc-testnet` for
+uses the automatic disposable QA fallback when configured; an exhausted pool
+remains `BLOCKED`. Its developer API uses `btc-testnet` for
 Testnet4 ([official API](https://www.cypherfaucet.com/api),
 [service source](https://github.com/Tech1k/cypherfaucet.com)).
+
+The default workstation example enables `qa_funding`. Configure its `sources`
+once with completed disposable QA runs belonging to the same account, optionally
+including `source_sponsor_dir` for one original version-1 sponsor receipt (see
+[SPONSOR.md](SPONSOR.md)). Normal `--qa-fresh` runs need no funding approval or
+additional command. Historical configurations without this field keep their
+faucet-only behavior. Automatic funding requires strict acceptance and the signed
+QA build preflight; screenshot protection remains enabled.
+
+After a bounded faucet grace period, the runner freezes the actual target's
+public provisioning evidence and selects one unspent, explicitly authorized QA
+change output. The native sponsor reconstructs its keys locally and signs only
+the frozen Testnet4 plan: 100,000–500,000 sats, a 100–1,000-sat fee and at least
+1,000 sats returned to the source. A host-wide private registry locks and reserves
+the source outpoint before signing, saves signed bytes before broadcasting, and
+reconciles those exact bytes through both explorers after any uncertain response.
+Retries retain the same source and transaction. Late faucet deposits are checked
+before reservation and before the first sponsor broadcast. Conflicting, spent or
+ambiguous outputs block rather than create another payment.
+
+Only fully completed strict runs with two signatures, actual PIN/Home-refresh
+proof and dual-explorer broadcast verification enter the reusable pool. Their
+public source snapshots retain the original run/profile identity and are scoped
+to the configured authorization roots; unrelated runs are never scanned or
+imported merely because they share an account. One original sponsor-change hop
+is supported; nested sponsor hops remain rejected. Keep the run profiles, native
+credential storage and the registry at
+`~/Library/Application Support/COINCUBE QA/funding-v1` for recovery. Reservations
+never expire automatically. The pool is finite: depletion, revoked sources,
+missing credentials, unavailable USB hardware or failed strict acceptance stop
+the flow with a specific blocker. Signing, spend broadcast and final txid
+verification continue through the normal strict stages after funding.
 
 A PIN attempt is recorded before entry and blocks further attempts across
 process restarts and different run directories until the exact key/signature
