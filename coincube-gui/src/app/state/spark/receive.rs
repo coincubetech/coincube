@@ -98,6 +98,11 @@ pub struct SparkReceive {
     pub method: SparkReceiveMethod,
     /// Whether the "THEY SEND" picker modal is open (overlays the panel).
     sender_picker_open: bool,
+    /// Whether the "YOU RECEIVE" picker modal is open.
+    receiver_picker_open: bool,
+    /// The wallet's auto-convert state (incoming bitcoin → USDB), which the
+    /// YOU RECEIVE tile shows and its picker changes. `None` until read.
+    auto_convert: Option<bool>,
     /// Amount input for BOLT11. Ignored for on-chain.
     pub amount_input: String,
     /// Invoice description shown to the payer for BOLT11. Ignored for on-chain.
@@ -167,6 +172,8 @@ impl SparkReceive {
             sideshift_flow: None,
             method: SparkReceiveMethod::Bolt11,
             sender_picker_open: false,
+            receiver_picker_open: false,
+            auto_convert: None,
             amount_input: String::new(),
             description_input: String::new(),
             phase: SparkReceivePhase::Idle,
@@ -252,13 +259,8 @@ impl State for SparkReceive {
         };
         // The received celebration takes the whole page, head included.
         let head = (!matches!(self.phase, SparkReceivePhase::Received { .. })).then(|| {
-            crate::app::view::spark::sub_page_head(cache, "Receive").action(
-                crate::app::view::spark::receive::head_action(
-                    cross_network_selected.is_some(),
-                    self.method,
-                    cache.network,
-                ),
-            )
+            // What the payer sends is picked from the THEY SEND tile.
+            crate::app::view::spark::sub_page_head(cache, "Receive")
         });
         let content = crate::app::view::dashboard_payment(
             menu,
@@ -299,6 +301,7 @@ impl State for SparkReceive {
                 mask_amounts: cache.balance_amounts_masked(),
                 sideshift_body,
                 cross_network_selected,
+                receive_usd: self.auto_convert == Some(true),
                 swap_deposit: self
                     .swap_settle_deposit()
                     .filter(|d| quietly_settling(d, &self.claim_notices))
@@ -322,6 +325,16 @@ impl State for SparkReceive {
                 )))
                 .into();
         }
+        if self.receiver_picker_open {
+            let modal_content = crate::app::view::spark::receive::receiver_picker_modal(
+                self.auto_convert == Some(true),
+            );
+            return coincube_ui::widget::modal::Modal::new(content, modal_content)
+                .on_blur(Some(crate::app::view::Message::SparkReceive(
+                    crate::app::view::SparkReceiveMessage::CloseReceiverPicker,
+                )))
+                .into();
+        }
         content
     }
 
@@ -338,6 +351,19 @@ impl State for SparkReceive {
             fetch_deposits_task(self.backend.clone()),
             fetch_payments_task(self.backend.clone()),
             fetch_balance_task(self.backend.clone()),
+            fetch_auto_convert_task(self.backend.clone()),
+            // A static address left on screen from before, or picked before
+            // the panel was ever shown, is (re)fetched without a button.
+            if auto_generates(self.method)
+                && matches!(self.phase, SparkReceivePhase::Idle)
+                && self.sideshift_flow.is_none()
+            {
+                Task::done(Message::View(crate::app::view::Message::SparkReceive(
+                    crate::app::view::SparkReceiveMessage::GenerateRequested,
+                )))
+            } else {
+                Task::none()
+            },
         ])
     }
 
@@ -414,6 +440,10 @@ impl State for SparkReceive {
                 SparkReceiveMessage::DepositsChanged
                     | SparkReceiveMessage::OpenSenderPicker
                     | SparkReceiveMessage::CloseSenderPicker
+                    | SparkReceiveMessage::OpenReceiverPicker
+                    | SparkReceiveMessage::CloseReceiverPicker
+                    | SparkReceiveMessage::SelectReceiveAs(_)
+                    | SparkReceiveMessage::AutoConvertLoaded(_)
                     | SparkReceiveMessage::SelectSenderRail(_)
                     | SparkReceiveMessage::SelectSenderCrossNetwork(_)
                     | SparkReceiveMessage::ClaimDepositRequested { .. }
@@ -432,6 +462,56 @@ impl State for SparkReceive {
             SparkReceiveMessage::OpenSenderPicker => {
                 self.sender_picker_open = true;
                 Task::none()
+            }
+            SparkReceiveMessage::OpenReceiverPicker => {
+                // US Dollar exists where conversions run (mainnet); elsewhere
+                // Bitcoin is the only thing Spark receives, so nothing to pick.
+                if crate::app::state::spark::swap::swap_available(cache.network) {
+                    self.receiver_picker_open = true;
+                }
+                Task::none()
+            }
+            SparkReceiveMessage::CloseReceiverPicker => {
+                self.receiver_picker_open = false;
+                Task::none()
+            }
+            SparkReceiveMessage::SelectReceiveAs(usd) => {
+                self.receiver_picker_open = false;
+                if self.auto_convert != Some(!usd) {
+                    // Already that way, or not read yet.
+                    return Task::none();
+                }
+                // Shown at once; a failed save is reconciled by the next read.
+                self.auto_convert = Some(usd);
+                Task::done(Message::View(crate::app::view::Message::SparkSettings(
+                    crate::app::view::SparkSettingsMessage::StableBalanceToggled(usd),
+                )))
+            }
+            SparkReceiveMessage::AutoConvertLoaded(state) => {
+                if state.is_some() {
+                    self.auto_convert = state;
+                }
+                Task::none()
+            }
+            SparkReceiveMessage::NewOnchainAddress => {
+                if self.method != SparkReceiveMethod::OnchainBitcoin {
+                    return Task::none();
+                }
+                let Some(backend) = self.backend.clone() else {
+                    return Task::none();
+                };
+                self.phase = SparkReceivePhase::Generating;
+                Task::perform(
+                    async move { backend.receive_onchain(Some(true)).await },
+                    |result| match result {
+                        Ok(ok) => Message::View(crate::app::view::Message::SparkReceive(
+                            SparkReceiveMessage::GenerateSucceeded(ok),
+                        )),
+                        Err(e) => Message::View(crate::app::view::Message::SparkReceive(
+                            SparkReceiveMessage::GenerateFailed(e.to_string()),
+                        )),
+                    },
+                )
             }
             SparkReceiveMessage::CloseSenderPicker => {
                 self.sender_picker_open = false;
@@ -457,6 +537,14 @@ impl State for SparkReceive {
                 self.phase = SparkReceivePhase::Idle;
                 self.qr_data = None;
                 self.displayed_invoice = None;
+                // Spark and on-chain addresses are static and reusable, so
+                // there is nothing to configure: show the address straight
+                // away rather than behind a Generate button.
+                if auto_generates(method) {
+                    return Task::done(Message::View(crate::app::view::Message::SparkReceive(
+                        SparkReceiveMessage::GenerateRequested,
+                    )));
+                }
                 Task::none()
             }
             SparkReceiveMessage::SelectSenderCrossNetwork(key) => {
@@ -923,6 +1011,31 @@ fn fetch_payments_task(backend: Option<Arc<SparkBackend>>) -> Task<Message> {
 }
 
 /// Spark-Receive-flavoured wrapper around [`super::fetch_balance_task`].
+/// Methods whose address is static and needs no input, so Receive fetches
+/// it as soon as the method is picked.
+pub(crate) fn auto_generates(method: SparkReceiveMethod) -> bool {
+    matches!(
+        method,
+        SparkReceiveMethod::Spark | SparkReceiveMethod::OnchainBitcoin
+    )
+}
+
+fn fetch_auto_convert_task(backend: Option<Arc<SparkBackend>>) -> Task<Message> {
+    let Some(backend) = backend else {
+        return Task::none();
+    };
+    Task::perform(
+        async move { backend.client().get_auto_convert().await.ok() },
+        |state| {
+            Message::View(crate::app::view::Message::SparkReceive(
+                crate::app::view::SparkReceiveMessage::AutoConvertLoaded(
+                    state.map(|state| state.enabled),
+                ),
+            ))
+        },
+    )
+}
+
 fn fetch_balance_task(backend: Option<Arc<SparkBackend>>) -> Task<Message> {
     super::fetch_balance_task(backend, |balance| {
         Message::View(crate::app::view::Message::SparkReceive(
@@ -1199,6 +1312,48 @@ mod tests {
         // A deferral note is only shown in the card.
         let notices = HashMap::from([(("aa11".to_string(), 0), "deferred".to_string())]);
         assert!(!quietly_settling(&confirming, &notices));
+    }
+
+    /// Picking under YOU RECEIVE flips auto-convert only from a known,
+    /// different state; until it has been read nothing is changed.
+    #[test]
+    fn receive_as_follows_the_read_auto_convert_state() {
+        let mut panel = SparkReceive::new(None);
+        let cache = Cache {
+            network: Network::Bitcoin,
+            ..Cache::default()
+        };
+        update_with_cache(&mut panel, &cache, SparkReceiveMessage::OpenReceiverPicker);
+        assert!(panel.receiver_picker_open);
+        update_with_cache(
+            &mut panel,
+            &cache,
+            SparkReceiveMessage::SelectReceiveAs(true),
+        );
+        assert!(!panel.receiver_picker_open);
+        assert_eq!(panel.auto_convert, None, "unknown state is left alone");
+
+        update(
+            &mut panel,
+            SparkReceiveMessage::AutoConvertLoaded(Some(false)),
+        );
+        update(&mut panel, SparkReceiveMessage::SelectReceiveAs(true));
+        assert_eq!(panel.auto_convert, Some(true));
+        // A failed read keeps what is known.
+        update(&mut panel, SparkReceiveMessage::AutoConvertLoaded(None));
+        assert_eq!(panel.auto_convert, Some(true));
+
+        // Off mainnet there is no US Dollar to pick.
+        let mut regtest = SparkReceive::new(None);
+        update_with_cache(
+            &mut regtest,
+            &Cache {
+                network: Network::Regtest,
+                ..Cache::default()
+            },
+            SparkReceiveMessage::OpenReceiverPicker,
+        );
+        assert!(!regtest.receiver_picker_open);
     }
 
     fn deposit(txid: &str, vout: u32, is_mature: bool) -> DepositInfo {
@@ -1953,10 +2108,10 @@ mod tests {
         assert_eq!(panel.usdb_balance.map(|sb| sb.balance), Some(usdb.balance));
     }
 
-    /// H-Receive: Bitcoin / Stablecoin (cross-chain) is a head action. With
-    /// no backend the body has no controls, so the choice can only be there.
+    /// The Receive head carries only Back to Spark: what the payer sends —
+    /// Bitcoin rail or stablecoin — is picked from the THEY SEND tile.
     #[test]
-    fn the_receive_kind_choice_is_a_head_action() {
+    fn the_receive_head_has_no_kind_toggle() {
         let panel = SparkReceive::new(None);
         let cache = Cache {
             network: Network::Bitcoin,
@@ -1964,23 +2119,19 @@ mod tests {
         };
         let menu = Menu::Spark(crate::app::menu::SparkSubMenu::Receive);
         let probe = crate::app::view::shared::landing::capture::inspect(
-            "spark-receive-head-kind",
+            "spark-receive-head",
             panel.view(&menu, &cache),
             (1440, 900),
             "dark",
             coincube_ui::theme::Theme::dark(),
         );
         assert!(probe.contains("Back to Spark"));
-        assert!(probe.contains("Stablecoin (cross-chain)"));
+        assert!(!probe.contains("Stablecoin (cross-chain)"));
         for id in [
             "spark-receive-kind-bitcoin",
             "spark-receive-kind-stablecoin",
         ] {
-            assert!(
-                probe.has_focus(iced::advanced::widget::Id::new(id)),
-                "{} in the head",
-                id
-            );
+            assert!(!probe.has_focus(iced::advanced::widget::Id::new(id)));
         }
     }
 
