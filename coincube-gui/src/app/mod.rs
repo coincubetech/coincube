@@ -4702,7 +4702,12 @@ impl App {
     /// load is what resolves the recipient list this gates on. Calling it any
     /// earlier reads an empty list and silently declines to prompt — which is
     /// exactly how the prompt used to be unreachable in every build.
-    fn maybe_show_recovery_alerts_prompt(&mut self) {
+    ///
+    /// The returned task clears keyboard focus when the prompt opens: the
+    /// content beneath it stays mounted (so it keeps its scroll offsets and
+    /// other widget state), and a control focused before the prompt appeared
+    /// must not go on taking Enter or Space behind it.
+    fn maybe_show_recovery_alerts_prompt(&mut self) -> Task<Message> {
         if should_show_recovery_alerts_prompt(
             self.show_recovery_alerts_prompt,
             self.cube_settings.recovery_alerts_prompt_answered,
@@ -4722,7 +4727,11 @@ impl App {
                 .is_some_and(|wallet| wallet.supports_inheritance()),
         ) {
             self.show_recovery_alerts_prompt = true;
+            return iced_runtime::task::widget(
+                iced::advanced::widget::operation::focusable::unfocus(),
+            );
         }
+        Task::none()
     }
 
     /// Backfill this Cube's Vault identity
@@ -10364,10 +10373,12 @@ impl App {
                 // Existing-Vault trigger (PR 3): a just-resolved `StatusLoaded`
                 // may have revealed an eligible (keyholders, monitoring off,
                 // unanswered) Vault. Offer the one-time consent prompt now.
-                if is_status_load {
-                    self.maybe_show_recovery_alerts_prompt();
-                }
-                return Task::batch([task, engaged]);
+                let prompt = if is_status_load {
+                    self.maybe_show_recovery_alerts_prompt()
+                } else {
+                    Task::none()
+                };
+                return Task::batch([task, engaged, prompt]);
             }
 
             // Route refundables updates directly to LiquidTransactions so that
@@ -11086,15 +11097,14 @@ impl App {
                 menu::CubeSettingsOption::AiAccess
             ))
         ) {
-            if let Some(dialog) = self.local_mcp.revoke_dialog() {
-                coincube_ui::widget::modal::Modal::new(view, dialog)
-                    .on_blur(Some(view::Message::LocalMcp(
-                        local_mcp::Message::CancelRevokePair,
-                    )))
-                    .into()
-            } else {
-                view
-            }
+            // `optional` keeps the page at the same tree position whether or
+            // not the revoke dialog is open, so opening and closing it doesn't
+            // reset the page's scroll offset or other widget state.
+            coincube_ui::widget::modal::Modal::optional(view, self.local_mcp.revoke_dialog())
+                .on_blur(Some(view::Message::LocalMcp(
+                    local_mcp::Message::CancelRevokePair,
+                )))
+                .into()
         } else {
             view
         };
@@ -11114,17 +11124,16 @@ impl App {
         // One-time recovery-alerts consent prompt overlays everything (PR 3).
         // `opaque` makes the full-screen overlay capture mouse presses so a
         // backdrop click can't fall through to (and actuate) the content layer
-        // beneath it in the Stack — a proper modal focus trap.
-        if self.show_recovery_alerts_prompt {
-            iced::widget::Stack::new()
-                .push(content)
-                .push(iced::widget::opaque(
-                    recovery_alerts_consent_overlay().map(Message::View),
-                ))
-                .into()
+        // beneath it in the Stack — a proper modal focus trap. As with the
+        // toast layer, the Stack stays mounted while the prompt is hidden (an
+        // empty `Space` layer that never claims the pointer) so showing or
+        // answering the prompt doesn't discard the content's widget state.
+        let prompt: Element<'_, Message> = if self.show_recovery_alerts_prompt {
+            iced::widget::opaque(recovery_alerts_consent_overlay().map(Message::View))
         } else {
-            content
-        }
+            iced::widget::Space::new().into()
+        };
+        iced::widget::Stack::new().push(content).push(prompt).into()
     }
 
     pub fn datadir_path(&self) -> &CoincubeDirectory {
@@ -19343,6 +19352,64 @@ mod toast_layer_tree_tests {
         drop(ui);
         drop(app);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Showing and answering the one-time recovery-alerts prompt must not
+    /// remount the content beneath it either.
+    #[test]
+    fn content_widget_state_survives_recovery_alerts_prompt() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("recovery-prompt-tree-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("bitcoin")).unwrap();
+        let (mut app, _wallet) = super::shell_tests::bitcoin_app(&root);
+        app.panels.current = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::AiAccess));
+        app.show_recovery_alerts_prompt = false;
+
+        let switch = Id::from("tenshu.ai-access.enable");
+        let mut renderer = renderer();
+
+        let mut ui = UserInterface::build(app.view(), SIZE, UiCache::new(), &mut renderer);
+        apply(&mut ui, &renderer, focusable::focus::<()>(switch.clone()));
+        assert_eq!(focused(&mut ui, &renderer), Some(switch.clone()));
+        let cache = ui.into_cache();
+
+        app.show_recovery_alerts_prompt = true;
+        let mut ui = UserInterface::build(app.view(), SIZE, cache, &mut renderer);
+        let mut probe = Texts::default();
+        ui.operate(&renderer, &mut operation::black_box(&mut probe));
+        assert!(
+            probe.0.iter().any(|text| text == "Alert your keyholders?"),
+            "the prompt is mounted"
+        );
+        assert_eq!(
+            focused(&mut ui, &renderer),
+            Some(switch.clone()),
+            "showing the prompt must not reset the content's widget state"
+        );
+        let cache = ui.into_cache();
+
+        app.show_recovery_alerts_prompt = false;
+        let mut ui = UserInterface::build(app.view(), SIZE, cache, &mut renderer);
+        assert_eq!(
+            focused(&mut ui, &renderer),
+            Some(switch),
+            "answering the prompt must not reset the content's widget state"
+        );
+        drop(ui);
+        drop(app);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[derive(Default)]
+    struct Texts(Vec<String>);
+    impl Operation for Texts {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, value: &str) {
+            self.0.push(value.to_owned());
+        }
     }
 
     /// With no toasts the always-mounted overlay layer must be transparent to
