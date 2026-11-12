@@ -615,7 +615,8 @@ fn open_seed_by_fingerprint_with_secret_loader(
         }
         // Only a matching v3 file needs the keystore. Legacy PIN-only files
         // must remain readable when the keystore is locked or unavailable.
-        let data = std::fs::read(&path).map_err(SignerError::MnemonicStorage)?;
+        // Pre-hardening files can contain a plaintext mnemonic.
+        let data = Zeroizing::new(std::fs::read(&path).map_err(SignerError::MnemonicStorage)?);
         let secret = if seed_crypt::format_version(&data) == Some(3) {
             load_secret().map_err(|e| SignerError::DecryptionFailed(e.to_string()))?
         } else {
