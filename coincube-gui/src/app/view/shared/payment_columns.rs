@@ -180,12 +180,10 @@ impl Widget<Message, theme::Theme, iced::Renderer> for PaymentColumns<'_> {
             .zip(&mut tree.children)
             .zip(layout.children())
         {
+            // Every child sees every event, as in iced's `Column` and `Row`.
             child.as_widget_mut().update(
                 state, event, layout, cursor, renderer, clipboard, shell, viewport,
             );
-            if shell.is_event_captured() {
-                break;
-            }
         }
     }
 

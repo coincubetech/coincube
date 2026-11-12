@@ -1116,7 +1116,9 @@ pub fn create_spend_tx<'a>(
                         feerate,
                         custom_feerate,
                         coins_shown.then(|| coins.iter().filter(|(_, selected)| *selected).count()),
-                        fee_amount.filter(|_| !mask_amounts),
+                        fee_amount,
+                        mask_amounts,
+                        bitcoin_unit,
                     )),
             ),
         ),
@@ -1124,7 +1126,9 @@ pub fn create_spend_tx<'a>(
 }
 
 /// "This spend": the rail's summary of what the form has set so far. Only
-/// what the draft already knows; the fee shows once a draft has one.
+/// what the draft already knows; the fee shows once a draft has one, masked
+/// with the balances.
+#[allow(clippy::too_many_arguments)]
 fn spend_summary<'a>(
     recipients: usize,
     recovery: bool,
@@ -1132,6 +1136,8 @@ fn spend_summary<'a>(
     custom_feerate: bool,
     selected_coins: Option<usize>,
     fee: Option<&Amount>,
+    mask_amounts: bool,
+    bitcoin_unit: BitcoinDisplayUnit,
 ) -> Element<'a, Message> {
     let line = |name: &'static str, value: String| {
         Row::new()
@@ -1167,12 +1173,23 @@ fn spend_summary<'a>(
         )
         .push(line("Fee rate", rate))
         .push(line("Coins", coins))
+        // The background draft sets the fee as soon as the form is complete,
+        // before Prepare; masked balances hide it without hiding that it exists.
         .push(line(
             "Fee",
-            fee.map_or_else(
-                || localized_copy("After Prepare").to_owned(),
-                |fee| fee.to_formatted_string_with_unit(BitcoinDisplayUnit::Sats) + " sats",
-            ),
+            match fee {
+                None => localized_copy("Not set").to_owned(),
+                Some(_) if mask_amounts => "••••••".to_owned(),
+                Some(fee) => format!(
+                    "{} {}",
+                    fee.to_formatted_string_with_unit(bitcoin_unit),
+                    if matches!(bitcoin_unit, BitcoinDisplayUnit::BTC) {
+                        "BTC"
+                    } else {
+                        "sats"
+                    }
+                ),
+            },
         ))
         .into()
 }
@@ -2675,6 +2692,39 @@ mod tests {
         for label in SEND_STEPS {
             assert!(probe.contains(label), "{}", label);
         }
+    }
+
+    /// The rail's fee: unset before a draft, masked with the balances, and in
+    /// the user's unit otherwise (never "After Prepare": the draft sets it).
+    #[test]
+    fn the_rail_fee_is_masked_with_balances_and_uses_the_display_unit() {
+        use crate::app::view::shared::landing::capture;
+        let feerate = form::Value {
+            value: "5".to_string(),
+            warning: None,
+            valid: true,
+        };
+        let fee = Amount::from_sat(1_234);
+        let render = |fee: Option<&Amount>, masked: bool, unit: BitcoinDisplayUnit| {
+            capture::inspect(
+                "vault-spend-summary",
+                spend_summary(1, false, &feerate, false, None, fee, masked, unit),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+            )
+        };
+        let unset = render(None, false, BitcoinDisplayUnit::Sats);
+        assert!(unset.contains("Not set"));
+        let masked = render(Some(&fee), true, BitcoinDisplayUnit::Sats);
+        assert!(masked.contains("••••••"));
+        assert!(!masked.contains("1,234") && !masked.contains("1 234"));
+        assert!(!masked.contains("Not set"));
+        let btc = render(Some(&fee), false, BitcoinDisplayUnit::BTC);
+        assert!(btc.contains(" BTC"), "fee in BTC");
+        assert!(!btc.contains("sats"));
+        let sats = render(Some(&fee), false, BitcoinDisplayUnit::Sats);
+        assert!(sats.contains(" sats"));
     }
 
     /// A preset hides the field and shows its rate; Custom shows the field.
