@@ -1,5 +1,7 @@
 """Strict acceptance boundaries, with synthetic clocks, AX and native responses only."""
 from copy import deepcopy
+import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -25,11 +27,13 @@ class Clock:
 
 
 class Control:
-    def __init__(self, identity, label, children=(), click=None, name=None):
+    def __init__(self, identity, label, children=(), click=None, name=None,
+                 kind="XCUIElementTypeButton", visible=True, enabled=True):
         self.id, self.label, self.children = identity, label, children
         self.name = label if name is None else name
         self.onclick = click
         self.clicks = 0
+        self.kind, self.visible, self.enabled = kind, visible, enabled
 
     def get_attribute(self, name):
         return self.label if name == "label" else self.name
@@ -67,8 +71,15 @@ class Driver:
     def find_elements(self, _, predicate):
         if 'XCUIElementTypeAlert' in predicate:
             return [object()] if self.modal else []
-        return [c for c in self.controls if any(value and ('"' + value.split(':')[0] + (':' if ':' in value else '') + '"') in predicate
-                for value in (c.label, c.name))]
+        types = re.findall(r'type == "([^"]+)"', predicate)
+        matches = re.findall(r'(label|name) (==|BEGINSWITH) ("(?:[^"\\]|\\.)*")', predicate)
+        return [c for c in self.controls
+                if ('visible == true' not in predicate or c.visible)
+                and ('enabled == true' not in predicate or c.enabled)
+                and (not types or c.kind in types)
+                and any((value := getattr(c, field)) is not None and
+                        (value == json.loads(literal) if operator == '==' else value.startswith(json.loads(literal)))
+                        for field, operator, literal in matches)]
 
 
 @pytest.fixture
@@ -120,6 +131,60 @@ def complete(policy):
     policy.journal.artifact("approval_context", context)
     policy.journal.artifact("pin_dispatch_started", {"context": deepcopy(context), "strict_scope": "qa-home-refresh-scope:session:1"})
     policy.journal.artifact("strict_pin_input", {"context": deepcopy(context), "scope": "qa-home-refresh-scope:session:1", "completed": True})
+
+
+@pytest.mark.parametrize("kind", ["XCUIElementTypeButton", "XCUIElementTypeOther"])
+def test_exact_qa_trigger_semantic_types_complete_correlated_probe(policy, kind):
+    delivered(policy)
+    trigger = markers(policy, click=lambda: markers(policy, status="completed", counts=(1, 1, 1, 0)))[3]
+    trigger.kind = kind
+    policy.probe("request", "session", 3)
+    assert trigger.clicks == 1
+    assert policy.artifacts["strict_home_refresh"]["phase"] == "completed"
+    assert policy.artifacts["strict_home_refresh"]["scope"] == "qa-home-refresh-scope:session:1"
+
+
+@pytest.mark.parametrize("change", ["disabled", "invisible", "text", "input", "wrong_identifier", "ambiguous"])
+def test_semantic_trigger_refusals_precede_intent_and_click(policy, change):
+    delivered(policy)
+    controls = markers(policy)
+    trigger = controls[3]
+    trigger.kind = "XCUIElementTypeOther"
+    if change == "disabled":
+        trigger.enabled = False
+    elif change == "invisible":
+        trigger.visible = False
+    elif change == "text":
+        trigger.kind = "XCUIElementTypeStaticText"
+    elif change == "input":
+        trigger.kind = "XCUIElementTypeTextField"
+    elif change == "wrong_identifier":
+        trigger.label = trigger.name = "qa-home-refresh-trigger-extra"
+    else:
+        controls.append(Control("duplicate", "qa-home-refresh-trigger"))
+    with pytest.raises(Blocked) as error:
+        policy.probe("request", "session", 3)
+    assert error.value.code == "STRICT_HOOK"
+    assert "strict_home_refresh" not in policy.artifacts
+    assert all(c.clicks == 0 for c in controls)
+
+
+def test_semantic_trigger_preserves_matching_leaf_and_ambiguity_rules(policy):
+    child = Control("button", "qa-home-refresh-trigger")
+    wrapper = Control("wrapper", "qa-home-refresh-trigger", children=[child], kind="XCUIElementTypeOther")
+    policy.phone.driver.controls = [wrapper, child]
+    assert policy._leaf_controls("qa-home-refresh-trigger", button=True) is child
+    policy.phone.driver.controls.append(Control("other-wrapper", "qa-home-refresh-trigger", kind="XCUIElementTypeOther"))
+    with pytest.raises(Blocked) as error:
+        policy._leaf_controls("qa-home-refresh-trigger", button=True)
+    assert error.value.code == "STRICT_HOOK"
+
+
+def test_other_semantics_are_not_a_generic_button_fallback(policy):
+    policy.phone.driver.controls = [Control("other", "Different button", kind="XCUIElementTypeOther")]
+    with pytest.raises(Blocked) as error:
+        policy._leaf_controls("Different button", button=True)
+    assert error.value.code == "STRICT_HOOK"
 
 
 @pytest.mark.parametrize("value", [None, False, True, {}, {"version": True}, {"version": 2}, {"version": 1, "override": True}, "1"])

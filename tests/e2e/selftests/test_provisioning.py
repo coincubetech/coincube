@@ -183,6 +183,85 @@ def test_lost_faucet_reply_reconciles_address_without_another_claim(runner):
     runner.stage_funding()
 
 
+@pytest.mark.parametrize("rate_limited", [False, True])
+def test_existing_external_funding_is_adopted_without_a_faucet_claim(runner, rate_limited):
+    runner.journal.artifact("receive_address", ADDRESS)
+    if rate_limited:
+        runner.journal.artifact("funding_claim_started", False)
+        runner.journal.artifact("faucet_retry_at", 9999999999)
+    runner.core = SimpleNamespace(utxos=lambda _: [(FUNDING_TXID, 0, 100000)], raw=lambda _: "00aa")
+    runner.stage_funding()  # External I/O fixture rejects any faucet request.
+    assert runner.artifacts["funding_outpoint"] == {"txid": FUNDING_TXID, "vout": 0, "value_sats": 100000}
+    assert private_read(runner.journal.directory / "funding.hex") == b"00aa"
+    assert not runner.artifacts.get("funding_claim_started")
+    assert "funding_claim_txid" not in runner.artifacts
+
+
+def test_empty_address_is_observed_before_claim_and_claim_is_not_repeated(runner, monkeypatch):
+    runner.journal.artifact("receive_address", ADDRESS)
+    observations = []
+    def utxos(_):
+        observations.append(bool(runner.artifacts.get("funding_claim_started")))
+        return []
+    runner.core = SimpleNamespace(utxos=utxos)
+    calls = faucet_stub(monkeypatch, [{"ok": True, "network": "btc-testnet", "txid": FUNDING_TXID}], runner.journal)
+    for _ in range(2):
+        with pytest.raises(Blocked) as caught:
+            runner.stage_funding()
+        assert caught.value.code == "FUNDING_PENDING"
+    assert observations == [False, True, True]
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("code,exception", [("FUNDING_PROPAGATION", Blocked), ("EXPLORER_CHAIN", Failed),
+                                          ("HTTP_UNAVAILABLE", Blocked)])
+def test_unverifiable_empty_address_never_requests_faucet_funds(runner, code, exception):
+    runner.journal.artifact("receive_address", ADDRESS)
+    def unavailable(_):
+        raise exception(code, "synthetic explorer failure")
+    runner.core = SimpleNamespace(utxos=unavailable)
+    with pytest.raises(Blocked) as caught:
+        runner.stage_funding()
+    assert caught.value.code == ("FUNDING_PENDING" if code == "FUNDING_PROPAGATION" else code)
+    assert "funding_claim_started" not in runner.artifacts
+    assert "funding_outpoint" not in runner.artifacts
+
+
+def test_unverified_raw_external_funding_never_requests_replacement(runner):
+    runner.journal.artifact("receive_address", ADDRESS)
+    def disagree(_):
+        raise Failed("FUNDING_RAW", "synthetic disagreement")
+    runner.core = SimpleNamespace(utxos=lambda _: [(FUNDING_TXID, 0, 100000)], raw=disagree)
+    with pytest.raises(Failed, match="synthetic disagreement"):
+        runner.stage_funding()
+    assert "funding_claim_started" not in runner.artifacts
+    assert "funding_outpoint" not in runner.artifacts
+
+
+@pytest.mark.parametrize("outputs,code", [
+    ([(FUNDING_TXID, 0, 100000), (FUNDING_TXID, 1, 100000)], "FUNDING_AMBIGUOUS"),
+    ([(FUNDING_TXID, 0, 99999)], "FUNDING_UNSUITABLE"),
+])
+def test_unusable_existing_outputs_do_not_trigger_additional_funding(runner, outputs, code):
+    runner.journal.artifact("receive_address", ADDRESS)
+    runner.core = SimpleNamespace(utxos=lambda _: outputs)
+    with pytest.raises(Blocked) as caught:
+        runner.stage_funding()
+    assert caught.value.code == code
+    assert "funding_claim_started" not in runner.artifacts
+
+
+def test_saved_faucet_txid_does_not_adopt_unrelated_external_funding(runner):
+    runner.journal.artifact("receive_address", ADDRESS)
+    runner.journal.artifact("funding_claim_started", True)
+    runner.journal.artifact("funding_claim_txid", FUNDING_TXID)
+    runner.core = SimpleNamespace(utxos=lambda _: [(TXID, 0, 100000)])
+    with pytest.raises(Blocked) as caught:
+        runner.stage_funding()
+    assert caught.value.code == "FUNDING_PENDING"
+    assert "funding_outpoint" not in runner.artifacts
+
+
 def test_missing_funding_after_claim_blocks_without_replacement(runner):
     runner.journal.artifact("receive_address", ADDRESS)
     runner.journal.artifact("funding_claim_started", True)

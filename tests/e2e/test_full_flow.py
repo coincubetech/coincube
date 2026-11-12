@@ -11,8 +11,8 @@ def test_fresh_testnet4(stage, acceptance, request, record_property):
     __tracebackhide__ = True
     if acceptance.config["version"] != 2:
         pytest.fail("Fresh flow requires schema version 2.", pytrace=False)
-    if request.config.getoption("--qa-preflight") and stage != "environment":
-        pytest.skip("Read-only environment preflight selected; provisioning and transaction stages not selected.")
+    if request.config.getoption("--qa-preflight") and stage not in ("environment", "authentication", "phone_setup"):
+        pytest.skip("Setup preflight selected; Cube, signer, vault and transaction stages not selected.")
     record_property("stage", stage)
     try:
         acceptance.run(stage)

@@ -14,14 +14,17 @@ requirements = root / "requirements.lock"
 stamp = venv / "requirements.sha256"
 digest = hashlib.sha256(requirements.read_bytes()).hexdigest()
 
-if sys.version_info < (3, 11):
+if sys.version_info < (3, 11, 4):
     for candidate in ("python3.13", "python3.12", "python3.11"):
         executable = shutil.which(candidate)
-        if executable:
+        if executable and subprocess.run([executable, "-c", "import sys; sys.exit(sys.version_info < (3, 11, 4))"],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
             os.execv(executable, [executable, str(Path(__file__).resolve()), *sys.argv[1:]])
-    raise SystemExit("Python 3.11 or newer is required.")
+    raise SystemExit("Python 3.11.4 or newer is required.")
 if not python.exists():
     subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+if subprocess.run([str(python), "-c", "import sys; sys.exit(sys.version_info < (3, 11, 4))"]).returncode:
+    raise SystemExit("The existing tests/e2e/.venv needs Python 3.11.4 or newer; recreate it with a supported interpreter.")
 if not stamp.exists() or stamp.read_text() != digest:
     subprocess.run([str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)], check=True)
     stamp.write_text(digest)

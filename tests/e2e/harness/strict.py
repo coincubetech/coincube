@@ -199,7 +199,13 @@ class StrictPolicy:
         from appium.webdriver.common.appiumby import AppiumBy
         import json
         if button:
-            predicate = ('visible == true AND enabled == true AND type == "XCUIElementTypeButton" AND '
+            types = 'type == "XCUIElementTypeButton"'
+            if prefix == "qa-home-refresh-trigger":
+                # Flutter's identifier-bearing Semantics wrapper is exposed by
+                # WDA as Other, even when its child is a TextButton. This is
+                # restricted to the exact QA trigger, not a generic fallback.
+                types = '(' + types + ' OR type == "XCUIElementTypeOther")'
+            predicate = ('visible == true AND enabled == true AND ' + types + ' AND '
                          f'(label == {json.dumps(prefix)} OR name == {json.dumps(prefix)})')
         else:
             predicate = ('visible == true AND '
