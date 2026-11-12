@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from harness import qa_cleanup as cleanup, qa_funding, sponsor
-from harness.provisioning import FreshRunner
+from harness.provisioning import FreshRunner, STAGES
 from harness.state import Blocked, Failed, atomic_write, digest, private_read
 from test_sponsor import address, raw_transaction
 
@@ -29,7 +29,7 @@ def flow(tmp_path, monkeypatch):
     artifacts = {'account_identity': 'a' * 64, 'cube_id': 12, 'cube_uuid': run_id, 'vault_id': '23',
                  'descriptor_id': '1234abcd', 'target_key_id': '34', 'target_fingerprint': 'aabbccdd',
                  'receive_address': address(51), 'broadcast_txid': txid, 'public_acceptance': {'txid': txid}, 'request_id': run_id}
-    cp = {'artifacts': artifacts, 'binding': 'binding'}
+    cp = {'artifacts': artifacts, 'binding': 'binding', 'stages': {k: {'status': 'passed'} for k in STAGES}}
     for target in (directory, snapshot):
         atomic_write(target / 'provision.json', sponsor.encoded(state))
         atomic_write(target / 'checkpoint.json', sponsor.encoded(cp))
@@ -37,13 +37,22 @@ def flow(tmp_path, monkeypatch):
     for name, value in {'signed.hex': raw.encode(), 'local-signed.psbt': b'synthetic-public-psbt',
                         'provision-secrets.keychain.json': b'{"locator":"native-only"}'}.items():
         atomic_write(directory / name, value)
+    (directory / 'profile').mkdir(mode=0o700)
+    atomic_write(directory / 'profile/encrypted-backup.bin', b'synthetic-encrypted-profile-backup')
+    atomic_write(directory / 'funding.hex', b'synthetic-public-funding')
+    atomic_write(directory / 'phone-key.json', b'{"public_key":"synthetic"}')
+    atomic_write(directory / 'signed.psbt', b'synthetic-public-fully-signed-psbt')
+    atomic_write(directory / 'run.lock', b'')
+    xml = '<testsuites><testsuite>' + ''.join(
+        '<testcase name="' + stage + '"><properties><property name="stage" value="' + stage + '"/>'
+        '<property name="outcome" value="passed"/></properties></testcase>' for stage in STAGES) + '</testsuite></testsuites>'
+    atomic_write(directory / 'results.xml', xml.encode())
     record = {'version': 1, 'account': 'a' * 64, 'owner': 5, 'run_id': run_id,
               'directory': str(directory), 'snapshot': str(snapshot), 'source_binding': sponsor.read_run(snapshot)[2],
               'cube_id': 12, 'cube_name': state['cube_name'], 'vault_id': 23, 'descriptor_id': '1234abcd',
               'key_id': 34, 'fingerprint': 'aabbccdd', 'keychain_id': 45, 'phase': 'enrolled',
-              'encryption_pubkey': '02' + 'ab' * 32,
-              'retained_files': {n: sponsor.sha(private_read(directory / n)) for n in
-                  ('provision.json', 'descriptor.txt', 'signed.hex', 'local-signed.psbt', 'provision-secrets.keychain.json')}}
+              'encryption_pubkey': '02' + 'ab' * 32, 'sealed': True,
+              'retained_files': cleanup.retained_tree(directory)}
     runner = SimpleNamespace(config={'amount_sats': 10000, 'fee_sats': 1000,
                                     'qa_cleanup': {'version': 1, 'preserve_runs': []}},
         strict=SimpleNamespace(requested=False, observe=lambda: None), account_user_id=5,
@@ -63,6 +72,11 @@ def flow(tmp_path, monkeypatch):
              'fail_delete': None, 'pending': [], 'decrypt': [], 'residual': 89000}
     def api(_, path, *, delete=False, body=None, missing=False):
         if delete:
+            import fcntl, os
+            fd = os.open(directory / 'run.lock', os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError): fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally: os.close(fd)
             with open(qa_funding.ROOT / 'pool.json') as f: saved = json.load(f)
             r = saved['retirements']['fixture']
             phase = {'/connect/cubes/12/vault': 'vault_intent', '/keys/delete': 'key_intent', '/connect/cubes/12': 'cube_intent'}[path]
@@ -81,10 +95,12 @@ def flow(tmp_path, monkeypatch):
         if path == '/connect/cubes': return ([cloud['cube']] if cloud['cube'] else []) + cloud['other']
         if path == '/connect/cubes/12': return deepcopy(cloud['cube'])
         if path == '/connect/cubes/12/vault': return deepcopy(cloud['vault'])
+        if path == '/connect/cubes/12/keys': return ([{'id': 34}] if cloud['key'] else []) if cloud['cube'] else None
         raise AssertionError(path)
     def http(url, **kwargs):
         if url.endswith('/block-height/0'): return cleanup.GENESIS.encode()
         if url.endswith('/hex'): return raw.encode()
+        if url.endswith('/outspend/1'): return b'{"spent":false}'
         if url.endswith('/address/' + address(51) + '/utxo'): return b'[]'
         if url.endswith('/address/' + address(34) + '/utxo'):
             return sponsor.encoded([{'txid': txid, 'vout': 1, 'value': cloud['residual']}])
@@ -105,10 +121,10 @@ def flow(tmp_path, monkeypatch):
 
 def test_cleanup_retires_exact_cloud_graph_and_keeps_recovery_and_residual(flow):
     runner, cloud, record = flow
-    before = {p: p.read_bytes() for p in Path(record['directory']).iterdir()}
+    before = {p: p.read_bytes() for p in Path(record['directory']).rglob('*') if p.is_file()}
     cleanup.ensure_capacity(runner)
     assert cloud['deletes'] == ['/connect/cubes/12/vault', '/keys/delete', '/connect/cubes/12']
-    assert before == {p: p.read_bytes() for p in Path(record['directory']).iterdir()}
+    assert before == {p: p.read_bytes() for p in Path(record['directory']).rglob('*') if p.is_file()}
     assert runner.artifacts['qa_cleanup']['residual_sats'] == 89000
     with qa_funding.pool() as data:
         assert cleanup.retired(data, {'source_run': record['snapshot']})
@@ -221,12 +237,13 @@ def test_capacity_available_performs_no_cleanup(monkeypatch):
         {'success': True, 'data': {'entitlements': {'personalKeyLimit': 7}}} if url.endswith('/plan') else
         {'success': True, 'data': {'userId': 5, 'network': 'testnet4', 'noOfKeys': 0, 'keyLimit': 21}}))
     monkeypatch.setattr(cleanup, 'ensure_capacity', lambda _: pytest.fail('cleanup without a capacity refusal'))
+    monkeypatch.setattr(cleanup, 'reconcile_capacity', lambda _: False)
     FreshRunner.preflight_capacity(runner)
 
 
 def test_current_key_resume_performs_no_cleanup(monkeypatch):
     runner = SimpleNamespace(keys=lambda: [{'name': 'QA current', 'network': 'testnet4'}],
-        phone_key_label=lambda: 'QA current', artifacts={'phone_key_creation_started': True})
+        phone_key_label=lambda: 'QA current', artifacts={'phone_key_creation_started': True}, config={})
     monkeypatch.setattr(cleanup, 'ensure_capacity', lambda _: pytest.fail('cleanup during current-key resume'))
     FreshRunner.preflight_capacity(runner)
 
@@ -322,3 +339,187 @@ def test_incomplete_run_cannot_auto_enroll_cleanup(flow):
     runner.journal.directory = Path(record['directory'])
     with pytest.raises((Failed, KeyError)):
         cleanup.register_completed(runner)
+
+
+@pytest.mark.parametrize('field', ['members', 'pendingInvites', 'keys', 'vault'])
+def test_missing_sharing_inventory_is_not_treated_as_empty(flow, field):
+    runner, cloud, _ = flow
+    del cloud['cube'][field]
+    with pytest.raises(Failed, match='SCHEMA'): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []
+
+
+def test_candidate_run_lease_busy_prevents_every_delete(flow):
+    import fcntl, os
+    runner, cloud, record = flow
+    fd = os.open(Path(record['directory']) / 'run.lock', os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(Blocked, match='still owned'): cleanup.ensure_capacity(runner)
+    finally:
+        os.close(fd)
+    assert cloud['deletes'] == []
+
+
+@pytest.mark.parametrize('path', ['funding.hex', 'phone-key.json', 'signed.psbt', 'results.xml', 'profile/encrypted-backup.bin'])
+def test_every_retained_history_and_profile_file_is_required(flow, path):
+    runner, cloud, record = flow
+    Path(record['directory'], path).unlink()
+    with pytest.raises(Failed, match='RECOVERY_CHANGED'): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []
+
+
+@pytest.mark.parametrize('change', ['phase', 'snapshot', 'account', 'run_id', 'cube_id', 'binding', 'history', 'forged'])
+def test_tombstone_cannot_mask_wrong_retirement_or_changed_history(flow, change):
+    runner, _, record = flow
+    cleanup.ensure_capacity(runner)
+    with qa_funding.pool() as data:
+        tombstone = data['retired_cloud_sources'][record['snapshot']]
+        if change == 'phase': data['retirements']['fixture']['phase'] = 'key_intent'
+        elif change == 'snapshot': data['retirements']['fixture']['snapshot'] = '/foreign/snapshot'
+        elif change in ('account', 'run_id'): tombstone[change] = 'foreign'
+        elif change == 'cube_id': tombstone['cube_id'] = 99
+        elif change == 'binding': tombstone['source_binding']['state_sha256'] = 'changed'
+        elif change == 'history': Path(record['directory'], 'funding.hex').unlink()
+        else: tombstone['retirement'] = 'missing-record'
+        with pytest.raises(Failed): cleanup.retired(data, {'source_run': record['snapshot']})
+
+
+def test_empty_utxo_index_without_spent_proof_is_not_zero_balance(flow, monkeypatch):
+    runner, cloud, _ = flow
+    original = cleanup.http
+    monkeypatch.setattr(cleanup, 'http', lambda url, **kwargs: b'[]' if url.endswith('/utxo') else original(url, **kwargs))
+    with pytest.raises(Failed, match='BALANCE_INDEX'): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []
+
+
+def test_capacity_resume_finishes_cube_after_key_success_even_with_free_slot(flow, monkeypatch):
+    from types import MethodType
+    runner, cloud, _ = flow
+    original = cleanup.api
+    lost = []
+    def api(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if kwargs.get('delete') and args[1] == '/keys/delete' and not lost:
+            lost.append(True)
+            raise Blocked('LOST_DELETE', 'synthetic key deleted before response')
+        return result
+    monkeypatch.setattr(cleanup, 'api', api)
+    with pytest.raises(Blocked): cleanup.ensure_capacity(runner)
+    assert cloud['key'] is None and cloud['cube'] is not None
+    runner.account = {'tokens': {'access_token': 'synthetic'}}
+    runner.keys = lambda: [{'id': 100 + i, 'name': 'other', 'network': 'testnet4'} for i in range(6)]
+    runner.phone_key_label = lambda: 'QA new'
+    runner.preflight_capacity = MethodType(FreshRunner.preflight_capacity, runner)
+    monkeypatch.setattr('harness.provisioning.http', lambda url, **kwargs: sponsor.encoded(
+        {'success': True, 'data': {'entitlements': {'personalKeyLimit': 7}}} if url.endswith('/plan') else
+        {'success': True, 'data': {'userId': 5, 'network': 'testnet4', 'noOfKeys': 6, 'keyLimit': 21}}))
+    runner.preflight_capacity()
+    assert cloud['cube'] is None
+    assert cloud['deletes'] == ['/connect/cubes/12/vault', '/keys/delete', '/connect/cubes/12']
+
+
+def test_unsealed_completion_can_be_sealed_once_after_lost_callback(flow):
+    runner, _, record = flow
+    with qa_funding.pool() as data:
+        saved = data['retirements']['fixture']
+        saved['sealed'] = False
+        saved['retained_files'].pop('results.xml')
+        qa_funding.save_pool(data)
+    cleanup.ensure_capacity(runner)
+    with qa_funding.pool() as data:
+        assert data['retirements']['fixture']['sealed'] is True
+        assert data['retirements']['fixture']['phase'] == 'complete'
+
+
+def test_actual_pytest_junit_is_written_before_completion_seals(flow, monkeypatch, tmp_path):
+    import os, subprocess, sys
+    runner, _, record = flow
+    directory = Path(record['directory'])
+    with qa_funding.pool() as data:
+        saved = data['retirements'].pop('fixture')
+        saved['sealed'] = False
+        saved['retained_files'].pop('results.xml')
+        key = digest({'account': saved['account'], 'run_id': saved['run_id'], 'directory': saved['directory']})
+        data['retirements'][key] = saved
+        qa_funding.save_pool(data)
+    (directory / 'results.xml').unlink()
+    child = tmp_path / 'child-pytest'; child.mkdir(mode=0o700)
+    original = Path(__file__).resolve().parents[1] / 'conftest.py'
+    (child / 'conftest.py').write_text(f'''
+import os
+os.umask(0o077)
+import importlib.util
+from pathlib import Path
+from types import SimpleNamespace
+from harness import qa_funding
+qa_funding.ROOT = Path({str(qa_funding.ROOT)!r})
+spec = importlib.util.spec_from_file_location('live_qa_hooks', {str(original)!r})
+hooks = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hooks)
+pytest_addoption = hooks.pytest_addoption
+pytest_sessionfinish = hooks.pytest_sessionfinish
+pytest_terminal_summary = hooks.pytest_terminal_summary
+def pytest_configure(config):
+    hooks.pytest_configure(config)
+    config._testnet4_runner = SimpleNamespace(stop=False, config={{'qa_cleanup': {{'version':1,'preserve_runs':[]}}}},
+        artifacts={{'account_identity': {record['account']!r}}}, account_user_id={record['owner']!r},
+        run_id={record['run_id']!r}, journal=SimpleNamespace(directory=Path({record['directory']!r})))
+''')
+    (child / 'test_completed.py').write_text('''
+import pytest
+from harness.provisioning import STAGES
+@pytest.mark.parametrize('stage', STAGES)
+def test_completed(stage, record_property):
+    record_property('stage', stage)
+    record_property('outcome', 'passed')
+''')
+    env = dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD='1', PYTHONDONTWRITEBYTECODE='1',
+               PYTHONPATH=str(original.parent))
+    result = subprocess.run([sys.executable, '-m', 'pytest', str(child), '-q', '--junitxml',
+                             str(directory / 'results.xml'), '-o', 'junit_family=xunit1'],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+    assert result.returncode == 0, result.stdout.decode()
+    with qa_funding.pool() as data:
+        assert data['retirements'][key]['sealed'] is True
+        assert 'results.xml' in data['retirements'][key]['retained_files']
+    runner.run_id = record['run_id']
+    runner.journal.directory = directory
+    # Lost callback after its durable save can call the same seal idempotently.
+    cleanup.seal_completed(runner)
+
+
+def test_missing_cube_keys_after_delete_requires_explicit_empty_key_endpoint(flow, monkeypatch):
+    runner, cloud, _ = flow
+    original = cleanup.api
+    def api(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not kwargs.get('delete') and args[1] == '/connect/cubes/12' and not cloud['key'] and result:
+            result.pop('keys', None)
+        return result
+    monkeypatch.setattr(cleanup, 'api', api)
+    cleanup.ensure_capacity(runner)
+    assert cloud['cube'] is None
+
+
+def test_foreign_account_cannot_use_tombstone_to_skip_a_source(flow):
+    runner, _, record = flow
+    cleanup.ensure_capacity(runner)
+    with qa_funding.pool() as data:
+        with pytest.raises(Failed, match='TOMBSTONE'):
+            cleanup.retired(data, {'source_run': record['snapshot']}, account='foreign-account')
+
+
+@pytest.mark.parametrize('change', ['missing', 'failure', 'duplicate'])
+def test_unsealed_completion_requires_final_complete_passed_junit(flow, change):
+    runner, cloud, record = flow
+    with qa_funding.pool() as data:
+        data['retirements']['fixture']['sealed'] = False
+        data['retirements']['fixture']['retained_files'].pop('results.xml')
+        qa_funding.save_pool(data)
+    path = Path(record['directory']) / 'results.xml'
+    if change == 'missing': path.unlink()
+    elif change == 'failure': atomic_write(path, path.read_bytes().replace(b'</testcase>', b'<failure/></testcase>', 1))
+    else: atomic_write(path, path.read_bytes().replace(b'value="environment"', b'value="phone_setup"', 1))
+    with pytest.raises(Blocked): cleanup.ensure_capacity(runner)
+    assert cloud['deletes'] == []

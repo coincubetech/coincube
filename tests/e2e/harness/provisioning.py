@@ -770,13 +770,12 @@ class FreshRunner(Runner):
 
     def preflight_capacity(self, *, cleaned=False):
         keys = self.keys()
-        matches = [key for key in keys if key.get("name") == self.phone_key_label() and key.get("network") == "testnet4"]
-        if matches:
-            # Resume adopts only a key whose durable creation record already
-            # exists. stage_phone_key performs the full identity reconciliation.
-            if len(matches) != 1 or not self.artifacts.get("phone_key_creation_started"):
-                raise Failed("KEY_NOT_FRESH", "A matching key has no unique recorded creation attempt.")
-            return
+        if "qa_cleanup" not in self.config:
+            matches = [key for key in keys if key.get("name") == self.phone_key_label() and key.get("network") == "testnet4"]
+            if matches:
+                if len(matches) != 1 or not self.artifacts.get("phone_key_creation_started"):
+                    raise Failed("KEY_NOT_FRESH", "A matching key has no unique recorded creation attempt.")
+                return
         headers = {"Authorization": "Bearer " + self.account["tokens"]["access_token"]}
         plan = json.loads(http(REST + "/api/v1/connect/plan", headers=headers))
         keychain = json.loads(http(REST + "/api/v1/keychains/active", headers=headers))
@@ -787,6 +786,15 @@ class FreshRunner(Runner):
                 or active.get("userId") != self.account_user_id or active.get("network") != "testnet4"
                 or any(type(v) is not int or v < 0 for v in (limit, count, key_limit))):
             raise Blocked("SIGNER_CAPACITY", "Authenticated QA signer capacity or active Testnet4 Keychain could not be verified.")
+        if "qa_cleanup" in self.config and not cleaned and qa_cleanup.reconcile_capacity(self):
+            return self.preflight_capacity(cleaned=True)
+        matches = [key for key in keys if key.get("name") == self.phone_key_label() and key.get("network") == "testnet4"]
+        if matches:
+            # Resume adopts only a key whose durable creation record already
+            # exists. stage_phone_key performs the full identity reconciliation.
+            if len(matches) != 1 or not self.artifacts.get("phone_key_creation_started"):
+                raise Failed("KEY_NOT_FRESH", "A matching key has no unique recorded creation attempt.")
+            return
         if count >= key_limit or len([key for key in keys if key.get("network") == "testnet4"]) >= limit:
             if "qa_cleanup" in self.config and not cleaned:
                 qa_cleanup.ensure_capacity(self)

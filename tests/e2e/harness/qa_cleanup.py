@@ -3,10 +3,15 @@
 Never deletes local files, recovery material or coins. Uses the funding registry's
 host lock so donor selection and cloud retirement cannot race on this host.
 """
+from contextlib import contextmanager
 from copy import deepcopy
+import fcntl
+import os
+import stat
 import json
 from pathlib import Path
 import time
+import xml.etree.ElementTree as ET
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler
 
@@ -69,8 +74,70 @@ def run_identity(directory):
     return state, cp, binding
 
 
+LOCK_FILES = {"run.lock", "provision.lock", "profile/.device-secret.lock"}
+
+
+def retained_tree(directory, *, pending_results=False):
+    """Exact owned recovery/history tree; ignore only known synchronization locks.
+
+    The live checkpoint legitimately gains confirmation/timestamps on re-verify;
+    its complete immutable counterpart is retained in the source snapshot.
+    """
+    directory = Path(directory)
+    require(directory.is_absolute() and not directory.is_symlink(), "DIRECTORY")
+    result = {}
+    paths = []
+    for root, directories, files in os.walk(directory, followlinks=False):
+        root = Path(root)
+        if root == directory / "qa-build":
+            # Reproducible compiler/source products, not recovery/history.
+            caches = {"source", "derived", "Runner.xcarchive", "export", "validated"}
+            directories[:] = [name for name in directories if name not in caches]
+        paths.extend(root / name for name in directories + files)
+    for path in sorted(paths):
+        relative = path.relative_to(directory).as_posix()
+        info = path.lstat()
+        require(not stat.S_ISLNK(info.st_mode) and info.st_uid == os.getuid(), "HISTORY_FILE")
+        if stat.S_ISDIR(info.st_mode):
+            require(not info.st_mode & 0o077, "HISTORY_DIRECTORY")
+            continue
+        require(stat.S_ISREG(info.st_mode), "HISTORY_FILE")
+        if (relative in LOCK_FILES or relative == "checkpoint.json"
+                or (pending_results and relative == "results.xml")
+                or (path.parent == directory / "profile" and path.name.startswith(".testnet4-secret-")
+                    and path.name.endswith(".lock"))
+                or relative == "profile/testnet4/settings.lock"):
+            continue
+        result[relative] = sponsor.sha(private_read(path))
+    require(result, "HISTORY_EMPTY")
+    return result
+
+
+@contextmanager
+def candidate_lease(record):
+    directory = Path(record["directory"])
+    require(directory.is_absolute() and not directory.is_symlink(), "DIRECTORY")
+    try:
+        fd = os.open(directory / "run.lock", os.O_RDWR | os.O_NOFOLLOW)
+    except OSError:
+        raise Blocked("QA_CLEANUP_RUN_LOCK", "The completed QA run's existing lease is unavailable.") from None
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077, "RUN_LOCK")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Blocked("QA_CLEANUP_RUN_BUSY", "The completed QA run is still owned by another process.") from None
+        yield
+    finally:
+        os.close(fd)
+
+
 def verify_local(record):
+    from .provisioning import STAGES
     state, cp, binding = run_identity(record["snapshot"])
+    require(set(cp.get("stages", {})) == set(STAGES)
+            and all(v.get("status") == "passed" for v in cp["stages"].values()), "COMPLETION")
     require(binding == record["source_binding"] and cp["artifacts"]["account_identity"] == record["account"]
             and state["owner_user_id"] == record["owner"]
             and state["run_id"] == record["run_id"]
@@ -79,8 +146,7 @@ def verify_local(record):
             and int(state["target_key_id"]) == record["key_id"]
             and state["target_fingerprint"] == record["fingerprint"], "PROVENANCE")
     directory = Path(record["directory"])
-    for name, sha in record["retained_files"].items():
-        require(sponsor.sha(private_read(directory / name)) == sha, "RECOVERY_CHANGED")
+    require(retained_tree(directory, pending_results=record.get("sealed") is not True) == record["retained_files"], "RECOVERY_CHANGED")
     require(Path(state["profile_dir"]).resolve() == (directory / "profile").resolve(), "PROFILE")
     return state, cp
 
@@ -133,6 +199,9 @@ def residual(record):
             require(isinstance(rows, list), "BALANCE")
             points += [(p["txid"], p["vout"], p["value"]) for p in rows]
         require(not points or points == [expected], "UNEXPECTED_FUNDS")
+        outspend = json.loads(http(endpoint + "/tx/" + spend["txid"] + "/outspend/1"))
+        require(type(outspend.get("spent")) is bool
+                and outspend["spent"] == (not points), "BALANCE_INDEX")
         values.append(sum(p[2] for p in points))
     require(values[0] == values[1], "EXPLORER_DISAGREEMENT")
     return values[0]
@@ -156,7 +225,7 @@ def protected_ids(runner, data):
         protected.add(outcome["identity"]["artifacts"]["cube_id"])
     # Managed donors with usable unspent change retain their cloud fixture.
     for item in data["accounts"].get(runner.artifacts["account_identity"], []):
-        if retired(data, item["entry"]):
+        if retired(data, item["entry"], item, account=runner.artifacts["account_identity"], owner=runner.account_user_id):
             continue
         source, prior, value, _ = qa_funding.source_metadata(item["entry"], item,
                                     runner.artifacts["account_identity"], runner.account_user_id)
@@ -176,15 +245,43 @@ def protected_ids(runner, data):
     return protected
 
 
-def retired(data, entry):
-    return str(Path(entry["source_run"]).resolve()) in data.get("retired_cloud_sources", {})
+def retired(data, entry, enrolled=None, *, account=None, owner=None):
+    path = str(Path(entry["source_run"]).resolve())
+    tombstones = data.get("retired_cloud_sources", {})
+    require(isinstance(tombstones, dict), "TOMBSTONE")
+    if path not in tombstones:
+        return False
+    tombstone = tombstones[path]
+    require(isinstance(tombstone, dict) and set(tombstone) == {
+        "retirement", "run_id", "cube_id", "account", "source_binding", "residual_sats", "local_recovery_retained"}, "TOMBSTONE")
+    records = data.get("retirements", {})
+    require(isinstance(records, dict) and isinstance(tombstone["retirement"], str), "TOMBSTONE")
+    record = records.get(tombstone["retirement"])
+    require(isinstance(record, dict) and type(record.get("version")) is int and record["version"] == 1
+            and record.get("phase") == "complete" and record.get("sealed") is True and record.get("snapshot") == path
+            and tombstone["local_recovery_retained"] is True
+            and type(tombstone["cube_id"]) is int and type(tombstone["residual_sats"]) is int
+            and tombstone["residual_sats"] >= 0
+            and all(tombstone[k] == record.get(k) for k in ("run_id", "cube_id", "account", "source_binding", "residual_sats")), "TOMBSTONE")
+    require((account is None or record["account"] == account)
+            and (owner is None or record["owner"] == owner), "TOMBSTONE")
+    verify_local(record)
+    if enrolled is not None:
+        require(enrolled.get("source_binding") == record["source_binding"], "TOMBSTONE")
+        _, _, _, binding = qa_funding.source_metadata(entry, enrolled, record["account"], record["owner"])
+        require(binding == record["source_binding"], "TOMBSTONE")
+    return True
 
 
 def graph(runner, record):
     base = "/connect/cubes/" + str(record["cube_id"])
     cube = api(runner, base, missing=True)
     vault = api(runner, base + "/vault", missing=True)
-    keys = api(runner, "/keys")["keys"]
+    cube_keys = api(runner, base + "/keys", missing=True)
+    require((cube is None and cube_keys is None) or isinstance(cube_keys, list), "KEY_SCHEMA")
+    key_result = api(runner, "/keys")
+    require(isinstance(key_result, dict) and isinstance(key_result.get("keys"), list), "KEY_SCHEMA")
+    keys = key_result["keys"]
     matches = [k for k in keys if k.get("id") == record["key_id"]]
     require(len(matches) <= 1, "KEY_GRAPH")
     key = matches[0] if matches else None
@@ -202,6 +299,9 @@ def graph(runner, record):
             require(not any(k.get("id") == record["key_id"] for k in other.get("keys", []))
                     and not any(m.get("keyId") == record["key_id"] for m in (other.get("vault") or {}).get("members", [])), "SHARED_KEY")
     if cube is not None:
+        require(isinstance(cube, dict) and all(isinstance(cube.get(k), list) for k in ("members", "pendingInvites"))
+                and (isinstance(cube.get("keys"), list) or ("keys" not in cube and cube_keys == []))
+                and "vault" in cube, "CUBE_SCHEMA")
         require(cube.get("id") == record["cube_id"] and cube.get("userId") == record["owner"]
                 and cube.get("uuid") == record["run_id"] and cube.get("name") == record["cube_name"]
                 and cube.get("network") == "testnet4" and cube.get("status") == "active"
@@ -211,11 +311,13 @@ def graph(runner, record):
                 and cube.get("hasRecoveryKit") is False
                 and all(k.get("id") == record["key_id"] and k.get("primaryOwnerId") == record["owner"]
                         for k in cube.get("keys", [])), "CUBE_GRAPH")
-        require(len(cube.get("keys", [])) == (1 if key is not None else 0), "KEY_GRAPH")
+        require(len(cube_keys) == len(cube.get("keys", [])) == (1 if key is not None else 0)
+                and all(k.get("id") == record["key_id"] for k in cube_keys), "KEY_GRAPH")
         embedded = cube.get("vault")
         require((embedded is None) == (vault is None)
                 and (embedded is None or embedded.get("id") == record["vault_id"]), "VAULT_GRAPH")
     if vault is not None:
+        require(isinstance(vault, dict) and isinstance(vault.get("members"), list), "VAULT_SCHEMA")
         require(cube is not None and vault.get("id") == record["vault_id"]
                 and vault.get("cubeId") == record["cube_id"] and vault.get("fingerprint") == record["descriptor_id"]
                 and vault.get("status") == "active" and len(vault.get("members", [])) == 1
@@ -250,8 +352,8 @@ def register_completed(runner):
                   "source_binding": binding, "cube_id": state["cube_id"], "cube_name": state["cube_name"],
                   "vault_id": state["vault_id"], "descriptor_id": state["descriptor_id"],
                   "key_id": int(state["target_key_id"]), "fingerprint": state["target_fingerprint"],
-                  "keychain_id": None, "phase": "enrolled", "retained_files": {name: sponsor.sha(private_read(directory / name))
-                      for name in ("provision.json", "descriptor.txt", "signed.hex", "local-signed.psbt", "provision-secrets.keychain.json")}}
+                  "keychain_id": None, "phase": "enrolled", "sealed": False,
+                  "retained_files": retained_tree(directory, pending_results=True)}
         keys = api(runner, "/keys")["keys"]
         match = [k for k in keys if k.get("id") == record["key_id"]]
         require(len(match) == 1 and type(match[0].get("keychainId")) is int, "KEY_GRAPH")
@@ -266,6 +368,8 @@ def register_completed(runner):
         if key in records:
             previous = deepcopy(records[key])
             previous["phase"] = "enrolled"
+            previous["sealed"] = False
+            previous["retained_files"].pop("results.xml", None)
             previous.pop("residual_sats", None)
             previous.pop("updated_at", None)
             previous.pop("consumer", None)
@@ -293,7 +397,7 @@ def ensure_capacity(runner):
         else:
             protections = protected_ids(runner, data)
             candidates = [(k, r) for k, r in records.items()
-                          if r.get("phase") == "enrolled" and r.get("account") == account
+                          if r.get("phase") == "enrolled" and type(r.get("sealed")) is bool and r.get("account") == account
                           and r.get("owner") == runner.account_user_id and r.get("cube_id") not in protections
                           and r.get("run_id") != runner.run_id]
             if not candidates:
@@ -301,49 +405,110 @@ def ensure_capacity(runner):
             key, record = sorted(candidates, key=lambda item: item[0])[0]
         require(record.get("account") == account and record.get("owner") == runner.account_user_id, "ACCOUNT")
         if record["phase"] == "complete":
+            retired(data, {"source_run": record["snapshot"]})
             return  # One fixture maximum per consumer, even if another remains full.
-        def guard():
-            runner.strict.observe()
-            require(not runner.strict.requested and record["cube_id"] not in protected_ids(runner, data), "PROTECTED")
-            verify_local(record)
-            backup_check(runner, record)
-            pending(runner, record)
-            amount = residual(record)
-            funding = qa_funding.options(runner.config.get("qa_funding", {"version": 1, "sources": []}))
-            require(amount < qa_funding.minimum_amount(runner.config) + funding["fee_sats"] + 1000, "FUNDING_SOURCE")
-            if "residual_sats" in record:
-                require(amount == record["residual_sats"], "BALANCE_CHANGED")
-            else:
-                record["residual_sats"] = amount
-            return graph(runner, record)
-        cube, vault, phone_key = guard()
-        if record["phase"] == "enrolled":
-            require(cube is not None and vault is not None and phone_key is not None, "MISSING_FIXTURE")
-            record.update(consumer=consumer, phase="vault_intent", updated_at=int(time.time()))
-            qa_funding.save_pool(data)
-        base = "/connect/cubes/" + str(record["cube_id"])
-        steps = (("vault_intent", "key_intent", base + "/vault", None, 1),
-                 ("key_intent", "cube_intent", "/keys/delete", {"keyId": record["key_id"], "keychainId": record["keychain_id"]}, 2),
-                 ("cube_intent", "complete", base, None, 0))
-        require(record["phase"] in {s[0] for s in steps}, "PHASE")
-        for phase, after, path, body, index in steps:
-            if record["phase"] != phase:
-                continue
-            resources = guard()
-            if phase != "vault_intent":
-                require(resources[1] is None, "VAULT_REAPPEARED")
-            if phase == "cube_intent":
-                require(resources[2] is None, "KEY_REAPPEARED")
-            if resources[index] is not None:
-                # Intent already fsynced. An uncertain transport stays here.
-                api(runner, path, delete=True, body=body)
-            require(graph(runner, record)[index] is None, "DELETE_UNCONFIRMED")
-            record.update(phase=after, updated_at=int(time.time()))
-            if after == "complete":
-                data.setdefault("retired_cloud_sources", {})[record["snapshot"]] = {
-                    "retirement": key, "run_id": record["run_id"], "cube_id": record["cube_id"],
-                    "residual_sats": record["residual_sats"], "local_recovery_retained": True}
-            qa_funding.save_pool(data)
+        with candidate_lease(record):
+            if record.get("sealed") is not True:
+                backup_check(runner, record)
+                seal_record(record)
+                qa_funding.save_pool(data)
+            def guard():
+                runner.strict.observe()
+                require(not runner.strict.requested and record["cube_id"] not in protected_ids(runner, data), "PROTECTED")
+                verify_local(record)
+                backup_check(runner, record)
+                pending(runner, record)
+                amount = residual(record)
+                funding = qa_funding.options(runner.config.get("qa_funding", {"version": 1, "sources": []}))
+                require(amount < qa_funding.minimum_amount(runner.config) + funding["fee_sats"] + 1000, "FUNDING_SOURCE")
+                if "residual_sats" in record:
+                    require(amount == record["residual_sats"], "BALANCE_CHANGED")
+                else:
+                    record["residual_sats"] = amount
+                return graph(runner, record)
+            cube, vault, phone_key = guard()
+            if record["phase"] == "enrolled":
+                require(cube is not None and vault is not None and phone_key is not None, "MISSING_FIXTURE")
+                record.update(consumer=consumer, phase="vault_intent", updated_at=int(time.time()))
+                qa_funding.save_pool(data)
+            base = "/connect/cubes/" + str(record["cube_id"])
+            steps = (("vault_intent", "key_intent", base + "/vault", None, 1),
+                     ("key_intent", "cube_intent", "/keys/delete", {"keyId": record["key_id"], "keychainId": record["keychain_id"]}, 2),
+                     ("cube_intent", "complete", base, None, 0))
+            require(record["phase"] in {s[0] for s in steps}, "PHASE")
+            for phase, after, path, body, index in steps:
+                if record["phase"] != phase:
+                    continue
+                resources = guard()
+                if phase != "vault_intent":
+                    require(resources[1] is None, "VAULT_REAPPEARED")
+                if phase == "cube_intent":
+                    require(resources[2] is None, "KEY_REAPPEARED")
+                if resources[index] is not None:
+                    # Intent already fsynced. An uncertain transport stays here.
+                    api(runner, path, delete=True, body=body)
+                require(graph(runner, record)[index] is None, "DELETE_UNCONFIRMED")
+                record.update(phase=after, updated_at=int(time.time()))
+                if after == "complete":
+                    data.setdefault("retired_cloud_sources", {})[record["snapshot"]] = {
+                        "retirement": key, "run_id": record["run_id"], "cube_id": record["cube_id"],
+                        "account": record["account"], "source_binding": record["source_binding"],
+                        "residual_sats": record["residual_sats"], "local_recovery_retained": True}
+                qa_funding.save_pool(data)
+
         runner.journal.artifact("qa_cleanup", {"retirement": key, "cube_id": record["cube_id"],
             "vault_id": record["vault_id"], "key_id": record["key_id"], "residual_sats": record["residual_sats"],
             "local_recovery_retained": True, "phase": record["phase"]})
+
+
+def reconcile_capacity(runner):
+    """Finish our prior exact retirement even after its key freed capacity."""
+    consumer = digest({"run_id": runner.run_id, "binding": runner.journal.data["binding"]})
+    with qa_funding.pool() as data:
+        records = data.get("retirements", {})
+        require(isinstance(records, dict), "REGISTRY")
+        pending = [r for r in records.values() if r.get("consumer") == consumer
+                   and r.get("phase") != "complete"]
+        require(len(pending) <= 1, "REGISTRY")
+    if pending:
+        ensure_capacity(runner)
+        return True
+    return False
+
+
+def seal_record(record):
+    from .provisioning import STAGES
+    verify_local(record)
+    if record.get("sealed") is True:
+        return
+    try:
+        results = ET.fromstring(private_read(Path(record["directory"]) / "results.xml"))
+    except ET.ParseError:
+        raise Failed("QA_CLEANUP_RESULTS", "The completed QA JUnit evidence is invalid.") from None
+    cases = results.findall(".//testcase")
+    stages = []
+    require(len(cases) == len(STAGES), "RESULTS")
+    for case in cases:
+        properties = {p.get("name"): p.get("value") for p in case.findall("./properties/property")}
+        require(properties.get("outcome") == "passed" and properties.get("stage") in STAGES
+                and not any(case.find(kind) is not None for kind in ("error", "failure", "skipped")), "RESULTS")
+        stages.append(properties["stage"])
+    require(set(stages) == set(STAGES), "RESULTS")
+    record["retained_files"] = retained_tree(Path(record["directory"]))
+    record["sealed"] = True
+
+
+def seal_completed(runner):
+    """Called after final JUnit serialization; no phone interaction is performed."""
+    key = digest({"account": runner.artifacts["account_identity"], "run_id": runner.run_id,
+                  "directory": str(runner.journal.directory.resolve())})
+    with qa_funding.pool() as data:
+        record = data.get("retirements", {}).get(key)
+        require(isinstance(record, dict) and record.get("phase") == "enrolled"
+                and record.get("run_id") == runner.run_id and record.get("owner") == runner.account_user_id
+                and record.get("account") == runner.artifacts["account_identity"]
+                and record.get("consumer") is None, "COMPLETION")
+        with candidate_lease(record):
+            verify_local(record)
+            seal_record(record)
+            qa_funding.save_pool(data)

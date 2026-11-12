@@ -587,3 +587,23 @@ backup, signed transaction or sponsorship evidence is deleted. A small residual
 with the retained Master and Border keys. A cloud tombstone excludes the retired
 managed donor from future funding selection without invalidating its local
 transaction/recovery history. Keep those local files and macOS Keychain items.
+
+Enrollment has two durable phases: the live `verify` stage records the exact
+strict proof and recovery tree, then the final pytest session callback seals it
+only after the real JUnit file contains all 15 passed stages. A lost callback
+can seal that same enrolled proof later; it never invents a new phone/process
+proof. Unfinished or failed JUnit evidence cannot authorize retirement. Cleanup
+holds the candidate's original `run.lock` through all guards, DELETEs, readbacks
+and its final tombstone, and resumes a pending retirement before considering a
+newly freed slot or an already-created current signer.
+
+The retained manifest includes the entire owned profile and run history,
+including encrypted mnemonic backups, wallet database/configuration, transport
+key/cache, public funding/signing files, phone key, final JUnit and build
+receipt/log/ExportOptions. Only known synchronization locks and the live
+checkpoint are excluded; the completed checkpoint is pinned in the immutable
+source snapshot. Reproducible `qa-build/source`, `derived`, `Runner.xcarchive`,
+`export` and `validated` trees are excluded from the recovery/history manifest.
+Nothing in those directories is deleted by cleanup. Any missing or changed
+retained file, malformed tombstone or inconsistent explorer outspend/UTXO view
+fails closed before further destructive work.

@@ -142,7 +142,7 @@ def entries(data, account, config):
     result = []
     for e in managed:
         from .qa_cleanup import retired
-        if retired(data, e["entry"]):
+        if retired(data, e["entry"], e, account=account):
             continue
         require(isinstance(e, dict) and e.get("kind") in ("completed", "sponsor") and isinstance(e.get("entry"), dict), "REGISTRY")
         if not roots.intersection(e.get("authorization_roots", [])):
