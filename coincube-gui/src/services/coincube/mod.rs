@@ -1046,6 +1046,8 @@ pub struct CubeResponse {
     pub uuid: String,
     pub name: String,
     pub network: String,
+    /// The Cube's Lightning username; `null` / `NULL` / blank read as none.
+    #[serde(default, deserialize_with = "deserialize_lightning_username")]
     pub lightning_address: Option<String>,
     pub status: String,
     /// Whether the cube has a Cube Recovery Kit on the server. Sent by both

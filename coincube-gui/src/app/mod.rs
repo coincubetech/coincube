@@ -9129,6 +9129,7 @@ impl App {
                             la.lightning_address.as_deref(),
                         )
                     });
+                self.cache.lightning_address_setup = self.panels.connect.cube.ln_auto.clone();
                 self.panels.spark_receive.sync_lightning_address_qr(
                     self.cache
                         .connect_authenticated
