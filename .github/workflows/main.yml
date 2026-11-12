@@ -248,6 +248,14 @@ jobs:
           python3 contrib/test_keyring_supervision.py
           python3 contrib/test_keyring_supervision.py --live-kill
           dbus-run-session -- python3 contrib/with_test_keyring.py -- cargo test --color always -- --nocapture
+      # The Testnet4 seed-resume gate is compiled only with `integration-tests`
+      # (it is the native test runner's resume path), so the bare `cargo test`
+      # above never reaches its unit tests. They are offline — no API, no
+      # keystore — so run that one module with the feature on every leg.
+      - name: Testnet4 seed-resume gate tests
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: cargo test -p coincube-gui ${{ matrix.os == 'windows-latest' && '--no-default-features' || '' }} --features integration-tests --lib installer::testnet4_seed_resume_tests
       - name: Preserve Secret Service fixture diagnostics
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4

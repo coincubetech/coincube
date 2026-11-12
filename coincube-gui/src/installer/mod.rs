@@ -3633,3 +3633,470 @@ mod connect_activation_tests;
 
 #[cfg(test)]
 mod claim_target_tests;
+
+/// The Testnet4 resume gate is compiled only into the integration runner.
+/// These cases are the ones that decide whether an existing seed is kept,
+/// replaced, or refused. They do not touch the system keystore.
+#[cfg(all(test, feature = "integration-tests"))]
+mod testnet4_seed_resume_tests {
+    use super::*;
+    use crate::chain::ChainId;
+    use coincube_core::{
+        descriptors::CoincubeDescriptor,
+        miniscript::bitcoin::bip32::DerivationPath,
+        seed_crypt::{self, ENCRYPTED_V2_MARKER, ENCRYPTED_V3_MARKER},
+        signer::{MasterSigner, MnemonicFileName},
+    };
+    use std::path::PathBuf;
+    use std::str::FromStr;
+
+    const PIN: &str = "2468";
+    const TIMESTAMP: i64 = 1_700_000_000;
+
+    struct Sealed {
+        root: CoincubeDirectory,
+        ctx: Context,
+        signer: Signer,
+        wallet_id: WalletId,
+        path: PathBuf,
+        bytes: Vec<u8>,
+        secret: seed_crypt::DeviceSecret,
+    }
+
+    impl Drop for Sealed {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.root.path());
+        }
+    }
+
+    fn key(signer: &Signer, branches: &str) -> String {
+        let path = DerivationPath::from_str("48'/1'/0'/2'").unwrap();
+        format!(
+            "[{}/48'/1'/0'/2']{}/<{branches}>/*",
+            signer.fingerprint(),
+            signer.get_extended_pubkey(&path)
+        )
+    }
+
+    fn descriptor(primary: &Signer, recovery: &Signer) -> CoincubeDescriptor {
+        CoincubeDescriptor::from_str(&format!(
+            "wsh(or_d(pk({}),and_v(v:pkh({}),older(3))))",
+            key(primary, "0;1"),
+            key(recovery, "2;3")
+        ))
+        .expect("testnet4 descriptor")
+    }
+
+    fn checksum(descriptor: &CoincubeDescriptor) -> String {
+        descriptor
+            .to_string()
+            .split_once('#')
+            .map(|(_, sum)| sum.to_owned())
+            .expect("descriptor display includes its checksum")
+    }
+
+    fn seed_path(root: &CoincubeDirectory, signer: &Signer, wallet_id: &WalletId) -> PathBuf {
+        MasterSigner::mnemonics_folder_for_chain(root.path(), ChainId::Testnet4).join(
+            MnemonicFileName {
+                fingerprint: signer.fingerprint(),
+                descriptor_info: Some((
+                    wallet_id.descriptor_checksum.clone(),
+                    wallet_id.timestamp.unwrap(),
+                )),
+            }
+            .to_string(),
+        )
+    }
+
+    fn seal(primary_is_signer: bool, cube_id: &str) -> Sealed {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("t4-seed-resume-{}", uuid::Uuid::new_v4())),
+        );
+        let signer = Signer::generate(Network::Testnet4).unwrap();
+        let other = Signer::generate(Network::Testnet4).unwrap();
+        let primary = if primary_is_signer { &signer } else { &other };
+        let desc = descriptor(primary, &signer);
+        let wallet_id = WalletId::new(checksum(&desc), Some(TIMESTAMP));
+        let secret = zeroize::Zeroizing::new([7u8; 32]);
+        signer
+            .store_encrypted_for_chain(
+                &root,
+                ChainId::Testnet4,
+                &wallet_id.descriptor_checksum,
+                TIMESTAMP,
+                PIN,
+                cube_id,
+                Some(&secret),
+            )
+            .unwrap();
+        let path = seed_path(&root, &signer, &wallet_id);
+        let bytes = std::fs::read(&path).unwrap();
+        let mut ctx = Context::new_for_chain(
+            ChainId::Testnet4,
+            root.clone(),
+            RemoteBackend::None,
+            None,
+            None,
+        );
+        ctx.descriptor = Some(desc);
+        ctx.cube_pin = Some(zeroize::Zeroizing::new(PIN.to_string()));
+        if !cube_id.is_empty() {
+            ctx.cube_id = Some(cube_id.to_string());
+        }
+        Sealed {
+            root,
+            ctx,
+            signer,
+            wallet_id,
+            path,
+            bytes,
+            secret,
+        }
+    }
+
+    fn fresh() -> Sealed {
+        seal(true, "cube-testnet4")
+    }
+
+    fn verify(sealed: &Sealed) -> Result<bool, Error> {
+        integration::verify_existing_testnet4_seed(
+            &sealed.ctx,
+            &sealed.wallet_id,
+            &sealed.signer,
+            &sealed.secret,
+        )
+    }
+
+    fn assert_refused(
+        label: &str,
+        ctx: &Context,
+        wallet_id: &WalletId,
+        signer: &Signer,
+        secret: &seed_crypt::DeviceSecret,
+        path: &std::path::Path,
+        bytes: &[u8],
+    ) {
+        let error = integration::verify_existing_testnet4_seed(ctx, wallet_id, signer, secret)
+            .expect_err(label);
+        assert!(
+            error
+                .to_string()
+                .contains("Existing Testnet4 seed could not be verified"),
+            "{label}: {error}",
+            label = label,
+            error = error,
+        );
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            bytes,
+            "{label} must not rewrite the seed",
+            label = label,
+        );
+    }
+
+    fn rewrite(path: &std::path::Path, bytes: &[u8]) {
+        // `restrict_permissions` seals seed files (mode 0o400 on Unix, the
+        // read-only attribute on Windows), so a later test write must be
+        // granted by the test on every platform. The verifier itself must not
+        // need that.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn refuse_sealed(label: &str, sealed: &Sealed) {
+        assert_refused(
+            label,
+            &sealed.ctx,
+            &sealed.wallet_id,
+            &sealed.signer,
+            &sealed.secret,
+            &sealed.path,
+            &sealed.bytes,
+        );
+    }
+
+    #[test]
+    fn a_matching_seed_verifies_twice_and_a_missing_file_is_absent() {
+        let sealed = fresh();
+        assert!(verify(&sealed).unwrap());
+        assert_eq!(std::fs::read(&sealed.path).unwrap(), sealed.bytes);
+        assert!(verify(&sealed).unwrap());
+        assert_eq!(std::fs::read(&sealed.path).unwrap(), sealed.bytes);
+        assert!(!sealed
+            .root
+            .network_directory(ChainId::Bitcoin)
+            .path()
+            .exists());
+
+        std::fs::remove_file(&sealed.path).unwrap();
+        assert!(!verify(&sealed).unwrap());
+        assert!(!sealed.path.exists());
+    }
+
+    #[test]
+    fn conflicts_are_refusals_rather_than_a_missing_seed() {
+        let sealed = fresh();
+        let refuse = |label: &str,
+                      ctx: &Context,
+                      wallet_id: &WalletId,
+                      secret: &seed_crypt::DeviceSecret,
+                      bytes: &[u8]| {
+            assert_refused(
+                label,
+                ctx,
+                wallet_id,
+                &sealed.signer,
+                secret,
+                &sealed.path,
+                bytes,
+            );
+        };
+
+        let mut network = sealed.ctx.clone();
+        network.network = Network::Signet;
+        refuse(
+            "installer network",
+            &network,
+            &sealed.wallet_id,
+            &sealed.secret,
+            &sealed.bytes,
+        );
+
+        let mut chain = sealed.ctx.clone();
+        chain.bitcoin_config.chain = ChainId::Signet;
+        refuse(
+            "chain",
+            &chain,
+            &sealed.wallet_id,
+            &sealed.secret,
+            &sealed.bytes,
+        );
+        assert!(!sealed
+            .root
+            .network_directory(ChainId::Signet)
+            .path()
+            .join("mnemonics")
+            .exists());
+
+        let mut checksum = sealed.wallet_id.clone();
+        checksum.descriptor_checksum = "deadbeef".into();
+        let looked_up = seed_path(&sealed.root, &sealed.signer, &checksum);
+        refuse(
+            "checksum",
+            &sealed.ctx,
+            &checksum,
+            &sealed.secret,
+            &sealed.bytes,
+        );
+        assert!(!looked_up.exists());
+
+        let mut cube = sealed.ctx.clone();
+        cube.cube_id = Some("other-cube".into());
+        refuse(
+            "cube id",
+            &cube,
+            &sealed.wallet_id,
+            &sealed.secret,
+            &sealed.bytes,
+        );
+
+        let wrong_secret = zeroize::Zeroizing::new([9u8; 32]);
+        refuse(
+            "device secret",
+            &sealed.ctx,
+            &sealed.wallet_id,
+            &wrong_secret,
+            &sealed.bytes,
+        );
+
+        let mut pin = sealed.ctx.clone();
+        pin.cube_pin = Some(zeroize::Zeroizing::new("9999".into()));
+        refuse(
+            "pin",
+            &pin,
+            &sealed.wallet_id,
+            &sealed.secret,
+            &sealed.bytes,
+        );
+
+        let mut missing_pin = sealed.ctx.clone();
+        missing_pin.cube_pin = None;
+        refuse(
+            "missing pin",
+            &missing_pin,
+            &sealed.wallet_id,
+            &sealed.secret,
+            &sealed.bytes,
+        );
+
+        let other = Signer::generate(Network::Testnet4).unwrap();
+        let wrong_phrase = seed_crypt::encrypt(
+            other.mnemonic().join(" ").as_bytes(),
+            PIN,
+            sealed.ctx.seed_cube_id(),
+            Some(&sealed.secret),
+        )
+        .unwrap();
+        rewrite(&sealed.path, &wrong_phrase);
+        refuse(
+            "other phrase",
+            &sealed.ctx,
+            &sealed.wallet_id,
+            &sealed.secret,
+            &wrong_phrase,
+        );
+
+        let pin_only = seed_crypt::encrypt(
+            sealed.signer.mnemonic().join(" ").as_bytes(),
+            PIN,
+            sealed.ctx.seed_cube_id(),
+            None,
+        )
+        .unwrap();
+        assert!(pin_only.starts_with(ENCRYPTED_V2_MARKER));
+        rewrite(&sealed.path, &pin_only);
+        refuse(
+            "pin-only v2 file",
+            &sealed.ctx,
+            &sealed.wallet_id,
+            &sealed.secret,
+            &pin_only,
+        );
+
+        let mut huge = ENCRYPTED_V3_MARKER.to_vec();
+        huge.resize(4097, 0);
+        rewrite(&sealed.path, &huge);
+        refuse(
+            "oversized file",
+            &sealed.ctx,
+            &sealed.wallet_id,
+            &sealed.secret,
+            &huge,
+        );
+
+        std::fs::remove_file(&sealed.path).unwrap();
+        std::fs::create_dir(&sealed.path).unwrap();
+        let error = verify(&sealed).expect_err("directory");
+        assert!(
+            error
+                .to_string()
+                .contains("Existing Testnet4 seed could not be verified"),
+            "{error}",
+            error = error,
+        );
+        assert!(sealed.path.is_dir());
+
+        let recovery_only = seal(false, "cube-testnet4");
+        refuse_sealed(
+            "recovery-path key is not the primary vault key",
+            &recovery_only,
+        );
+
+        let unbound = seal(true, "");
+        assert!(unbound.ctx.seed_cube_id().is_empty());
+        refuse_sealed("unbound cube", &unbound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_valid_seed_is_refused_without_following_it() {
+        let sealed = fresh();
+        let target = sealed.path.with_file_name("target-seed.txt");
+        std::fs::rename(&sealed.path, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &sealed.path).unwrap();
+        let error = verify(&sealed).expect_err("symlink");
+        assert!(error
+            .to_string()
+            .contains("Existing Testnet4 seed could not be verified"));
+        assert!(sealed
+            .path
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), sealed.bytes);
+        assert!(target.is_file());
+    }
+
+    #[test]
+    fn resume_refuses_the_wrong_context_before_creating_a_datadir() {
+        let signer = || Arc::new(Mutex::new(Signer::generate(Network::Testnet4).unwrap()));
+        let wallet_id = WalletId::new("unused".into(), Some(TIMESTAMP));
+        let run = |ctx: Context, label: &str| {
+            let root = ctx.coincube_directory.path().to_path_buf();
+            let error = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(integration::install_testnet4_wallet_resumable(
+                    ctx,
+                    wallet_id.clone(),
+                    signer(),
+                ))
+                .expect_err(label);
+            assert!(
+                error
+                    .to_string()
+                    .contains("Invalid Testnet4 resume context"),
+                "{label}: {error}",
+                label = label,
+                error = error,
+            );
+            assert!(
+                !root.exists(),
+                "{label} must not create a datadir",
+                label = label,
+            );
+        };
+
+        let root = |label: &str| {
+            CoincubeDirectory::new(std::env::temp_dir().join(format!(
+                "t4-resume-context-{label}-{}",
+                uuid::Uuid::new_v4()
+            )))
+        };
+        run(
+            Context::new(
+                Network::Signet,
+                root("signet"),
+                RemoteBackend::None,
+                None,
+                None,
+            ),
+            "signet",
+        );
+
+        let mut recovered = Context::new_for_chain(
+            ChainId::Testnet4,
+            root("recovered"),
+            RemoteBackend::None,
+            None,
+            None,
+        );
+        recovered.cube_id = Some("cube-testnet4".into());
+        recovered.recovered_signer = Some(Arc::new(Signer::generate(Network::Testnet4).unwrap()));
+        run(recovered, "recovered signer");
+
+        run(
+            Context::new_for_chain(
+                ChainId::Testnet4,
+                root("anonymous"),
+                RemoteBackend::None,
+                None,
+                None,
+            ),
+            "empty cube id",
+        );
+    }
+}
