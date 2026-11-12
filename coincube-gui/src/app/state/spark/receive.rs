@@ -21,7 +21,6 @@
 //! land in Phase 4d.
 
 use std::collections::{HashMap, HashSet};
-use std::convert::TryInto;
 use std::sync::Arc;
 
 use coincube_spark_protocol::{DepositInfo, ReceivePaymentOk};
@@ -34,7 +33,6 @@ use crate::app::message::Message;
 use crate::app::state::{redirect, State};
 use crate::app::view::spark::SparkReceiveView;
 use crate::app::view::spark::SparkRecentTransaction;
-use crate::app::view::FiatAmountConverter;
 use crate::app::wallets::SparkBackend;
 
 use super::esplora::DEPOSIT_MATURITY_CONFIRMATIONS;
@@ -950,18 +948,7 @@ impl State for SparkReceive {
                 Task::none()
             }
             SparkReceiveMessage::PaymentsLoaded(payments) => {
-                let fiat_converter: Option<FiatAmountConverter> =
-                    cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
-                self.recent_transactions = payments
-                    .iter()
-                    .take(5)
-                    .map(|p| {
-                        crate::app::state::spark::overview::payment_summary_to_recent_tx(
-                            p,
-                            fiat_converter.as_ref(),
-                        )
-                    })
-                    .collect();
+                self.recent_transactions = super::recent_transactions_from(&payments, cache);
                 Task::none()
             }
             SparkReceiveMessage::PaymentsFailed(err) => {

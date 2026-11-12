@@ -773,23 +773,6 @@ mod tests {
         )
     }
 
-    fn payment(amount_sat: i64) -> coincube_spark_protocol::PaymentSummary {
-        coincube_spark_protocol::PaymentSummary {
-            id: "pay-1".to_string(),
-            amount_sat,
-            fees_sat: 0,
-            token_amount: None,
-            token_decimals: None,
-            token_ticker: None,
-            timestamp: 1_700_000_000,
-            status: "completed".to_string(),
-            direction: "incoming".to_string(),
-            method: "lightning".to_string(),
-            description: None,
-            details: Default::default(),
-        }
-    }
-
     /// The form and the rail fill the page column, as on Send and Receive:
     /// compact tiles, and the rail ending at the column's right edge with
     /// Spark's latest payments.
@@ -798,7 +781,10 @@ mod tests {
         use crate::app::view::shared::payment_columns::RAIL_WIDTH;
         let cache = mainnet();
         let mut swap = funded();
-        swap.set_recent_payments(&[payment(1_001)], &cache);
+        swap.set_recent_payments(
+            &[crate::app::state::spark::test_payment("pay-1", 1_001)],
+            &cache,
+        );
         let width = 1106;
         let probe = crate::app::view::shared::landing::capture::inspect_wide_content(
             "spark-swap-columns",

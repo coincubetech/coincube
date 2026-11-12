@@ -173,14 +173,7 @@ impl SparkSwap {
         payments: &[coincube_spark_protocol::PaymentSummary],
         cache: &Cache,
     ) {
-        use std::convert::TryInto;
-        let fiat: Option<crate::app::view::FiatAmountConverter> =
-            cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
-        self.recent_transactions = payments
-            .iter()
-            .take(5)
-            .map(|p| super::overview::payment_summary_to_recent_tx(p, fiat.as_ref()))
-            .collect();
+        self.recent_transactions = super::recent_transactions_from(payments, cache);
     }
 
     pub fn from(&self) -> WalletAsset {
@@ -1192,20 +1185,7 @@ mod tests {
     fn recent_payments_keep_five_and_clear_when_the_load_fails() {
         let cache = Cache::default();
         let mut swap = SparkSwap::new(None);
-        let payment = |n: i64| coincube_spark_protocol::PaymentSummary {
-            id: format!("pay-{}", n),
-            amount_sat: n,
-            fees_sat: 0,
-            token_amount: None,
-            token_decimals: None,
-            token_ticker: None,
-            timestamp: 1_700_000_000,
-            status: "completed".to_string(),
-            direction: "incoming".to_string(),
-            method: "lightning".to_string(),
-            description: None,
-            details: Default::default(),
-        };
+        let payment = |n: i64| super::super::test_payment(&format!("pay-{}", n), n);
         drop(State::update(
             &mut swap,
             None,

@@ -35,6 +35,42 @@ use crate::app::wallets::SparkBackend;
 /// and Receive panels so the "Last transactions" feed stays identical
 /// across wallet screens — callers differ only in which panel message
 /// they wrap the response in.
+/// The latest five of `payments` as Send, Receive and Swap list them in their
+/// side panel, priced at the cache's fiat rate.
+pub(crate) fn recent_transactions_from(
+    payments: &[PaymentSummary],
+    cache: &Cache,
+) -> Vec<crate::app::view::spark::SparkRecentTransaction> {
+    use std::convert::TryInto;
+    let fiat: Option<crate::app::view::FiatAmountConverter> =
+        cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
+    payments
+        .iter()
+        .take(5)
+        .map(|p| overview::payment_summary_to_recent_tx(p, fiat.as_ref()))
+        .collect()
+}
+
+/// A completed incoming Lightning payment, for tests of the panels that list
+/// payments.
+#[cfg(test)]
+pub(crate) fn test_payment(id: &str, amount_sat: i64) -> PaymentSummary {
+    PaymentSummary {
+        id: id.to_string(),
+        amount_sat,
+        fees_sat: 0,
+        token_amount: None,
+        token_decimals: None,
+        token_ticker: None,
+        timestamp: 1_700_000_000,
+        status: "completed".to_string(),
+        direction: "incoming".to_string(),
+        method: "lightning".to_string(),
+        description: None,
+        details: Default::default(),
+    }
+}
+
 pub(crate) fn fetch_payments_task(
     backend: Option<Arc<SparkBackend>>,
     on_loaded: impl FnOnce(Vec<PaymentSummary>) -> Message + Send + 'static,
