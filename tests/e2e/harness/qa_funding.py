@@ -504,10 +504,15 @@ def register_completed(runner):
                     shutil.rmtree(temporary)
         private_dir(snapshot)
         saved_state, saved_cp, saved_binding = sponsor.read_run(snapshot)
+        # A later verify may observe confirmation. Acceptance's immutable txid
+        # and every other proof remain bound to the saved donor evidence.
+        saved_artifacts, current_artifacts = deepcopy(saved_cp["artifacts"]), deepcopy(a)
+        for artifacts in (saved_artifacts, current_artifacts):
+            artifacts.get("public_acceptance", {}).pop("confirmed", None)
         require(saved_binding["state_sha256"] == binding["state_sha256"]
                 and saved_binding["descriptor_sha256"] == binding["descriptor_sha256"]
                 and saved_state["run_id"] == runner.run_id
-                and saved_cp.get("binding") == cp["binding"] and saved_cp["artifacts"] == a
+                and saved_cp.get("binding") == cp["binding"] and saved_artifacts == current_artifacts
                 and set(saved_cp.get("stages", {})) == set(STAGES)
                 and all(v.get("status") == "passed" for v in saved_cp["stages"].values()), "SOURCE_CHANGED")
         key = digest({"directory": str(directory), "run_id": runner.run_id,

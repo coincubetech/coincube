@@ -306,6 +306,7 @@ def test_completed_registration_snapshot_survives_live_checkpoint_replay(flow, m
     snapshot = Path(item['entry']['source_run'])
     original = {n: private_read(snapshot / n) for n in qa_funding.FILES}
     cp['stages']['verify']['at'] = 2
+    cp['artifacts']['public_acceptance']['confirmed'] = True
     atomic_write(live / 'checkpoint.json', sponsor.encoded(cp))
     qa_funding.register_completed(runner)
     with qa_funding.pool() as data:
