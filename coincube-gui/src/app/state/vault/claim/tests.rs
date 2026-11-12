@@ -816,6 +816,8 @@ async fn apply_saved_funding_outputs(p: &mut ClaimStep1Panel, task: Task<Message
     }
 }
 
+// This fixture hand-writes a POSIX-private journal, matching its Unix-only helper.
+#[cfg(unix)]
 #[tokio::test]
 async fn reopening_saved_deposits_does_not_repeat_the_full_vault_scan() {
     use coincube_core::miniscript::bitcoin::hashes::sha256;
