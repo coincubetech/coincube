@@ -599,12 +599,11 @@ fn connected_view<'a>(
                     BalanceValue::Known { primary, secondary },
                     visibility,
                     // Send opens Spark's Send paying from US Dollar; Receive
-                    // is Spark's Receive, which explains that payments
-                    // arrive as bitcoin.
+                    // opens Spark's Receive set to USDB sent on Spark.
                     send_receive(
                         "usdb",
                         SparkOverviewMessage::SendUsdb,
-                        SparkOverviewMessage::ReceiveBtc,
+                        SparkOverviewMessage::ReceiveUsdb,
                     ),
                 )
             }

@@ -96,6 +96,7 @@ fn legacy_payment_succeeded_event_without_bolt11_remains_compatible() {
         id,
         amount_sat,
         bolt11,
+        token,
     }) = frame
     else {
         panic!("expected payment_succeeded event");
@@ -103,6 +104,41 @@ fn legacy_payment_succeeded_event_without_bolt11_remains_compatible() {
     assert_eq!(id, "payment-1");
     assert_eq!(amount_sat, 1250);
     assert_eq!(bolt11, None);
+    assert_eq!(token, None, "a bridge before the token field sends bitcoin");
+}
+
+#[test]
+fn token_payment_succeeded_event_names_its_token() {
+    let event = Event::PaymentSucceeded {
+        id: "payment-2".to_string(),
+        amount_sat: 12_500_000,
+        bolt11: None,
+        token: Some(coincube_spark_protocol::PaymentToken {
+            ticker: "USDB".to_string(),
+            decimals: 6,
+        }),
+    };
+    let value = serde_json::to_value(Frame::Event(event)).unwrap();
+    assert_eq!(
+        value["payload"]["token"],
+        json!({ "ticker": "USDB", "decimals": 6 })
+    );
+    let Frame::Event(Event::PaymentSucceeded { token, .. }) =
+        serde_json::from_value::<Frame>(value).unwrap()
+    else {
+        panic!("expected payment_succeeded event");
+    };
+    assert_eq!(token.map(|t| t.ticker), Some("USDB".to_string()));
+
+    // A bitcoin payment's event keeps its old shape.
+    let bitcoin = serde_json::to_value(Frame::Event(Event::PaymentSucceeded {
+        id: "payment-3".to_string(),
+        amount_sat: 1,
+        bolt11: None,
+        token: None,
+    }))
+    .unwrap();
+    assert!(bitcoin["payload"].get("token").is_none());
 }
 
 #[test]

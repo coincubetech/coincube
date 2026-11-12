@@ -350,7 +350,10 @@ impl State for SparkOverview {
                     return send_from(coincube_spark_protocol::WalletAsset::Usdb);
                 }
                 view::SparkOverviewMessage::ReceiveBtc => {
-                    return redirect(Menu::Spark(SparkSubMenu::Receive));
+                    return receive_into(coincube_spark_protocol::WalletAsset::Bitcoin);
+                }
+                view::SparkOverviewMessage::ReceiveUsdb => {
+                    return receive_into(coincube_spark_protocol::WalletAsset::Usdb);
                 }
                 view::SparkOverviewMessage::History => {
                     return redirect(Menu::Spark(SparkSubMenu::Transactions(None)));
@@ -418,6 +421,16 @@ impl State for SparkOverview {
 }
 
 /// Spark's Send, paying from `asset` — each Overview balance row's Send.
+/// Spark's Receive, set for what the balance row holds (USDB → USDB).
+fn receive_into(asset: coincube_spark_protocol::WalletAsset) -> Task<Message> {
+    Task::batch(vec![
+        redirect(Menu::Spark(SparkSubMenu::Receive)),
+        Task::done(Message::View(view::Message::SparkReceive(
+            view::SparkReceiveMessage::StartFrom(asset),
+        ))),
+    ])
+}
+
 fn send_from(asset: coincube_spark_protocol::WalletAsset) -> Task<Message> {
     Task::batch(vec![
         redirect(Menu::Spark(SparkSubMenu::Send)),
