@@ -97,9 +97,15 @@ def test_replay_cannot_clear_reintroduced_old_attempt():
     assert store.writes == 1
 
 
-@pytest.fixture
-def scenario(tmp_path, monkeypatch):
-    run = tmp_path / 'original'
+@pytest.fixture(params=['direct', 'symlinked-parent'])
+def scenario(tmp_path, monkeypatch, request):
+    parent = tmp_path / 'parent'
+    parent.mkdir(mode=0o700)
+    if request.param == 'symlinked-parent':
+        alias = tmp_path / 'parent-alias'
+        alias.symlink_to(parent, target_is_directory=True)
+        parent = alias
+    run = parent / 'original'
     run.mkdir(mode=0o700)
     config = {'account_email': 'fixture@example.invalid', 'profile_dir': str(tmp_path / 'desktop'),
               'phone_state_dir': str(tmp_path / 'phone')}
@@ -164,6 +170,15 @@ def test_durable_terminal_precedes_cas_and_original_run_unchanged(scenario):
     assert abort.execute(args)['phase'] == 'already_quarantined'
     assert store.value['pending_attempt'] == 'sign:newer' and store.writes == 1
     assert len(calls) == 2
+
+
+def test_output_cannot_overlap_source_through_parent_alias(scenario):
+    args, run, config, store, calls = scenario
+    args.output_dir = str(run.resolve() / 'abort')
+    with pytest.raises(Failed, match='OUTPUT_ISOLATION'):
+        abort.execute(args)
+    assert not calls and store.writes == 0
+    assert not (run / 'abort').exists()
 
 
 @pytest.mark.parametrize('file', ['checkpoint.json', 'local-signed.psbt', 'provision.json'])

@@ -134,11 +134,12 @@ def execute(args):
     for value in (args.source_run, args.config, args.output_dir, args.native_binary, args.signing_binary):
         require(Path(value).is_absolute() and not Path(value).is_symlink(), "ABSOLUTE_PATH")
     require(isinstance(args.authorize_abort, str) and 0 < len(args.authorize_abort.strip()) <= 512, "AUTHORIZATION_REQUIRED")
-    directory, output = Path(args.source_run).resolve(), Path(args.output_dir).resolve()
+    # Fresh runs bind the lexical absolute path, including symlinked parents.
+    directory, output = Path(args.source_run).absolute(), Path(args.output_dir).resolve()
     config = validate_config(json.loads(private_read(args.config)))
     require("phone_state_dir" in config, "PHONE_STORE_REQUIRED")
     phone_root = Path(config["phone_state_dir"]).resolve()
-    with source_lock(directory), output_lock(output, [directory, phone_root, Path(config["profile_dir"]).resolve(), Path(args.config).resolve()]):
+    with source_lock(directory), output_lock(output, [directory.resolve(), phone_root, Path(config["profile_dir"]).resolve(), Path(args.config).resolve()]):
         state, binding, snapshot, fixture = bind_source(directory, config)
         phone_dir = phone_root / binding["account_identity"]
         locator = phone_dir / "phone-secrets.keychain.json"
