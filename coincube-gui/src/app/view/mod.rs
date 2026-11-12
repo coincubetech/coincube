@@ -18,8 +18,6 @@ pub mod wallet_header;
 
 pub mod vault;
 
-use std::iter::FromIterator;
-
 pub use liquid::*;
 pub use message::*;
 pub use spark::{
@@ -924,6 +922,20 @@ fn toast_card<'a>(
         .clip(true)
 }
 
+/// Most toasts shown at once, so a burst can't grow the stack up the window.
+/// Older toasts keep running their own expiry timers while hidden: they only
+/// come back if a newer one is dismissed first, and in a fast burst they
+/// usually expire unseen.
+const TOAST_MAX_VISIBLE: usize = 3;
+
+/// The newest `TOAST_MAX_VISIBLE` toasts, oldest first so the newest sits
+/// nearest the bottom edge.
+fn visible_toasts<T>(iter: impl Iterator<Item = T>) -> impl Iterator<Item = T> {
+    let all: Vec<T> = iter.collect();
+    let hidden = all.len().saturating_sub(TOAST_MAX_VISIBLE);
+    all.into_iter().skip(hidden)
+}
+
 pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
     iter: I,
 ) -> coincube_ui::widget::Element<'a, Message> {
@@ -932,13 +944,21 @@ pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
         iced::widget::Space::new().width(nav::shell::FULL_WIDTH),
         // center toasts horizontally
         iced::widget::Space::new().width(iced::Length::Fill),
-        iced::widget::Column::from_iter(iter.map(|(id, level, content)| {
-            toast_card(
+        // Keyed by toast id so card state (a held dismiss button) follows
+        // its toast when the number shown changes, e.g. the oldest of two
+        // toasts expiring. iced only matches keys when the count changes: a
+        // capped shift that keeps three cards on screen reuses state by slot.
+        iced::widget::keyed_column(visible_toasts(iter).map(|(id, level, content)| {
+            // `opaque` captures presses on the card and levitates the cursor
+            // for the layers below, so clicks, hover and scroll over a toast
+            // never reach the screen underneath. Only the cards are wrapped:
+            // the rest of the overlay stays click-through.
+            let card = iced::widget::opaque(toast_card(
                 level.into(),
                 coincube_ui::locale::notice(content),
                 Some(Message::DismissToast(id)),
-            )
-            .into()
+            ));
+            (id, card)
         }))
         .spacing(8),
         iced::widget::Space::new().width(iced::Length::Fill),
@@ -957,6 +977,180 @@ pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
         .align_x(Alignment::Center)
         .align_y(Alignment::Center)
         .into()
+}
+
+#[cfg(test)]
+mod toast_overlay_tests {
+    use super::{toast_overlay, visible_toasts, Message, TOAST_MAX_VISIBLE};
+    use coincube_ui::{font, theme, widget::Renderer};
+    use iced::advanced::{
+        renderer::Headless,
+        widget::{operation, Id, Operation},
+    };
+    use iced::{mouse, Event, Point, Rectangle, Size};
+    use iced_runtime::user_interface::{Cache as UiCache, UserInterface};
+
+    /// Marks a press that reached the screen under the toasts.
+    const UNDERLAY: usize = usize::MAX;
+    const WINDOW: Size = Size::new(1440.0, 900.0);
+
+    #[derive(Default)]
+    struct TextProbe(Vec<(String, Rectangle)>);
+    impl Operation for TextProbe {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn text(&mut self, _: Option<&Id>, bounds: Rectangle, value: &str) {
+            self.0.push((value.to_owned(), bounds));
+        }
+    }
+
+    fn toasts(n: usize) -> Vec<(usize, log::Level, String)> {
+        (0..n)
+            .map(|i| (i, log::Level::Info, format!("Toast number {i}")))
+            .collect()
+    }
+
+    fn renderer() -> Renderer {
+        for bytes in font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        iced::futures::executor::block_on(<Renderer as Headless>::new(
+            font::REGULAR,
+            16.into(),
+            Some("tiny-skia"),
+        ))
+        .unwrap()
+    }
+
+    /// The overlay stacked over a full-window clickable screen, as `App::view`
+    /// mounts it.
+    fn mounted<'a>(
+        list: Vec<(usize, log::Level, String)>,
+        renderer: &mut Renderer,
+    ) -> UserInterface<'a, Message, theme::Theme, Renderer> {
+        let underlay = iced::widget::mouse_area(
+            iced::widget::Space::new()
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill),
+        )
+        .on_press(Message::DismissToast(UNDERLAY));
+        let stack: coincube_ui::widget::Element<'a, Message> = iced::widget::Stack::new()
+            .push(underlay)
+            .push(toast_overlay(list.into_iter()))
+            .into();
+        UserInterface::build(stack, WINDOW, UiCache::new(), renderer)
+    }
+
+    fn texts(
+        ui: &mut UserInterface<'_, Message, theme::Theme, Renderer>,
+        renderer: &Renderer,
+    ) -> Vec<(String, Rectangle)> {
+        let mut probe = TextProbe::default();
+        ui.operate(renderer, &mut operation::black_box(&mut probe));
+        probe.0
+    }
+
+    fn click(
+        ui: &mut UserInterface<'_, Message, theme::Theme, Renderer>,
+        renderer: &mut Renderer,
+        at: Point,
+    ) -> Vec<Message> {
+        let mut messages = Vec::new();
+        let cursor = mouse::Cursor::Available(at);
+        for event in [
+            Event::Mouse(mouse::Event::CursorMoved { position: at }),
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ] {
+            ui.update(
+                &[event],
+                cursor,
+                renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+        }
+        messages
+    }
+
+    fn reached_underlay(messages: &[Message]) -> bool {
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::DismissToast(UNDERLAY)))
+    }
+
+    #[test]
+    fn only_the_newest_toasts_are_shown() {
+        let shown: Vec<usize> = visible_toasts(toasts(5).into_iter())
+            .map(|(id, ..)| id)
+            .collect();
+        assert_eq!(shown, vec![2, 3, 4], "newest last, nearest the bottom edge");
+        assert_eq!(visible_toasts(toasts(2).into_iter()).count(), 2);
+        assert_eq!(visible_toasts(toasts(0).into_iter()).count(), 0);
+
+        let mut renderer = renderer();
+        let mut ui = mounted(toasts(TOAST_MAX_VISIBLE + 4), &mut renderer);
+        let mounted: Vec<String> = texts(&mut ui, &renderer)
+            .into_iter()
+            .map(|(text, _)| text)
+            .filter(|text| text.starts_with("Toast number"))
+            .collect();
+        assert_eq!(mounted.len(), TOAST_MAX_VISIBLE, "{mounted:?}");
+        assert!(!mounted.iter().any(|t| t == "Toast number 0"));
+    }
+
+    #[test]
+    fn a_press_on_a_toast_does_not_reach_the_screen_below() {
+        let mut renderer = renderer();
+        let mut ui = mounted(toasts(1), &mut renderer);
+        let message = texts(&mut ui, &renderer)
+            .into_iter()
+            .find(|(text, _)| text == "Toast number 0")
+            .expect("mounted toast message")
+            .1;
+
+        let on_toast = click(&mut ui, &mut renderer, message.center());
+        assert!(
+            !reached_underlay(&on_toast),
+            "a press on the toast reached the screen below"
+        );
+
+        // The dismiss cross is the glyph after the message. Inside `opaque` it
+        // still gets the press first and dismisses its own toast.
+        let all = texts(&mut ui, &renderer);
+        let at = all
+            .iter()
+            .position(|(text, _)| text == "Toast number 0")
+            .expect("mounted toast message");
+        let cross = all.get(at + 1).expect("mounted dismiss cross").1;
+        assert!(cross.x > message.x, "the cross sits right of the message");
+        let on_cross = click(&mut ui, &mut renderer, cross.center());
+        assert!(
+            on_cross
+                .iter()
+                .any(|m| matches!(m, Message::DismissToast(0))),
+            "the dismiss button must still dismiss its toast"
+        );
+        assert!(
+            !reached_underlay(&on_cross),
+            "a press on the dismiss button reached the screen below"
+        );
+
+        // The overlay outside the cards stays click-through.
+        let beside = click(
+            &mut ui,
+            &mut renderer,
+            Point::new(WINDOW.width - 20.0, 20.0),
+        );
+        assert!(
+            reached_underlay(&beside),
+            "a press beside the toasts must reach the screen below"
+        );
+    }
 }
 
 #[cfg(test)]
