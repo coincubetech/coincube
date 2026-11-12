@@ -165,7 +165,8 @@ def test_real_package_validation_rejects_wrong_profile_endpoints_and_build(tmp_p
     assets = app / "Frameworks/App.framework/flutter_assets"
     assets.mkdir(parents=True)
     (app / "Runner").write_bytes(b"synthetic binary")
-    (assets.parent / "App").write_bytes(b"synthetic flutter")
+    framework = assets.parent / "App"
+    framework.write_bytes(b"synthetic flutter qa-home-refresh-trigger")
     info = {"CFBundleIdentifier": qa_build.BUNDLE, "CFBundleVersion": "41"}
     (app / "Info.plist").write_bytes(plistlib.dumps(info))
     env = "API_URL=https://api.coincube.io/api/v1/\nGRPC_HOST=grpc.coincube.io\nGRPC_PORT=443\nGRPC_TLS=true\n"
@@ -179,6 +180,11 @@ def test_real_package_validation_rejects_wrong_profile_endpoints_and_build(tmp_p
     monkeypatch.setattr(qa_build, "plist_output", lambda args: ent if args[0] == "codesign" else profile)
     device = {"hardwareProperties": {"udid": "synthetic-udid"}}
     assert qa_build.validate_app(app, device, 41)["build"] == 41
+    framework.write_bytes(b"synthetic release build without QA probe")
+    with pytest.raises(Failed) as caught:
+        qa_build.validate_app(app, device, 41)
+    assert caught.value.code == "QA_BUILD_HOOK"
+    framework.write_bytes(b"synthetic flutter qa-home-refresh-trigger")
     with pytest.raises(Failed, match="identity"):
         qa_build.validate_app(app, device, 42)
     profile["ProvisionedDevices"] = []

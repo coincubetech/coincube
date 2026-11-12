@@ -93,8 +93,8 @@ namespace. Both API endpoint values always remain pinned to production. `ios.min
 reviewed Keychain build. Fresh onboarding also requires accessibility forwarding
 through Keychain's screenshot-protection wrapper: build 36 hides the recovery
 controls from XCTest, and cannot complete this flow. The example selects build
-38, which also routes PIN-backed signer entropy through real PIN verification and
-exposes non-spoken signing-session/empty-entry accessibility identifiers. A build
+41. Build 38 introduced real PIN verification for PIN-backed signer entropy and
+non-spoken signing-session/empty-entry accessibility identifiers. A build
 number alone is not source or acceptance evidence.
 The QA account must have capacity for a new signer key. The exact **Key limit
 reached** screen produces `SIGNER_LIMIT` immediately; the runner never changes a

@@ -87,9 +87,12 @@ def validate_app(app, device, minimum_build):
     if any(env.get(k) != v for k, v in {"API_URL": "https://api.coincube.io/api/v1/",
                                         "GRPC_HOST": "grpc.coincube.io", "GRPC_PORT": "443", "GRPC_TLS": "true"}.items()):
         raise Failed("QA_BUILD_ENDPOINTS", "The QA app must use production REST and TLS gRPC endpoints.")
+    framework = (app / "Frameworks/App.framework/App").read_bytes()
+    if b"qa-home-refresh-trigger" not in framework:
+        raise Failed("QA_BUILD_HOOK", "The compiled app lacks the QA Home-refresh trigger; build number or a define alone is insufficient.")
     # The validated signed bundle, not its version alone, binds the receipt.
     return {"build": build, "binary_sha256": hashlib.sha256((app / "Runner").read_bytes()).hexdigest(),
-            "flutter_sha256": hashlib.sha256((app / "Frameworks/App.framework/App").read_bytes()).hexdigest()}
+            "flutter_sha256": hashlib.sha256(framework).hexdigest()}
 
 
 def prepare(config, strict, device, minimum_build, query):
