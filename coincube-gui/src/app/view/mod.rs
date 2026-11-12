@@ -56,14 +56,6 @@ use crate::app::{
     menu::Menu,
 };
 
-/// Simple toast notification for clipboard copy and other success messages
-pub fn simple_toast(message: &str) -> Container<Message> {
-    container(text::p2_regular(message))
-        .padding(15)
-        .style(theme::notification::success)
-        .max_width(400.0)
-}
-
 /// Wraps `content` in the shared balance card style used across wallet overview and send screens
 /// (themed card background, orange border, rounded corners).
 pub fn balance_header_card<'a, Msg: 'a>(content: impl Into<Element<'a, Msg>>) -> Element<'a, Msg> {
@@ -842,87 +834,121 @@ pub fn loading_placeholder<'a, T: Into<Element<'a, Message>>>(
         .into()
 }
 
+/// Fixed toast width so stacked toasts line up; height follows the copy.
+const TOAST_WIDTH: f32 = 420.0;
+/// Square dismiss button and icon tile inside a toast.
+const TOAST_CONTROL: f32 = 28.0;
+/// Glyph size of the toast icon and the dismiss cross.
+const TOAST_GLYPH: f32 = 16.0;
+
+/// One toast: a tone icon tile, the message, and a dismiss button when
+/// `on_dismiss` is set. Styles resolve against the live theme at draw time,
+/// so the toast follows light and dark mode.
+fn toast_card<'a>(
+    tone: coincube_ui::theme::notification::ToastTone,
+    message: String,
+    on_dismiss: Option<Message>,
+) -> Container<'a, Message> {
+    use coincube_ui::component::tenshu::text as tenshu_text;
+    use coincube_ui::icon;
+    use coincube_ui::theme::notification::{self, ToastTone};
+    use coincube_ui::theme::tenshu::button::{action, ActionKind, ActionShape};
+
+    let glyph = match tone {
+        ToastTone::Info => icon::tooltip_icon(),
+        ToastTone::Success => icon::check_circle_icon(),
+        ToastTone::Warning => icon::warning_icon(),
+        ToastTone::Error => icon::x_circle_icon(),
+        ToastTone::Debug => icon::code_slash_icon(),
+    }
+    .size(TOAST_GLYPH)
+    .style(
+        move |t: &coincube_ui::theme::Theme| iced::widget::text::Style {
+            color: Some(tone.color(t)),
+        },
+    );
+
+    let tile = container(glyph)
+        .width(TOAST_CONTROL)
+        .height(TOAST_CONTROL)
+        .center_x(TOAST_CONTROL)
+        .center_y(TOAST_CONTROL)
+        .style(move |t| notification::toast_icon_tile(t, tone));
+
+    // `Word` wrapping never breaks inside a word, so a txid, address or URL
+    // would run past the card; fall back to breaking between glyphs.
+    let message = if tone == ToastTone::Debug {
+        tenshu_text::mono(message)
+    } else {
+        tenshu_text::label(message)
+    }
+    .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
+
+    let mut content = iced::widget::Row::new()
+        .spacing(12)
+        .align_y(Alignment::Start)
+        .push(tile)
+        .push(
+            container(message)
+                .width(Length::Fill)
+                .padding(iced::Padding::ZERO.top(4).bottom(4)),
+        );
+
+    if let Some(on_dismiss) = on_dismiss {
+        content = content.push(
+            iced::widget::Button::new(
+                icon::cross_icon()
+                    .size(TOAST_GLYPH)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
+            )
+            .padding(0)
+            .width(TOAST_CONTROL)
+            .height(TOAST_CONTROL)
+            .style(|t, status| action(t, status, ActionKind::Quiet, ActionShape::Icon))
+            .on_press(on_dismiss),
+        );
+    }
+
+    container(content)
+        .width(TOAST_WIDTH)
+        .padding(iced::Padding {
+            top: 10.0,
+            right: 8.0,
+            bottom: 10.0,
+            left: 12.0,
+        })
+        .style(move |t| notification::toast(t, tone))
+        .clip(true)
+}
+
 pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
     iter: I,
-    theme: &coincube_ui::theme::Theme,
 ) -> coincube_ui::widget::Element<'a, Message> {
-    use coincube_ui::{color, component::text, icon::cross_icon, theme::notification};
-
-    // Color mapping for toast levels using the theme
-    let toast = |id: usize, level: log::Level, content: String| {
-        const WIDGET_HEIGHT: u32 = 80;
-
-        // Use theme palette for the toast background
-        let palette = notification::palette_for_level(&level, theme);
-        let bg_color = palette.background;
-        let border_color = palette.border.unwrap_or(palette.background);
-        let text_color = palette.text.unwrap_or(color::WHITE);
-
-        let bg = iced::Background::Color(bg_color);
-        let border = iced::Border {
-            width: 1.0,
-            color: border_color,
-            radius: 25.0.into(),
-        };
-
-        let inner = iced::widget::row![
-            container(text::p1_bold(coincube_ui::locale::notice(content)).color(text_color))
-                .width(600)
-                .height(WIDGET_HEIGHT)
-                .padding(15)
-                .align_y(iced::Alignment::Center),
-            iced::widget::Button::new(
-                cross_icon()
-                    .color(text_color)
-                    .size(36)
-                    .align_x(iced::Alignment::Center)
-                    .align_y(iced::Alignment::Center)
-                    .height(iced::Length::Fill)
-            )
-            .height(WIDGET_HEIGHT)
-            .width(60)
-            .style(move |_, status| {
-                let base = iced::widget::button::Style::default();
-                match status {
-                    iced::widget::button::Status::Hovered => base.with_background(iced::Color {
-                        a: 0.2,
-                        ..color::BLACK
-                    }),
-                    _ => base,
-                }
-            })
-            .on_press(Message::DismissToast(id))
-        ];
-
-        // Wrap the entire row in a single styled container so the close
-        // button sits inside the rounded rectangle. clip(true) ensures
-        // the hover highlight respects the border radius.
-        container(inner)
-            .style(move |_| {
-                iced::widget::container::Style::default()
-                    .background(bg)
-                    .border(border)
-            })
-            .clip(true)
-    };
-
     let centered = iced::widget::row![
         // Offset notifications past the full-width Cube shell.
         iced::widget::Space::new().width(nav::shell::FULL_WIDTH),
         // center toasts horizontally
         iced::widget::Space::new().width(iced::Length::Fill),
-        iced::widget::Column::from_iter(
-            iter.map(|(id, level, content)| toast(id, level, content).into())
-        )
-        .spacing(10),
+        iced::widget::Column::from_iter(iter.map(|(id, level, content)| {
+            toast_card(
+                level.into(),
+                coincube_ui::locale::notice(content),
+                Some(Message::DismissToast(id)),
+            )
+            .into()
+        }))
+        .spacing(8),
         iced::widget::Space::new().width(iced::Length::Fill),
     ];
 
-    // full screen positioning
+    // full screen positioning: bottom-centre, 24px above the edge
     let column = iced::widget::column![
         iced::widget::Space::new().height(iced::Length::Fill),
         centered,
-        iced::widget::Space::new().height(25),
+        iced::widget::Space::new().height(24),
     ];
 
     container(column)
