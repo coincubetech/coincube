@@ -29,7 +29,7 @@ impl From<BackupMnemonic> for Box<dyn Step> {
 }
 
 /// A reminder only. Vault creation reuses the open Cube's master seed, which
-/// the Cube already recorded and backed up when it was created.
+/// was created with the Cube; backing it up is the Cube's own reminder.
 impl Step for BackupMnemonic {
     fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
         Some(crate::installer::VaultStage::Backup)

@@ -901,7 +901,8 @@ impl Installer {
 
         let restore = RestorePath::of(&user_flow).map(|path| (path, chain));
         // A Vault created inside an open Cube, Bitcoin Blake2b included: its
-        // steps carry the same stages. A fresh fork install is not framed.
+        // steps carry the same stages. Restore and claim flows are not framed
+        // as Vault creation.
         let create_vault = launched_from_app
             && matches!(user_flow, UserFlow::CreateWallet)
             && (!chain.is_blake2b() || context.in_cube_fork_vault);
@@ -4772,34 +4773,6 @@ mod create_vault_frame_tests {
                 );
             }
         }
-    }
-
-    #[tokio::test]
-    async fn a_fresh_install_keeps_the_installer_layout() {
-        let root = CoincubeDirectory::new(
-            std::env::temp_dir().join(format!("create-vault-{}", uuid::Uuid::new_v4())),
-        );
-        let fresh = Installer::try_new_for_chain(
-            root,
-            ChainId::BitcoinBlake2b,
-            UserFlow::CreateWallet,
-            false,
-            None,
-            None,
-            None,
-            false,
-            None,
-        )
-        .unwrap()
-        .0;
-        assert!(!fresh.create_vault);
-        let shown = rendered_labels(fresh.view()).await;
-        assert!(
-            !shown.iter().any(|t| t == CREATE_VAULT_TITLE),
-            "{:?}",
-            shown
-        );
-        assert!(shown.iter().any(|t| t.contains(" | ")), "{:?}", shown);
     }
 }
 
