@@ -6821,6 +6821,61 @@ mod tests {
             assert!(!home.transfer_signed);
         }
 
+        /// A broadcast already in flight when the page is left still
+        /// completes: Sent, and the Cube reported locked again.
+        #[test]
+        fn a_broadcast_in_flight_when_leaving_still_completes() {
+            use crate::app::breez_spark::SparkClient;
+            use crate::chain::ChainId;
+
+            let (_directory, root) = receiving_cube_catalog(true);
+            let (client, _requests) = SparkClient::mock_transport();
+            let cache = Cache {
+                datadir_path: root.clone(),
+                ..Cache::default()
+            };
+            let mut home = GlobalHome::new_without_wallet(
+                None,
+                Some(Arc::new(SparkBackend::new(Arc::new(client)))),
+                root.clone(),
+                ChainId::Bitcoin,
+                "source".into(),
+                false,
+            );
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::SparkBalanceUpdated {
+                    btc: Amount::from_sat(200_000),
+                    usdb_balance: None,
+                    identity_pubkey: "source-spark".into(),
+                },
+            );
+            send(&mut home, &cache, HomeMessage::NextStep);
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::PickOtherCubeWallet("destination".into(), WalletKind::Vault),
+            );
+            assert!(home.other_scope.is_some());
+            home.current_view.step = 2;
+            home.is_sending = true;
+            home.interrupt();
+            assert!(home.other_scope.is_none());
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::TransferBroadcast {
+                    amount_sat: 50_000,
+                    destination_kind: WalletKind::Vault,
+                    swap_id: None,
+                },
+            );
+            assert!(!home.is_sending);
+            assert_eq!(home.current_view.step, 3, "Sent");
+            assert!(home.other_locked_again, "Sent says it's locked again");
+        }
+
         /// A PSBT for another Cube's Vault or Spark that lands after the page
         /// was left opens no signer: the Cube is locked, so its unlock starts
         /// over on Details.
@@ -6926,13 +6981,28 @@ mod tests {
                 assert!(home.other_address.is_none());
                 if sending {
                     assert!(home.other_locked_again, "Done says it locked again");
-                    // The in-flight work fails: still locked.
+                    // The in-flight work fails: still locked, and Confirm
+                    // can't send again without a fresh unlock.
                     send(
                         &mut home,
                         &cache,
                         HomeMessage::Error(TransferError::PreparationExpired),
                     );
                     assert!(home.other_scope.is_none());
+                    home.current_view.step = 2;
+                    home.receive_address_info = Some(ReceiveAddressInfo {
+                        address: Address::from_str(MAINNET_ADDR).unwrap().assume_checked(),
+                        index: ChildNumber::from(3),
+                        labels: HashMap::new(),
+                    });
+                    home.destination_ready = Some((
+                        home.transfer_request_generation,
+                        TransferDirection::SparkToOtherCube,
+                    ));
+                    send(&mut home, &cache, HomeMessage::ConfirmSparkSend);
+                    assert_eq!(home.current_view.step, 1, "the unlock starts over");
+                    assert_eq!(home.transfer_page, TransferPage::Wallets);
+                    assert!(!home.is_sending, "nothing was sent again");
                 } else {
                     assert_eq!(home.transfer_page, TransferPage::Wallets);
                     assert!(home.other_cube_selected.is_none());
