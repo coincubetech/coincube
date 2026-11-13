@@ -428,3 +428,27 @@ def test_actual_legacy_binary_hash_guard_stops_replacement_before_backup_or_dele
     with pytest.raises(Failed, match='CLEANUP_BUILD_CHANGED'):
         qa_cleanup.cleanup_local(admission, lambda *args:called.append('private-backup'), context, {})
     assert called == []
+
+
+def test_available_blake2b_creation_needs_no_ordinary_testnet4_cleanup_context(config,tmp_path,monkeypatch):
+    import shutil
+    import uuid
+    calls = offline_protocol(config,tmp_path,monkeypatch)
+    suite = native.NativeRecovery(config,tmp_path/'run',{'consumer':'offline-only-test'})
+    account = {'tokens':{'access_token':'unit-not-a-credential'}}
+    try:
+        suite.execute(account,1)
+        chain = public.CHAINS[1]
+        scope = str(uuid.uuid5(uuid.NAMESPACE_URL,'native-recovery/'+str(suite.directory.resolve())+'/'+chain))
+        # Recreate only this test's synthetic external worker state to exercise
+        # the next chain independently. This is not a live resume mechanism.
+        shutil.rmtree(suite.directory/scope)
+        del suite.journal.data['artifacts'][chain]
+        suite.journal.save(); calls.clear()
+        def forbidden(*args,**kwargs):
+            pytest.fail('B2 available capacity must not construct ordinary-T4 cleanup admission')
+        monkeypatch.setattr(native,'NativeCleanupContext',forbidden)
+        suite.execute(account,1,cleanup_runner=object())
+        assert calls == [(chain,a) for a in ('admit_create','preflight','bind_auth',*native.ACTIONS,'retire_remote')]
+    finally:
+        suite.close()

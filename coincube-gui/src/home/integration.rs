@@ -229,7 +229,9 @@ pub async fn create_recovery_fixture_cube(
     }
     // Owner-authorized settings apply only to this initially absent QA profile.
     // These are normal product preference setters, never a visibility bypass.
-    std::fs::create_dir(root.path()).map_err(|_| "recovery_profile_create")?;
+    tokio::fs::create_dir(root.path())
+        .await
+        .map_err(|_| "recovery_profile_create")?;
     crate::recovery_native::initialize_preferences(&root, chain)?;
     crate::recovery_native::require_backend_feature(chain, &client, &root).await?;
     let name = format!("Native Recovery QA {}", &id.to_string()[..8]);

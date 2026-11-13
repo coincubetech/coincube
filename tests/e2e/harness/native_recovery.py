@@ -266,6 +266,7 @@ class NativeCleanupContext:
 class NativeCleanupConsumerV1:
     """Live native BEFORE-CREATE admission, with a real signed observer."""
     def __init__(self, suite, runner, config, account, owner_id, executable, receipt):
+        require(config.get('chain') == 'testnet4', 'CLEANUP_CHAIN')
         require(type(runner) is NativeCleanupContext, 'CLEANUP_ADMISSION')
         self.suite, self.runner, self.config = suite, runner, dict(config)
         self.account, self.owner_id = account, owner_id
@@ -280,6 +281,7 @@ class NativeCleanupConsumerV1:
 
     def observe(self):
         suite, runner = self.suite, self.runner
+        require(self.config.get('chain') == 'testnet4', 'CLEANUP_CHAIN')
         require(suite.journal.lock is not None and os.fstat(suite.journal.lock).st_uid == os.getuid(), 'CLEANUP_LEASE')
         require(self.consumer_binding == digest(suite.consumer)
                 and self.config['owner_id'] == self.owner_id == runner.account_user_id
@@ -384,10 +386,10 @@ class NativeRecovery:
             if not records:
                 # Read-only and deliberately not journaled as a secret-producing
                 # action: quota refusal must leave no fixture credentials.
-                if cleanup_context is None and (cleanup_runner is not None or cleanup_workstation is not None):
+                if chain == 'testnet4' and cleanup_context is None and (cleanup_runner is not None or cleanup_workstation is not None):
                     cleanup_context = NativeCleanupContext(self, account, owner_id, parent=cleanup_runner, workstation=cleanup_workstation)
                 admission = (NativeCleanupConsumerV1(self, cleanup_context, config, account, owner_id, executable, receipt)
-                             if cleanup_context is not None else None)
+                             if chain == 'testnet4' and cleanup_context is not None else None)
                 from . import qa_cleanup
                 if admission is not None:
                     qa_cleanup.reconcile_capacity(cleanup_context, admission=admission)

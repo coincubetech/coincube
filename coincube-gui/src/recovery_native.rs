@@ -445,7 +445,9 @@ pub async fn restore(
         .descriptor
         .parse::<CoincubeDescriptor>()
         .map_err(|_| "native_descriptor")?;
-    std::fs::create_dir_all(root.path()).map_err(|_| "native_profile_create")?;
+    tokio::fs::create_dir_all(root.path())
+        .await
+        .map_err(|_| "native_profile_create")?;
     initialize_preferences(root, cube.network)?;
     require_backend_feature(cube.network, &client, root).await?;
     device_secret::get_or_create(root.path(), &cube.id).map_err(|_| "native_keystore_blocked")?;

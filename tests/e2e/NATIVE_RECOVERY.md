@@ -96,7 +96,10 @@ Before any native PIN, password, profile or production canary is created, a
 signed read-only process validates the real account, chain capability, all-network
 owned/shared UUID absence, pending approvals/sessions/decrypt requests and exact
 Cube quota. A full quota can retire at most one already enrolled disposable QA
-fixture through the existing cleanup policy. It reuses its retained-file and
+fixture through the existing cleanup policy. This legacy cleanup admission is
+ordinary Testnet4 only: full Blake2b Testnet4 capacity blocks without selecting
+or deleting an ordinary Testnet4 fixture. Available Blake2b capacity proceeds
+normally. It reuses its retained-file and
 backup checks, candidate lease, pending/sharing graph, residual accounting and
 funding-source protections. Native admission is a separate typed consumer; it
 never fabricates a phone PID or mobile acceptance. Initial selection requires a

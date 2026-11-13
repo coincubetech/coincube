@@ -69,3 +69,20 @@ def test_lost_cube_delete_finishes_exact_saga_even_when_slot_is_now_available(fl
         assert runner.artifacts['qa_cleanup']['phase'] == 'complete'
     finally:
         journal.close()
+
+
+def test_blake2b_full_quota_cannot_select_or_delete_ordinary_testnet4_fixture(flow, tmp_path, monkeypatch):
+    from harness import qa_funding
+    from harness.state import Failed, private_read
+    runner, ordinary, calls, _, journal = admission_for(flow, tmp_path, monkeypatch)
+    before = private_read(qa_funding.ROOT/'pool.json')
+    try:
+        config = dict(ordinary.config, chain='bitcoin-blake2b-testnet4')
+        with pytest.raises(Failed, match='CLEANUP_CHAIN'):
+            admission = native.NativeCleanupConsumerV1(ordinary.suite, runner, config, runner.account, 5, None, {})
+            cleanup.ensure_capacity(runner, admission=admission)
+        assert flow[1]['deletes'] == []
+        assert private_read(qa_funding.ROOT/'pool.json') == before
+        assert calls == []
+    finally:
+        journal.close()
