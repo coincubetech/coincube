@@ -55,6 +55,10 @@ pub struct SparkSendView<'a> {
     pub theme_mode: theme::palette::ThemeMode,
     pub sent_amount_display: &'a str,
     pub sent_celebration_context: &'a str,
+    /// Who the sent payment went to, as typed (receipt's To row).
+    pub sent_recipient: &'a str,
+    /// Amount plus fee, for a bitcoin send (receipt's Total row).
+    pub sent_total_sat: Option<u64>,
     pub sent_quote: &'a coincube_ui::component::quote_display::Quote,
     pub sent_image_handle: &'a iced::widget::image::Handle,
     pub recent_transactions: &'a [SparkRecentTransaction],
@@ -95,6 +99,9 @@ pub struct SparkSendView<'a> {
     /// one. Lives on the panel rather than in the phase because it must survive
     /// a failed send — a retry re-prepares from it.
     pub cross_chain_ctx: Option<&'a CrossChainContext>,
+    /// Which network the typed stablecoin destination belongs to, once looked
+    /// up — named on the THEY RECEIVE tile and under Destination.
+    pub detected_network: Option<&'a cross_chain::DetectedNetwork>,
     /// Cross-chain slippage tolerance, in basis points, as typed. Empty means
     /// the SDK default. Only rendered behind the advanced disclosure.
     pub slippage_input: &'a str,
@@ -135,17 +142,55 @@ impl<'a> SparkSendView<'a> {
                 .into();
         }
 
-        // ── Full-screen celebration for successful sends ─────────────
-        if matches!(self.phase, SparkSendPhase::Sent(_)) {
-            return coincube_ui::component::sent_celebration_page(
-                self.sent_celebration_context,
+        // ── Payment result: the receipt first, the worldview art beside it ──
+        if let SparkSendPhase::Sent(ok) = self.phase {
+            use coincube_ui::component::amount::format_u64_as_string;
+            use coincube_ui::component::payment_result::{
+                payment_result, short_id, Outcome, ReceiptRow,
+            };
+            // An on-chain exit is broadcast, not settled: Activity carries
+            // the confirmation.
+            let outcome = if self.sent_celebration_context == "bitcoin-send" {
+                Outcome::Confirming
+            } else {
+                Outcome::Sent
+            };
+            let recipient = self.sent_recipient;
+            let mut to = ReceiptRow::new(localized_copy("To"), short_id(recipient));
+            if !recipient.contains('@') {
+                to = to.mono();
+            }
+            let sats = |sat: u64| format!("{} sats", format_u64_as_string(sat, ","));
+            let mut rows = Vec::new();
+            if !recipient.is_empty() {
+                rows.push(to);
+            }
+            rows.push(ReceiptRow::new(localized_copy("Paid from"), "Spark"));
+            rows.push(ReceiptRow::new(localized_copy("Fee"), sats(ok.fee_sat)));
+            if let Some(total) = self.sent_total_sat {
+                rows.push(ReceiptRow::new(localized_copy("Total"), sats(total)));
+            }
+            if !ok.payment_id.is_empty() {
+                rows.push(
+                    ReceiptRow::new(localized_copy("Payment ID"), short_id(&ok.payment_id))
+                        .mono()
+                        .on_copy(Message::Clipboard(ok.payment_id.clone())),
+                );
+            }
+            return payment_result(
+                outcome,
                 self.sent_amount_display,
+                self.sent_celebration_context,
                 self.sent_quote,
                 self.sent_image_handle,
-                CopyText::HasBeenSentSuccessfully.get(),
-                coincube_ui::worldview_copy::VoiceLine::PaymentSent.get(),
                 Message::SparkSend(crate::app::view::SparkSendMessage::Reset),
-            );
+            )
+            .rows(rows)
+            .voice(coincube_ui::worldview_copy::VoiceLine::PaymentSent.get())
+            .on_activity(Message::SparkSend(
+                crate::app::view::SparkSendMessage::ViewActivity,
+            ))
+            .into();
         }
 
         // ── Payment details card ──────────────────────────────────────
@@ -288,6 +333,7 @@ impl<'a> SparkSendView<'a> {
                     .push(iced::widget::rule::horizontal(1))
                     .push(card_section(spark_send_cards(
                         self.receive_target,
+                        self.detected_network,
                         self.pay_from,
                         SendMenus {
                             open: self.open_menu,
@@ -301,7 +347,21 @@ impl<'a> SparkSendView<'a> {
                         Column::new()
                             .spacing(10)
                             .push(p1_bold(localized_copy("Destination")))
-                            .push(destination),
+                            .push(destination)
+                            .push(
+                                Column::new().push_maybe(
+                                    self.detected_network
+                                        .filter(|_| self.receive_target.is_stablecoin())
+                                        .map(|detected| {
+                                            p2_regular(detected.note(self.receive_target.label()))
+                                                .style(if detected.is_problem() {
+                                                    theme::text::warning
+                                                } else {
+                                                    theme::text::secondary
+                                                })
+                                        }),
+                                ),
+                            ),
                     ))
                     .push(iced::widget::rule::horizontal(1))
                     .push(card_section(
@@ -459,7 +519,9 @@ fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
             for (idx, route) in routes.iter().enumerate() {
                 let label = iced::widget::text(format!(
                     "{} on {} — via {}",
-                    route.asset, route.chain, route.provider
+                    route.asset,
+                    cross_chain::chain_name(&route.chain),
+                    route.provider
                 ))
                 .align_y(iced::Alignment::Center);
                 let style = if idx == *selected {
@@ -1969,6 +2031,7 @@ fn target_place(target: SparkSendTarget) -> &'static str {
 /// under its tile; a chevron and the hover outline mark each tappable tile.
 fn spark_send_cards<'a>(
     target: SparkSendTarget,
+    detected_network: Option<&cross_chain::DetectedNetwork>,
     pay_from: coincube_spark_protocol::WalletAsset,
     menus: SendMenus<'a>,
 ) -> Element<'a, Message> {
@@ -2025,7 +2088,10 @@ fn spark_send_cards<'a>(
                 "They receive",
                 None,
                 localized_copy(target.label()).to_string(),
-                localized_copy(target_place(target)).to_string(),
+                detected_network
+                    .filter(|_| target.is_stablecoin())
+                    .and_then(cross_chain::DetectedNetwork::tile_place)
+                    .unwrap_or_else(|| localized_copy(target_place(target)).to_string()),
                 Some(receive_open),
             ),
             Message::FocusAction,
@@ -2406,6 +2472,8 @@ mod tests {
                 theme_mode: self.mode,
                 sent_amount_display: "",
                 sent_celebration_context: "",
+                sent_recipient: "",
+                sent_total_sat: None,
                 sent_quote: &self.quote,
                 sent_image_handle: &self.image,
                 recent_transactions: &[],
@@ -2433,6 +2501,7 @@ mod tests {
                 network: self.network,
                 chain: self.network.into(),
                 cross_chain_ctx: None,
+                detected_network: None,
                 slippage_input: "",
                 advanced_open: false,
                 quote_countdown: self.countdown.clone(),

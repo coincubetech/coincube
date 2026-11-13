@@ -21,16 +21,16 @@ use crate::theme::Theme;
 use crate::widget::{Element, Renderer};
 
 /// Answers a key press given the ID of the focused descendant, if any.
-pub(super) type KeyHandler<'a, M> =
+pub(crate) type KeyHandler<'a, M> =
     Box<dyn Fn(&keyboard::Key, keyboard::Modifiers, Option<&Id>) -> Option<Vec<M>> + 'a>;
 
-pub(super) struct KeyScope<'a, M> {
+pub(crate) struct KeyScope<'a, M> {
     content: Element<'a, M>,
     on_key: KeyHandler<'a, M>,
 }
 
 impl<'a, M> KeyScope<'a, M> {
-    pub(super) fn new(content: impl Into<Element<'a, M>>, on_key: KeyHandler<'a, M>) -> Self {
+    pub(crate) fn new(content: impl Into<Element<'a, M>>, on_key: KeyHandler<'a, M>) -> Self {
         Self {
             content: content.into(),
             on_key,

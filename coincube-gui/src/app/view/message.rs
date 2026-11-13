@@ -320,6 +320,8 @@ pub enum Message {
     DuressActivateLocal(crate::services::unlock::throttle::VerifiedSeedExportDuress),
     ToggleTheme,
     DismissReceivedCelebration,
+    /// The received receipt's View in Activity: dismiss it, then open Activity.
+    ReceivedCelebrationActivity,
     /// Answer to the one-time recovery-alerts consent prompt overlay
     /// (PLAN-recovery-alerts-cleanup PR 3). `true` = accept (enable monitoring),
     /// `false` = decline. Handled at the App level; the answer is persisted

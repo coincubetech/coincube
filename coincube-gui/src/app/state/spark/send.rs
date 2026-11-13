@@ -54,6 +54,10 @@ use crate::services::branta::{self, LookupRequest, LookupResult, LookupTicket, R
 // panel's first prepare from matching a replacement panel's first prepare.
 static PREPARATION_ID: AtomicU64 = AtomicU64::new(1);
 
+/// How long the Destination field must sit still before Details looks up
+/// which network a stablecoin address belongs to.
+const NETWORK_DETECT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
+
 fn next_preparation_generation() -> u64 {
     PREPARATION_ID.fetch_add(1, Ordering::Relaxed)
 }
@@ -417,8 +421,12 @@ impl SparkSendTarget {
             Self::OnChain => "Bitcoin address",
             Self::Spark => "Spark address or invoice",
             Self::SparkUsd => "Spark address or US Dollar invoice",
-            Self::Usdt => "Recipient's USDt address on Ethereum, Tron, or Solana",
-            Self::Usdc => "Recipient's USDC address on Ethereum, Tron, or Solana",
+            Self::Usdt => {
+                "Recipient's USDt address on Ethereum or another EVM chain, Tron, or Solana"
+            }
+            Self::Usdc => {
+                "Recipient's USDC address on Ethereum or another EVM chain, Tron, or Solana"
+            }
         }
     }
 
@@ -481,6 +489,11 @@ pub struct SparkSend {
     sent_amount_display: String,
     /// Quote context key for the celebration screen (e.g. "lightning-send").
     sent_celebration_context: String,
+    /// Who the last successful send went to, as typed, for its receipt.
+    sent_recipient: String,
+    /// Amount plus fee of the last successful bitcoin send. `None` for a
+    /// token payment, whose amount and fee are in different units.
+    sent_total_sat: Option<u64>,
     /// Quote and image handle for the celebration screen.
     sent_quote: coincube_ui::component::quote_display::Quote,
     sent_image_handle: iced::widget::image::Handle,
@@ -491,6 +504,14 @@ pub struct SparkSend {
     /// Outlives the phases that read it so a failed send can be re-prepared —
     /// see [`CrossChainContext`].
     cross_chain: Option<CrossChainContext>,
+    /// Which network the typed stablecoin destination belongs to, looked up
+    /// while composing so Details names it before Prepare. `None` while there
+    /// is nothing to show (empty field, not a stablecoin target, or the
+    /// lookup still pending/failed).
+    detected_network: Option<cross_chain::DetectedNetwork>,
+    /// Sequence for the debounced network lookup: every edit bumps it, and a
+    /// timer or answer carrying an older one is dropped.
+    detect_seq: u64,
     /// Slippage tolerance in basis points, as typed. Empty means "use the SDK
     /// default" (100 bps). Only reachable behind the advanced disclosure —
     /// a normal user should never have to think in basis points.
@@ -564,6 +585,8 @@ impl SparkSend {
             phase: SparkSendPhase::Idle,
             last_send_method: String::new(),
             sent_amount_display: String::new(),
+            sent_recipient: String::new(),
+            sent_total_sat: None,
             sent_celebration_context: "lightning-send".to_string(),
             sent_quote: coincube_ui::component::quote_display::random_quote("lightning-send"),
             sent_image_handle: coincube_ui::component::quote_display::image_handle_for_context(
@@ -571,6 +594,8 @@ impl SparkSend {
             ),
             recent_transactions: Vec::new(),
             cross_chain: None,
+            detected_network: None,
+            detect_seq: 0,
             slippage_input: String::new(),
             advanced_open: false,
             send_idempotency_key: None,
@@ -619,6 +644,33 @@ impl SparkSend {
 
     fn recipient_mismatch(&self) -> bool {
         self.tampered_request.as_deref() == Some(self.destination_input.trim())
+    }
+
+    /// Forget the last network lookup and, for a stablecoin target with a
+    /// destination typed, start a debounced one. Typing fires an edit per
+    /// keystroke; only the value the field settles on is looked up.
+    fn schedule_network_detection(
+        &mut self,
+        network: coincube_core::miniscript::bitcoin::Network,
+    ) -> Task<Message> {
+        self.detect_seq = self.detect_seq.wrapping_add(1);
+        self.detected_network = None;
+        if !self.receive_target.is_stablecoin()
+            || !cross_chain::supported_on(network)
+            || self.backend.is_none()
+            || self.destination_input.trim().is_empty()
+        {
+            return Task::none();
+        }
+        let seq = self.detect_seq;
+        Task::perform(
+            async move { tokio::time::sleep(NETWORK_DETECT_DEBOUNCE).await },
+            move |_| {
+                Message::View(crate::app::view::Message::SparkSend(
+                    crate::app::view::SparkSendMessage::DetectDestinationNetwork(seq),
+                ))
+            },
+        )
     }
 
     fn begin_preparation(&mut self) -> u64 {
@@ -1014,6 +1066,8 @@ impl State for SparkSend {
                 .is_some(),
                 sent_amount_display: &self.sent_amount_display,
                 sent_celebration_context: &self.sent_celebration_context,
+                sent_recipient: &self.sent_recipient,
+                sent_total_sat: self.sent_total_sat,
                 sent_quote: &self.sent_quote,
                 sent_image_handle: &self.sent_image_handle,
                 recent_transactions: &self.recent_transactions,
@@ -1062,6 +1116,7 @@ impl State for SparkSend {
                 show_direction_badges: cache.show_direction_badges,
                 mask_amounts: cache.balance_amounts_masked(),
                 cross_chain_ctx: self.cross_chain.as_ref(),
+                detected_network: self.detected_network.as_ref(),
                 slippage_input: &self.slippage_input,
                 advanced_open: self.advanced_open,
                 quote_countdown: self.quote_countdown.clone(),
@@ -1157,6 +1212,40 @@ impl State for SparkSend {
                 // nothing now. (A re-Prepare rebuilds them, but leaving a stale
                 // destination lying around is a trap.)
                 self.cross_chain = None;
+                self.schedule_network_detection(cache.network)
+            }
+            SparkSendMessage::DetectDestinationNetwork(seq) => {
+                if seq != self.detect_seq {
+                    return Task::none();
+                }
+                let Some(backend) = self.backend.clone() else {
+                    return Task::none();
+                };
+                let input = self.destination_input.trim().to_string();
+                Task::perform(
+                    async move {
+                        backend
+                            .get_cross_chain_routes(input)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    move |result| {
+                        Message::View(crate::app::view::Message::SparkSend(
+                            SparkSendMessage::DestinationNetworkDetected(seq, result),
+                        ))
+                    },
+                )
+            }
+            SparkSendMessage::DestinationNetworkDetected(seq, result) => {
+                if seq != self.detect_seq {
+                    return Task::none();
+                }
+                // A failed lookup shows nothing: Prepare asks again and
+                // reports the error there, where it can be retried.
+                self.detected_network = match (result, self.receive_target.stablecoin()) {
+                    (Ok(found), Some(asset)) => Some(cross_chain::detect_network(&found, asset)),
+                    _ => None,
+                };
                 Task::none()
             }
             SparkSendMessage::AmountInputChanged(value) => {
@@ -1246,6 +1335,8 @@ impl State for SparkSend {
                 self.invoice_amount_sat = None;
                 self.abandon_payment_intent();
                 self.cross_chain = None;
+                self.detect_seq = self.detect_seq.wrapping_add(1);
+                self.detected_network = None;
                 Task::none()
             }
             SparkSendMessage::PrepareRequested => {
@@ -1443,9 +1534,9 @@ impl State for SparkSend {
                     // firing funds somewhere unrecoverable.
                     self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
                         "That doesn't look like a {} address. Paste the recipient's {} address \
-                         on Ethereum, Tron, or Solana.",
+                         on Ethereum or another EVM chain, Tron, or Solana.",
                         "Eso no parece una dirección de {}. Pega la dirección de {} del \
-                         destinatario en Ethereum, Tron o Solana.",
+                         destinatario en Ethereum u otra red EVM, Tron o Solana.",
                         self.receive_target.label(),
                         self.receive_target.label(),
                     ));
@@ -1580,9 +1671,16 @@ impl State for SparkSend {
                     ),
                     None => format!("{} sats", format_u64_as_string(ok.amount_sat, ",")),
                 };
+                self.sent_recipient = self.destination_input.trim().to_string();
+                self.sent_total_sat = self
+                    .prepared_token_payment
+                    .is_none()
+                    .then(|| ok.amount_sat.saturating_add(ok.fee_sat));
                 self.phase = SparkSendPhase::Sent(ok);
                 // Clear the inputs so a follow-up send doesn't re-use them.
                 self.destination_input.clear();
+                self.detect_seq = self.detect_seq.wrapping_add(1);
+                self.detected_network = None;
                 self.amount_input.clear();
                 self.invoice_amount_sat = None;
                 // Retire the idempotency key with the send it belonged to. A
@@ -1744,10 +1842,18 @@ impl State for SparkSend {
                 }
                 Task::none()
             }
+            SparkSendMessage::ViewActivity => Task::done(Message::View(
+                crate::app::view::Message::SparkSend(SparkSendMessage::Reset),
+            ))
+            .chain(redirect(Menu::Cube(
+                crate::app::menu::CubeSubMenu::Activity,
+            ))),
             SparkSendMessage::Reset => {
                 self.invalidate_recipient_identity();
                 self.tampered_request = None;
                 self.destination_input.clear();
+                self.detect_seq = self.detect_seq.wrapping_add(1);
+                self.detected_network = None;
                 self.amount_input.clear();
                 self.invoice_amount_sat = None;
                 self.phase = SparkSendPhase::Idle;
@@ -3364,6 +3470,86 @@ mod tests {
             panel.usdb_covers(&cache),
             Err("Stablecoin sends are paid from bitcoin.")
         );
+    }
+
+    /// Details names the network a stablecoin destination belongs to. Only the
+    /// answer for the latest edit counts: a slow lookup for what was typed
+    /// before must not label what is in the field now.
+    #[test]
+    fn network_detection_keeps_only_the_latest_answer() {
+        let tron = || {
+            Ok(CrossChainRoutesOk {
+                address: Some(CrossChainAddress {
+                    address: "TQ2".into(),
+                    family: "tron".into(),
+                    contract_address: None,
+                    chain_id: None,
+                    amount: None,
+                }),
+                routes: vec![CrossChainRoute {
+                    provider: "orchestra".into(),
+                    chain: "tron".into(),
+                    chain_id: None,
+                    asset: "USDT".into(),
+                    contract_address: None,
+                    decimals: 6,
+                    btc_source_supported: true,
+                }],
+            })
+        };
+        let mut panel = SparkSend::new(None);
+        panel.receive_target = SparkSendTarget::Usdt;
+        drop(send(
+            &mut panel,
+            SparkSendMessage::DestinationInputChanged("TQ".into()),
+        ));
+        let stale = panel.detect_seq;
+        drop(send(
+            &mut panel,
+            SparkSendMessage::DestinationInputChanged("TQ2".into()),
+        ));
+        drop(send(
+            &mut panel,
+            SparkSendMessage::DestinationNetworkDetected(stale, tron()),
+        ));
+        assert_eq!(panel.detected_network, None);
+
+        let current = panel.detect_seq;
+        drop(send(
+            &mut panel,
+            SparkSendMessage::DestinationNetworkDetected(current, tron()),
+        ));
+        assert!(matches!(
+            &panel.detected_network,
+            Some(cross_chain::DetectedNetwork::Chains { chains, .. }) if chains == &["Tron"]
+        ));
+
+        // Editing the field drops the label until the new value is looked up,
+        // and so does picking another target.
+        drop(send(
+            &mut panel,
+            SparkSendMessage::DestinationInputChanged("TQ23".into()),
+        ));
+        assert_eq!(panel.detected_network, None);
+        let current = panel.detect_seq;
+        drop(send(
+            &mut panel,
+            SparkSendMessage::DestinationNetworkDetected(current, tron()),
+        ));
+        assert!(panel.detected_network.is_some());
+        drop(send(
+            &mut panel,
+            SparkSendMessage::SetReceiveTarget(SparkSendTarget::Usdc),
+        ));
+        assert_eq!(panel.detected_network, None);
+
+        // A failed lookup shows nothing; Prepare reports the error.
+        let current = panel.detect_seq;
+        drop(send(
+            &mut panel,
+            SparkSendMessage::DestinationNetworkDetected(current, Err("offline".into())),
+        ));
+        assert_eq!(panel.detected_network, None);
     }
 
     /// US Dollar can be picked whenever there is a USDB balance — before an

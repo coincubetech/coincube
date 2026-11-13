@@ -13,7 +13,9 @@
 //!    [`QuoteCountdown`].
 //! 3. **Paying twice on a retry.** See [`RetryPolicy`].
 
-use coincube_spark_protocol::{CrossChainAddress, CrossChainQuote, CrossChainRoute};
+use coincube_spark_protocol::{
+    CrossChainAddress, CrossChainQuote, CrossChainRoute, CrossChainRoutesOk,
+};
 
 /// SDK-enforced slippage bounds, in basis points. Mirrors
 /// `MIN/MAX_CROSS_CHAIN_SLIPPAGE_BPS` in `breez-sdk-spark`; the bridge
@@ -90,6 +92,154 @@ pub fn chain_confirmation(address: &CrossChainAddress, route: &CrossChainRoute) 
         route.chain,
         family_label(&address.family),
     )
+}
+
+/// Display name for a route's destination chain. The SDK reports lowercase
+/// slugs (`"base"`, `"bsc"`) from one provider and display names
+/// (`"Arbitrum One"`) from another; both should read as the network's name.
+pub fn chain_name(chain: &str) -> String {
+    let known = match chain.trim().to_ascii_lowercase().as_str() {
+        "ethereum" | "eth" | "mainnet" => "Ethereum",
+        "base" => "Base",
+        "arbitrum" | "arbitrum one" => "Arbitrum",
+        "optimism" | "op" => "Optimism",
+        "polygon" | "matic" => "Polygon",
+        "bsc" | "bnb" | "binance" => "BNB Smart Chain",
+        "avalanche" | "avax" => "Avalanche",
+        "solana" => "Solana",
+        "tron" => "Tron",
+        "plasma" => "Plasma",
+        _ => "",
+    };
+    if !known.is_empty() {
+        return known.to_string();
+    }
+    let mut chars = chain.trim().chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// What a typed destination turned out to be, for the Details step of a
+/// stablecoin send — before Prepare, so the user sees which network the
+/// address belongs to while they can still change it.
+///
+/// Detection asks the bridge (the same `get_cross_chain_routes` Prepare uses),
+/// so it can never disagree with what Prepare will do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetectedNetwork {
+    /// The bridge doesn't read this as a cross-chain address.
+    NotCrossChain,
+    /// A cross-chain address, but no route delivers the picked coin there.
+    Unreachable { family: String },
+    /// The networks the picked coin can be delivered on, by display name,
+    /// deduplicated and in the bridge's order.
+    Chains { family: String, chains: Vec<String> },
+}
+
+/// Classify a routes lookup for the coin picked in THEY RECEIVE (`asset` is
+/// `"USDT"` / `"USDC"`, compared case-insensitively).
+pub fn detect_network(found: &CrossChainRoutesOk, asset: &str) -> DetectedNetwork {
+    let Some(address) = &found.address else {
+        return DetectedNetwork::NotCrossChain;
+    };
+    let mut chains: Vec<String> = Vec::new();
+    for route in found
+        .routes
+        .iter()
+        .filter(|r| r.asset.eq_ignore_ascii_case(asset))
+    {
+        let name = chain_name(&route.chain);
+        if !chains.contains(&name) {
+            chains.push(name);
+        }
+    }
+    if chains.is_empty() {
+        DetectedNetwork::Unreachable {
+            family: address.family.clone(),
+        }
+    } else {
+        DetectedNetwork::Chains {
+            family: address.family.clone(),
+            chains,
+        }
+    }
+}
+
+/// Join names as prose: "A", "A and B", "A, B and C".
+fn join_names(names: &[String]) -> String {
+    let and = coincube_ui::locale::copy(" and ");
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{}{and}{last}", init.join(", ")),
+    }
+}
+
+/// The address family as a noun phrase for the detection line.
+fn detected_family_label(family: &str) -> &str {
+    match family {
+        "evm" => coincube_ui::locale::copy("An EVM address"),
+        "solana" => coincube_ui::locale::copy("A Solana address"),
+        "tron" => coincube_ui::locale::copy("A Tron address"),
+        _ => coincube_ui::locale::copy("A cross-chain address"),
+    }
+}
+
+impl DetectedNetwork {
+    /// What follows the coin on the THEY RECEIVE tile ("USDt on Tron").
+    /// `None` keeps the generic "cross-chain" wording.
+    pub fn tile_place(&self) -> Option<String> {
+        match self {
+            DetectedNetwork::Chains { chains, .. } if chains.len() <= 2 => Some(
+                coincube_ui::localized_format!("on {}", "en {}", join_names(chains)),
+            ),
+            DetectedNetwork::Chains { chains, .. } => Some(coincube_ui::localized_format!(
+                "on {} networks",
+                "en {} redes",
+                chains.len()
+            )),
+            _ => None,
+        }
+    }
+
+    /// The line under the Destination field. `coin` is the picked coin's
+    /// display label ("USDt").
+    pub fn note(&self, coin: &str) -> String {
+        match self {
+            DetectedNetwork::NotCrossChain => coincube_ui::localized_format!(
+                "This isn't a {coin} address on a supported network: Ethereum or another EVM \
+                 chain, Tron, or Solana.",
+                "Esta no es una dirección de {coin} en una red compatible: Ethereum u otra red \
+                 EVM, Tron o Solana.",
+            ),
+            DetectedNetwork::Unreachable { family } => coincube_ui::localized_format!(
+                "{} — no route can deliver {coin} there right now.",
+                "{}: ahora mismo ninguna ruta puede entregar {coin} ahí.",
+                detected_family_label(family),
+            ),
+            DetectedNetwork::Chains { family, chains } if chains.len() == 1 => {
+                coincube_ui::localized_format!(
+                    "{} — {coin} will be sent on {}.",
+                    "{}: se enviarán {coin} en {}.",
+                    detected_family_label(family),
+                    chains[0],
+                )
+            }
+            DetectedNetwork::Chains { family, chains } => coincube_ui::localized_format!(
+                "{} — {coin} can be sent on {}. You'll choose the network next.",
+                "{}: se pueden enviar {coin} en {}. Elegirás la red a continuación.",
+                detected_family_label(family),
+                join_names(chains),
+            ),
+        }
+    }
+
+    /// Whether this is a definite "can't send here" — styled as a warning.
+    pub fn is_problem(&self) -> bool {
+        !matches!(self, DetectedNetwork::Chains { .. })
+    }
 }
 
 /// How the quote's expiry should be presented, and whether sending is still
@@ -416,5 +566,114 @@ mod tests {
         assert_eq!(format_asset_amount(1_000_000, 18), "0.000000000001");
         assert_eq!(format_asset_amount(0, 6), "0.00");
         assert_eq!(format_asset_amount(1_234_567, 6), "1.234567");
+    }
+
+    // ── Network detection on Details ────────────────────────────────────
+
+    fn found(family: Option<&str>, routes: Vec<CrossChainRoute>) -> CrossChainRoutesOk {
+        CrossChainRoutesOk {
+            address: family.map(|family| CrossChainAddress {
+                address: "addr".to_string(),
+                family: family.to_string(),
+                contract_address: None,
+                chain_id: None,
+                amount: None,
+            }),
+            routes,
+        }
+    }
+
+    #[test]
+    fn chain_names_read_as_network_names_whatever_the_provider_reports() {
+        assert_eq!(chain_name("base"), "Base");
+        assert_eq!(chain_name("Arbitrum One"), "Arbitrum");
+        assert_eq!(chain_name("bsc"), "BNB Smart Chain");
+        assert_eq!(chain_name("tron"), "Tron");
+        assert_eq!(chain_name("somechain"), "Somechain");
+        assert_eq!(chain_name(""), "");
+    }
+
+    #[test]
+    fn a_tron_address_names_tron_on_the_tile_and_under_the_field() {
+        let detected = detect_network(&found(Some("tron"), vec![route("USDT", "tron", 6)]), "USDT");
+        assert_eq!(
+            detected,
+            DetectedNetwork::Chains {
+                family: "tron".into(),
+                chains: vec!["Tron".into()],
+            }
+        );
+        assert_eq!(detected.tile_place().as_deref(), Some("on Tron"));
+        let note = detected.note("USDt");
+        assert!(note.contains("Tron address") && note.contains("USDt will be sent on Tron"));
+        assert!(!detected.is_problem());
+    }
+
+    #[test]
+    fn an_evm_address_lists_only_the_picked_coins_chains_once_each() {
+        let detected = detect_network(
+            &found(
+                Some("evm"),
+                vec![
+                    route("USDT", "ethereum", 6),
+                    route("USDC", "base", 6),
+                    route("USDT", "arbitrum", 6),
+                    route("USDT", "Arbitrum One", 6),
+                    route("usdt", "bsc", 18),
+                ],
+            ),
+            "USDT",
+        );
+        let DetectedNetwork::Chains { chains, .. } = &detected else {
+            panic!("expected chains, got {:?}", detected);
+        };
+        assert_eq!(chains, &["Ethereum", "Arbitrum", "BNB Smart Chain"]);
+        // Too many for the tile: it gives a count and the note lists them.
+        assert_eq!(detected.tile_place().as_deref(), Some("on 3 networks"));
+        let note = detected.note("USDt");
+        assert!(note.contains("Ethereum, Arbitrum and BNB Smart Chain"));
+        assert!(note.contains("choose the network next"));
+    }
+
+    #[test]
+    fn two_chains_fit_on_the_tile() {
+        let detected = detect_network(
+            &found(
+                Some("evm"),
+                vec![route("USDC", "ethereum", 6), route("USDC", "base", 6)],
+            ),
+            "USDC",
+        );
+        assert_eq!(
+            detected.tile_place().as_deref(),
+            Some("on Ethereum and Base")
+        );
+    }
+
+    #[test]
+    fn an_address_no_route_reaches_is_a_problem_with_no_network_on_the_tile() {
+        let detected = detect_network(
+            &found(Some("solana"), vec![route("USDC", "solana", 6)]),
+            "USDT",
+        );
+        assert_eq!(
+            detected,
+            DetectedNetwork::Unreachable {
+                family: "solana".into()
+            }
+        );
+        assert!(detected.is_problem());
+        assert_eq!(detected.tile_place(), None);
+        assert!(detected.note("USDt").contains("no route can deliver USDt"));
+    }
+
+    #[test]
+    fn a_non_cross_chain_destination_lists_the_supported_networks() {
+        let detected = detect_network(&found(None, vec![]), "USDT");
+        assert_eq!(detected, DetectedNetwork::NotCrossChain);
+        assert!(detected.is_problem());
+        assert_eq!(detected.tile_place(), None);
+        let note = detected.note("USDt");
+        assert!(note.contains("Ethereum") && note.contains("Tron") && note.contains("Solana"));
     }
 }

@@ -1318,6 +1318,14 @@ impl PsbtState {
                                 "bitcoin-send",
                             ),
                         spend_amount_display: amount_display,
+                        fee_display: self.tx.fee_amount.map(|fee| {
+                            format!(
+                                "{} {}",
+                                fee.to_formatted_string_with_unit(cache.bitcoin_unit),
+                                cache.bitcoin_unit.label(),
+                            )
+                        }),
+                        txid: self.tx.psbt.unsigned_tx.compute_txid(),
                         is_self_transfer,
                         wallet: self.wallet.clone(),
                         recipient_identities: self.recipient_identities.clone().filter(|review| {
@@ -1500,6 +1508,10 @@ pub struct BroadcastModal {
     sent_image_handle: iced::widget::image::Handle,
     /// Formatted spend amount for the celebration display.
     spend_amount_display: String,
+    /// Network fee with its unit, for the receipt.
+    fee_display: Option<String>,
+    /// The broadcast transaction, for the receipt's Copy.
+    txid: Txid,
     /// True when every output of the tx returns to the wallet's own change
     /// addresses. Used by the celebration view to render the right phrasing.
     is_self_transfer: bool,
@@ -1637,6 +1649,10 @@ impl Modal for BroadcastModal {
                 &self.sent_image_handle,
                 self.is_self_transfer,
                 identity_review,
+                view::vault::psbt::BroadcastReceipt {
+                    fee: self.fee_display.as_deref(),
+                    txid: Some(self.txid),
+                },
             ),
         )
         .on_blur(on_blur)

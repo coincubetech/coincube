@@ -461,6 +461,8 @@ pub enum SparkSendMessage {
     /// prepared/sent state. Fired from the "Send another" / "Try
     /// again" / "Cancel" buttons.
     Reset,
+    /// The sent receipt's View in Activity: [`Self::Reset`], then Activity.
+    ViewActivity,
     /// The Spark wallet balance for the YOU SEND card — BTC sats plus the Stable
     /// Balance snapshot, folded into a unified total by the handler. `None` when
     /// the `get_info` fetch failed; the card keeps its last value.
@@ -480,6 +482,15 @@ pub enum SparkSendMessage {
     /// returned the routes that can reach it. Moves the panel into
     /// `CrossChainRoutes`, where the user confirms the chain and asset.
     CrossChainRoutesLoaded(
+        u64,
+        Result<coincube_spark_protocol::CrossChainRoutesOk, String>,
+    ),
+    /// The destination stopped changing long enough to look up which network
+    /// it belongs to (stablecoin targets only). Carries the lookup sequence;
+    /// a stale one is ignored.
+    DetectDestinationNetwork(u64),
+    /// The bridge answered that lookup.
+    DestinationNetworkDetected(
         u64,
         Result<coincube_spark_protocol::CrossChainRoutesOk, String>,
     ),
@@ -633,6 +644,8 @@ pub enum SparkReceiveMessage {
     /// not on every new confirmation).
     RefreshConfirmations,
     Reset,
+    /// The received receipt's View in Activity: [`Self::Reset`], then Activity.
+    ViewActivity,
     /// The Spark wallet balance for the YOU RECEIVE card — BTC sats plus the
     /// Stable Balance snapshot, folded into a unified total by the handler.
     /// `None` when `get_info` failed; the card keeps its last value.
