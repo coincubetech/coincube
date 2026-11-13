@@ -69,20 +69,6 @@ pub enum SparkSendPhase {
     Idle,
     /// Awaiting the `prepare_send` RPC response.
     Preparing,
-    /// The destination is a cross-chain address (EVM / Solana / Tron), and the
-    /// user must confirm *which chain and asset* before we quote.
-    ///
-    /// This is a mandatory stop, not a convenience. Address formats don't
-    /// announce their chain, and USDT exists on all three families — so the
-    /// panel states the detected chain in words and makes the user pick a
-    /// route before any money moves. See
-    /// [`cross_chain::chain_confirmation`](super::cross_chain::chain_confirmation).
-    ///
-    /// The destination and routes themselves live in
-    /// [`SparkSend::cross_chain`], not in this variant — they have to outlive
-    /// it, so a failed send can be re-prepared without making the user retype
-    /// the address.
-    CrossChainRoutes,
     /// `prepare_send` returned; the caller can review the preview and
     /// either confirm (→ `send_payment`) or go back to `Idle`.
     ///
@@ -504,20 +490,23 @@ pub struct SparkSend {
     /// Outlives the phases that read it so a failed send can be re-prepared —
     /// see [`CrossChainContext`].
     cross_chain: Option<CrossChainContext>,
-    /// Which network the typed stablecoin destination belongs to, looked up
-    /// while composing so Details names it before Prepare. `None` while there
-    /// is nothing to show (empty field, not a stablecoin target, or the
-    /// lookup still pending/failed).
-    detected_network: Option<cross_chain::DetectedNetwork>,
+    /// What the typed stablecoin destination is — its network, the routes to
+    /// it and the one the user is sending on — looked up while composing so
+    /// Details settles the network before Prepare. `None` while there is
+    /// nothing to show (empty field, not a stablecoin target, or the lookup
+    /// still pending/failed). Only counts while it matches the field: see
+    /// [`SparkSend::current_detection`].
+    detected: Option<cross_chain::DetectedDestination>,
+    /// Review's "they use this network" box, for a network the user chose
+    /// themselves. Cleared with every new quote.
+    network_acknowledged: bool,
     /// Sequence for the debounced network lookup: every edit bumps it, and a
     /// timer or answer carrying an older one is dropped.
     detect_seq: u64,
-    /// Slippage tolerance in basis points, as typed. Empty means "use the SDK
-    /// default" (100 bps). Only reachable behind the advanced disclosure —
-    /// a normal user should never have to think in basis points.
+    /// Slippage tolerance in basis points. Empty means "use the SDK default"
+    /// (100 bps). Set from Review's "price may move up to" presets — a normal
+    /// user should never have to think in basis points.
     pub slippage_input: String,
-    /// Whether the advanced (slippage) disclosure is open.
-    pub advanced_open: bool,
     /// Idempotency key for the in-flight send, minted once per user-initiated
     /// send and **reused across retries of that same send**. On the bitcoin
     /// rails (Lightning / on-chain / Spark) this is the dedup: a fresh key on
@@ -594,10 +583,10 @@ impl SparkSend {
             ),
             recent_transactions: Vec::new(),
             cross_chain: None,
-            detected_network: None,
+            detected: None,
+            network_acknowledged: false,
             detect_seq: 0,
             slippage_input: String::new(),
-            advanced_open: false,
             send_idempotency_key: None,
             pending_send: None,
             cross_chain_prepare: None,
@@ -654,7 +643,7 @@ impl SparkSend {
         network: coincube_core::miniscript::bitcoin::Network,
     ) -> Task<Message> {
         self.detect_seq = self.detect_seq.wrapping_add(1);
-        self.detected_network = None;
+        self.detected = None;
         if !self.receive_target.is_stablecoin()
             || !cross_chain::supported_on(network)
             || self.backend.is_none()
@@ -671,6 +660,60 @@ impl SparkSend {
                 ))
             },
         )
+    }
+
+    /// The destination lookup, while it still describes what is typed.
+    fn current_detection(&self) -> Option<&cross_chain::DetectedDestination> {
+        self.detected
+            .as_ref()
+            .filter(|_| self.receive_target.is_stablecoin())
+            .filter(|d| d.input == self.destination_input.trim())
+    }
+
+    /// Why the typed amount can't go on the chosen network, if it can't —
+    /// checked on Details so a below-minimum send is caught before a quote,
+    /// not reported by the provider after one.
+    fn cross_chain_amount_issue(&self, cache: &Cache) -> Option<cross_chain::AmountIssue> {
+        let route = self.current_detection()?.route()?;
+        let amount = parse_amount_to_sats(&self.amount_input, cache.bitcoin_unit).ok()?;
+        if amount == 0 {
+            return None;
+        }
+        cross_chain::amount_issue(route, amount, super::reference_btc_usd_price(cache))
+    }
+
+    /// Whether Review is waiting for "they use this network": only when the
+    /// user chose the network among several (an EVM address), since an
+    /// address that belongs to one network already says where it goes.
+    pub fn awaiting_network_ack(&self) -> bool {
+        matches!(&self.phase, SparkSendPhase::Prepared(ok) if ok.cross_chain.is_some())
+            && !self.network_acknowledged
+            && self
+                .current_detection()
+                .is_some_and(cross_chain::DetectedDestination::network_was_chosen)
+    }
+
+    /// Quote the network Details settled on. Stays on Details (Idle) while
+    /// the network is still to be chosen or the amount is out of the route's
+    /// bounds — both are shown there, next to the field that fixes them.
+    fn quote_detected_route(&mut self, cache: &Cache) -> Task<Message> {
+        let picked = self
+            .current_detection()
+            .and_then(|d| Some((d.address.clone()?, d.route()?.clone())));
+        let Some((address, route)) = picked else {
+            self.phase = SparkSendPhase::Idle;
+            return Task::none();
+        };
+        if self.cross_chain_amount_issue(cache).is_some() {
+            self.phase = SparkSendPhase::Idle;
+            return Task::none();
+        }
+        self.cross_chain = Some(CrossChainContext {
+            address,
+            routes: vec![route],
+            selected: 0,
+        });
+        self.quote_cross_chain(cache.bitcoin_unit)
     }
 
     fn begin_preparation(&mut self) -> u64 {
@@ -869,6 +912,7 @@ impl SparkSend {
         // `contract_address` / `chain_id` are what let the bridge re-resolve the
         // route against exactly the destination these routes were offered for.
         let destination = ctx.address.clone();
+        self.network_acknowledged = false;
         let generation = self.begin_preparation();
         Task::perform(
             async move {
@@ -1116,9 +1160,11 @@ impl State for SparkSend {
                 show_direction_badges: cache.show_direction_badges,
                 mask_amounts: cache.balance_amounts_masked(),
                 cross_chain_ctx: self.cross_chain.as_ref(),
-                detected_network: self.detected_network.as_ref(),
+                detected: self.current_detection(),
+                amount_issue: self.cross_chain_amount_issue(cache),
+                awaiting_network_ack: self.awaiting_network_ack(),
+                network_acknowledged: self.network_acknowledged,
                 slippage_input: &self.slippage_input,
-                advanced_open: self.advanced_open,
                 quote_countdown: self.quote_countdown.clone(),
                 receive_target: self.receive_target,
                 network: cache.network,
@@ -1242,8 +1288,11 @@ impl State for SparkSend {
                 }
                 // A failed lookup shows nothing: Prepare asks again and
                 // reports the error there, where it can be retried.
-                self.detected_network = match (result, self.receive_target.stablecoin()) {
-                    (Ok(found), Some(asset)) => Some(cross_chain::detect_network(&found, asset)),
+                let input = self.destination_input.trim().to_string();
+                self.detected = match (result, self.receive_target.stablecoin()) {
+                    (Ok(found), Some(asset)) => {
+                        Some(cross_chain::DetectedDestination::new(input, found, asset))
+                    }
                     _ => None,
                 };
                 Task::none()
@@ -1336,7 +1385,7 @@ impl State for SparkSend {
                 self.abandon_payment_intent();
                 self.cross_chain = None;
                 self.detect_seq = self.detect_seq.wrapping_add(1);
-                self.detected_network = None;
+                self.detected = None;
                 Task::none()
             }
             SparkSendMessage::PrepareRequested => {
@@ -1403,6 +1452,15 @@ impl State for SparkSend {
                             "Stablecoin sends aren't available on this network.".to_string(),
                         );
                         return Task::none();
+                    }
+                    // Details already looked the address up: quote the network
+                    // it settled on. Otherwise ask now (Prepare pressed before
+                    // the lookup came back).
+                    if self
+                        .current_detection()
+                        .is_some_and(|d| !d.network.is_problem())
+                    {
+                        return self.quote_detected_route(cache);
                     }
                     return Task::perform(
                         async move {
@@ -1505,7 +1563,18 @@ impl State for SparkSend {
                         self.phase = SparkSendPhase::Prepared(ok);
                         self.refresh_quote_countdown();
                     }
-                    Err(err) => self.phase = SparkSendPhase::Error(err),
+                    Err(err) => {
+                        self.phase = SparkSendPhase::Error(
+                            match (&self.cross_chain, self.current_detection()) {
+                                (Some(_), Some(detected))
+                                    if cross_chain::is_amount_too_small_error(&err) =>
+                                {
+                                    too_small_message(detected.chosen.as_deref())
+                                }
+                                _ => err,
+                            },
+                        )
+                    }
                 }
                 Task::none()
             }
@@ -1528,63 +1597,74 @@ impl State for SparkSend {
                         return Task::none();
                     }
                 };
-                let Some(address) = found.address else {
+                let Some(asset) = self.receive_target.stablecoin() else {
+                    self.phase = SparkSendPhase::Idle;
+                    return Task::none();
+                };
+                let input = self.destination_input.trim().to_string();
+                let detected = cross_chain::DetectedDestination::new(input, found, asset);
+                match &detected.network {
                     // The picked target is a stablecoin, but the pasted string
                     // isn't a recognised cross-chain address. Say so rather than
                     // firing funds somewhere unrecoverable.
-                    self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
-                        "That doesn't look like a {} address. Paste the recipient's {} address \
-                         on Ethereum or another EVM chain, Tron, or Solana.",
-                        "Eso no parece una dirección de {}. Pega la dirección de {} del \
-                         destinatario en Ethereum u otra red EVM, Tron o Solana.",
-                        self.receive_target.label(),
-                        self.receive_target.label(),
-                    ));
-                    return Task::none();
-                };
-                // Keep only routes that deliver the coin the user picked in the
-                // THEY RECEIVE card (USDt vs USDC) — the address alone reaches
-                // both, and the picker is what disambiguates.
-                let mut routes = found.routes;
-                if let Some(symbol) = self.receive_target.stablecoin() {
-                    routes.retain(|r| r.asset.eq_ignore_ascii_case(symbol));
-                }
-                if routes.is_empty() {
-                    self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
-                        "No route can currently send {} to this {} address.",
-                        "Ahora mismo ninguna ruta puede enviar {} a esta dirección de {}.",
-                        self.receive_target.label(),
-                        address.family,
-                    ));
-                    return Task::none();
-                }
-                self.cross_chain = Some(CrossChainContext {
-                    address,
-                    routes,
-                    selected: 0,
-                });
-                self.phase = SparkSendPhase::CrossChainRoutes;
-                Task::none()
-            }
-            SparkSendMessage::CrossChainRouteSelected(idx) => {
-                if let Some(ctx) = &mut self.cross_chain {
-                    if idx < ctx.routes.len() {
-                        ctx.selected = idx;
+                    cross_chain::DetectedNetwork::NotCrossChain => {
+                        self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
+                            "That doesn't look like a {} address. Paste the recipient's {} \
+                             address on Ethereum or another EVM chain, Tron, or Solana.",
+                            "Eso no parece una dirección de {}. Pega la dirección de {} del \
+                             destinatario en Ethereum u otra red EVM, Tron o Solana.",
+                            self.receive_target.label(),
+                            self.receive_target.label(),
+                        ));
                     }
+                    cross_chain::DetectedNetwork::Unreachable { family } => {
+                        self.phase = SparkSendPhase::Error(coincube_ui::localized_format!(
+                            "No route can currently send {} to this {} address.",
+                            "Ahora mismo ninguna ruta puede enviar {} a esta dirección de {}.",
+                            self.receive_target.label(),
+                            family,
+                        ));
+                    }
+                    cross_chain::DetectedNetwork::Chains { .. } => {}
+                }
+                let quotable = !detected.network.is_problem();
+                self.detected = Some(detected);
+                if !quotable {
+                    return Task::none();
+                }
+                self.quote_detected_route(cache)
+            }
+            SparkSendMessage::ChooseNetwork(chain) => {
+                if let Some(detected) = &mut self.detected {
+                    detected.choose(&chain);
                 }
                 Task::none()
             }
-            SparkSendMessage::SlippageChanged(value) => {
-                self.slippage_input = value;
+            SparkSendMessage::UseMinimum => {
+                if let Some(cross_chain::AmountIssue::BelowMinimum { min_sats }) =
+                    self.cross_chain_amount_issue(cache)
+                {
+                    self.amount_input = format_amount_for_input(min_sats, cache.bitcoin_unit);
+                    self.phase = SparkSendPhase::Idle;
+                    self.abandon_payment_intent();
+                }
                 Task::none()
             }
-            SparkSendMessage::ToggleAdvanced => {
-                self.advanced_open = !self.advanced_open;
+            SparkSendMessage::AcknowledgeNetwork(acknowledged) => {
+                self.network_acknowledged = acknowledged;
                 Task::none()
             }
-            SparkSendMessage::CrossChainQuoteRequested | SparkSendMessage::ReQuoteRequested => {
-                self.quote_cross_chain(cache.bitcoin_unit)
+            SparkSendMessage::SlippagePreset(bps) => {
+                // A different tolerance is a different quote: fetch it.
+                self.slippage_input = bps.to_string();
+                match &self.phase {
+                    SparkSendPhase::Prepared(ok) if ok.cross_chain.is_some() => {
+                        self.quote_cross_chain(cache.bitcoin_unit)
+                    }
+                    _ => Task::none(),
+                }
             }
+            SparkSendMessage::ReQuoteRequested => self.quote_cross_chain(cache.bitcoin_unit),
             SparkSendMessage::CrossChainRetryRequested => {
                 // A cross-chain retry re-sends the **same prepared quote**, not a
                 // fresh one. The bridge keeps a token-leg prepare re-sendable
@@ -1638,7 +1718,7 @@ impl State for SparkSend {
                     return Task::none();
                 };
                 let prepare = prepare.clone();
-                if self.recipient_mismatch() {
+                if self.recipient_mismatch() || self.awaiting_network_ack() {
                     return Task::none();
                 }
                 // A cross-chain quote that has run out must not be sent. The
@@ -1680,7 +1760,7 @@ impl State for SparkSend {
                 // Clear the inputs so a follow-up send doesn't re-use them.
                 self.destination_input.clear();
                 self.detect_seq = self.detect_seq.wrapping_add(1);
-                self.detected_network = None;
+                self.detected = None;
                 self.amount_input.clear();
                 self.invoice_amount_sat = None;
                 // Retire the idempotency key with the send it belonged to. A
@@ -1853,7 +1933,7 @@ impl State for SparkSend {
                 self.tampered_request = None;
                 self.destination_input.clear();
                 self.detect_seq = self.detect_seq.wrapping_add(1);
-                self.detected_network = None;
+                self.detected = None;
                 self.amount_input.clear();
                 self.invoice_amount_sat = None;
                 self.phase = SparkSendPhase::Idle;
@@ -2422,6 +2502,24 @@ async fn resolve_and_prepare<B: PrepareBackend>(
     }
 }
 
+/// The provider refused the amount as too small after Details let it through
+/// (a route can enforce more than it publishes). Said plainly, instead of the
+/// SDK's text with its base units.
+fn too_small_message(network: Option<&str>) -> String {
+    match network {
+        Some(network) => coincube_ui::localized_format!(
+            "That amount is too small for {network} right now. Try a larger amount: this \
+             route's minimum is higher than it publishes.",
+            "Ese importe es muy pequeño para {network} ahora mismo. Prueba con un importe \
+             mayor: el mínimo de esta ruta es más alto del que publica.",
+        ),
+        None => coincube_ui::locale::copy(
+            "That amount is too small for this route right now. Try a larger amount.",
+        )
+        .to_string(),
+    }
+}
+
 /// Human label for a [`coincube_spark_protocol::CrossChainAddress`] family
 /// (`"evm"` / `"solana"` / `"tron"`), for the wrong-network error copy.
 fn cross_chain_family_label(family: &str) -> &'static str {
@@ -2851,6 +2949,7 @@ mod tests {
             contract_address: None,
             decimals: 6,
             btc_source_supported: true,
+            btc_limits: None,
         }
     }
 
@@ -3494,6 +3593,7 @@ mod tests {
                     contract_address: None,
                     decimals: 6,
                     btc_source_supported: true,
+                    btc_limits: None,
                 }],
             })
         };
@@ -3512,7 +3612,7 @@ mod tests {
             &mut panel,
             SparkSendMessage::DestinationNetworkDetected(stale, tron()),
         ));
-        assert_eq!(panel.detected_network, None);
+        assert!(panel.detected.is_none());
 
         let current = panel.detect_seq;
         drop(send(
@@ -3520,7 +3620,7 @@ mod tests {
             SparkSendMessage::DestinationNetworkDetected(current, tron()),
         ));
         assert!(matches!(
-            &panel.detected_network,
+            panel.detected.as_ref().map(|d| &d.network),
             Some(cross_chain::DetectedNetwork::Chains { chains, .. }) if chains == &["Tron"]
         ));
 
@@ -3530,18 +3630,18 @@ mod tests {
             &mut panel,
             SparkSendMessage::DestinationInputChanged("TQ23".into()),
         ));
-        assert_eq!(panel.detected_network, None);
+        assert!(panel.detected.is_none());
         let current = panel.detect_seq;
         drop(send(
             &mut panel,
             SparkSendMessage::DestinationNetworkDetected(current, tron()),
         ));
-        assert!(panel.detected_network.is_some());
+        assert!(panel.detected.is_some());
         drop(send(
             &mut panel,
             SparkSendMessage::SetReceiveTarget(SparkSendTarget::Usdc),
         ));
-        assert_eq!(panel.detected_network, None);
+        assert!(panel.detected.is_none());
 
         // A failed lookup shows nothing; Prepare reports the error.
         let current = panel.detect_seq;
@@ -3549,7 +3649,7 @@ mod tests {
             &mut panel,
             SparkSendMessage::DestinationNetworkDetected(current, Err("offline".into())),
         ));
-        assert_eq!(panel.detected_network, None);
+        assert!(panel.detected.is_none());
     }
 
     /// US Dollar can be picked whenever there is a USDB balance — before an
@@ -3930,15 +4030,22 @@ mod tests {
             },
         );
 
-        assert!(matches!(panel.phase, SparkSendPhase::CrossChainRoutes));
-        let ctx = panel.cross_chain.as_ref().expect("routes retained");
-        assert_eq!(ctx.address.family, "tron");
-        assert_eq!(ctx.routes.len(), 2);
-        assert!(ctx
+        // One network, so there is nothing to confirm: Prepare goes straight
+        // on to the quote (which fails here only for want of a backend).
+        let detected = panel.detected.as_ref().expect("lookup kept");
+        assert_eq!(detected.routes.len(), 2);
+        assert!(detected
             .routes
             .iter()
             .all(|r| r.asset.eq_ignore_ascii_case("USDT")));
+        let ctx = panel.cross_chain.as_ref().expect("route picked to quote");
+        assert_eq!(ctx.address.family, "tron");
+        assert_eq!(ctx.routes.len(), 1);
         assert_eq!(ctx.selected, 0);
+        assert!(matches!(
+            &panel.phase,
+            SparkSendPhase::Error(msg) if msg == "Spark backend is not available."
+        ));
     }
 
     #[test]
@@ -4466,69 +4573,162 @@ mod tests {
     }
 
     #[test]
-    fn advanced_and_slippage_controls_only_update_their_local_fields() {
+    fn a_slippage_preset_outside_review_only_records_the_choice() {
         let mut panel = SparkSend::new(None);
-        assert!(!panel.advanced_open);
+        let _ = send(&mut panel, SparkSendMessage::SlippagePreset(50));
+        assert_eq!(panel.slippage_input, "50");
+        assert!(matches!(panel.phase, SparkSendPhase::Idle));
+    }
 
-        let _ = send(&mut panel, SparkSendMessage::ToggleAdvanced);
-        assert!(panel.advanced_open);
+    fn evm_lookup(panel: &mut SparkSend, input: &str) {
+        panel.receive_target = SparkSendTarget::Usdt;
+        panel.destination_input = input.to_string();
+        panel.detected = Some(cross_chain::DetectedDestination::new(
+            input.to_string(),
+            coincube_spark_protocol::CrossChainRoutesOk {
+                address: Some(cross_chain_address("evm")),
+                routes: vec![
+                    CrossChainRoute {
+                        chain: "ethereum".into(),
+                        ..route_with_asset("USDT")
+                    },
+                    CrossChainRoute {
+                        chain: "base".into(),
+                        btc_limits: Some(coincube_spark_protocol::CrossChainRouteLimits {
+                            min_sats: Some(1_200),
+                            ..Default::default()
+                        }),
+                        ..route_with_asset("USDT")
+                    },
+                ],
+            },
+            "USDT",
+        ));
+    }
+
+    /// An EVM address works on several networks, so Prepare waits on Details
+    /// until one is chosen — nothing is guessed — and then quotes that one.
+    #[test]
+    fn an_evm_address_waits_for_its_network_before_quoting() {
+        let mut panel = SparkSend::new(None);
+        evm_lookup(&mut panel, "0xabc");
+        panel.amount_input = "5000".into();
+
+        let _ = panel.quote_detected_route(&Cache::default());
+        assert!(matches!(panel.phase, SparkSendPhase::Idle));
+        assert!(panel.cross_chain.is_none());
 
         let _ = send(
             &mut panel,
-            SparkSendMessage::SlippageChanged("250".to_string()),
+            SparkSendMessage::ChooseNetwork("Polygon".into()),
         );
-        assert_eq!(panel.slippage_input, "250");
-        assert!(panel.advanced_open);
-        assert!(matches!(panel.phase, SparkSendPhase::Idle));
+        assert_eq!(panel.detected.as_ref().unwrap().chosen, None);
+        let _ = send(&mut panel, SparkSendMessage::ChooseNetwork("Base".into()));
+        assert_eq!(
+            panel.detected.as_ref().unwrap().chosen.as_deref(),
+            Some("Base")
+        );
 
-        let _ = send(&mut panel, SparkSendMessage::ToggleAdvanced);
-        assert!(!panel.advanced_open);
-        assert_eq!(panel.slippage_input, "250");
+        let _ = panel.quote_detected_route(&Cache::default());
+        assert_eq!(panel.cross_chain.as_ref().unwrap().routes[0].chain, "base");
     }
 
+    /// Below the route's minimum (plus its buffer) is caught on Details:
+    /// Prepare stays put, and "Use the minimum" fills the buffered floor.
     #[test]
-    fn route_selection_updates_valid_indices_and_ignores_out_of_bounds() {
+    fn a_below_minimum_amount_is_caught_before_any_quote() {
         let mut panel = SparkSend::new(None);
+        evm_lookup(&mut panel, "0xabc");
+        let _ = send(&mut panel, SparkSendMessage::ChooseNetwork("Base".into()));
+        panel.amount_input = "1200".into();
+
+        assert_eq!(
+            panel.cross_chain_amount_issue(&Cache::default()),
+            Some(cross_chain::AmountIssue::BelowMinimum { min_sats: 1_500 })
+        );
+        let _ = panel.quote_detected_route(&Cache::default());
+        assert!(matches!(panel.phase, SparkSendPhase::Idle));
+        assert!(panel.cross_chain.is_none());
+
+        let _ = send(&mut panel, SparkSendMessage::UseMinimum);
+        assert_eq!(panel.amount_input, "1500");
+        assert_eq!(panel.cross_chain_amount_issue(&Cache::default()), None);
+    }
+
+    /// Review asks "they use this network" only for a network the user
+    /// picked; an address with one network goes straight to Confirm.
+    #[test]
+    fn only_a_chosen_network_needs_acknowledging() {
+        let quoted = |panel: &mut SparkSend| {
+            panel.phase = SparkSendPhase::Prepared(PrepareSendOk {
+                cross_chain: Some(Box::new(coincube_spark_protocol::CrossChainQuote {
+                    route: route_with_asset("USDT"),
+                    estimated_out: 1_000_000,
+                    fee_amount: 0,
+                    source_transfer_fee_sats: 0,
+                    expires_at: (chrono::Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+                    retry_safe: true,
+                })),
+                ..plain_prepare("cross")
+            });
+        };
+
+        let mut evm = SparkSend::new(None);
+        evm_lookup(&mut evm, "0xabc");
+        let _ = send(&mut evm, SparkSendMessage::ChooseNetwork("Base".into()));
+        quoted(&mut evm);
+        assert!(evm.awaiting_network_ack());
+        let _ = send(&mut evm, SparkSendMessage::AcknowledgeNetwork(true));
+        assert!(!evm.awaiting_network_ack());
+
+        let mut tron = SparkSend::new(None);
+        tron.receive_target = SparkSendTarget::Usdt;
+        tron.destination_input = "TQ2".into();
+        tron.detected = Some(cross_chain::DetectedDestination::new(
+            "TQ2".into(),
+            coincube_spark_protocol::CrossChainRoutesOk {
+                address: Some(cross_chain_address("tron")),
+                routes: vec![CrossChainRoute {
+                    chain: "tron".into(),
+                    ..route_with_asset("USDT")
+                }],
+            },
+            "USDT",
+        ));
+        quoted(&mut tron);
+        assert!(!tron.awaiting_network_ack());
+    }
+
+    /// When the provider still refuses an amount Details let through, the
+    /// error names the network in plain words, not the SDK's base units.
+    #[test]
+    fn a_too_small_refusal_reads_plainly() {
+        let mut panel = SparkSend::new(None);
+        evm_lookup(&mut panel, "0xabc");
+        let _ = send(&mut panel, SparkSendMessage::ChooseNetwork("Base".into()));
         panel.cross_chain = Some(CrossChainContext {
             address: cross_chain_address("evm"),
-            routes: vec![route_with_asset("USDT"), route_with_asset("USDC")],
+            routes: vec![route()],
             selected: 0,
         });
-        panel.phase = SparkSendPhase::CrossChainRoutes;
-
-        let _ = send(&mut panel, SparkSendMessage::CrossChainRouteSelected(1));
-        assert_eq!(panel.cross_chain.as_ref().unwrap().selected, 1);
-
-        let _ = send(&mut panel, SparkSendMessage::CrossChainRouteSelected(99));
-        assert_eq!(
-            panel.cross_chain.as_ref().unwrap().selected,
-            1,
-            "out-of-bounds route selections must leave the current route alone"
-        );
-    }
-
-    #[test]
-    fn quote_request_requires_a_selected_route_before_backend_or_amount_work() {
-        let mut no_context = SparkSend::new(None);
-        let _ = send(&mut no_context, SparkSendMessage::CrossChainQuoteRequested);
-        assert!(matches!(no_context.phase, SparkSendPhase::Idle));
-
-        let mut missing_route = SparkSend::new(None);
-        missing_route.cross_chain = Some(CrossChainContext {
-            address: cross_chain_address("evm"),
-            routes: vec![route()],
-            selected: 99,
-        });
-        missing_route.phase = SparkSendPhase::CrossChainRoutes;
-
+        let generation = panel.begin_preparation();
         let _ = send(
-            &mut missing_route,
-            SparkSendMessage::CrossChainQuoteRequested,
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation,
+                result: Err(
+                    "Couldn't quote this send: Spark bridge error (sdk): Amount too \
+                             small (published minimum: 1200 base units or 0.80 USD)"
+                        .into(),
+                ),
+                recipient: None,
+            },
         );
-        assert!(
-            matches!(missing_route.phase, SparkSendPhase::CrossChainRoutes),
-            "without a selected route, quote request must be a no-op"
-        );
+        assert!(matches!(
+            &panel.phase,
+            SparkSendPhase::Error(msg) if msg.contains("too small for Base")
+                && !msg.contains("base units")
+        ));
     }
 
     #[test]
@@ -4541,7 +4741,7 @@ mod tests {
         });
         panel.amount_input = "1000".to_string();
 
-        let _ = send(&mut panel, SparkSendMessage::CrossChainQuoteRequested);
+        let _ = send(&mut panel, SparkSendMessage::ReQuoteRequested);
         assert!(matches!(
             &panel.phase,
             SparkSendPhase::Error(msg) if msg == "Spark backend is not available."
