@@ -12,6 +12,50 @@ pub mod integration {
         super::connect_esplora_config(super::bitcoin::Network::Testnet4, jwt)
     }
 
+    /// Exact product restore staging, with no caller-supplied original signer.
+    pub fn stage_full_recovery(
+        ctx: &mut Context,
+        seed: &crate::services::recovery::SeedBlob,
+        descriptor: &crate::services::recovery::DescriptorBlob,
+    ) -> Result<(), String> {
+        use super::step::recovery_kit_restore::{stage_restore, RestoreScope};
+        if seed.cube.uuid != descriptor.cube.uuid
+            || seed.cube.network != descriptor.cube.network
+            || seed.cube.network != ctx.bitcoin_config.chain.api_str()
+            || ctx.seed_cube_id() != seed.cube.uuid
+        {
+            return Err("Recovery fixture identity mismatch".into());
+        }
+        stage_restore(
+            ctx.network,
+            RestoreScope::Full,
+            Some(seed),
+            Some(descriptor),
+        )?
+        .commit(ctx, super::context::RestoreSource::PasswordKit);
+        Ok(())
+    }
+
+    pub fn recovery_esplora_config(
+        chain: crate::chain::ChainId,
+        jwt: &str,
+    ) -> coincubed::config::EsploraConfig {
+        if chain.is_blake2b() {
+            return super::connect_esplora_config(chain, jwt);
+        }
+        // Native QA never persists an ordinary-Testnet4 bearer in daemon.toml.
+        // Use the product's existing public providers; Connect kit APIs keep
+        // their token solely in the signed process / protected QA item.
+        coincubed::config::EsploraConfig {
+            addr: super::public_esplora_url(chain.bitcoin_network()),
+            token: None,
+            fallback_addr: super::public_esplora_fallback_url(chain.bitcoin_network()),
+            fallback_token: None,
+            secondary_fallback_addr: None,
+            secondary_fallback_token: None,
+        }
+    }
+
     /// Resume only the native test runner's verified Testnet4 seed write.
     /// Normal app callers retain create-new behavior through install_local_wallet.
     pub async fn install_testnet4_wallet_resumable(

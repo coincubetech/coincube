@@ -22,7 +22,9 @@ async fn drain(task: Task<Message>) -> Vec<Message> {
 }
 
 /// Run the normal creation and backup state machine for a previously absent Cube.
+#[allow(clippy::too_many_arguments)]
 async fn create_new_testnet4_cube(
+    chain: ChainId,
     root: &CoincubeDirectory,
     id: uuid::Uuid,
     name: String,
@@ -31,12 +33,20 @@ async fn create_new_testnet4_cube(
     server_limit: usize,
     existing: Vec<CubeSettings>,
 ) -> Result<CubeSettings, &'static str> {
-    let (mut home, _) = Home::new(root.clone(), Some(Network::Testnet4));
-    home.network = ChainId::Testnet4;
+    let (mut home, _) = Home::new(root.clone(), Some(chain.bitcoin_network()));
+    home.network = chain;
+    if chain.is_blake2b() {
+        let enabled = crate::chain::global_blake2b_enabled(CoincubeClient::new()).await;
+        let request = home.global_feature_request;
+        let _ = home.update(Message::GlobalFeatureLoaded(request, enabled));
+        if !home.chain_availability(chain).is_available() {
+            return Err("recovery_chain_unavailable");
+        }
+    }
     home.state = State::Cubes {
         cubes: existing,
         create_cube: true,
-        source: ChainId::Testnet4,
+        source: chain,
     };
     home.server_cube_limit = Some(server_limit);
     home.passkey_mode = false;
@@ -123,7 +133,17 @@ pub async fn create_testnet4_cube(
         }
         cube.clone()
     } else {
-        create_new_testnet4_cube(&root, id, name, pin, saved_words, server_limit, existing).await?
+        create_new_testnet4_cube(
+            ChainId::Testnet4,
+            &root,
+            id,
+            name,
+            pin,
+            saved_words,
+            server_limit,
+            existing,
+        )
+        .await?
     };
     if !cube.backed_up
         || cube.creation_backup_bypass.is_some()
@@ -140,6 +160,47 @@ pub async fn create_testnet4_cube(
         return Err("cube_backup_mismatch");
     }
     Ok(cube)
+}
+
+/// Fresh native Recovery Kit fixture only. Never adopts an existing UUID/profile.
+/// Uses the same Home create/backup/persist ceremony on the two allowed chains.
+pub async fn create_recovery_fixture_cube(
+    chain: ChainId,
+    root: CoincubeDirectory,
+    id: uuid::Uuid,
+    pin: &str,
+    saved_words: &[String],
+    server_limit: usize,
+    client: CoincubeClient,
+) -> Result<CubeSettings, &'static str> {
+    if !matches!(chain, ChainId::Testnet4 | ChainId::BitcoinBlake2bTestnet4)
+        || root.path().exists()
+        || unlock::device_secret::load_optional(&id.to_string())
+            .map_err(|_| "keystore_unavailable")?
+            .is_some()
+    {
+        return Err("recovery_fixture_not_fresh");
+    }
+    if pin.len() != 4 || !pin.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("recovery_desktop_pin_length");
+    }
+    // Owner-authorized settings apply only to this initially absent QA profile.
+    // These are normal product preference setters, never a visibility bypass.
+    std::fs::create_dir(root.path()).map_err(|_| "recovery_profile_create")?;
+    crate::recovery_native::initialize_preferences(&root, chain)?;
+    crate::recovery_native::require_backend_feature(chain, &client, &root).await?;
+    let name = format!("Native Recovery QA {}", &id.to_string()[..8]);
+    create_new_testnet4_cube(
+        chain,
+        &root,
+        id,
+        name,
+        pin,
+        saved_words,
+        server_limit,
+        Vec::new(),
+    )
+    .await
 }
 
 #[cfg(test)]

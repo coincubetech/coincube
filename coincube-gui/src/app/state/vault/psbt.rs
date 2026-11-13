@@ -3227,6 +3227,15 @@ pub fn merge_testnet4_integration_signatures(
 /// Sign with the Vault's hot key, keyed on the chain: `SIGHASH_ALL` into
 /// `partial_sigs` on the Bitcoin family (unchanged), unified signatures into
 /// the proprietary records on Bitcoin Blake2b.
+#[cfg(feature = "integration-tests")]
+pub(crate) fn sign_recovery_fixture_for_chain(
+    chain: ChainId,
+    signer: &crate::signer::Signer,
+    psbt: Psbt,
+) -> Result<Psbt, Error> {
+    sign_with_master_signer_for_chain(chain, signer, psbt)
+}
+
 fn sign_with_master_signer_for_chain(
     chain: ChainId,
     signer: &crate::signer::Signer,
