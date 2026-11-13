@@ -34,8 +34,10 @@ acceptance. The current source has not completed a live full-kit run.
 
 New `workstation.example.json` enables `native_recovery`. The fresh mobile
 pipeline performs read-only native source/dependency preflight in environment,
-before mobile creation. Immediately before every funding/resume branch it runs
-or revalidates the run-bound native suite, blocking faucet/sponsor activity on
+before mobile creation. After real phone setup, it completes the native suite
+before creating the mobile Cube, so the temporary native fixtures do not require
+another spare slot after mobile creation. Immediately before every funding/resume
+branch it revalidates the same completed run-bound native proof, blocking faucet/sponsor activity on
 missing prerequisites, malformed evidence or native failure. Historical configs
 without this field preserve their original fifteen stages and record
 `legacy_mobile_only`; they do not gain full Recovery Kit coverage retroactively.
@@ -89,6 +91,40 @@ Blake2b Unified `0x21`, and wrong-domain/altered-message refusal. This is a
 controlled unfunded PSBT, never a recognized UTXO or transaction acceptance.
 
 ## Repeatability, retirement and interruption
+
+Before any native PIN, password, profile or production canary is created, a
+signed read-only process validates the real account, chain capability, all-network
+owned/shared UUID absence, pending approvals/sessions/decrypt requests and exact
+Cube quota. A full quota can retire at most one already enrolled disposable QA
+fixture through the existing cleanup policy. It reuses its retained-file and
+backup checks, candidate lease, pending/sharing graph, residual accounting and
+funding-source protections. Native admission is a separate typed consumer; it
+never fabricates a phone PID or mobile acceptance. Initial selection requires a
+fresh FULL quota. An already selected retirement finishes even if its earlier
+DELETE has made capacity available. No second fixture is selected to chase a
+concurrent quota change. Complete native proofs perform no new admission or
+cleanup when the mobile Cube later occupies the freed slot.
+
+Standalone runs can add `"cleanup_workstation": "/private/workstation.json"` to
+the private launcher config. This references the existing QA workstation's exact
+account/cache, preservation roots and funding policy. It does not adopt its phone
+identity. Backup and pending helpers are built from the same frozen source and
+pinned by hash and signing profile before and after private recovery operations;
+caller-selected binaries are not accepted. Without this explicit cleanup config,
+full capacity remains BLOCKED before native fixture secrets.
+
+One narrow source-upgrade handoff supports the reviewed historical capacity
+failure from source `74da94d2848783951ff9b305724340afbb230ab8` and its pinned signed
+helper. The launcher accepts `--abandon-capacity-from /private/old-native-run`
+and `--legacy-capacity-helper /private/archive/RecoveryNative.app/Contents/MacOS/recovery_kit_native`
+together, with a fresh `--run-dir`. It verifies the archived helper (never executes
+it), exact old source/checkpoint/derived UUID/account, dead creator, NEW pending
+create with no identity/kit/profiles/factor, production factor and all-network
+remote UUID absence, and the fixed QA-service canary handle. It does not trust or
+read the mutable production-canary UUID. All old files and Keychain items remain
+unchanged. A new add-only protected metadata claim binds that one historical
+failure to one fresh consumer; retrying that same consumer is idempotent. This
+handoff is neither native acceptance nor a general interrupted-fixture importer.
 
 After independent public verification, only the newly created native remote
 Cube is eligible for retirement. This flow never registers a remote Vault/key.

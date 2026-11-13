@@ -142,6 +142,67 @@ async fn install(
     Ok(())
 }
 
+/// Read-only admission, before generating any fixture credential or canary.
+/// Repeated immediately before product creation to close stale quota evidence.
+pub async fn create_capacity_available(
+    chain: ChainId,
+    id: uuid::Uuid,
+    owner_id: u32,
+    client: &CoincubeClient,
+) -> Result<bool> {
+    allowed_chain(chain)?;
+    check(
+        client
+            .get_user()
+            .await
+            .map_err(|_| "native_auth_blocked")?
+            .id
+            == owner_id,
+        "native_account_changed",
+    )?;
+    if chain.is_blake2b() {
+        check(
+            client
+                .get_connect_features()
+                .await
+                .map_err(|_| "native_chain_capability_blocked")?
+                .bitcoin_blake2b_enabled
+                == Some(true),
+            "native_chain_capability_blocked",
+        )?;
+    }
+    check(
+        !client
+            .list_cubes()
+            .await
+            .map_err(|_| "native_remote_inventory_blocked")?
+            .iter()
+            .any(|cube| cube.uuid == id.to_string()),
+        "native_remote_uuid_already_exists",
+    )?;
+    let limits = client
+        .get_cube_limits(chain.api_str())
+        .await
+        .map_err(|_| "native_limits_blocked")?;
+    check(
+        limits.network == chain.api_str() && limits.current_count >= 0,
+        "native_limits_blocked",
+    )?;
+    Ok(limits.current_count < limits.max_allowed as i64)
+}
+
+pub async fn admit_create(
+    chain: ChainId,
+    id: uuid::Uuid,
+    owner_id: u32,
+    client: &CoincubeClient,
+) -> Result<()> {
+    check(
+        create_capacity_available(chain, id, owner_id, client).await?,
+        "native_capacity_blocked",
+    )
+}
+
 /// Drive Home's real creation/backup ceremony, then real in-Cube Vault installation
 /// and the exact full-kit encrypt/upload function shared by Settings and creation.
 #[allow(clippy::too_many_arguments)]

@@ -142,9 +142,9 @@ def offline_protocol(config, tmp_path, monkeypatch, crash_retirement=False):
     def worker(executable,request,directory,access_token=None):
         action=request['action'];cfg=request['config'];calls.append((cfg['chain'],action))
         case=Path(cfg['case_root']);state_path=case/'state.json'
-        pid={'preflight':10,'bind_auth':11,'create_export':100,'wipe_original':150,'restore':200,'reopen_sign':300,'retire_remote':400}[action]
+        pid={'admit_create':9,'preflight':10,'bind_auth':11,'create_export':100,'wipe_original':150,'restore':200,'reopen_sign':300,'retire_remote':400}[action]
         record={'pid':pid,'start_id':str(pid),'exited':True,'returncode':0}
-        if action in ('preflight','bind_auth'):return record
+        if action in ('admit_create','preflight','bind_auth'):return record
         if action=='create_export':
             case.mkdir(mode=0o700);(case/'original').mkdir(mode=0o700)
             psbt,identity=fixture(cfg['chain'])
@@ -179,7 +179,7 @@ def test_offline_orchestration_orders_both_chains_and_retirement_without_gui_cla
         assert list(result['chains'])==list(public.CHAINS)
         assert result['gui'] is result['funded'] is result['broadcast'] is False
         assert all(result['chains'][c]['verified_key_count']==2 for c in public.CHAINS)
-        assert calls==[(c,a) for c in public.CHAINS for a in ('preflight','bind_auth',*native.ACTIONS,'retire_remote')]
+        assert calls==[(c,a) for c in public.CHAINS for a in ('admit_create','preflight','bind_auth',*native.ACTIONS,'retire_remote')]
         before=list(calls);suite.execute({'tokens':{'access_token':'unit-not-a-credential'}},1)
         assert calls==before  # Same consumer resumes retained proof, not a new run.
     finally:suite.close()
@@ -251,3 +251,180 @@ def test_completed_resume_revalidates_signer_identity_instead_of_returning_cache
         with pytest.raises(Failed,match='identity changed'):suite.execute({'tokens':{'access_token':'unit-not-a-credential'}},1)
         assert calls==before
     finally:suite.close()
+
+
+def test_capacity_refusal_precedes_every_secret_producing_action(config, tmp_path, monkeypatch):
+    calls = offline_protocol(config, tmp_path, monkeypatch)
+    original = native.process
+    def worker(executable, request, directory, access_token=None):
+        if request['action'] == 'admit_create':
+            calls.append((request['config']['chain'], 'admit_create'))
+            raise native.NativeActionBlocked('native_capacity_blocked')
+        return original(executable, request, directory, access_token=access_token)
+    monkeypatch.setattr(native, 'process', worker)
+    suite = native.NativeRecovery(config, tmp_path/'run', {'consumer': 'offline-capacity-test'})
+    try:
+        with pytest.raises(native.NativeActionBlocked):
+            suite.execute({'tokens': {'access_token': 'unit-not-a-credential'}}, 1)
+        assert calls == [(public.CHAINS[0], 'admit_create')]
+        assert 'pending_native_action' not in suite.journal.data['artifacts']
+        assert not any(p.is_dir() for p in suite.directory.iterdir())
+    finally:
+        suite.close()
+
+
+def test_mobile_cube_creation_gate_precedes_any_provision_call(monkeypatch):
+    calls = []
+    runner = FreshRunner.__new__(FreshRunner)
+    runner.provision = SimpleNamespace(call=lambda _: calls.append('mobile-create'))
+    def stop(_):
+        calls.append('native-gate')
+        raise Blocked('NATIVE_RECOVERY_ACTION', 'capacity blocked')
+    monkeypatch.setattr(native, 'gate', stop)
+    with pytest.raises(Blocked):
+        runner.stage_cube_creation()
+    assert calls == ['native-gate']
+
+
+def test_completed_native_proof_revalidation_needs_no_capacity_or_cleanup_context(config, tmp_path, monkeypatch):
+    calls = offline_protocol(config, tmp_path, monkeypatch)
+    suite = native.NativeRecovery(config, tmp_path/'run', {'consumer': 'offline-only-test'})
+    try:
+        suite.execute({'tokens': {'access_token': 'unit-not-a-credential'}}, 1)
+        before = list(calls)
+        def forbidden(*args, **kwargs):
+            pytest.fail('Completed proof must not build cleanup tools or query full capacity')
+        monkeypatch.setattr(native, 'NativeCleanupContext', forbidden)
+        suite.execute({'tokens': {'access_token': 'unit-not-a-credential'}}, 1, cleanup_runner=object())
+        assert calls == before
+    finally:
+        suite.close()
+
+
+def test_cleanup_rejects_untyped_noop_admission():
+    from harness import qa_cleanup
+    runner = SimpleNamespace()
+    with pytest.raises(Failed, match='ADMISSION'):
+        qa_cleanup.cleanup_admission(runner, SimpleNamespace(runner=runner, observe=lambda: None))
+
+
+def test_native_legacy_operation_has_immediate_before_after_identity_guards(monkeypatch):
+    from harness import qa_cleanup
+    calls = []
+    runner = SimpleNamespace(observe=lambda: calls.append('identity'))
+    admission = native.NativeCleanupConsumerV1.__new__(native.NativeCleanupConsumerV1)
+    admission.runner = runner
+    admission.observe = lambda: runner.observe()
+    def operation(actual, record):
+        assert actual is runner and record == {'fixture': 'exact'}
+        calls.append('backup')
+    qa_cleanup.cleanup_local(admission, operation, runner, {'fixture': 'exact'})
+    assert calls == ['identity', 'backup', 'identity']
+    calls.clear()
+    def replaced():
+        calls.append('replacement-refused')
+        raise Failed('NATIVE_RECOVERY_CLEANUP_BUILD_CHANGED', 'replaced binary')
+    runner.observe = replaced
+    with pytest.raises(Failed):
+        qa_cleanup.cleanup_local(admission, operation, runner, {'fixture': 'exact'})
+    assert calls == ['replacement-refused']
+
+
+def abandoned_capacity_fixture(config, tmp_path, monkeypatch):
+    import hashlib
+    import uuid
+    from harness.state import atomic_write, digest
+    calls = offline_protocol(config, tmp_path, monkeypatch)
+    old = tmp_path/'old-capacity-run'; old.mkdir(mode=0o700)
+    scope = str(uuid.uuid5(uuid.NAMESPACE_URL, 'native-recovery/' + str(old) + '/testnet4'))
+    case = old/scope; case.mkdir(mode=0o700)
+    old_config = {'version':1,'case_root':str(case),'run_id':scope,'chain':'testnet4','owner_id':5,
+        'source_head':native.LEGACY_CAPACITY_SOURCE,
+        'auth_account':hashlib.sha256(f'recovery-native-v1:{case}:{scope}:testnet4:auth'.encode()).hexdigest()}
+    archive = tmp_path/'archive'/'RecoveryNative.app'/'Contents'/'MacOS'/'recovery_kit_native'
+    archive.parent.mkdir(parents=True); archive.write_bytes(b'offline-reviewed-legacy-artifact')
+    monkeypatch.setattr(native, 'LEGACY_CAPACITY_HELPER', hashlib.sha256(archive.read_bytes()).hexdigest())
+    cp = {'artifacts':{'build':{'sha256':native.LEGACY_CAPACITY_HELPER,'source':{'head':native.LEGACY_CAPACITY_SOURCE}},
+        'testnet4':{'preflight':{},'bind_auth':{}},
+        'pending_native_action':{'chain':'testnet4','action':'create_export','config_sha256':digest(old_config)}}}
+    atomic_write(old/'checkpoint.json', json.dumps(cp).encode())
+    atomic_write(case/'state.json', json.dumps({'config':old_config}).encode())
+    suite = native.NativeRecovery(config, tmp_path/'new-capacity-run', {'unit':'offline-handoff'})
+    observed = []
+    def audit(cfg, binding, executable, receipt, request, directory, access_token=None):
+        assert request['action'] == 'audit_capacity_abandonment'
+        assert request['old_directory'] == str(old)
+        observed.append(request)
+        return {'pid':99,'start_id':'offline-only','exited':True,'returncode':0}
+    monkeypatch.setattr(native, 'checked_process', audit)
+    return suite, old, case, archive, observed
+
+
+def test_narrow_abandonment_requires_live_observer_and_never_claims_native_acceptance(config,tmp_path,monkeypatch):
+    suite, old, case, archive, observed = abandoned_capacity_fixture(config,tmp_path,monkeypatch)
+    before = (old/'checkpoint.json').read_bytes(), (case/'state.json').read_bytes()
+    try:
+        marker = suite.abandon_capacity({'email':'qa@example.invalid','tokens':{'access_token':'offline-only'}},5,old,archive)
+        assert len(observed) == 1
+        assert marker['native_acceptance'] is False and marker['all_old_material_retained'] is True
+        assert before == ((old/'checkpoint.json').read_bytes(), (case/'state.json').read_bytes())
+        first = suite.journal.data['artifacts']['capacity_abandonment']
+        assert suite.abandon_capacity({'email':'qa@example.invalid','tokens':{'access_token':'offline-only'}},5,old,archive) == marker
+        assert suite.journal.data['artifacts']['capacity_abandonment'] == first
+    finally:
+        suite.close()
+
+
+@pytest.mark.parametrize('change', ['helper','source','owner','scope','pending'])
+def test_unreviewed_or_changed_abandonment_cannot_reach_observer(config,tmp_path,monkeypatch,change):
+    from harness.state import atomic_write
+    suite, old, case, archive, observed = abandoned_capacity_fixture(config,tmp_path,monkeypatch)
+    try:
+        if change == 'helper': archive.write_bytes(b'different')
+        elif change in ('owner','scope'):
+            state = json.loads((case/'state.json').read_bytes())
+            state['config']['owner_id' if change == 'owner' else 'run_id'] = 99 if change == 'owner' else 'wrong'
+            atomic_write(case/'state.json',json.dumps(state).encode())
+        else:
+            cp = json.loads((old/'checkpoint.json').read_bytes())
+            if change == 'source': cp['artifacts']['build']['source']['head'] = 'b'*40
+            else: cp['artifacts']['pending_native_action']['action'] = 'wipe_original'
+            atomic_write(old/'checkpoint.json',json.dumps(cp).encode())
+        with pytest.raises(Failed):
+            suite.abandon_capacity({'email':'qa@example.invalid','tokens':{'access_token':'offline-only'}},5,old,archive)
+        assert observed == []
+        assert 'capacity_abandonment' not in suite.journal.data['artifacts']
+    finally:
+        suite.close()
+
+
+def test_actual_legacy_binary_hash_guard_stops_replacement_before_backup_or_delete(tmp_path, monkeypatch):
+    import hashlib
+    from harness import qa_cleanup
+    from harness.state import atomic_write, digest
+    context = native.NativeCleanupContext.__new__(native.NativeCleanupContext)
+    binding = {'head':'a'*40}
+    context.suite = SimpleNamespace(config={}, binding=binding)
+    context.parent = None
+    context.config = {}; context.config_binding = digest({})
+    context.workstation = tmp_path/'workstation.json'; context.workstation_raw = b'{}'
+    atomic_write(context.workstation, context.workstation_raw)
+    context.profile = tmp_path/'profile'; (context.profile/'testnet4').mkdir(parents=True)
+    context.account = {'email':'qa@example.invalid','tokens':{'access_token':'offline-only'}}
+    atomic_write(context.profile/'testnet4/connect.json',json.dumps({'active_email':context.account['email'],'accounts':[context.account]}).encode())
+    context.provision_binary = tmp_path/'provision'; context.provision_binary.write_bytes(b'original')
+    context.signing_binary = tmp_path/'signing'; context.signing_binary.write_bytes(b'signing')
+    context.tools = {'head':binding['head'],'provision_sha256':hashlib.sha256(b'original').hexdigest(),
+                     'signing_sha256':hashlib.sha256(b'signing').hexdigest()}
+    monkeypatch.setattr(native,'source',lambda _:binding)
+    monkeypatch.setattr(native,'signed_identity',lambda *args:None)
+    context.suite.config = {'checkout':str(tmp_path)}
+    context.observe()  # Real source/hash guard with synthetic files, not keys.
+    context.provision_binary.write_bytes(b'replacement')
+    admission = native.NativeCleanupConsumerV1.__new__(native.NativeCleanupConsumerV1)
+    admission.runner = context
+    admission.observe = context.observe
+    called = []
+    with pytest.raises(Failed, match='CLEANUP_BUILD_CHANGED'):
+        qa_cleanup.cleanup_local(admission, lambda *args:called.append('private-backup'), context, {})
+    assert called == []

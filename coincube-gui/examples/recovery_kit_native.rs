@@ -68,6 +68,19 @@ mod native {
         config: Config,
         access_token: String,
     }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct AbandonInput {
+        config: Config,
+        old_directory: PathBuf,
+        access_token: String,
+    }
+    impl Drop for AbandonInput {
+        fn drop(&mut self) {
+            use zeroize::Zeroize;
+            self.access_token.zeroize();
+        }
+    }
     impl Drop for AuthInput {
         fn drop(&mut self) {
             use zeroize::Zeroize;
@@ -156,6 +169,14 @@ mod native {
             }
         }
     }
+    fn absent(path: &Path) -> Result<bool> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(_) => Err("native_absence_unknown"),
+        }
+    }
+
     fn account(c: &Config, role: &str) -> String {
         hash(
             format!(
@@ -593,6 +614,276 @@ mod native {
             "native_retirement_readback",
         )
     }
+    async fn observe_before_create(c: &Config, jwt: &str, client: &CoincubeClient) -> Result<()> {
+        check(absent(&c.case_root)?, "native_run_not_fresh")?;
+        let parent = c.case_root.parent().ok_or("native_root_parent")?;
+        check(
+            parent.canonicalize().map_err(|_| "native_root_parent")? == parent,
+            "native_root_symlink_parent",
+        )?;
+        let metadata = fs::metadata(parent).map_err(|_| "native_root_parent")?;
+        check(
+            metadata.is_dir()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.permissions().mode() & 0o077 == 0,
+            "native_parent_private",
+        )?;
+        check(
+            device_secret::load_optional(&c.run_id.to_string())
+                .map_err(|_| "native_keychain_blocked")?
+                .is_none(),
+            "native_original_factor_exists",
+        )?;
+        observe_remote_before_create(c, jwt, client).await
+    }
+    async fn observe_remote_before_create(
+        c: &Config,
+        jwt: &str,
+        client: &CoincubeClient,
+    ) -> Result<()> {
+        use coincube_gui::services::connect::grpc::{
+            self, interceptor::AuthInterceptor, session::GrpcSessionClient,
+        };
+        // Both inventories cover supported owned and contact-shared references,
+        // across all networks. No label or hasVault boolean grants absence.
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|_| "native_admission_http")?;
+        for path in ["/connect/cubes", "/connect/cubes/shared-with-me"] {
+            let value = raw(&http, jwt, path, false)
+                .await?
+                .ok_or("native_admission_inventory")?;
+            let rows = value
+                .get("data")
+                .and_then(|v| v.as_array())
+                .ok_or("native_admission_inventory")?;
+            for row in rows {
+                let uuid = row
+                    .get("uuid")
+                    .and_then(|v| v.as_str())
+                    .ok_or("native_admission_inventory")?;
+                check(
+                    uuid != c.run_id.to_string(),
+                    "native_remote_uuid_already_exists",
+                )?;
+            }
+        }
+        let approvals = raw(&http, jwt, "/approvals", false)
+            .await?
+            .ok_or("native_admission_pending")?;
+        check(
+            approvals
+                .get("approvals")
+                .and_then(|v| v.as_array())
+                .is_some_and(|v| v.is_empty()),
+            "native_admission_pending",
+        )?;
+        let channel = grpc::create_channel("https://grpc.coincube.io:443")
+            .await
+            .map_err(|_| "native_admission_pending")?;
+        let mut pending = GrpcSessionClient::new(channel, AuthInterceptor::new(jwt));
+        check(
+            pending
+                .list_pending_sessions()
+                .await
+                .map_err(|_| "native_admission_pending")?
+                .sessions
+                .is_empty()
+                && pending
+                    .list_pending_decrypt_requests()
+                    .await
+                    .map_err(|_| "native_admission_pending")?
+                    .requests
+                    .is_empty(),
+            "native_admission_pending",
+        )?;
+        // Validate quota shape/owner even once our exact retirement frees a slot.
+        let _ = recovery_native::create_capacity_available(c.chain, c.run_id, c.owner_id, client)
+            .await?;
+        Ok(())
+    }
+
+    fn legacy_case_id(directory: &Path, chain: &str) -> uuid::Uuid {
+        use coincube_core::miniscript::bitcoin::hashes::{sha1, Hash};
+        let name = format!("native-recovery/{}/{chain}", directory.display());
+        let mut material = uuid::Uuid::NAMESPACE_URL.as_bytes().to_vec();
+        material.extend_from_slice(name.as_bytes());
+        let digest = sha1::Hash::hash(&material).to_byte_array();
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x50;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        uuid::Uuid::from_bytes(bytes)
+    }
+
+    const LEGACY_CAPACITY_SOURCE: &str = "74da94d2848783951ff9b305724340afbb230ab8";
+
+    fn validate_capacity_failure(
+        state: &State,
+        case: &Path,
+        id: uuid::Uuid,
+        owner_id: u32,
+    ) -> Result<()> {
+        let c = &state.config;
+        check(
+            c.version == 1
+                && c.run_id == id
+                && c.case_root == case
+                && c.chain == ChainId::Testnet4
+                && c.owner_id == owner_id
+                && c.source_head == LEGACY_CAPACITY_SOURCE
+                && c.auth_account == account(c, "auth"),
+            "native_abandon_identity",
+        )?;
+        check(
+            state.stage == "new"
+                && state.pending.as_deref() == Some("create_export")
+                && state.identity.is_none()
+                && state.kit.is_none()
+                && state.restorer.is_none()
+                && state.original_manifest.is_none()
+                && state.wipe_manifest.is_none()
+                && state.wipe_oracle.is_none()
+                && state.retirement_oracle.is_none()
+                && state.original_factor.is_none()
+                && state.restored_factor.is_none()
+                && state.proof_sha256.is_none()
+                && !state.remote_delete_started
+                && state.canary_uuid.is_some()
+                && state
+                    .canary
+                    .as_ref()
+                    .is_some_and(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit())),
+            "native_abandon_stage",
+        )?;
+        Ok(())
+    }
+
+    async fn audit_capacity_abandonment(input: &AbandonInput) -> Result<()> {
+        preflight(&input.config)?;
+        let old = &input.old_directory;
+        check(
+            old.is_absolute()
+                && old.canonicalize().map_err(|_| "native_abandon_directory")? == *old
+                && old
+                    != input
+                        .config
+                        .case_root
+                        .parent()
+                        .ok_or("native_abandon_directory")?,
+            "native_abandon_directory",
+        )?;
+        let metadata = fs::symlink_metadata(old).map_err(|_| "native_abandon_directory")?;
+        check(
+            metadata.is_dir()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.permissions().mode() & 0o077 == 0,
+            "native_abandon_directory",
+        )?;
+        let suite_lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(old.join("run.lock"))
+            .map_err(|_| "native_abandon_lock")?;
+        check(
+            unsafe { libc::flock(suite_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+            "native_abandon_busy",
+        )?;
+        let id = legacy_case_id(old, "testnet4");
+        let b2_id = legacy_case_id(old, "bitcoin-blake2b-testnet4");
+        check(
+            absent(&old.join(b2_id.to_string()))?,
+            "native_abandon_has_other_case",
+        )?;
+        let case = old.join(id.to_string());
+        check(
+            case.canonicalize().map_err(|_| "native_abandon_case")? == case,
+            "native_abandon_case",
+        )?;
+        let case_lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(case.join("run.lock"))
+            .map_err(|_| "native_abandon_lock")?;
+        check(
+            unsafe { libc::flock(case_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+            "native_abandon_busy",
+        )?;
+        let state: State = serde_json::from_slice(&private(&case.join("state.json"))?)
+            .map_err(|_| "native_abandon_state")?;
+        let c = &state.config;
+        validate_capacity_failure(&state, &case, id, input.config.owner_id)?;
+        let mut client = CoincubeClient::new();
+        client.set_token(&input.access_token);
+        check(
+            client
+                .get_user()
+                .await
+                .map_err(|_| "native_auth_blocked")?
+                .id
+                == c.owner_id,
+            "native_account_changed",
+        )?;
+        process_absent(&state.creator)?;
+        for path in fs::read_dir(&case).map_err(|_| "native_abandon_case")? {
+            let path = path.map_err(|_| "native_abandon_case")?;
+            check(
+                matches!(path.file_name().to_str(), Some("state.json" | "run.lock")),
+                "native_abandon_has_profile",
+            )?;
+        }
+        check(
+            device_secret::load_optional(&id.to_string())
+                .map_err(|_| "native_keychain_blocked")?
+                .is_none(),
+            "native_abandon_factor_exists",
+        )?;
+        check(
+            device_secret::integration::load(&account(c, "quarantined_factor"))
+                .map_err(|_| "native_keychain_blocked")?
+                .is_none(),
+            "native_abandon_factor_exists",
+        )?;
+        // The state canary UUID is not trusted to address a production item.
+        // Only the fixed, derived QA-service handle is read; all old items stay.
+        check(
+            state.canary.is_some()
+                && state.canary_uuid.is_some()
+                && Some(hash(&load(c, "canary")?)) == state.canary,
+            "native_abandon_canary",
+        )?;
+        observe_remote_before_create(c, &input.access_token, &client).await?;
+        // Immutable add-only migration claim: this historical no-Cube failure
+        // may authorize only one fresh consumer. Existing material is untouched.
+        let handle =
+            hash(format!("native-capacity-handoff-v1:{}:{}", old.display(), id).as_bytes());
+        let value = hash(
+            format!(
+                "{}:{}:{}:{}:{}",
+                input.config.source_head,
+                input.config.case_root.display(),
+                input.config.owner_id,
+                hash(&private(&case.join("state.json"))?),
+                hash(&private(&old.join("checkpoint.json"))?)
+            )
+            .as_bytes(),
+        );
+        let _ = device_secret::integration::add(&handle, value.as_bytes())
+            .map_err(|_| "native_abandon_claim")?;
+        device_secret::integration::verify(&handle).map_err(|_| "native_abandon_claim")?;
+        check(
+            device_secret::integration::load(&handle)
+                .map_err(|_| "native_abandon_claim")?
+                .is_some_and(|bytes| bytes.as_slice() == value.as_bytes()),
+            "native_abandon_already_claimed",
+        )?;
+        Ok(())
+    }
+
     async fn action(request: Request) -> Result<()> {
         let c = request.config;
         preflight(&c)?;
@@ -635,7 +926,9 @@ mod native {
             return Ok(());
         }
         if request.action == "create_export" {
-            check(!root.exists(), "native_run_not_fresh")?;
+            check(absent(root)?, "native_run_not_fresh")?;
+            let (client, _) = auth(&c)?;
+            recovery_native::admit_create(c.chain, c.run_id, c.owner_id, &client).await?;
             fs::DirBuilder::new()
                 .mode(0o700)
                 .create(root)
@@ -981,7 +1274,20 @@ mod native {
             .read_to_end(&mut input)
             .map_err(|_| "native_input")?;
         check(input.len() <= 32768, "native_input_size")?;
-        if std::env::args().nth(1).as_deref() == Some("--bind-auth") {
+        let mode = std::env::args().nth(1);
+        if mode.as_deref() == Some("--audit-capacity-abandonment") {
+            let request: AbandonInput =
+                serde_json::from_slice(&input).map_err(|_| "native_abandon_input")?;
+            return tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| "native_runtime")?
+                .block_on(audit_capacity_abandonment(&request));
+        }
+        if matches!(
+            mode.as_deref(),
+            Some("--bind-auth" | "--admit-create" | "--observe-cleanup" | "--begin-cleanup")
+        ) {
             let request: AuthInput =
                 serde_json::from_slice(&input).map_err(|_| "native_auth_input_schema")?;
             preflight(&request.config)?;
@@ -995,7 +1301,42 @@ mod native {
                 .block_on(client.get_user())
                 .map_err(|_| "native_auth_blocked")?;
             check(user.id == request.config.owner_id, "native_account_changed")?;
-            put(&request.config, "auth", request.access_token.as_bytes())?;
+            if mode.as_deref() == Some("--begin-cleanup") {
+                runtime.block_on(observe_before_create(
+                    &request.config,
+                    &request.access_token,
+                    &client,
+                ))?;
+                check(
+                    !runtime.block_on(recovery_native::create_capacity_available(
+                        request.config.chain,
+                        request.config.run_id,
+                        request.config.owner_id,
+                        &client,
+                    ))?,
+                    "native_capacity_not_full",
+                )?;
+            } else if mode.as_deref() == Some("--observe-cleanup") {
+                runtime.block_on(observe_before_create(
+                    &request.config,
+                    &request.access_token,
+                    &client,
+                ))?;
+            } else if mode.as_deref() == Some("--admit-create") {
+                runtime.block_on(observe_before_create(
+                    &request.config,
+                    &request.access_token,
+                    &client,
+                ))?;
+                runtime.block_on(recovery_native::admit_create(
+                    request.config.chain,
+                    request.config.run_id,
+                    request.config.owner_id,
+                    &client,
+                ))?;
+            } else {
+                put(&request.config, "auth", request.access_token.as_bytes())?;
+            }
             return Ok(());
         }
         check(std::env::args().len() == 1, "native_arguments")?;
@@ -1045,6 +1386,60 @@ mod native {
             };
             (config, identity, kit)
         }
+        #[test]
+        fn legacy_public_case_ids_match_python_uuid5() {
+            let root = Path::new("/private/tmp/native-v5-unit");
+            assert_eq!(
+                legacy_case_id(root, "testnet4").to_string(),
+                "67f9b8fa-1570-5b0c-afdb-7648827f6ec1"
+            );
+            assert_eq!(
+                legacy_case_id(root, "bitcoin-blake2b-testnet4").to_string(),
+                "e5df97ed-9560-55c8-b8ae-966217d5a93e"
+            );
+        }
+
+        #[test]
+        fn capacity_failure_refuses_material_or_identity_changes_before_any_secret_api() {
+            let (mut c, identity, kit) = fixture();
+            c.source_head = LEGACY_CAPACITY_SOURCE.into();
+            let value = serde_json::json!({"config":c,"stage":"new","pending":"create_export",
+                "creator":{"pid":1,"start_id":"unit-dead-process"},"restorer":null,
+                "identity":null,"kit":null,"original_manifest":null,"wipe_manifest":null,
+                "wipe_oracle":null,"retirement_oracle":null,"original_factor":null,
+                "canary_uuid":uuid::Uuid::new_v4(),"canary":"a".repeat(64),
+                "restored_factor":null,"proof_sha256":null,"remote_delete_started":false});
+            let valid: State = serde_json::from_value(value.clone()).unwrap();
+            assert!(validate_capacity_failure(&valid, &c.case_root, c.run_id, c.owner_id).is_ok());
+            for field in [
+                "uuid", "owner", "chain", "source", "identity", "kit", "profile", "factor",
+                "canary", "stage", "pending", "delete",
+            ] {
+                let mut bad = value.clone();
+                match field {
+                    "uuid" => bad["config"]["run_id"] = serde_json::json!(uuid::Uuid::new_v4()),
+                    "owner" => bad["config"]["owner_id"] = serde_json::json!(99),
+                    "chain" => {
+                        bad["config"]["chain"] = serde_json::json!(ChainId::BitcoinBlake2bTestnet4)
+                    }
+                    "source" => bad["config"]["source_head"] = serde_json::json!("b".repeat(40)),
+                    "identity" => bad["identity"] = serde_json::to_value(&identity).unwrap(),
+                    "kit" => bad["kit"] = serde_json::to_value(&kit).unwrap(),
+                    "profile" => bad["original_manifest"] = serde_json::json!("exists"),
+                    "factor" => bad["original_factor"] = serde_json::json!("exists"),
+                    "canary" => bad["canary"] = serde_json::Value::Null,
+                    "stage" => bad["stage"] = serde_json::json!("exported"),
+                    "pending" => bad["pending"] = serde_json::Value::Null,
+                    _ => bad["remote_delete_started"] = serde_json::json!(true),
+                }
+                let bad: State = serde_json::from_value(bad).unwrap();
+                assert!(
+                    validate_capacity_failure(&bad, &c.case_root, c.run_id, c.owner_id).is_err(),
+                    "{field}"
+                );
+            }
+        }
+
         #[test]
         fn changed_identity_is_refused_before_mutation_boundary() {
             let (c, identity, kit) = fixture();

@@ -18,6 +18,8 @@ from .native_recovery_verify import CHAINS, dependencies, verify
 
 PREREQUISITE = '9e9a1f25995b4be9a6ab188240a2bf92d5f3209b'
 IDENTITY = 'Developer ID Application: COINCUBE TECHNOLOGY LLC (8UVR249AD5)'
+LEGACY_CAPACITY_SOURCE = '74da94d2848783951ff9b305724340afbb230ab8'
+LEGACY_CAPACITY_HELPER = 'f98dfad45951000a7538ad5fe595dcb6dddf9dc4c7b7d7f6cf31905dfa0ab48f'
 ACTIONS = ('create_export', 'wipe_original', 'restore', 'reopen_sign')
 
 
@@ -146,7 +148,9 @@ def checked_process(cfg, binding, executable, receipt, request, directory, *, ac
 
 def process(executable, request, directory, *, access_token=None):
     """Wait on fresh process; sample kernel start before providing any action."""
-    argv = [str(executable)] + (['--bind-auth'] if access_token is not None else [])
+    modes = {'admit_create': '--admit-create', 'observe_cleanup': '--observe-cleanup', 'begin_cleanup': '--begin-cleanup', 'audit_capacity_abandonment': '--audit-capacity-abandonment', 'bind_auth': '--bind-auth'}
+    require(access_token is None or request['action'] in modes, 'AUTH_ROLE')
+    argv = [str(executable)] + ([modes[request['action']]] if access_token is not None else [])
     env = dict(os.environ, COINCUBE_API_URL='https://api.coincube.io')
     # Do not allow runtime environment to assert source/dependency provenance.
     env.pop('COINCUBE_NATIVE_RECOVERY_SOURCE', None); env.pop('COINCUBE_NATIVE_RECOVERY_PREREQUISITE', None)
@@ -160,6 +164,8 @@ def process(executable, request, directory, *, access_token=None):
                 payload = dict(request)
                 if access_token is not None:
                     payload = {'config': request['config'], 'access_token': access_token}
+                    if request['action'] == 'audit_capacity_abandonment':
+                        payload['old_directory'] = request['old_directory']
                 output, _ = child.communicate(json.dumps(payload).encode(), timeout=300)
             except BaseException:
                 child.kill(); child.wait(); raise
@@ -170,9 +176,122 @@ def process(executable, request, directory, *, access_token=None):
     if child.returncode or reply.get('ok') is not True:
         code = reply.get('code')
         require(isinstance(code, str) and re.fullmatch('[A-Za-z0-9_]{1,96}', code), 'PROTOCOL')
-        raise Blocked('NATIVE_RECOVERY_ACTION', 'Native action stopped: ' + code)
+        raise NativeActionBlocked(code)
     require(reply == {'ok': True, 'provenance': 'native_product_integration', 'funded': False, 'broadcast': False}, 'PROTOCOL')
     return {'pid': child.pid, 'start_id': start, 'exited': True, 'returncode': child.returncode}
+
+
+class NativeActionBlocked(Blocked):
+    def __init__(self, native_code):
+        self.native_code = native_code
+        super().__init__('NATIVE_RECOVERY_ACTION', 'Native action stopped: ' + native_code)
+
+
+def legacy_tools(cfg, binding):
+    """Build the actual backup/pending helpers from the frozen reviewed source."""
+    require(source(cfg) == binding, 'SOURCE_CHANGED')
+    checkout = Path(cfg['checkout'])
+    try:
+        subprocess.run([str(checkout / 'tests/e2e/build-native')], cwd=checkout,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, check=True)
+    except (OSError, subprocess.SubprocessError):
+        raise Blocked('NATIVE_RECOVERY_CLEANUP_BUILD', 'Pinned backup/pending helpers could not be built and signed.') from None
+    local = checkout / 'tests/e2e/.local'
+    receipt = json.loads(private_read(local / 'native-build.json'))
+    provision = local / 'Provision.app/Contents/MacOS/testnet4_provision'
+    signing = local / 'testnet4_connect'
+    require(source(cfg) == binding and receipt.get('head') == binding['head']
+            and receipt.get('provision_sha256') == hashlib.sha256(provision.read_bytes()).hexdigest()
+            and receipt.get('signing_sha256') == hashlib.sha256(signing.read_bytes()).hexdigest(), 'CLEANUP_BUILD')
+    signed_identity(checkout, provision)
+    return provision, signing, receipt
+
+
+class NativeCleanupContext:
+    """A native consumer's real account, retained history and pinned tools.
+
+    No StrictPolicy impersonation. Full-flow contexts additionally retain the
+    actual parent phone observation; standalone contexts have no phone claim.
+    """
+    def __init__(self, suite, account, owner_id, *, parent=None, workstation=None):
+        from . import provisioning
+        self.suite, self.parent, self.workstation = suite, parent, workstation
+        if parent is not None:
+            require(workstation is None and parent.account == account and parent.account_user_id == owner_id, 'CLEANUP_ACCOUNT')
+            config, profile = parent.config, parent.profile
+            self.journal, self.run_id = parent.journal, parent.run_id
+        else:
+            require(isinstance(workstation, str) and Path(workstation).is_absolute(), 'CLEANUP_CONFIG')
+            self.workstation_raw = private_read(workstation)
+            config = provisioning.validate_config(json.loads(self.workstation_raw))
+            require(config['account_email'].casefold() == account['email'].casefold(), 'CLEANUP_ACCOUNT')
+            profile = Path(config['profile_dir'])
+            self.journal, self.run_id = suite.journal, str(uuid.uuid5(uuid.NAMESPACE_URL, 'native-cleanup/' + str(suite.directory)))
+        require('qa_cleanup' in config and config['account_email'].casefold() == account['email'].casefold(), 'CLEANUP_CONFIG')
+        self.config, self.profile = json.loads(json.dumps(config)), Path(profile)
+        self.config_binding = digest(self.config)
+        self.account, self.account_user_id = account, owner_id
+        self.artifacts = self.journal.data['artifacts']
+        expected = digest({'email': account['email'].casefold(), 'user_id': owner_id})
+        require(self.artifacts.get('account_identity', expected) == expected, 'CLEANUP_ACCOUNT')
+        if parent is None:
+            self.journal.artifact('account_identity', expected)
+        # No signed smoke-test fixtures are created until real full-capacity
+        # admission or a previously selected retirement actually needs tools.
+        self.tools = None
+
+    def observe(self):
+        require(source(self.suite.config) == self.suite.binding, 'SOURCE_CHANGED')
+        require(digest(self.config) == self.config_binding, 'CLEANUP_CONFIG_CHANGED')
+        if self.parent is not None:
+            require(digest(self.parent.config) == self.config_binding, 'CLEANUP_CONFIG_CHANGED')
+            require(self.parent.account == self.account and self.parent.account_user_id == self.account_user_id
+                    and self.parent.strict is not None and not self.parent.strict.requested, 'CLEANUP_ACCOUNT')
+            self.parent.strict.observe()
+        else:
+            require(private_read(self.workstation) == self.workstation_raw, 'CLEANUP_CONFIG_CHANGED')
+        if self.tools is None:
+            from .provisioning import Provision
+            self.provision_binary, self.signing_binary, self.tools = legacy_tools(self.suite.config, self.suite.binding)
+            self.provision = Provision(self.provision_binary, self.profile, self.journal.directory, self.run_id)
+        cache = json.loads(private_read(self.profile / 'testnet4/connect.json'))
+        matches = [a for a in cache['accounts'] if a.get('email') == cache.get('active_email') == self.account['email']]
+        require(matches == [self.account], 'CLEANUP_ACCOUNT')
+        require(self.tools['head'] == self.suite.binding['head']
+                and hashlib.sha256(self.provision_binary.read_bytes()).hexdigest() == self.tools['provision_sha256']
+                and hashlib.sha256(Path(self.signing_binary).read_bytes()).hexdigest() == self.tools['signing_sha256'], 'CLEANUP_BUILD_CHANGED')
+        signed_identity(Path(self.suite.config['checkout']), self.provision_binary)
+
+
+class NativeCleanupConsumerV1:
+    """Live native BEFORE-CREATE admission, with a real signed observer."""
+    def __init__(self, suite, runner, config, account, owner_id, executable, receipt):
+        require(type(runner) is NativeCleanupContext, 'CLEANUP_ADMISSION')
+        self.suite, self.runner, self.config = suite, runner, dict(config)
+        self.account, self.owner_id = account, owner_id
+        self.executable, self.receipt = executable, receipt
+        self.consumer_binding = digest(suite.consumer)
+
+    def select(self):
+        self.observe()
+        checked_process(self.suite.config, self.suite.binding, self.executable, self.receipt,
+                        {'action': 'begin_cleanup', 'config': self.config}, self.suite.directory,
+                        access_token=self.account['tokens']['access_token'])
+
+    def observe(self):
+        suite, runner = self.suite, self.runner
+        require(suite.journal.lock is not None and os.fstat(suite.journal.lock).st_uid == os.getuid(), 'CLEANUP_LEASE')
+        require(self.consumer_binding == digest(suite.consumer)
+                and self.config['owner_id'] == self.owner_id == runner.account_user_id
+                and runner.artifacts['account_identity'] == digest({'email': self.account['email'].casefold(), 'user_id': self.owner_id})
+                and runner.account == self.account, 'CLEANUP_ACCOUNT')
+        records = suite.journal.data['artifacts'].get(self.config['chain'], {})
+        require(not records and not suite.journal.data['artifacts'].get('pending_native_action')
+                and not Path(self.config['case_root']).exists(), 'CLEANUP_PHASE')
+        checked_process(suite.config, suite.binding, self.executable, self.receipt,
+                        {'action': 'observe_cleanup', 'config': self.config}, suite.directory,
+                        access_token=self.account['tokens']['access_token'])
+        runner.observe()  # Pin legacy helpers only after live native admission.
 
 
 class NativeRecovery:
@@ -186,13 +305,71 @@ class NativeRecovery:
     def close(self):
         self.journal.close()
 
-    def execute(self, account, owner_id):
+    def abandon_capacity(self, account, owner_id, old_directory, archived_helper):
+        """One reviewed historical failure, never a general receipt importer.
+
+        No old process is executed and no old files/Keychain items are changed.
+        New signed code independently observes absence and fixed QA handles.
+        """
+        require(type(owner_id) is int and owner_id > 0, 'ACCOUNT')
+        old = Path(old_directory)
+        require(old.is_absolute() and old.resolve() == old and old != self.directory, 'ABANDON_DIRECTORY')
+        metadata = old.stat()
+        require(metadata.st_uid == os.getuid() and metadata.st_mode & 0o077 == 0, 'ABANDON_DIRECTORY')
+        archived = Path(archived_helper)
+        require(archived.is_absolute() and archived.name == 'recovery_kit_native', 'ABANDON_HELPER')
+        require(hashlib.sha256(archived.read_bytes()).hexdigest() == LEGACY_CAPACITY_HELPER, 'ABANDON_HELPER')
+        signed_identity(Path(self.config['checkout']), archived)
+        old_checkpoint_raw = private_read(old / 'checkpoint.json')
+        old_checkpoint = json.loads(old_checkpoint_raw)
+        artifacts = old_checkpoint['artifacts']
+        require(artifacts['build']['sha256'] == LEGACY_CAPACITY_HELPER
+                and artifacts['build']['source']['head'] == LEGACY_CAPACITY_SOURCE
+                and set(artifacts) <= {'build', 'testnet4', 'pending_native_action'}, 'ABANDON_CHECKPOINT')
+        scope = str(uuid.uuid5(uuid.NAMESPACE_URL, 'native-recovery/' + str(old) + '/testnet4'))
+        old_case = old / scope
+        raw = private_read(old_case / 'state.json')
+        old_config = json.loads(raw)['config']
+        require(old_config == {'version': 1, 'case_root': str(old_case), 'run_id': scope, 'chain': 'testnet4',
+                'auth_account': hashlib.sha256(f'recovery-native-v1:{old_case}:{scope}:testnet4:auth'.encode()).hexdigest(),
+                'owner_id': owner_id, 'source_head': LEGACY_CAPACITY_SOURCE}, 'ABANDON_CONFIG')
+        require(set(artifacts['testnet4']) == {'preflight', 'bind_auth'}
+                and artifacts['pending_native_action'] == {'chain': 'testnet4', 'action': 'create_export', 'config_sha256': digest(old_config)}, 'ABANDON_CHECKPOINT')
+        executable, receipt = build(self.config, self.binding)
+        scope = str(uuid.uuid5(uuid.NAMESPACE_URL, 'native-recovery/' + str(self.directory.resolve()) + '/testnet4'))
+        case = self.directory / scope
+        config = {'version': 1, 'case_root': str(case), 'run_id': scope, 'chain': 'testnet4',
+                  'auth_account': hashlib.sha256(f'recovery-native-v1:{case}:{scope}:testnet4:auth'.encode()).hexdigest(),
+                  'owner_id': owner_id, 'source_head': self.binding['head']}
+        marker = {'version': 1, 'kind': 'abandon_no_cube_capacity', 'old_source': LEGACY_CAPACITY_SOURCE,
+                  'old_helper_sha256': LEGACY_CAPACITY_HELPER, 'old_directory': str(old),
+                  'old_checkpoint_sha256': hashlib.sha256(old_checkpoint_raw).hexdigest(),
+                  'old_state_sha256': hashlib.sha256(raw).hexdigest(), 'new_source': self.binding,
+                  'new_helper_sha256': receipt['sha256'], 'new_consumer': self.consumer,
+                  'account': digest({'email': account['email'].casefold(), 'user_id': owner_id}),
+                  'all_old_material_retained': True, 'native_acceptance': False}
+        previous = self.journal.data['artifacts'].get('capacity_abandonment')
+        require(previous is None or previous['binding'] == marker, 'ABANDON_CHANGED')
+        require(previous is not None or not any(chain in self.journal.data['artifacts'] for chain in CHAINS), 'ABANDON_NEW_NOT_FRESH')
+        observed = checked_process(self.config, self.binding, executable, receipt,
+                                  {'action': 'audit_capacity_abandonment', 'config': config, 'old_directory': str(old)}, self.directory,
+                                  access_token=account['tokens']['access_token'])
+        require(private_read(old / 'checkpoint.json') == old_checkpoint_raw
+                and private_read(old_case / 'state.json') == raw
+                and hashlib.sha256(archived.read_bytes()).hexdigest() == LEGACY_CAPACITY_HELPER, 'ABANDON_CHANGED')
+        signed_identity(Path(self.config['checkout']), archived)
+        if previous is None:
+            self.journal.artifact('capacity_abandonment', {'binding': marker, 'observer': observed})
+        return marker
+
+    def execute(self, account, owner_id, *, cleanup_runner=None, cleanup_workstation=None):
         require(type(owner_id) is int and owner_id > 0, 'ACCOUNT')
         executable, receipt = build(self.config, self.binding)
         previous = self.journal.data['artifacts'].get('build')
         require(previous is None or previous == receipt, 'BUILD_CHANGED')
         checked_artifact(self.config, self.binding, executable, receipt)
         self.journal.artifact('build', receipt)
+        cleanup_context = None
         for chain in CHAINS:
             scope = str(uuid.uuid5(uuid.NAMESPACE_URL, 'native-recovery/' + str(self.directory.resolve()) + '/' + chain))
             case = self.directory / scope
@@ -204,6 +381,27 @@ class NativeRecovery:
             if pending is not None and 'retire_remote' not in records:
                 require(pending == {'chain': chain, 'action': 'retire_remote', 'config_sha256': digest(config)}
                         and all(action in records for action in ('preflight', 'bind_auth', *ACTIONS)), 'UNCERTAIN_RETIREMENT')
+            if not records:
+                # Read-only and deliberately not journaled as a secret-producing
+                # action: quota refusal must leave no fixture credentials.
+                if cleanup_context is None and (cleanup_runner is not None or cleanup_workstation is not None):
+                    cleanup_context = NativeCleanupContext(self, account, owner_id, parent=cleanup_runner, workstation=cleanup_workstation)
+                admission = (NativeCleanupConsumerV1(self, cleanup_context, config, account, owner_id, executable, receipt)
+                             if cleanup_context is not None else None)
+                from . import qa_cleanup
+                if admission is not None:
+                    qa_cleanup.reconcile_capacity(cleanup_context, admission=admission)
+                try:
+                    checked_process(self.config, self.binding, executable, receipt,
+                                    {'action': 'admit_create', 'config': config}, self.directory,
+                                    access_token=account['tokens']['access_token'])
+                except NativeActionBlocked as error:
+                    if error.native_code != 'native_capacity_blocked' or admission is None:
+                        raise
+                    qa_cleanup.ensure_capacity(cleanup_context, admission=admission)
+                    checked_process(self.config, self.binding, executable, receipt,
+                                    {'action': 'admit_create', 'config': config}, self.directory,
+                                    access_token=account['tokens']['access_token'])
             for action in ('preflight', 'bind_auth', *ACTIONS):
                 if action in records:
                     continue  # Exact same consumer/action only; proofs below revalidated.
@@ -258,7 +456,7 @@ def gate(runner):
     suite = NativeRecovery(cfg, runner.journal.directory / 'native-recovery',
                            {'run_id': runner.run_id, 'binding': runner.journal.data['binding']})
     try:
-        proof = suite.execute(runner.account, runner.account_user_id)
+        proof = suite.execute(runner.account, runner.account_user_id, cleanup_runner=runner if 'qa_cleanup' in runner.config else None)
         runner.journal.artifact('native_recovery_acceptance_version', 1)
         runner.journal.artifact('native_recovery_acceptance', proof)
     finally:

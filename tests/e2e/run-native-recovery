@@ -45,11 +45,13 @@ from harness.clients import http, REST
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--config', required=True)
 parser.add_argument('--run-dir', required=True)
+parser.add_argument('--abandon-capacity-from')
+parser.add_argument('--legacy-capacity-helper')
 args = parser.parse_args()
 suite = None
 try:
     config = json.loads(private_read(args.config))
-    if set(config) != {'version', 'native_recovery', 'account_email', 'connect_cache'} or config['version'] != 1:
+    if not {'version', 'native_recovery', 'account_email', 'connect_cache'} <= set(config) or set(config) - {'version', 'native_recovery', 'account_email', 'connect_cache', 'cleanup_workstation'} or config['version'] != 1:
         raise Blocked('NATIVE_RECOVERY_CONFIG', 'Use a private version1 native Recovery Kit configuration.')
     # NativeRecovery verifies source BEFORE this credential cache is read.
     suite = NativeRecovery(config['native_recovery'], args.run_dir, {'standalone': str(Path(args.run_dir).absolute())})
@@ -61,7 +63,11 @@ try:
     user = json.loads(http(REST + '/api/v1/user', headers={'Authorization': 'Bearer ' + account['tokens']['access_token']}))
     if user['email'].casefold() != config['account_email'].casefold():
         raise Blocked('NATIVE_RECOVERY_ACCOUNT', 'Authenticated QA identity changed.')
-    suite.execute(account, user['id'])
+    if bool(args.abandon_capacity_from) != bool(args.legacy_capacity_helper):
+        raise Blocked('NATIVE_RECOVERY_ABANDON_ARGUMENTS', 'Both narrow capacity handoff paths are required together.')
+    if args.abandon_capacity_from:
+        suite.abandon_capacity(account, user['id'], args.abandon_capacity_from, args.legacy_capacity_helper)
+    suite.execute(account, user['id'], cleanup_workstation=config.get('cleanup_workstation'))
 except Blocked as error:
     print(error.code + ': ' + str(error), file=sys.stderr)
     raise SystemExit(2)

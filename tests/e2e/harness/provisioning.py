@@ -808,6 +808,9 @@ class FreshRunner(Runner):
             raise Blocked("SIGNER_LIMIT", "The disposable QA account has no capacity for a fresh signer.")
 
     def stage_cube_creation(self):
+        # Native temporary Cubes are retired before consuming the mobile slot.
+        # phone_setup has already established the real mobile admission.
+        native_recovery.gate(self)
         result = self.provision.call("cube")
         if result.get("backup_verified") is not True:
             raise Failed("CUBE_BACKUP", "The newly created Cube's backup was not verified.")

@@ -21,6 +21,56 @@ async fn drain(task: Task<Message>) -> Vec<Message> {
     }
 }
 
+async fn admitted_recovery_home(
+    chain: ChainId,
+    root: &CoincubeDirectory,
+    client: Option<CoincubeClient>,
+) -> Result<Home, &'static str> {
+    let (mut home, _startup) = Home::new_for_chain(root.clone(), Some(chain));
+    if let Some(client) = client {
+        // Reuse the normal admitted-session initialization. In particular the
+        // account feature grant is not the anonymous global rollout flag.
+        let admitted = home.adopt_connect_client(client.clone());
+        for message in drain(admitted).await {
+            // This is the actual AdmittedUserLoaded response. Its follow-up
+            // task batch includes unrelated global device-registration work;
+            // do not execute it against the host's active personal profile.
+            drop(home.update(message));
+        }
+        let features = client
+            .get_connect_features()
+            .await
+            .map_err(|_| "recovery_account_features")?;
+        let generation = home.connect_account.session_generation();
+        drop(home.update(Message::View(ViewMessage::ConnectAccount(
+            ConnectAccountMessage::FeaturesLoaded(Some(features), generation),
+        ))));
+        let duress = client
+            .get_duress_state()
+            .await
+            .map_err(|_| "recovery_account_duress")?;
+        if duress.active {
+            return Err("recovery_account_duress");
+        }
+        drop(home.update(Message::View(ViewMessage::ConnectAccount(
+            ConnectAccountMessage::DuressStateChecked(
+                crate::services::coincube::DuressCheckOutcome::Ok(duress),
+                generation,
+                0,
+            ),
+        ))));
+        if !home.connect_account.is_authenticated() {
+            return Err("recovery_account_unadmitted");
+        }
+    } else if chain.is_blake2b() {
+        return Err("recovery_account_required");
+    }
+    if home.network != chain || !home.chain_availability(chain).is_available() {
+        return Err("recovery_chain_unavailable");
+    }
+    Ok(home)
+}
+
 /// Run the normal creation and backup state machine for a previously absent Cube.
 #[allow(clippy::too_many_arguments)]
 async fn create_new_testnet4_cube(
@@ -32,17 +82,9 @@ async fn create_new_testnet4_cube(
     saved_words: &[String],
     server_limit: usize,
     existing: Vec<CubeSettings>,
+    client: Option<CoincubeClient>,
 ) -> Result<CubeSettings, &'static str> {
-    let (mut home, _) = Home::new(root.clone(), Some(chain.bitcoin_network()));
-    home.network = chain;
-    if chain.is_blake2b() {
-        let enabled = crate::chain::global_blake2b_enabled(CoincubeClient::new()).await;
-        let request = home.global_feature_request;
-        let _ = home.update(Message::GlobalFeatureLoaded(request, enabled));
-        if !home.chain_availability(chain).is_available() {
-            return Err("recovery_chain_unavailable");
-        }
-    }
+    let mut home = admitted_recovery_home(chain, root, client).await?;
     home.state = State::Cubes {
         cubes: existing,
         create_cube: true,
@@ -142,6 +184,7 @@ pub async fn create_testnet4_cube(
             saved_words,
             server_limit,
             existing,
+            None,
         )
         .await?
     };
@@ -199,6 +242,7 @@ pub async fn create_recovery_fixture_cube(
         saved_words,
         server_limit,
         Vec::new(),
+        Some(client),
     )
     .await
 }
@@ -259,6 +303,50 @@ mod tests {
             .path()
             .join(settings::SETTINGS_FILE_NAME);
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn recovery_home_uses_account_grant_without_anonymous_global_flag_or_chain_reset() {
+        use httpmock::{Method::GET, MockServer};
+        for (chain, grant, expected) in [
+            (ChainId::BitcoinBlake2bTestnet4, true, true),
+            (ChainId::BitcoinBlake2bTestnet4, false, false),
+            (ChainId::Testnet4, false, true),
+        ] {
+            let server = MockServer::start();
+            let user = server.mock(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/user")
+                    .header("authorization", "Bearer offline-only");
+                then.status(200).json_body(
+                    serde_json::json!({"id":5,"email":"qa@example.invalid","email_verified":true}),
+                );
+            });
+            let features = server.mock(|when, then| {
+                when.method(GET).path("/api/v1/connect/features").header("authorization", "Bearer offline-only");
+                then.status(200).json_body(serde_json::json!({"success":true,"data":{"plans":[],"bitcoinBlake2bEnabled":grant}}));
+            });
+            server.mock(|when, then| {
+                when.method(GET).path("/api/v1/connect/duress");
+                then.status(200).json_body(serde_json::json!({"success":true,"data":{"active":false,"unlockAt":null,"enrolled":false,"thisDeviceRegistered":false}}));
+            });
+            let root = temp_root("account-grant");
+            crate::recovery_native::initialize_preferences(&root, chain).unwrap();
+            let mut client = super::CoincubeClient::for_test(server.base_url());
+            client.set_token("offline-only");
+            let result = super::admitted_recovery_home(chain, &root, Some(client)).await;
+            assert_eq!(result.is_ok(), expected);
+            if let Ok(home) = result {
+                assert_eq!(home.network, chain);
+                assert!(!home.global_blake2b_enabled);
+                assert!(home.displayed_networks.contains(&chain));
+                assert_eq!(home.datadir_path, root);
+                assert!(home.connect_account.is_authenticated());
+            }
+            assert_eq!(user.hits(), 1);
+            assert_eq!(features.hits(), 1);
+            std::fs::remove_dir_all(root.path()).unwrap();
+        }
     }
 
     #[test]
