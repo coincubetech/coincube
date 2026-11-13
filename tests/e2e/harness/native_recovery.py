@@ -158,17 +158,18 @@ def process(executable, request, directory, *, access_token=None):
     env.pop('COINCUBE_NATIVE_RECOVERY_SOURCE', None); env.pop('COINCUBE_NATIVE_RECOVERY_PREREQUISITE', None)
     try:
         with (directory / 'native-stderr.log').open('ab') as errors:
-            child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors,
-                                     env=env, start_new_session=True)
             process_dir = directory / 'native-processes'
             process_dir.mkdir(mode=0o700, exist_ok=True)
             require(not process_dir.is_symlink() and process_dir.stat().st_uid == os.getuid()
                     and process_dir.stat().st_mode & 0o077 == 0, 'PROCESS_DIRECTORY')
             record_path = process_dir / (str(uuid.uuid4()) + '.json')
-            identity = {'version': 1, 'pid': child.pid, 'start_id': None, 'action': request['action'],
+            identity = {'version': 1, 'pid': None, 'start_id': None, 'action': request['action'],
                         'config_sha256': digest(request['config']), 'payload_sent': False, 'exited': False}
-            atomic_write(record_path, json.dumps(identity).encode())
+            child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors,
+                                     env=env, start_new_session=True)
             try:
+                identity['pid'] = child.pid
+                atomic_write(record_path, json.dumps(identity).encode())
                 start = subprocess.check_output(['/bin/ps', '-p', str(child.pid), '-o', 'lstart=']).decode().strip()
                 require(bool(start), 'KERNEL_PROCESS')
                 identity['start_id'] = start
@@ -189,7 +190,10 @@ def process(executable, request, directory, *, access_token=None):
             except BaseException:
                 child.kill(); child.wait()
                 identity.update(exited=True, returncode=child.returncode)
-                atomic_write(record_path, json.dumps(identity).encode())
+                try:
+                    atomic_write(record_path, json.dumps(identity).encode())
+                except OSError:
+                    pass  # Preserve the original failure after reaping the child.
                 raise
     except (OSError, subprocess.TimeoutExpired):
         raise Blocked('NATIVE_RECOVERY_PROCESS', 'Native process unavailable or timed out; retain uncertain fixture evidence.') from None

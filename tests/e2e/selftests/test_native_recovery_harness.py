@@ -478,7 +478,7 @@ def test_failed_child_identity_is_durable_before_wait_and_never_contains_token(t
     import os
     if os.name!='posix':pytest.skip('Native process supervision is POSIX-only')
     executable=tmp_path/'offline-child'
-    executable.write_text('#!/usr/bin/env python3\nimport sys,json,pathlib\nroot=pathlib.Path('+repr(str(tmp_path))+')\nrows=list((root/"native-processes").glob("*.json"))\nassert rows and json.loads(rows[0].read_text())["payload_sent"]\njson.load(sys.stdin)\nprint(json.dumps({"ok":False,"code":"native_unit_failure"}))\nsys.exit(2)\n')
+    executable.write_text('#!/usr/bin/env python3\nimport sys,json,pathlib\njson.load(sys.stdin)\nroot=pathlib.Path('+repr(str(tmp_path))+')\nrows=list((root/"native-processes").glob("*.json"))\nassert rows and json.loads(rows[0].read_text())["payload_sent"]\nprint(json.dumps({"ok":False,"code":"native_unit_failure"}))\nsys.exit(2)\n')
     executable.chmod(0o700)
     with pytest.raises(native.NativeActionBlocked):
         native.process(executable,{'action':'refresh_auth','config':{'unit':'offline-only'}},tmp_path,access_token='unit-token-must-not-persist')
@@ -487,3 +487,33 @@ def test_failed_child_identity_is_durable_before_wait_and_never_contains_token(t
     assert identity['pid']>0 and identity['start_id'] and identity['exited'] is True and identity['returncode']==2
     assert identity['code']=='native_unit_failure' and 'unit-token-must-not-persist' not in raw
     assert rows[0].stat().st_mode&0o077==0
+
+
+def test_invalid_process_directory_never_starts_child(tmp_path,monkeypatch):
+    (tmp_path/'native-processes').mkdir(mode=0o755)
+    (tmp_path/'native-processes').chmod(0o755)
+    children=[]
+    monkeypatch.setattr(native.subprocess,'Popen',lambda *args,**kwargs:children.append(args))
+    with pytest.raises(Blocked,match='PROCESS_DIRECTORY'):
+        native.process(tmp_path/'unused',{'action':'reopen_sign','config':{}},tmp_path)
+    assert children==[]
+
+
+def test_initial_identity_write_failure_reaps_child_without_action_payload(tmp_path,monkeypatch):
+    import os
+    if os.name!='posix':pytest.skip('Native process supervision is POSIX-only')
+    executable=tmp_path/'offline-waiting-child'
+    marker=tmp_path/'payload-received'
+    executable.write_text('#!/usr/bin/env python3\nimport sys,pathlib\npayload=sys.stdin.read()\nif payload:pathlib.Path('+repr(str(marker))+').write_text("action")\n')
+    executable.chmod(0o700)
+    popen=native.subprocess.Popen;children=[]
+    def capture(*args,**kwargs):
+        child=popen(*args,**kwargs);children.append(child);return child
+    def fail_write(*args,**kwargs):raise OSError('unit identity write failure')
+    monkeypatch.setattr(native.subprocess,'Popen',capture)
+    monkeypatch.setattr(native,'atomic_write',fail_write)
+    with pytest.raises(Blocked,match='Native process unavailable'):
+        native.process(executable,{'action':'reopen_sign','config':{}},tmp_path)
+    assert len(children)==1 and children[0].poll() is not None
+    with pytest.raises(ChildProcessError):os.waitpid(children[0].pid,os.WNOHANG)
+    assert not marker.exists()
