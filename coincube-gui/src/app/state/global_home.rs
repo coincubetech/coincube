@@ -6964,8 +6964,9 @@ mod tests {
                         Message::View(view::Message::Home(HomeMessage::SignVaultToLiquidTx)),
                     );
                 };
-                let at_review = || {
-                    let (mut home, _) = home_on_transfer_screen();
+                // Review with a PSBT being built under the held unlock.
+                let building = || {
+                    let (mut home, wallet) = home_on_transfer_screen();
                     send(&mut home, &cache, HomeMessage::BackToHome);
                     send(&mut home, &cache, HomeMessage::NextStep);
                     send(&mut home, &cache, HomeMessage::ContinueFromWallets);
@@ -6997,6 +6998,7 @@ mod tests {
                         warning: None,
                         valid: true,
                     };
+                    home.transfer_unit = BitcoinDisplayUnit::Sats;
                     home.entered_amount = form::Value {
                         value: "100000".into(),
                         warning: None,
@@ -7009,12 +7011,77 @@ mod tests {
                         direction
                     );
                     assert_eq!(home.current_view.step, 2);
+                    (home, wallet)
+                };
+                let at_review = || {
+                    let (mut home, _) = building();
                     // The user leaves while it builds.
                     home.interrupt();
                     assert!(home.other_scope.is_none(), "{:?}", direction);
                     assert!(home.check_other_review_address(&cache).is_err());
                     home
                 };
+
+                // Control, staying on the page: with the valid unlock, a
+                // landing PSBT and Confirm both get past the unlock check
+                // (the transfer stays on Review; nothing restarts). The test
+                // PSBT is empty, so analysis then stops it with an error
+                // instead of opening the signer; Confirm has no signed
+                // transaction to send. Locked, the same handlers restart the
+                // unlock (below).
+                let (mut valid, wallet) = building();
+                let request_id = valid.active_psbt_request.expect("a PSBT request");
+                let generation = valid.transfer_request_generation;
+                let psbt =
+                    Psbt::from_unsigned_tx(coincube_core::miniscript::bitcoin::Transaction {
+                        version: coincube_core::miniscript::bitcoin::transaction::Version::TWO,
+                        lock_time: coincube_core::miniscript::bitcoin::absolute::LockTime::ZERO,
+                        input: vec![],
+                        output: vec![],
+                    })
+                    .unwrap();
+                let messages = collect(valid.update(
+                    Some(as_daemon.clone()),
+                    &cache,
+                    Message::View(view::Message::Home(HomeMessage::TransferPsbtReady {
+                        request_id,
+                        generation,
+                        direction,
+                        destination: MAINNET_ADDR.to_string(),
+                        amount_sat: 100_000,
+                        feerate_vb: 2,
+                        result: Ok((
+                            psbt,
+                            Some(wallet),
+                            (cache.datadir_path.clone(), cache.network),
+                        )),
+                    })),
+                ));
+                assert_eq!(valid.current_view.step, 2, "{:?}: no restart", direction);
+                assert!(
+                    valid.other_scope.is_some(),
+                    "{:?}: still unlocked",
+                    direction
+                );
+                assert!(
+                    messages.iter().any(|message| matches!(
+                        message,
+                        Message::View(view::Message::ShowError(error))
+                            if error.contains("signature info")
+                    )),
+                    "{:?}: past the unlock check, into PSBT analysis",
+                    direction
+                );
+                valid.transfer_psbt_ready_for =
+                    Some((valid.next_psbt_request_id, generation, direction));
+                valid.transfer_signed = true;
+                send(&mut valid, &cache, HomeMessage::ConfirmTransfer);
+                assert_eq!(
+                    valid.current_view.step, 2,
+                    "{:?}: Confirm keeps Review",
+                    direction
+                );
+                assert!(valid.other_scope.is_some(), "{:?}", direction);
 
                 let mut failed = at_review();
                 send(
