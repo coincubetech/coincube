@@ -1,3 +1,4 @@
+mod activity_routing;
 mod connect_auth;
 mod connect_stream;
 
@@ -8692,58 +8693,18 @@ impl App {
             | Message::ActivityLiquidLoaded(..)
             | Message::ActivityRefundablesLoaded(..)
             | Message::ActivityLabelSaved(..)) => {
-                let task = self
-                    .panels
-                    .activity
-                    .update(self.daemon.clone(), &self.cache, msg);
-                self.settle_wallet_selection();
-                return task;
+                return self.route_activity_result(msg);
             }
             Message::View(view::Message::Activity(view::activity::ActivityMessage::ViewAll(
                 wallet,
             ))) => {
-                let filter = self.panels.activity.update(
-                    self.daemon.clone(),
-                    &self.cache,
-                    Message::View(view::Message::Activity(
-                        view::activity::ActivityMessage::ViewAll(wallet),
-                    )),
-                );
-                return Task::batch([
-                    filter,
-                    self.set_current_panel(Menu::Cube(menu::CubeSubMenu::Activity)),
-                ]);
+                return self.route_activity_view_all(wallet);
             }
             Message::View(view::Message::Activity(view::activity::ActivityMessage::Open(id))) => {
-                // An Overview row: Activity opens unfiltered on it. Selected
-                // after the switch, so leaving a page can't clear it. The row
-                // as the Overview listed it is read first: the switch's reload
-                // clears Activity's rows, and its pane shows that copy until
-                // (or unless) the read brings a fresh one.
-                let opened = self
-                    .panels
-                    .activity
-                    .recent_entries(view::activity::RecentScope::Cube)
-                    .into_iter()
-                    .find(|entry| entry.id == id);
-                let load = self.set_current_panel(Menu::Cube(menu::CubeSubMenu::Activity));
-                let select = self.panels.activity.update(
-                    self.daemon.clone(),
-                    &self.cache,
-                    Message::View(view::Message::Activity(
-                        view::activity::ActivityMessage::Open(id.clone()),
-                    )),
-                );
-                if self.panels.activity.selected_id.as_deref() == Some(id.as_str()) {
-                    self.panels.activity.opened = opened;
-                }
-                return Task::batch([load, select]);
+                return self.route_activity_open(id);
             }
             msg @ Message::View(view::Message::Activity(_)) => {
-                return self
-                    .panels
-                    .activity
-                    .update(self.daemon.clone(), &self.cache, msg);
+                return self.route_activity_view(msg);
             }
             msg @ Message::View(view::Message::SparkOverview(
                 view::SparkOverviewMessage::DataLoaded { .. },
@@ -8752,16 +8713,7 @@ impl App {
                 Menu::Spark(menu::SparkSubMenu::Overview)
             ) =>
             {
-                // Every Spark page reload (a payment event, a `Synced` tick,
-                // opening the page) re-reads payments for its balance; its
-                // "Recent activity" follows from Activity's copy.
-                let refresh = self.panels.activity.refresh_wallet(
-                    view::activity::WalletFilter::Spark,
-                    None,
-                    None,
-                );
-                let forwarded = self.panels.spark_overview.update(None, &self.cache, msg);
-                return Task::batch([forwarded, refresh]);
+                return self.route_activity_spark_overview(msg);
             }
             msg @ Message::Payments(Ok(_))
                 if matches!(
@@ -8769,88 +8721,10 @@ impl App {
                     Menu::Vault(menu::VaultSubMenu::Overview)
                 ) =>
             {
-                // The Vault page re-read its payments; its "Recent activity"
-                // follows from Activity's copy of the history.
-                let refresh = self.panels.activity.refresh_wallet(
-                    view::activity::WalletFilter::Vault,
-                    self.daemon.clone(),
-                    self.wallet.clone(),
-                );
-                let daemon = self.daemon.clone();
-                let forwarded = match self.panels.current_mut() {
-                    Some(panel) => panel.update(daemon, &self.cache, msg),
-                    None => Task::none(),
-                };
-                return Task::batch([forwarded, refresh]);
+                return self.route_activity_vault_overview(msg);
             }
             Message::ActivityOpenDetail(target) => {
-                // The hand-off leaves the wallet page: its selection ends.
-                if wallet_page(&self.panels.current).is_some() {
-                    self.panels.activity.clear_selection();
-                }
-                // Hand off the source record to its owning wallet panel. Those
-                // panels retain signing, refund and replacement safeguards.
-                match target {
-                    state::activity::ActivityTarget::Vault(tx) => {
-                        if self.panels.transactions.is_some() {
-                            let load = self.set_current_panel(Menu::Vault(
-                                menu::VaultSubMenu::Transactions(None),
-                            ));
-                            let panel = self.panels.transactions.as_mut().expect("checked above");
-                            panel.preselect(tx);
-                            return load;
-                        }
-                    }
-                    state::activity::ActivityTarget::Psbt(tx) => {
-                        if self.panels.psbts.is_some() {
-                            let load = self
-                                .set_current_panel(Menu::Vault(menu::VaultSubMenu::PSBTs(None)));
-                            let panel = self.panels.psbts.as_mut().expect("checked above");
-                            panel.preselect(tx);
-                            return load;
-                        }
-                    }
-                    state::activity::ActivityTarget::Spark(payment) => {
-                        let row =
-                            state::spark::overview::payment_summary_to_recent_tx(&payment, None);
-                        self.panels.current = Menu::Spark(menu::SparkSubMenu::Transactions(None));
-                        let load = self
-                            .panels
-                            .spark_transactions
-                            .reload(self.daemon.clone(), self.wallet.clone());
-                        let select = self.panels.spark_transactions.update(
-                            self.daemon.clone(),
-                            &self.cache,
-                            Message::View(view::Message::SparkTransactions(
-                                view::SparkTransactionsMessage::Preselect(row),
-                            )),
-                        );
-                        return Task::batch([load, select]);
-                    }
-                    state::activity::ActivityTarget::Liquid(payment) => {
-                        if let Some(panel) = self.panels.liquid_transactions.as_mut() {
-                            self.panels.current =
-                                Menu::Liquid(menu::LiquidSubMenu::Transactions(None));
-                            let load = panel.reload(self.daemon.clone(), self.wallet.clone());
-                            let select = panel.update(
-                                self.daemon.clone(),
-                                &self.cache,
-                                Message::View(view::Message::PreselectPayment(payment)),
-                            );
-                            return Task::batch([load, select]);
-                        }
-                    }
-                    state::activity::ActivityTarget::Refundable(refundable) => {
-                        if let Some(panel) = self.panels.liquid_transactions.as_mut() {
-                            let load = panel.reload(self.daemon.clone(), self.wallet.clone());
-                            panel.preselect_refundable(refundable);
-                            self.panels.current =
-                                Menu::Liquid(menu::LiquidSubMenu::Transactions(None));
-                            return load;
-                        }
-                    }
-                }
-                return Task::none();
+                return self.route_activity_detail(target);
             }
             msg @ Message::View(view::Message::ConnectAccount(_))
             | msg @ Message::View(view::Message::ConnectCube(_)) => {
@@ -18517,6 +18391,69 @@ mod wallet_recent_activity_tests {
             vec![0],
             Network::Regtest,
         )
+    }
+
+    #[test]
+    fn late_activity_results_do_not_navigate_or_replace_current_rows() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("activity-late-routing-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let route = Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::About));
+        app.panels.current = route.clone();
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((vec![receipt("current")], false)),
+        )));
+        let current_ids = app
+            .panels
+            .activity
+            .wallet_entries(view::activity::WalletFilter::Spark)
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(current_ids.len(), 1);
+        let stale = generation.wrapping_add(1);
+        for message in [
+            Message::ActivitySparkLoaded(stale, Ok((vec![receipt("stale")], false))),
+            Message::ActivitySparkRefreshed(stale, Ok((Vec::new(), false))),
+            Message::ActivityVaultLoaded(stale, Err("late vault failure".into())),
+            Message::ActivityPsbtLoaded(stale, Err("late PSBT failure".into())),
+            Message::ActivityLiquidLoaded(stale, Err("late Liquid failure".into())),
+            Message::ActivityRefundablesLoaded(stale, Err("late refund failure".into())),
+            Message::ActivityLabelSaved(u64::MAX, Err("late label failure".into())),
+        ] {
+            drop(app.update(message));
+            assert_eq!(app.panels.current, route);
+            assert_eq!(
+                app.panels
+                    .activity
+                    .wallet_entries(view::activity::WalletFilter::Spark)
+                    .iter()
+                    .map(|entry| entry.id.clone())
+                    .collect::<Vec<_>>(),
+                current_ids
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn activity_detail_without_a_vault_panel_keeps_the_current_route() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("activity-missing-panel-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let route = Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::About));
+        app.panels.current = route.clone();
+        app.panels.transactions = None;
+        let task = app.update(Message::ActivityOpenDetail(
+            state::activity::ActivityTarget::Vault(vault_payment()),
+        ));
+        assert_eq!(task.units(), 0);
+        assert_eq!(app.panels.current, route);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// The Vault page's own payment refresh re-reads Activity's Vault rows
