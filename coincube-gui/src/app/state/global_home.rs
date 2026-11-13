@@ -2692,7 +2692,10 @@ impl State for GlobalHome {
                                     | TransferDirection::VaultToOtherSpark
                                     | TransferDirection::VaultToOtherCube
                             ) {
-                                if transfer_direction == TransferDirection::VaultToOtherSpark {
+                                // Another Cube must still be unlocked for this
+                                // transfer (leaving the page locks it), whichever
+                                // of its wallets receives.
+                                if transfer_direction.is_other_cube() {
                                     if let Err(refusal) = self.check_other_review_address(cache) {
                                         return self.restart_other_cube_unlock(refusal);
                                     }
@@ -2958,7 +2961,10 @@ impl State for GlobalHome {
                                     | TransferDirection::VaultToOtherSpark
                                     | TransferDirection::VaultToOtherCube
                             ) {
-                                if transfer_direction == TransferDirection::VaultToOtherSpark {
+                                // Another Cube must still be unlocked for this
+                                // transfer (leaving the page locks it), whichever
+                                // of its wallets receives.
+                                if transfer_direction.is_other_cube() {
                                     if let Err(refusal) = self.check_other_review_address(cache) {
                                         return self.restart_other_cube_unlock(refusal);
                                     }
@@ -6773,6 +6779,39 @@ mod tests {
             );
             assert_eq!(home.transfer_page, TransferPage::Wallets);
             assert!(home.other_scope.is_none());
+        }
+
+        /// A Vault → another Cube's Vault PSBT that finished after the page
+        /// was left can't be signed: the Cube is locked, so signing starts
+        /// its unlock over instead.
+        #[test]
+        fn a_vault_to_vault_psbt_finished_after_leaving_cannot_be_signed() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.transfer_from = Some(WalletKind::Vault);
+            home.transfer_to = None;
+            home.transfer_direction = Some(TransferDirection::VaultToOtherCube);
+            home.destination_ready = Some((
+                home.transfer_request_generation,
+                TransferDirection::VaultToOtherCube,
+            ));
+            home.other_cube_selected = Some("destination".into());
+            home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+            home.other_address = Some(checked_other_address());
+            home.is_sending = true;
+            // Left mid-preparation: locked now, the preparation then lands.
+            home.interrupt();
+            home.is_sending = false;
+            assert!(home.destination_is_ready(), "the address is still in place");
+            let task = home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SignVaultToLiquidTx)),
+            );
+            drain(task);
+            assert_eq!(home.current_view.step, 1, "back to Details to unlock again");
+            assert_eq!(home.transfer_page, TransferPage::Wallets);
+            assert!(!home.transfer_signed);
         }
 
         /// The side menu leaving Transfer revokes a real scoped unlock, with
