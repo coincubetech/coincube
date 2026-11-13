@@ -654,6 +654,8 @@ struct TransferCtx<'a> {
     other: OtherCubeView<'a>,
     /// The route tile whose menu is open.
     menu: Option<PickerSide>,
+    /// The wallet page leaving returns to; `None` for the Overview.
+    origin: Option<WalletKind>,
 }
 
 impl TransferCtx<'_> {
@@ -896,8 +898,11 @@ pub struct TransferScreen<'a> {
     /// The active step on [`TRANSFER_STEPS`]; `TRANSFER_STEPS.len()` once
     /// sent (every step done).
     pub step: usize,
-    /// Back to Overview is offered; `false` while a send is in flight.
+    /// Back is offered; `false` while a send is in flight.
     pub can_leave: bool,
+    /// Where Back goes: the wallet page the transfer opened from, or the
+    /// Overview.
+    pub back_to: &'static str,
     pub body: Element<'a, Message>,
 }
 
@@ -905,7 +910,7 @@ pub struct TransferScreen<'a> {
 /// and rail. The title, Cube line, steps and Back to Overview are the page
 /// head's ([`transfer_page_head`]).
 fn transfer_dialog<'a>(
-    _ctx: &TransferCtx<'a>,
+    ctx: &TransferCtx<'a>,
     active: usize,
     context: Option<Element<'a, Message>>,
     close: Option<Message>,
@@ -914,12 +919,18 @@ fn transfer_dialog<'a>(
     TransferScreen {
         step: active,
         can_leave: close.is_some(),
+        back_to: back_to(ctx.origin),
         body: Column::new()
             .spacing(16)
             .push_maybe(context)
             .push(form)
             .into(),
     }
+}
+
+/// The page Back returns to, named as the side menu names it.
+pub fn back_to(origin: Option<WalletKind>) -> &'static str {
+    origin.map_or("Overview", |wallet| wallet.label())
 }
 
 /// The steps every transfer takes, for the page head's rule.
@@ -936,7 +947,7 @@ pub fn transfer_page_head<'a>(
     let head = crate::app::view::page_head(cache, localized_copy("Transfer"))
         .rule(transfer_steps_row(screen.step));
     if screen.can_leave {
-        head.back("Overview", Message::Home(HomeMessage::BackToHome))
+        head.back(screen.back_to, Message::Home(HomeMessage::LeaveTransfer))
     } else {
         head
     }
@@ -1815,7 +1826,7 @@ fn details_page<'a>(
         ctx,
         0,
         None,
-        Some(Message::Home(HomeMessage::BackToHome)),
+        Some(Message::Home(HomeMessage::LeaveTransfer)),
         crate::app::view::shared::payment_columns::payment_columns(
             transfer_card(sections),
             transfer_rail(ctx, parsed, None),
@@ -2180,7 +2191,7 @@ fn review_page<'a>(
         ctx,
         ctx.review_index(),
         other_cube_context(ctx, true, false),
-        (!is_sending).then_some(Message::Home(HomeMessage::BackToHome)),
+        (!is_sending).then_some(Message::Home(HomeMessage::LeaveTransfer)),
         crate::app::view::shared::payment_columns::payment_columns(
             legacy_form(
                 Column::new()
@@ -2248,7 +2259,7 @@ fn done_page<'a>(ctx: &TransferCtx<'a>, amount: &'a form::Value<String>) -> Tran
         ctx,
         ctx.steps().len(),
         other_cube_context(ctx, false, true),
-        Some(Message::Home(HomeMessage::BackToHome)),
+        Some(Message::Home(HomeMessage::LeaveTransfer)),
         legacy_form(
             Column::new()
                 .spacing(20)
@@ -2284,10 +2295,15 @@ fn done_page<'a>(ctx: &TransferCtx<'a>, amount: &'a form::Value<String>) -> Tran
                             Some(Message::Home(HomeMessage::OpenTransferActivity)),
                         ))
                         .push(dialog_button(
-                            coincube_ui::locale::copy("Back to Overview"),
+                            coincube_ui::locale::copy(match ctx.origin {
+                                Some(WalletKind::Spark) => "Back to Spark",
+                                Some(WalletKind::Vault) => "Back to Vault",
+                                Some(WalletKind::Liquid) => "Back to Liquid",
+                                None => "Back to Overview",
+                            }),
                             None,
                             false,
-                            Some(Message::Home(HomeMessage::BackToHome)),
+                            Some(Message::Home(HomeMessage::LeaveTransfer)),
                         ))
                         .push(Space::new().width(Length::Fill))
                         .push(dialog_button(
@@ -2665,6 +2681,9 @@ pub struct GlobalViewConfig<'a> {
     /// Max is on: the transfer sends the source's whole balance, fees included.
     pub transfer_max: bool,
     pub other_cube: OtherCubeView<'a>,
+    /// The wallet page this transfer was opened from, which leaving returns
+    /// to; `None` for the Overview.
+    pub transfer_origin: Option<WalletKind>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -2762,6 +2781,7 @@ pub fn global_home_view<'a>(
         transfer_unit,
         transfer_max,
         other_cube,
+        transfer_origin,
     } = config;
 
     let overview_masks = OverviewMasks::new(
@@ -2798,6 +2818,7 @@ pub fn global_home_view<'a>(
             balance_masked,
             other: other_cube,
             menu: wallet_picker,
+            origin: transfer_origin,
         };
         match current_view.step {
             1 => Some(details_page(
@@ -3598,6 +3619,49 @@ pub fn transfer_head_action<'a>(config: &GlobalViewConfig<'_>) -> Option<Element
     })
 }
 
+/// Whether a wallet page's Transfer can start (see
+/// `GlobalHome::wallet_transfer_entry`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletTransferEntry {
+    /// The flow can open from this wallet.
+    Ready,
+    /// The balances the form caps against are still loading.
+    Loading,
+    /// No other wallet in this Cube and no other Cube can receive.
+    NoDestination,
+}
+
+/// Why a wallet page's Transfer is disabled when there is nowhere to send.
+pub const NO_TRANSFER_DESTINATION: &str =
+    "Add another wallet to this Cube, or create another Cube, to transfer between them.";
+
+/// A wallet page's Transfer: the Overview's action, opening the flow with
+/// this wallet as the source. With nowhere to send it stays disabled and
+/// says, on hover, what would give it a destination.
+pub fn wallet_transfer_action<'a>(
+    cube_id: &str,
+    wallet: WalletKind,
+    entry: WalletTransferEntry,
+) -> Element<'a, Message> {
+    let action: Element<'a, Message> = coincube_ui::component::tenshu::transfer_action(
+        landing_control_id(cube_id, wallet.label(), "transfer"),
+        Message::FocusAction,
+        (entry == WalletTransferEntry::Ready)
+            .then_some(Message::Home(HomeMessage::TransferFromWallet(wallet))),
+    )
+    .compact()
+    .into();
+    match entry {
+        WalletTransferEntry::NoDestination => coincube_ui::component::tooltip::tooltip_custom(
+            localized_copy(NO_TRANSFER_DESTINATION),
+            action,
+            iced::widget::tooltip::Position::Bottom,
+        )
+        .into(),
+        WalletTransferEntry::Ready | WalletTransferEntry::Loading => action,
+    }
+}
+
 /// Aggregate failure may end loading for display while an installed Spark
 /// wallet still has no authoritative funds for the transfer picker or cap.
 pub(crate) fn transfer_balance_ready(
@@ -3612,6 +3676,60 @@ pub(crate) fn transfer_balance_ready(
 mod tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
+
+    /// A wallet page's Transfer opens the flow from that wallet when ready,
+    /// and does nothing while loading or with nowhere to send.
+    #[test]
+    fn a_wallet_page_transfer_button_opens_from_its_wallet_only_when_ready() {
+        for wallet in [WalletKind::Spark, WalletKind::Vault] {
+            let id = landing_control_id("cube", wallet.label(), "transfer");
+            for pointer in [false, true] {
+                let emitted = capture::activate(
+                    wallet_transfer_action("cube", wallet, WalletTransferEntry::Ready),
+                    id.clone(),
+                    (1024, 768),
+                    pointer,
+                );
+                assert!(emitted.iter().any(|message| matches!(
+                    message,
+                    Message::Home(HomeMessage::TransferFromWallet(from)) if *from == wallet
+                )));
+            }
+            let ready = capture::inspect(
+                "wallet-transfer-ready",
+                wallet_transfer_action("cube", wallet, WalletTransferEntry::Ready),
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(ready.has_focus(id.clone()), "{:?}", wallet);
+            // Loading, or nowhere to send: shown, but disabled.
+            for entry in [
+                WalletTransferEntry::Loading,
+                WalletTransferEntry::NoDestination,
+            ] {
+                let probe = capture::inspect(
+                    "wallet-transfer-disabled",
+                    wallet_transfer_action("cube", wallet, entry),
+                    (1024, 768),
+                    "dark",
+                    theme::Theme::dark(),
+                );
+                assert!(probe.contains("Transfer"), "{:?} {:?}", wallet, entry);
+                assert!(!probe.has_focus(id.clone()), "{:?} {:?}", wallet, entry);
+            }
+        }
+        assert_eq!(back_to(None), "Overview");
+        assert_eq!(back_to(Some(WalletKind::Spark)), "Spark");
+        assert_eq!(back_to(Some(WalletKind::Vault)), "Vault");
+        // The disabled button's hover copy is translated.
+        assert_ne!(
+            coincube_ui::locale::render_in(coincube_ui::locale::Language::Spanish, || {
+                localized_copy(NO_TRANSFER_DESTINATION).to_owned()
+            }),
+            NO_TRANSFER_DESTINATION
+        );
+    }
 
     /// The Overview a step renders beneath any transfer dialog.
     fn overview(config: GlobalViewConfig<'_>) -> Element<'_, Message> {
@@ -3640,7 +3758,7 @@ mod tests {
             .context(Space::new(), context)
             .rule(transfer_steps_row(screen.step));
         let head = if screen.can_leave {
-            head.back("Overview", Message::Home(HomeMessage::BackToHome))
+            head.back(screen.back_to, Message::Home(HomeMessage::LeaveTransfer))
         } else {
             head
         };
@@ -3823,6 +3941,7 @@ mod tests {
                 transfer_page: TransferPage::Wallets,
                 transfer_unit: BitcoinDisplayUnit::Sats,
                 transfer_max: false,
+                transfer_origin: None,
                 other_cube: OtherCubeView::default(),
             }
         }
@@ -5265,6 +5384,7 @@ mod tests {
             balance_masked: config.balance_masked,
             other: config.other_cube,
             menu: config.wallet_picker,
+            origin: config.transfer_origin,
         }
     }
 

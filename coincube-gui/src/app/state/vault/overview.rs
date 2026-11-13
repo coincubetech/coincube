@@ -1,3 +1,4 @@
+use crate::app::view::global_home::{WalletKind, WalletTransferEntry};
 use std::convert::TryInto;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -119,6 +120,7 @@ impl VaultOverview {
         &'a self,
         menu: &'a Menu,
         cache: &'a Cache,
+        transfer: WalletTransferEntry,
         recent_activity: impl Fn(Option<&'static str>) -> Element<'a, view::Message> + 'a,
         detail: impl Fn() -> Option<Element<'a, view::Message>> + 'a,
     ) -> Element<'a, view::Message> {
@@ -129,7 +131,7 @@ impl VaultOverview {
         view::dashboard_with_detail(
             menu,
             cache,
-            move || Self::page_head(cache),
+            move || Self::page_head(cache, Some(transfer)),
             move || self.page_body(cache, Some(recent_activity(unknown_history))),
             detail,
         )
@@ -183,22 +185,36 @@ impl VaultOverview {
         })
     }
 
-    fn page_head<'a>(cache: &Cache) -> PageHead<'a, view::Message> {
+    /// The head: Transfer (when App supplies its state, as the Overview
+    /// offers it), then the page's own actions.
+    fn page_head<'a>(
+        cache: &Cache,
+        transfer: Option<WalletTransferEntry>,
+    ) -> PageHead<'a, view::Message> {
         let tools = view::nav::vault::tools(&view::nav::NavContext::from_cache(cache));
+        let head = view::wallet_page_head(cache, "Vault", cache.wallet_names.vault.as_deref());
+        let head = match transfer {
+            Some(entry) => head.action(view::global_home::wallet_transfer_action(
+                &cache.cube_id,
+                WalletKind::Vault,
+                entry,
+            )),
+            None => head,
+        };
         head_actions(
             &cache.cube_id,
             tools.first().map(|(_, route)| route.clone()),
         )
         .into_iter()
-        .fold(
-            view::wallet_page_head(cache, "Vault", cache.wallet_names.vault.as_deref()),
-            |head, (_, action)| head.action(action),
-        )
+        .fold(head, |head, (_, action)| head.action(action))
     }
 
     #[cfg(test)]
-    pub fn page_head_for_tests<'a>(cache: &Cache) -> PageHead<'a, view::Message> {
-        Self::page_head(cache)
+    pub fn page_head_for_tests<'a>(
+        cache: &Cache,
+        transfer: Option<WalletTransferEntry>,
+    ) -> PageHead<'a, view::Message> {
+        Self::page_head(cache, transfer)
     }
 
     fn page_body<'a>(
@@ -240,7 +256,7 @@ impl State for VaultOverview {
             view::dashboard_headed(
                 menu,
                 cache,
-                Self::page_head(cache),
+                Self::page_head(cache, None),
                 self.page_body(cache, None),
             )
         })

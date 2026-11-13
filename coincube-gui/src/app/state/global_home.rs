@@ -130,7 +130,8 @@ use crate::app::transfer_destination_loader::{
 };
 use crate::app::view::global_home::{
     GlobalViewConfig, HomeView, OtherCubeView, PendingTransfer, PickerSide, TransferDirection,
-    TransferError, TransferPage, TransferStage, UnlockPhase, WalletKind, UNLOCK_CHECKS,
+    TransferError, TransferPage, TransferStage, UnlockPhase, WalletKind, WalletTransferEntry,
+    UNLOCK_CHECKS,
 };
 
 /// Which per-wallet balances the Total Balance aggregate is still waiting on.
@@ -204,6 +205,69 @@ pub(crate) fn default_transfer_direction(
         [from] => TransferDirection::to_other_cube(*from, chain),
         _ => None,
     }
+}
+
+/// The wallet page a transfer opened from returns to, and keeps selected in
+/// the side menu meanwhile.
+pub(crate) fn transfer_origin_menu(wallet: WalletKind) -> &'static Menu {
+    use crate::app::menu::{LiquidSubMenu, SparkSubMenu, VaultSubMenu};
+    static SPARK: Menu = Menu::Spark(SparkSubMenu::Overview);
+    static VAULT: Menu = Menu::Vault(VaultSubMenu::Overview);
+    static LIQUID: Menu = Menu::Liquid(LiquidSubMenu::Overview);
+    match wallet {
+        WalletKind::Spark => &SPARK,
+        WalletKind::Vault => &VAULT,
+        WalletKind::Liquid => &LIQUID,
+    }
+}
+
+/// Whether some other local Cube on this network can receive a transfer from
+/// a Spark or a Vault source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OtherCubeReceivers {
+    spark: bool,
+    vault: bool,
+}
+
+impl OtherCubeReceivers {
+    fn from(self, wallet: WalletKind) -> bool {
+        match wallet {
+            WalletKind::Spark => self.spark,
+            WalletKind::Vault => self.vault,
+            WalletKind::Liquid => false,
+        }
+    }
+}
+
+/// The direction a wallet page's Transfer opens with, `from` fixed: another
+/// wallet in this Cube in Liquid, Vault, Spark order, else another Cube when
+/// one can receive. `None` leaves the wallet page's Transfer disabled.
+pub(crate) fn transfer_direction_from(
+    from: WalletKind,
+    has_liquid: bool,
+    has_vault: bool,
+    has_spark: bool,
+    chain: crate::chain::ChainId,
+    other_cube_receives: bool,
+) -> Option<TransferDirection> {
+    let has = |wallet| match wallet {
+        WalletKind::Liquid => has_liquid,
+        WalletKind::Vault => has_vault,
+        WalletKind::Spark => has_spark,
+    };
+    if !has(from) {
+        return None;
+    }
+    [WalletKind::Liquid, WalletKind::Vault, WalletKind::Spark]
+        .iter()
+        .copied()
+        .filter(|to| *to != from && has(*to))
+        .find_map(|to| TransferDirection::try_from_pair(from, to))
+        .or_else(|| {
+            other_cube_receives
+                .then(|| TransferDirection::to_other_cube(from, chain))
+                .flatten()
+        })
 }
 
 /// Returns `(effective_min_sat, max_sat_opt)` for a given direction.
@@ -380,6 +444,13 @@ pub struct GlobalHome {
     transfer_direction: Option<TransferDirection>,
     transfer_from: Option<WalletKind>,
     transfer_to: Option<WalletKind>,
+    /// The wallet page whose Transfer button opened this flow. Leaving the
+    /// flow returns there, and the side menu keeps it selected meanwhile.
+    /// `None` for a transfer opened from the Overview.
+    transfer_origin: Option<WalletKind>,
+    /// Whether another local Cube could receive from each source wallet, read
+    /// from the Cube catalog when a wallet page opens (not on every frame).
+    other_cube_receivers: OtherCubeReceivers,
     /// `Some(side)` when the wallet-picker popup is open editing that side.
     wallet_picker: Option<PickerSide>,
     current_view: HomeView,
@@ -594,6 +665,8 @@ impl GlobalHome {
             transfer_direction: None,
             transfer_from: None,
             transfer_to: None,
+            transfer_origin: None,
+            other_cube_receivers: OtherCubeReceivers::default(),
             wallet_picker: None,
             current_view: HomeView::default(),
             entered_amount: form::Value::default(),
@@ -687,6 +760,8 @@ impl GlobalHome {
             transfer_direction: None,
             transfer_from: None,
             transfer_to: None,
+            transfer_origin: None,
+            other_cube_receivers: OtherCubeReceivers::default(),
             wallet_picker: None,
             current_view: HomeView::default(),
             entered_amount: form::Value::default(),
@@ -809,15 +884,7 @@ impl GlobalHome {
             crate::app::features::liquid_wallet_usable(cache.chain(), cache.liquid_gate);
         let vault_pending = cache.has_vault
             && vault_balance_pending(cache.blockheight(), cache.history_sync(), vault_balance);
-        let total_balance_loading = (cache.has_imported_bitcoin && self.imported_balance.is_none())
-            || total_balance_pending(BalanceReadiness {
-                has_spark,
-                spark_loaded: self.spark_balance_loaded || self.spark_balance_error,
-                has_liquid,
-                liquid_loaded: self.liquid_balance_loaded,
-                usdt_loaded: self.usdt_balance_loaded,
-                vault_pending,
-            });
+        let total_balance_loading = self.total_balance_loading(cache);
 
         let config = GlobalViewConfig {
             cube_id: &self.cube_id,
@@ -927,6 +994,7 @@ impl GlobalHome {
                 unlocked: self.other_scope.is_some() && self.other_address.is_some(),
                 locked_again: self.other_locked_again,
             },
+            transfer_origin: self.transfer_origin,
         };
         let transfer_action = view::global_home::transfer_head_action(&config);
         let (overview, transfer) = view::global_home::global_home_view(config);
@@ -934,8 +1002,13 @@ impl GlobalHome {
         // steps and Back to Overview, which cancels the flow (it isn't
         // offered while a send is in flight).
         let content = match transfer {
+            // Opened from a wallet page, that wallet stays selected in the
+            // side menu for the whole flow.
             Some(screen) => crate::app::view::dashboard_payment(
-                menu,
+                match self.transfer_origin {
+                    Some(wallet) => transfer_origin_menu(wallet),
+                    None => menu,
+                },
                 cache,
                 Some(view::global_home::transfer_page_head(cache, &screen)),
                 screen.body,
@@ -980,6 +1053,9 @@ impl State for GlobalHome {
     /// over in To.
     fn interrupt(&mut self) {
         self.wallet_picker = None;
+        // Left through the side menu: the flow stays open on the Overview,
+        // which now owns it, rather than returning to the wallet page.
+        self.transfer_origin = None;
         if self.other_scope.is_none() && self.other_cube_selected.is_none() {
             return;
         }
@@ -1145,58 +1221,7 @@ impl State for GlobalHome {
                             ) else {
                                 return Task::none();
                             };
-                            self.transfer_from = Some(direction.from_kind());
-                            self.transfer_to =
-                                (!direction.is_other_cube()).then(|| direction.to_kind());
-                            self.transfer_direction = Some(direction);
-                            self.invalidate_transfer_destination();
-                            self.wallet_picker = None;
-                            self.entered_amount = form::Value::default();
-                            self.transfer_max = None;
-                            // Fresh flow: reset the Vault-sourced feerate
-                            // picker so a value (or stuck loading flag)
-                            // from a prior transfer doesn't leak in.
-                            self.transfer_feerate = default_transfer_feerate();
-                            self.transfer_feerate_loading = None;
-                            // One Details card: a same-Cube pair takes an
-                            // amount at once; another Cube waits for its pick.
-                            self.transfer_page = if direction.is_other_cube() {
-                                TransferPage::Wallets
-                            } else {
-                                TransferPage::Amount
-                            };
-                            self.transfer_unit = cache.bitcoin_unit;
-                            self.reset_other_cube();
-                            self.current_view.next();
-                            // Breez's swap limits bound only the Liquid legs
-                            // (see `effective_transfer_min_sat`). Without a
-                            // usable Liquid wallet the SDK isn't connected, so
-                            // the fetch would do nothing but raise an error.
-                            if !has_liquid {
-                                return Task::none();
-                            }
-                            let Some(breez_client) = self.breez_client.clone() else {
-                                return Task::none();
-                            };
-                            return Task::perform(
-                                async move { breez_client.fetch_onchain_limits().await },
-                                |limit| match limit {
-                                    Ok(limits) => Message::View(view::Message::Home(
-                                        HomeMessage::OnChainLimitsFetched {
-                                            send: (limits.send.min_sat, limits.send.max_sat),
-                                            receive: (
-                                                limits.receive.min_sat,
-                                                limits.receive.max_sat,
-                                            ),
-                                        },
-                                    )),
-                                    Err(error) => Message::View(view::Message::Home(
-                                        HomeMessage::Error(TransferError::FeeEstimateFailed {
-                                            detail: error.to_string(),
-                                        }),
-                                    )),
-                                },
-                            );
+                            return self.begin_transfer(cache, direction);
                         }
                         // Step 1 → 2 (amount → confirm): fetch the destination
                         // receive address and, for the Liquid-source leg, ask
@@ -2619,6 +2644,24 @@ impl State for GlobalHome {
                         }
                         Task::none()
                     }
+                    HomeMessage::LeaveTransfer => {
+                        let origin = self.transfer_origin;
+                        let reset = self.update(
+                            daemon.clone(),
+                            cache,
+                            Message::View(view::Message::Home(HomeMessage::BackToHome)),
+                        );
+                        match origin {
+                            Some(wallet) => Task::batch([
+                                reset,
+                                crate::app::state::redirect(transfer_origin_menu(wallet).clone()),
+                            ]),
+                            None => reset,
+                        }
+                    }
+                    // A wallet page's Transfer is routed by the App, which
+                    // switches to the Overview first (`start_transfer_from`).
+                    HomeMessage::TransferFromWallet(_) => Task::none(),
                     HomeMessage::OpenTransferActivity => {
                         let reset = self.update(
                             daemon.clone(),
@@ -2633,6 +2676,11 @@ impl State for GlobalHome {
                         ])
                     }
                     HomeMessage::RestartTransfer => {
+                        // Opened from a wallet page, the new transfer starts
+                        // from that wallet again and still returns there.
+                        if let Some(origin) = self.transfer_origin {
+                            return self.start_transfer_from(daemon.clone(), cache, origin);
+                        }
                         let reset = self.update(
                             daemon.clone(),
                             cache,
@@ -3544,6 +3592,7 @@ impl State for GlobalHome {
                     }
                     HomeMessage::BackToHome => {
                         self.current_view.reset();
+                        self.transfer_origin = None;
                         self.transfer_page = TransferPage::Wallets;
                         self.reset_other_cube();
                         self.transfer_direction = None;
@@ -4119,6 +4168,186 @@ impl State for GlobalHome {
 }
 
 impl GlobalHome {
+    /// Open the transfer's Details step with `direction`, fresh: the Overview's
+    /// Transfer, a wallet page's Transfer and Done's New transfer all start
+    /// here. Prefetches Breez's on-chain swap limits for the Liquid legs.
+    fn begin_transfer(&mut self, cache: &Cache, direction: TransferDirection) -> Task<Message> {
+        let has_liquid =
+            crate::app::features::liquid_wallet_usable(cache.network, cache.liquid_gate);
+        self.transfer_from = Some(direction.from_kind());
+        self.transfer_to = (!direction.is_other_cube()).then(|| direction.to_kind());
+        self.transfer_direction = Some(direction);
+        self.invalidate_transfer_destination();
+        self.wallet_picker = None;
+        self.entered_amount = form::Value::default();
+        self.transfer_max = None;
+        // Fresh flow: reset the Vault-sourced feerate picker so a value (or
+        // stuck loading flag) from a prior transfer doesn't leak in.
+        self.transfer_feerate = default_transfer_feerate();
+        self.transfer_feerate_loading = None;
+        // One Details card: a same-Cube pair takes an amount at once;
+        // another Cube waits for its pick.
+        self.transfer_page = if direction.is_other_cube() {
+            TransferPage::Wallets
+        } else {
+            TransferPage::Amount
+        };
+        self.transfer_unit = cache.bitcoin_unit;
+        self.reset_other_cube();
+        self.current_view.next();
+        // Breez's swap limits bound only the Liquid legs (see
+        // `effective_transfer_min_sat`). Without a usable Liquid wallet the
+        // SDK isn't connected, so the fetch would do nothing but raise an
+        // error.
+        if !has_liquid {
+            return Task::none();
+        }
+        let Some(breez_client) = self.breez_client.clone() else {
+            return Task::none();
+        };
+        Task::perform(
+            async move { breez_client.fetch_onchain_limits().await },
+            |limit| match limit {
+                Ok(limits) => {
+                    Message::View(view::Message::Home(HomeMessage::OnChainLimitsFetched {
+                        send: (limits.send.min_sat, limits.send.max_sat),
+                        receive: (limits.receive.min_sat, limits.receive.max_sat),
+                    }))
+                }
+                Err(error) => Message::View(view::Message::Home(HomeMessage::Error(
+                    TransferError::FeeEstimateFailed {
+                        detail: error.to_string(),
+                    },
+                ))),
+            },
+        )
+    }
+
+    /// Whether the Total Balance is still waiting on a wallet (see
+    /// [`total_balance_pending`]); the Transfer buttons wait on it too.
+    fn total_balance_loading(&self, cache: &Cache) -> bool {
+        let vault_balance = cache
+            .coins()
+            .iter()
+            .filter(|coin| coin.spend_info.is_none())
+            .fold(Amount::from_sat(0), |acc, coin| acc + coin.amount);
+        let vault_pending = cache.has_vault
+            && vault_balance_pending(cache.blockheight(), cache.history_sync(), vault_balance);
+        (cache.has_imported_bitcoin && self.imported_balance.is_none())
+            || total_balance_pending(BalanceReadiness {
+                has_spark: self.spark_backend.is_some(),
+                spark_loaded: self.spark_balance_loaded || self.spark_balance_error,
+                has_liquid: crate::app::features::liquid_wallet_usable(
+                    cache.chain(),
+                    cache.liquid_gate,
+                ),
+                liquid_loaded: self.liquid_balance_loaded,
+                usdt_loaded: self.usdt_balance_loaded,
+                vault_pending,
+            })
+    }
+
+    /// A wallet page's Transfer: open the flow from `from`, remembering the
+    /// page so leaving returns there. Any transfer left open on the Overview
+    /// starts over. The caller has already switched to the Overview route.
+    pub fn start_transfer_from(
+        &mut self,
+        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        cache: &Cache,
+        from: WalletKind,
+    ) -> Task<Message> {
+        if self.wallet_transfer_entry(cache, from) != WalletTransferEntry::Ready {
+            return Task::none();
+        }
+        let Some(direction) = self.wallet_transfer_direction(cache, from) else {
+            return Task::none();
+        };
+        let reset = if self.current_view.step == 0 {
+            Task::none()
+        } else {
+            self.update(
+                daemon,
+                cache,
+                Message::View(view::Message::Home(HomeMessage::BackToHome)),
+            )
+        };
+        self.transfer_origin = Some(from);
+        Task::batch([reset, self.begin_transfer(cache, direction)])
+    }
+
+    /// The direction a wallet page's Transfer would open with.
+    fn wallet_transfer_direction(
+        &self,
+        cache: &Cache,
+        from: WalletKind,
+    ) -> Option<TransferDirection> {
+        transfer_direction_from(
+            from,
+            crate::app::features::liquid_wallet_usable(cache.chain(), cache.liquid_gate),
+            cache.has_vault,
+            self.spark_backend.is_some(),
+            cache.chain(),
+            self.other_cube_receivers.from(from),
+        )
+    }
+
+    /// The state of a wallet page's Transfer button: disabled without a
+    /// destination, while the balances the form caps against load, and while
+    /// a transfer already open on the Overview is sending (starting another
+    /// would reset it mid-send).
+    pub fn wallet_transfer_entry(&self, cache: &Cache, from: WalletKind) -> WalletTransferEntry {
+        if self.wallet_transfer_direction(cache, from).is_none() {
+            WalletTransferEntry::NoDestination
+        } else if !self.is_sending
+            && view::global_home::transfer_balance_ready(
+                self.total_balance_loading(cache),
+                self.spark_backend.is_some(),
+                self.spark_balance_loaded,
+            )
+        {
+            WalletTransferEntry::Ready
+        } else {
+            WalletTransferEntry::Loading
+        }
+    }
+
+    /// Re-read whether another local Cube can receive from this Cube's Spark
+    /// and Vault. One catalog read, done when a wallet page opens.
+    pub fn refresh_other_cube_receivers(&mut self, cache: &Cache) {
+        let chain = cache.chain();
+        let receives = |wallet: Option<WalletIdentity>| {
+            wallet.is_some_and(|wallet| {
+                other_cubes(
+                    &cache.datadir_path,
+                    &Source {
+                        cube_id: self.cube_id.clone(),
+                        chain,
+                        wallet,
+                        app: cache.app_generation,
+                    },
+                )
+                .iter()
+                .any(|cube| cube.refusal.is_none())
+            })
+        };
+        let on_mainnet = chain == crate::chain::ChainId::Bitcoin;
+        // The Spark identity only names the source; whether another Cube can
+        // receive doesn't depend on it, so a not-yet-loaded one is fine here.
+        let spark = (on_mainnet && self.spark_backend.is_some())
+            .then(|| WalletIdentity::Spark(self.spark_identity.clone().unwrap_or_default()));
+        let vault = (on_mainnet && self.legacy_vault_available(cache))
+            .then(|| {
+                self.wallet
+                    .as_ref()
+                    .map(|wallet| WalletIdentity::Vault(wallet.id()))
+            })
+            .flatten();
+        self.other_cube_receivers = OtherCubeReceivers {
+            spark: receives(spark),
+            vault: receives(vault),
+        };
+    }
+
     fn transfer_source_wallet(
         &self,
         direction: TransferDirection,
@@ -5148,6 +5377,39 @@ mod tests {
             "cube".to_string(),
             false,
         )
+    }
+
+    /// A wallet page's Transfer prefers another wallet in this Cube, falls
+    /// back to another Cube (mainnet only) and is otherwise unavailable.
+    #[test]
+    fn a_wallet_page_transfer_picks_a_destination_for_its_source() {
+        use crate::chain::ChainId::{Bitcoin, Regtest};
+        use WalletKind::{Liquid, Spark, Vault};
+        let from = |wallet, (liquid, vault, spark), chain, other| {
+            transfer_direction_from(wallet, liquid, vault, spark, chain, other)
+        };
+        assert_eq!(
+            from(Spark, (false, true, true), Bitcoin, false),
+            Some(TransferDirection::SparkToVault)
+        );
+        assert_eq!(
+            from(Vault, (true, true, true), Bitcoin, false),
+            Some(TransferDirection::VaultToLiquid)
+        );
+        // Alone in its Cube: another Cube, when one can receive.
+        assert_eq!(from(Spark, (false, false, true), Bitcoin, false), None);
+        assert_eq!(
+            from(Spark, (false, false, true), Bitcoin, true),
+            Some(TransferDirection::SparkToOtherCube)
+        );
+        assert_eq!(
+            from(Vault, (false, true, false), Bitcoin, true),
+            Some(TransferDirection::VaultToOtherCube)
+        );
+        // Other Cubes receive on mainnet only.
+        assert_eq!(from(Vault, (false, true, false), Regtest, true), None);
+        // A wallet the Cube doesn't have has no Transfer.
+        assert_eq!(from(Liquid, (false, true, true), Bitcoin, true), None);
     }
 
     #[test]
@@ -7647,6 +7909,182 @@ mod tests {
             let (client, _requests) = crate::app::breez_spark::SparkClient::mock_transport();
             home.spark_backend = Some(Arc::new(SparkBackend::new(Arc::new(client))));
             home
+        }
+
+        /// `transfer_cache` once every balance the Transfer form caps
+        /// against has loaded: the wallet pages' Transfer is ready.
+        fn loaded(home: &mut GlobalHome) -> Cache {
+            home.spark_balance_loaded = true;
+            let mut cache = transfer_cache();
+            cache.daemon_cache.blockheight = 1;
+            cache
+        }
+
+        /// The view messages a task emits.
+        fn emitted(task: Task<Message>) -> Vec<view::Message> {
+            collect(task)
+                .into_iter()
+                .filter_map(|message| match message {
+                    Message::View(message) => Some(message),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn a_wallet_page_transfer_starts_from_that_wallet() {
+            for (from, direction) in [
+                (WalletKind::Spark, TransferDirection::SparkToVault),
+                (WalletKind::Vault, TransferDirection::VaultToSpark),
+            ] {
+                let mut home = home_with_spark_and_vault();
+                let cache = loaded(&mut home);
+                assert_eq!(
+                    home.wallet_transfer_entry(&cache, from),
+                    WalletTransferEntry::Ready
+                );
+                // A transfer left open on the Overview starts over.
+                assert_eq!(home.current_view.step, 2);
+                drain(home.start_transfer_from(None, &cache, from));
+                assert_eq!(home.current_view.step, 1);
+                assert_eq!(home.transfer_direction, Some(direction));
+                assert_eq!(home.transfer_page, TransferPage::Amount);
+                assert_eq!(home.transfer_origin, Some(from));
+            }
+        }
+
+        #[test]
+        fn leaving_a_wallet_page_transfer_returns_to_that_page() {
+            use crate::app::menu::{SparkSubMenu, VaultSubMenu};
+            for (from, page) in [
+                (WalletKind::Spark, Menu::Spark(SparkSubMenu::Overview)),
+                (WalletKind::Vault, Menu::Vault(VaultSubMenu::Overview)),
+            ] {
+                let mut home = home_with_spark_and_vault();
+                let cache = loaded(&mut home);
+                drain(home.start_transfer_from(None, &cache, from));
+                let out = emitted(home.update(
+                    None,
+                    &cache,
+                    Message::View(view::Message::Home(HomeMessage::LeaveTransfer)),
+                ));
+                assert!(
+                    out.iter()
+                        .any(|m| matches!(m, view::Message::Menu(menu) if *menu == page)),
+                    "{:?}: {:?}",
+                    from,
+                    out
+                );
+                assert_eq!(home.current_view.step, 0);
+                assert_eq!(home.transfer_origin, None);
+                assert_eq!(transfer_origin_menu(from), &page);
+            }
+
+            // Opened from the Overview, leaving stays there.
+            let mut home = home_with_spark_and_vault();
+            let cache = loaded(&mut home);
+            let out = emitted(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::LeaveTransfer)),
+            ));
+            assert!(
+                !out.iter().any(|m| matches!(m, view::Message::Menu(_))),
+                "{:?}",
+                out
+            );
+            assert_eq!(home.current_view.step, 0);
+        }
+
+        #[test]
+        fn a_wallet_page_transfer_keeps_its_page_until_the_side_menu_leaves() {
+            let mut home = home_with_spark_and_vault();
+            let cache = loaded(&mut home);
+            drain(home.start_transfer_from(None, &cache, WalletKind::Vault));
+
+            // New transfer, from Done: the same source, still returning there.
+            home.current_view.step = 3;
+            send(&mut home, &cache, HomeMessage::RestartTransfer);
+            assert_eq!(home.current_view.step, 1);
+            assert_eq!(home.transfer_from, Some(WalletKind::Vault));
+            assert_eq!(home.transfer_origin, Some(WalletKind::Vault));
+
+            // Leaving through the side menu hands the open flow to the
+            // Overview: its Back no longer returns to the Vault page.
+            home.interrupt();
+            assert_eq!(home.transfer_origin, None);
+            assert_eq!(home.current_view.step, 1);
+
+            // Activity, from Done, doesn't return to the page either.
+            drain(home.start_transfer_from(None, &cache, WalletKind::Spark));
+            let out = emitted(home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::OpenTransferActivity)),
+            ));
+            let menus: Vec<&Menu> = out
+                .iter()
+                .filter_map(|m| match m {
+                    view::Message::Menu(menu) => Some(menu),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                menus,
+                [&Menu::Cube(crate::app::menu::CubeSubMenu::Activity)],
+                "{:?}",
+                out
+            );
+            assert_eq!(home.transfer_origin, None);
+        }
+
+        #[test]
+        fn a_wallet_page_transfer_waits_for_balances_and_in_flight_sends() {
+            let mut home = home_with_spark_and_vault();
+            // The Vault hasn't polled and Spark hasn't reported.
+            let cache = transfer_cache();
+            assert_eq!(
+                home.wallet_transfer_entry(&cache, WalletKind::Spark),
+                WalletTransferEntry::Loading
+            );
+            drain(home.start_transfer_from(None, &cache, WalletKind::Spark));
+            assert_eq!(home.transfer_origin, None, "a disabled press opens nothing");
+
+            let cache = loaded(&mut home);
+            home.is_sending = true;
+            assert_eq!(
+                home.wallet_transfer_entry(&cache, WalletKind::Vault),
+                WalletTransferEntry::Loading
+            );
+            let step = home.current_view.step;
+            drain(home.start_transfer_from(None, &cache, WalletKind::Vault));
+            assert_eq!(home.current_view.step, step, "the send in flight is kept");
+        }
+
+        #[test]
+        fn a_lone_wallet_transfers_only_when_another_cube_can_receive() {
+            // A Vault-only Cube: nowhere to send until another Cube exists.
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let mut cache = loaded(&mut home);
+            home.refresh_other_cube_receivers(&cache);
+            assert_eq!(
+                home.wallet_transfer_entry(&cache, WalletKind::Vault),
+                WalletTransferEntry::NoDestination
+            );
+
+            let (_directory, root) = receiving_cube_catalog(true);
+            cache.datadir_path = root;
+            home.refresh_other_cube_receivers(&cache);
+            assert_eq!(
+                home.wallet_transfer_entry(&cache, WalletKind::Vault),
+                WalletTransferEntry::Ready
+            );
+            drain(home.start_transfer_from(None, &cache, WalletKind::Vault));
+            assert_eq!(
+                home.transfer_direction,
+                Some(TransferDirection::VaultToOtherCube)
+            );
+            assert_eq!(home.transfer_page, TransferPage::Wallets);
         }
 
         #[test]

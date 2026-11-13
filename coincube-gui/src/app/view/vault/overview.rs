@@ -919,6 +919,7 @@ mod capture_tests {
                         move || {
                             crate::app::state::vault::overview::VaultOverview::page_head_for_tests(
                                 cache,
+                                Some(crate::app::view::global_home::WalletTransferEntry::Ready),
                             )
                         },
                         move || {
