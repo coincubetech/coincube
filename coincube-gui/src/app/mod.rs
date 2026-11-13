@@ -9519,8 +9519,12 @@ impl App {
                 // claim — only `DepositsChanged` — so the celebration is fired
                 // explicitly from the auto-claim watcher in `GlobalHome`).
                 use coincube_ui::component::amount::DisplayAmount;
-                self.received_celebration_amount = bitcoin::Amount::from_sat(amount_sat)
-                    .to_formatted_string_with_unit(self.cache.bitcoin_unit);
+                self.received_celebration_amount = format!(
+                    "{} {}",
+                    bitcoin::Amount::from_sat(amount_sat)
+                        .to_formatted_string_with_unit(self.cache.bitcoin_unit),
+                    self.cache.bitcoin_unit.label()
+                );
                 self.received_celebration_quote =
                     coincube_ui::component::quote_display::random_quote(&context);
                 self.received_celebration_image =
@@ -9830,8 +9834,12 @@ impl App {
                                     crate::app::breez_liquid::assets::format_usdt_display(minor)
                                 )
                             } else {
-                                bitcoin::Amount::from_sat(details.amount_sat)
-                                    .to_formatted_string_with_unit(self.cache.bitcoin_unit)
+                                format!(
+                                    "{} {}",
+                                    bitcoin::Amount::from_sat(details.amount_sat)
+                                        .to_formatted_string_with_unit(self.cache.bitcoin_unit),
+                                    self.cache.bitcoin_unit.label()
+                                )
                             };
                             self.received_celebration_context = context.to_string();
                             self.received_celebration_wallet = "Into Liquid";

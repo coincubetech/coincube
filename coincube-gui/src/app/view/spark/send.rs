@@ -57,8 +57,10 @@ pub struct SparkSendView<'a> {
     pub sent_celebration_context: &'a str,
     /// Who the sent payment went to, as typed (receipt's To row).
     pub sent_recipient: &'a str,
-    /// Amount plus fee, for a bitcoin send (receipt's Total row).
-    pub sent_total_sat: Option<u64>,
+    /// Fee and amount plus fee, in the unit the payment was made in
+    /// (receipt's Fee and Total rows).
+    pub sent_fee_display: &'a str,
+    pub sent_total_display: &'a str,
     pub sent_quote: &'a coincube_ui::component::quote_display::Quote,
     pub sent_image_handle: &'a iced::widget::image::Handle,
     pub recent_transactions: &'a [SparkRecentTransaction],
@@ -141,7 +143,6 @@ impl<'a> SparkSendView<'a> {
 
         // ── Payment result: the receipt first, the worldview art beside it ──
         if let SparkSendPhase::Sent(ok) = self.phase {
-            use coincube_ui::component::amount::format_u64_as_string;
             use coincube_ui::component::payment_result::{
                 payment_result, short_id, Outcome, ReceiptRow,
             };
@@ -162,15 +163,20 @@ impl<'a> SparkSendView<'a> {
                     .mono()
                     .on_copy(Message::Clipboard(recipient.to_string()))
             };
-            let sats = |sat: u64| format!("{} sats", format_u64_as_string(sat, ","));
             let mut rows = Vec::new();
             if !recipient.is_empty() {
                 rows.push(to);
             }
             rows.push(ReceiptRow::new(localized_copy("Paid from"), "Spark"));
-            rows.push(ReceiptRow::new(localized_copy("Fee"), sats(ok.fee_sat)));
-            if let Some(total) = self.sent_total_sat {
-                rows.push(ReceiptRow::new(localized_copy("Total"), sats(total)));
+            if !self.sent_fee_display.is_empty() {
+                rows.push(ReceiptRow::new(
+                    localized_copy("Fee"),
+                    self.sent_fee_display,
+                ));
+                rows.push(ReceiptRow::new(
+                    localized_copy("Total"),
+                    self.sent_total_display,
+                ));
             }
             if !ok.payment_id.is_empty() {
                 rows.push(
@@ -2454,7 +2460,8 @@ mod tests {
                 sent_amount_display: "",
                 sent_celebration_context: "",
                 sent_recipient: "",
-                sent_total_sat: None,
+                sent_fee_display: "",
+                sent_total_display: "",
                 sent_quote: &self.quote,
                 sent_image_handle: &self.image,
                 recent_transactions: &[],

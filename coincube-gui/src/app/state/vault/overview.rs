@@ -338,9 +338,13 @@ impl State for VaultOverview {
                             .is_none_or(|prev| prev.outpoint != newest.outpoint);
                         if is_incoming && is_new && !self.payments.list.is_empty() {
                             use coincube_ui::component::amount::DisplayAmount;
-                            self.received_amount_display = newest
-                                .amount
-                                .to_formatted_string_with_unit(cache.bitcoin_unit);
+                            self.received_amount_display = format!(
+                                "{} {}",
+                                newest
+                                    .amount
+                                    .to_formatted_string_with_unit(cache.bitcoin_unit),
+                                cache.bitcoin_unit.label()
+                            );
                             self.received_quote =
                                 coincube_ui::component::quote_display::random_quote(
                                     "bitcoin-receive",

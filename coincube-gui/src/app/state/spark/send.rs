@@ -483,9 +483,11 @@ pub struct SparkSend {
     sent_celebration_context: String,
     /// Who the last successful send went to, as typed, for its receipt.
     sent_recipient: String,
-    /// Amount plus fee of the last successful bitcoin send. `None` for a
-    /// token payment, whose amount and fee are in different units.
-    sent_total_sat: Option<u64>,
+    /// The last successful send's fee and amount-plus-fee, in the unit it
+    /// was paid in: USDB for a token payment (the bridge reports its sats
+    /// as zero), sats otherwise.
+    sent_fee_display: String,
+    sent_total_display: String,
     /// Quote and image handle for the celebration screen.
     sent_quote: coincube_ui::component::quote_display::Quote,
     sent_image_handle: iced::widget::image::Handle,
@@ -570,7 +572,8 @@ impl SparkSend {
             last_send_method: String::new(),
             sent_amount_display: String::new(),
             sent_recipient: String::new(),
-            sent_total_sat: None,
+            sent_fee_display: String::new(),
+            sent_total_display: String::new(),
             sent_celebration_context: "lightning-send".to_string(),
             sent_quote: coincube_ui::component::quote_display::random_quote("lightning-send"),
             sent_image_handle: coincube_ui::component::quote_display::image_handle_for_context(
@@ -1022,7 +1025,8 @@ impl State for SparkSend {
                 sent_amount_display: &self.sent_amount_display,
                 sent_celebration_context: &self.sent_celebration_context,
                 sent_recipient: &self.sent_recipient,
-                sent_total_sat: self.sent_total_sat,
+                sent_fee_display: &self.sent_fee_display,
+                sent_total_display: &self.sent_total_display,
                 sent_quote: &self.sent_quote,
                 sent_image_handle: &self.sent_image_handle,
                 recent_transactions: &self.recent_transactions,
@@ -1590,10 +1594,28 @@ impl State for SparkSend {
                     None => format!("{} sats", format_u64_as_string(ok.amount_sat, ",")),
                 };
                 self.sent_recipient = self.destination_input.trim().to_string();
-                self.sent_total_sat = self
-                    .prepared_token_payment
-                    .is_none()
-                    .then(|| ok.amount_sat.saturating_add(ok.fee_sat));
+                (self.sent_fee_display, self.sent_total_display) = match self.prepared_token_payment
+                {
+                    Some(payment) => {
+                        let line = |amount| {
+                            crate::app::view::spark::send::usdb_amount_line(
+                                amount,
+                                self.usdb_decimals(),
+                            )
+                        };
+                        (
+                            line(payment.fee.amount),
+                            line(payment.amount.amount.saturating_add(payment.fee.amount)),
+                        )
+                    }
+                    None => {
+                        let sats = |sat: u64| format!("{} sats", format_u64_as_string(sat, ","));
+                        (
+                            sats(ok.fee_sat),
+                            sats(ok.amount_sat.saturating_add(ok.fee_sat)),
+                        )
+                    }
+                };
                 self.phase = SparkSendPhase::Sent(ok);
                 // Clear the inputs so a follow-up send doesn't re-use them.
                 self.destination_input.clear();
@@ -4405,12 +4427,41 @@ mod tests {
 
         assert!(matches!(panel.phase, SparkSendPhase::Sent(_)));
         assert_eq!(panel.sent_amount_display, "42,000 sats");
+        assert_eq!(panel.sent_recipient, "destination");
+        assert_eq!(panel.sent_fee_display, "17 sats");
+        assert_eq!(panel.sent_total_display, "42,017 sats");
         assert!(panel.destination_input.is_empty());
         assert!(panel.amount_input.is_empty());
         assert!(panel.send_idempotency_key.is_none());
         assert!(panel.cross_chain_prepare.is_none());
         assert!(panel.quote_countdown.is_none());
         assert!(panel.cross_chain.is_none());
+    }
+
+    /// A USDB payment's receipt reads its fee and total in USDB: the bridge
+    /// reports a token payment's sats as zero.
+    #[test]
+    fn token_send_receipt_reads_fee_and_total_in_usdb() {
+        let mut panel = failed_panel(cross_chain::RetryPolicy::SafeToRetry);
+        panel.destination_input = "destination".to_string();
+        panel.prepared_token_payment = Some(coincube_spark_protocol::TokenPayment {
+            amount: usdb_amount(12_400_000),
+            fee: usdb_amount(50_000),
+        });
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::SendSucceeded(SendPaymentOk {
+                payment_id: "payment-id".to_string(),
+                amount_sat: 0,
+                fee_sat: 0,
+            }),
+        );
+        let usdb =
+            |amount| crate::app::view::spark::send::usdb_amount_line(amount, panel.usdb_decimals());
+        assert_eq!(panel.sent_amount_display, usdb(12_400_000));
+        assert_eq!(panel.sent_fee_display, usdb(50_000));
+        assert_eq!(panel.sent_total_display, usdb(12_450_000));
+        assert!(!panel.sent_fee_display.contains("sats"));
     }
 
     #[test]

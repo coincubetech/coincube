@@ -740,8 +740,12 @@ impl State for LiquidReceive {
                                     format!("{} USDt", format_usdt_display(minor))
                                 } else {
                                     use coincube_ui::component::amount::DisplayAmount;
-                                    Amount::from_sat(payment.amount_sat)
-                                        .to_formatted_string_with_unit(cache.bitcoin_unit)
+                                    format!(
+                                        "{} {}",
+                                        Amount::from_sat(payment.amount_sat)
+                                            .to_formatted_string_with_unit(cache.bitcoin_unit),
+                                        cache.bitcoin_unit.label()
+                                    )
                                 };
                                 let context = if usdt_amount.is_some() {
                                     "note-receive"
