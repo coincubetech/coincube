@@ -136,7 +136,11 @@ impl<'a> SparkReceiveView<'a> {
                         self.network,
                         self.open_menu,
                     ))
-                    .push(arrival_note(self.network, self.method, self.receive_usd)),
+                    .push(arrival_note(
+                        self.network,
+                        usdb_sent(self.method, self.cross_network_selected),
+                        self.receive_usd,
+                    )),
             )
             .padding([18, 24]),
         );
@@ -338,15 +342,18 @@ fn note_link<'a>(
 pub(crate) const ARRIVAL_NOTE_USDB: &str =
     "USDB sent to this Spark address arrives as USDB. Ask the payer to send USDB on Spark.";
 
-fn arrival_note<'a>(
-    network: Network,
-    method: SparkReceiveMethod,
-    receive_usd: bool,
-) -> Element<'a, Message> {
+/// USDB sent on Spark is what the payer sends: picked, and no cross-chain
+/// stablecoin swap is up over it (the swap keeps the method underneath, so
+/// the method alone doesn't say).
+fn usdb_sent(method: SparkReceiveMethod, cross: Option<DepositOption>) -> bool {
+    method == SparkReceiveMethod::UsdbSpark && cross.is_none()
+}
+
+fn arrival_note<'a>(network: Network, usdb_sent: bool, receive_usd: bool) -> Element<'a, Message> {
     use crate::app::menu::{Menu, SparkSettingsOption, SparkSubMenu};
     // Conversions, and so USDB, exist where Swap does.
     let usd = crate::app::state::spark::swap::swap_available(network);
-    if usd && method == SparkReceiveMethod::UsdbSpark {
+    if usd && usdb_sent {
         return p2_regular(localized_copy(ARRIVAL_NOTE_USDB))
             .style(theme::text::secondary)
             .into();
@@ -747,7 +754,7 @@ fn spark_receive_cards<'a>(
     let sender_open = open == Some(ReceiveMenu::TheySend);
     // Where conversions run, YOU RECEIVE is a choice too: keep bitcoin, or
     // convert it to US Dollar as it arrives (auto-convert).
-    let usdb_sent = method == SparkReceiveMethod::UsdbSpark && cross.is_none();
+    let usdb_sent = usdb_sent(method, cross);
     // USDB sent stays USDB, so there is nothing to choose then.
     let choosable = crate::app::state::spark::swap::swap_available(network) && !usdb_sent;
     let receiver_open = choosable && open == Some(ReceiveMenu::YouReceive);
@@ -1382,13 +1389,63 @@ mod tests {
 
         let note = capture::inspect(
             "spark-receive-note-usdb",
-            arrival_note(Network::Bitcoin, SparkReceiveMethod::UsdbSpark, false),
+            arrival_note(Network::Bitcoin, true, false),
             (1024, 768),
             "dark",
             theme::Theme::dark(),
         );
         assert!(note.contains(ARRIVAL_NOTE_USDB));
         assert!(!note.contains(ARRIVAL_NOTE));
+
+        // A cross-chain stablecoin picked after USDB is swapped to bitcoin:
+        // neither the note nor the tiles may still say USDB.
+        let usdt = deposit_options()[0];
+        assert!(usdb_sent(SparkReceiveMethod::UsdbSpark, None));
+        assert!(!usdb_sent(SparkReceiveMethod::UsdbSpark, Some(usdt)));
+        let swapped = capture::inspect(
+            "spark-receive-cards-usdb-then-usdt",
+            spark_receive_cards(
+                SparkReceiveMethod::UsdbSpark,
+                Some(usdt),
+                false,
+                Network::Bitcoin,
+                None,
+            ),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(swapped.contains("USDt") && swapped.contains("Bitcoin"));
+    }
+
+    /// The whole panel, with a cross-chain swap up over USDB: the note is the
+    /// bitcoin one, not "send USDB on Spark".
+    #[test]
+    fn a_cross_chain_swap_over_usdb_does_not_ask_for_usdb() {
+        let mainnet = Cache {
+            network: Network::Bitcoin,
+            ..Cache::default()
+        };
+        let mut panel = crate::app::state::spark::SparkReceive::new(None);
+        let _ = crate::app::state::State::update(
+            &mut panel,
+            None,
+            &mainnet,
+            crate::app::message::Message::View(Message::SparkReceive(
+                SparkReceiveMessage::SelectSenderRail(SparkReceiveMethod::UsdbSpark),
+            )),
+        );
+        assert_eq!(panel.method, SparkReceiveMethod::UsdbSpark);
+        let usdt = deposit_options()[0];
+        let note = capture::inspect(
+            "spark-receive-note-usdb-then-usdt",
+            arrival_note(Network::Bitcoin, usdb_sent(panel.method, Some(usdt)), false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(!note.contains(ARRIVAL_NOTE_USDB));
+        assert!(note.contains(ARRIVAL_NOTE));
     }
 
     /// Master I4: Receive never implies native stablecoin receive. Off
@@ -1397,14 +1454,14 @@ mod tests {
     fn the_arrival_note_says_payments_arrive_as_bitcoin() {
         let mainnet = capture::inspect(
             "spark-receive-note-mainnet",
-            arrival_note(Network::Bitcoin, SparkReceiveMethod::Bolt11, false),
+            arrival_note(Network::Bitcoin, false, false),
             (1024, 768),
             "dark",
             theme::Theme::dark(),
         );
         assert!(mainnet.contains(ARRIVAL_NOTE) && mainnet.contains(ARRIVAL_NOTE_USD));
         let messages = capture::activate(
-            arrival_note(Network::Bitcoin, SparkReceiveMethod::Bolt11, false),
+            arrival_note(Network::Bitcoin, false, false),
             iced::advanced::widget::Id::new(WALLET_SETTINGS_ID),
             (1024, 768),
             true,
@@ -1418,7 +1475,7 @@ mod tests {
             ))
         )));
         let messages = capture::activate(
-            arrival_note(Network::Bitcoin, SparkReceiveMethod::Bolt11, false),
+            arrival_note(Network::Bitcoin, false, false),
             iced::advanced::widget::Id::new(SWAP_ID),
             (1024, 768),
             true,
@@ -1432,7 +1489,7 @@ mod tests {
         for network in [Network::Testnet, Network::Signet, Network::Regtest] {
             let note = capture::inspect(
                 "spark-receive-note-test-network",
-                arrival_note(network, SparkReceiveMethod::Bolt11, false),
+                arrival_note(network, false, false),
                 (1024, 768),
                 "dark",
                 theme::Theme::dark(),
