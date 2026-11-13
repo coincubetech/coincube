@@ -6953,6 +6953,17 @@ mod tests {
                     has_vault: true,
                     ..Cache::default()
                 };
+                let daemon = Arc::new(RecordingDaemon::default());
+                let as_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
+                // The Sign handler with a daemon. Its task isn't run: the
+                // PSBT request it dispatches stays in flight.
+                let sign = |home: &mut GlobalHome| {
+                    let _in_flight = home.update(
+                        Some(as_daemon.clone()),
+                        &cache,
+                        Message::View(view::Message::Home(HomeMessage::SignVaultToLiquidTx)),
+                    );
+                };
                 let at_review = || {
                     let (mut home, _) = home_on_transfer_screen();
                     send(&mut home, &cache, HomeMessage::BackToHome);
@@ -6979,8 +6990,26 @@ mod tests {
                         "{:?}: a valid unlock signs and broadcasts",
                         direction
                     );
-                    home.transfer_signed = true;
-                    home.is_sending = true;
+                    // Control through the handler: with the valid unlock,
+                    // signing dispatches the PSBT request to the daemon.
+                    home.transfer_feerate = form::Value {
+                        value: "2".into(),
+                        warning: None,
+                        valid: true,
+                    };
+                    home.entered_amount = form::Value {
+                        value: "100000".into(),
+                        warning: None,
+                        valid: true,
+                    };
+                    sign(&mut home);
+                    assert!(
+                        home.active_psbt_request.is_some() && home.is_sending,
+                        "{:?}: a valid unlock reaches the daemon",
+                        direction
+                    );
+                    assert_eq!(home.current_view.step, 2);
+                    // The user leaves while it builds.
                     home.interrupt();
                     assert!(home.other_scope.is_none(), "{:?}", direction);
                     assert!(home.check_other_review_address(&cache).is_err());
@@ -6993,9 +7022,24 @@ mod tests {
                     &cache,
                     HomeMessage::Error(TransferError::PreparationExpired),
                 );
-                send(&mut failed, &cache, HomeMessage::ConfirmTransfer);
+                // Signing again can't reach the daemon: the unlock restarts.
+                failed.active_psbt_request = None;
+                sign(&mut failed);
+                assert!(failed.active_psbt_request.is_none(), "{:?}", direction);
                 assert_eq!(failed.current_view.step, 1, "{:?}", direction);
                 assert!(!failed.is_sending, "{:?}: nothing sent again", direction);
+
+                // Nor can a broadcast of an earlier signed transaction.
+                let mut signed = at_review();
+                send(
+                    &mut signed,
+                    &cache,
+                    HomeMessage::Error(TransferError::PreparationExpired),
+                );
+                signed.transfer_signed = true;
+                send(&mut signed, &cache, HomeMessage::ConfirmTransfer);
+                assert_eq!(signed.current_view.step, 1, "{:?}", direction);
+                assert!(!signed.is_sending, "{:?}: nothing broadcast", direction);
 
                 let mut done = at_review();
                 send(&mut done, &cache, success_callback(direction));
