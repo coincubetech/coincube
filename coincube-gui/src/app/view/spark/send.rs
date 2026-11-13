@@ -55,6 +55,12 @@ pub struct SparkSendView<'a> {
     pub theme_mode: theme::palette::ThemeMode,
     pub sent_amount_display: &'a str,
     pub sent_celebration_context: &'a str,
+    /// Who the sent payment went to, as typed (receipt's To row).
+    pub sent_recipient: &'a str,
+    /// Fee and amount plus fee, in the unit the payment was made in
+    /// (receipt's Fee and Total rows).
+    pub sent_fee_display: &'a str,
+    pub sent_total_display: &'a str,
     pub sent_quote: &'a coincube_ui::component::quote_display::Quote,
     pub sent_image_handle: &'a iced::widget::image::Handle,
     pub recent_transactions: &'a [SparkRecentTransaction],
@@ -135,17 +141,64 @@ impl<'a> SparkSendView<'a> {
                 .into();
         }
 
-        // ── Full-screen celebration for successful sends ─────────────
-        if matches!(self.phase, SparkSendPhase::Sent(_)) {
-            return coincube_ui::component::sent_celebration_page(
-                self.sent_celebration_context,
+        // ── Payment result: the receipt first, the worldview art beside it ──
+        if let SparkSendPhase::Sent(ok) = self.phase {
+            use coincube_ui::component::payment_result::{
+                payment_result, short_id, Outcome, ReceiptRow,
+            };
+            // An on-chain exit is broadcast, not settled: Activity carries
+            // the confirmation.
+            let outcome = if self.sent_celebration_context == "bitcoin-send" {
+                Outcome::Confirming
+            } else {
+                Outcome::Sent
+            };
+            let recipient = self.sent_recipient;
+            // A Lightning address reads in full; an invoice or address is cut
+            // to its ends, with Copy for the whole value.
+            let to = if recipient.contains('@') {
+                ReceiptRow::new(localized_copy("To"), recipient)
+            } else {
+                ReceiptRow::new(localized_copy("To"), short_id(recipient))
+                    .mono()
+                    .on_copy(Message::Clipboard(recipient.to_string()))
+            };
+            let mut rows = Vec::new();
+            if !recipient.is_empty() {
+                rows.push(to);
+            }
+            rows.push(ReceiptRow::new(localized_copy("Paid from"), "Spark"));
+            if !self.sent_fee_display.is_empty() {
+                rows.push(ReceiptRow::new(
+                    localized_copy("Fee"),
+                    self.sent_fee_display,
+                ));
+                rows.push(ReceiptRow::new(
+                    localized_copy("Total"),
+                    self.sent_total_display,
+                ));
+            }
+            if !ok.payment_id.is_empty() {
+                rows.push(
+                    ReceiptRow::new(localized_copy("Payment ID"), short_id(&ok.payment_id))
+                        .mono()
+                        .on_copy(Message::Clipboard(ok.payment_id.clone())),
+                );
+            }
+            return payment_result(
+                outcome,
                 self.sent_amount_display,
+                self.sent_celebration_context,
                 self.sent_quote,
                 self.sent_image_handle,
-                CopyText::HasBeenSentSuccessfully.get(),
-                coincube_ui::worldview_copy::VoiceLine::PaymentSent.get(),
                 Message::SparkSend(crate::app::view::SparkSendMessage::Reset),
-            );
+            )
+            .rows(rows)
+            .voice(coincube_ui::worldview_copy::VoiceLine::PaymentSent.get())
+            .on_activity(Message::SparkSend(
+                crate::app::view::SparkSendMessage::ViewActivity,
+            ))
+            .into();
         }
 
         // ── Payment details card ──────────────────────────────────────
@@ -2406,6 +2459,9 @@ mod tests {
                 theme_mode: self.mode,
                 sent_amount_display: "",
                 sent_celebration_context: "",
+                sent_recipient: "",
+                sent_fee_display: "",
+                sent_total_display: "",
                 sent_quote: &self.quote,
                 sent_image_handle: &self.image,
                 recent_transactions: &[],

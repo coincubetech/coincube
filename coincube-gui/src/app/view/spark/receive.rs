@@ -101,25 +101,34 @@ impl<'a> SparkReceiveView<'a> {
                 .into();
         }
 
-        // ── Full-screen celebration for received payments ─────────────
+        // ── Payment result: the receipt first, the worldview art beside it ──
         if let SparkReceivePhase::Received { count, .. } = self.phase {
-            let verb_phrase = if *count > 1 {
-                CopyText::HaveArrived.get()
+            use coincube_ui::component::payment_result::{payment_result, Outcome};
+            let detail = if *count > 1 {
+                coincube_ui::localized_format!(
+                    "Into Spark · {} payments",
+                    "En Spark · {} pagos",
+                    count
+                )
             } else {
-                CopyText::HasArrived.get()
+                localized_copy("Into Spark").to_string()
             };
-            return coincube_ui::component::received_celebration_page(
-                self.received_celebration_context,
+            return payment_result(
+                Outcome::Received,
                 if self.mask_amounts {
                     "••••••"
                 } else {
                     self.received_amount_display
                 },
+                self.received_celebration_context,
                 self.received_quote,
                 self.received_image_handle,
-                verb_phrase,
                 Message::SparkReceive(SparkReceiveMessage::Reset),
-            );
+            )
+            .detail(detail)
+            .voice(coincube_ui::worldview_copy::VoiceLine::PaymentReceived.get())
+            .on_activity(Message::SparkReceive(SparkReceiveMessage::ViewActivity))
+            .into();
         }
 
         // What the payer sends — asset and network, Bitcoin rail or stablecoin
@@ -2243,7 +2252,8 @@ mod tests {
                 theme::Theme::dark(),
             );
             if privacy == Some(BalancePrivacy::Shown) {
-                assert!(mounted.contains("+87,654,321 sats"));
+                assert!(mounted.contains("+87,654,321"));
+                assert!(mounted.contains("sats"));
             } else {
                 assert!(mounted.contains("••••••"));
                 assert!(!mounted.contains("87,654,321"));

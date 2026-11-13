@@ -1,5 +1,7 @@
+mod activity_routing;
 mod connect_auth;
 mod connect_stream;
+mod cube_name;
 
 pub mod breez_liquid;
 pub mod breez_spark;
@@ -29,7 +31,6 @@ pub mod view;
 pub mod wallet;
 pub mod wallets;
 
-use coincube_ui::locale::Text as CopyText;
 use std::collections::{HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -1004,6 +1005,8 @@ pub struct App {
     spark_nickname_queued: Option<Option<String>>,
     received_celebration_amount: String,
     received_celebration_context: String,
+    /// The receipt's "Into …" line for the payment shown, untranslated.
+    received_celebration_wallet: &'static str,
     received_celebration_quote: coincube_ui::component::quote_display::Quote,
     received_celebration_image: iced::widget::image::Handle,
     /// tx_ids of recent incoming payments we've already toasted for in
@@ -3899,6 +3902,7 @@ impl App {
             spark_nickname_queued: None,
             received_celebration_amount: String::new(),
             received_celebration_context: "transaction-received".to_string(),
+            received_celebration_wallet: "",
             received_celebration_quote: coincube_ui::component::quote_display::random_quote(
                 "transaction-received",
             ),
@@ -4180,6 +4184,7 @@ impl App {
                 spark_nickname_queued: None,
                 received_celebration_amount: String::new(),
                 received_celebration_context: "transaction-received".to_string(),
+                received_celebration_wallet: "",
                 received_celebration_quote: coincube_ui::component::quote_display::random_quote(
                     "transaction-received",
                 ),
@@ -5322,6 +5327,16 @@ impl App {
         }
         if let Some(panel) = self.panels.current_mut() {
             panel.interrupt();
+        }
+        if matches!(
+            menu,
+            Menu::Spark(menu::SparkSubMenu::Overview) | Menu::Vault(menu::VaultSubMenu::Overview)
+        ) {
+            // The page's Transfer needs to know whether another Cube can
+            // receive: one catalog read per visit, not per frame.
+            self.panels
+                .global_home
+                .refresh_other_cube_receivers(&self.cache);
         }
 
         match &menu {
@@ -8692,58 +8707,18 @@ impl App {
             | Message::ActivityLiquidLoaded(..)
             | Message::ActivityRefundablesLoaded(..)
             | Message::ActivityLabelSaved(..)) => {
-                let task = self
-                    .panels
-                    .activity
-                    .update(self.daemon.clone(), &self.cache, msg);
-                self.settle_wallet_selection();
-                return task;
+                return self.route_activity_result(msg);
             }
             Message::View(view::Message::Activity(view::activity::ActivityMessage::ViewAll(
                 wallet,
             ))) => {
-                let filter = self.panels.activity.update(
-                    self.daemon.clone(),
-                    &self.cache,
-                    Message::View(view::Message::Activity(
-                        view::activity::ActivityMessage::ViewAll(wallet),
-                    )),
-                );
-                return Task::batch([
-                    filter,
-                    self.set_current_panel(Menu::Cube(menu::CubeSubMenu::Activity)),
-                ]);
+                return self.route_activity_view_all(wallet);
             }
             Message::View(view::Message::Activity(view::activity::ActivityMessage::Open(id))) => {
-                // An Overview row: Activity opens unfiltered on it. Selected
-                // after the switch, so leaving a page can't clear it. The row
-                // as the Overview listed it is read first: the switch's reload
-                // clears Activity's rows, and its pane shows that copy until
-                // (or unless) the read brings a fresh one.
-                let opened = self
-                    .panels
-                    .activity
-                    .recent_entries(view::activity::RecentScope::Cube)
-                    .into_iter()
-                    .find(|entry| entry.id == id);
-                let load = self.set_current_panel(Menu::Cube(menu::CubeSubMenu::Activity));
-                let select = self.panels.activity.update(
-                    self.daemon.clone(),
-                    &self.cache,
-                    Message::View(view::Message::Activity(
-                        view::activity::ActivityMessage::Open(id.clone()),
-                    )),
-                );
-                if self.panels.activity.selected_id.as_deref() == Some(id.as_str()) {
-                    self.panels.activity.opened = opened;
-                }
-                return Task::batch([load, select]);
+                return self.route_activity_open(id);
             }
             msg @ Message::View(view::Message::Activity(_)) => {
-                return self
-                    .panels
-                    .activity
-                    .update(self.daemon.clone(), &self.cache, msg);
+                return self.route_activity_view(msg);
             }
             msg @ Message::View(view::Message::SparkOverview(
                 view::SparkOverviewMessage::DataLoaded { .. },
@@ -8752,16 +8727,7 @@ impl App {
                 Menu::Spark(menu::SparkSubMenu::Overview)
             ) =>
             {
-                // Every Spark page reload (a payment event, a `Synced` tick,
-                // opening the page) re-reads payments for its balance; its
-                // "Recent activity" follows from Activity's copy.
-                let refresh = self.panels.activity.refresh_wallet(
-                    view::activity::WalletFilter::Spark,
-                    None,
-                    None,
-                );
-                let forwarded = self.panels.spark_overview.update(None, &self.cache, msg);
-                return Task::batch([forwarded, refresh]);
+                return self.route_activity_spark_overview(msg);
             }
             msg @ Message::Payments(Ok(_))
                 if matches!(
@@ -8769,88 +8735,10 @@ impl App {
                     Menu::Vault(menu::VaultSubMenu::Overview)
                 ) =>
             {
-                // The Vault page re-read its payments; its "Recent activity"
-                // follows from Activity's copy of the history.
-                let refresh = self.panels.activity.refresh_wallet(
-                    view::activity::WalletFilter::Vault,
-                    self.daemon.clone(),
-                    self.wallet.clone(),
-                );
-                let daemon = self.daemon.clone();
-                let forwarded = match self.panels.current_mut() {
-                    Some(panel) => panel.update(daemon, &self.cache, msg),
-                    None => Task::none(),
-                };
-                return Task::batch([forwarded, refresh]);
+                return self.route_activity_vault_overview(msg);
             }
             Message::ActivityOpenDetail(target) => {
-                // The hand-off leaves the wallet page: its selection ends.
-                if wallet_page(&self.panels.current).is_some() {
-                    self.panels.activity.clear_selection();
-                }
-                // Hand off the source record to its owning wallet panel. Those
-                // panels retain signing, refund and replacement safeguards.
-                match target {
-                    state::activity::ActivityTarget::Vault(tx) => {
-                        if self.panels.transactions.is_some() {
-                            let load = self.set_current_panel(Menu::Vault(
-                                menu::VaultSubMenu::Transactions(None),
-                            ));
-                            let panel = self.panels.transactions.as_mut().expect("checked above");
-                            panel.preselect(tx);
-                            return load;
-                        }
-                    }
-                    state::activity::ActivityTarget::Psbt(tx) => {
-                        if self.panels.psbts.is_some() {
-                            let load = self
-                                .set_current_panel(Menu::Vault(menu::VaultSubMenu::PSBTs(None)));
-                            let panel = self.panels.psbts.as_mut().expect("checked above");
-                            panel.preselect(tx);
-                            return load;
-                        }
-                    }
-                    state::activity::ActivityTarget::Spark(payment) => {
-                        let row =
-                            state::spark::overview::payment_summary_to_recent_tx(&payment, None);
-                        self.panels.current = Menu::Spark(menu::SparkSubMenu::Transactions(None));
-                        let load = self
-                            .panels
-                            .spark_transactions
-                            .reload(self.daemon.clone(), self.wallet.clone());
-                        let select = self.panels.spark_transactions.update(
-                            self.daemon.clone(),
-                            &self.cache,
-                            Message::View(view::Message::SparkTransactions(
-                                view::SparkTransactionsMessage::Preselect(row),
-                            )),
-                        );
-                        return Task::batch([load, select]);
-                    }
-                    state::activity::ActivityTarget::Liquid(payment) => {
-                        if let Some(panel) = self.panels.liquid_transactions.as_mut() {
-                            self.panels.current =
-                                Menu::Liquid(menu::LiquidSubMenu::Transactions(None));
-                            let load = panel.reload(self.daemon.clone(), self.wallet.clone());
-                            let select = panel.update(
-                                self.daemon.clone(),
-                                &self.cache,
-                                Message::View(view::Message::PreselectPayment(payment)),
-                            );
-                            return Task::batch([load, select]);
-                        }
-                    }
-                    state::activity::ActivityTarget::Refundable(refundable) => {
-                        if let Some(panel) = self.panels.liquid_transactions.as_mut() {
-                            let load = panel.reload(self.daemon.clone(), self.wallet.clone());
-                            panel.preselect_refundable(refundable);
-                            self.panels.current =
-                                Menu::Liquid(menu::LiquidSubMenu::Transactions(None));
-                            return load;
-                        }
-                    }
-                }
-                return Task::none();
+                return self.route_activity_detail(target);
             }
             msg @ Message::View(view::Message::ConnectAccount(_))
             | msg @ Message::View(view::Message::ConnectCube(_)) => {
@@ -9246,6 +9134,13 @@ impl App {
                 }
                 return Task::batch([task, auth_bootstrap, refresh_recovery_kit, persist_grant]);
             }
+            Message::View(view::Message::ReceivedCelebrationActivity) => {
+                return Task::done(Message::View(view::Message::DismissReceivedCelebration)).chain(
+                    Task::done(Message::View(view::Message::Menu(Menu::Cube(
+                        crate::app::menu::CubeSubMenu::Activity,
+                    )))),
+                );
+            }
             Message::View(view::Message::DismissReceivedCelebration) => {
                 self.show_received_celebration = false;
                 // Panels that render their own celebration overlay
@@ -9571,6 +9466,29 @@ impl App {
                     },
                 ));
             }
+            Message::View(view::Message::Home(view::HomeMessage::TransferFromWallet(wallet))) => {
+                // A wallet page's Transfer: the flow lives on the Overview
+                // route, so switch there (the side menu keeps the wallet
+                // selected), then open it from this wallet. A press that
+                // raced the button's state changing does nothing.
+                if self
+                    .panels
+                    .global_home
+                    .wallet_transfer_entry(&self.cache, wallet)
+                    != view::global_home::WalletTransferEntry::Ready
+                {
+                    return Task::none();
+                }
+                let switch = self.update(Message::View(view::Message::Menu(Menu::Cube(
+                    menu::CubeSubMenu::Overview,
+                ))));
+                let start = self.panels.global_home.start_transfer_from(
+                    self.daemon.clone(),
+                    &self.cache,
+                    wallet,
+                );
+                return Task::batch([switch, start]);
+            }
             msg @ Message::View(view::Message::Home(_)) => {
                 return self
                     .panels
@@ -9602,13 +9520,18 @@ impl App {
                 // claim — only `DepositsChanged` — so the celebration is fired
                 // explicitly from the auto-claim watcher in `GlobalHome`).
                 use coincube_ui::component::amount::DisplayAmount;
-                self.received_celebration_amount = bitcoin::Amount::from_sat(amount_sat)
-                    .to_formatted_string_with_unit(self.cache.bitcoin_unit);
+                self.received_celebration_amount = format!(
+                    "{} {}",
+                    bitcoin::Amount::from_sat(amount_sat)
+                        .to_formatted_string_with_unit(self.cache.bitcoin_unit),
+                    self.cache.bitcoin_unit.label()
+                );
                 self.received_celebration_quote =
                     coincube_ui::component::quote_display::random_quote(&context);
                 self.received_celebration_image =
                     coincube_ui::component::quote_display::image_handle_for_context(&context);
                 self.received_celebration_context = context.clone();
+                self.received_celebration_wallet = "Into Spark";
                 self.show_received_celebration = true;
                 // A Spark swap's bitcoin just landed. Forward the arrival to the
                 // cross-network Receive flow so it advances from "Bitcoin
@@ -9912,10 +9835,15 @@ impl App {
                                     crate::app::breez_liquid::assets::format_usdt_display(minor)
                                 )
                             } else {
-                                bitcoin::Amount::from_sat(details.amount_sat)
-                                    .to_formatted_string_with_unit(self.cache.bitcoin_unit)
+                                format!(
+                                    "{} {}",
+                                    bitcoin::Amount::from_sat(details.amount_sat)
+                                        .to_formatted_string_with_unit(self.cache.bitcoin_unit),
+                                    self.cache.bitcoin_unit.label()
+                                )
                             };
                             self.received_celebration_context = context.to_string();
+                            self.received_celebration_wallet = "Into Liquid";
                             self.received_celebration_quote =
                                 coincube_ui::component::quote_display::random_quote(context);
                             self.received_celebration_image =
@@ -10220,116 +10148,13 @@ impl App {
             Message::View(view::Message::Settings(view::SettingsMessage::CubeNameSubmitted(
                 name,
             ))) => {
-                let name = name.trim().to_owned();
-                if name.is_empty() || name == self.cube_settings.name {
-                    let daemon = self.daemon.clone();
-                    return self.panels.global_settings.update(
-                        daemon,
-                        &self.cache,
-                        Message::View(view::Message::Settings(
-                            view::SettingsMessage::CubeNameSubmitted(name),
-                        )),
-                    );
-                }
-                let network_dir = self.datadir.network_directory(self.cube_settings.network);
-                let cube_id = self.cube_settings.id.clone();
-                return Task::perform(
-                    async move {
-                        let saved = name.clone();
-                        settings::update_settings_file(&network_dir, move |mut s| {
-                            if let Some(c) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
-                                c.name = saved;
-                                c.remote_synced = false;
-                            }
-                            Some(s)
-                        })
-                        .await
-                        .map(|_| name)
-                        .map_err(|e| e.to_string())
-                    },
-                    Message::CubeNameSaved,
-                );
+                return self.route_cube_name_submitted(name);
             }
             Message::CubeNameSaved(result) => {
-                let name = match result {
-                    Ok(name) => name,
-                    Err(e) => {
-                        return Task::done(Message::View(view::Message::ShowError(
-                            coincube_ui::localized_format!(
-                                "Couldn't save the Cube name: {}",
-                                "No se pudo guardar el nombre del Cube: {}",
-                                e
-                            ),
-                        )));
-                    }
-                };
-                self.cube_settings.name = name.clone();
-                self.cache.cube_name = name.clone();
-                // A later registration retry submits the panel's name.
-                self.panels.connect.cube.cube_name = name.clone();
-                let daemon = self.daemon.clone();
-                let settle = self.panels.global_settings.update(
-                    daemon,
-                    &self.cache,
-                    Message::View(view::Message::Settings(
-                        view::SettingsMessage::CubeNameSubmitted(name.clone()),
-                    )),
-                );
-                let (Some(client), Some(server_id)) = (
-                    self.authenticated_coincube_client(),
-                    self.panels.connect.cube.server_cube_id,
-                ) else {
-                    return settle;
-                };
-                let cube_id = self.cube_settings.id.clone();
-                let network_dir = self.datadir.network_directory(self.cube_settings.network);
-                let synced_name = name.clone();
-                let request = crate::services::coincube::UpdateCubeRequest {
-                    name: Some(name),
-                    status: None,
-                    // Name-only rename: leave server Vault presence and the
-                    // Spark Stable Balance record untouched.
-                    has_vault: None,
-                    spark_stable_balance: None,
-                };
-                let remote = Task::perform(
-                    {
-                        let cube_id = cube_id.clone();
-                        async move {
-                            client
-                                .update_cube(&server_id.to_string(), request)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            settings::update_settings_file(&network_dir, move |mut s| {
-                                // A newer rename may have been written while
-                                // this one was in flight; leave it unsynced.
-                                if let Some(c) = s
-                                    .cubes
-                                    .iter_mut()
-                                    .find(|c| c.id == cube_id && c.name == synced_name)
-                                {
-                                    c.remote_synced = true;
-                                }
-                                Some(s)
-                            })
-                            .await
-                            .map(|_| ())
-                            .map_err(|e| e.to_string())
-                        }
-                    },
-                    move |result| Message::CubeNameSynced {
-                        cube_id: cube_id.clone(),
-                        result,
-                    },
-                );
-                return Task::batch([settle, remote]);
+                return self.route_cube_name_saved(result);
             }
             Message::CubeNameSynced { cube_id, result } => {
-                // Left unsynced on failure; the Launcher's catch-up retries it.
-                if let Err(e) = result {
-                    warn!("Cube {} rename not yet synced to Connect: {}", cube_id, e);
-                }
-                return Task::none();
+                return self.route_cube_name_synced(cube_id, result);
             }
             // Vault Recovery Alerts dispatch (Estate Notifications — PR 2).
             // Like the Recovery Kit above, the handler needs the
@@ -10910,14 +10735,21 @@ impl App {
         } else {
             &self.received_celebration_amount
         };
-        coincube_ui::component::received_celebration_page(
-            &self.received_celebration_context,
+        use coincube_ui::component::payment_result::{payment_result, Outcome};
+        let mut page = payment_result(
+            Outcome::Received,
             displayed_amount,
+            &self.received_celebration_context,
             &self.received_celebration_quote,
             &self.received_celebration_image,
-            CopyText::HasArrived.get(),
             view::Message::DismissReceivedCelebration,
         )
+        .voice(coincube_ui::worldview_copy::VoiceLine::PaymentReceived.get())
+        .on_activity(view::Message::ReceivedCelebrationActivity);
+        if !self.received_celebration_wallet.is_empty() {
+            page = page.detail(coincube_ui::locale::copy(self.received_celebration_wallet));
+        }
+        page.into()
     }
 
     /// Starts the expiry clock of each toast that has just come on screen and
@@ -11026,10 +10858,15 @@ impl App {
                 &self.panels.connect.cube,
             );
             let (activity, cache) = (&self.panels.activity, &self.cache);
+            let transfer = self
+                .panels
+                .global_home
+                .wallet_transfer_entry(cache, view::global_home::WalletKind::Spark);
             self.panels.spark_overview.view_with_lightning_share(
                 &self.panels.current,
                 &self.cache,
                 lightning_address,
+                transfer,
                 move || {
                     view::activity::recent_activity(
                         activity,
@@ -11057,9 +10894,14 @@ impl App {
             // The Vault page's "Recent activity" and its detail pane are
             // Activity's rows and pane, filtered to the Vault.
             let (activity, cache) = (&self.panels.activity, &self.cache);
+            let transfer = self
+                .panels
+                .global_home
+                .wallet_transfer_entry(cache, view::global_home::WalletKind::Vault);
             panel.view_with_recent_activity(
                 &self.panels.current,
                 cache,
+                transfer,
                 move |unknown_history| {
                     view::activity::recent_activity(
                         activity,
@@ -16855,7 +16697,9 @@ mod received_celebration_privacy_tests {
             "dark",
             coincube_ui::theme::Theme::dark(),
         );
-        assert!(shown.contains("12,345 SATS"));
+        // The receipt sets the unit beside the figure as its own text.
+        assert!(shown.contains("+12,345"));
+        assert!(shown.contains("SATS"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
@@ -18519,6 +18363,69 @@ mod wallet_recent_activity_tests {
         )
     }
 
+    #[test]
+    fn late_activity_results_do_not_navigate_or_replace_current_rows() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("activity-late-routing-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let route = Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::About));
+        app.panels.current = route.clone();
+        let generation = app.panels.activity.generation_for_tests();
+        drop(app.update(Message::ActivitySparkLoaded(
+            generation,
+            Ok((vec![receipt("current")], false)),
+        )));
+        let current_ids = app
+            .panels
+            .activity
+            .wallet_entries(view::activity::WalletFilter::Spark)
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(current_ids.len(), 1);
+        let stale = generation.wrapping_add(1);
+        for message in [
+            Message::ActivitySparkLoaded(stale, Ok((vec![receipt("stale")], false))),
+            Message::ActivitySparkRefreshed(stale, Ok((Vec::new(), false))),
+            Message::ActivityVaultLoaded(stale, Err("late vault failure".into())),
+            Message::ActivityPsbtLoaded(stale, Err("late PSBT failure".into())),
+            Message::ActivityLiquidLoaded(stale, Err("late Liquid failure".into())),
+            Message::ActivityRefundablesLoaded(stale, Err("late refund failure".into())),
+            Message::ActivityLabelSaved(u64::MAX, Err("late label failure".into())),
+        ] {
+            drop(app.update(message));
+            assert_eq!(app.panels.current, route);
+            assert_eq!(
+                app.panels
+                    .activity
+                    .wallet_entries(view::activity::WalletFilter::Spark)
+                    .iter()
+                    .map(|entry| entry.id.clone())
+                    .collect::<Vec<_>>(),
+                current_ids
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn activity_detail_without_a_vault_panel_keeps_the_current_route() {
+        let _guard = crate::app::session::test_guard();
+        let root =
+            std::env::temp_dir().join(format!("activity-missing-panel-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::shell_tests::bitcoin_app(&root);
+        let route = Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::About));
+        app.panels.current = route.clone();
+        app.panels.transactions = None;
+        let task = app.update(Message::ActivityOpenDetail(
+            state::activity::ActivityTarget::Vault(vault_payment()),
+        ));
+        assert_eq!(task.units(), 0);
+        assert_eq!(app.panels.current, route);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The Vault page's own payment refresh re-reads Activity's Vault rows
     /// there and nowhere else; a request made while a read is in flight is
     /// served once that read lands; a wallet page's Retry keeps other rows.
@@ -19471,5 +19378,144 @@ mod toast_layer_tree_tests {
                 assert!(messages.is_empty());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cube_name_routing_tests {
+    use super::*;
+    use iced::futures::StreamExt;
+
+    fn with_session(test: impl std::future::Future<Output = ()>) {
+        let _guard = crate::app::session::test_guard();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(test);
+    }
+
+    #[test]
+    fn submitted_name_is_saved_unsynced_before_completion_changes_memory() {
+        with_session(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+            let network_dir = app.datadir.network_directory(app.cube_settings.network);
+            let mut saved = app.cube_settings.clone();
+            saved.remote_synced = true;
+            let sibling =
+                settings::CubeSettings::new("Sibling".into(), crate::chain::ChainId::Bitcoin);
+            let sibling_id = sibling.id.clone();
+            settings::update_settings_file(&network_dir, move |mut settings| {
+                settings.cubes = vec![saved, sibling];
+                Some(settings)
+            })
+            .await
+            .unwrap();
+            let old_name = app.cube_settings.name.clone();
+            let task = app.update(Message::View(view::Message::Settings(
+                view::SettingsMessage::CubeNameSubmitted("  New name  ".into()),
+            )));
+            assert_eq!(app.cube_settings.name, old_name);
+            let output = iced_runtime::task::into_stream(task)
+                .unwrap()
+                .next()
+                .await
+                .unwrap();
+            assert!(
+                matches!(output, iced_runtime::Action::Output(Message::CubeNameSaved(Ok(name))) if name == "New name")
+            );
+            assert_eq!(app.cube_settings.name, old_name);
+            let persisted = settings::Settings::from_file(&network_dir).unwrap();
+            let own = persisted
+                .cubes
+                .iter()
+                .find(|cube| cube.id == app.cube_settings.id)
+                .unwrap();
+            assert_eq!(own.name, "New name");
+            assert!(!own.remote_synced);
+            assert_eq!(
+                persisted
+                    .cubes
+                    .iter()
+                    .find(|cube| cube.id == sibling_id)
+                    .unwrap()
+                    .name,
+                "Sibling"
+            );
+        });
+    }
+
+    #[test]
+    fn saved_cube_name_settles_all_local_owners_without_navigating() {
+        with_session(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+            let route = Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::About));
+            app.panels.current = route.clone();
+            app.panels.connect.cube.server_cube_id = None;
+
+            drop(app.update(Message::CubeNameSaved(Ok("New name".into()))));
+
+            assert_eq!(app.cube_settings.name, "New name");
+            assert_eq!(app.cache.cube_name, "New name");
+            assert_eq!(app.panels.connect.cube.cube_name, "New name");
+            assert_eq!(app.panels.current, route);
+        });
+    }
+
+    #[test]
+    fn failed_cube_name_save_reports_error_without_mutating_names_or_route() {
+        with_session(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+            let before = (
+                app.cube_settings.name.clone(),
+                app.cache.cube_name.clone(),
+                app.panels.connect.cube.cube_name.clone(),
+                app.panels.current.clone(),
+            );
+            let task = app.update(Message::CubeNameSaved(Err("synthetic disk failure".into())));
+            let output = iced_runtime::task::into_stream(task)
+                .unwrap()
+                .next()
+                .await
+                .unwrap();
+            assert!(matches!(output, iced_runtime::Action::Output(Message::View(
+            view::Message::ShowError(error)
+        )) if error.contains("synthetic disk failure")));
+            assert_eq!(
+                (
+                    app.cube_settings.name.clone(),
+                    app.cache.cube_name.clone(),
+                    app.panels.connect.cube.cube_name.clone(),
+                    app.panels.current.clone()
+                ),
+                before
+            );
+        });
+    }
+
+    #[test]
+    fn remote_name_completion_never_replaces_local_name_or_route() {
+        with_session(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+            app.cube_settings.name = "Newer local name".into();
+            app.cache.cube_name = "Newer local name".into();
+            app.panels.connect.cube.cube_name = "Newer local name".into();
+            let route = app.panels.current.clone();
+            for result in [Ok(()), Err("synthetic remote failure".into())] {
+                let task = app.update(Message::CubeNameSynced {
+                    cube_id: "older-cube".into(),
+                    result,
+                });
+                assert!(iced_runtime::task::into_stream(task).is_none());
+                assert_eq!(app.cube_settings.name, "Newer local name");
+                assert_eq!(app.cache.cube_name, "Newer local name");
+                assert_eq!(app.panels.connect.cube.cube_name, "Newer local name");
+                assert_eq!(app.panels.current, route);
+            }
+        });
     }
 }

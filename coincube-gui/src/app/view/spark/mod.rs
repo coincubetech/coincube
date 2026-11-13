@@ -461,6 +461,8 @@ pub enum SparkSendMessage {
     /// prepared/sent state. Fired from the "Send another" / "Try
     /// again" / "Cancel" buttons.
     Reset,
+    /// The sent receipt's View in Activity: [`Self::Reset`], then Activity.
+    ViewActivity,
     /// The Spark wallet balance for the YOU SEND card — BTC sats plus the Stable
     /// Balance snapshot, folded into a unified total by the handler. `None` when
     /// the `get_info` fetch failed; the card keeps its last value.
@@ -633,6 +635,8 @@ pub enum SparkReceiveMessage {
     /// not on every new confirmation).
     RefreshConfirmations,
     Reset,
+    /// The received receipt's View in Activity: [`Self::Reset`], then Activity.
+    ViewActivity,
     /// The Spark wallet balance for the YOU RECEIVE card — BTC sats plus the
     /// Stable Balance snapshot, folded into a unified total by the handler.
     /// `None` when `get_info` failed; the card keeps its last value.

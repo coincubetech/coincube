@@ -320,6 +320,8 @@ pub enum Message {
     DuressActivateLocal(crate::services::unlock::throttle::VerifiedSeedExportDuress),
     ToggleTheme,
     DismissReceivedCelebration,
+    /// The received receipt's View in Activity: dismiss it, then open Activity.
+    ReceivedCelebrationActivity,
     /// Answer to the one-time recovery-alerts consent prompt overlay
     /// (PLAN-recovery-alerts-cleanup PR 3). `true` = accept (enable monitoring),
     /// `false` = decline. Handled at the App level; the answer is persisted
@@ -2468,6 +2470,13 @@ pub enum HomeMessage {
     OpenTransferActivity,
     /// Done page: start another transfer.
     RestartTransfer,
+    /// A wallet page's Transfer button: open the transfer with this wallet as
+    /// the source. The App switches to the Overview route, where the flow
+    /// lives, and remembers the wallet page so leaving returns there.
+    TransferFromWallet(WalletKind),
+    /// The user leaves the transfer (the head's Back, a step's Cancel, Done's
+    /// Back): reset it, and return to the wallet page it was opened from.
+    LeaveTransfer,
     AmountEdited(String),
     NextStep,
     PreviousStep,
