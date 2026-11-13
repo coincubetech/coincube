@@ -571,6 +571,30 @@ pub struct CrossChainRoute {
     /// Whether this route can be funded from the BTC balance. v1 only offers
     /// routes where this holds; token-funded routes are a follow-up.
     pub btc_source_supported: bool,
+    /// The amount bounds the provider publishes for funding this route from
+    /// bitcoin. `None` when it publishes none. A route can enforce a tighter
+    /// bound than it publishes, so these are a floor for the gui's own check,
+    /// not a promise that an amount inside them will quote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub btc_limits: Option<CrossChainRouteLimits>,
+}
+
+/// Mirrors `breez_sdk_spark::CrossChainRouteLimits` for the bitcoin-funded
+/// side of a route. Either group may be absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrossChainRouteLimits {
+    /// Smallest amount accepted, in sats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_sats: Option<u64>,
+    /// Largest amount accepted, in sats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sats: Option<u64>,
+    /// Smallest order value accepted, in USD cents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_usd_cents: Option<u64>,
+    /// Largest order value accepted, in USD cents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_usd_cents: Option<u64>,
 }
 
 /// Result of [`Method::GetCrossChainRoutes`].
@@ -1807,6 +1831,7 @@ mod tests {
                         contract_address: None,
                         decimals: 6,
                         btc_source_supported: true,
+                        btc_limits: None,
                     },
                     estimated_out: big,
                     fee_amount: 102_531,
