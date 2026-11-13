@@ -1878,35 +1878,44 @@ fn billing_management_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conn
         .into()
 }
 
-/// The "Current plan" row (`.li` with `.k`, plan and date, billing status).
+/// The "Current plan" row (`.li`): the "Current plan" label, the plan and
+/// date centered in the row (COIN-668, COIN-669), and the billing status.
 fn current_plan_summary<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
-    let value: Element<'a, ConnectAccountMessage> = if let Some(plan) = state.plan.as_ref() {
-        let (icon, status, tone) = match plan.status {
-            PlanStatus::Active => (check_circle_icon(), "Active", Tone::Good),
-            PlanStatus::PastDue => (exclamation_circle_icon(), "Past due", Tone::Warn),
-            PlanStatus::Canceled => (dash_circle_icon(), "Cancelled", Tone::Muted),
-        };
-        let mut main = Column::new().push(tenshu_text::label(plan.tier().to_string()));
-        if let Some(date) = plan.renewal_at.as_deref() {
-            let label = match plan.status {
-                PlanStatus::Active => localized_copy("Paid through"),
-                PlanStatus::PastDue => localized_copy("Payment due"),
-                PlanStatus::Canceled => localized_copy("Access until"),
+    let (main, status): (Element<'a, ConnectAccountMessage>, Option<_>) =
+        if let Some(plan) = state.plan.as_ref() {
+            let (icon, status, tone) = match plan.status {
+                PlanStatus::Active => (check_circle_icon(), "Active", Tone::Good),
+                PlanStatus::PastDue => (exclamation_circle_icon(), "Past due", Tone::Warn),
+                PlanStatus::Canceled => (dash_circle_icon(), "Cancelled", Tone::Muted),
             };
-            main = main.push(lead(format!("{label} {}", format_date(date))));
-        }
-        Row::new()
-            .push(main.width(Length::Fill))
-            .push(status_line(icon, status, tone))
-            .spacing(16)
-            .align_y(Alignment::Center)
-            .into()
-    } else {
-        lead(localized_copy("Checking your current plan…")).into()
-    };
+            let mut main = Column::new()
+                .push(tenshu_text::label(plan.tier().to_string()))
+                .align_x(Alignment::Center);
+            if let Some(date) = plan.renewal_at.as_deref() {
+                let label = match plan.status {
+                    PlanStatus::Active => localized_copy("Paid through"),
+                    PlanStatus::PastDue => localized_copy("Payment due"),
+                    PlanStatus::Canceled => localized_copy("Access until"),
+                };
+                main = main.push(lead(format!("{label} {}", format_date(date))));
+            }
+            (main.into(), Some(status_line(icon, status, tone)))
+        } else {
+            (
+                lead(localized_copy("Checking your current plan…")).into(),
+                None,
+            )
+        };
+
+    // Equal `Fill` columns either side keep the plan on the row's true
+    // center, whatever the width of the label or the status.
     ruled_list([Row::new()
-        .push(lead(localized_copy("Current plan")).width(Length::Fixed(168.0)))
-        .push(value)
+        .push(lead(localized_copy("Current plan")).width(Length::Fill))
+        .push(main)
+        .push(
+            container(status.unwrap_or_else(|| iced::widget::Space::new().into()))
+                .align_right(Length::Fill),
+        )
         .spacing(16)
         .align_y(Alignment::Center)
         .into()])
@@ -2078,10 +2087,9 @@ fn campaign_redeem_field<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conn
             .push(text::p2_regular(msg).color(accent));
     }
 
-    container(col.padding(16).spacing(2))
-        .style(card_style)
-        .width(Length::Fill)
-        .into()
+    // No card or inner padding: the field runs flush with the sheet's left
+    // and right edges, like the ruled rows around it (COIN-669).
+    col.spacing(2).width(Length::Fill).into()
 }
 
 // ── Plan selection view ─────────────────────────────────────────────────────
