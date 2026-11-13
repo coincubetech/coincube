@@ -6876,6 +6876,53 @@ mod tests {
             assert!(home.other_locked_again, "Sent says it's locked again");
         }
 
+        /// Vault → another Cube (its Vault or its Spark), left mid-broadcast:
+        /// a failed broadcast can't be confirmed again without a fresh unlock,
+        /// and one already in flight still completes to Sent.
+        #[test]
+        fn a_vault_broadcast_after_leaving_fails_closed_or_completes() {
+            for direction in [
+                TransferDirection::VaultToOtherCube,
+                TransferDirection::VaultToOtherSpark,
+            ] {
+                let setup = || {
+                    let (mut home, _wallet) = home_on_transfer_screen();
+                    home.transfer_from = Some(WalletKind::Vault);
+                    home.transfer_to = None;
+                    home.transfer_direction = Some(direction);
+                    home.destination_ready = Some((home.transfer_request_generation, direction));
+                    home.transfer_signed = true;
+                    home.other_cube_selected = Some("destination".into());
+                    home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+                    home.other_address = Some(checked_other_address());
+                    home.is_sending = true;
+                    home.interrupt();
+                    home
+                };
+                let cache = transfer_cache();
+
+                // The broadcast fails: Confirm restarts the unlock, sends nothing.
+                let mut failed = setup();
+                send(
+                    &mut failed,
+                    &cache,
+                    HomeMessage::Error(TransferError::PreparationExpired),
+                );
+                assert!(!failed.is_sending);
+                send(&mut failed, &cache, HomeMessage::ConfirmTransfer);
+                assert_eq!(failed.current_view.step, 1, "{:?}", direction);
+                assert_eq!(failed.transfer_page, TransferPage::Wallets);
+                assert!(!failed.is_sending, "{:?}: nothing sent again", direction);
+
+                // The broadcast was already out: it completes to Sent.
+                let mut done = setup();
+                send(&mut done, &cache, HomeMessage::TransferSuccessful);
+                assert!(!done.is_sending);
+                assert_eq!(done.current_view.step, 3, "{:?}", direction);
+                assert!(done.other_scope.is_none() && done.other_address.is_none());
+            }
+        }
+
         /// A PSBT for another Cube's Vault or Spark that lands after the page
         /// was left opens no signer: the Cube is locked, so its unlock starts
         /// over on Details.
