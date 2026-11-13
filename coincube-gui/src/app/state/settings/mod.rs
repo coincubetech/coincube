@@ -1,4 +1,5 @@
 pub mod about;
+pub mod connections;
 pub mod general;
 mod install_stats;
 pub mod keychain_backfill;
@@ -13,6 +14,7 @@ use iced::Task;
 use coincube_ui::widget::Element;
 
 use about::AboutSettingsState;
+use connections::ConnectionsSettingsState;
 use general::{GeneralSettingsState, SettingsSection};
 use install_stats::InstallStatsState;
 
@@ -47,6 +49,23 @@ pub struct SettingsState {
 }
 
 impl SettingsState {
+    #[cfg(test)]
+    pub(crate) fn reviewer_show_seed_phrase_for_test(
+        &mut self,
+        datadir: &crate::dir::CoincubeDirectory,
+    ) {
+        let mut recovery = GeneralSettingsState::new(
+            self.cube_id.clone(),
+            SettingsSection::Recovery,
+            self.current_price_setting.clone(),
+            self.current_unit_setting.clone(),
+            datadir,
+        );
+        recovery.backup_state = general::BackupSeedState::RecoveryPhrase;
+        recovery.backup_mnemonic = Some(zeroize::Zeroizing::new(vec!["synthetic".into(); 12]));
+        self.setting = Some(recovery.into());
+    }
+
     /// Load the active Cube's preferences from its authenticated chain directory.
     pub fn from_directory(cube_id: String, directory: &crate::dir::NetworkDirectory) -> Self {
         let (price, unit) = crate::app::settings::Settings::from_file(directory)
@@ -73,14 +92,43 @@ impl SettingsState {
     }
 }
 
-impl State for SettingsState {
-    fn update(
+impl SettingsState {
+    /// The Display & appearance (or another general) section, when open.
+    pub fn general(&self) -> Option<&GeneralSettingsState> {
+        self.setting
+            .as_ref()
+            .and_then(|s| s.as_any())
+            .and_then(|a| a.downcast_ref::<GeneralSettingsState>())
+    }
+
+    /// Leaving Display & appearance for another section saves a Cube name
+    /// that was typed but not yet submitted, as leaving the field does.
+    fn save_pending_name(&self, cache: &Cache) -> Task<Message> {
+        match self
+            .general()
+            .and_then(|g| g.pending_cube_name(&cache.cube_name))
+        {
+            Some(name) => Task::done(Message::View(view::Message::Settings(
+                view::SettingsMessage::CubeNameSubmitted(name),
+            ))),
+            None => Task::none(),
+        }
+    }
+
+    fn switch_section(
         &mut self,
         daemon: Option<Arc<dyn Daemon + Sync + Send>>,
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
         match &message {
+            Message::View(view::Message::Settings(view::SettingsMessage::GeneralSection))
+                if self
+                    .general()
+                    .is_some_and(|g| g.section() == SettingsSection::General) =>
+            {
+                Task::none()
+            }
             Message::View(view::Message::Settings(view::SettingsMessage::GeneralSection)) => {
                 self.setting = Some(
                     GeneralSettingsState::new(
@@ -96,6 +144,32 @@ impl State for SettingsState {
                     .as_mut()
                     .map(|s| s.reload(daemon, None))
                     .unwrap_or_else(Task::none)
+            }
+            Message::View(view::Message::Settings(view::SettingsMessage::PaymentChecksSection)) => {
+                self.setting = Some(
+                    GeneralSettingsState::new(
+                        self.cube_id.clone(),
+                        SettingsSection::PaymentChecks,
+                        self.current_price_setting.clone(),
+                        self.current_unit_setting.clone(),
+                        &cache.datadir_path,
+                    )
+                    .into(),
+                );
+                Task::none()
+            }
+            Message::View(view::Message::Settings(view::SettingsMessage::DataExportsSection)) => {
+                self.setting = Some(
+                    GeneralSettingsState::new(
+                        self.cube_id.clone(),
+                        SettingsSection::DataExports,
+                        self.current_price_setting.clone(),
+                        self.current_unit_setting.clone(),
+                        &cache.datadir_path,
+                    )
+                    .into(),
+                );
+                Task::none()
             }
             Message::View(view::Message::Settings(view::SettingsMessage::RecoverySection)) => {
                 // Same content state, Recovery face — it hosts the local backup
@@ -136,6 +210,16 @@ impl State for SettingsState {
                     .map(|s| s.reload(daemon, None))
                     .unwrap_or_else(Task::none)
             }
+            Message::View(view::Message::Settings(view::SettingsMessage::ConnectionsSection)) => {
+                // Re-opening the tab keeps the last Re-register result.
+                if !self.setting.as_ref().is_some_and(|s| {
+                    s.as_any()
+                        .is_some_and(|a| a.is::<ConnectionsSettingsState>())
+                }) {
+                    self.setting = Some(ConnectionsSettingsState::default().into());
+                }
+                Task::none()
+            }
             Message::View(view::Message::Settings(view::SettingsMessage::InstallStatsSection)) => {
                 self.setting = Some(InstallStatsState::default().into());
                 self.setting
@@ -172,6 +256,30 @@ impl State for SettingsState {
                 .map(|s| s.update(daemon, cache, message))
                 .unwrap_or_else(Task::none),
         }
+    }
+}
+
+impl State for SettingsState {
+    fn update(
+        &mut self,
+        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        cache: &Cache,
+        message: Message,
+    ) -> Task<Message> {
+        if let Message::View(view::Message::Settings(
+            view::SettingsMessage::PaymentChecksSection
+            | view::SettingsMessage::DataExportsSection
+            | view::SettingsMessage::RecoverySection
+            | view::SettingsMessage::AboutSection
+            | view::SettingsMessage::ConnectionsSection
+            | view::SettingsMessage::InstallStatsSection,
+        )) = &message
+        {
+            let save = self.save_pending_name(cache);
+            let switch = self.switch_section(daemon, cache, message);
+            return Task::batch([save, switch]);
+        }
+        self.switch_section(daemon, cache, message)
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {

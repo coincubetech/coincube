@@ -23,9 +23,9 @@
 //!   ([`blocked_entangled_inputs`]). An input whose entanglement is *Unknown*
 //!   is amber and acknowledgeable, never blocked — a lookup that has not
 //!   happened is not evidence either way.
-//! - *Split — cannot replay*: positive poison-split evidence for every input.
-//!   Minted only by fresh Claim checks, bound to the owned construction and
-//!   current session; it never substitutes for verified final signatures.
+//! - *Split — cannot replay*: the spend's inputs include a verified split key
+//!   (a coin whose ancestry exists only on this chain), so Bitcoin rejects the
+//!   whole transaction; set by [`ReplayReview::with_split_key`].
 //! - *Unknown / not yet checked*: no signatures, not enough of them, or the
 //!   verifier refused the PSBT.
 
@@ -39,6 +39,7 @@ use coincube_core::{
 };
 
 use crate::{chain::ChainId, services::entangled::Entanglement};
+use coincube_ui::{locale::copy as localized_copy, localized_format};
 
 /// The acknowledgement a user gives before broadcasting a replayable spend
 /// (`#276` I4). Verbatim from the lane brief.
@@ -74,8 +75,6 @@ pub enum UnknownReason {
     Refused(String),
 }
 
-pub use crate::services::claim_coordinator::fork::SplitEvidence;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayStatus {
     Unknown(UnknownReason),
@@ -105,16 +104,11 @@ impl ReplayStatus {
 
 /// Derive the replay status of a Bitcoin Blake2b spend from its signatures.
 ///
-/// `split` is fresh, transaction-bound poison evidence. A Split result still
-/// requires successful retained-witness finalization; stale or mismatched
-/// evidence refuses the Claim review instead of opening an acknowledgement path.
-///
 /// Callers must gate on the chain: this is meaningless — and never shown —
 /// for a Bitcoin-family Cube.
 pub fn replay_status(
     psbt: &Psbt,
     secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
-    split: Option<&SplitEvidence>,
 ) -> ReplayStatus {
     let unified = match UnifiedPsbt::from_psbt(psbt.clone()) {
         Ok(unified) => unified,
@@ -137,13 +131,6 @@ pub fn replay_status(
     }
     match finalize_p2wsh_all_unified(&unified, secp) {
         Ok(finalized) => {
-            if let Some(evidence) = split {
-                return if evidence.matches(&unified) {
-                    ReplayStatus::Split
-                } else {
-                    expired_split_status()
-                };
-            }
             let inputs: Vec<usize> = finalized
                 .inputs
                 .iter()
@@ -162,12 +149,6 @@ pub fn replay_status(
         }
         Err(e) => ReplayStatus::Unknown(UnknownReason::Refused(e.to_string())),
     }
-}
-
-fn expired_split_status() -> ReplayStatus {
-    ReplayStatus::Unknown(UnknownReason::Refused(
-        "Claim checks expired or changed. Check both chains again.".to_string(),
-    ))
 }
 
 /// Why a Bitcoin Blake2b PSBT must not be handed to any signer.
@@ -319,7 +300,12 @@ pub(crate) fn counting_projection(psbt: &Psbt) -> Psbt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayReview {
     status: ReplayStatus,
-    split: Option<std::sync::Arc<SplitEvidence>>,
+    /// The input that spends a split key: a coin whose verified ancestry
+    /// proves it exists only on this chain, so Bitcoin rejects the whole
+    /// transaction whatever its signatures. Set only while the spend screen
+    /// holds a fresh re-qualification of the key
+    /// ([`crate::app::state::vault::psbt::PsbtState::current_review`]).
+    split_key: Option<(usize, coincube_core::miniscript::bitcoin::OutPoint)>,
     /// SHA-256 of the serialised PSBT the status was derived from: the exact
     /// signatures the user is looking at.
     psbt_digest: [u8; 32],
@@ -335,34 +321,36 @@ pub struct ReplayReview {
 impl ReplayReview {
     pub fn new(psbt: &Psbt, secp: &secp256k1::Secp256k1<impl secp256k1::Verification>) -> Self {
         Self {
-            status: replay_status(psbt, secp, None),
-            split: None,
+            status: replay_status(psbt, secp),
+            split_key: None,
             psbt_digest: psbt_digest(psbt),
             acknowledged_for: None,
         }
     }
 
-    pub fn with_split(
-        psbt: &Psbt,
-        secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
-        evidence: std::sync::Arc<SplitEvidence>,
-    ) -> Self {
-        Self {
-            status: replay_status(psbt, secp, Some(&evidence)),
-            split: Some(evidence),
-            psbt_digest: psbt_digest(psbt),
-            acknowledged_for: None,
-        }
-    }
-
-    /// Signature verification may be cached; the Claim evidence's lifetime may
-    /// not. Views and dispatch gates must use this accessor on every read.
+    /// Views and dispatch gates must use this accessor on every read.
     pub fn status(&self) -> ReplayStatus {
-        if self.split.as_ref().is_some_and(|proof| !proof.is_live()) {
-            expired_split_status()
+        if self.split_key.is_some() && matches!(self.status, ReplayStatus::Replayable { .. }) {
+            // Finalisable with legacy signatures, but it spends a coin
+            // Bitcoin doesn't have: Bitcoin rejects it.
+            ReplayStatus::Split
         } else {
             self.status.clone()
         }
+    }
+
+    /// The input marked as spending a split key, if any.
+    pub fn split_key(&self) -> Option<(usize, coincube_core::miniscript::bitcoin::OutPoint)> {
+        self.split_key
+    }
+
+    /// Mark the input (index, outpoint) that spends a verified split key.
+    pub fn with_split_key(
+        mut self,
+        input: Option<(usize, coincube_core::miniscript::bitcoin::OutPoint)>,
+    ) -> Self {
+        self.split_key = input;
+        self
     }
 
     /// Recompute for the current PSBT, carrying an acknowledgement over
@@ -372,10 +360,14 @@ impl ReplayReview {
         psbt: &Psbt,
         secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
     ) -> Self {
-        let mut next = match &self.split {
-            Some(evidence) => Self::with_split(psbt, secp, evidence.clone()),
-            None => Self::new(psbt, secp),
-        };
+        let mut next = Self::new(psbt, secp);
+        // The same transaction spends the same key; only signatures change.
+        next.split_key = self.split_key.filter(|(index, outpoint)| {
+            psbt.unsigned_tx
+                .input
+                .get(*index)
+                .is_some_and(|input| input.previous_output == *outpoint)
+        });
         if self.acknowledged_for == Some(next.psbt_digest) {
             next.acknowledged_for = self.acknowledged_for;
         }
@@ -505,7 +497,7 @@ pub fn not_ready_reason(
     checking: bool,
 ) -> String {
     if checking {
-        return CHECKING_COPY.to_string();
+        return localized_copy(CHECKING_COPY).to_string();
     }
     let blocked = blocked_entangled_inputs(&review.status(), entangled);
     if let Some(required) = blocked_entangled_copy(&blocked) {
@@ -513,15 +505,20 @@ pub fn not_ready_reason(
     }
     let (label, _) = pill_copy(&review.status(), entangled);
     if review.status().needs_acknowledgement() && !review.acknowledged() {
-        return format!("{label}. Tick \"{REPLAYABLE_ACKNOWLEDGEMENT}\" to send.");
+        return localized_format!(
+            "{}. Tick \"{}\" to send.",
+            "{}. Marca «{}» para enviar.",
+            label,
+            localized_copy(REPLAYABLE_ACKNOWLEDGEMENT)
+        );
     }
     label
 }
 
 /// The remedy line shown under the pill when [`blocked_entangled_inputs`] is
-/// non-empty: what is true in this build (a replay-capable signature — the
-/// Cube key or a Border Wallet key), and that splitting first is not yet
-/// available rather than offering a tool that does not exist (Lane B1.5).
+/// non-empty: a replay-capable signature (the Cube key or a Border Wallet
+/// key), or splitting the coins first in Coin control (Lane B1.5), which
+/// the view offers as **Split first**.
 pub fn blocked_entangled_copy(blocked: &[usize]) -> Option<String> {
     if blocked.is_empty() {
         return None;
@@ -532,16 +529,25 @@ pub fn blocked_entangled_copy(blocked: &[usize]) -> Option<String> {
         .collect::<Vec<_>>()
         .join(", ");
     let (noun, verb, pronoun) = if blocked.len() == 1 {
-        ("Input", "exists", "it")
+        (
+            localized_copy("Input"),
+            localized_copy("exists"),
+            localized_copy("it"),
+        )
     } else {
-        ("Inputs", "exist", "them")
+        (
+            localized_copy("Inputs"),
+            localized_copy("exist"),
+            localized_copy("them"),
+        )
     };
-    Some(format!(
+    Some(localized_format!(
         "{noun} {list} also {verb} on Bitcoin, so this cannot be sent without a replay-capable \
          signature on {pronoun} (the Cube key or a Border Wallet key). If enough legacy \
          signatures were already collected to form a Bitcoin witness, create a new spend and \
          collect the replay-capable signature first; Coincube refuses to retain both complete \
-         alternatives. Splitting the coins first is not available in this version."
+         alternatives. Or split the coins first in Coin control.",
+        "{noun} {list} también {verb} en Bitcoin. Para enviar se necesita una firma protegida contra repetición en {pronoun}, con la clave del Cube o de Border Wallet. Si ya hay suficientes firmas antiguas para formar un testigo válido en Bitcoin, crea un gasto nuevo y recopila primero la firma protegida. Coincube rechaza conservar ambas alternativas completas. También puedes separar primero las monedas en Control de monedas."
     ))
 }
 
@@ -559,10 +565,13 @@ pub enum PillTone {
 pub fn pill_copy(status: &ReplayStatus, entangled: &[(usize, Entanglement)]) -> (String, PillTone) {
     match status {
         ReplayStatus::Protected => (
-            "This witness is replay protected".to_string(),
+            localized_copy("This witness is replay protected").to_owned(),
             PillTone::Success,
         ),
-        ReplayStatus::Split => ("Split — cannot replay".to_string(), PillTone::Success),
+        ReplayStatus::Split => (
+            localized_copy("Split — cannot replay").to_owned(),
+            PillTone::Success,
+        ),
         ReplayStatus::Replayable { inputs } => {
             let blocked: BTreeSet<usize> = blocked_entangled_inputs(status, entangled)
                 .into_iter()
@@ -572,31 +581,42 @@ pub fn pill_copy(status: &ReplayStatus, entangled: &[(usize, Entanglement)]) -> 
                 .iter()
                 .map(|index| {
                     if blocked.contains(index) {
-                        format!("{index} (also exists on Bitcoin — signature required)")
+                        localized_format!(
+                            "{index} (also exists on Bitcoin — signature required)",
+                            "{index} (también existe en Bitcoin · requiere firma)"
+                        )
                     } else if entangled.contains(index) {
-                        format!("{index} (not yet checked against Bitcoin)")
+                        localized_format!(
+                            "{index} (not yet checked against Bitcoin)",
+                            "{index} (aún sin comprobar en Bitcoin)"
+                        )
                     } else {
                         index.to_string()
                     }
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            let noun = if inputs.len() == 1 { "input" } else { "inputs" };
+            let noun = localized_copy(if inputs.len() == 1 { "input" } else { "inputs" });
             (
-                format!("Replayable — no replay-capable signature on {noun} {list}"),
+                localized_format!(
+                    "Replayable — no replay-capable signature on {noun} {list}",
+                    "Repetible · sin firma protegida contra repetición en {noun} {list}"
+                ),
                 PillTone::Warning,
             )
         }
-        ReplayStatus::Unknown(UnknownReason::NotYetChecked) => {
-            ("Not yet checked".to_string(), PillTone::Neutral)
-        }
-        ReplayStatus::Unknown(UnknownReason::Incomplete) => (
-            "Unknown — not enough signatures to check yet".to_string(),
+        ReplayStatus::Unknown(UnknownReason::NotYetChecked) => (
+            localized_copy("Not yet checked").to_owned(),
             PillTone::Neutral,
         ),
-        ReplayStatus::Unknown(UnknownReason::Refused(reason)) => {
-            (format!("Unknown — {reason}"), PillTone::Neutral)
-        }
+        ReplayStatus::Unknown(UnknownReason::Incomplete) => (
+            localized_copy("Unknown — not enough signatures to check yet").to_owned(),
+            PillTone::Neutral,
+        ),
+        ReplayStatus::Unknown(UnknownReason::Refused(reason)) => (
+            localized_format!("Unknown — {reason}", "Desconocido · {reason}"),
+            PillTone::Neutral,
+        ),
     }
 }
 
@@ -617,7 +637,7 @@ mod tests {
         let f = fixture();
         let signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
         assert!(!matches!(
-            replay_status(&signed, &secp(), None),
+            replay_status(&signed, &secp()),
             ReplayStatus::Split
         ));
         assert_eq!(
@@ -628,33 +648,66 @@ mod tests {
         assert!(!ReplayStatus::Split.needs_acknowledgement());
     }
 
+    /// A spend through a verified split key is split, not replayable: Bitcoin
+    /// has no such coin. The mark follows the same input across refreshes and
+    /// is dropped if the transaction no longer spends it.
+    #[test]
+    fn a_split_key_input_makes_a_legacy_spend_split() {
+        let f = fixture();
+        let secp = secp();
+        let signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+        let key = (0, signed.unsigned_tx.input[0].previous_output);
+        let plain = ReplayReview::new(&signed, &secp);
+        assert!(matches!(plain.status(), ReplayStatus::Replayable { .. }));
+        let review = plain.with_split_key(Some(key));
+        assert_eq!(review.status(), ReplayStatus::Split);
+        assert!(review.broadcast_ready(&[(0, Entanglement::Entangled)]));
+        assert_eq!(
+            review.refreshed(&signed, &secp).status(),
+            ReplayStatus::Split
+        );
+        let mut other = signed.clone();
+        other.unsigned_tx.input[0].previous_output.vout += 1;
+        assert!(matches!(
+            review.refreshed(&other, &secp).status(),
+            ReplayStatus::Unknown(_) | ReplayStatus::Replayable { .. }
+        ));
+        // Unsigned stays unchecked: the key never manufactures a status.
+        assert!(matches!(
+            ReplayReview::new(&f.psbt, &secp)
+                .with_split_key(Some(key))
+                .status(),
+            ReplayStatus::Unknown(_)
+        ));
+    }
+
     #[test]
     fn status_matrix_from_verified_signatures() {
         let f = fixture();
         let secp = secp();
 
         assert_eq!(
-            replay_status(&f.psbt, &secp, None),
+            replay_status(&f.psbt, &secp),
             ReplayStatus::Unknown(UnknownReason::NotYetChecked)
         );
         let one = unified(&f.psbt, &f.signers[0]);
         assert_eq!(
-            replay_status(&one, &secp, None),
+            replay_status(&one, &secp),
             ReplayStatus::Unknown(UnknownReason::Incomplete)
         );
         let two = unified(&one, &f.signers[1]);
-        assert_eq!(replay_status(&two, &secp, None), ReplayStatus::Protected);
+        assert_eq!(replay_status(&two, &secp), ReplayStatus::Protected);
 
         // Legacy signatures alone finalise but are replayable.
         let legacy_only = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
         assert_eq!(
-            replay_status(&legacy_only, &secp, None),
+            replay_status(&legacy_only, &secp),
             ReplayStatus::Replayable { inputs: vec![0] }
         );
         // One unified + one legacy (different keys): protected — a legacy
         // signature alongside is fine.
         let mixed = legacy(&one, &f.signers[1]);
-        assert_eq!(replay_status(&mixed, &secp, None), ReplayStatus::Protected);
+        assert_eq!(replay_status(&mixed, &secp), ReplayStatus::Protected);
         // Unified on the *third* key with two legacy ones: the finaliser would
         // keep the unified signature, but the retained legacy pair can also
         // satisfy the input. Local policy refuses the alternate set instead of
@@ -664,7 +717,7 @@ mod tests {
             &f.signers[1],
         );
         assert!(matches!(
-            replay_status(&third, &secp, None),
+            replay_status(&third, &secp),
             ReplayStatus::Unknown(UnknownReason::Refused(reason))
                 if reason.contains("independently satisfy")
         ));
@@ -684,7 +737,7 @@ mod tests {
             .unwrap();
         let value = tampered.inputs[0].proprietary.get_mut(&key).unwrap();
         value[10] ^= 0x01;
-        match replay_status(&tampered, &secp, None) {
+        match replay_status(&tampered, &secp) {
             ReplayStatus::Unknown(UnknownReason::Refused(reason)) => {
                 assert!(reason.contains("unified"), "{}", reason)
             }
@@ -734,7 +787,7 @@ mod tests {
             Err(DispatchRefused::AnyoneCanPay { input: 0, .. })
         ));
         assert!(matches!(
-            replay_status(&carried, &secp(), None),
+            replay_status(&carried, &secp()),
             ReplayStatus::Unknown(UnknownReason::Refused(_))
         ));
     }
@@ -963,7 +1016,7 @@ mod tests {
         assert!(one.contains("Cube key or a Border Wallet key"), "{}", one);
         assert!(one.contains("create a new spend"), "{}", one);
         assert!(
-            one.contains("Splitting the coins first is not available in this version"),
+            one.ends_with("Or split the coins first in Coin control."),
             "{}",
             one
         );
@@ -1140,7 +1193,7 @@ mod tests {
 
         // Both inputs signed by two keys the unified way: protected.
         let both = unified(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
-        assert_eq!(replay_status(&both, &secp, None), ReplayStatus::Protected);
+        assert_eq!(replay_status(&both, &secp), ReplayStatus::Protected);
 
         // Now assemble a PSBT whose inputs disagree: input 0 keeps its unified
         // signatures, input 1 carries legacy ones only. Built per input rather
@@ -1153,22 +1206,22 @@ mod tests {
         assert!(mixed.inputs[1].proprietary.is_empty());
         assert_eq!(mixed.inputs[1].partial_sigs.len(), 2);
         assert_eq!(
-            replay_status(&mixed, &secp, None),
+            replay_status(&mixed, &secp),
             ReplayStatus::Replayable { inputs: vec![1] }
         );
         assert!(!matches!(
-            replay_status(&mixed, &secp, None),
+            replay_status(&mixed, &secp),
             ReplayStatus::Protected
         ));
 
         // The copy names the input the user has to act on, not just "some".
-        let (copy, tone) = pill_copy(&replay_status(&mixed, &secp, None), &[]);
+        let (copy, tone) = pill_copy(&replay_status(&mixed, &secp), &[]);
         assert!(copy.contains("input 1"), "{}", copy);
         assert_eq!(tone, PillTone::Warning);
 
         // And the acknowledgement gate follows the same per-input answer.
-        assert!(replay_status(&mixed, &secp, None).needs_acknowledgement());
-        assert!(!replay_status(&both, &secp, None).needs_acknowledgement());
+        assert!(replay_status(&mixed, &secp).needs_acknowledgement());
+        assert!(!replay_status(&both, &secp).needs_acknowledgement());
     }
 
     /// B4.2 replay matrix — the tampered-signature row. A signature that is
@@ -1180,7 +1233,7 @@ mod tests {
         let f = fixture();
         let secp = secp();
         let signed = unified(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
-        assert_eq!(replay_status(&signed, &secp, None), ReplayStatus::Protected);
+        assert_eq!(replay_status(&signed, &secp), ReplayStatus::Protected);
 
         // Flip bits inside the signature bytes of one unified record, leaving
         // the record's shape and the PSBT's structure intact. Every byte offset
@@ -1193,7 +1246,7 @@ mod tests {
         for offset in 0..original.len() {
             let mut tampered = signed.clone();
             tampered.inputs[0].proprietary.get_mut(&key).unwrap()[offset] ^= 0x01;
-            let status = replay_status(&tampered, &secp, None);
+            let status = replay_status(&tampered, &secp);
             assert_ne!(
                 status,
                 ReplayStatus::Protected,
@@ -1222,8 +1275,8 @@ mod tests {
             signature: parsed,
             sighash_type: EcdsaSighashType::All,
         };
-        let clean = replay_status(&legacy_signed, &secp, None);
-        let tampered = replay_status(&bad_legacy, &secp, None);
+        let clean = replay_status(&legacy_signed, &secp);
+        let tampered = replay_status(&bad_legacy, &secp);
         assert_eq!(clean, ReplayStatus::Replayable { inputs: vec![0] });
         assert!(
             matches!(
@@ -1251,7 +1304,7 @@ mod tests {
             vec![0x30, 0x00],
         );
         assert!(matches!(
-            replay_status(&bad, &secp(), None),
+            replay_status(&bad, &secp()),
             ReplayStatus::Unknown(UnknownReason::Refused(_))
         ));
     }

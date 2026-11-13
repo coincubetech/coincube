@@ -157,6 +157,10 @@ impl From<OwnerKeychainRestoreStep> for Box<dyn Step> {
 }
 
 impl Step for OwnerKeychainRestoreStep {
+    fn restore_stage(&self) -> Option<crate::installer::RestoreStage> {
+        Some(crate::installer::RestoreStage::Approve)
+    }
+
     /// Pick up the owner's already-authenticated Connect client from `Context`.
     fn load_context(&mut self, ctx: &Context) {
         if self.client.is_none() {
@@ -214,6 +218,17 @@ impl Step for OwnerKeychainRestoreStep {
         let Phase::Ready { seed, descriptor } = &self.phase else {
             return false;
         };
+        // A Bitcoin Blake2b Cube and its Bitcoin twin share a seed, so the
+        // seed's own Cube must be on the chain being restored.
+        if seed
+            .as_ref()
+            .is_some_and(|seed| seed.cube.network != ctx.bitcoin_config.chain.api_str())
+        {
+            self.phase = Phase::Error {
+                message: "This phone backup belongs to a Cube on another network.".into(),
+            };
+            return false;
+        }
         // Reuse the shared seam: parse descriptor + derive the seed signer (Full
         // only), all-or-nothing.
         let (vault_blob, imported_blob) = match descriptor.as_ref() {
@@ -236,22 +251,6 @@ impl Step for OwnerKeychainRestoreStep {
                 };
                 return false;
             }
-        }
-        // A phone backup names the chain it was sealed for. A Bitcoin Blake2b
-        // backup restored into another chain, or another chain's into Bitcoin
-        // Blake2b, would bind the seed to the wrong directory and Connect
-        // network. The password-kit step refuses the same mismatch through
-        // `validate_against_selection`.
-        let chain = ctx.bitcoin_config.chain;
-        if seed
-            .as_ref()
-            .is_some_and(|s| crosses_fork(chain, &s.cube.network))
-            || vault_blob.is_some_and(|d| crosses_fork(chain, &d.cube.network))
-        {
-            self.phase = Phase::Error {
-                message: "This phone backup belongs to a different Cube or chain.".into(),
-            };
-            return false;
         }
         let staged = match stage_restore(
             ctx.bitcoin_config.network,
@@ -279,15 +278,12 @@ impl Step for OwnerKeychainRestoreStep {
         // a duplicate — the same duplicate-Cube bug the owner CRK restore had.
         // Full scope only (a real Cube); Vault-only restores into an existing
         // Cube with its own identity.
-
-        if let Some(seed) = seed
-            .as_ref()
-            .filter(|_| matches!(self.scope, RestoreScope::Full))
-        {
-            ctx.cube_id = Some(seed.cube.uuid.clone());
-            ctx.cube_name = Some(seed.cube.name.clone());
+        if matches!(self.scope, RestoreScope::Full) {
+            if let Some(seed) = seed {
+                ctx.cube_id = Some(seed.cube.uuid.clone());
+                ctx.cube_name = Some(seed.cube.name.clone());
+            }
         }
-
         // Thread the owner's Connect session into the context so the downstream
         // `CoincubeConnectStep` skips a redundant re-auth and `Final` re-registers
         // the recovered Cube under the owner's account — mirrors the owner CRK
@@ -317,12 +313,11 @@ impl Step for OwnerKeychainRestoreStep {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         match &self.phase {
-            Phase::Decrypting | Phase::Ready { .. } => view::install(
+            Phase::Decrypting | Phase::Ready { .. } => view::install_titled(
+                "Approve on your phone",
                 progress,
-                email,
                 true,
                 false,
                 None,
@@ -331,17 +326,16 @@ impl Step for OwnerKeychainRestoreStep {
                         .to_string(),
                 ),
             ),
-            Phase::Error { message } => {
-                view::install(progress, email, false, false, Some(message), None)
-            }
+            Phase::Error { message } => view::install_titled(
+                "Approve on your phone",
+                progress,
+                false,
+                false,
+                Some(message),
+                None,
+            ),
         }
     }
-}
-
-fn crosses_fork(chain: crate::chain::ChainId, network: &str) -> bool {
-    network != chain.api_str()
-        && (chain.is_blake2b()
-            || crate::chain::ChainId::from_api_str(network).is_some_and(|c| c.is_blake2b()))
 }
 
 #[cfg(test)]
@@ -350,7 +344,6 @@ mod tests {
     use crate::{
         chain::ChainId,
         dir::CoincubeDirectory,
-        installer::context::RemoteBackend,
         services::recovery::{
             ImportedDescriptorBlob, ImportedDescriptorBlobWallet, SeedBlobCube, SeedBlobMnemonic,
         },
@@ -417,7 +410,6 @@ mod tests {
             CoincubeDirectory::new(
                 std::env::temp_dir().join("owner-imported-restore-context-only"),
             ),
-            RemoteBackend::None,
             None,
             None,
         )
@@ -504,50 +496,5 @@ mod tests {
                 .receive_index,
             45
         );
-    }
-
-    /// A phone backup sealed for one side of the fork never restores into the
-    /// other: the seed would be bound to the wrong chain's directory.
-    #[test]
-    fn owner_phone_refuses_a_backup_from_across_the_fork() {
-        let fork_context = || {
-            Context::new_for_chain(
-                ChainId::BitcoinBlake2b,
-                CoincubeDirectory::new(
-                    std::env::temp_dir().join("owner-fork-restore-context-only"),
-                ),
-                RemoteBackend::None,
-                None,
-                None,
-            )
-        };
-        let ready = |network: &str| {
-            let mut seed = seed_blob();
-            seed.cube.network = network.into();
-            let mut step = OwnerKeychainRestoreStep::new(RestoreScope::Full, 7);
-            step.phase = Phase::Ready {
-                seed: Some(seed),
-                descriptor: None,
-            };
-            step
-        };
-
-        let mut mainnet_into_fork = ready("mainnet");
-        let mut ctx = fork_context();
-        assert!(!mainnet_into_fork.apply(&mut ctx));
-        assert!(matches!(mainnet_into_fork.phase, Phase::Error { .. }));
-        assert!(ctx.recovered_signer.is_none());
-        assert!(ctx.cube_id.is_none());
-
-        let mut fork_into_mainnet = ready(ChainId::BitcoinBlake2b.api_str());
-        let mut ctx = context();
-        assert!(!fork_into_mainnet.apply(&mut ctx));
-        assert!(ctx.recovered_signer.is_none());
-
-        let mut fork_into_fork = ready(ChainId::BitcoinBlake2b.api_str());
-        let mut ctx = fork_context();
-        assert!(fork_into_fork.apply(&mut ctx));
-        assert!(ctx.recovered_signer.is_some());
-        assert_eq!(ctx.cube_id.as_deref(), Some("restored-cube"));
     }
 }

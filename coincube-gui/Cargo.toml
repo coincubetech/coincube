@@ -17,11 +17,14 @@ name = "coincube"
 path = "src/main.rs"
 
 [dependencies]
-# Official SDK source at ba5e510a; manifest-only reqwest adjustment avoids the
-# existing Breez iOS build-dependency pin conflict. Drop the adaptation when
+tempfile = "3.27"
+# Official SDK 4.0.0 source at 6292bbd0; manifest-only reqwest adjustment avoids
+# the existing Breez iOS build-dependency pin conflict. Drop the adaptation when
 # upstream relaxes that pin or provides compatible HTTP/TLS configuration.
 # See vendor/branta/TENSHU_PROVENANCE.md and its enforced source hashes.
-branta = { path = "../vendor/branta", version = "=3.2.1", default-features = false }
+branta = { path = "../vendor/branta", version = "=4.0.0", default-features = false }
+# Decodes BIP21 query values in the Branta request pre-filter, matching the SDK.
+percent-encoding = "2.3"
 async-trait = "0.1"
 async-hwi = "0.0.32"
 # Build-only adaptation of the mirrored SDK 0.12.2 revision 94e1e184.
@@ -29,6 +32,7 @@ async-hwi = "0.0.32"
 # to fetch even for SDK consumers. SDK Rust source and manifests are unchanged.
 # See COINCUBE_BUILD_PATCH.md at the pinned dependency revision.
 breez-sdk-liquid = { git = "https://github.com/coincubetech/breez-sdk-liquid", rev = "4ac5017c18dd3bb174cb3f193570c0d8b6ef3afa" }
+coincube-mcp = { path = "../coincube-mcp", default-features = false }
 coincube-core = { path = "../coincube-core" }
 coincube-spark-protocol = { path = "../coincube-spark-protocol" }
 coincubed = { path = "../coincubed", default-features = false, features = [
@@ -58,6 +62,7 @@ iced_runtime  = "0.14.0"
 email_address = "0.2.7"
 
 tokio = { version = "1", features = [
+	"net",
 	"signal",
 	"process",
 	"io-util",
@@ -73,7 +78,7 @@ prost = "0.13"
 prost-types = "0.13"
 async-fd-lock = "0.2.0"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["raw_value"] }
 
 # Used to ping bitcoind node
 jsonrpc = "0.18"
@@ -92,10 +97,14 @@ mostro-core = "0.7"
 nostr-sdk = { version = "0.43.0", features = ["nip06", "nip59"] }
 bip39 = { version = "2.1.0", features = ["rand"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
+unicode-segmentation = "1.0"
 argon2 = { version = "0.5", features = ["std"] }
 
 # Used for managing internal bitcoind
 base64 = "0.22"
+# Rasterizes Launcher face art once per content for the GPU floor. Same
+# version and features iced already builds for its SVG widget.
+resvg = "0.45"
 bitcoin_hashes = "0.16"
 reqwest = { version = "0.12.18", default-features = false, features = [
 	"json",
@@ -105,6 +114,8 @@ reqwest = { version = "0.12.18", default-features = false, features = [
 reqwest-sse = "0.1"
 rust-ini = "0.21"
 rfd = "0.15.1"
+# Same version iced's QR widget encodes with; renders the saved QR image.
+qrcode = { version = "0.13", default-features = false }
 fs4 = { version = "0.13", features = ["sync"] }
 
 # Used for opening URLs in browser
@@ -246,8 +257,13 @@ tokio = { version = "1", features = ["rt", "macros", "test-util"] }
 httpmock = "0.7"
 
 [features]
-# Explicit opt-in for disposable loopback regtest integration.
-regtest-harness = ["coincubed/regtest-harness"]
+default = ["mcp-proposals", "mcp-transactions"]
+# Native-consent workflows are included in normal builds; pairing remains opt-in.
+mcp-proposals = ["coincube-mcp/native-proposals"]
+mcp-transactions = ["coincube-mcp/native-transactions"]
+# Opt-in test knobs for ancestry checks against a disposable regtest
+# history (`CoincubeClient::enable_regtest_ancestry`).
+regtest-harness = []
 # Opt-in tests that hit a real `coincube-api` endpoint (production with a
 # dedicated test account, or a local API; there is no dev server). Requires
 # the `COINCUBE_API_URL` env var (and, for the auth-flavoured tests,
@@ -255,6 +271,8 @@ regtest-harness = ["coincubed/regtest-harness"]
 # `cargo test` matrix so PR CI stays hermetic; enabled by the
 # connect-integration workflow when it is switched on.
 integration-tests = []
+# Debug-only signed macOS fault probe. Release builds reject its entry point.
+native-anchor-probe = []
 
 [build-dependencies]
 dotenvy = "0.15.7"

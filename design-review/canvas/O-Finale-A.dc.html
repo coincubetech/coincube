@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Finale A — Bloom</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.rv{width:1440px;height:980px;display:flex;flex-direction:column;background:#0d0e0d;font-family:'IBM Plex Sans',system-ui,sans-serif;color:#f5f0e8}
+.rvbar{height:80px;flex:none;box-sizing:border-box;padding:0 28px;display:flex;align-items:center;gap:20px;border-bottom:1px solid #424242}
+.rvtag{flex:none;display:inline-grid;place-items:center;min-width:40px;height:40px;padding:0 10px;box-sizing:border-box;border-radius:8px;background:#f3821d;color:#201407;font-size:20px;font-weight:600}
+.rvtx{display:flex;flex-direction:column;gap:2px;min-width:0}
+.rvtx b{font-size:20px;font-weight:600}
+.rvtx span{font-size:14px;color:#b9bbb5}
+.rvgrow{flex:1}
+.rvbtn{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 16px;border-radius:8px;border:1px solid #424242;background:none;cursor:pointer;font:inherit;font-size:14px;font-weight:500;color:#f5f0e8}
+.rvbtn:hover{border-color:#b9bbb5}
+.rvbtn:focus-visible{outline:2px solid #8fc1ff;outline-offset:2px}
+.rvbtn svg{width:16px;height:16px}
+.rvbody{width:1440px;height:900px;flex:none;position:relative;overflow:hidden}
+</style>
+</helmet>
+<div class="rv">
+  <div class="rvbar">
+    <span class="rvtag" aria-hidden="true">A</span>
+    <span class="rvtx"><b>Finale A · Bloom</b><span>The face fills the screen, the edge colour glows out from the centre, then it dissolves into the Overview</span></span>
+    <span class="rvgrow"></span>
+    <button type="button" class="rvbtn" onClick="{{ replay }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4.5h4.5"></path></svg>
+      <span>Replay</span>
+    </button>
+  </div>
+  <div class="rvbody">
+    <sc-if value="{{ show }}" hint-placeholder-val="{{ true }}">
+      <dc-import name="O-Launcher" hint-size="1440px,900px" launcher-style="cubes" start-phase="loading" start-stage="3" finale="bloom"></dc-import>
+    </sc-if>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":980}}'>
+class Component extends DCLogic {
+  constructor(p) { super(p); this.state = { show: true }; }
+  renderVals() {
+    // Replay unmounts the imported Launcher for a beat, so it starts again from its first loader stage
+    return { show: this.state.show !== false, replay: () => { this.setState({ show: false }); setTimeout(() => this.setState({ show: true }), 60); } };
+  }
+}
+</script>
+</body>
+</html>

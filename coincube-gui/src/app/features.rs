@@ -66,6 +66,10 @@ pub struct MarketplaceServerFlags {
     pub p2p_enabled: bool,
 }
 
+/// First-release product ceiling. Turning this on is a deliberate release
+/// decision, independent of Connect defaults and per-account overrides.
+const MARKETPLACE_ENABLED_FOR_RELEASE: bool = false;
+
 impl MarketplaceServerFlags {
     /// Fail-closed value: everything off. The default state before features
     /// load, and the value used when the API is unreachable or silent.
@@ -74,6 +78,16 @@ impl MarketplaceServerFlags {
         buy_sell_enabled: false,
         p2p_enabled: false,
     };
+
+    /// Apply the local release ceiling before flags enter the cache used by
+    /// navigation, route availability, and P2P subscription/action guards.
+    pub fn for_release(self) -> Self {
+        if MARKETPLACE_ENABLED_FOR_RELEASE {
+            self
+        } else {
+            Self::OFF
+        }
+    }
 
     /// Whether the server permits Buy/Sell at all: the master switch AND the
     /// Buy/Sell flag. The single source of truth for "should Buy/Sell show".
@@ -94,13 +108,14 @@ impl MarketplaceServerFlags {
 /// deliberately generic, since "off at the server" is not a per-network state.
 fn marketplace_off() -> Availability {
     Availability::Unavailable {
-        reason: "The Marketplace isn't available right now.".to_string(),
+        reason: coincube_ui::locale::copy("The Marketplace isn't available right now.").to_string(),
     }
 }
 
-/// Whether the Liquid wallet is shown at all. This is the sunset gate: Liquid
-/// is being wound down, so new installs don't get it, but anyone who already
-/// has a Liquid wallet keeps full access to it forever.
+/// Whether the Liquid wallet is shown at all. This is the sunset gate. Since
+/// Tenshu v175 it hides Liquid for everyone ([`Self::show`] is always
+/// `false`); the rest of this comment describes the inputs it would use if
+/// Liquid were reopened.
 ///
 /// Two independent inputs, OR'd — and note this deliberately does **not**
 /// behave like [`MarketplaceServerFlags`]:
@@ -139,10 +154,16 @@ impl LiquidGate {
     };
 
     /// The single source of truth for "should the Liquid surface exist".
-    /// Consulted by the nav rails, the route guard, global home, and the
-    /// wallet-creation entry points.
+    /// Consulted by the nav rails, the route guard, global home, Activity and
+    /// the Launcher.
+    ///
+    /// Always `false`: Liquid is hidden for everyone, including grandfathered
+    /// accounts and Cubes with a Liquid wallet on disk (Robert, 2026-10-29,
+    /// Tenshu v175 master §3 decision 2). Both inputs are still recorded, and
+    /// the Liquid signer still derives from the Cube seed, so reopening Liquid
+    /// is a change to this function alone.
     pub fn show(&self) -> bool {
-        self.server_enabled || self.local_state_exists
+        false
     }
 }
 
@@ -162,9 +183,12 @@ pub fn liquid_wallet_usable<C: Into<ChainId>>(chain: C, gate: LiquidGate) -> boo
 /// Reason shown for a Liquid route reached while the wallet is gated off —
 /// a restored or deep-linked route, since the nav hides Liquid entirely in
 /// this state. Not a per-network message: Liquid is sunset for new wallets.
+pub const LIQUID_ACCOUNT_UNAVAILABLE_REASON: &str =
+    "The Liquid wallet isn't available on this account.";
+
 fn liquid_sunset() -> Availability {
     Availability::Unavailable {
-        reason: "The Liquid wallet isn't available on this account.".to_string(),
+        reason: LIQUID_ACCOUNT_UNAVAILABLE_REASON.to_string(),
     }
 }
 
@@ -289,8 +313,9 @@ pub fn p2p<C: Into<ChainId>>(chain: C, has_test_coordinator: bool) -> Availabili
         // rather than misattribute the block to a missing coordinator when the
         // coordinator is present but Spark is down.
         other => Availability::Unavailable {
-            reason: format!(
+            reason: coincube_ui::localized_format!(
                 "P2P trading on {} needs a test Mostro coordinator and a connected Spark wallet.",
+                "El intercambio P2P en {} necesita un coordinador Mostro de prueba y una cartera Spark conectada.",
                 net_label(other)
             ),
         },
@@ -356,7 +381,12 @@ pub fn route_availability<C: Into<ChainId>>(
 
 fn unavailable(feature: &str, net: ChainId) -> Availability {
     Availability::Unavailable {
-        reason: format!("{} isn't available on {}.", feature, net_label(net)),
+        reason: coincube_ui::localized_format!(
+            "{} isn't available on {}.",
+            "{} no está disponible en {}.",
+            coincube_ui::locale::copy(feature),
+            net_label(net)
+        ),
     }
 }
 
@@ -436,12 +466,11 @@ pub struct ClaimSourceCube {
     pub already_claimed: bool,
 }
 
-/// Whether this Cube may take part in a Bitcoin Blake2b claim at all. Both
-/// halves of the gate — [`bitcoin_blake2b`] for the build/account, and the
-/// source Cube's own shape. What the entry *does* is [`claim_entry`]'s call:
-/// a Cube that already has a claim target is still a claim source, because
-/// the claim itself (step 1, the poison self-transfer) happens after the
-/// target exists.
+/// Whether this Cube may have a Bitcoin Blake2b copy (Tools › Split coins →
+/// Create copy). Both halves of the gate — [`bitcoin_blake2b`] for the
+/// build/account, and the source Cube's own shape. Whether a copy already
+/// exists is a separate question (`already_claimed`): the caller refuses a
+/// second copy, which would watch the same addresses twice.
 pub fn claim_blake2b(source: ClaimSourceCube) -> Availability {
     let account = bitcoin_blake2b(BitcoinBlake2bServerFlag {
         server_enabled: source.server_enabled,
@@ -460,58 +489,6 @@ pub fn claim_blake2b(source: ClaimSourceCube) -> Availability {
         };
     }
     Availability::Available
-}
-
-/// Imported Bitcoin policies can fund a fork claim without becoming a Vault.
-/// Keep this separate from `claim_blake2b` so imported descriptors never
-/// acquire the inheritance or Connect `hasVault` capability.
-pub fn imported_claim_blake2b(
-    chain: ChainId,
-    has_imported_bitcoin: bool,
-    server_enabled: bool,
-) -> Availability {
-    let account = bitcoin_blake2b(BitcoinBlake2bServerFlag { server_enabled });
-    if !account.is_available() {
-        return account;
-    }
-    if chain != ChainId::Bitcoin {
-        return Availability::Unavailable {
-            reason: "Only a Bitcoin imported wallet can be claimed onto Bitcoin Blake2b."
-                .to_string(),
-        };
-    }
-    if !has_imported_bitcoin {
-        return Availability::Unavailable {
-            reason: "This Cube has no imported Bitcoin wallet to claim.".to_string(),
-        };
-    }
-    Availability::Available
-}
-
-/// What the claim entry does for this Cube, once [`claim_blake2b`] admits it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaimEntry {
-    /// No Bitcoin Blake2b Cube reuses this descriptor yet: start the
-    /// claim-target installer (Lane B1.4).
-    CreateTarget,
-    /// The target exists: open claim step 1, the poison self-transfer on
-    /// Bitcoin (Lane B1.5). A second target would watch the same addresses
-    /// twice, so the installer is never offered again.
-    Step1,
-}
-
-/// Which entry a claim from this Cube takes, or `None` when
-/// [`claim_blake2b`] refuses. One decision, made where the App and the rail
-/// can both ask it — never by comparing the card's copy.
-pub fn claim_entry(source: ClaimSourceCube) -> Option<ClaimEntry> {
-    if !claim_blake2b(source).is_available() {
-        return None;
-    }
-    Some(if source.already_claimed {
-        ClaimEntry::Step1
-    } else {
-        ClaimEntry::CreateTarget
-    })
 }
 
 #[cfg(test)]
@@ -566,19 +543,13 @@ mod tests {
         })
         .is_available());
 
-        // Already claimed: still a claim source (step 1 happens after the
-        // target exists), but the entry is the step-1 panel, never a second
-        // target — that would watch the same addresses twice.
+        // Already copied: still an eligible source; the caller refuses a
+        // second copy, which would watch the same addresses twice.
         let claimed = ClaimSourceCube {
             already_claimed: true,
             ..claim_source(ChainId::Bitcoin)
         };
         assert!(claim_blake2b(claimed).is_available());
-        assert_eq!(claim_entry(claimed), Some(ClaimEntry::Step1));
-        assert_eq!(
-            claim_entry(claim_source(ChainId::Bitcoin)),
-            Some(ClaimEntry::CreateTarget)
-        );
 
         // Account half absent — fails closed, and keeps the account-level
         // wording rather than a per-Cube one.
@@ -699,6 +670,17 @@ mod tests {
     }
 
     #[test]
+    fn first_release_rejects_true_server_flags_for_routes_and_actions() {
+        let flags = ALL_ON.for_release();
+        assert_eq!(flags, MarketplaceServerFlags::OFF);
+        assert!(!flags.buy_sell_on());
+        assert!(!flags.p2p_on());
+        assert!(!avail(&buy_sell_route(), Network::Bitcoin, flags));
+        assert!(!avail(&p2p_route(), Network::Bitcoin, flags));
+        assert!(!avail(&p2p_settings_route(), Network::Bitcoin, flags));
+    }
+
+    #[test]
     fn sub_flags_require_the_master_switch() {
         // Sub-flags on but master off → still off (fail-closed).
         let master_off = MarketplaceServerFlags {
@@ -777,43 +759,28 @@ mod tests {
 
     // ── Liquid sunset gate ──────────────────────────────────────────────
     //
-    // The four scenarios from PLAN-liquid-sunset PR 1. The load-bearing one
-    // is the last: unlike Marketplace, an unreachable API must never hide a
-    // funded wallet.
+    // Tenshu v175 hides Liquid for everyone (master §3 decision 2). Neither
+    // the account grant nor a Liquid wallet on this machine shows it.
+
+    const LIQUID_GRANTED_AND_LOCAL: LiquidGate = LiquidGate {
+        server_enabled: true,
+        local_state_exists: true,
+    };
 
     #[test]
-    fn fresh_install_with_flag_off_hides_liquid() {
-        assert!(!LiquidGate::HIDDEN.show());
+    fn liquid_is_hidden_whatever_the_gate_records() {
         assert_eq!(LiquidGate::default(), LiquidGate::HIDDEN);
-        assert!(!avail_liquid(Network::Bitcoin, LiquidGate::HIDDEN));
-    }
-
-    #[test]
-    fn server_flag_grants_liquid_on_a_fresh_install() {
-        assert!(LIQUID_GRANTED.show());
-        assert!(avail_liquid(Network::Bitcoin, LIQUID_GRANTED));
-    }
-
-    #[test]
-    fn local_wallet_shows_liquid_even_with_the_flag_off() {
-        // The grandfather case: the server says no (or has never been asked),
-        // but this machine already has a Liquid wallet. Funds win.
-        assert!(LIQUID_LOCAL_ONLY.show());
-        assert!(avail_liquid(Network::Bitcoin, LIQUID_LOCAL_ONLY));
-    }
-
-    #[test]
-    fn unreachable_api_still_shows_a_funded_local_wallet() {
-        // An unreachable/silent API reads as `server_enabled: false` — the
-        // same value as a real "no". Local state must still surface the
-        // wallet, or a network outage strands the user's L-BTC. This is the
-        // deliberate divergence from `MarketplaceServerFlags`' fail-closed
-        // behavior; if someone "fixes" this to fail closed, that's a bug.
-        let api_down = LiquidGate {
-            server_enabled: false,
-            local_state_exists: true,
-        };
-        assert!(api_down.show());
+        for gate in [
+            LiquidGate::HIDDEN,
+            LIQUID_GRANTED,
+            LIQUID_LOCAL_ONLY,
+            LIQUID_GRANTED_AND_LOCAL,
+        ] {
+            assert!(!gate.show(), "{:?}", gate);
+            assert!(!avail_liquid(Network::Bitcoin, gate), "{:?}", gate);
+            // The Cube-home cards, the transfer picker and the Launcher.
+            assert!(!liquid_wallet_usable(Network::Bitcoin, gate), "{:?}", gate);
+        }
     }
 
     #[test]
@@ -825,32 +792,30 @@ mod tests {
 
     #[test]
     fn gated_off_liquid_route_reads_as_account_scoped_not_network_scoped() {
-        assert_eq!(
-            route_availability(
-                &Menu::Liquid(crate::app::menu::LiquidSubMenu::Overview),
-                Network::Bitcoin,
-                false,
-                MarketplaceServerFlags::OFF,
-                LiquidGate::HIDDEN,
-            )
-            .reason(),
-            Some("The Liquid wallet isn't available on this account.")
-        );
+        // A restored or deep-linked Liquid route, even with the grant and a
+        // local wallet, gets the account reason rather than a live panel.
+        for gate in [LiquidGate::HIDDEN, LIQUID_GRANTED_AND_LOCAL] {
+            assert_eq!(
+                route_availability(
+                    &Menu::Liquid(crate::app::menu::LiquidSubMenu::Overview),
+                    Network::Bitcoin,
+                    false,
+                    MarketplaceServerFlags::OFF,
+                    gate,
+                )
+                .reason(),
+                Some(LIQUID_ACCOUNT_UNAVAILABLE_REASON),
+                "{gate:?}"
+            );
+        }
     }
 
     #[test]
     fn wallet_card_hides_liquid_off_mainnet_even_when_granted() {
-        // The nav greys Liquid out on a testnet cube; the Cube-home card and
-        // the transfer picker hide it outright, so a user never gets live
-        // Send/Receive buttons for a wallet with no backend behind it.
-        assert!(liquid_wallet_usable(Network::Bitcoin, LIQUID_GRANTED));
-        assert!(liquid_wallet_usable(Network::Bitcoin, LIQUID_LOCAL_ONLY));
         assert!(!liquid_wallet_usable(Network::Testnet, LIQUID_GRANTED));
         assert!(!liquid_wallet_usable(Network::Testnet4, LIQUID_LOCAL_ONLY));
         assert!(!liquid_wallet_usable(Network::Signet, LIQUID_GRANTED));
         assert!(!liquid_wallet_usable(Network::Regtest, LIQUID_GRANTED));
-        // Sunset gate still wins on mainnet.
-        assert!(!liquid_wallet_usable(Network::Bitcoin, LiquidGate::HIDDEN));
     }
 
     fn avail_liquid<C: Into<ChainId>>(net: C, gate: LiquidGate) -> bool {
@@ -1031,14 +996,5 @@ mod tests {
             Some("Bitcoin Blake2b isn't enabled for this account.")
         );
         assert!(bitcoin_blake2b_with(RuntimeSupport::Supported, ON).is_available());
-    }
-
-    #[test]
-    fn imported_claim_requires_mainnet_attachment_and_account_grant() {
-        assert!(imported_claim_blake2b(ChainId::Bitcoin, true, true).is_available());
-        assert!(!imported_claim_blake2b(ChainId::Bitcoin, true, false).is_available());
-        assert!(!imported_claim_blake2b(ChainId::Bitcoin, false, true).is_available());
-        assert!(!imported_claim_blake2b(ChainId::BitcoinBlake2b, true, true).is_available());
-        assert!(!imported_claim_blake2b(ChainId::Testnet4, true, true).is_available());
     }
 }

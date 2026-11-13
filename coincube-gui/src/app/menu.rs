@@ -17,8 +17,10 @@ pub enum Menu {
 pub enum CubeSubMenu {
     /// Cube landing / dashboard.
     Overview,
+    /// Activity across the wallets in this open Cube.
+    Activity,
     /// Cube-level settings. The inner enum drives the third rail —
-    /// General / About / Stats / Avatar / Members.
+    /// General / Recovery / Payment checks / About / Stats / Avatar / Members.
     Settings(CubeSettingsOption),
 }
 
@@ -27,11 +29,20 @@ pub enum CubeSubMenu {
 /// Avatar and Members, lifted out of the per-Cube Connect surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CubeSettingsOption {
+    AiAccess,
     General,
     /// Backup & recovery: local paper backup, the Connect Recovery Kit
     /// (password / Keychain), and Vault Recovery Alerts. Split out of General
     /// so each screen stays focused.
     Recovery,
+    /// Recipient verification controls, separate from display preferences.
+    PaymentChecks,
+    /// Cube-wide entry points for recovery and Vault-specific files.
+    DataExports,
+    /// The Connect account, this device's registration and realtime
+    /// stream, and the Re-register action. Shared by every wallet in the
+    /// Cube; the Vault and Spark Connections tabs link here.
+    Connections,
     About,
     Stats,
     /// Avatar questionnaire / generation / reveal / management. Renders
@@ -99,6 +110,8 @@ pub enum SparkSubMenu {
     Overview,
     Send,
     Receive,
+    /// Swap BTC ⇄ USDB (S3), mainnet only.
+    Swap,
     Transactions(Option<Txid>),
     Settings(Option<SparkSettingsOption>),
 }
@@ -108,10 +121,13 @@ pub enum SparkSubMenu {
 /// form false sibling relationships.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SparkSettingsOption {
-    /// Stable Balance toggle + Bridge status diagnostics.
+    /// Balances & conversion: the Stable Balance toggle and the Spark
+    /// nickname.
     General,
-    /// Lightning Address claim / manage page.
+    /// Lightning address claim / manage page, on its own tab.
     LightningAddress,
+    /// Spark wallet service health, and a link to Cube › Connections.
+    Connections,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,12 +139,9 @@ pub enum VaultSubMenu {
     Transactions(Option<Txid>),
     PSBTs(Option<Txid>),
     Recovery,
-    /// Bitcoin Blake2b claim entry. Before a claim target exists the rail
-    /// item is an *action* (it starts the claim-target installer, Lane B1.4,
-    /// and the menu never settles here); once the target exists it is a real
-    /// panel, claim step 1 (Lane B1.5). The App decides which on arrival,
-    /// from what is on disk — see [`crate::app::features::claim_entry`].
-    Claim,
+    /// Tools › Split coins: the checklist of what is still on both chains
+    /// ([`crate::app::state::vault::split_hub`]).
+    SplitCoins,
     Settings(Option<SettingsOption>),
 }
 
@@ -145,6 +158,8 @@ pub enum SettingsOption {
     /// this vault specifically (the persisted record is scoped to the
     /// vault's id fingerprint).
     LocalSigning,
+    /// Node backend health, and a link to Cube › Connections.
+    Connections,
 }
 
 /// Discriminant for the primary (left-most) nav rail. Derived from `Menu`

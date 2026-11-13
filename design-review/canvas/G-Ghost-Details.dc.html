@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ghost Cube details</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--good:#8bdfab;--warn:#f3b465;--focus:#8fc1ff;--on-accent:#1a1208;--face-b:#2a2b28;--ghost-btc:rgba(243,130,29,.5)}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--ink:#202020;--muted:#575a54;--line:#c4beb4;--good:#23613b;--warn:#77450b;--focus:#1d5fb8;--face-b:#e6e0d5;--ghost-btc:rgba(176,86,8,.55)}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.tenshu button{font:inherit;color:inherit}
+a{color:#f3821d}a:hover{color:#ffa54d}
+svg{flex:none}
+.col{display:flex;flex-direction:column;gap:14px}
+.cap{margin:0;font-size:13px;color:var(--muted)}
+.cap b{color:var(--ink);font-weight:600}
+.fc{width:420px;height:420px;box-sizing:border-box;padding:28px;display:flex;flex-direction:column;background:var(--face-b);border:1.5px solid var(--ghost-btc)}
+.fc.nokit{border-style:dotted;border-width:2px}
+.pn{display:flex;align-items:center;gap:10px;margin:0;font-size:20px;font-weight:600;line-height:1.3}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;border:1px dashed var(--muted);color:var(--muted);box-sizing:border-box}
+.av svg{width:16px;height:16px}
+.pnet{display:flex;align-items:center;gap:6px;margin:8px 0 0;font-size:14px}
+.pnet img{width:18px;height:18px;border-radius:50%;filter:grayscale(1);opacity:.6}
+.pdl{margin:20px 0 0;padding:16px 0 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:10px}
+.pdl div{display:flex;align-items:flex-start;gap:12px}
+.pdl dt{width:64px;flex:none;font-size:13px;color:var(--muted);line-height:22px}
+.pdl dd{margin:0;display:flex;align-items:center;gap:6px;font-size:14px;line-height:22px}
+.pdl dd svg{width:16px;height:16px}
+.good{color:var(--good)}
+.warn{color:var(--warn)}
+.muted{color:var(--muted)}
+.pnote{margin:14px 0 0;font-size:13px;color:var(--muted);line-height:1.45}
+.grow{flex:1}
+.pact{display:flex;align-items:center;gap:14px}
+.btn{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;color:var(--ink);white-space:nowrap}
+.btn svg{width:16px;height:16px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.linkbtn{border:0;background:none;padding:2px 2px;color:var(--ink);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px;cursor:pointer;font-size:14px}
+.linkbtn.del{text-decoration-color:var(--warn)}
+.pfoot{margin:10px 0 0;font-size:12px;color:var(--muted)}
+</style>
+</helmet>
+<div class="tenshu {{ themeCls }}" style="width:1120px;height:620px;box-sizing:border-box;padding:56px 80px;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;gap:80px;justify-content:center">
+
+  <div class="col">
+    <p class="cap"><b>Recovery Kit in Connect</b> · solid ghost edge</p>
+    <section class="fc kit" aria-labelledby="g1">
+      <h2 class="pn" id="g1"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z"></path></svg></span>Passkey</h2>
+      <p class="pnet"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><span>Bitcoin mainnet</span></p>
+      <dl class="pdl">
+        <div><dt>Where</dt><dd class="muted">In Connect, not on this device</dd></div>
+        <div><dt>Backup</dt><dd class="good"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg><span>Recovery Kit available</span></dd></div>
+      </dl>
+      <p class="pnote">Restore brings this Cube onto this device from its Recovery Kit. You'll set a PIN for it here.</p>
+      <div class="grow"></div>
+      <div class="pact">
+        <button type="button" class="btn primary">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"></path></svg>
+          <span>Restore to this device</span>
+        </button>
+        <a class="linkbtn" href="G-Launcher.dc.html">Back</a>
+        <a class="linkbtn del" href="P-Delete.dc.html">Delete from Connect…</a>
+      </div>
+      <p class="pfoot">Same spin-to-face as a local Cube; this face replaces the PIN face.</p>
+    </section>
+  </div>
+
+  <div class="col">
+    <p class="cap"><b>No Recovery Kit</b> · dotted ghost edge</p>
+    <section class="fc nokit" aria-labelledby="g2">
+      <h2 class="pn" id="g2"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18h10a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 6.9 9.2 4.4 4.4 0 0 0 7 18z"></path></svg></span>Everyday</h2>
+      <p class="pnet"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><span>Bitcoin mainnet</span></p>
+      <dl class="pdl">
+        <div><dt>Where</dt><dd class="muted">In Connect, not on this device</dd></div>
+        <div><dt>Backup</dt><dd class="warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg><span>No Recovery Kit in Connect</span></dd></div>
+      </dl>
+      <p class="pnote">Connect has this Cube's registration but not its keys, so it can't be restored from here. Open it on the device that holds it and add a Recovery Kit, or import it with its recovery phrase.</p>
+      <div class="grow"></div>
+      <div class="pact">
+        <a class="btn" href="P-Restore.dc.html">Import with recovery phrase…</a>
+        <a class="linkbtn" href="G-Launcher.dc.html">Back</a>
+        <a class="linkbtn del" href="P-Delete.dc.html">Delete from Connect…</a>
+      </div>
+      <p class="pfoot">Delete removes the registration only; no funds are touched.</p>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark"},"$preview":{"width":1120,"height":620}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { themeCls: this.props.theme === 'light' ? 'light' : '' };
+  }
+}
+</script>
+</body>
+</html>

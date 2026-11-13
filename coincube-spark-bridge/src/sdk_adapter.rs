@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use breez_sdk_spark::{
-    default_config, BreezSdk, CrossChainConfig, MaxFee, Network as SparkNetwork, SdkBuilder, Seed,
-    StableBalanceConfig, StableBalanceToken,
+    default_config, default_server_config, BreezSdk, CrossChainConfig, MaxFee, MaxOnchainFee,
+    Network as SparkNetwork, SdkBuilder, Seed,
 };
 
 /// Mainnet USDB token identifier. Published by Breez in the Stable
@@ -21,12 +21,6 @@ use breez_sdk_spark::{
 /// production wallet.
 pub const USDB_MAINNET_TOKEN_IDENTIFIER: &str =
     "btkn1xgrvjwey5ngcagvap2dzzvsy4uk8ua9x69k82dwvt5e7ef9drm9qztux87";
-
-/// Integrator-defined label used to reference the USDB token in
-/// [`breez_sdk_spark::UpdateUserSettingsRequest`]. This string is
-/// plumbing, not user copy — the gui always renders the feature as
-/// "Stable Balance" without leaking this label.
-pub const STABLE_BALANCE_LABEL: &str = "USDB";
 
 /// Default LNURL domain for production builds. The Breez-hosted LNURL
 /// server issues Lightning Addresses of the form `<username>@<this>`.
@@ -50,25 +44,17 @@ pub struct SdkHandle {
 
 /// Build a mainnet Spark SDK config with the given API key.
 ///
-/// Phase 6: always wires up [`StableBalanceConfig`] with the single
-/// USDB token. `default_active_label` is `None` so Stable Balance
-/// starts deactivated — the user opts in explicitly via the Spark
-/// Settings toggle, which then calls `update_user_settings`.
-/// Omitting `default_active_label` also means existing users keep
-/// their previous state (persisted by the SDK locally) across
-/// restarts.
+/// SDK Stable Balance stays unconfigured (#950 S2b): auto-convert is the
+/// bridge's own ([`crate::auto_convert`]). Without a
+/// `stable_balance_config` the SDK builds no Stable Balance at all
+/// (`build_stable_balance` in `sdk_builder.rs` at the pin), so it never
+/// sweeps bitcoin, never reads a Stable Balance setting or pending
+/// deactivation it saved before, and never converts the USDB balance back
+/// to bitcoin. Those saved entries stay in its storage, unread.
 pub fn mainnet_config(api_key: String) -> breez_sdk_spark::Config {
     let mut config = default_config(SparkNetwork::Mainnet);
     config.api_key = Some(api_key);
-    config.stable_balance_config = Some(StableBalanceConfig {
-        tokens: vec![StableBalanceToken {
-            label: STABLE_BALANCE_LABEL.to_string(),
-            token_identifier: USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
-        }],
-        default_active_label: None,
-        threshold_sats: None,
-        max_slippage_bps: None,
-    });
+    config.stable_balance_config = None;
     // Treat an unset / empty / whitespace-only env var as "not
     // configured" and fall back to the default. An empty string
     // would otherwise be handed to the SDK as a valid domain and
@@ -101,8 +87,11 @@ pub fn mainnet_config(api_key: String) -> breez_sdk_spark::Config {
     // deposits claim themselves: `NetworkRecommended` tracks the mempool's
     // fastest-fee estimate plus a small leeway, which comfortably covers the
     // few-sat/vbyte a static-deposit claim actually needs.
-    config.max_deposit_claim_fee = Some(MaxFee::NetworkRecommended {
-        leeway_sat_per_vbyte: 5,
+    config.max_deposit_claim_fee = Some(MaxFee {
+        onchain: MaxOnchainFee::NetworkRecommended {
+            leeway_sat_per_vbyte: 5,
+        },
+        proportional_ppm: None,
     });
     config
 }
@@ -117,8 +106,16 @@ pub async fn connect_mainnet(
     mnemonic: String,
     passphrase: Option<String>,
     storage_dir: String,
+    receive_only: bool,
 ) -> anyhow::Result<SdkHandle> {
-    let config = mainnet_config(api_key);
+    let config = if receive_only {
+        let mut config = default_server_config(SparkNetwork::Mainnet);
+        config.api_key = Some(api_key);
+        config.max_deposit_claim_fee = None;
+        config
+    } else {
+        mainnet_config(api_key)
+    };
     let seed = Seed::Mnemonic {
         mnemonic,
         passphrase,
@@ -158,25 +155,14 @@ mod tests {
         );
     }
 
+    /// SDK Stable Balance is never configured: with it, turning the
+    /// feature off converts the whole USDB balance back to bitcoin.
     #[test]
-    fn mainnet_config_wires_stable_balance_and_claim_fee_defaults() {
+    fn mainnet_config_leaves_stable_balance_off_and_wires_claim_fee_defaults() {
         let config = mainnet_config("api-key".to_string());
 
         assert_eq!(config.api_key.as_deref(), Some("api-key"));
-
-        let stable_balance = config
-            .stable_balance_config
-            .as_ref()
-            .expect("stable balance config should be enabled");
-        assert_eq!(stable_balance.tokens.len(), 1);
-        assert_eq!(stable_balance.tokens[0].label, STABLE_BALANCE_LABEL);
-        assert_eq!(
-            stable_balance.tokens[0].token_identifier,
-            USDB_MAINNET_TOKEN_IDENTIFIER
-        );
-        assert!(stable_balance.default_active_label.is_none());
-        assert!(stable_balance.threshold_sats.is_none());
-        assert!(stable_balance.max_slippage_bps.is_none());
+        assert!(config.stable_balance_config.is_none());
 
         let cross_chain = config
             .cross_chain_config
@@ -187,8 +173,11 @@ mod tests {
 
         assert!(matches!(
             config.max_deposit_claim_fee,
-            Some(MaxFee::NetworkRecommended {
-                leeway_sat_per_vbyte: 5
+            Some(MaxFee {
+                onchain: MaxOnchainFee::NetworkRecommended {
+                    leeway_sat_per_vbyte: 5
+                },
+                proportional_ppm: None,
             })
         ));
     }

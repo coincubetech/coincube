@@ -1,149 +1,87 @@
-use iced::{alignment, widget::Space, Alignment, Length};
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
+use iced::Alignment;
 
 use coincube_ui::{
     color,
     component::{
-        button, collapse,
-        text::{h3, p1_regular, text, Text, H3_SIZE},
+        collapse,
+        text::{text, Text},
     },
     icon, theme,
     widget::*,
 };
 
 use crate::installer::{
-    context,
     descriptor::{Path, PathKind, PathSequence},
     message::{self, Message},
     view::{
         editor::{
             define_descriptor_advanced_settings, defined_key, path,
-            template::diagram::{policy_timeline, PolicyRow, Timelock},
+            template::diagram::{PolicyRow, Timelock},
             undefined_key,
         },
-        layout,
+        layout_with_actions,
     },
 };
 
-pub fn inheritance_template_description(progress: (usize, usize)) -> Element<'static, Message> {
-    layout(
+pub fn inheritance_template_description(
+    progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
+) -> Element<'static, Message> {
+    super::template_introduction(
         progress,
-        None,
-        "Introduction",
-        Column::new()
-            .align_x(Alignment::Start)
-            .push(h3("Simple inheritance wallet"))
-            .max_width(800.0)
-            .push(Container::new(
-                p1_regular("For this setup you will need 2 Keys: Your Primary Key (for yourself) and an Inheritance Key (for your heir). For security reasons, we suggest you use a separate Hardware Wallet for each key.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(Row::new()
-                .spacing(30)
-                .push(
-                    Row::new()
-                    .align_y(Alignment::Center)
-                    .spacing(10)
-                    .push(icon::round_key_icon().size(H3_SIZE).style(theme::text::adaptive(color::GREEN)))
-                    .push(p1_regular("Primary key").bold())
-                ).push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(icon::round_key_icon().size(H3_SIZE).style(theme::text::adaptive(color::BLUE)))
-                        .push(p1_regular("Inheritance key").bold())
-            ))
-            .push(Container::new(
-                p1_regular("You will always be able to spend using your Primary Key.
-After a period of inactivity (but not before that) your Inheritance Key will become able to recover your funds.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(Container::new(
-                p1_regular("Tip: instead of coordinating a hardware wallet for your heir, you can invite a family member or friend to contribute a Keychain key for the inheritance key — they accept an invitation and provide their key remotely, dramatically simplifying setup.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(policy_timeline(vec![
-                PolicyRow {
-                    label: "Primary spending policy:",
-                    keys: vec![(1, color::GREEN)],
-                    box_label: "Primary Key",
-                    timelock: Timelock::None,
-                },
-                PolicyRow {
-                    label: "Recovery spending policy:",
-                    keys: vec![(2, color::BLUE)],
-                    box_label: "Inheritance Key",
-                    timelock: Timelock::After(0.5),
-                },
-            ]))
-            .push(Row::new().push(Space::new().width(Length::Fill)).push(button::primary(None, "Next").width(Length::Fixed(200.0)).on_press(Message::Next)))
-            .push(Space::new().height(50.0))
-            .spacing(20),
-        true,
-        Some(Message::Previous),
+        ui_instance,
+        show_keychain_tip,
+        "Simple inheritance wallet",
+        "You need 2 keys: your Primary Key and an Inheritance Key for your heir.",
+        "Your Primary Key can always spend. After the configured inactivity delay, the Inheritance Key can recover your funds.",
+        "Choose a separate signing device for your heir's key where practical.",
+        vec![
+            PolicyRow {
+                label: "Primary spending policy",
+                keys: vec![(1, color::GREEN)],
+                box_label: "Primary Key",
+                timelock: Timelock::None,
+            },
+            PolicyRow {
+                label: "Inheritance recovery policy",
+                keys: vec![(2, color::BLUE)],
+                box_label: "Inheritance Key",
+                timelock: Timelock::After(0.5),
+            },
+        ],
     )
 }
 
-pub fn two_of_three_inheritance_description(progress: (usize, usize)) -> Element<'static, Message> {
-    layout(
+pub fn two_of_three_inheritance_description(
+    progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
+) -> Element<'static, Message> {
+    super::template_introduction(
         progress,
-        None,
-        "Introduction",
-        Column::new()
-            .align_x(Alignment::Start)
-            .push(h3("2-of-3 multisig with inheritance"))
-            .max_width(800.0)
-            .push(Container::new(
-                p1_regular("For this setup you will need 4 keys: three Primary Keys and an Inheritance Key. For security reasons, we suggest you use a separate Hardware Wallet for each key.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(Row::new()
-                .spacing(30)
-                .push(
-                    Row::new()
-                    .align_y(Alignment::Center)
-                    .spacing(10)
-                    .push(icon::round_key_icon().size(H3_SIZE).style(theme::text::success))
-                    .push(p1_regular("Primary keys #1-3").bold())
-                ).push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(icon::round_key_icon().size(H3_SIZE).style(theme::text::adaptive(color::BLUE)))
-                        .push(p1_regular("Inheritance key").bold())
-            ))
-            .push(Container::new(
-                p1_regular("Any two of your three Primary Keys form a 2-of-3 multisig that can always spend. After a period of inactivity (but not before that) your Inheritance Key will become able to recover your funds.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(Container::new(
-                p1_regular("Tip: instead of coordinating a hardware wallet for your heir, you can invite a family member or friend to contribute a Keychain key for the inheritance key — they accept an invitation and provide their key remotely, dramatically simplifying setup.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(policy_timeline(vec![
-                PolicyRow {
-                    label: "Primary spending policy:",
-                    keys: vec![(1, color::GREEN), (2, color::GREEN), (3, color::GREEN)],
-                    box_label: "2-of-3 multisig",
-                    timelock: Timelock::None,
-                },
-                PolicyRow {
-                    label: "Recovery spending policy:",
-                    keys: vec![(4, color::BLUE)],
-                    box_label: "Inheritance Key",
-                    timelock: Timelock::After(0.5),
-                },
-            ]))
-            .push(Row::new().push(Space::new().width(Length::Fill)).push(button::primary(None, "Next").width(Length::Fixed(200.0)).on_press(Message::Next)))
-            .push(Space::new().height(50.0))
-            .spacing(20),
-        true,
-        Some(Message::Previous),
+        ui_instance,
+        show_keychain_tip,
+        "2-of-3 multisig with inheritance",
+        "You need 4 keys: three Primary Keys and an Inheritance Key.",
+        "Any two Primary Keys can spend now. After the configured inactivity delay, the Inheritance Key can recover your funds.",
+        "Choose a separate signing device for your heir's key where practical.",
+        vec![
+            PolicyRow {
+                label: "Primary spending policy",
+                keys: vec![(1, color::GREEN), (2, color::GREEN), (3, color::GREEN)],
+                box_label: "2-of-3 multisig",
+                timelock: Timelock::None,
+            },
+            PolicyRow {
+                label: "Inheritance recovery policy",
+                keys: vec![(4, color::BLUE)],
+                box_label: "Inheritance Key",
+                timelock: Timelock::After(0.5),
+            },
+        ],
     )
 }
 
@@ -157,9 +95,8 @@ pub fn two_of_three_inheritance_template<'a>(
     inheritance_path: &'a Path,
     valid: bool,
 ) -> Element<'a, Message> {
-    layout(
+    layout_with_actions(
         progress,
-        None,
         "Set keys",
         Column::new()
             .align_x(Alignment::Start)
@@ -170,7 +107,7 @@ pub fn two_of_three_inheritance_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapse_icon()),
                     )
                     .style(theme::button::transparent)
@@ -180,7 +117,7 @@ pub fn two_of_three_inheritance_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapsed_icon()),
                     )
                     .style(theme::button::transparent)
@@ -199,12 +136,35 @@ pub fn two_of_three_inheritance_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(i, primary_key)| {
-                            crate::installer::view::editor::template_primary_key(
-                                i,
-                                primary_key,
-                                use_taproot,
-                                primary_path,
-                            )
+                            if let Some(key) = primary_key {
+                                defined_key(
+                                    &key.name,
+                                    color::GREEN,
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
+                                    if use_taproot && !key.source.is_compatible_taproot() {
+                                        Some("This device does not support Taproot")
+                                    } else {
+                                        None
+                                    },
+                                    true,
+                                )
+                            } else {
+                                undefined_key(
+                                    color::GREEN,
+                                    localized_format!(
+                                        "Primary key #{}",
+                                        "Clave principal #{}",
+                                        i + 1
+                                    ),
+                                    !primary_path.keys[0..i].iter().any(|k| k.is_none()),
+                                    true,
+                                )
+                            }
+                            .map(move |msg| message::DefinePath::Key(i, msg))
                         })
                         .collect(),
                     true,
@@ -232,13 +192,28 @@ pub fn two_of_three_inheritance_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(i, inh_key)| {
-                            two_of_three_inheritance_template_inh_key(
-                                i,
-                                inh_key,
-                                use_taproot,
-                                primary_path,
-                                inheritance_path,
-                            )
+                            if let Some(key) = inh_key {
+                                defined_key(
+                                    &key.name,
+                                    color::BLUE,
+                                    "Inheritance key".to_string(),
+                                    if use_taproot && !key.source.is_compatible_taproot() {
+                                        Some("This device does not support Taproot")
+                                    } else {
+                                        None
+                                    },
+                                    true,
+                                )
+                            } else {
+                                undefined_key(
+                                    color::BLUE,
+                                    "Inheritance key",
+                                    !(primary_path.keys.iter().any(|k| k.is_none())
+                                        || inheritance_path.keys[0..i].iter().any(|k| k.is_none())),
+                                    true,
+                                )
+                            }
+                            .map(move |msg| message::DefinePath::Key(i, msg))
                         })
                         .collect(),
                     true,
@@ -254,35 +229,10 @@ pub fn two_of_three_inheritance_template<'a>(
                     }
                 }),
             )
-            .push(Space::new().height(10))
-            .push(
-                Row::new()
-                    .push(
-                        button::secondary(None, "Clear All")
-                            .width(Length::Fixed(120.0))
-                            .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
-                    )
-                    .push(Space::new().width(40))
-                    .push(
-                        button::secondary(None, "Customize")
-                            .width(Length::Fixed(120.0))
-                            .on_press(Message::DefineDescriptor(
-                                message::DefineDescriptor::ChangeTemplate(
-                                    context::DescriptorTemplate::Custom,
-                                ),
-                            )),
-                    )
-                    .push(Space::new().width(Length::Fill))
-                    .push(
-                        button::primary(None, "Continue")
-                            .width(Length::Fixed(200.0))
-                            .on_press_maybe(if valid { Some(Message::Next) } else { None }),
-                    ),
-            )
-            .push(Space::new().height(100.0))
             .spacing(20),
         true,
         Some(Message::Previous),
+        super::template_actions(valid, true),
     )
 }
 
@@ -299,9 +249,8 @@ pub fn inheritance_template<'a>(
     } else {
         None
     };
-    layout(
+    layout_with_actions(
         progress,
-        None,
         "Set keys",
         Column::new()
             .align_x(Alignment::Start)
@@ -312,7 +261,7 @@ pub fn inheritance_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapse_icon()),
                     )
                     .style(theme::button::transparent)
@@ -322,7 +271,7 @@ pub fn inheritance_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapsed_icon()),
                     )
                     .style(theme::button::transparent)
@@ -341,7 +290,11 @@ pub fn inheritance_template<'a>(
                             &key.name,
                             color::GREEN,
                             "Primary key".to_string(),
-                            crate::installer::view::editor::template_key_warning(use_taproot, key),
+                            if use_taproot && !key.source.is_compatible_taproot() {
+                                Some("This device does not support Taproot")
+                            } else {
+                                None
+                            },
                             true,
                         )
                     } else {
@@ -364,7 +317,11 @@ pub fn inheritance_template<'a>(
                             &key.name,
                             color::BLUE,
                             "Inheritance key".to_string(),
-                            crate::installer::view::editor::template_key_warning(use_taproot, key),
+                            if use_taproot && !key.source.is_compatible_taproot() {
+                                Some("This device does not support Taproot")
+                            } else {
+                                None
+                            },
                             true,
                         )
                     } else {
@@ -375,60 +332,9 @@ pub fn inheritance_template<'a>(
                 )
                 .map(|msg| Message::DefineDescriptor(message::DefineDescriptor::Path(1, msg))),
             )
-            .push(Space::new().height(10))
-            .push(
-                Row::new()
-                    .push(
-                        button::secondary(None, "Clear All")
-                            .width(Length::Fixed(120.0))
-                            .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
-                    )
-                    .push(Space::new().width(40))
-                    .push(
-                        button::secondary(None, "Customize")
-                            .width(Length::Fixed(120.0))
-                            .on_press(Message::DefineDescriptor(
-                                message::DefineDescriptor::ChangeTemplate(
-                                    context::DescriptorTemplate::Custom,
-                                ),
-                            )),
-                    )
-                    .push(Space::new().width(Length::Fill))
-                    .push(
-                        button::primary(None, "Continue")
-                            .width(Length::Fixed(200.0))
-                            .on_press_maybe(if valid { Some(Message::Next) } else { None }),
-                    ),
-            )
             .spacing(20),
         true,
         Some(Message::Previous),
+        super::template_actions(valid, true),
     )
-}
-
-fn two_of_three_inheritance_template_inh_key<'a>(
-    i: usize,
-    inh_key: &'a Option<crate::installer::descriptor::Key>,
-    use_taproot: bool,
-    primary_path: &'a Path,
-    inheritance_path: &'a Path,
-) -> Element<'a, message::DefinePath> {
-    if let Some(key) = inh_key {
-        defined_key(
-            &key.name,
-            color::BLUE,
-            "Inheritance key".to_string(),
-            crate::installer::view::editor::template_key_warning(use_taproot, key),
-            true,
-        )
-    } else {
-        undefined_key(
-            color::BLUE,
-            "Inheritance key",
-            !(primary_path.keys.iter().any(|k| k.is_none())
-                || inheritance_path.keys[0..i].iter().any(|k| k.is_none())),
-            true,
-        )
-    }
-    .map(move |msg| message::DefinePath::Key(i, msg))
 }

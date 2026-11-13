@@ -79,7 +79,19 @@ async fn create_new_testnet4_cube(
             input: saved_words[index - 1].clone(),
         }));
     }
-    let messages = drain(home.update(backup(BackupWalletMessage::VerifyPhrase))).await;
+    let verification = drain(home.update(backup(BackupWalletMessage::VerifyPhrase))).await;
+    // Verification returns to the backup hub; only its explicit Continue
+    // action persists the Cube. Never continue without the real challenge.
+    if !verification.is_empty()
+        || !home.creation_seed_confirmed
+        || !matches!(
+            home.state,
+            State::CreationBackup(CreationBackupStep::Choice)
+        )
+    {
+        return Err("backup_verification_failed");
+    }
+    let messages = drain(home.update(Message::View(ViewMessage::CreationBackupContinue))).await;
     let mut created = None;
     for message in messages {
         if let Message::CubeCreated(result) = message {

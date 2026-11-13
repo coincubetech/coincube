@@ -81,11 +81,6 @@ impl ImportDescriptor {
 }
 
 impl Step for ImportDescriptor {
-    // ImportRemoteWallet is used instead
-    fn skip(&self, ctx: &Context) -> bool {
-        ctx.remote_backend.is_some()
-    }
-
     fn subscription(&self, hws: &HardwareWallets) -> Subscription<Message> {
         self.modal.subscriptions(hws)
     }
@@ -115,7 +110,31 @@ impl Step for ImportDescriptor {
                 None
             }
             Message::ImportExport(ImportExportMessage::Progress(Progress::WalletFromBackup(r))) => {
-                self.on_wallet_backup(r)
+                let (descriptor, network, aliases, backup) = r;
+                if !matches!(backup.chain_identity(), Ok(chain) if !chain.is_blake2b()) {
+                    self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
+                    return Task::none();
+                }
+                if let Some(n) = network {
+                    if self.network == n {
+                        self.imported_backup = Some(backup);
+                        self.imported_descriptor.value = descriptor.to_string();
+                        self.imported_aliases = Some(aliases);
+                    } else {
+                        self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
+                    }
+                } else {
+                    // The backup have been inferred from a bare descriptor, we check whether
+                    // the descriptor match any test network
+                    if self.network != Network::Bitcoin {
+                        self.imported_backup = Some(backup);
+                        self.imported_descriptor.value = descriptor.to_string();
+                        self.imported_aliases = Some(aliases);
+                    } else {
+                        self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
+                    }
+                }
+                None
             }
             Message::ImportExport(ImportExportMessage::Progress(Progress::EncryptedFile(
                 bytes,
@@ -137,7 +156,38 @@ impl Step for ImportDescriptor {
                 }
                 None
             }
-            Message::Decrypt(Decrypt::Backup(backup)) => self.on_decrypted_backup(backup),
+            Message::Decrypt(Decrypt::Backup(mut backup)) => {
+                if !matches!(backup.chain_identity(), Ok(chain) if !chain.is_blake2b()) {
+                    self.modal = ImportDescriptorModal::None;
+                    self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
+                    return Task::none();
+                }
+                let descriptor = backup.accounts.first().map(|acc| acc.descriptor.clone());
+                if let Some(desc) = descriptor {
+                    let network_matches = if self.network == Network::Bitcoin {
+                        backup.network == Network::Bitcoin
+                    } else {
+                        backup.network != Network::Bitcoin
+                    };
+                    if network_matches {
+                        // NOTE: we need to overwrite w/ correct network for testnets
+                        // as non Mainnet keys / descriptor are parsed as Signet
+                        backup.network = self.network;
+
+                        self.imported_descriptor.value = desc;
+                        self.imported_backup = Some(backup);
+                        self.imported_aliases = None;
+                        self.modal = ImportDescriptorModal::None;
+                    } else {
+                        self.modal = ImportDescriptorModal::None;
+                        self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
+                    }
+                } else {
+                    self.modal = ImportDescriptorModal::None;
+                    self.error = Some("Backup imported but descriptor missing!".into());
+                }
+                None
+            }
             Message::Decrypt(msg) => Some(self.modal.update(Message::Decrypt(msg))),
             _ => None,
         };
@@ -187,11 +237,9 @@ impl Step for ImportDescriptor {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         let content = view::import_descriptor(
             progress,
-            email,
             &self.imported_descriptor,
             self.imported_backup.is_some(),
             self.wrong_network,
@@ -246,6 +294,9 @@ impl RegisterDescriptor {
 }
 
 impl Step for RegisterDescriptor {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Register)
+    }
     fn load_context(&mut self, ctx: &Context) {
         // we reset device registered set if the descriptor have changed.
         if self.descriptor != ctx.descriptor {
@@ -335,13 +386,11 @@ impl Step for RegisterDescriptor {
         &'a self,
         hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         let desc = self.descriptor.as_ref().unwrap();
 
         view::register_descriptor(
             progress,
-            email,
             desc,
             &hws.list,
             &self.registered,
@@ -384,6 +433,9 @@ pub struct BackupDescriptor {
 }
 
 impl Step for BackupDescriptor {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Backup)
+    }
     fn subscription(&self, _hws: &HardwareWallets) -> Subscription<Message> {
         if let Some(modal) = &self.modal {
             if let Some(sub) = modal.subscription() {
@@ -462,11 +514,9 @@ impl Step for BackupDescriptor {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         let content = view::backup_descriptor(
             progress,
-            email,
             self.descriptor.as_ref().expect("Must be a descriptor"),
             &self.keys,
             self.error.as_ref(),
@@ -483,76 +533,6 @@ impl Step for BackupDescriptor {
 impl From<BackupDescriptor> for Box<dyn Step> {
     fn from(s: BackupDescriptor) -> Box<dyn Step> {
         Box::new(s)
-    }
-}
-
-impl ImportDescriptor {
-    fn on_wallet_backup(
-        &mut self,
-        r: (
-            CoincubeDescriptor,
-            Option<Network>,
-            HashMap<Fingerprint, KeySetting>,
-            Backup,
-        ),
-    ) -> Option<Task<Message>> {
-        let (descriptor, network, aliases, backup) = r;
-        if !matches!(backup.chain_identity(), Ok(chain) if !chain.is_blake2b()) {
-            self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
-            return None;
-        }
-        if let Some(n) = network {
-            if self.network == n {
-                self.imported_backup = Some(backup);
-                self.imported_descriptor.value = descriptor.to_string();
-                self.imported_aliases = Some(aliases);
-            } else {
-                self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
-            }
-        } else {
-            // The backup have been inferred from a bare descriptor, we check whether
-            // the descriptor match any test network
-            if self.network != Network::Bitcoin {
-                self.imported_backup = Some(backup);
-                self.imported_descriptor.value = descriptor.to_string();
-                self.imported_aliases = Some(aliases);
-            } else {
-                self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
-            }
-        }
-        None
-    }
-    fn on_decrypted_backup(&mut self, mut backup: Backup) -> Option<Task<Message>> {
-        if !matches!(backup.chain_identity(), Ok(chain) if !chain.is_blake2b()) {
-            self.modal = ImportDescriptorModal::None;
-            self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
-            return None;
-        }
-        let descriptor = backup.accounts.first().map(|acc| acc.descriptor.clone());
-        if let Some(desc) = descriptor {
-            let network_matches = if self.network == Network::Bitcoin {
-                backup.network == Network::Bitcoin
-            } else {
-                backup.network != Network::Bitcoin
-            };
-            if network_matches {
-                // NOTE: we need to overwrite w/ correct network for testnets
-                // as non Mainnet keys / descriptor are parsed as Signet
-                backup.network = self.network;
-
-                self.imported_descriptor.value = desc;
-                self.imported_backup = Some(backup);
-                self.imported_aliases = None;
-                self.modal = ImportDescriptorModal::None;
-            } else {
-                self.modal = ImportDescriptorModal::None;
-                self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
-            }
-        } else {
-            self.modal = ImportDescriptorModal::None;
-            self.error = Some("Backup imported but descriptor missing!".into());
-        }
-        None
     }
 }
 

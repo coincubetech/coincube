@@ -1,10 +1,10 @@
 [package]
 name = "branta"
-version = "3.2.1"
+version = "4.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
-description = "Rust SDK for the Branta V2 API — payment destination lookup and registration with zero-knowledge encryption support"
+description = "Rust SDK for the Branta V2 API — verify a payment destination or register one"
 repository = "https://github.com/BrantaOps/branta-rust"
 homepage = "https://branta.pro"
 readme = "README.md"
@@ -14,7 +14,7 @@ exclude = ["CLAUDE.md"]
 
 [dependencies]
 aes-gcm = "0.11.0"
-async-trait = "0.1.91"
+async-trait = "0.1.92"
 base64 = "0.23.0"
 hex = "0.4.3"
 hmac = "0.13.0"

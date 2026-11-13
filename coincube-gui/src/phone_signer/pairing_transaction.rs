@@ -91,6 +91,16 @@ impl PairingTransaction {
         mut candidate: PairedPhone,
     ) -> io::Result<Self> {
         let _guard = WRITER.lock().unwrap();
+        // The pairing transaction ID is a fresh UUID minted by the local
+        // handshake. Persist it with the row so revocation is reliable even
+        // when two pairings complete within the same display second.
+        if let Some(scope) = candidate
+            .signer_binding
+            .as_mut()
+            .and_then(|binding| binding.imported_scope.as_mut())
+        {
+            scope.pairing_revision = Some(id.clone());
+        }
         let key = hex::encode(candidate.cert_pin);
         let visible = pairing_store::load_visible(dir)?;
         let previous = visible

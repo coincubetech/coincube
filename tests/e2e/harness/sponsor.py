@@ -139,7 +139,7 @@ def read_run(directory):
     return state, checkpoint, binding
 
 
-def make_intent(source_dir, target_dir, amount, fee):
+def make_intent(source_dir, target_dir, amount, fee, prior_dir=None):
     require(type(amount) is int and 100000 <= amount <= 500000 and type(fee) is int and 100 <= fee <= 1000, "AMOUNT_BOUNDS")
     source, checkpoint, source_binding = read_run(source_dir)
     target, target_checkpoint, target_binding = read_run(target_dir)
@@ -150,20 +150,45 @@ def make_intent(source_dir, target_dir, amount, fee):
     txid = spend["txid"]
     require(checkpoint["artifacts"]["public_acceptance"]["txid"] == txid
             and checkpoint["artifacts"]["broadcast_txid"] == txid, "SOURCE_INCOMPLETE")
+    prior = None
+    expected_change = spend["change_sats"]
+    if prior_dir is not None:
+        intent_text = private_read(prior_dir / "sponsor-intent.json")
+        receipt_text = private_read(prior_dir / "sponsor-receipt.json")
+        parent = json.loads(intent_text)
+        receipt = json.loads(receipt_text)
+        require(parent.get("version") == 1 and "prior_sponsor" not in parent
+                and parent.get("source") == source_binding
+                and parent.get("previous_txid") == txid, "PARENT_BINDING")
+        validate_receipt(receipt, parent, sha(intent_text))
+        old_target = parent["target"]
+        prior_state, prior_checkpoint, prior_binding = read_run(Path(old_target["directory"]).resolve())
+        require(all(prior_binding[k] == old_target[k] for k in ("directory", "run_id", "descriptor_sha256"))
+                and prior_state["owner_user_id"] == source["owner_user_id"]
+                and prior_state["vault_id"] != source["vault_id"]
+                and prior_checkpoint["artifacts"]["account_identity"] == checkpoint["artifacts"]["account_identity"],
+                "PARENT_TARGET_BINDING")
+        prior = {"intent_json": intent_text.decode(), "receipt_json": receipt_text.decode(), "target": prior_binding}
+        txid, expected_change = receipt["txid"], receipt["change_sats"]
     evidence = observe(txid, 1)
+    if prior is not None:
+        require(evidence[0]["raw_tx"] == receipt["raw_tx"], "PARENT_SIGNED_BYTES")
     previous = transaction(evidence[0]["raw_tx"])
     require(len(previous["outputs"]) == 2, "SOURCE_CHANGE")
     change = previous["outputs"][1]
-    require(change["value_sats"] == spend["change_sats"] and change["script"] == p2wsh_script(spend["change_address"]), "SOURCE_CHANGE")
+    require(change["value_sats"] == expected_change and change["script"] == p2wsh_script(spend["change_address"]), "SOURCE_CHANGE")
     target_address = target_checkpoint["artifacts"]["receive_address"]
     remaining = change["value_sats"] - amount - fee
     require(1000 <= remaining and change["value_sats"] <= 10000000, "AMOUNT_BOUNDS")
-    return {"version": 1, "network": "testnet4", "authorization_ref": "coincube#1137:testnet4-sponsor",
+    intent = {"version": 2 if prior else 1, "network": "testnet4", "authorization_ref": "coincube#1137:testnet4-sponsor",
             "source": source_binding, "target": target_binding, "previous_txid": txid, "previous_vout": 1,
             "previous_value_sats": change["value_sats"], "previous_raw_sha256": sha(evidence[0]["raw_tx"].encode()),
             "source_script": change["script"], "target_address": target_address,
             "target_script": p2wsh_script(target_address), "amount_sats": amount,
-            "fee_sats": fee, "change_sats": remaining}, evidence, source
+            "fee_sats": fee, "change_sats": remaining}
+    if prior is not None:
+        intent["prior_sponsor"] = prior
+    return intent, evidence, source
 
 
 def validate_receipt(receipt, intent, intent_hash):
@@ -212,6 +237,9 @@ def binary_digest(path):
 def verify_snapshot(intent):
     for key in ("source", "target"):
         require(read_run(Path(intent[key]["directory"]))[2] == intent[key], "RUN_SNAPSHOT_CHANGED")
+    if "prior_sponsor" in intent:
+        binding = intent["prior_sponsor"]["target"]
+        require(read_run(Path(binding["directory"]))[2] == binding, "PARENT_SNAPSHOT_CHANGED")
 
 
 def execute(args):
@@ -221,8 +249,17 @@ def execute(args):
     source_state = json.loads(private_read(source_dir / "provision.json"))
     target_state = json.loads(private_read(target_dir / "provision.json"))
     protected = [source_dir, target_dir, Path(source_state["profile_dir"]).resolve(), Path(target_state["profile_dir"]).resolve()]
+    prior_dir = getattr(args, "source_sponsor_dir", None)
+    if prior_dir is not None:
+        prior_dir = Path(prior_dir)
+        require(prior_dir.is_absolute() and not prior_dir.is_symlink(), "PARENT_DIRECTORY")
+        prior_dir = prior_dir.resolve()
+        parent = json.loads(private_read(prior_dir / "sponsor-intent.json"))
+        prior_target = Path(parent["target"]["directory"]).resolve()
+        prior_state = json.loads(private_read(prior_target / "provision.json"))
+        protected += [prior_dir, prior_target, Path(prior_state["profile_dir"]).resolve()]
     with output_lock(output, protected):
-        intent, evidence, source = make_intent(source_dir, target_dir, args.amount_sats, args.fee_sats)
+        intent, evidence, source = make_intent(source_dir, target_dir, args.amount_sats, args.fee_sats, prior_dir)
         path = output / "sponsor-intent.json"
         content = encoded(intent)
         if path.exists():
@@ -277,6 +314,7 @@ def main():
     parser.add_argument("--amount-sats", type=int, required=True)
     parser.add_argument("--fee-sats", type=int, required=True)
     parser.add_argument("--native-binary")
+    parser.add_argument("--source-sponsor-dir", help="Private original v1 sponsor intent/receipt directory; supports exactly one sponsor hop.")
     parser.add_argument("--sign-intent-sha256")
     args = parser.parse_args()
     os.umask(0o077)

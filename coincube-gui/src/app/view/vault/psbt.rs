@@ -1,8 +1,13 @@
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::notice;
+use coincube_ui::localized_format;
 use std::collections::{HashMap, HashSet};
 
+use coincube_ui::locale::Text as CopyText;
+use iced::advanced::widget::Id;
 use iced::{
     alignment::Horizontal,
-    widget::{checkbox, scrollable, tooltip, Space},
+    widget::{checkbox, scrollable, text::Wrapping, tooltip, Space},
     Alignment, Length,
 };
 
@@ -30,6 +35,24 @@ use coincube_ui::{
     widget::{Button, Column, ColumnExt, Container, Element, Row, RowExt, TextInput},
 };
 
+pub(crate) fn action_id(scope: u64, name: &str) -> Id {
+    Id::from(format!("tenshu.psbt.{scope}.{name}"))
+}
+
+fn primary_action<'a>(
+    id: Id,
+    label: &'static str,
+) -> coincube_ui::widget::action::Action<'a, Message> {
+    button::primary_action(id, None, label, Message::FocusAction)
+}
+
+fn secondary_action<'a>(
+    id: Id,
+    label: &'static str,
+) -> coincube_ui::widget::action::Action<'a, Message> {
+    button::secondary_action(id, None, label, Message::FocusAction)
+}
+
 use crate::{
     app::{
         cache::Cache,
@@ -50,7 +73,9 @@ use crate::{
 /// the screen and Broadcast gates on the path threshold as before.
 #[derive(Debug, Clone)]
 pub struct ReplayPill<'a> {
-    pub review: &'a ReplayReview,
+    /// The review as of the current cache
+    /// ([`crate::app::state::vault::psbt::PsbtState::current_review`]).
+    pub review: std::borrow::Cow<'a, ReplayReview>,
     /// [`replay::entangled_inputs`] for this PSBT, from the cache.
     pub entangled: Vec<(usize, Entanglement)>,
     /// [`crate::app::state::vault::psbt::PsbtState::broadcast_ready`].
@@ -78,7 +103,7 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
         Row::new()
             .spacing(10)
             .align_y(Alignment::Center)
-            .push(p1_bold("Replay"))
+            .push(p1_bold(localized_copy("Replay")))
             .push(
                 Container::new(p2_regular(label))
                     .padding(10)
@@ -89,21 +114,29 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
     if let Some(required) = replay::blocked_entangled_copy(&blocked) {
         // No checkbox: the acknowledgement does not apply to a required
         // signature, and showing one would suggest it does.
-        column = column.push(p2_regular(required).style(theme::text::warning));
+        column = column
+            .push(p2_regular(required).style(theme::text::warning))
+            .push(
+                coincube_ui::component::button::secondary(None, localized_copy("Split first"))
+                    .on_press(Message::SplitFirst),
+            );
     } else if pill.review.status().needs_acknowledgement() {
         if pill.checking {
-            column = column.push(p2_regular(replay::CHECKING_COPY).style(theme::text::secondary));
+            column = column.push(
+                p2_regular(localized_copy(replay::CHECKING_COPY)).style(theme::text::secondary),
+            );
         } else if !pill.unresolved.is_empty() {
             let (noun, verb) = if pill.unresolved.len() == 1 {
-                ("input", "exists")
+                (localized_copy("input"), localized_copy("exists"))
             } else {
-                ("inputs", "exist")
+                (localized_copy("inputs"), localized_copy("exist"))
             };
             column = column.push(
-                p2_regular(format!(
+                p2_regular(localized_format!(
                     "Could not check whether {} {} {} also on Bitcoin (Connect did not answer). \
                      You can still send after acknowledging below; the check is retried after \
                      the next sync.",
+                    "No se pudo comprobar si {} {} {} también en Bitcoin porque Connect no respondió. Puedes enviar después de confirmar abajo. La comprobación se repetirá tras la próxima sincronización.",
                     noun,
                     pill.unresolved
                         .iter()
@@ -118,12 +151,13 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
         let acknowledged = pill.review.acknowledged();
         column = column.push(
             checkbox(acknowledged)
-                .label(replay::REPLAYABLE_ACKNOWLEDGEMENT)
+                .label(localized_copy(replay::REPLAYABLE_ACKNOWLEDGEMENT))
                 .on_toggle(|checked| Message::Spend(SpendTxMessage::AcknowledgeReplay(checked))),
         );
     } else if matches!(pill.review.status(), replay::ReplayStatus::Protected) {
-        column =
-            column.push(p2_regular(replay::PROTECTED_LIMITATION).style(theme::text::secondary));
+        column = column.push(
+            p2_regular(localized_copy(replay::PROTECTED_LIMITATION)).style(theme::text::secondary),
+        );
     }
     let unchecked: Vec<usize> = pill
         .entangled
@@ -133,9 +167,10 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
         .collect();
     if !unchecked.is_empty() {
         column = column.push(
-            p2_regular(format!(
+            p2_regular(localized_format!(
                 "Not yet checked whether {} {} also on Bitcoin (the lookup will run after the next sync).",
-                if unchecked.len() == 1 { "input" } else { "inputs" },
+                "Aún falta comprobar si {} {} también existen en Bitcoin. La comprobación se hará después de la próxima sincronización.",
+                localized_copy(if unchecked.len() == 1 { "input" } else { "inputs" }),
                 unchecked
                     .iter()
                     .map(|i| i.to_string())
@@ -150,6 +185,7 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
 
 #[allow(clippy::too_many_arguments)]
 pub fn psbt_view<'a>(
+    action_scope: u64,
     cache: &'a Cache,
     tx: &'a SpendTx,
     saved: bool,
@@ -161,17 +197,46 @@ pub fn psbt_view<'a>(
     bitcoin_unit: BitcoinDisplayUnit,
     replay: Option<ReplayPill<'a>>,
     broadcast_ready: bool,
+    recipient_identities: &'a [(usize, crate::services::branta::LookupResult)],
 ) -> Element<'a, Message> {
+    // A pending PSBT is an authorization screen: Sign and Broadcast must
+    // always show the exact amounts the user is approving. Once the proposal
+    // is terminal, its detail is passive and follows the global privacy eye.
+    let mask_amounts = mask_passive_psbt_detail(cache.balance_amounts_masked(), &tx.status);
+    let identity_summary = recipient_identity_summary(
+        tx,
+        network,
+        bitcoin_unit,
+        broadcast_ready,
+        recipient_identities,
+        cache.theme_mode,
+        mask_amounts,
+    );
+    let output_identities = if identity_summary.is_some() {
+        &[][..]
+    } else {
+        recipient_identities
+    };
     dashboard(
         &Menu::Vault(VaultSubMenu::PSBTs(None)),
         cache,
         Column::new()
             .spacing(20)
             .push(
+                secondary_action(
+                    action_id(action_scope, "overview.back"),
+                    localized_copy("‹ All PSBTs"),
+                )
+                .on_press(Message::Close),
+            )
+            .push(
                 Row::new()
                     .align_y(Alignment::Center)
                     .spacing(10)
-                    .push(Container::new(h3("PSBT").bold()).width(Length::Fill))
+                    .push(
+                        Container::new(h3(localized_copy("PSBT proposal")).bold())
+                            .width(Length::Fill),
+                    )
                     .push(if !tx.sigs.recovery_paths().is_empty() {
                         Some(badge::recovery())
                     } else {
@@ -184,8 +249,18 @@ pub fn psbt_view<'a>(
                         _ => None,
                     }),
             )
-            .push(spend_header(tx, labels_editing, bitcoin_unit))
+            .push(p1_regular(crate::chain::canonical_network_name(
+                cache.chain(),
+            )))
+            .push(spend_header_masked(
+                tx,
+                labels_editing,
+                bitcoin_unit,
+                mask_amounts,
+            ))
+            .push_maybe(identity_summary)
             .push(spend_overview_view(
+                action_scope,
                 tx,
                 desc_info,
                 key_aliases,
@@ -193,18 +268,20 @@ pub fn psbt_view<'a>(
                 saved,
                 replay,
                 broadcast_ready,
+                true,
             ))
             .push(
                 Column::new()
                     .spacing(20)
-                    .push(inputs_view(
+                    .push(history_inputs_view(
                         &tx.coins,
                         &tx.psbt.unsigned_tx,
                         &tx.labels,
                         labels_editing,
                         bitcoin_unit,
+                        mask_amounts,
                     ))
-                    .push(outputs_view(
+                    .push(outputs_view_with_identities_masked(
                         &tx.psbt.unsigned_tx,
                         network,
                         &tx.change_indexes,
@@ -213,31 +290,40 @@ pub fn psbt_view<'a>(
                         bitcoin_unit,
                         tx.is_single_payment().is_some(),
                         false,
+                        output_identities,
+                        cache.theme_mode,
+                        mask_amounts,
                     )),
             )
             .push(if saved {
                 Row::new()
                     .push(
-                        button::secondary(None, "Delete")
-                            .width(Length::Fixed(200.0))
-                            .on_press_maybe(if currently_signing {
-                                None
-                            } else {
-                                Some(Message::Spend(SpendTxMessage::Delete))
-                            }),
+                        secondary_action(
+                            action_id(action_scope, "overview.delete"),
+                            localized_copy("Delete"),
+                        )
+                        .width(Length::Fixed(200.0))
+                        .on_press_maybe(if currently_signing {
+                            None
+                        } else {
+                            Some(Message::Spend(SpendTxMessage::Delete))
+                        }),
                     )
                     .width(Length::Fill)
             } else {
                 Row::new()
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        button::secondary(None, "Save")
-                            .width(Length::Fixed(150.0))
-                            .on_press_maybe(if currently_signing {
-                                None
-                            } else {
-                                Some(Message::Spend(SpendTxMessage::Save))
-                            }),
+                        secondary_action(
+                            action_id(action_scope, "overview.save"),
+                            localized_copy("Save"),
+                        )
+                        .width(Length::Fixed(150.0))
+                        .on_press_maybe(if currently_signing {
+                            None
+                        } else {
+                            Some(Message::Spend(SpendTxMessage::Save))
+                        }),
                     )
                     .width(Length::Fill)
             })
@@ -245,9 +331,103 @@ pub fn psbt_view<'a>(
     )
 }
 
+fn mask_passive_psbt_detail(balance_amounts_masked: bool, status: &SpendStatus) -> bool {
+    balance_amounts_masked && *status != SpendStatus::Pending
+}
+
+/// The detail screen shows a current Branta association for a single external
+/// recipient beside the signing controls. Readiness comes from the spend state;
+/// Branta only identifies the recipient and never asserts that a PSBT is safe.
+fn recipient_identity_summary<'a>(
+    tx: &'a SpendTx,
+    network: Network,
+    bitcoin_unit: BitcoinDisplayUnit,
+    broadcast_ready: bool,
+    identities: &'a [(usize, crate::services::branta::LookupResult)],
+    theme_mode: coincube_ui::theme::palette::ThemeMode,
+    mask_amounts: bool,
+) -> Option<Element<'a, Message>> {
+    if !broadcast_ready || tx.status != SpendStatus::Pending || tx.is_send_to_self() {
+        return None;
+    }
+    // Keep the per-output cards for multi-recipient PSBTs, so the identities
+    // remain next to their respective outputs rather than one appearing to
+    // apply to the whole transaction.
+    if tx
+        .psbt
+        .unsigned_tx
+        .output
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !tx.change_indexes.contains(index))
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let (vout, output) = tx
+        .psbt
+        .unsigned_tx
+        .output
+        .iter()
+        .enumerate()
+        .find(|(index, _)| !tx.change_indexes.contains(index))?;
+    let (_, crate::services::branta::LookupResult::Identified(matches)) =
+        identities.iter().find(|(index, _)| *index == vout)?
+    else {
+        return None;
+    };
+    let address = Address::from_script(&output.script_pubkey, network).ok()?;
+    let current: Vec<_> = matches
+        .iter()
+        .enumerate()
+        .filter(|(_, identity)| identity.is_current())
+        .collect();
+    if current.is_empty() {
+        return None;
+    }
+    let cards = current
+        .into_iter()
+        .fold(Column::new().spacing(10), |column, (index, identity)| {
+            column.push(crate::app::view::shared::recipient_identity::card(
+                identity,
+                Message::OpenVaultRecipientIdentity(vout, index),
+                theme_mode,
+            ))
+        });
+    Some(
+        Column::new()
+            .spacing(10)
+            .push(h4_bold(localized_copy("Recipient identity")))
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .align_y(Alignment::Start)
+                    .push(
+                        p2_regular(address.to_string())
+                            .style(theme::text::secondary)
+                            .wrapping(Wrapping::WordOrGlyph)
+                            .width(Length::Fill),
+                    )
+                    .push({
+                        let amount: Element<'a, Message> = if mask_amounts {
+                            p2_regular("••••").into()
+                        } else {
+                            amount_with_unit(&output.value, bitcoin_unit)
+                                .width(Length::Shrink)
+                                .into()
+                        };
+                        amount
+                    }),
+            )
+            .push(cards)
+            .into(),
+    )
+}
+
 pub fn save_action<'a>(saved: bool) -> Element<'a, Message> {
     if saved {
-        card::simple(text("Transaction is saved"))
+        card::simple(text(localized_copy("Transaction is saved")))
             .width(Length::Fixed(400.0))
             .align_x(iced::alignment::Horizontal::Center)
             .into()
@@ -255,14 +435,17 @@ pub fn save_action<'a>(saved: bool) -> Element<'a, Message> {
         card::simple(
             Column::new()
                 .spacing(10)
-                .push(text("Save this transaction"))
+                .push(text(localized_copy("Save this transaction")))
                 .push(
                     Row::new()
                         .spacing(10)
                         .push(Space::new().width(Length::Fill))
-                        .push(button::secondary(None, "Ignore").on_press(Message::Close))
                         .push(
-                            button::primary(None, "Save")
+                            button::secondary(None, localized_copy("Ignore"))
+                                .on_press(Message::Close),
+                        )
+                        .push(
+                            button::primary(None, localized_copy("Save"))
                                 .on_press(Message::Spend(SpendTxMessage::Confirm)),
                         ),
                 ),
@@ -293,6 +476,7 @@ pub fn broadcast_action<'a>(
     is_self_transfer: bool,
 ) -> Element<'a, Message> {
     broadcast_action_with_identity_review(
+        crate::chain::ChainId::Bitcoin,
         conflicting_txids,
         saved,
         broadcasting,
@@ -313,14 +497,15 @@ pub fn broadcast_action<'a>(
 /// the cancellation confirms, though: the original can still be mined first.
 fn broadcast_outcome(is_self_transfer: bool, replaces_pending: bool) -> &'static str {
     match (is_self_transfer, replaces_pending) {
-        (true, true) => "will return to your wallet once the cancellation confirms.",
-        (true, false) => "has been transferred.",
-        (false, _) => "has been sent successfully.",
+        (true, true) => CopyText::CancellationOutcome.get(),
+        (true, false) => CopyText::HasBeenTransferred.get(),
+        (false, _) => CopyText::HasBeenSentSuccessfully.get(),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn broadcast_action_with_identity_review<'a>(
+    chain: crate::chain::ChainId,
     conflicting_txids: &HashSet<Txid>,
     saved: bool,
     broadcasting: bool,
@@ -338,14 +523,23 @@ pub fn broadcast_action_with_identity_review<'a>(
             sent_quote,
             sent_image_handle,
             broadcast_outcome(is_self_transfer, !conflicting_txids.is_empty()),
+            if is_self_transfer {
+                None
+            } else {
+                coincube_ui::worldview_copy::VoiceLine::PaymentSent.get()
+            },
             Message::Spend(super::super::SpendTxMessage::Cancel),
         )
     } else {
         card::simple(
             Column::new()
                 .spacing(10)
-                .push(Container::new(h4_bold("Broadcast the transaction")).width(Length::Fill))
-                .push(error.map(|err| card::error("Broadcast failed", err)))
+                .push(
+                    Container::new(h4_bold(CopyText::BroadcastTheTransaction.get()))
+                        .width(Length::Fill),
+                )
+                .push(p1_regular(crate::chain::canonical_network_name(chain)))
+                .push(error.map(|err| card::error(CopyText::BroadcastFailed.get(), notice(err))))
                 .push(if conflicting_txids.is_empty() {
                     None
                 } else {
@@ -355,28 +549,36 @@ pub fn broadcast_action_with_identity_review<'a>(
                                 .spacing(5)
                                 .push(Row::new().spacing(10).push(icon::warning_icon()).push(text(
                                     if conflicting_txids.len() > 1 {
-                                        "WARNING: Broadcasting this transaction \
-                                        will invalidate some pending payments."
+                                        localized_copy(
+                                            "WARNING: Broadcasting this transaction \
+                                        will invalidate some pending payments.",
+                                        )
                                     } else {
-                                        "WARNING: Broadcasting this transaction \
-                                        will invalidate a pending payment."
+                                        localized_copy(
+                                            "WARNING: Broadcasting this transaction \
+                                        will invalidate a pending payment.",
+                                        )
                                     },
                                 )))
                                 .push(Row::new().padding([0, 30]).push(text(
                                     if conflicting_txids.len() > 1 {
-                                        "The following transactions are \
+                                        localized_copy(
+                                            "The following transactions are \
                                         spending one or more inputs \
                                         from the transaction to be \
                                         broadcast and will be \
                                         dropped, along with any other \
-                                        transactions that depend on them:"
+                                        transactions that depend on them:",
+                                        )
                                     } else {
-                                        "The following transaction is \
+                                        localized_copy(
+                                            "The following transaction is \
                                         spending one or more inputs \
                                         from the transaction to be \
                                         broadcast and will be \
                                         dropped, along with any other \
-                                        transactions that depend on it:"
+                                        transactions that depend on it:",
+                                        )
                                     },
                                 ))),
                             |col, txid| {
@@ -410,9 +612,9 @@ pub fn broadcast_action_with_identity_review<'a>(
                     // unset is this codebase's idiom for a
                     // visually-disabled button.
                     if broadcasting {
-                        button::primary(None, "Broadcasting…")
+                        button::primary(None, localized_copy("Broadcasting…"))
                     } else {
-                        button::primary(None, "Broadcast")
+                        button::primary(None, localized_copy("Broadcast"))
                             .on_press(Message::Spend(SpendTxMessage::Confirm))
                     },
                 )),
@@ -472,8 +674,13 @@ pub fn delete_action<'a>(deleted: bool) -> Element<'a, Message> {
             Column::new()
                 .spacing(20)
                 .align_x(Alignment::Center)
-                .push(text("Successfully deleted this transaction."))
-                .push(button::secondary(None, "Go back to PSBTs").on_press(Message::Close)),
+                .push(text(localized_copy(
+                    "Successfully deleted this transaction.",
+                )))
+                .push(
+                    button::secondary(None, localized_copy("Go back to PSBTs"))
+                        .on_press(Message::Close),
+                ),
         )
         .align_x(iced::alignment::Horizontal::Center)
         .width(Length::Fixed(400.0))
@@ -482,12 +689,12 @@ pub fn delete_action<'a>(deleted: bool) -> Element<'a, Message> {
         card::simple(
             Column::new()
                 .spacing(10)
-                .push(text("Delete this PSBT"))
+                .push(text(localized_copy("Delete this PSBT")))
                 .push(
                     Row::new()
                         .push(Column::new().width(Length::Fill))
                         .push(
-                            button::transparent(None, "Cancel")
+                            button::transparent(None, CopyText::Cancel.get())
                                 .on_press(Message::Spend(SpendTxMessage::Cancel)),
                         )
                         .push(
@@ -507,15 +714,19 @@ pub fn delete_action<'a>(deleted: bool) -> Element<'a, Message> {
 /// over Wi-Fi (local signing, no Connect needed). `signed_in` tweaks the
 /// wording — once tokens exist, the blocker is device/stream readiness
 /// rather than a missing sign-in.
-pub fn keychain_unavailable_action<'a>(signed_in: bool) -> Element<'a, Message> {
+pub fn keychain_unavailable_action<'a>(action_scope: u64, signed_in: bool) -> Element<'a, Message> {
     let body = if signed_in {
-        "Connect hasn't finished setting up this device for Keychain \
+        localized_copy(
+            "Connect hasn't finished setting up this device for Keychain \
          signing. Set it up now, or pair a phone over Wi-Fi to sign \
-         locally without Connect."
+         locally without Connect.",
+        )
     } else {
-        "To sign with a Keychain phone through Connect, sign in to \
+        localized_copy(
+            "To sign with a Keychain phone through Connect, sign in to \
          COINCUBE Connect. Or pair a phone over Wi-Fi to sign locally — \
-         no Connect required."
+         no Connect required.",
+        )
     };
     // When already signed in, the primary action bootstraps Connect
     // signing on demand ("Sign with Connect"); otherwise it routes to
@@ -528,25 +739,37 @@ pub fn keychain_unavailable_action<'a>(signed_in: bool) -> Element<'a, Message> 
     card::simple(
         Column::new()
             .spacing(15)
-            .push(text("Keychain signing needs Connect").bold())
+            .push(text(localized_copy("Keychain signing needs Connect")).bold())
             .push(text(body).style(theme::text::secondary))
             .push(
                 Row::new()
                     .spacing(10)
                     .push(Column::new().width(Length::Fill))
                     .push(
-                        button::transparent(None, "Cancel")
-                            .on_press(Message::Spend(SpendTxMessage::Cancel)),
+                        button::secondary_action(
+                            action_id(action_scope, "keychain-unavailable.cancel"),
+                            None,
+                            CopyText::Cancel.get(),
+                            Message::FocusAction,
+                        )
+                        .style(theme::button::container)
+                        .on_press(Message::Spend(SpendTxMessage::Cancel)),
                     )
                     .push(
-                        button::secondary(None, "Pair a phone")
-                            .on_press(Message::Spend(SpendTxMessage::KeychainPairPhone))
-                            .width(Length::Fixed(140.0)),
+                        secondary_action(
+                            action_id(action_scope, "keychain-unavailable.pair"),
+                            localized_copy("Pair a phone"),
+                        )
+                        .on_press(Message::Spend(SpendTxMessage::KeychainPairPhone))
+                        .width(Length::Fixed(140.0)),
                     )
                     .push(
-                        button::primary(None, primary_label)
-                            .on_press(Message::Spend(primary_msg))
-                            .width(Length::Fixed(190.0)),
+                        primary_action(
+                            action_id(action_scope, "keychain-unavailable.connect"),
+                            primary_label,
+                        )
+                        .on_press(Message::Spend(primary_msg))
+                        .width(Length::Fixed(190.0)),
                     )
                     .align_y(Alignment::Center),
             ),
@@ -560,7 +783,23 @@ pub fn spend_header<'a>(
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
 ) -> Element<'a, Message> {
+    spend_header_masked(tx, labels_editing, bitcoin_unit, false)
+}
+
+fn spend_header_masked<'a>(
+    tx: &'a SpendTx,
+    labels_editing: &'a HashMap<String, form::Value<String>>,
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+) -> Element<'a, Message> {
     let txid = tx.psbt.unsigned_tx.compute_txid().to_string();
+    let amount_title: Element<'a, Message> = if tx.is_send_to_self() {
+        h1(localized_copy("Self-transfer")).into()
+    } else if mask_amounts {
+        h1("••••").into()
+    } else {
+        amount_with_size_and_unit(&tx.spend_amount, H1_SIZE, bitcoin_unit).into()
+    };
     Column::new()
         .spacing(20)
         .push(if let Some(outpoint) = tx.is_single_payment() {
@@ -580,42 +819,38 @@ pub fn spend_header<'a>(
             label::label_editable(vec![txid.clone()], tx.labels.get(&txid), H3_SIZE)
         })
         .push(
-            Column::new()
-                .push(if tx.is_send_to_self() {
-                    Container::new(h1("Self-transfer"))
-                } else {
-                    Container::new(amount_with_size_and_unit(
-                        &tx.spend_amount,
-                        H1_SIZE,
-                        bitcoin_unit,
-                    ))
-                })
-                .push(
-                    Row::new()
-                        .align_y(Alignment::Center)
-                        .push(h3("Miner fee: ").style(theme::text::secondary))
-                        .push(if tx.fee_amount.is_none() {
-                            Some(text("Missing information about transaction inputs"))
+            Column::new().push(amount_title).push(
+                Row::new()
+                    .align_y(Alignment::Center)
+                    .push(h3(localized_copy("Miner fee: ")).style(theme::text::secondary))
+                    .push(if tx.fee_amount.is_none() {
+                        Some(text(localized_copy(
+                            "Missing information about transaction inputs",
+                        )))
+                    } else {
+                        None
+                    })
+                    .push_maybe(tx.fee_amount.map(|fee| -> Element<'a, Message> {
+                        if mask_amounts {
+                            h3("••••").into()
                         } else {
-                            None
-                        })
-                        .push_maybe(
-                            tx.fee_amount
-                                .map(|fee| amount_with_size_and_unit(&fee, H3_SIZE, bitcoin_unit)),
-                        )
-                        .push(text(" ").size(H3_SIZE))
-                        .push(tx.min_feerate_vb().map(|rate| {
-                            text(format!("(~{} sats/vbyte)", rate))
-                                .size(H4_SIZE)
-                                .style(theme::text::secondary)
-                        })),
-                ),
+                            amount_with_size_and_unit(&fee, H3_SIZE, bitcoin_unit).into()
+                        }
+                    }))
+                    .push(text(" ").size(H3_SIZE))
+                    .push(tx.min_feerate_vb().map(|rate| {
+                        text(format!("(~{} sats/vbyte)", rate))
+                            .size(H4_SIZE)
+                            .style(theme::text::secondary)
+                    })),
+            ),
         )
         .into()
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn spend_overview_view<'a>(
+    action_scope: u64,
     tx: &'a SpendTx,
     desc_info: &'a CoincubePolicy,
     key_aliases: &'a HashMap<Fingerprint, String>,
@@ -623,8 +858,10 @@ pub fn spend_overview_view<'a>(
     saved: bool,
     replay: Option<ReplayPill<'a>>,
     broadcast_ready: bool,
+    allow_signing: bool,
 ) -> Element<'a, Message> {
     spend_overview_with_cancel(
+        action_scope,
         tx,
         desc_info,
         key_aliases,
@@ -633,11 +870,13 @@ pub fn spend_overview_view<'a>(
         replay,
         broadcast_ready,
         None,
+        allow_signing,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn spend_overview_with_cancel<'a>(
+    action_scope: u64,
     tx: &'a SpendTx,
     desc_info: &'a CoincubePolicy,
     key_aliases: &'a HashMap<Fingerprint, String>,
@@ -646,6 +885,7 @@ pub fn spend_overview_with_cancel<'a>(
     replay: Option<ReplayPill<'a>>,
     broadcast_ready: bool,
     cancel: Option<Message>,
+    allow_signing: bool,
 ) -> Element<'a, Message> {
     // The state supplies cryptographically verified readiness. Claimed
     // signature counts below are progress hints only.
@@ -656,13 +896,17 @@ pub fn spend_overview_with_cancel<'a>(
     // Force the user to save (which commits the derivation-index increment to the
     // database) before exporting, otherwise the exported PSBT can lead to change
     // address reuse.
-    let export_button = button::secondary(Some(icon::backup_icon()), "Export").on_press_maybe(
-        if currently_signing || !saved {
-            None
-        } else {
-            Some(Message::ExportPsbt)
-        },
-    );
+    let export_button = button::secondary_action(
+        action_id(action_scope, "overview.export"),
+        Some(icon::backup_icon()),
+        coincube_ui::locale::copy("Export"),
+        Message::FocusAction,
+    )
+    .on_press_maybe(if currently_signing || !saved {
+        None
+    } else {
+        Some(Message::ExportPsbt)
+    });
     Column::new()
         .spacing(20)
         .push(
@@ -685,7 +929,7 @@ pub fn spend_overview_with_cancel<'a>(
                                                 Container::new(tooltip::Tooltip::new(
                                                     export_button,
                                                     Container::new(p1_regular(
-                                                        "Sign or save the transaction first to enable export",
+                                                        localized_copy("Sign or save the transaction first to enable export"),
                                                     ))
                                                     .style(theme::card::simple)
                                                     .padding(10),
@@ -693,9 +937,11 @@ pub fn spend_overview_with_cancel<'a>(
                                                 ))
                                             })
                                             .push(
-                                                button::secondary(
+                                                button::secondary_action(
+                                                    action_id(action_scope, "overview.import"),
                                                     Some(icon::restore_icon()),
-                                                    "Import",
+                                                    coincube_ui::locale::copy("Import"),
+                                                    Message::FocusAction,
                                                 )
                                                 .on_press_maybe(if currently_signing || !saved {
                                                     None
@@ -714,8 +960,10 @@ pub fn spend_overview_with_cancel<'a>(
                                             .style(theme::text::secondary),
                                     )
                                     .push(
-                                        Button::new(
+                                        coincube_ui::widget::action::Action::new(
+                                            action_id(action_scope, "overview.copy-txid"),
                                             icon::clipboard_icon().style(theme::text::secondary),
+                                            Message::FocusAction,
                                         )
                                         .on_press(Message::CopyWithToast(
                                             tx.psbt.unsigned_tx.compute_txid().to_string(),
@@ -738,28 +986,30 @@ pub fn spend_overview_with_cancel<'a>(
             Some(
                 Row::new()
                     .push(Space::new().width(Length::Fill))
-                    .push_maybe(cancel.map(|message| button::secondary(None, "Cancel")
+                    .push_maybe(cancel.map(|message| secondary_action(action_id(action_scope, "overview.cancel"), CopyText::Cancel.get())
                         .on_press(message).width(Length::Fixed(150.0))))
                     .push(if tx.status != SpendStatus::Pending {
                         None
-                    } else if sign_or_broadcast {
+                    } else if sign_or_broadcast && allow_signing {
                         // A single "Sign" entry point opens the unified
                         // picker, which lists every signer — local (HW,
                         // master, border) and Keychain (contacts' phones) —
                         // as its own row.
                         Some(
                             Row::new().push(
-                                button::primary(None, "Sign")
+                                primary_action(action_id(action_scope, "overview.sign"), localized_copy("Sign"))
                                     .on_press(Message::Spend(SpendTxMessage::Sign))
                                     .width(Length::Fixed(150.0)),
                             ),
                         )
+                    } else if !allow_signing {
+                        None
                     } else {
                         // Disabled (never hidden) while a replayable BTCB2
                         // spend awaits its acknowledgement.
                         Some(
                             Row::new().push(
-                                button::primary(None, "Broadcast")
+                                primary_action(action_id(action_scope, "overview.broadcast"), localized_copy("Broadcast"))
                                     .on_press_maybe(
                                         broadcast_ready
                                             .then_some(Message::Spend(SpendTxMessage::Broadcast)),
@@ -792,10 +1042,14 @@ pub fn signatures<'a>(
                             .spacing(5)
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(p1_bold("Status"))
+                            .push(p1_bold(localized_copy("Status")))
                             .push(icon::square_check_icon().style(theme::text::success))
-                            .push(text("Ready").bold().style(theme::text::success))
-                            .push(text("  signed by"))
+                            .push(
+                                text(CopyText::Ready.get())
+                                    .bold()
+                                    .style(theme::text::success),
+                            )
+                            .push(text(localized_copy("  signed by")))
                             .push(
                                 sigs.signed_pubkeys
                                     .keys()
@@ -828,7 +1082,9 @@ pub fn signatures<'a>(
                             Column::new()
                                 .padding(15)
                                 .spacing(10)
-                                .push(text("Finalizing this transaction requires:"))
+                                .push(text(localized_copy(
+                                    "Finalizing this transaction requires:",
+                                )))
                                 .push(if tx.sigs.recovery_paths().is_empty() {
                                     Some(path_view(
                                         desc_info.primary_path(),
@@ -853,12 +1109,14 @@ pub fn signatures<'a>(
                                 Row::new()
                                     .spacing(10)
                                     .align_y(Alignment::Center)
-                                    .push(p1_bold("Status"))
+                                    .push(p1_bold(localized_copy("Status")))
                                     .push(icon::clock_icon().style(theme::text::warning))
                                     .push(
-                                        text("Partially signed").bold().style(theme::text::warning),
+                                        text(localized_copy("Partially signed"))
+                                            .bold()
+                                            .style(theme::text::warning),
                                     )
-                                    .push(text("  signed by"))
+                                    .push(text(localized_copy("  signed by")))
                                     .push(signed.iter().fold(Row::new().spacing(5), |row, fg| {
                                         row.push(container_from_fg(*fg, keys_aliases))
                                     })),
@@ -894,7 +1152,7 @@ fn requirements_header<'a, T: 'a>(
             .align_y(Alignment::Center)
             .spacing(20)
             .push(
-                text("Remaining requirements")
+                text(localized_copy("Remaining requirements"))
                     .style(theme::text::secondary)
                     .width(Length::Fill),
             )
@@ -903,13 +1161,13 @@ fn requirements_header<'a, T: 'a>(
         Row::new()
             .align_y(Alignment::Center)
             .spacing(20)
-            .push(p1_bold("Status"))
+            .push(p1_bold(localized_copy("Status")))
             .push(
                 Row::new()
                     .spacing(5)
                     .align_y(Alignment::Center)
                     .push(icon::square_cross_icon().style(theme::text::error))
-                    .push(text("Not ready").style(theme::text::error))
+                    .push(text(localized_copy("Not ready")).style(theme::text::error))
                     .width(Length::Fill),
             )
             .push(collapse_icon)
@@ -985,24 +1243,17 @@ pub fn path_view<'a>(
                     .push(Space::new().width(Length::Fixed(20.0))),
             )
             .push(
-                p1_regular(format!(
-                    "{} more signature{}",
-                    missing_signatures,
-                    if missing_signatures > 1 {
-                        "s from "
-                    } else if missing_signatures == 0 {
-                        ""
-                    } else {
-                        " from "
-                    }
-                ))
+                p1_regular(match missing_signatures {
+                    0 => localized_copy("0 more signature").to_owned(),
+                    1 => localized_format!("{} more signature from ", "Falta {} firma de ", 1),
+                    n => localized_format!("{} more signatures from ", "Faltan {} firmas de ", n),
+                })
                 .style(theme::text::secondary),
             )
             .push(row_unsigned)
-            .push(
-                (!sigs.signed_pubkeys.is_empty())
-                    .then_some(p1_regular(", already signed by ").style(theme::text::secondary)),
-            )
+            .push((!sigs.signed_pubkeys.is_empty()).then_some(
+                p1_regular(localized_copy(", already signed by ")).style(theme::text::secondary),
+            ))
             .push(row_signed),
     )
     .direction(scrollable::Direction::Horizontal(
@@ -1018,11 +1269,25 @@ pub fn inputs_view<'a>(
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
 ) -> Element<'a, Message> {
+    history_inputs_view(coins, tx, labels, labels_editing, bitcoin_unit, false)
+}
+
+/// History detail can hide passive coin values without changing the PSBT
+/// signing/review presentation, which always shows exact authorization values.
+pub fn history_inputs_view<'a>(
+    coins: &'a HashMap<OutPoint, Coin>,
+    tx: &'a Transaction,
+    labels: &'a HashMap<String, String>,
+    labels_editing: &'a HashMap<String, form::Value<String>>,
+    bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
+) -> Element<'a, Message> {
     Container::new(
         Column::new()
             .push(
-                Container::new(h4_bold(format!(
+                Container::new(h4_bold(localized_format!(
                     "{} coin{} spent",
+                    "Monedas gastadas: {} moneda{}",
                     tx.input.len(),
                     if tx.input.len() == 1 { "" } else { "s" }
                 )))
@@ -1038,12 +1303,17 @@ pub fn inputs_view<'a>(
                         labels,
                         labels_editing,
                         bitcoin_unit,
+                        mask_amounts,
                     ))
                 },
             )),
     )
     .style(theme::card::simple)
     .into()
+}
+
+fn history_amount_redaction(mask_amounts: bool) -> Option<&'static str> {
+    mask_amounts.then_some("••••")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1057,7 +1327,32 @@ pub fn outputs_view<'a>(
     is_single_payment: bool,
     is_external: bool,
 ) -> Element<'a, Message> {
-    outputs_view_with_identities(
+    history_outputs_view(
+        tx,
+        network,
+        change_indexes,
+        labels,
+        labels_editing,
+        bitcoin_unit,
+        is_single_payment,
+        is_external,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn history_outputs_view<'a>(
+    tx: &'a Transaction,
+    network: Network,
+    change_indexes: &'a [usize],
+    labels: &'a HashMap<String, String>,
+    labels_editing: &'a HashMap<String, form::Value<String>>,
+    bitcoin_unit: BitcoinDisplayUnit,
+    is_single_payment: bool,
+    is_external: bool,
+    mask_amounts: bool,
+) -> Element<'a, Message> {
+    outputs_view_with_identities_masked(
         tx,
         network,
         change_indexes,
@@ -1068,6 +1363,7 @@ pub fn outputs_view<'a>(
         is_external,
         &[],
         coincube_ui::theme::palette::ThemeMode::default(),
+        mask_amounts,
     )
 }
 
@@ -1083,6 +1379,35 @@ pub fn outputs_view_with_identities<'a>(
     is_external: bool,
     identities: &'a [(usize, crate::services::branta::LookupResult)],
     theme_mode: coincube_ui::theme::palette::ThemeMode,
+) -> Element<'a, Message> {
+    outputs_view_with_identities_masked(
+        tx,
+        network,
+        change_indexes,
+        labels,
+        labels_editing,
+        bitcoin_unit,
+        is_single_payment,
+        is_external,
+        identities,
+        theme_mode,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn outputs_view_with_identities_masked<'a>(
+    tx: &'a Transaction,
+    network: Network,
+    change_indexes: &'a [usize],
+    labels: &'a HashMap<String, String>,
+    labels_editing: &'a HashMap<String, form::Value<String>>,
+    bitcoin_unit: BitcoinDisplayUnit,
+    is_single_payment: bool,
+    is_external: bool,
+    identities: &'a [(usize, crate::services::branta::LookupResult)],
+    theme_mode: coincube_ui::theme::palette::ThemeMode,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     Column::new()
         .spacing(20)
@@ -1139,6 +1464,7 @@ pub fn outputs_view_with_identities<'a>(
                                             bitcoin_unit,
                                             is_single_payment,
                                             is_editable,
+                                            mask_amounts,
                                         ));
                                         if let Some((_, crate::services::branta::LookupResult::Identified(matches))) = identities.iter().find(|(vout, _)| *vout == i) {
                                             matches.iter().enumerate().fold(col, |col, (identity_index, identity)| {
@@ -1154,12 +1480,12 @@ pub fn outputs_view_with_identities<'a>(
             } else {
                 Container::new(
                     Column::new()
-                        .push(h4_bold("Self-transfer").style(|t| {
+                        .push(h4_bold(localized_copy("Self-transfer")).style(|t| {
                             theme::text::custom(t.colors.buttons.transparent_border.active.text)
                         }))
                         .push(
                             p2_regular(
-                                "No external recipients — every output returns to this wallet.",
+                                localized_copy("No external recipients — every output returns to this wallet."),
                             )
                             .style(|t| {
                                 theme::text::custom(t.colors.buttons.transparent_border.active.text)
@@ -1179,7 +1505,7 @@ pub fn outputs_view_with_identities<'a>(
                         Button::new(
                             Row::new()
                                 .align_y(Alignment::Center)
-                                .push(h4_bold("Change").width(Length::Fill))
+                                .push(h4_bold(localized_copy("Change")).width(Length::Fill))
                                 .push(icon::collapse_icon()),
                         )
                         .padding(20)
@@ -1190,7 +1516,7 @@ pub fn outputs_view_with_identities<'a>(
                         Button::new(
                             Row::new()
                                 .align_y(Alignment::Center)
-                                .push(h4_bold("Change").width(Length::Fill))
+                                .push(h4_bold(localized_copy("Change")).width(Length::Fill))
                                 .push(icon::collapsed_icon()),
                         )
                         .padding(20)
@@ -1206,7 +1532,7 @@ pub fn outputs_view_with_identities<'a>(
                                 Column::new().padding(20),
                                 |col: Column<'a, Message>, (_, output)| {
                                     col.spacing(10)
-                                        .push(change_view(output, network, bitcoin_unit))
+                                        .push(change_view(output, network, bitcoin_unit, mask_amounts))
                                 },
                             )
                             .into()
@@ -1226,6 +1552,7 @@ fn input_view<'a>(
     labels: &'a HashMap<String, String>,
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let outpoint = outpoint.to_string();
     Column::new()
@@ -1246,7 +1573,15 @@ fn input_view<'a>(
                     })
                     .width(Length::Fill),
                 )
-                .push_maybe(coin.map(|c| amount_with_unit(&c.amount, bitcoin_unit))),
+                .push_maybe(coin.map(|c| {
+                    let value: Element<'a, Message> =
+                        if let Some(redaction) = history_amount_redaction(mask_amounts) {
+                            text(redaction).into()
+                        } else {
+                            amount_with_unit(&c.amount, bitcoin_unit).into()
+                        };
+                    value
+                })),
         )
         .push(
             Column::new()
@@ -1254,7 +1589,7 @@ fn input_view<'a>(
                     Row::new()
                         .align_y(Alignment::Center)
                         .spacing(5)
-                        .push(p1_bold("Outpoint:").style(theme::text::secondary))
+                        .push(p1_bold(localized_copy("Outpoint:")).style(theme::text::secondary))
                         .push(p2_regular(outpoint.clone()).style(theme::text::secondary))
                         .push(
                             Button::new(icon::clipboard_icon().style(theme::text::secondary))
@@ -1272,7 +1607,10 @@ fn input_view<'a>(
                                 .align_y(Alignment::Center)
                                 .width(Length::Fill)
                                 .spacing(5)
-                                .push(p1_bold("Address:").style(theme::text::secondary))
+                                .push(
+                                    p1_bold(localized_copy("Address:"))
+                                        .style(theme::text::secondary),
+                                )
                                 .push(p2_regular(addr.clone()).style(theme::text::secondary))
                                 .push(
                                     Button::new(
@@ -1293,7 +1631,10 @@ fn input_view<'a>(
                                     .align_y(Alignment::Center)
                                     .width(Length::Fill)
                                     .spacing(5)
-                                    .push(p1_bold("Address label:").style(theme::text::secondary))
+                                    .push(
+                                        p1_bold(localized_copy("Address label:"))
+                                            .style(theme::text::secondary),
+                                    )
                                     .push(p2_regular(label).style(theme::text::secondary)),
                             )
                     })
@@ -1314,6 +1655,7 @@ fn payment_view<'a>(
     bitcoin_unit: BitcoinDisplayUnit,
     is_single_payment: bool,
     is_editable: bool,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let addr = Address::from_script(&output.script_pubkey, network)
         .ok()
@@ -1343,6 +1685,12 @@ fn payment_view<'a>(
     } else {
         label::label_non_editable(labelled, labels.get(&outpoint), text::P1_SIZE)
     };
+    let amount_value: Element<'a, Message> =
+        if let Some(redaction) = history_amount_redaction(mask_amounts) {
+            text(redaction).into()
+        } else {
+            amount_with_unit(&output.value, bitcoin_unit).into()
+        };
     Column::new()
         .width(Length::Fill)
         .spacing(5)
@@ -1351,7 +1699,7 @@ fn payment_view<'a>(
                 .spacing(5)
                 .align_y(Alignment::Center)
                 .push(Container::new(label_widget).width(Length::Fill))
-                .push(amount_with_unit(&output.value, bitcoin_unit)),
+                .push(amount_value),
         )
         .push(addr.map(|addr| {
             Column::new()
@@ -1364,7 +1712,10 @@ fn payment_view<'a>(
                                 .align_y(Alignment::Center)
                                 .width(Length::Fill)
                                 .spacing(5)
-                                .push(p1_bold("Address:").style(theme::text::secondary))
+                                .push(
+                                    p1_bold(localized_copy("Address:"))
+                                        .style(theme::text::secondary),
+                                )
                                 .push(p2_regular(addr.clone()).style(theme::text::secondary))
                                 .push(
                                     Button::new(
@@ -1384,7 +1735,10 @@ fn payment_view<'a>(
                                 .align_y(Alignment::Center)
                                 .width(Length::Fill)
                                 .spacing(5)
-                                .push(p1_bold("Address label:").style(theme::text::secondary))
+                                .push(
+                                    p1_bold(localized_copy("Address label:"))
+                                        .style(theme::text::secondary),
+                                )
                                 .push(p2_regular(label).style(theme::text::secondary)),
                         )
                 }))
@@ -1396,17 +1750,24 @@ fn change_view(
     output: &TxOut,
     network: Network,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<Message> {
     let addr = Address::from_script(&output.script_pubkey, network)
         .unwrap()
         .to_string();
+    let amount_value: Element<'_, Message> =
+        if let Some(redaction) = history_amount_redaction(mask_amounts) {
+            text(redaction).into()
+        } else {
+            amount_with_unit(&output.value, bitcoin_unit).into()
+        };
     Column::new()
         .width(Length::Fill)
         .spacing(5)
         .push(
             Row::new()
                 .push(Space::new().width(Length::Fill))
-                .push(amount_with_unit(&output.value, bitcoin_unit)),
+                .push(amount_value),
         )
         .push(
             Row::new()
@@ -1417,7 +1778,7 @@ fn change_view(
                         .align_y(Alignment::Center)
                         .width(Length::Fill)
                         .spacing(5)
-                        .push(p1_bold("Address:").style(theme::text::secondary))
+                        .push(p1_bold(localized_copy("Address:")).style(theme::text::secondary))
                         .push(p2_regular(addr.clone()).style(theme::text::secondary))
                         .push(
                             Button::new(icon::clipboard_icon().style(theme::text::secondary))
@@ -1560,7 +1921,23 @@ fn signing_key_kind_caption(kind: &SigningKeyKind) -> Option<&'static str> {
 
 /// Render one signer row inside a spending-path card. The key icon is colored
 /// with the path color, matching the creation "Set keys" look.
-fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, Message> {
+fn signing_key_row(
+    row: &SigningKeyRow,
+    color: iced::Color,
+    action_scope: u64,
+    sequence: Option<u16>,
+) -> Element<'static, Message> {
+    let row_id = |action: &str| {
+        action_id(
+            action_scope,
+            &format!(
+                "picker.path.{}.key.{}.{}",
+                sequence.map_or_else(|| "primary".to_string(), |seq| seq.to_string()),
+                row.fingerprint,
+                action
+            ),
+        )
+    };
     let key_icon = match row.kind {
         SigningKeyKind::Hardware => icon::usb_drive_icon(),
         _ => icon::round_key_icon(),
@@ -1573,20 +1950,20 @@ fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, 
         .width(Length::Fill)
         .push(p1_bold(row.label.clone()));
     if let Some(caption) = signing_key_kind_caption(&row.kind) {
-        info = info.push(text::caption(caption));
+        info = info.push(text::caption(localized_copy(caption)));
     }
 
     let right: Element<Message> = match &row.state {
         SigningKeyState::Signed => Row::new()
             .spacing(5)
             .align_y(Alignment::Center)
-            .push(p1_regular("Signed").color(color::GREEN))
+            .push(p1_regular(localized_copy("Signed")).color(color::GREEN))
             .push(icon::check_icon().style(theme::text::success))
             .into(),
-        SigningKeyState::InProgress(status) => p1_regular(status.clone())
+        SigningKeyState::InProgress(status) => p1_regular(notice(status.clone()))
             .style(theme::text::secondary)
             .into(),
-        SigningKeyState::Disabled(reason) => p1_regular(reason.clone())
+        SigningKeyState::Disabled(reason) => p1_regular(notice(reason.clone()))
             .style(theme::text::secondary)
             .into(),
         // Stack the button *under* the reason rather than beside it: the sibling
@@ -1596,26 +1973,32 @@ fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, 
         SigningKeyState::NeedsSignIn(reason) => Column::new()
             .spacing(6)
             .align_x(Alignment::End)
-            .push(p1_regular(reason.clone()).style(theme::text::secondary))
+            .push(p1_regular(notice(reason.clone())).style(theme::text::secondary))
             .push(
                 // Bubbles straight to the tab (which opens/focuses the Home
                 // tab for sign-in) without routing through the PSBT panel, so
                 // the picker stays open behind the new tab.
-                button::secondary(None, "Sign in to Connect").on_press(Message::OpenConnectSignIn),
+                secondary_action(row_id("sign-in"), localized_copy("Sign in to Connect"))
+                    .on_press(Message::OpenConnectSignIn),
             )
             .into(),
         SigningKeyState::NeedsAccountSwitch(reason) => Column::new()
             .spacing(6)
             .align_x(Alignment::End)
-            .push(p1_regular(reason.clone()).style(theme::text::secondary))
+            .push(p1_regular(notice(reason.clone())).style(theme::text::secondary))
             .push(
-                button::secondary(None, "Switch account")
+                secondary_action(row_id("switch-account"), localized_copy("Switch account"))
                     .on_press(Message::OpenConnectSwitchAccount),
             )
             .into(),
-        SigningKeyState::Retry(idx) => button::secondary(Some(icon::reload_icon()), "Retry")
-            .on_press(Message::Spend(SpendTxMessage::RetryKeychainSigner(*idx)))
-            .into(),
+        SigningKeyState::Retry(idx) => button::secondary_action(
+            row_id("retry"),
+            Some(icon::reload_icon()),
+            CopyText::Retry.get(),
+            Message::FocusAction,
+        )
+        .on_press(Message::Spend(SpendTxMessage::RetryKeychainSigner(*idx)))
+        .into(),
         // Stacked like `NeedsSignIn`, for the same reason: beside the `Fill`
         // info column the buttons' labels would wrap.
         SigningKeyState::LanFailed {
@@ -1626,16 +2009,27 @@ fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, 
             let mut col = Column::new()
                 .spacing(6)
                 .align_x(Alignment::End)
-                .push(p1_regular(reason.clone()).style(theme::text::secondary));
+                .push(p1_regular(notice(reason.clone())).style(theme::text::secondary));
             if *connect {
-                col = col.push(button::primary(None, "Send through Connect").on_press(
-                    Message::Spend(SpendTxMessage::SelectKeychainSigner(row.fingerprint)),
-                ));
+                col = col.push(
+                    primary_action(
+                        row_id("send-connect"),
+                        localized_copy("Send through Connect"),
+                    )
+                    .on_press(Message::Spend(
+                        SpendTxMessage::SelectKeychainSigner(row.fingerprint),
+                    )),
+                );
             }
             if retry.is_some() {
                 col = col.push(
-                    button::secondary(Some(icon::reload_icon()), "Try Wi-Fi again")
-                        .on_press(Message::SelectPsbtHardwareWallet(row.fingerprint)),
+                    button::secondary_action(
+                        row_id("retry-wifi"),
+                        Some(icon::reload_icon()),
+                        coincube_ui::locale::copy("Try Wi-Fi again"),
+                        Message::FocusAction,
+                    )
+                    .on_press(Message::SelectPsbtHardwareWallet(row.fingerprint)),
                 );
             }
             col.into()
@@ -1657,7 +2051,9 @@ fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, 
                     "Request",
                 ),
             };
-            button::primary(None, label).on_press(msg).into()
+            primary_action(row_id("activate"), localized_copy(label))
+                .on_press(msg)
+                .into()
         }
     };
 
@@ -1692,8 +2088,9 @@ fn signing_threshold_badge<'a>(
                     row.push(icon::round_key_icon())
                 }
             }))
-            .push(text(format!(
+            .push(text(localized_format!(
                 "{} of {} signature{} collected",
+                "Firmas recopiladas: {} de {} firma{}",
                 collected,
                 threshold,
                 if threshold == 1 { "" } else { "s" }
@@ -1706,7 +2103,7 @@ fn signing_threshold_badge<'a>(
 /// Render one spending-path card, mirroring the creation "Set keys" page. The
 /// active path is fully expanded; inactive paths default to a collapsed header
 /// (title + subtitle + note) with a caret, toggled via `ToggleSpendPath`.
-fn signing_path_card(path: SigningPath) -> Element<'static, Message> {
+fn signing_path_card(path: SigningPath, action_scope: u64) -> Element<'static, Message> {
     let SigningPath {
         title,
         is_primary,
@@ -1725,13 +2122,16 @@ fn signing_path_card(path: SigningPath) -> Element<'static, Message> {
         color::BLUE
     };
     let subtitle_text = if is_primary {
-        "Able to move the funds at any time.".to_string()
+        localized_copy("Able to move the funds at any time.").to_string()
     } else {
-        format!(
+        localized_format!(
             "Available after inactivity of ~{}",
+            "Disponible tras ~{} de inactividad",
             sequence.map(humanize_timelock).unwrap_or_default()
         )
     };
+    // Built in English by the signing state; shown in the window's language.
+    let title = localized_copy(&title).to_string();
 
     // Header. For an inactive path it's a toggle button (with a caret and the
     // "not available" note); for the active path it's a plain title + subtitle.
@@ -1751,7 +2151,14 @@ fn signing_path_card(path: SigningPath) -> Element<'static, Message> {
         } else {
             icon::collapse_icon()
         };
-        Button::new(
+        coincube_ui::widget::action::Action::new(
+            action_id(
+                action_scope,
+                &format!(
+                    "picker.path.{}.toggle",
+                    sequence.map_or_else(|| "primary".to_string(), |seq| seq.to_string())
+                ),
+            ),
             Column::new()
                 .spacing(6)
                 .push(
@@ -1768,9 +2175,12 @@ fn signing_path_card(path: SigningPath) -> Element<'static, Message> {
                         .push(caret),
                 )
                 .push(
-                    p2_regular("This spending path isn't available for this transaction.")
-                        .style(theme::text::secondary),
+                    p2_regular(localized_copy(
+                        "This spending path isn't available for this transaction.",
+                    ))
+                    .style(theme::text::secondary),
                 ),
+            Message::FocusAction,
         )
         .padding(10)
         .width(Length::Fill)
@@ -1784,16 +2194,25 @@ fn signing_path_card(path: SigningPath) -> Element<'static, Message> {
     if expanded {
         let mut keys_col = Column::new().spacing(5);
         for key in &keys {
-            keys_col = keys_col.push(signing_key_row(key, color));
+            keys_col = keys_col.push(signing_key_row(key, color, action_scope, sequence));
         }
         col = col
             .push(keys_col)
             .push(signing_threshold_badge(color, collected, threshold, total));
         if can_request_all {
             col = col.push(
-                button::secondary(None, "Request from everyone")
-                    .on_press(Message::Spend(SpendTxMessage::RequestFromEveryone))
-                    .width(Length::Fill),
+                secondary_action(
+                    action_id(
+                        action_scope,
+                        &format!(
+                            "picker.path.{}.request-all",
+                            sequence.map_or_else(|| "primary".to_string(), |seq| seq.to_string())
+                        ),
+                    ),
+                    localized_copy("Request from everyone"),
+                )
+                .on_press(Message::Spend(SpendTxMessage::RequestFromEveryone))
+                .width(Length::Fill),
             );
         }
     }
@@ -1808,19 +2227,35 @@ fn signing_path_card(path: SigningPath) -> Element<'static, Message> {
 /// listing its keys with per-key signability, mirroring the vault-creation
 /// "Set keys" layout.
 pub fn sign_action<'a>(
+    chain: crate::chain::ChainId,
+    action_scope: u64,
     paths: Vec<SigningPath>,
     keychain_notices: Vec<String>,
     error: Option<String>,
 ) -> Element<'a, Message> {
-    let mut col = Column::new().spacing(15).width(Length::Fill);
+    let mut col = Column::new().spacing(15).width(Length::Fill).push(
+        Row::new()
+            .align_y(Alignment::Center)
+            .push(p1_regular(crate::chain::canonical_network_name(chain)).width(Length::Fill))
+            .push(
+                secondary_action(
+                    action_id(action_scope, "picker.close"),
+                    CopyText::Close.get(),
+                )
+                .on_press(Message::Spend(SpendTxMessage::Cancel))
+                .width(Length::Fixed(100.0)),
+            ),
+    );
     if let Some(error) = error {
-        col = col.push(card::warning(error));
+        col = col.push(card::warning(notice(error)));
     }
     for notice in &keychain_notices {
-        col = col.push(p1_regular(notice.clone()).style(theme::text::secondary));
+        col = col.push(
+            p1_regular(coincube_ui::locale::notice(notice.clone())).style(theme::text::secondary),
+        );
     }
     for path in paths {
-        col = col.push(signing_path_card(path));
+        col = col.push(signing_path_card(path, action_scope));
     }
     card::simple(scrollable(col.padding(5)))
         // Wide enough that long device names, the per-path key rows and their
@@ -1856,13 +2291,16 @@ fn border_wallet_recon_phrase_view(
         for i in chunk_start..std::cmp::min(chunk_start + 3, 12) {
             let label = format!("{}.", i + 1);
             let idx = i;
-            let input = TextInput::new(&format!("Word {}", i + 1), &recon.phrase_words[i].value)
-                .on_input(move |s| {
-                    Message::Spend(SpendTxMessage::BorderWalletRecon(
-                        BorderWalletReconMessage::PhraseWordEdited(idx, s),
-                    ))
-                })
-                .width(Length::Fill);
+            let input = TextInput::new(
+                &localized_format!("Word {}", "Palabra {}", i + 1),
+                &recon.phrase_words[i].value,
+            )
+            .on_input(move |s| {
+                Message::Spend(SpendTxMessage::BorderWalletRecon(
+                    BorderWalletReconMessage::PhraseWordEdited(idx, s),
+                ))
+            })
+            .width(Length::Fill);
             row_widget = row_widget.push(
                 Row::new()
                     .push(text::text(label).width(25))
@@ -1877,18 +2315,18 @@ fn border_wallet_recon_phrase_view(
     let error_text: Option<Element<Message>> = recon
         .error
         .as_ref()
-        .map(|e| p1_regular(e.as_str()).color(color::RED).into());
+        .map(|e| p1_regular(notice(e.clone())).color(color::RED).into());
 
-    let cancel_btn = button::transparent(None, "Cancel").on_press(Message::Spend(
+    let cancel_btn = button::transparent(None, CopyText::Cancel.get()).on_press(Message::Spend(
         SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::Cancel),
     ));
 
     let next_btn = if recon.phrase_valid {
-        button::primary(None, "Next").on_press(Message::Spend(SpendTxMessage::BorderWalletRecon(
-            BorderWalletReconMessage::Next,
-        )))
+        button::primary(None, localized_copy("Next")).on_press(Message::Spend(
+            SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::Next),
+        ))
     } else {
-        button::primary(None, "Next")
+        button::primary(None, localized_copy("Next"))
     }
     .width(Length::Fill);
 
@@ -1911,14 +2349,16 @@ fn border_wallet_recon_phrase_view(
         .spacing(12)
         .push(header)
         .push(p1_regular(prompt))
+        .push(p1_regular(localized_copy("Reconstruction needs the recovery phrase and your exact 11-cell pattern in order. The checksum word is recalculated from your pattern."))
+            .style(theme::text::secondary))
         .push(word_rows);
 
     if recon.phrase_prefilled {
         col = col.push(
-            p1_regular(
+            p1_regular(localized_copy(
                 "Filled in for you. Edit any word if this key was enrolled from a \
                  different phrase.",
-            )
+            ))
             .style(theme::text::secondary),
         );
     }
@@ -1945,31 +2385,33 @@ fn border_wallet_recon_grid_view(recon: &BorderWalletReconstructionState) -> Ele
         }),
     );
 
-    let back_btn =
-        button::transparent(Some(icon::previous_icon()), "Back").on_press(Message::Spend(
-            SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::Previous),
-        ));
+    let back_btn = button::transparent(Some(icon::previous_icon()), CopyText::Back.get()).on_press(
+        Message::Spend(SpendTxMessage::BorderWalletRecon(
+            BorderWalletReconMessage::Previous,
+        )),
+    );
 
-    let status = p1_bold(format!(
+    let status = p1_bold(localized_format!(
         "Selected: {} / {} cells",
+        "Seleccionado: {} / células {}",
         recon.pattern.len(),
         PATTERN_LENGTH
     ));
 
     let undo_btn = if !recon.pattern.is_empty() {
-        button::secondary(None, "Undo").on_press(Message::Spend(SpendTxMessage::BorderWalletRecon(
-            BorderWalletReconMessage::UndoLastCell,
-        )))
+        button::secondary(None, localized_copy("Undo")).on_press(Message::Spend(
+            SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::UndoLastCell),
+        ))
     } else {
-        button::secondary(None, "Undo")
+        button::secondary(None, localized_copy("Undo"))
     };
 
     let clear_btn = if !recon.pattern.is_empty() {
-        button::secondary(None, "Clear").on_press(Message::Spend(
+        button::secondary(None, localized_copy("Clear")).on_press(Message::Spend(
             SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::ClearPattern),
         ))
     } else {
-        button::secondary(None, "Clear")
+        button::secondary(None, localized_copy("Clear"))
     };
 
     let grid_content: Element<Message> = if let Some(grid) = &recon.grid {
@@ -2018,20 +2460,20 @@ fn border_wallet_recon_grid_view(recon: &BorderWalletReconstructionState) -> Ele
         }
         scrollable(grid_col).height(400).into()
     } else {
-        p1_regular("No grid available").into()
+        p1_regular(localized_copy("No grid available")).into()
     };
 
     let error_text: Option<Element<Message>> = recon
         .error
         .as_ref()
-        .map(|e| p1_regular(e.as_str()).color(color::RED).into());
+        .map(|e| p1_regular(notice(e.clone())).color(color::RED).into());
 
     let next_btn = if recon.pattern.is_complete() {
-        button::primary(None, "Sign").on_press(Message::Spend(SpendTxMessage::BorderWalletRecon(
-            BorderWalletReconMessage::Next,
-        )))
+        button::primary(None, localized_copy("Sign")).on_press(Message::Spend(
+            SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::Next),
+        ))
     } else {
-        button::primary(None, "Sign")
+        button::primary(None, localized_copy("Sign"))
     }
     .width(Length::Fill);
 
@@ -2041,6 +2483,8 @@ fn border_wallet_recon_grid_view(recon: &BorderWalletReconstructionState) -> Ele
         .push(p1_regular(
             "Select 11 cells from the grid in order \u{2014} the same pattern you used during enrollment.",
         ))
+        .push(p1_regular(localized_copy("The pattern must rebuild the enrolled key before any signature is added."))
+            .style(theme::text::secondary))
         .push(
             Row::new()
                 .spacing(10)
@@ -2051,7 +2495,14 @@ fn border_wallet_recon_grid_view(recon: &BorderWalletReconstructionState) -> Ele
         .push(grid_content);
 
     if let Some(checksum) = &recon.checksum_word {
-        col = col.push(p1_bold(format!("Checksum word: \"{}\"", checksum)).color(color::GREEN));
+        col = col.push(
+            p1_bold(localized_format!(
+                "Checksum word: \"{}\"",
+                "Ver resumen: \"{}\"",
+                checksum
+            ))
+            .color(color::GREEN),
+        );
     }
 
     if let Some(err) = error_text {
@@ -2126,12 +2577,14 @@ pub fn update_spend_view<'a>(
                 .push(
                     Column::new()
                         .spacing(10)
-                        .push(text("Insert updated PSBT:").bold())
+                        .push(text(localized_copy("Insert updated PSBT:")).bold())
                         .push(
                             form::Form::new_trimmed("PSBT", updated, move |msg| {
                                 Message::ImportSpend(ImportSpendMessage::PsbtEdited(msg))
                             })
-                            .warning("Please enter the correct base64 encoded PSBT")
+                            .warning(localized_copy(
+                                "Please enter the correct base64 encoded PSBT",
+                            ))
                             .size(P1_SIZE)
                             .padding(10),
                         )
@@ -2155,7 +2608,7 @@ pub fn update_spend_success_view<'a>() -> Element<'a, Message> {
     Column::new()
         .push(
             card::simple(Container::new(
-                text("Spend transaction is updated").style(theme::text::secondary),
+                text(localized_copy("Spend transaction is updated")).style(theme::text::secondary),
             ))
             .padding(50),
         )
@@ -2167,12 +2620,14 @@ pub fn update_spend_success_view<'a>() -> Element<'a, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::view::shared::landing::capture;
     use coincube_core::{
         border_wallet::OrderedPattern,
         descriptors::CoincubeDescriptor,
         miniscript::bitcoin::{absolute, bip32::ChildNumber, transaction, Amount, Sequence, TxIn},
     };
     use coincubed::commands::LCSpendInfo;
+    use iced::keyboard::key::Named;
     use std::str::FromStr;
 
     const DESC: &str = "wsh(or_d(multi(2,[f714c228/48'/1'/0'/2']tpubDEwJnTwfKoMvu8AXXBPydBVWDpzNP5tatjjZ56q4TQioGL7iL9xzTbMoCCQ3tfGihtff7vtR4xsjcRuhZ7HWARVAkGZ1HZcpBhVdou76k7j/<0;1>/*,[2522f23c/48'/1'/0'/2']tpubDEoTU4bDW1EXN1rnLXnRfue1a7DeqjJcs39PkEeLcVXhVKzCnFo9yQX2EeeXJ6kh4hgbz5o9v7YAc1EE97AEJpJbKNmDxE3ZQo4msGPSp2J/<0;1>/*),and_v(v:thresh(1,pkh([f714c228/48'/1'/0'/2']tpubDEwJnTwfKoMvu8AXXBPydBVWDpzNP5tatjjZ56q4TQioGL7iL9xzTbMoCCQ3tfGihtff7vtR4xsjcRuhZ7HWARVAkGZ1HZcpBhVdou76k7j/<2;3>/*),a:pkh([2522f23c/48'/1'/0'/2']tpubDEoTU4bDW1EXN1rnLXnRfue1a7DeqjJcs39PkEeLcVXhVKzCnFo9yQX2EeeXJ6kh4hgbz5o9v7YAc1EE97AEJpJbKNmDxE3ZQo4msGPSp2J/<2;3>/*)),older(65535))))#9s8ekrce";
@@ -2277,6 +2732,463 @@ mod tests {
     }
 
     #[test]
+    fn pending_psbt_review_keeps_authorization_amounts_visible() {
+        assert!(!mask_passive_psbt_detail(true, &SpendStatus::Pending));
+        for status in [
+            SpendStatus::Broadcast,
+            SpendStatus::Spent,
+            SpendStatus::Deprecated,
+        ] {
+            assert!(mask_passive_psbt_detail(true, &status));
+            assert!(!mask_passive_psbt_detail(false, &status));
+        }
+    }
+
+    #[test]
+    fn signer_picker_mounted_keyboard_actions_and_replacement() {
+        let fp = fingerprint("f714c228");
+        let make_path = |state| SigningPath {
+            title: "Primary spending option:".into(),
+            is_primary: true,
+            sequence: None,
+            active: true,
+            threshold: 1,
+            total: 1,
+            collected: 0,
+            keys: vec![signing_row(fp, "This Cube", SigningKeyKind::Master, state)],
+            can_request_all: false,
+            expanded: true,
+        };
+        let close = action_id(91, "picker.close");
+        let sign = action_id(91, &format!("picker.path.primary.key.{fp}.activate"));
+        let mounted = capture::inspect_full_window(
+            "psbt-picker-keyboard",
+            sign_action(
+                crate::chain::ChainId::Bitcoin,
+                91,
+                vec![make_path(SigningKeyState::Available(
+                    SigningKeyAction::Master,
+                ))],
+                vec![],
+                None,
+            ),
+            (1200, 800),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.has_focus(close.clone()));
+        assert!(mounted.has_focus(sign.clone()));
+        assert!(
+            mounted.focus.iter().position(|(id, _)| id == &close)
+                < mounted.focus.iter().position(|(id, _)| id == &sign)
+        );
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    sign_action(
+                        crate::chain::ChainId::Bitcoin,
+                        91,
+                        vec![make_path(SigningKeyState::Available(
+                            SigningKeyAction::Master
+                        ))],
+                        vec![],
+                        None
+                    ),
+                    sign.clone(),
+                    (1200, 800),
+                    false,
+                    key
+                )
+                .as_slice(),
+                [Message::Spend(SpendTxMessage::SelectMasterSigner)]
+            ));
+        }
+        let busy = capture::inspect_full_window(
+            "psbt-picker-busy",
+            sign_action(
+                crate::chain::ChainId::Bitcoin,
+                91,
+                vec![make_path(SigningKeyState::InProgress("Signing…".into()))],
+                vec![],
+                None,
+            ),
+            (1024, 768),
+            "light",
+            theme::Theme::light(),
+        );
+        assert!(!busy.has_focus(sign));
+        assert!(busy.has_focus(close));
+
+        let inactive = || SigningPath {
+            title: "Recovery spending option:".into(),
+            is_primary: false,
+            sequence: Some(42),
+            active: false,
+            threshold: 1,
+            total: 1,
+            collected: 0,
+            keys: vec![signing_row(
+                fp,
+                "Unavailable",
+                SigningKeyKind::Hardware,
+                SigningKeyState::Disabled("This path is unavailable".into()),
+            )],
+            can_request_all: false,
+            expanded: false,
+        };
+        let toggle = action_id(91, "picker.path.42.toggle");
+        let collapsed = capture::inspect_full_window(
+            "psbt-picker-inactive-path",
+            sign_action(
+                crate::chain::ChainId::Bitcoin,
+                91,
+                vec![inactive()],
+                vec![],
+                None,
+            ),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(collapsed.has_focus(toggle.clone()));
+        assert!(!collapsed.has_focus(action_id(91, &format!("picker.path.42.key.{fp}.activate"))));
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    sign_action(
+                        crate::chain::ChainId::Bitcoin,
+                        91,
+                        vec![inactive()],
+                        vec![],
+                        None
+                    ),
+                    toggle.clone(),
+                    (1024, 768),
+                    false,
+                    key,
+                )
+                .as_slice(),
+                [Message::Spend(SpendTxMessage::ToggleSpendPath(Some(42)))]
+            ));
+        }
+    }
+
+    #[test]
+    fn keychain_unavailable_has_distinct_keyboard_handoff_actions() {
+        for (size, appearance, theme) in [
+            ((1024, 768), "dark", theme::Theme::dark()),
+            ((1440, 900), "light", theme::Theme::light()),
+        ] {
+            let mounted = capture::inspect_full_window(
+                "psbt-keychain-unavailable",
+                keychain_unavailable_action(92, false),
+                size,
+                appearance,
+                theme,
+            );
+            for name in ["cancel", "pair", "connect"] {
+                assert!(mounted.has_focus(action_id(92, &format!("keychain-unavailable.{name}"))));
+            }
+            assert!(matches!(
+                capture::activate_with_key(
+                    keychain_unavailable_action(92, false),
+                    action_id(92, "keychain-unavailable.connect"),
+                    size,
+                    false,
+                    Named::Enter,
+                )
+                .as_slice(),
+                [Message::Spend(SpendTxMessage::KeychainConnectSignIn)]
+            ));
+            assert!(matches!(
+                capture::activate_with_key(
+                    keychain_unavailable_action(92, true),
+                    action_id(92, "keychain-unavailable.pair"),
+                    size,
+                    false,
+                    Named::Space,
+                )
+                .as_slice(),
+                [Message::Spend(SpendTxMessage::KeychainPairPhone)]
+            ));
+        }
+        assert_ne!(action_id(92, "picker.close"), action_id(93, "picker.close"));
+    }
+
+    #[test]
+    fn recipient_identity_summary_is_visible_only_for_a_current_ready_proposal() {
+        let fixture = crate::app::state::vault::test_support::unified::fixture();
+        let mut input_coin = coin(1, 50_000, false);
+        input_coin.outpoint = fixture.psbt.unsigned_tx.input[0].previous_output;
+        let tx = SpendTx::new(
+            None,
+            fixture.psbt,
+            vec![input_coin],
+            &fixture.descriptor,
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+            Network::Signet,
+        );
+        let ticket = crate::services::branta::test_ticket(true);
+        let identity = crate::services::branta::test_identity(&ticket, "Synthetic Merchant");
+        let identities = [(
+            0,
+            crate::services::branta::LookupResult::Identified(vec![identity]),
+        )];
+
+        for (appearance, theme, mode) in [
+            (
+                "dark",
+                theme::Theme::dark(),
+                coincube_ui::theme::palette::ThemeMode::Dark,
+            ),
+            (
+                "light",
+                theme::Theme::light(),
+                coincube_ui::theme::palette::ThemeMode::Light,
+            ),
+        ] {
+            let summary = recipient_identity_summary(
+                &tx,
+                Network::Signet,
+                BitcoinDisplayUnit::Sats,
+                true,
+                &identities,
+                mode,
+                false,
+            )
+            .expect("current identity on a ready single-recipient proposal");
+            let mounted = capture::inspect(
+                "psbt-detail-recipient-identity",
+                summary,
+                (1024, 768),
+                appearance,
+                theme,
+            );
+            assert!(mounted.contains("Recipient identity"));
+            assert!(mounted.contains("Synthetic Merchant"));
+            assert!(mounted.contains("View with Branta"));
+            let hidden = capture::inspect(
+                "psbt-detail-recipient-identity-hidden",
+                recipient_identity_summary(
+                    &tx,
+                    Network::Signet,
+                    BitcoinDisplayUnit::Sats,
+                    true,
+                    &identities,
+                    mode,
+                    true,
+                )
+                .expect("masked current identity"),
+                (1024, 768),
+                appearance,
+                theme,
+            );
+            assert!(hidden.contains("••••"));
+            assert!(hidden.contains("Synthetic Merchant"));
+        }
+        assert!(recipient_identity_summary(
+            &tx,
+            Network::Signet,
+            BitcoinDisplayUnit::Sats,
+            false,
+            &identities,
+            coincube_ui::theme::palette::ThemeMode::Dark,
+            false,
+        )
+        .is_none());
+        ticket.set_test_enabled(false);
+        assert!(recipient_identity_summary(
+            &tx,
+            Network::Signet,
+            BitcoinDisplayUnit::Sats,
+            true,
+            &identities,
+            coincube_ui::theme::palette::ThemeMode::Dark,
+            false,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn overview_preserves_disabled_gates_and_modal_hides_base_from_tab_order() {
+        let fixture = crate::app::state::vault::test_support::unified::fixture();
+        let policy = fixture.descriptor.policy();
+        let mut input_coin = coin(1, 50_000, false);
+        input_coin.outpoint = fixture.psbt.unsigned_tx.input[0].previous_output;
+        let tx = SpendTx::new(
+            None,
+            fixture.psbt.clone(),
+            vec![input_coin],
+            &fixture.descriptor,
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+            Network::Signet,
+        );
+        let aliases = HashMap::new();
+        let overview = |currently_signing| {
+            spend_overview_with_cancel(
+                94,
+                &tx,
+                &policy,
+                &aliases,
+                currently_signing,
+                true,
+                None,
+                false,
+                Some(Message::Spend(SpendTxMessage::Cancel)),
+                true,
+            )
+        };
+        let enabled = capture::inspect_full_window(
+            "psbt-overview-enabled",
+            overview(false),
+            (1200, 800),
+            "dark",
+            theme::Theme::dark(),
+        );
+        for name in ["export", "import", "copy-txid", "cancel", "sign"] {
+            assert!(
+                enabled.has_focus(action_id(94, &format!("overview.{name}"))),
+                "missing {name}: {:?}",
+                enabled.focus
+            );
+        }
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    overview(false),
+                    action_id(94, "overview.sign"),
+                    (1200, 800),
+                    false,
+                    key,
+                )
+                .as_slice(),
+                [Message::Spend(SpendTxMessage::Sign)]
+            ));
+        }
+        let busy = capture::inspect_full_window(
+            "psbt-overview-busy",
+            overview(true),
+            (1024, 768),
+            "light",
+            theme::Theme::light(),
+        );
+        for name in ["export", "import"] {
+            assert!(!busy.has_focus(action_id(94, &format!("overview.{name}"))));
+        }
+        // Inspect the actual overlay operation too. The generic content-only
+        // capture intentionally probes just the root, not overlay widgets.
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Operation, Tree},
+            Layout,
+        };
+        struct FocusProbe(Vec<Id>);
+        impl Operation for FocusProbe {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn focusable(
+                &mut self,
+                id: Option<&Id>,
+                _bounds: iced::Rectangle,
+                _: &mut dyn iced::advanced::widget::operation::Focusable,
+            ) {
+                if let Some(id) = id {
+                    self.0.push(id.clone());
+                }
+            }
+        }
+        let size = iced::Size::new(1200.0, 800.0);
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut element: Element<'_, Message> = coincube_ui::widget::modal::Modal::new(
+            overview(false),
+            sign_action(crate::chain::ChainId::Bitcoin, 95, vec![], vec![], None),
+        )
+        .into();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, size),
+        );
+        let mut probe = FocusProbe(Vec::new());
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut probe);
+        let viewport = iced::Rectangle::with_size(size);
+        let mut overlay = element
+            .as_widget_mut()
+            .overlay(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &viewport,
+                iced::Vector::ZERO,
+            )
+            .unwrap();
+        let overlay_node = overlay.as_overlay_mut().layout(&renderer, size);
+        overlay
+            .as_overlay_mut()
+            .operate(Layout::new(&overlay_node), &renderer, &mut probe);
+        assert!(probe.0.contains(&action_id(95, "picker.close")));
+        assert!(!probe.0.contains(&action_id(94, "overview.sign")));
+    }
+
+    #[test]
+    fn worldview_signer_and_broadcast_confirmations_show_the_exact_chain() {
+        use crate::chain::ChainId;
+
+        let quote = quote();
+        let image = image_handle();
+        for (chain, expected, other) in [
+            (
+                ChainId::Bitcoin,
+                "Bitcoin SHA-256 · Mainnet",
+                "Bitcoin BLAKE2b · Mainnet",
+            ),
+            (
+                ChainId::BitcoinBlake2b,
+                "Bitcoin BLAKE2b · Mainnet",
+                "Bitcoin SHA-256 · Mainnet",
+            ),
+        ] {
+            for dialog in [
+                sign_action(chain, 1, vec![], vec![], None),
+                broadcast_action_with_identity_review(
+                    chain,
+                    &HashSet::new(),
+                    false,
+                    false,
+                    None,
+                    "40,000 sats",
+                    &quote,
+                    &image,
+                    false,
+                    None,
+                ),
+            ] {
+                let mounted = capture::inspect(
+                    "psbt-canonical-network",
+                    dialog,
+                    (1024, 768),
+                    "dark",
+                    theme::Theme::dark(),
+                );
+                assert!(mounted.contains(expected), "missing {}", expected);
+                for wrong in [other, "Spamcoin", "LukeCoin", "Bitcoin (XBT)"] {
+                    assert!(!mounted.contains(wrong), "unexpected {}", wrong);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn action_modals_build_for_success_pending_and_error_states() {
         let mut conflicts = HashSet::new();
         conflicts.insert(Txid::from_str(&format!("{:064x}", 1)).unwrap());
@@ -2288,8 +3200,8 @@ mod tests {
         let _ = save_action(true);
         let _ = delete_action(false);
         let _ = delete_action(true);
-        let _ = keychain_unavailable_action(false);
-        let _ = keychain_unavailable_action(true);
+        let _ = keychain_unavailable_action(1, false);
+        let _ = keychain_unavailable_action(1, true);
         let _ = broadcast_action(
             &HashSet::new(),
             false,
@@ -2371,6 +3283,28 @@ mod tests {
             &labels,
             &labels_editing,
             BitcoinDisplayUnit::Sats,
+            false,
+            true,
+        );
+
+        assert_eq!(history_amount_redaction(true), Some("••••"));
+        assert_eq!(history_amount_redaction(false), None);
+        let _ = history_inputs_view(
+            &coins,
+            &tx,
+            &labels,
+            &labels_editing,
+            BitcoinDisplayUnit::Sats,
+            true,
+        );
+        let _ = history_outputs_view(
+            &tx,
+            Network::Bitcoin,
+            &[1],
+            &labels,
+            &labels_editing,
+            BitcoinDisplayUnit::Sats,
+            true,
             false,
             true,
         );
@@ -2521,6 +3455,8 @@ mod tests {
         };
 
         let _ = sign_action(
+            crate::chain::ChainId::Bitcoin,
+            1,
             vec![active, inactive_collapsed, inactive_expanded],
             vec!["Connect is not ready yet.".to_string()],
             Some("Signing device unavailable.".to_string()),

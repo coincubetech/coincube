@@ -20,7 +20,7 @@ body{margin:0}
 a{color:#f3821d}a:hover{color:#ffa54d}
 
 /* scene tokens copied from V3-Launcher-Spin; the floor here is static (no transitions) */
-.tenshu{--floor:#1b1c1a;--floor-rule:#2b2c29;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--on-accent:#201407;--skel:#2c2d2b;font-variant-numeric:tabular-nums}
+.tenshu{--floor:#1b1c1a;--floor-rule:#2b2c29;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--on-accent:#1a1208;--skel:#2c2d2b;font-variant-numeric:tabular-nums}
 .tenshu.light{--floor:#efebe3;--floor-rule:#e0d9cd;--face-t:#e6e0d5;--face-l:#d6cfc2;--face-r:#c9c1b2;--edge-test:rgba(87,90,84,.6);--shadow:rgba(70,52,30,.3);--skel:#ece7de}
 .tenshu button,.tenshu input{font:inherit;color:inherit}
 .grow{flex:1}
@@ -78,7 +78,7 @@ a.tbtn,a.tbtn:hover{color:var(--ink);text-decoration:none}
 .sheet{position:absolute;left:200px;top:28px;width:1040px;bottom:28px;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 24px 64px -16px rgba(0,0,0,.55);overflow:hidden;z-index:4}
 .light .sheet{box-shadow:0 24px 64px -20px rgba(70,52,30,.35)}
 .shead{flex:none;display:flex;align-items:center;gap:16px;padding:18px 24px 18px 28px;border-bottom:1px solid var(--line)}
-.shead h1{margin:0;font-size:24px;font-weight:600;line-height:1.25}
+.shead h1{margin:0;font-size:22px;font-weight:600;line-height:1.25}
 .shead p{margin:2px 0 0;font-size:13px;color:var(--muted)}
 .btn.close{gap:6px;padding:0 12px 0 10px}
 .sbody{flex:1;min-height:0;display:flex}
@@ -86,7 +86,7 @@ a.tbtn,a.tbtn:hover{color:var(--ink);text-decoration:none}
 /* the 6px gap is wider than the ring (2px + 2px offset), and the focused/selected row paints above its neighbours */
 .ni{position:relative;z-index:0;display:flex;align-items:center;gap:10px;height:40px;padding:0 12px;border:0;border-radius:8px;background:none;cursor:pointer;font-size:14px;text-align:left}
 .ni[aria-current="page"]{z-index:1}
-.ni:focus-visible,.ni.demo-focus{z-index:2}
+.ni:focus-visible{z-index:2}
 .ni svg{width:18px;height:18px;color:var(--muted)}
 .ni:hover{background:var(--selected)}
 .ni[aria-current="page"]{background:var(--selected);font-weight:600}
@@ -145,6 +145,24 @@ a.linkbtn:hover,.linkbtn:hover{color:var(--ink)}
 .coin-top{width:calc(var(--s) * .34);height:calc(var(--s) * .34)}
 a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
 .cubebg{position:absolute;inset:0;opacity:.45;pointer-events:none;filter:saturate(.6)}
+/* shared top bar (Robert, 2026-10-29): the same bar on every screen, Launcher and Cube: 64px on the rail colour; on the right the hide-balances eye, the Connect account chip, then App preferences as an icon with a tooltip. tbx- names keep it clear of page classes. */
+.top{height:64px;padding:0 24px;gap:16px;background:var(--rail)}
+.tbx-r{display:flex;align-items:center;gap:8px;flex:none}
+.tbx-ico{position:relative;width:32px;height:32px;display:grid;place-items:center;padding:0;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;text-decoration:none}
+.tbx-ico:hover{background:var(--hover,rgba(245,240,232,.06));color:var(--ink)}
+.tbx-ico[aria-pressed="true"],.tbx-ico[aria-current="page"]{background:var(--selected);color:var(--ink)}
+.tbx-ico svg{width:16px;height:16px}
+.tbx-ico[data-tip]::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);right:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--muted);font-size:13px;font-weight:400;line-height:1.3;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease .25s;z-index:20}
+.tbx-ico[data-tip]:hover::after,.tbx-ico[data-tip]:focus-visible::after{opacity:1}
+.tbx-chip{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--ink);font:inherit;font-size:13px;white-space:nowrap;text-decoration:none;cursor:pointer}
+a.tbx-chip{color:var(--ink)}
+.tbx-chip:hover{background:var(--hover,rgba(245,240,232,.06))}
+.tbx-chip[aria-current="page"]{border-color:var(--accent);background:var(--selected)}
+.tbx-chip svg{width:16px;height:16px;flex:none}
+.tbx-chip .pi{color:var(--muted)}
+.tbx-st{display:inline-flex;align-items:center;gap:5px}
+.tbx-st.ok{color:var(--good)}.tbx-st.out{color:var(--muted)}.tbx-st.warn{color:var(--warn)}
+.tbx-mini{font-weight:600;color:var(--acc-ink,var(--accent))}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -156,18 +174,9 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
       <span>Tenshu</span>
     </a>
     <span class="grow"></span>
-    <button type="button" class="tbtn ico" aria-label="Hide balances" aria-pressed="{{ hidePressed }}" title="{{ hideTitle }}" onClick="{{ toggleHide }}">
+    <div class="tbx-r"><button type="button" class="tbx-ico" aria-label="Hide balances" aria-pressed="{{ hidePressed }}" title="{{ hideTitle }}" onClick="{{ toggleHide }}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ eyePath }}"></path></svg>
-    </button>
-    <span class="vsep"></span>
-    <a class="tbtn" href="P-Connect.dc.html" aria-label="Connect, alex@example.test, signed in">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
-      <span>Connect</span><span class="dot">·</span><span>alex@example.test</span><span class="stw">Signed in</span>
-    </a>
-    <a class="tbtn on" href="P-AppPrefs.dc.html" aria-current="page">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>
-      <span>App preferences</span>
-    </a>
+    </button><a href="P-Connect.dc.html" class="tbx-chip" aria-label="Connect account alex@example.test: signed in"><svg class="pi" aria-hidden="true" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="tbx-st ok"><svg aria-hidden="true" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></a><button type="button" class="tbx-ico" aria-current="page" aria-label="App preferences" data-tip="App preferences"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg></button></div>
   </header>
   </sc-if>
 
@@ -261,6 +270,23 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                   </fieldset>
                   <span class="scope">This device</span>
                 </li>
+                <li class="row">
+                  <label for="ap-bd"><span class="lbl">Network activity</span><span class="dsc" id="ap-bd-d">Recent blocks and the mempool behind the Cubes, for the network the Launcher is filtered to.</span></label>
+                  <span class="ctl"><span class="swst" aria-hidden="true">{{ bdWord }}</span><input type="checkbox" role="switch" class="sw" id="ap-bd" aria-describedby="ap-bd-d" checked="{{ bd }}" onChange="{{ toggleBd }}"></span>
+                  <span class="scope">This device</span>
+                </li>
+                <sc-if value="{{ bd }}" hint-placeholder-val="{{ true }}">
+                <li class="row">
+                  <span><span class="lbl" id="ap-src-l">Activity source</span><span class="dsc" id="ap-src-d">Automatic reads a local node that is already running, else COINCUBE | Connect. The Launcher never starts a node.</span></span>
+                  <fieldset class="seg ctl" aria-labelledby="ap-src-l" aria-describedby="ap-src-d">
+                    <sc-for list="{{ srcOpts }}" as="o" hint-placeholder-count="3">
+                      <input type="radio" name="ap-src" id="{{ o.id }}" value="{{ o.value }}" checked="{{ o.checked }}" onChange="{{ o.pick }}">
+                      <label for="{{ o.id }}">{{ o.label }}</label>
+                    </sc-for>
+                  </fieldset>
+                  <span class="scope">This device</span>
+                </li>
+                </sc-if>
               </ul>
             </div>
           </sc-if>
@@ -413,6 +439,9 @@ class Component extends DCLogic {
     let APPEAR = 'system'; try { const v = localStorage.getItem('tenshu.proto.theme'); if (v === 'light' || v === 'dark') APPEAR = v; } catch (e) {}
     // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
     let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
+    // prototype-only (design B): Launcher network activity and its source, shared with the Launcher artboards
+    let BD = true; try { BD = localStorage.getItem('tenshu.proto.backdrop') !== 'off'; } catch (e) {}
+    let SRC = 'auto'; try { SRC = localStorage.getItem('tenshu.proto.chainsrc') || 'auto'; } catch (e) {}
     const P = this.props;
     const L = { section: P.section ?? 'Appearance', os: P.theme ?? 'dark', osReduced: !!P.reducedMotion, hide: !!P.hideBalances };
     const key = [L.section, L.os, L.osReduced, L.hide].join('|');
@@ -454,8 +483,8 @@ class Component extends DCLogic {
     const sections = SECS.map(([label, icon]) => ({
       label, icon,
       current: sec === label ? 'page' : 'false',
-      // the active section shows its keyboard-focus ring in this review state
-      cls: sec === label ? 'demo-focus' : '',
+      // no focus ring on the selected row (Robert, 2026-10-29)
+      cls: '',
       pick: () => go({ section: label })
     }));
 
@@ -505,6 +534,9 @@ class Component extends DCLogic {
       dev: !!s.dev,
       devWord: s.dev ? 'On' : 'Off',
       toggleDev: () => { try { if (s.dev) localStorage.removeItem('tenshu.proto.dev'); else localStorage.setItem('tenshu.proto.dev', '1'); window.dispatchEvent(new CustomEvent('tenshu-proto')); } catch (e) {} go({ dev: !s.dev }); },
+      bd: BD, bdWord: BD ? 'On' : 'Off',
+      toggleBd: () => { try { if (BD) localStorage.setItem('tenshu.proto.backdrop', 'off'); else localStorage.removeItem('tenshu.proto.backdrop'); window.dispatchEvent(new CustomEvent('tenshu-proto')); } catch (e) {} go({}); },
+      srcOpts: [['auto', 'Automatic'], ['local', 'Local node'], ['connect', 'Connect']].map(([v, label]) => ({ id: 'ap-src-' + v, value: v, label, checked: SRC === v, pick: () => { try { localStorage.setItem('tenshu.proto.chainsrc', v); window.dispatchEvent(new CustomEvent('tenshu-proto')); } catch (e) {} go({}); } })),
       b2b: B2B, b2bWord: B2B ? 'On' : 'Off',
       toggleB2b: () => { try { if (B2B) localStorage.removeItem('tenshu.proto.b2b'); else localStorage.setItem('tenshu.proto.b2b', '1'); window.dispatchEvent(new CustomEvent('tenshu-proto')); } catch (e) {} go({}); },
       showDiagnostics: sec === 'Diagnostics',

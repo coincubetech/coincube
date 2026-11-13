@@ -16,3 +16,11 @@ copyright and permission notice is preserved beside it in
 The Coincube test suite executes the 142 vectors for script types 0 and 1. The
 12 taproot key-path and 12 tapscript vectors are intentionally skipped because
 those script types are outside this implementation slice.
+
+# Bitcoin Blake2b block fixture
+
+`btcb2_block_979904.raw` is Bitcoin Blake2b mainnet block 979,904
+(`000000000000000065508ea018e19120795fb5af170a89853ad3b477343fd252`, 49
+transactions, 20,820 bytes), fetched unchanged on 2026-10-31 from Connect's
+`/api/v1/esplora/bitcoin-blake2b/mainnet/block/<hash>/raw`. Public chain data;
+`btcb2_block.rs` checks it hashes to that id, so a corrupted copy fails loudly.

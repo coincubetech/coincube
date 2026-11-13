@@ -1,54 +1,46 @@
-//! Per-service configuration, overridable per-call.
+//! Service configuration, overridable per call.
 
-use crate::enums::{BrantaServerBaseUrl, PrivacyMode};
+use crate::enums::BrantaEnvironment;
 
-#[derive(Debug, Clone)]
-pub struct BrantaClientOptions {
-    pub base_url: BrantaServerBaseUrl,
-    pub default_api_key: Option<String>,
+/// Constructor argument and per-call override.
+///
+/// A per-call `environment` of `None` leaves the service default in place.
+#[derive(Debug, Clone, Default)]
+pub struct BrantaApiOptions {
+    pub environment: Option<BrantaEnvironment>,
+    pub api_key: Option<String>,
     pub hmac_secret: Option<String>,
-    pub privacy: PrivacyMode,
 }
 
-impl BrantaClientOptions {
-    pub fn new(base_url: BrantaServerBaseUrl) -> Self {
+impl BrantaApiOptions {
+    pub fn new(environment: BrantaEnvironment) -> Self {
         Self {
-            base_url,
-            default_api_key: None,
+            environment: Some(environment),
+            api_key: None,
             hmac_secret: None,
-            privacy: PrivacyMode::default(),
         }
     }
 
-    /// Resolves the effective base URL: `overrides` wins if present, else `self`.
-    pub fn get_base_url(&self, overrides: Option<&BrantaClientOptions>) -> &'static str {
-        overrides.map(|o| o.base_url).unwrap_or(self.base_url).url()
-    }
-
-    /// Resolves the effective privacy mode: `overrides` wins if present, else `self`.
-    pub fn get_privacy(&self, overrides: Option<&BrantaClientOptions>) -> PrivacyMode {
-        overrides.map(|o| o.privacy).unwrap_or(self.privacy)
-    }
-
-    /// Resolves the effective API key, field-by-field: `overrides`'s key wins if `Some`, else
-    /// falls back to `self`'s key.
-    pub fn get_api_key<'a>(
-        &'a self,
-        overrides: Option<&'a BrantaClientOptions>,
-    ) -> Option<&'a str> {
+    pub fn get_base_url(&self, overrides: Option<&BrantaApiOptions>) -> &'static str {
         overrides
-            .and_then(|o| o.default_api_key.as_deref())
-            .or(self.default_api_key.as_deref())
+            .and_then(|options| options.environment)
+            .or(self.environment)
+            .unwrap_or(BrantaEnvironment::Staging)
+            .url()
     }
 
-    /// Resolves the effective HMAC secret, field-by-field: `overrides`'s secret wins if `Some`,
-    /// else falls back to `self`'s secret.
+    pub fn get_api_key<'a>(&'a self, overrides: Option<&'a BrantaApiOptions>) -> Option<&'a str> {
+        overrides
+            .and_then(|options| options.api_key.as_deref())
+            .or(self.api_key.as_deref())
+    }
+
     pub fn get_hmac_secret<'a>(
         &'a self,
-        overrides: Option<&'a BrantaClientOptions>,
+        overrides: Option<&'a BrantaApiOptions>,
     ) -> Option<&'a str> {
         overrides
-            .and_then(|o| o.hmac_secret.as_deref())
+            .and_then(|options| options.hmac_secret.as_deref())
             .or(self.hmac_secret.as_deref())
     }
 }
@@ -57,20 +49,17 @@ impl BrantaClientOptions {
 mod tests {
     use super::*;
 
-    fn opts(base_url: BrantaServerBaseUrl) -> BrantaClientOptions {
-        BrantaClientOptions::new(base_url)
-    }
-
     #[test]
     fn override_wins_over_default_field_by_field() {
-        let default = BrantaClientOptions {
-            default_api_key: Some("default-key".into()),
+        let default = BrantaApiOptions {
+            api_key: Some("default-key".into()),
             hmac_secret: Some("default-hmac".into()),
-            ..opts(BrantaServerBaseUrl::Staging)
+            ..BrantaApiOptions::new(BrantaEnvironment::Staging)
         };
-        let mut over = opts(BrantaServerBaseUrl::Production);
-        over.default_api_key = Some("child-key".into());
-        // over.hmac_secret left None -> should fall back to default's hmac_secret.
+        let over = BrantaApiOptions {
+            api_key: Some("child-key".into()),
+            ..BrantaApiOptions::new(BrantaEnvironment::Production)
+        };
 
         assert_eq!(
             default.get_base_url(Some(&over)),
@@ -81,14 +70,12 @@ mod tests {
     }
 
     #[test]
-    fn none_overrides_fall_back_entirely_to_default() {
-        let default = opts(BrantaServerBaseUrl::Staging);
+    fn missing_environment_does_not_override() {
+        let default = BrantaApiOptions::new(BrantaEnvironment::Production);
+        let over = BrantaApiOptions::default();
         assert_eq!(
-            default.get_base_url(None),
-            "https://staging.guardrail.branta.pro"
+            default.get_base_url(Some(&over)),
+            "https://guardrail.branta.pro"
         );
-        assert_eq!(default.get_privacy(None), PrivacyMode::Strict);
-        assert_eq!(default.get_api_key(None), None);
-        assert_eq!(default.get_hmac_secret(None), None);
     }
 }

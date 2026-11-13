@@ -1,26 +1,15 @@
 pub mod auth;
-pub mod backend;
 pub mod cache;
-
-use coincube_core::miniscript::bitcoin;
 
 use serde::Deserialize;
 
-const LIANALITE_SIGNET_URL: &str = "https://api.signet.lianalite.com";
-const LIANALITE_MAINNET_URL: &str = "https://api.lianalite.com";
 const CONNECT_GRPC_URL_ENV: &str = "COINCUBE_CONNECT_GRPC_URL";
 const LEGACY_GRPC_URL_ENV: &str = "COINCUBE_GRPC_URL";
 
-#[derive(Debug, Clone, Deserialize)]
-struct ServiceConfigResource {
-    pub auth_api_url: String,
-    pub auth_api_public_key: String,
-}
-
 /// COINCUBE-owned Connect service config (`GET /api/v1/connect/service-config`).
-/// Source of the Connect signing gRPC endpoint for **all** networks — replaces
-/// the per-network lianalite `grpc_url`. The endpoint is network-agnostic (one
-/// gRPC deployment serves every network), so we don't pass a `network` query.
+/// Source of the Connect signing gRPC endpoint for **all** networks. The
+/// endpoint is network-agnostic (one gRPC deployment serves every network), so
+/// we don't pass a `network` query.
 #[derive(Debug, Clone, Deserialize)]
 struct CoincubeServiceConfig {
     #[serde(rename = "grpcUrl")]
@@ -33,67 +22,46 @@ fn default_connect_grpc_tls() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ServiceConfig {
-    pub auth_api_url: String,
-    pub auth_api_public_key: String,
-    pub backend_api_url: String,
-    pub grpc_url: Option<String>,
-}
-
-pub async fn get_service_config(
-    network: bitcoin::Network,
-) -> Result<ServiceConfig, reqwest::Error> {
-    let default_backend_api_url = if network == bitcoin::Network::Bitcoin {
-        LIANALITE_MAINNET_URL
-    } else {
-        LIANALITE_SIGNET_URL
-    };
-    // NOTE: the lianalite `/v1/desktop` call remains only for the auth +
-    // remote-backend fields, which are tracked for removal separately
-    // (see plans/liana-api-removal-rust.md). The signing `grpc_url` no
-    // longer comes from lianalite.
-    let res: ServiceConfigResource =
-        reqwest::get(format!("{}/v1/desktop", default_backend_api_url))
-            .await?
-            .json()
-            .await?;
-    // gRPC endpoint discovery, COINCUBE-only, in precedence order:
-    //   1. runtime env override (staging/local),
-    //   2. COINCUBE service-config endpoint (env-specific, all networks),
-    //   3. compile-time baked default (resilience if the endpoint is down).
-    let grpc_url = resolve_connect_grpc_url().await;
-    Ok(ServiceConfig {
-        auth_api_url: res.auth_api_url,
-        auth_api_public_key: res.auth_api_public_key,
-        backend_api_url: runtime_backend_api_url_override()
-            .unwrap_or_else(|| default_backend_api_url.to_string()),
-        grpc_url,
-    })
-}
-
-/// Resolve only the Connect signing gRPC endpoint, without fetching the
-/// legacy lianalite desktop config used for auth and remote-backend fields.
+/// Resolve the Connect signing gRPC endpoint, COINCUBE-only, in precedence order:
+///   1. runtime env override (staging/local),
+///   2. COINCUBE service-config endpoint (env-specific, all networks),
+///   3. compile-time baked default (resilience if the endpoint is down).
 pub async fn resolve_connect_grpc_url() -> Option<String> {
-    if let Some(url) = runtime_grpc_url_override() {
+    if let Some(url) = reject_plaintext_in_release(runtime_grpc_url_override()) {
         return Some(url);
     }
     coincube_grpc_url()
         .await
-        .or_else(buildtime_grpc_url_default)
+        .or_else(|| reject_plaintext_in_release(buildtime_grpc_url_default()))
 }
 
 /// Fetch the Connect signing gRPC URL from coincube-api. Best-effort: any
-/// network/parse failure yields `None` so the caller can fall back, and we
-/// never fall back to lianalite. The returned URL is normalized to a
-/// tonic-ready form (`https://…` when TLS, `http://…` otherwise) so
-/// `create_channel` enables TLS correctly.
+/// network/parse failure yields `None` so the caller can fall back. The
+/// returned URL is normalized to a tonic-ready form (`https://…` when TLS,
+/// `http://…` otherwise) so `create_channel` enables TLS correctly.
 async fn coincube_grpc_url() -> Option<String> {
     let base = crate::services::coincube_api_base_url();
     let url = format!("{base}/api/v1/connect/service-config");
-    let cfg: CoincubeServiceConfig = reqwest::get(url).await.ok()?.json().await.ok()?;
+    let https_only = !base.starts_with("http://");
+    let client = reqwest::Client::builder()
+        .https_only(https_only)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
+    let cfg: CoincubeServiceConfig = client.get(url).send().await.ok()?.json().await.ok()?;
     let raw = cfg.grpc_url?;
-    normalize_grpc_url(&raw, cfg.tls)
+    reject_plaintext_in_release(normalize_grpc_url(&raw, cfg.tls))
+}
+
+/// Release builds drop a cleartext gRPC URL instead of dialing it. Debug
+/// builds keep `http://` for a local signer.
+fn reject_plaintext_in_release(url: Option<String>) -> Option<String> {
+    #[cfg(not(debug_assertions))]
+    if url.as_deref().is_some_and(|u| u.starts_with("http://")) {
+        tracing::error!("refusing a plaintext Connect gRPC URL in a release build");
+        return None;
+    }
+    url
 }
 
 /// Compile-time baked gRPC URL (`COINCUBE_CONNECT_GRPC_URL` at build time),
@@ -135,13 +103,6 @@ fn runtime_grpc_url_override() -> Option<String> {
         .ok()
         .or_else(|| std::env::var(LEGACY_GRPC_URL_ENV).ok())
         .and_then(|v| normalize_grpc_url(&v, true))
-}
-
-fn runtime_backend_api_url_override() -> Option<String> {
-    std::env::var("COINCUBE_API_URL")
-        .ok()
-        .map(|v| v.trim().trim_end_matches('/').to_string())
-        .filter(|v| !v.is_empty())
 }
 
 #[cfg(test)]

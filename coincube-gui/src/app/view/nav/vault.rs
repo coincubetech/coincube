@@ -4,6 +4,7 @@ use coincube_ui::icon::{
     claim_icon, coins_outline_icon, home_icon, receipt_icon, receive_icon, recovery_icon,
     send_icon, settings_icon,
 };
+use coincube_ui::locale::copy as localized_copy;
 
 /// Secondary-rail items for the Vault wallet section.
 pub fn items(ctx: &NavContext) -> Vec<SubItem> {
@@ -45,7 +46,7 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
             "Settings",
             settings_icon,
             Menu::Vault(VaultSubMenu::Settings(Some(
-                crate::app::menu::SettingsOption::Node,
+                crate::app::menu::SettingsOption::Wallet,
             ))),
             |m| matches!(m, Menu::Vault(VaultSubMenu::Settings(_))),
         ),
@@ -64,41 +65,42 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
             ),
         );
     }
-    // Bitcoin Blake2b claim entry. Hidden rather than disabled when the
-    // account has no fork grant: an account without it has no BTCB2 at all,
-    // which is not a per-Cube state the user can act on. Inserted before
-    // Settings so the rail keeps Settings last.
-    let resume_fork = ctx.network == crate::chain::ChainId::BitcoinBlake2b
-        && ctx.has_vault
-        && ctx.btcb2_server_enabled
-        && ctx.btcb2_claim_resume;
-    let imported_claim = crate::app::features::imported_claim_blake2b(
-        ctx.network,
-        ctx.has_imported_bitcoin,
-        ctx.btcb2_server_enabled,
-    )
-    .is_available();
-    if imported_claim
-        || (!ctx.has_imported_bitcoin
-            && (resume_fork
-                || crate::app::features::claim_blake2b(ctx.claim_source_cube()).is_available()))
-    {
+    // Split coins checklist (Lane B1.5): only while Bitcoin Blake2b is on for
+    // this Vault, like Coin control's Chains column.
+    let blake2b_on = ctx.network.is_blake2b()
+        || (ctx.network == crate::chain::ChainId::Bitcoin && ctx.btcb2_server_enabled);
+    if blake2b_on && ctx.has_vault && !ctx.has_imported_bitcoin {
         let settings_at = items.len().saturating_sub(1);
         items.insert(
             settings_at,
             SubItem::new(
-                if !imported_claim && resume_fork {
-                    "Resume Claim"
-                } else {
-                    "Claim BTCB2"
-                },
+                "Split coins",
                 claim_icon,
-                Menu::Vault(VaultSubMenu::Claim),
-                |m| matches!(m, Menu::Vault(VaultSubMenu::Claim)),
+                Menu::Vault(VaultSubMenu::SplitCoins),
+                |m| matches!(m, Menu::Vault(VaultSubMenu::SplitCoins)),
             ),
         );
     }
     items
+}
+
+/// The Vault's tools, which the canvas reaches from the Vault page rather
+/// than the sidebar: coin control, PSBT proposals, recovery path and split
+/// coins, each only where [`items`] offers its route.
+pub fn tools(ctx: &NavContext) -> Vec<(&'static str, Menu)> {
+    items(ctx)
+        .into_iter()
+        .filter_map(|item| {
+            let label = match &item.route {
+                Menu::Vault(VaultSubMenu::Coins(_)) => localized_copy("Coin control"),
+                Menu::Vault(VaultSubMenu::PSBTs(_)) => localized_copy("PSBT proposals"),
+                Menu::Vault(VaultSubMenu::Recovery) => localized_copy("Recovery path"),
+                Menu::Vault(VaultSubMenu::SplitCoins) => localized_copy("Split coins"),
+                _ => return None,
+            };
+            Some((label, item.route))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -120,14 +122,17 @@ mod tests {
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             cube_name: "test cube",
+            spark_alias: None,
+            vault_alias: None,
             lightning_address: None,
             avatar: None,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             connect_authenticated: btcb2_server_enabled,
+            connect_email: None,
             connect_stream_status: status,
+            connect: Default::default(),
             btcb2_server_enabled,
             btcb2_already_claimed,
-            btcb2_claim_resume: false,
         }
     }
 
@@ -136,7 +141,70 @@ mod tests {
     }
 
     #[test]
-    fn imported_wallet_has_claim_without_inheritance_actions() {
+    fn vault_page_tools_follow_the_routes_the_vault_offers() {
+        let status = crate::app::ConnectionStatus::default();
+        let vault = ctx(&status, crate::chain::ChainId::Bitcoin, false, false);
+        let names = |context: &NavContext| -> Vec<&'static str> {
+            tools(context).into_iter().map(|(label, _)| label).collect()
+        };
+        assert_eq!(
+            names(&vault),
+            ["Coin control", "PSBT proposals", "Recovery path"]
+        );
+        assert_eq!(
+            tools(&vault)[0].1,
+            Menu::Vault(VaultSubMenu::Coins(None)),
+            "Coin control opens the coins route"
+        );
+        // Imported descriptors cannot use the inheritance recovery route.
+        let imported = NavContext {
+            has_vault: false,
+            has_imported_bitcoin: true,
+            ..vault
+        };
+        assert!(!names(&imported).contains(&"Recovery path"));
+        // Never Send, Receive, Transactions or Settings: those are not tools.
+        for (_, route) in tools(&vault) {
+            assert!(matches!(
+                route,
+                Menu::Vault(
+                    VaultSubMenu::Coins(_)
+                        | VaultSubMenu::PSBTs(_)
+                        | VaultSubMenu::Recovery
+                        | VaultSubMenu::SplitCoins
+                )
+            ));
+        }
+    }
+
+    #[test]
+    fn vault_settings_enters_wallet_first_and_keeps_pair_available() {
+        let status = crate::app::ConnectionStatus::default();
+        let context = ctx(&status, crate::chain::ChainId::Bitcoin, false, false);
+        let nav = items(&context);
+        assert!(matches!(
+            &nav.last().unwrap().route,
+            Menu::Vault(VaultSubMenu::Settings(Some(
+                crate::app::menu::SettingsOption::Wallet
+            )))
+        ));
+        let sections = crate::app::view::nav::tertiary::items_for(
+            &Menu::Vault(VaultSubMenu::Settings(None)),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(
+            labels(&sections),
+            ["Wallet & signers", "Node", "Keychain", "Data & exports"]
+        );
+        assert!(sections[2].disabled_reason.is_none());
+        assert!((sections[0].matches)(&Menu::Vault(VaultSubMenu::Settings(
+            None
+        ))));
+    }
+
+    #[test]
+    fn imported_wallet_has_no_inheritance_or_split_actions() {
         let status = crate::app::ConnectionStatus::default();
         let mut context = ctx(&status, crate::chain::ChainId::Bitcoin, true, false);
         context.has_vault = false;
@@ -150,27 +218,33 @@ mod tests {
                 "Coins",
                 "Transactions",
                 "PSBTs",
-                "Claim BTCB2",
                 "Settings"
             ]
         );
+        assert!(matches!(
+            &items(&context).last().unwrap().route,
+            Menu::Vault(VaultSubMenu::Settings(Some(
+                crate::app::menu::SettingsOption::Wallet
+            )))
+        ));
         let settings = crate::app::view::nav::tertiary::items_for(
             &Menu::Vault(VaultSubMenu::Settings(None)),
             &context,
         )
         .unwrap();
-        assert_eq!(labels(&settings), ["Node", "Wallet", "Import/Export"]);
-        context.btcb2_server_enabled = false;
-        assert!(!labels(&items(&context)).contains(&"Claim BTCB2"));
-        context.btcb2_server_enabled = true;
+        assert_eq!(
+            labels(&settings),
+            ["Wallet & signers", "Node", "Keychain", "Data & exports"]
+        );
+        assert!(settings[2].disabled_reason.is_some());
         context.network = crate::chain::ChainId::BitcoinBlake2b;
-        assert!(!labels(&items(&context)).contains(&"Claim BTCB2"));
+        assert!(!labels(&items(&context)).contains(&"Split coins"));
     }
 
-    /// With the account grant the claim entry appears, immediately before
+    /// With the account grant Split coins appears, immediately before
     /// Settings — and without it the rail is byte-for-byte what it was.
     #[test]
-    fn the_claim_entry_appears_only_with_the_account_grant_and_keeps_settings_last() {
+    fn split_coins_appears_only_with_the_account_grant_and_keeps_settings_last() {
         let status = crate::app::ConnectionStatus::default();
         let granted = items(&ctx(&status, crate::chain::ChainId::Bitcoin, true, false));
         assert_eq!(
@@ -183,7 +257,7 @@ mod tests {
                 "Transactions",
                 "PSBTs",
                 "Recovery",
-                "Claim BTCB2",
+                "Split coins",
                 "Settings",
             ]
         );
@@ -204,10 +278,7 @@ mod tests {
             ]
         );
 
-        // Already claimed: the item stays — the claim itself (step 1, the
-        // poison self-transfer) happens after the target exists, and the App
-        // routes the item to the step-1 panel instead of the installer
-        // (`features::claim_entry`).
+        // A copy already exists: the hub still shows (it checks it off).
         assert_eq!(
             labels(&items(&ctx(
                 &status,
@@ -217,8 +288,7 @@ mod tests {
             ))),
             labels(&granted)
         );
-        // A non-Bitcoin Cube: no claim surface, answered by
-        // `features::claim_blake2b`.
+        // A Blake2b Cube: its own Split coins checklist.
         assert_eq!(
             labels(&items(&ctx(
                 &status,
@@ -226,17 +296,17 @@ mod tests {
                 true,
                 false
             ))),
-            labels(&ungranted)
+            [
+                "Overview",
+                "Send",
+                "Receive",
+                "Coins",
+                "Transactions",
+                "PSBTs",
+                "Recovery",
+                "Split coins",
+                "Settings",
+            ]
         );
-    }
-    #[test]
-    fn fork_resume_entry_requires_an_existing_pair_and_account_grant() {
-        let status = crate::app::ConnectionStatus::default();
-        let mut context = ctx(&status, crate::chain::ChainId::BitcoinBlake2b, true, false);
-        assert!(!labels(&items(&context)).contains(&"Resume Claim"));
-        context.btcb2_claim_resume = true;
-        assert!(labels(&items(&context)).contains(&"Resume Claim"));
-        context.btcb2_server_enabled = false;
-        assert!(!labels(&items(&context)).contains(&"Resume Claim"));
     }
 }

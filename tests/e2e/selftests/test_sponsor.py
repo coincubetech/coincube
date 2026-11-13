@@ -74,7 +74,121 @@ def native_reply(request):
                                                    (intent['change_sats'], intent['source_script'])])
     return {'ok': True, 'action': 'sponsor', 'network': 'testnet4', 'raw_tx': raw,
             'txid': sponsor.transaction(raw)['txid'], 'intent_sha256': request['sponsor_intent_sha256'],
-            'amount_sats': 500000, 'fee_sats': 1000, 'change_sats': 488000}
+            'amount_sats': intent['amount_sats'], 'fee_sats': intent['fee_sats'], 'change_sats': intent['change_sats']}
+
+
+@pytest.fixture
+def hop(scenario, tmp_path, monkeypatch):
+    import shutil
+    args, _ = scenario
+    prepared = sponsor.execute(args)
+    prior_dir = Path(args.output_dir)
+    receipt = native_reply({'sponsor_intent_file': str(prior_dir / 'sponsor-intent.json'),
+                            'sponsor_intent_sha256': prepared['intent_sha256']})
+    atomic_write(prior_dir / 'sponsor-receipt.json', sponsor.encoded(receipt))
+    previous_target = Path(args.target_run)
+    # The historical target progressed after receiving its payout. Its old
+    # snapshot stays in the parent intent; the new intent binds current state.
+    checkpoint = json.loads(private_read(previous_target / 'checkpoint.json'))
+    checkpoint['artifacts']['later_progress'] = True
+    atomic_write(previous_target / 'checkpoint.json', sponsor.encoded(checkpoint))
+    target = tmp_path / 'next-target'
+    shutil.copytree(previous_target, target)
+    state = json.loads(private_read(target / 'provision.json'))
+    state.update(run_id='next-target', vault_id=99, profile_dir=str(target / 'profile'))
+    checkpoint['artifacts']['vault_id'] = '99'
+    atomic_write(target / 'provision.json', sponsor.encoded(state))
+    atomic_write(target / 'checkpoint.json', sponsor.encoded(checkpoint))
+    args.source_sponsor_dir = str(prior_dir)
+    args.target_run = str(target)
+    args.output_dir = str(tmp_path / 'next-sponsor')
+    args.amount_sats = 100000
+    evidence = [{'endpoint': ep, 'genesis': sponsor.GENESIS, 'observed_at': 1000,
+                 'txid': receipt['txid'], 'vout': 1, 'raw_tx': receipt['raw_tx'], 'spent': False}
+                for ep in sponsor.EXPLORERS]
+    monkeypatch.setattr(sponsor, 'observe', lambda *a: deepcopy(evidence))
+    return args, receipt, evidence, previous_target
+
+
+def test_one_hop_prepare_and_sign_keep_original_runs_and_parent_bytes(hop, monkeypatch):
+    args, parent_receipt, _, previous_target = hop
+    before = {str(p): p.read_bytes() for d in (args.source_run, args.target_run, args.source_sponsor_dir, previous_target)
+              for p in Path(d).iterdir() if p.is_file()}
+    prepared = sponsor.execute(args)
+    intent = json.loads(private_read(Path(args.output_dir) / 'sponsor-intent.json'))
+    assert intent['version'] == 2
+    assert intent['previous_txid'] == parent_receipt['txid']
+    assert (intent['previous_vout'], intent['previous_value_sats'], intent['amount_sats'], intent['change_sats']) == (1, 488000, 100000, 387000)
+    assert intent['prior_sponsor']['intent_json'].encode() == private_read(Path(args.source_sponsor_dir) / 'sponsor-intent.json')
+    assert intent['prior_sponsor']['receipt_json'].encode() == private_read(Path(args.source_sponsor_dir) / 'sponsor-receipt.json')
+    assert intent['prior_sponsor']['target']['checkpoint_sha256'] != json.loads(intent['prior_sponsor']['intent_json'])['target']['checkpoint_sha256']
+    args.sign_intent_sha256 = prepared['intent_sha256']
+    stub_native(monkeypatch)
+    result = sponsor.execute(args)
+    assert result['signed'] and result['broadcast'] is False
+    assert sponsor.execute(args) == result
+    assert before == {str(p): p.read_bytes() for d in (args.source_run, args.target_run, args.source_sponsor_dir, previous_target)
+                      for p in Path(d).iterdir() if p.is_file()}
+
+
+@pytest.mark.parametrize('change', ['receipt', 'source', 'nested', 'descriptor', 'account', 'identity', 'witness'])
+def test_one_hop_refuses_unbound_or_changed_parent_before_native(hop, change):
+    args, _, evidence, previous_target = hop
+    parent_path = Path(args.source_sponsor_dir) / 'sponsor-intent.json'
+    if change in ('source', 'nested'):
+        parent = json.loads(private_read(parent_path))
+        if change == 'source': parent['source']['state_sha256'] = 'changed'
+        else: parent['prior_sponsor'] = {}
+        atomic_write(parent_path, sponsor.encoded(parent))
+    elif change == 'receipt':
+        path = Path(args.source_sponsor_dir) / 'sponsor-receipt.json'
+        receipt = json.loads(private_read(path)); receipt['fee_sats'] += 1
+        atomic_write(path, sponsor.encoded(receipt))
+    elif change == 'descriptor':
+        atomic_write(previous_target / 'descriptor.txt', b'other descriptor')
+    elif change == 'account':
+        path = previous_target / 'checkpoint.json'; checkpoint = json.loads(private_read(path))
+        checkpoint['artifacts']['account_identity'] = 'b' * 64
+        atomic_write(path, sponsor.encoded(checkpoint))
+    elif change == 'identity':
+        path = previous_target / 'provision.json'; state = json.loads(private_read(path)); state['run_id'] = 'other'
+        atomic_write(path, sponsor.encoded(state))
+    else:
+        # Same unsigned txid, different observed witness cannot substitute for
+        # the immutable parent receipt, even before native crypto checks.
+        for item in evidence: item['raw_tx'] = item['raw_tx'].replace('03000101010200000000', '03000101010300000000')
+    with pytest.raises(Failed):
+        sponsor.execute(args)
+
+
+def test_one_hop_freezes_parent_receipt_and_current_snapshot(hop, monkeypatch):
+    args, _, _, previous_target = hop
+    args.sign_intent_sha256 = sponsor.execute(args)['intent_sha256']
+    def mutate():
+        path = previous_target / 'checkpoint.json'
+        path.write_bytes(path.read_bytes() + b' ')
+    stub_native(monkeypatch, mutate)
+    with pytest.raises(Failed) as caught:
+        sponsor.execute(args)
+    assert caught.value.code == 'PARENT_SNAPSHOT_CHANGED'
+    assert not (Path(args.output_dir) / 'sponsor-receipt.json').exists()
+
+
+def test_one_hop_refuses_changed_parent_bytes_after_prepare(hop):
+    args, _, _, _ = hop
+    args.sign_intent_sha256 = sponsor.execute(args)['intent_sha256']
+    path = Path(args.source_sponsor_dir) / 'sponsor-receipt.json'
+    atomic_write(path, private_read(path) + b' ')
+    with pytest.raises(Failed) as caught:
+        sponsor.execute(args)
+    assert caught.value.code == 'SPONSOR_INTENT_CHANGED'
+
+
+def test_one_hop_output_cannot_overwrite_parent_evidence(hop):
+    args, _, _, _ = hop
+    args.output_dir = args.source_sponsor_dir
+    with pytest.raises(Failed, match='OUTPUT_ISOLATION'):
+        sponsor.execute(args)
 
 
 def test_prepare_does_not_invoke_native_or_modify_runs(scenario):

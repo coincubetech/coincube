@@ -735,11 +735,23 @@ impl Client {
     where
         F: FnMut() -> SyncRequest,
     {
-        self.try_in_order(|client| {
-            client
-                .sync(build_request(), parallel_requests)
-                .map_err(|e| *e)
-        })
+        let result = self.try_in_order(|client| {
+            let mut request = build_request();
+            // Same shutdown guard as `full_scan`: BDK pulls these iterators one
+            // HTTP batch at a time, so ending them stops the sync before its next
+            // batch instead of after every address.
+            until_aborted(&mut request.spks, &self.abort);
+            until_aborted(&mut request.txids, &self.abort);
+            until_aborted(&mut request.outpoints, &self.abort);
+            client.sync(request, parallel_requests).map_err(|e| *e)
+        });
+        // As in `full_scan`, an iterator ended early is a successful *partial*
+        // sync. Never apply it on shutdown.
+        if self.abort.load(Ordering::Relaxed) {
+            Err(Error::Aborted)
+        } else {
+            result
+        }
     }
 
     /// Perform a full scan from genesis for all keychain SPKs.
@@ -779,6 +791,52 @@ impl Client {
         }
     }
 }
+
+/// Swap a [`SyncRequest`] iterator for one that ends once `abort` is set.
+///
+/// `take_while` would do, but `SyncRequest` requires `ExactSizeIterator`.
+fn until_aborted<T: 'static>(
+    iter: &mut Box<dyn ExactSizeIterator<Item = T> + Send>,
+    abort: &Arc<AtomicBool>,
+) {
+    let inner = std::mem::replace(iter, Box::new(std::iter::empty()));
+    *iter = Box::new(UntilAborted {
+        inner,
+        abort: abort.clone(),
+    });
+}
+
+struct UntilAborted<I> {
+    inner: I,
+    abort: Arc<AtomicBool>,
+}
+
+impl<I: Iterator> Iterator for UntilAborted<I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<I::Item> {
+        if self.abort.load(Ordering::Relaxed) {
+            return None;
+        }
+        let item = self.inner.next()?;
+        // Checked again like `take_while`: the flag may be set while the
+        // item is produced.
+        (!self.abort.load(Ordering::Relaxed)).then_some(item)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.abort.load(Ordering::Relaxed) {
+            (0, Some(0))
+        } else {
+            self.inner.size_hint()
+        }
+    }
+}
+
+// Strictly this breaks `ExactSizeIterator`'s contract once `abort` is set: the
+// iterator ends early and `size_hint` shrinks mid-iteration. Harmless here,
+// because a sync that saw the flag is discarded as `Error::Aborted`.
+impl<I: ExactSizeIterator> ExactSizeIterator for UntilAborted<I> {}
 
 #[cfg(test)]
 mod tests {
@@ -1896,6 +1954,66 @@ mod tests {
                 .count(),
             10
         );
+    }
+
+    /// The poller's every-tick `sync` gets the same shutdown guard as a full
+    /// scan. Without it `DaemonHandle::stop` joined a poller that went on to
+    /// query every remaining address first.
+    #[test]
+    fn sync_shutdown_stops_address_batches_and_rejects_partial_result() {
+        use bdk_electrum::bdk_chain::{local_chain::CheckPoint, BlockId};
+        use bitcoin::{
+            hashes::{sha256, Hash},
+            ScriptBuf,
+        };
+        let script = ScriptBuf::new();
+        let path = format!("/scripthash/{}/txs", sha256::Hash::hash(script.as_bytes()));
+        let mut paths = routes((200, blocks_json(&[bitcoin_summary(H1, 1, 1231006505, H0)])));
+        paths.insert("/block-height/0", (200, H0.into()));
+        paths.insert(Box::leak(path.into_boxed_str()), (200, "[]".into()));
+        let primary = mock_esplora(paths);
+        let fallback = mock_esplora(StdHashMap::new());
+        let client = client_with(vec![
+            primary.provider("primary"),
+            fallback.provider("fallback"),
+        ]);
+        let tip = CheckPoint::new(BlockId {
+            height: 0,
+            hash: H0.parse().unwrap(),
+        });
+        let scripthash_requests = || {
+            primary
+                .requests()
+                .iter()
+                .filter(|p| p.starts_with("/scripthash/"))
+                .count()
+        };
+        let build = |cancel: bool| {
+            let abort = client.abort.clone();
+            let script = script.clone();
+            SyncRequest::from_chain_tip(tip.clone()).chain_spks((0..10).map(move |index| {
+                // BDK has finished its first two-address HTTP batch. Model
+                // daemon.stop setting the flag while a sync is underway.
+                if cancel && index == 2 {
+                    abort.store(true, Ordering::Relaxed);
+                }
+                script.clone()
+            }))
+        };
+        assert!(matches!(
+            client.sync(|| build(true), 2),
+            Err(Error::Aborted)
+        ));
+        assert_eq!(scripthash_requests(), 2);
+        assert!(
+            fallback.requests().is_empty(),
+            "shutdown must not sync against a fallback"
+        );
+
+        // An ordinary sync still queries every address.
+        client.abort.store(false, Ordering::Relaxed);
+        client.sync(|| build(false), 2).unwrap();
+        assert_eq!(scripthash_requests(), 12);
     }
 
     #[test]

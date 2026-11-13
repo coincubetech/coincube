@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use coincube_core::miniscript::bitcoin::{Amount, OutPoint};
+use coincube_ui::component::tenshu::PageHead;
 use coincube_ui::widget::Element;
 use coincubed::commands::CoinStatus;
 use iced::Task;
@@ -35,6 +36,9 @@ pub struct Payments {
     list: Vec<Payment>,
     is_last_page: bool,
     loaded_page_count: usize,
+    history_loaded: bool,
+    refresh_in_flight: bool,
+    last_error: Option<String>,
 }
 
 pub struct VaultOverview {
@@ -46,6 +50,8 @@ pub struct VaultOverview {
     unconfirmed_balance: Amount,
     remaining_sequence: Option<u32>,
     expiring_coins: Vec<OutPoint>,
+    /// PSBT proposals waiting for signatures, for the protection strip.
+    psbts_waiting: usize,
     payments: Payments,
     processing: bool,
     selected_event: Option<(HistoryTransaction, usize)>,
@@ -86,6 +92,7 @@ impl VaultOverview {
             unconfirmed_balance,
             remaining_sequence: remaining_seq,
             expiring_coins,
+            psbts_waiting: 0,
             selected_event: None,
             payments: Payments::default(),
             labels_edited: LabelsEdited::default(),
@@ -105,21 +112,67 @@ impl VaultOverview {
     }
 }
 
-impl State for VaultOverview {
-    fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+impl VaultOverview {
+    /// The Vault page with its "Recent activity" and the selected row's
+    /// detail pane, both read from Activity by App (`view::activity`).
+    pub fn view_with_recent_activity<'a>(
+        &'a self,
+        menu: &'a Menu,
+        cache: &'a Cache,
+        recent_activity: impl Fn(Option<&'static str>) -> Element<'a, view::Message> + 'a,
+        detail: impl Fn() -> Option<Element<'a, view::Message>> + 'a,
+    ) -> Element<'a, view::Message> {
+        if let Some(page) = self.full_page_view(menu, cache) {
+            return page;
+        }
+        let unknown_history = self.unknown_history_note();
+        view::dashboard_with_detail(
+            menu,
+            cache,
+            move || Self::page_head(cache),
+            move || self.page_body(cache, Some(recent_activity(unknown_history))),
+            detail,
+        )
+    }
+
+    /// What a "Recent activity" table that lists the Vault's rows says in
+    /// place of "No transactions yet" while the Vault's history is not known:
+    /// an empty answer from an unfinished scan says nothing about the
+    /// payments. The Vault page and the Overview share it.
+    pub fn unknown_history_note(&self) -> Option<&'static str> {
+        self.history_unknown().then(|| {
+            coincube_ui::locale::copy("Transactions appear once the Vault's history has loaded")
+        })
+    }
+
+    /// The balance row's own test: the Vault's history is not known yet.
+    fn history_unknown(&self) -> bool {
+        matches!(
+            view::vault::overview::balance_sync_state(
+                &self.sync_status,
+                self.balance + self.unconfirmed_balance,
+                self.awaiting_rescan_date,
+            ),
+            view::wallet_header::SyncState::Unknown { .. }
+        )
+    }
+
+    /// The received celebration or a payment's own screen replace the page.
+    fn full_page_view<'a>(
+        &'a self,
+        menu: &'a Menu,
+        cache: &'a Cache,
+    ) -> Option<Element<'a, view::Message>> {
         if self.show_received_celebration {
             let celebration = view::vault::overview::received_celebration_page(
                 "bitcoin-receive",
-                &self.received_amount_display,
+                passive_received_amount(&self.received_amount_display, cache),
                 &self.received_quote,
                 &self.received_image_handle,
             );
-            return view::dashboard(menu, cache, celebration);
+            return Some(view::dashboard(menu, cache, celebration));
         }
-
-        let converter: Option<view::FiatAmountConverter> =
-            cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
-        if let Some((tx, output_index)) = &self.selected_event {
+        self.selected_event.as_ref().map(|(tx, output_index)| {
             view::vault::overview::payment_view(
                 menu,
                 cache,
@@ -127,37 +180,70 @@ impl State for VaultOverview {
                 *output_index,
                 self.labels_edited.cache(),
             )
-        } else {
-            view::dashboard(
+        })
+    }
+
+    fn page_head<'a>(cache: &Cache) -> PageHead<'a, view::Message> {
+        let tools = view::nav::vault::tools(&view::nav::NavContext::from_cache(cache));
+        head_actions(
+            &cache.cube_id,
+            tools.first().map(|(_, route)| route.clone()),
+        )
+        .into_iter()
+        .fold(
+            view::wallet_page_head(cache, "Vault", cache.wallet_names.vault.as_deref()),
+            |head, (_, action)| head.action(action),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn page_head_for_tests<'a>(cache: &Cache) -> PageHead<'a, view::Message> {
+        Self::page_head(cache)
+    }
+
+    fn page_body<'a>(
+        &'a self,
+        cache: &'a Cache,
+        recent_activity: Option<Element<'a, view::Message>>,
+    ) -> Element<'a, view::Message> {
+        let converter: Option<view::FiatAmountConverter> =
+            cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
+        view::vault::overview::vault_overview_view(
+            &self.balance,
+            &self.unconfirmed_balance,
+            &self.remaining_sequence,
+            converter,
+            &self.expiring_coins,
+            recent_activity,
+            &cache.cube_id,
+            cache.chain(),
+            &self.sync_status,
+            self.show_rescan_prompt,
+            self.awaiting_rescan_date,
+            cache.bitcoin_unit,
+            cache.node_bitcoind_sync_progress,
+            cache.node_bitcoind_ibd,
+            cache.show_direction_badges,
+            cache.display_mode,
+            cache.balance_amounts_masked(),
+            self.psbts_waiting,
+            cache.vault_alert.as_ref(),
+        )
+    }
+}
+
+impl State for VaultOverview {
+    /// App renders this page through [`Self::view_with_recent_activity`];
+    /// on its own it has no Activity rows to show.
+    fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+        self.full_page_view(menu, cache).unwrap_or_else(|| {
+            view::dashboard_headed(
                 menu,
                 cache,
-                view::vault::overview::vault_overview_view(
-                    &self.balance,
-                    &self.unconfirmed_balance,
-                    &self.remaining_sequence,
-                    converter,
-                    &self.expiring_coins,
-                    &self.payments.list,
-                    self.payments.is_last_page,
-                    self.processing,
-                    // "Loading transactions" while the very first page fetch
-                    // is still in flight: no page loaded yet, nothing to
-                    // show, and no error reported. A background Tick reload
-                    // keeps `list` populated, so it won't flash to loading.
-                    self.payments.list.is_empty()
-                        && self.payments.loaded_page_count == 0
-                        && self.warning.is_none(),
-                    &self.sync_status,
-                    self.show_rescan_prompt,
-                    self.awaiting_rescan_date,
-                    cache.bitcoin_unit,
-                    cache.node_bitcoind_sync_progress,
-                    cache.node_bitcoind_ibd,
-                    cache.show_direction_badges,
-                    cache.display_mode,
-                ),
+                Self::page_head(cache),
+                self.page_body(cache, None),
             )
-        }
+        })
     }
 
     fn update(
@@ -176,7 +262,8 @@ impl State for VaultOverview {
                 // we reload the page only when the user is not exploring the history
                 // looking at a selected event
                 // or when the last reload was less than the defined TTL.
-                if self.payments.loaded_page_count == 1
+                if (self.payments.loaded_page_count == 1 || self.payments.last_error.is_some())
+                    && !self.payments.refresh_in_flight
                     && self.selected_event.is_none()
                     && Instant::now() > self.last_reload + HOME_RELOAD_MAX_TTL
                 {
@@ -203,14 +290,119 @@ impl State for VaultOverview {
                     );
                 }
             },
-            Message::Payments(res) => {
-                return self.apply_payments(cache, res);
+            // The protection strip's PSBT count. A failed read keeps the
+            // last count rather than raising an error on the Vault page;
+            // PSBT proposals reports it.
+            Message::SpendTxs(Ok(mut txs)) => {
+                self.wallet.apply_spend_tx_overrides(&mut txs);
+                self.psbts_waiting = view::vault::overview::waiting_for_signatures(&txs);
             }
-            Message::PaymentsExtension(res) => {
-                return self.apply_payments_extension(res);
-            }
+            Message::SpendTxs(Err(_)) => {}
+            Message::Payments(res) => match res {
+                Err(e) => {
+                    self.payments.refresh_in_flight = false;
+                    let err_msg = crate::user_error::report(&e);
+                    self.payments.last_error = Some(err_msg.clone());
+                    self.warning = Some(e);
+                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                }
+                Ok(events) => {
+                    self.payments.refresh_in_flight = false;
+                    self.payments.history_loaded = true;
+                    self.payments.last_error = None;
+                    self.warning = None;
+                    // Detect new incoming payment by comparing newest tx
+                    if let Some(newest) = events.first() {
+                        use crate::daemon::model::PaymentKind;
+                        let is_incoming = matches!(newest.kind, PaymentKind::Incoming);
+                        let is_new = self
+                            .payments
+                            .list
+                            .first()
+                            .is_none_or(|prev| prev.outpoint != newest.outpoint);
+                        if is_incoming && is_new && !self.payments.list.is_empty() {
+                            use coincube_ui::component::amount::DisplayAmount;
+                            self.received_amount_display = newest
+                                .amount
+                                .to_formatted_string_with_unit(cache.bitcoin_unit);
+                            self.received_quote =
+                                coincube_ui::component::quote_display::random_quote(
+                                    "bitcoin-receive",
+                                );
+                            self.received_image_handle =
+                                coincube_ui::component::quote_display::image_handle_for_context(
+                                    "bitcoin-receive",
+                                );
+                            self.show_received_celebration = true;
+                        }
+                    }
+                    self.payments.list = events;
+                    self.payments.loaded_page_count = 1;
+                    self.payments.is_last_page =
+                        (self.payments.list.len() as u64) < HISTORY_EVENT_PAGE_SIZE;
+                }
+            },
+            Message::PaymentsExtension(res) => match res {
+                Err(e) => {
+                    self.processing = false;
+                    let err_msg = crate::user_error::report(&e);
+                    self.warning = Some(e);
+                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                }
+                Ok((events, actual_limit)) => {
+                    self.processing = false;
+                    self.warning = None;
+                    self.payments.loaded_page_count += 1;
+                    self.payments.is_last_page = (events.len() as u64) < actual_limit;
+                    if let Some(event) = events.first() {
+                        if let Some(position) = self
+                            .payments
+                            .list
+                            .iter()
+                            .position(|event2| event2.outpoint == event.outpoint)
+                        {
+                            let len = self.payments.list.len();
+                            for event in events {
+                                if !self.payments.list[position..len]
+                                    .iter()
+                                    .any(|event2| event2.outpoint == event.outpoint)
+                                {
+                                    self.payments.list.push(event);
+                                }
+                            }
+                        } else {
+                            self.payments.list.extend(events);
+                        }
+                    }
+                }
+            },
             Message::UpdatePanelCache(is_current) => {
-                return self.apply_panel_cache(daemon, cache, is_current);
+                // `rescan_progress` is the daemon's definitive signal: it is
+                // reported for exactly as long as the persisted rescan
+                // timestamp is set, and only `complete_rescan` clears that,
+                // after the post-rescan update succeeds. An interrupted rescan
+                // keeps it and goes on reporting progress (0% if the backend
+                // is unreachable); a failed refresh leaves this cache as it was.
+                if cache.rescan_progress().is_some() {
+                    self.rescan_seen_running = true;
+                } else if self.rescan_seen_running {
+                    // The rescan the restore was owed has run to completion.
+                    self.rescan_seen_running = false;
+                    self.awaiting_rescan_date = false;
+                }
+                let wallet_was_syncing = !self.sync_status.is_synced();
+                self.sync_status = sync_status(
+                    daemon.backend(),
+                    cache.blockheight(),
+                    cache.sync_progress(),
+                    cache.last_poll_timestamp(),
+                    cache.last_poll_at_startup,
+                    cache.history_sync(),
+                );
+                // If this is the current panel, reload it if wallet is no longer syncing.
+                if is_current && wallet_was_syncing && self.sync_status.is_synced() {
+                    return self.reload(Some(daemon.clone()), Some(self.wallet.clone()));
+                }
             }
             Message::Payment(res) => match res {
                 Ok(event) => {
@@ -279,7 +471,48 @@ impl State for VaultOverview {
                 }
             }
             Message::View(view::Message::Next) => {
-                return self.next_payments(daemon);
+                if let Some(last) = self.payments.list.last() {
+                    let daemon = daemon.clone();
+                    let last_event_date = last.time.unwrap();
+                    self.processing = true;
+                    return Task::perform(
+                        async move {
+                            let last_event_date = last_event_date.timestamp() as u32;
+                            let mut limit = HISTORY_EVENT_PAGE_SIZE;
+                            let mut events = daemon
+                                .list_confirmed_payments(0_u32, last_event_date, limit)
+                                .await?;
+
+                            // because gethistory cursor is inclusive and use blocktime
+                            // multiple events can occur in the same block.
+                            // If there is more event in the same block that the
+                            // HISTORY_EVENT_PAGE_SIZE they can not be retrieved by changing
+                            // the cursor value (blocktime) but by increasing the limit.
+                            //
+                            // 1. Check if the events retrieved have all the same blocktime
+                            let blocktime = if let Some(event) = events.first() {
+                                event.time
+                            } else {
+                                return Ok((events, limit));
+                            };
+
+                            // 2. Retrieve a larger batch of event with the same cursor but
+                            //    a larger limit.
+                            while !events.iter().any(|evt| evt.time != blocktime)
+                                && events.len() as u64 == limit
+                            {
+                                // increments of the equivalent of one page more.
+                                limit += HISTORY_EVENT_PAGE_SIZE;
+                                events = daemon
+                                    .list_confirmed_payments(0, last_event_date, limit)
+                                    .await?;
+                            }
+                            events.sort_by(|a, b| a.compare(b));
+                            Ok((events, limit))
+                        },
+                        Message::PaymentsExtension,
+                    );
+                }
             }
             _ => {}
         }
@@ -304,6 +537,7 @@ impl State for VaultOverview {
         self.selected_event = None;
         self.wallet = wallet;
         self.payments.loaded_page_count = 0;
+        self.payments.refresh_in_flight = true;
         let daemon2 = daemon.clone();
         let now: u32 = now().as_secs().try_into().unwrap();
         self.last_reload = Instant::now();
@@ -313,7 +547,17 @@ impl State for VaultOverview {
         // poller to flag the spend. Mirrors the override applied to
         // the central `Cache.coins()`.
         let wallet_for_coins = self.wallet.clone();
+        let daemon3 = daemon.clone();
         Task::batch(vec![
+            Task::perform(
+                async move {
+                    daemon3
+                        .list_spend_transactions(None)
+                        .await
+                        .map_err(|e| e.into())
+                },
+                Message::SpendTxs,
+            ),
             Task::perform(
                 async move {
                     let mut payments = daemon
@@ -345,170 +589,11 @@ impl State for VaultOverview {
     }
 }
 
-impl VaultOverview {
-    fn apply_payments(&mut self, cache: &Cache, res: Result<Vec<Payment>, Error>) -> Task<Message> {
-        match res {
-            Err(e) => {
-                let err_msg = crate::user_error::report(&e);
-                self.warning = Some(e);
-                return Task::done(Message::View(view::Message::ShowError(err_msg)));
-            }
-            Ok(events) => {
-                self.warning = None;
-                // Detect new incoming payment by comparing newest tx
-                if let Some(newest) = events.first() {
-                    use crate::daemon::model::PaymentKind;
-                    let is_incoming = matches!(newest.kind, PaymentKind::Incoming);
-                    let is_new = self
-                        .payments
-                        .list
-                        .first()
-                        .is_none_or(|prev| prev.outpoint != newest.outpoint);
-                    if is_incoming && is_new && !self.payments.list.is_empty() {
-                        use coincube_ui::component::amount::DisplayAmount;
-                        self.received_amount_display = newest
-                            .amount
-                            .to_formatted_string_with_unit(cache.bitcoin_unit);
-                        self.received_quote =
-                            coincube_ui::component::quote_display::random_quote("bitcoin-receive");
-                        self.received_image_handle =
-                            coincube_ui::component::quote_display::image_handle_for_context(
-                                "bitcoin-receive",
-                            );
-                        self.show_received_celebration = true;
-                    }
-                }
-                self.payments.list = events;
-                self.payments.loaded_page_count = 1;
-                self.payments.is_last_page =
-                    (self.payments.list.len() as u64) < HISTORY_EVENT_PAGE_SIZE;
-            }
-        };
-        Task::none()
-    }
-    fn apply_payments_extension(
-        &mut self,
-        res: Result<(Vec<Payment>, u64), Error>,
-    ) -> Task<Message> {
-        match res {
-            Err(e) => {
-                self.processing = false;
-                let err_msg = crate::user_error::report(&e);
-                self.warning = Some(e);
-                return Task::done(Message::View(view::Message::ShowError(err_msg)));
-            }
-            Ok((events, actual_limit)) => {
-                self.processing = false;
-                self.warning = None;
-                self.payments.loaded_page_count += 1;
-                self.payments.is_last_page = (events.len() as u64) < actual_limit;
-                self.append_payments_extension(events);
-            }
-        };
-        Task::none()
-    }
-    fn apply_panel_cache(
-        &mut self,
-        daemon: Arc<dyn Daemon + Sync + Send>,
-        cache: &Cache,
-        is_current: bool,
-    ) -> Task<Message> {
-        // `rescan_progress` is the daemon's definitive signal: it is
-        // reported for exactly as long as the persisted rescan
-        // timestamp is set, and only `complete_rescan` clears that,
-        // after the post-rescan update succeeds. An interrupted rescan
-        // keeps it and goes on reporting progress (0% if the backend
-        // is unreachable); a failed refresh leaves this cache as it was.
-        if cache.rescan_progress().is_some() {
-            self.rescan_seen_running = true;
-        } else if self.rescan_seen_running {
-            // The rescan the restore was owed has run to completion.
-            self.rescan_seen_running = false;
-            self.awaiting_rescan_date = false;
-        }
-        let wallet_was_syncing = !self.sync_status.is_synced();
-        self.sync_status = sync_status(
-            daemon.backend(),
-            cache.blockheight(),
-            cache.sync_progress(),
-            cache.last_poll_timestamp(),
-            cache.last_poll_at_startup,
-            cache.history_sync(),
-        );
-        // If this is the current panel, reload it if wallet is no longer syncing.
-        if is_current && wallet_was_syncing && self.sync_status.is_synced() {
-            return self.reload(Some(daemon.clone()), Some(self.wallet.clone()));
-        }
-
-        Task::none()
-    }
-    fn append_payments_extension(&mut self, events: Vec<Payment>) {
-        if let Some(event) = events.first() {
-            if let Some(position) = self
-                .payments
-                .list
-                .iter()
-                .position(|event2| event2.outpoint == event.outpoint)
-            {
-                let len = self.payments.list.len();
-                for event in events {
-                    if !self.payments.list[position..len]
-                        .iter()
-                        .any(|event2| event2.outpoint == event.outpoint)
-                    {
-                        self.payments.list.push(event);
-                    }
-                }
-            } else {
-                self.payments.list.extend(events);
-            }
-        }
-    }
-    fn next_payments(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
-        if let Some(last) = self.payments.list.last() {
-            let daemon = daemon.clone();
-            let last_event_date = last.time.unwrap();
-            self.processing = true;
-            return Task::perform(
-                async move {
-                    let last_event_date = last_event_date.timestamp() as u32;
-                    let mut limit = HISTORY_EVENT_PAGE_SIZE;
-                    let mut events = daemon
-                        .list_confirmed_payments(0_u32, last_event_date, limit)
-                        .await?;
-
-                    // because gethistory cursor is inclusive and use blocktime
-                    // multiple events can occur in the same block.
-                    // If there is more event in the same block that the
-                    // HISTORY_EVENT_PAGE_SIZE they can not be retrieved by changing
-                    // the cursor value (blocktime) but by increasing the limit.
-                    //
-                    // 1. Check if the events retrieved have all the same blocktime
-                    let blocktime = if let Some(event) = events.first() {
-                        event.time
-                    } else {
-                        return Ok((events, limit));
-                    };
-
-                    // 2. Retrieve a larger batch of event with the same cursor but
-                    //    a larger limit.
-                    while !events.iter().any(|evt| evt.time != blocktime)
-                        && events.len() as u64 == limit
-                    {
-                        // increments of the equivalent of one page more.
-                        limit += HISTORY_EVENT_PAGE_SIZE;
-                        events = daemon
-                            .list_confirmed_payments(0, last_event_date, limit)
-                            .await?;
-                    }
-                    events.sort_by(|a, b| a.compare(b));
-                    Ok((events, limit))
-                },
-                Message::PaymentsExtension,
-            );
-        }
-
-        Task::none()
+fn passive_received_amount<'a>(amount: &'a str, cache: &Cache) -> &'a str {
+    if cache.balance_amounts_masked() {
+        "••••••"
+    } else {
+        amount
     }
 }
 
@@ -518,24 +603,87 @@ impl From<VaultOverview> for Box<dyn State> {
     }
 }
 
+/// The Vault page's head actions, labelled: **Tools**, opening the first
+/// tool the Vault offers (`tools`; none, none shown), and **Wallet
+/// settings**, opening Settings › Vault › Wallet & signers.
+fn head_actions<'a>(
+    cube_id: &str,
+    tools: Option<Menu>,
+) -> Vec<(&'static str, Element<'a, view::Message>)> {
+    use coincube_ui::component::tenshu::{ActionButton, ActionKind};
+    let action = |label: &'static str, control: &str, route: Menu| {
+        let button: Element<'a, view::Message> = ActionButton::new(
+            view::shared::landing::landing_control_id(cube_id, "Vault", control),
+            coincube_ui::locale::copy(label),
+            ActionKind::Secondary,
+            view::Message::FocusAction,
+        )
+        .on_press(view::Message::Menu(route))
+        .compact()
+        .into();
+        (label, button)
+    };
+    let tools = tools.map(|route| action("Tools", "tools", route));
+    let settings = action(
+        "Wallet settings",
+        "wallet-settings",
+        Menu::Vault(crate::app::menu::VaultSubMenu::Settings(Some(
+            crate::app::menu::SettingsOption::Wallet,
+        ))),
+    );
+    tools.into_iter().chain(std::iter::once(settings)).collect()
+}
 #[cfg(test)]
 mod tests {
+    /// Tools opens the first tool and is left out without one; Wallet
+    /// settings opens Settings › Vault › Wallet & signers.
+    #[test]
+    fn vault_head_actions_open_tools_and_wallet_settings() {
+        use crate::app::menu::{SettingsOption, VaultSubMenu};
+        use crate::app::view::shared::landing::{capture, landing_control_id};
+        let labels = |tools| {
+            head_actions("cube", tools)
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect::<Vec<_>>()
+        };
+        let coins = Menu::Vault(VaultSubMenu::Coins(None));
+        assert_eq!(labels(Some(coins.clone())), ["Tools", "Wallet settings"]);
+        assert_eq!(labels(None), ["Wallet settings"]);
+        for (index, control, route) in [
+            (0, "tools", coins.clone()),
+            (
+                1,
+                "wallet-settings",
+                Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Wallet))),
+            ),
+        ] {
+            let (_, action) = head_actions("cube", Some(coins.clone())).remove(index);
+            let emitted = capture::activate(
+                action,
+                landing_control_id("cube", "Vault", control),
+                (1024, 768),
+                false,
+            );
+            assert!(
+                emitted
+                    .iter()
+                    .any(|message| matches!(message, view::Message::Menu(m) if *m == route)),
+                "{}",
+                control
+            );
+        }
+    }
+
     use super::*;
     use crate::daemon::model::Coin;
     use coincube_core::miniscript::bitcoin;
     use coincubed::commands::LCSpendInfo;
     use std::str::FromStr;
 
-    /// A Vault restored without a date, on a local node, is empty until it is
-    /// rescanned. Dismissing the prompt asking for that date must not turn its
-    /// unknown balance into a confident zero; only a rescan that runs to the end does.
-    #[test]
-    fn dismissing_the_rescan_prompt_keeps_an_unscanned_balance_unknown() {
-        use crate::app::{
-            view::vault::overview::balance_sync_state, view::wallet_header::SyncState,
-        };
+    fn test_overview() -> (VaultOverview, Arc<dyn Daemon + Sync + Send>, Cache) {
         const DESC: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
-        let root = std::env::temp_dir().join(format!("rescan-prompt-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("overview-test-{}", uuid::Uuid::new_v4()));
         let descriptor = coincube_core::descriptors::CoincubeDescriptor::from_str(DESC).unwrap();
         let cfg: coincubed::config::Config = toml::from_str(&format!(
             "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[bitcoind_config]\naddr = '127.0.0.1:8332'\ncookie_path = '{}'\n",
@@ -548,8 +696,22 @@ mod tests {
             crate::daemon::embedded::EmbeddedDaemon::unstarted_for_test(cfg, None),
         );
         let wallet = Arc::new(Wallet::new(descriptor));
-        let mut overview = VaultOverview::new(wallet, &[], SyncStatus::Synced, 970_247, true);
-        let mut cache = Cache::default();
+        (
+            VaultOverview::new(wallet, &[], SyncStatus::Synced, 970_247, true),
+            daemon,
+            Cache::default(),
+        )
+    }
+
+    /// A Vault restored without a date, on a local node, is empty until it is
+    /// rescanned. Dismissing the prompt asking for that date must not turn its
+    /// unknown balance into a confident zero; only a rescan that runs to the end does.
+    #[test]
+    fn dismissing_the_rescan_prompt_keeps_an_unscanned_balance_unknown() {
+        use crate::app::{
+            view::vault::overview::balance_sync_state, view::wallet_header::SyncState,
+        };
+        let (mut overview, daemon, mut cache) = test_overview();
         let shown = |overview: &VaultOverview| {
             balance_sync_state(
                 &SyncStatus::Synced,
@@ -581,6 +743,92 @@ mod tests {
         cache.daemon_cache.rescan_progress = None;
         let _ = overview.update(Some(daemon), &cache, Message::UpdatePanelCache(false));
         assert!(matches!(shown(&overview), SyncState::Synced));
+    }
+
+    #[test]
+    fn refresh_failure_keeps_history_visible_and_tick_retries_once() {
+        use crate::daemon::model::PaymentKind;
+
+        let (mut overview, daemon, cache) = test_overview();
+        let payment = Payment {
+            label: None,
+            address: None,
+            address_label: None,
+            amount: Amount::from_sat(1),
+            outpoint: OutPoint::new(
+                bitcoin::Txid::from_str(
+                    "f7bd1b2a995b689d326e51eb742eb1088c4a8f110d9cb56128fd553acc9f88e5",
+                )
+                .unwrap(),
+                0,
+            ),
+            time: None,
+            kind: PaymentKind::Outgoing,
+        };
+        let _ = overview.update(
+            Some(daemon.clone()),
+            &cache,
+            Message::Payments(Ok(vec![payment])),
+        );
+        assert!(overview.payments.history_loaded);
+        assert_eq!(overview.payments.loaded_page_count, 1);
+
+        let wallet = overview.wallet.clone();
+        let _ = overview.reload(Some(daemon.clone()), Some(wallet));
+        assert!(overview.payments.refresh_in_flight);
+        assert!(overview.payments.history_loaded);
+        assert_eq!(overview.payments.list.len(), 1);
+        assert_eq!(overview.payments.loaded_page_count, 0);
+
+        overview.last_reload = Instant::now() - HOME_RELOAD_MAX_TTL - Duration::from_secs(1);
+        let old_reload = overview.last_reload;
+        let _ = overview.update(Some(daemon.clone()), &cache, Message::Tick);
+        assert_eq!(
+            overview.last_reload, old_reload,
+            "Tick must not duplicate an in-flight fetch"
+        );
+
+        let _ = overview.update(
+            Some(daemon.clone()),
+            &cache,
+            Message::Payments(Err(Error::Unexpected("refresh failed".into()))),
+        );
+        assert!(!overview.payments.refresh_in_flight);
+        assert!(overview.payments.history_loaded);
+        assert!(overview.payments.last_error.is_some());
+        assert_eq!(overview.payments.list.len(), 1);
+
+        let _ = overview.update(Some(daemon.clone()), &cache, Message::Tick);
+        assert!(overview.payments.refresh_in_flight);
+        assert!(overview.last_reload > old_reload);
+        overview.last_reload = Instant::now() - HOME_RELOAD_MAX_TTL - Duration::from_secs(1);
+        let retry_reload = overview.last_reload;
+        let _ = overview.update(Some(daemon), &cache, Message::Tick);
+        assert_eq!(
+            overview.last_reload, retry_reload,
+            "in-flight retry must remain throttled"
+        );
+    }
+
+    #[test]
+    fn loaded_empty_history_stays_known_during_refresh_and_error() {
+        let (mut overview, daemon, cache) = test_overview();
+        let _ = overview.update(Some(daemon.clone()), &cache, Message::Payments(Ok(vec![])));
+        assert!(overview.payments.history_loaded);
+        assert!(overview.payments.list.is_empty());
+
+        let wallet = overview.wallet.clone();
+        let _ = overview.reload(Some(daemon.clone()), Some(wallet));
+        assert!(overview.payments.history_loaded);
+        assert!(overview.payments.refresh_in_flight);
+        let _ = overview.update(
+            Some(daemon),
+            &cache,
+            Message::Payments(Err(Error::Unexpected("refresh failed".into()))),
+        );
+        assert!(overview.payments.history_loaded);
+        assert!(overview.payments.list.is_empty());
+        assert!(overview.payments.last_error.is_some());
     }
     #[tokio::test]
     async fn test_coins_summary() {
@@ -741,5 +989,52 @@ mod tests {
                 Some(500)
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod received_privacy_tests {
+    use super::*;
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+    use crate::app::view::shared::landing::capture;
+    use coincube_ui::theme;
+
+    #[test]
+    fn mounted_celebration_follows_passive_privacy_authority() {
+        let mut cache = Cache::default();
+        let amount = "87,654,321 sats";
+        let quote = coincube_ui::component::quote_display::random_quote("bitcoin-receive");
+        let image =
+            coincube_ui::component::quote_display::image_handle_for_context("bitcoin-receive");
+        for privacy in [
+            None,
+            Some(BalancePrivacy::Unresolved),
+            Some(BalancePrivacy::Hidden),
+            Some(BalancePrivacy::Shown),
+        ] {
+            cache.balance_privacy = privacy.map(|privacy| BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: false,
+            });
+            let mounted = capture::inspect(
+                "vault-received-celebration-privacy",
+                view::vault::overview::received_celebration_page(
+                    "bitcoin-receive",
+                    passive_received_amount(amount, &cache),
+                    &quote,
+                    &image,
+                ),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+            );
+            if privacy == Some(BalancePrivacy::Shown) {
+                assert!(mounted.contains(amount));
+            } else {
+                assert!(mounted.contains("••••••"));
+                assert!(!mounted.contains(amount));
+            }
+        }
     }
 }

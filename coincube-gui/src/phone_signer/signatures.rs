@@ -3,6 +3,7 @@
 use super::pairing_store::SignerBinding;
 use coincube_core::{
     descriptors::CoincubeDescriptor,
+    imported_spend::verify_imported_signatures,
     miniscript::{
         bitcoin::{
             bip32::ChildNumber,
@@ -15,6 +16,7 @@ use coincube_core::{
         descriptor::DescriptorPublicKey,
         ForEachKey,
     },
+    wallet_descriptor::ImportedWalletDescriptor,
 };
 use std::{collections::BTreeSet, str::FromStr};
 
@@ -242,5 +244,124 @@ pub(super) fn merge_verified(
         before.tap_key_sig = after.tap_key_sig;
         before.tap_script_sigs = after.tap_script_sigs.clone();
     }
+    Ok(())
+}
+
+/// Accept only the exact imported phone account's new ECDSA partials. BDK may
+/// return final script fields as well; those fields have no authority and are
+/// never copied. All request metadata stays on the original PSBT, and core
+/// verifies every retained partial against that original before the atomic
+/// assignment.
+pub(super) fn merge_imported_verified(
+    original: &mut Psbt,
+    returned: &Psbt,
+    wallet: &ImportedWalletDescriptor,
+    binding: &SignerBinding,
+) -> Result<(), String> {
+    let reject =
+        || "Keychain returned an invalid or unauthorized imported signature delta.".to_owned();
+    let scope = binding.imported_scope.as_ref().ok_or_else(reject)?;
+    let expected_wallet_id =
+        crate::app::settings::WalletId::for_imported(wallet, scope.chain).map_err(|_| reject())?;
+    if scope.chain != wallet.chain()
+        || scope.wallet_id != expected_wallet_id
+        || original.unsigned_tx != returned.unsigned_tx
+        || original.inputs.len() != returned.inputs.len()
+        || original.outputs.len() != returned.outputs.len()
+    {
+        return Err(reject());
+    }
+    let prevouts = authenticated_prevouts(original).map_err(|_| reject())?;
+    let secp = Secp256k1::verification_only();
+    let mut candidate = original.clone();
+    let mut normalized = returned.clone();
+    let mut additions = 0usize;
+    for (i, (before, after)) in original.inputs.iter().zip(&returned.inputs).enumerate() {
+        if before
+            .partial_sigs
+            .iter()
+            .any(|(key, sig)| after.partial_sigs.get(key) != Some(sig))
+            || after.tap_key_sig != before.tap_key_sig
+            || after.tap_script_sigs != before.tap_script_sigs
+            || after.tap_key_origins != before.tap_key_origins
+            || after.sighash_type != before.sighash_type
+        {
+            return Err(reject());
+        }
+        // The sole permitted response changes are partial signatures and
+        // disposable finalization fields. Reject changed prevouts, derivations,
+        // scripts, output metadata, global maps and unsigned transactions.
+        normalized.inputs[i].partial_sigs = before.partial_sigs.clone();
+        normalized.inputs[i].final_script_sig = before.final_script_sig.clone();
+        normalized.inputs[i].final_script_witness = before.final_script_witness.clone();
+        for (key, signature) in &after.partial_sigs {
+            if before.partial_sigs.contains_key(key) {
+                continue;
+            }
+            if signature.sighash_type != EcdsaSighashType::All
+                || before
+                    .sighash_type
+                    .is_some_and(|kind| kind != EcdsaSighashType::All.into())
+            {
+                return Err(reject());
+            }
+            let (fingerprint, path) = before.bip32_derivation.get(&key.inner).ok_or_else(reject)?;
+            let account_len = scope.account_origin.len();
+            if *fingerprint != binding.fingerprint
+                || path.len() != account_len + 2
+                || !path.as_ref().starts_with(scope.account_origin.as_ref())
+            {
+                return Err(reject());
+            }
+            let branch = match path[account_len] {
+                ChildNumber::Normal { index: 0 } => wallet.receive_descriptor(),
+                ChildNumber::Normal { index: 1 } => wallet.change_descriptor(),
+                _ => return Err(reject()),
+            };
+            let ChildNumber::Normal { index } = path[account_len + 1] else {
+                return Err(reject());
+            };
+            let derived = branch.at_derivation_index(index).map_err(|_| reject())?;
+            if derived.script_pubkey() != prevouts[i].script_pubkey {
+                return Err(reject());
+            }
+            let mut owned = false;
+            branch.for_each_key(|descriptor_key| {
+                if let DescriptorPublicKey::XPub(account) = descriptor_key {
+                    if account.xkey.to_string() == binding.xpub
+                        && account.origin.as_ref()
+                            == Some(&(binding.fingerprint, scope.account_origin.clone()))
+                        && descriptor_key
+                            .clone()
+                            .at_derivation_index(index)
+                            .and_then(|derived_key| derived_key.derive_public_key(&secp))
+                            .ok()
+                            == Some(*key)
+                    {
+                        owned = true;
+                    }
+                }
+                true
+            });
+            if !owned {
+                return Err(reject());
+            }
+            candidate.inputs[i].partial_sigs.insert(*key, *signature);
+            additions += 1;
+        }
+    }
+    if additions == 0 || normalized != *original {
+        return Err(reject());
+    }
+    // The core verifier takes the unsigned construction as its first PSBT.
+    // The LAN request may already contain another cosigner's valid partial;
+    // remove only those partials in the comparison baseline, then verify all
+    // retained old and new signatures together in `candidate`.
+    let mut construction = original.clone();
+    for input in &mut construction.inputs {
+        input.partial_sigs.clear();
+    }
+    verify_imported_signatures(wallet, &construction, &candidate, &secp).map_err(|_| reject())?;
+    *original = candidate;
     Ok(())
 }

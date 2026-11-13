@@ -73,6 +73,10 @@ impl RestorePinSetupStep {
 }
 
 impl Step for RestorePinSetupStep {
+    fn restore_stage(&self) -> Option<crate::installer::RestoreStage> {
+        Some(crate::installer::RestoreStage::Pin)
+    }
+
     fn skip(&self, ctx: &Context) -> bool {
         // New recovered seeds and fresh fork Cubes need a PIN. Descriptor-only
         // restores into an existing Cube retain its existing credentials.
@@ -118,11 +122,9 @@ impl Step for RestorePinSetupStep {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        email: Option<&'a str>,
     ) -> Element<'a, Message> {
         view::restore_pin_setup(
             progress,
-            email,
             &self.entry,
             &self.confirm,
             self.error,

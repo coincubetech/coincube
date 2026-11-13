@@ -46,7 +46,11 @@ impl State for PsbtsPanel {
             let list_view = view::dashboard(
                 menu,
                 cache,
-                view::vault::psbts::psbts_view(&self.spend_txs, cache.bitcoin_unit),
+                view::vault::psbts::psbts_view(
+                    &self.spend_txs,
+                    cache.bitcoin_unit,
+                    cache.balance_amounts_masked(),
+                ),
             );
             if let Some(modal) = &self.modal {
                 modal.view(list_view)
@@ -71,9 +75,44 @@ impl State for PsbtsPanel {
             Message::View(view::Message::Reload) | Message::View(view::Message::Close) => {
                 return self.reload(Some(daemon), Some(self.wallet.clone()));
             }
-            Message::SpendTxs(res) => {
-                return self.apply_spend_transactions(daemon, res);
-            }
+            Message::SpendTxs(res) => match res {
+                Err(e) => {
+                    let err_msg = crate::user_error::report(&e);
+                    self.warning = Some(e);
+                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                }
+                Ok(mut txs) => {
+                    self.warning = None;
+                    // Optimistic Pending->Broadcast override for txs
+                    // the user just broadcast locally, until the
+                    // daemon's mempool poller reflects the spend in
+                    // its derived `SpendStatus`.
+                    self.wallet.apply_spend_tx_overrides(&mut txs);
+                    self.spend_txs = txs;
+                    if let Some(tx) = &self.selected_tx {
+                        // Never rebuild the open PSBT panel while a modal is up:
+                        // a `PsbtState::new` here resets `modal` to `None` and
+                        // replaces `tx.psbt` with the daemon's copy, dropping an
+                        // in-progress Sign session (and its in-flight Keychain
+                        // sessions) and re-exposing only the signatures persisted
+                        // so far. The signing flow keeps the merged psbt in
+                        // memory and persists it itself, so a refresh has nothing
+                        // to add here.
+                        if tx.modal.is_some() {
+                            return Task::none();
+                        }
+                        if let Some(tx) = self.spend_txs.iter().find(|spend_tx| {
+                            spend_tx.psbt.unsigned_tx.compute_txid()
+                                == tx.tx.psbt.unsigned_tx.compute_txid()
+                        }) {
+                            let tx = psbt::PsbtState::new(self.wallet.clone(), tx.clone(), true);
+                            let cmd = tx.load(daemon);
+                            self.selected_tx = Some(tx);
+                            return cmd;
+                        }
+                    }
+                }
+            },
             Message::View(view::Message::ImportPsbt) => {
                 if let Some(tx) = &mut self.selected_tx {
                     return tx.update(daemon, cache, message);
@@ -163,54 +202,6 @@ impl State for PsbtsPanel {
     }
 }
 
-impl PsbtsPanel {
-    fn apply_spend_transactions(
-        &mut self,
-        daemon: Arc<dyn Daemon + Sync + Send>,
-        res: Result<Vec<SpendTx>, Error>,
-    ) -> Task<Message> {
-        match res {
-            Err(e) => {
-                let err_msg = crate::user_error::report(&e);
-                self.warning = Some(e);
-                return Task::done(Message::View(view::Message::ShowError(err_msg)));
-            }
-            Ok(mut txs) => {
-                self.warning = None;
-                // Optimistic Pending->Broadcast override for txs
-                // the user just broadcast locally, until the
-                // daemon's mempool poller reflects the spend in
-                // its derived `SpendStatus`.
-                self.wallet.apply_spend_tx_overrides(&mut txs);
-                self.spend_txs = txs;
-                if let Some(tx) = &self.selected_tx {
-                    // Never rebuild the open PSBT panel while a modal is up:
-                    // a `PsbtState::new` here resets `modal` to `None` and
-                    // replaces `tx.psbt` with the daemon's copy, dropping an
-                    // in-progress Sign session (and its in-flight Keychain
-                    // sessions) and re-exposing only the signatures persisted
-                    // so far. The signing flow keeps the merged psbt in
-                    // memory and persists it itself, so a refresh has nothing
-                    // to add here.
-                    if tx.modal.is_some() {
-                        return Task::none();
-                    }
-                    if let Some(tx) = self.spend_txs.iter().find(|spend_tx| {
-                        spend_tx.psbt.unsigned_tx.compute_txid()
-                            == tx.tx.psbt.unsigned_tx.compute_txid()
-                    }) {
-                        let tx = psbt::PsbtState::new(self.wallet.clone(), tx.clone(), true);
-                        let cmd = tx.load(daemon);
-                        self.selected_tx = Some(tx);
-                        return cmd;
-                    }
-                }
-            }
-        };
-        Task::none()
-    }
-}
-
 impl From<PsbtsPanel> for Box<dyn State> {
     fn from(s: PsbtsPanel) -> Box<dyn State> {
         Box::new(s)
@@ -220,11 +211,17 @@ impl From<PsbtsPanel> for Box<dyn State> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{daemon::client::Coincubed, utils::mock::Daemon as MockDaemon};
+    use crate::app::view::shared::landing::capture;
+    use crate::{
+        daemon::{client::Coincubed, model::TransactionKind},
+        utils::mock::Daemon as MockDaemon,
+    };
     use coincube_core::{
         descriptors::CoincubeDescriptor,
-        miniscript::bitcoin::{secp256k1::Secp256k1, Network, Psbt},
+        miniscript::bitcoin::{secp256k1::Secp256k1, Amount, Network, Psbt},
     };
+    use coincube_ui::component::amount::{BitcoinDisplayUnit, DisplayAmount};
+    use coincube_ui::theme;
     use std::str::FromStr;
 
     const DESC: &str = "wsh(or_d(multi(2,[f714c228/48'/1'/0'/2']tpubDEwJnTwfKoMvu8AXXBPydBVWDpzNP5tatjjZ56q4TQioGL7iL9xzTbMoCCQ3tfGihtff7vtR4xsjcRuhZ7HWARVAkGZ1HZcpBhVdou76k7j/<0;1>/*,[2522f23c/48'/1'/0'/2']tpubDEoTU4bDW1EXN1rnLXnRfue1a7DeqjJcs39PkEeLcVXhVKzCnFo9yQX2EeeXJ6kh4hgbz5o9v7YAc1EE97AEJpJbKNmDxE3ZQo4msGPSp2J/<0;1>/*),and_v(v:thresh(1,pkh([f714c228/48'/1'/0'/2']tpubDEwJnTwfKoMvu8AXXBPydBVWDpzNP5tatjjZ56q4TQioGL7iL9xzTbMoCCQ3tfGihtff7vtR4xsjcRuhZ7HWARVAkGZ1HZcpBhVdou76k7j/<2;3>/*),a:pkh([2522f23c/48'/1'/0'/2']tpubDEoTU4bDW1EXN1rnLXnRfue1a7DeqjJcs39PkEeLcVXhVKzCnFo9yQX2EeeXJ6kh4hgbz5o9v7YAc1EE97AEJpJbKNmDxE3ZQo4msGPSp2J/<2;3>/*)),older(65535))))#9s8ekrce";
@@ -238,6 +235,78 @@ mod tests {
         let psbt = Psbt::from_str(UNSIGNED_PSBT).unwrap();
         let secp = Secp256k1::verification_only();
         SpendTx::new(None, psbt, vec![], &desc, &secp, Network::Signet)
+    }
+
+    #[test]
+    fn hidden_psbt_list_masks_spend_and_fee_without_removing_entry() {
+        let mut tx = spend_tx();
+        // The shared PSBT is a self-transfer; make this rendering fixture an
+        // outbound row with nonzero values so both amount fields are visible.
+        tx.kind = TransactionKind::OutgoingPaymentBatch(vec![]);
+        // Ten BTC in the default Sats unit exercises the narrow Amount cell.
+        tx.spend_amount = Amount::from_sat(1_000_000_000);
+        tx.fee_amount = Some(Amount::from_sat(12_345));
+        assert!(tx.spend_amount.to_sat() > 0);
+        let raw_spend = tx
+            .spend_amount
+            .to_formatted_string_with_unit(BitcoinDisplayUnit::Sats);
+        let fee = tx
+            .fee_amount
+            .map(|amount| amount.to_formatted_string_with_unit(BitcoinDisplayUnit::Sats));
+        let rows = [tx];
+        for size in [(1024, 768), (1440, 900)] {
+            for (appearance, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                for masked in [true, false] {
+                    let mounted = capture::inspect(
+                        if masked {
+                            "vault-psbts-private"
+                        } else {
+                            "vault-psbts-shown"
+                        },
+                        view::vault::psbts::psbts_view(&rows, BitcoinDisplayUnit::Sats, masked),
+                        size,
+                        appearance,
+                        theme,
+                    );
+                    assert!(mounted.contains("PSBT proposals"));
+                    assert_eq!(mounted.contains(&raw_spend), !masked);
+                    if let Some(fee) = &fee {
+                        assert_eq!(mounted.contains(fee), !masked);
+                    }
+                    assert_eq!(mounted.contains("••••••"), masked);
+                    if size == (1024, 768) && !masked {
+                        let partial = capture::inspect(
+                            "vault-psbts-partially-signed",
+                            coincube_ui::widget::Container::new(
+                                view::vault::psbts::spend_tx_list_view_with_status(
+                                    0,
+                                    &rows[0],
+                                    BitcoinDisplayUnit::Sats,
+                                    false,
+                                    ("Partially signed", theme::pill::warning),
+                                ),
+                            )
+                            .width(iced::Length::Fixed(652.0))
+                            .into(),
+                            size,
+                            appearance,
+                            theme,
+                        );
+                        assert!(partial.contains("Partially signed"));
+                        let status_height = partial
+                            .text
+                            .iter()
+                            .find(|(value, _)| value == "Partially signed")
+                            .map(|(_, bounds)| bounds.height)
+                            .expect("captured status label");
+                        assert!(status_height <= 24.0, "status pill text wrapped");
+                    }
+                }
+            }
+        }
     }
 
     // Regression: a background `SpendTxs` refresh must NOT rebuild the open

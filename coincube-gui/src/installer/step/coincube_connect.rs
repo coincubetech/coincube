@@ -85,7 +85,30 @@ async fn send_otp(client: CoincubeClient, email: String, is_signup: bool) -> Res
     .map_err(|e| e.to_string())
 }
 
+impl CoincubeConnectStep {
+    /// The flow has no Connect step at all, as opposed to one whose token
+    /// is already in hand.
+    fn never_runs(ctx: &Context) -> bool {
+        (ctx.fork_local_vault_allowed()
+            && ctx
+                .coincube_client
+                .as_ref()
+                .and_then(|c| c.token())
+                .is_none())
+            || ctx.network == coincube_core::miniscript::bitcoin::Network::Regtest
+    }
+}
+
 impl Step for CoincubeConnectStep {
+    fn vault_stage(&self) -> Option<crate::installer::VaultStage> {
+        Some(crate::installer::VaultStage::Connect)
+    }
+    /// The token this step collected skips the step but keeps its place
+    /// on the stepper. A session the installer was launched with is adopted
+    /// without the step ever showing, so that one leaves it off.
+    fn off_vault_stepper(&self, ctx: &Context) -> bool {
+        Self::never_runs(ctx) || ctx.connect_signed_in_at_launch
+    }
     /// Adopt an already-authenticated Connect session forwarded from the
     /// app (`ctx.coincube_client`) the first time this step becomes
     /// active. When a Vault is set up from Home while signed in, the
@@ -102,7 +125,7 @@ impl Step for CoincubeConnectStep {
     ///   * Only a client with a token auto-advances; an unauthenticated
     ///     client still supplies the configured endpoint for the OTP flow.
     fn load_context(&mut self, ctx: &Context) {
-        self.required = ctx.bitcoin_config.chain.is_blake2b() && !ctx.fresh_fork_cube;
+        self.required = ctx.bitcoin_config.chain.is_blake2b() && !ctx.fork_local_vault_allowed();
         // load_context is called when entering this step, not between an OTP
         // response and apply. Re-entering after auth was undone must not reuse
         // a pending token or auto-advance from the previous visit.
@@ -156,9 +179,7 @@ impl Step for CoincubeConnectStep {
     }
 
     fn skip(&self, ctx: &Context) -> bool {
-        (ctx.fresh_fork_cube && ctx.coincube_client.as_ref().and_then(|c| c.token()).is_none())
-            || ctx.network == coincube_core::miniscript::bitcoin::Network::Regtest
-            || ctx.remote_backend.is_some()
+        Self::never_runs(ctx)
             // An earlier step (today: `RecoveryKitRestoreStep`) has
             // already collected the user's JWT for the same Connect
             // account, so re-authenticating here would just be a
@@ -170,7 +191,8 @@ impl Step for CoincubeConnectStep {
     }
 
     fn apply(&mut self, ctx: &mut Context) -> bool {
-        if self.skipped && ctx.bitcoin_config.chain.is_blake2b() && !ctx.fresh_fork_cube {
+        if self.skipped && ctx.bitcoin_config.chain.is_blake2b() && !ctx.fork_local_vault_allowed()
+        {
             self.error = Some("Connect authentication is required for Bitcoin Blake2b".to_string());
             return false;
         }
@@ -215,10 +237,7 @@ impl Step for CoincubeConnectStep {
     }
 
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
-        let Message::CoincubeConnect(msg) = message else {
-            return Task::none();
-        };
-        {
+        if let Message::CoincubeConnect(msg) = message {
             match msg {
                 CoincubeConnectMsg::EmailEdited(value) => {
                     self.email_touched = true;
@@ -259,7 +278,22 @@ impl Step for CoincubeConnectStep {
                     );
                 }
                 CoincubeConnectMsg::OtpRequested { email, result } => {
-                    return self.on_otp_requested(email, result);
+                    self.processing = false;
+                    match result {
+                        Ok(()) => {
+                            self.otp_sent = true;
+                            self.otp = form::Value::default();
+                            self.error = None;
+                        }
+                        Err(e) => {
+                            if !self.is_signup && e.contains("Email not verified") {
+                                return Task::done(Message::CoincubeConnect(
+                                    CoincubeConnectMsg::EmailNotVerified { email },
+                                ));
+                            }
+                            self.error = Some(e);
+                        }
+                    }
                 }
                 CoincubeConnectMsg::OtpResent(res) => {
                     self.processing = false;
@@ -293,7 +327,36 @@ impl Step for CoincubeConnectStep {
                     );
                 }
                 CoincubeConnectMsg::OtpEdited(value) => {
-                    return self.edit_otp(value);
+                    self.otp.value = value.trim().to_string();
+                    self.otp.valid = true;
+                    if self.otp.value.len() == 6 && !self.processing {
+                        let client = self.client.clone();
+                        let email = self.email.value.clone();
+                        let otp = self.otp.value.clone();
+                        let is_signup = self.is_signup;
+                        self.processing = true;
+                        self.error = None;
+                        return Task::perform(
+                            async move {
+                                let req = OtpVerifyRequest { email, otp };
+                                if is_signup {
+                                    client.signup_verify_otp(req).await
+                                } else {
+                                    client.login_verify_otp(req).await
+                                }
+                                // Wrap into `Zeroizing<String>` at the
+                                // async boundary — before the token
+                                // enters the message queue — so every
+                                // in-flight copy of the subsequent
+                                // `OtpVerified` message scrubs its
+                                // heap on drop, not just the copy
+                                // stashed on the step's state.
+                                .map(|resp| Zeroizing::new(resp.token))
+                                .map_err(|e| e.to_string())
+                            },
+                            |res| Message::CoincubeConnect(CoincubeConnectMsg::OtpVerified(res)),
+                        );
+                    }
                 }
                 CoincubeConnectMsg::OtpVerified(res) => {
                     self.processing = false;
@@ -328,7 +391,6 @@ impl Step for CoincubeConnectStep {
         &'a self,
         _hws: &'a HardwareWallets,
         progress: (usize, usize),
-        _email: Option<&'a str>,
     ) -> Element<'a, Message> {
         let email_display = if self.email_touched {
             self.email.clone()
@@ -351,82 +413,16 @@ impl Step for CoincubeConnectStep {
     }
 }
 
-impl CoincubeConnectStep {
-    fn edit_otp(&mut self, value: String) -> Task<Message> {
-        self.otp.value = value.trim().to_string();
-        self.otp.valid = true;
-        if self.otp.value.len() == 6 && !self.processing {
-            let client = self.client.clone();
-            let email = self.email.value.clone();
-            let otp = self.otp.value.clone();
-            let is_signup = self.is_signup;
-            self.processing = true;
-            self.error = None;
-            return Task::perform(
-                async move {
-                    let req = OtpVerifyRequest { email, otp };
-                    if is_signup {
-                        client.signup_verify_otp(req).await
-                    } else {
-                        client.login_verify_otp(req).await
-                    }
-                    // Wrap into `Zeroizing<String>` at the
-                    // async boundary — before the token
-                    // enters the message queue — so every
-                    // in-flight copy of the subsequent
-                    // `OtpVerified` message scrubs its
-                    // heap on drop, not just the copy
-                    // stashed on the step's state.
-                    .map(|resp| Zeroizing::new(resp.token))
-                    .map_err(|e| e.to_string())
-                },
-                |res| Message::CoincubeConnect(CoincubeConnectMsg::OtpVerified(res)),
-            );
-        }
-
-        Task::none()
-    }
-}
-
-impl CoincubeConnectStep {
-    fn on_otp_requested(&mut self, email: String, result: Result<(), String>) -> Task<Message> {
-        self.processing = false;
-        match result {
-            Ok(()) => {
-                self.otp_sent = true;
-                self.otp = form::Value::default();
-                self.error = None;
-            }
-            Err(e) => {
-                if !self.is_signup && e.contains("Email not verified") {
-                    return Task::done(Message::CoincubeConnect(
-                        CoincubeConnectMsg::EmailNotVerified { email },
-                    ));
-                }
-                self.error = Some(e);
-            }
-        }
-
-        Task::none()
-    }
-}
-
 #[cfg(test)]
 mod chain_auth_tests {
     use super::*;
-    use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+    use crate::{chain::ChainId, dir::CoincubeDirectory};
 
     #[test]
     fn login_and_retained_sessions_keep_authenticated_client_for_startup() {
         for retained in [false, true] {
             let dir = CoincubeDirectory::new(Default::default());
-            let mut ctx = Context::new_for_chain(
-                ChainId::BitcoinBlake2b,
-                dir.clone(),
-                RemoteBackend::None,
-                None,
-                None,
-            );
+            let mut ctx = Context::new_for_chain(ChainId::BitcoinBlake2b, dir.clone(), None, None);
             let mut client = CoincubeClient::for_test("http://127.0.0.1:1/custom-connect");
             if retained {
                 client.set_token("synthetic-session");
@@ -468,7 +464,6 @@ mod chain_auth_tests {
             let mut ctx = Context::new_for_chain(
                 chain,
                 CoincubeDirectory::new(Default::default()),
-                RemoteBackend::None,
                 None,
                 None,
             );
@@ -518,7 +513,6 @@ mod chain_auth_tests {
         let mut ctx = Context::new_for_chain(
             ChainId::BitcoinBlake2b,
             CoincubeDirectory::new(Default::default()),
-            RemoteBackend::None,
             None,
             None,
         );
@@ -546,8 +540,7 @@ mod chain_auth_tests {
             ChainId::BitcoinBlake2bTestnet4,
         ] {
             let dir = CoincubeDirectory::new(Default::default());
-            let mut ctx =
-                Context::new_for_chain(chain, dir.clone(), RemoteBackend::None, None, None);
+            let mut ctx = Context::new_for_chain(chain, dir.clone(), None, None);
             let mut step = CoincubeConnectStep::new();
             step.load_context(&ctx);
             let mut hws = HardwareWallets::new(dir, chain.bitcoin_network());

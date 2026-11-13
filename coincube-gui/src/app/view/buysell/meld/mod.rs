@@ -56,9 +56,9 @@ pub enum MeldMessage {
 
 pub enum MeldFlowStep {
     RegionChecks,
-    NotSupported {
-        msg: std::borrow::Cow<'static, str>,
-    },
+    /// The detected country has no Meld coverage; the message is rendered
+    /// from `MeldState::country` so it follows the display language.
+    NotSupported,
     RegionSelection {
         search: String,
         regions: Vec<meld::api::MeldRegion>,
@@ -182,7 +182,7 @@ impl MeldState {
     pub(crate) fn view<'a>(&'a self) -> coincube_ui::widget::Element<'a, view::Message> {
         match &self.steps.last() {
             None | Some(MeldFlowStep::RegionChecks) => ui::region_checks_ux(),
-            Some(MeldFlowStep::NotSupported { msg }) => ui::not_supported_ux(msg.as_ref()),
+            Some(MeldFlowStep::NotSupported) => ui::not_supported_ux(self.country),
             Some(MeldFlowStep::RegionSelection {
                 selected,
                 search,
@@ -277,13 +277,7 @@ impl MeldState {
             }
 
             // initialization
-            MeldMessage::CountryNotSupported => self.steps.push(MeldFlowStep::NotSupported {
-                msg: format!(
-                    "Your country: {} currently isn't supported for BuySell",
-                    self.country
-                )
-                .into(),
-            }),
+            MeldMessage::CountryNotSupported => self.steps.push(MeldFlowStep::NotSupported),
             MeldMessage::InitializeCountryData(limits, regions_) => {
                 match regions_ {
                     Some(regions) => {

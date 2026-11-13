@@ -19,6 +19,7 @@ pub fn binding(descriptor: &str) -> SignerBinding {
         xpub: k.xkey.to_string(),
         fingerprint: k.origin.as_ref().unwrap().0,
         descriptor_sha256: Sha256::digest(descriptor.as_bytes()).to_vec(),
+        imported_scope: None,
     }
 }
 pub fn vault(descriptor: &str) -> Fingerprint {

@@ -1,10 +1,10 @@
 //! Lightning Address claim / manage UX.
 //!
-//! Renders the per-Cube Lightning Address sub-page: empty-state claim
-//! form when no address is bound, full-page display + "Change" button
-//! when bound, and an in-place edit form when the user is renaming.
-//! The "Change your Lightning Address?" confirmation lives here as a
-//! modal stacked on the page.
+//! [`settings_view`] renders Spark › Settings › Lightning address: the claim
+//! form when no address is bound, else "Your Lightning address" with Copy
+//! and Change, where Change opens the rename form in place. That form says
+//! what happens to the old address before Save, so it changes the address
+//! without a confirmation.
 //!
 //! Owns `LN_ADDRESS_DOMAIN`, the only string in the codebase that must
 //! match the Connect backend's `lightningAddressDomain`.
@@ -15,384 +15,409 @@
 //! existing dispatch path through `ConnectPanel::update` keeps
 //! working.
 
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
-    color,
-    component::{button, text},
-    icon::clipboard_icon,
-    theme,
-    widget::{modal::Modal, Column, ColumnExt, Element, Row, TextInput},
+    component::{
+        tenshu,
+        tenshu::{text_field, ActionKind, Tone},
+    },
+    font, icon,
+    theme::{
+        self,
+        tenshu::button::{self, ActionShape},
+    },
+    widget::{action::Action, Column, Container, Element, Row},
 };
-use iced::{widget::container, Alignment, Length};
+use iced::{
+    widget::{rich_text, span, Space},
+    Alignment, Length,
+};
 
+use crate::app::view::settings::page;
 use crate::app::{state::connect::ConnectCubePanel, view::ConnectCubeMessage};
 
 /// Domain suffix displayed in the Lightning Address claim form.
 /// Must match the backend's `lightningAddressDomain`.
 pub(crate) const LN_ADDRESS_DOMAIN: &str = "@coincube.io";
 
-fn card_style(t: &theme::Theme) -> container::Style {
-    container::Style {
-        background: Some(iced::Background::Color(t.colors.cards.simple.background)),
+pub const COPY_ID: &str = "tenshu.settings.spark.ln-address.copy";
+pub const CHANGE_ID: &str = "tenshu.settings.spark.ln-address.change";
+pub const USERNAME_ID: &str = "tenshu.settings.spark.ln-address.username";
+pub const SAVE_ID: &str = "tenshu.settings.spark.ln-address.save";
+pub const CANCEL_ID: &str = "tenshu.settings.spark.ln-address.cancel";
+pub const CLAIM_ID: &str = "tenshu.settings.spark.ln-address.claim";
+pub const RETRY_ID: &str = "tenshu.settings.spark.ln-address.retry";
+
+/// The username rules, as the server enforces them.
+pub const USERNAME_RULES: &str = "3–64 characters: lowercase letters, numbers, dots, \
+     underscores and hyphens. Start and end with a letter or number, with no two of . _ - in \
+     a row.";
+
+/// What saving a new username does to the old address, shown beside the form
+/// before Save.
+pub fn release_warning(old_address: &str) -> String {
+    format!(
+        "{old_address} stops working when you save. You give it up, and anyone can claim it \
+         after you, so payments sent to it could reach them. Update it anywhere you have \
+         shared it."
+    )
+}
+
+/// The artboard's 36px rectangular form actions, retaining the shared
+/// Action keyboard/focus contract and semantic button colours.
+fn action<'a>(
+    id: &'static str,
+    label: &'a str,
+    kind: ActionKind,
+    on_press: Option<ConnectCubeMessage>,
+) -> Action<'a, ConnectCubeMessage> {
+    let label = iced::widget::text(label)
+        .size(14)
+        .shaping(iced::advanced::text::Shaping::Advanced)
+        .font(if kind == ActionKind::Primary {
+            font::SEMIBOLD
+        } else {
+            font::MEDIUM
+        });
+    let mut content = Row::new().spacing(6).align_y(Alignment::Center);
+    if id == COPY_ID {
+        content = content.push(icon::copy_icon().size(16));
+    }
+    Action::new(
+        id,
+        Container::new(content.push(label)).center_y(Length::Fill),
+        ConnectCubeMessage::FocusAction,
+    )
+    .height(36)
+    .padding([0, 14])
+    .focus_radius(8.0)
+    .style(move |theme, status| {
+        let mut appearance = button::action(theme, status, kind, ActionShape::Compact);
+        if kind == ActionKind::Primary && status == iced::widget::button::Status::Disabled {
+            appearance.background = None;
+            appearance.border.color = theme.colors.shell.line;
+            appearance.text_color = theme.colors.shell.muted;
+        } else if kind == ActionKind::Secondary && status == iced::widget::button::Status::Active {
+            appearance.background = None;
+        }
+        appearance
+    })
+    .on_press_maybe(on_press)
+}
+
+fn release_callout<'a>(address: &str) -> Element<'a, ConnectCubeMessage> {
+    let lead = format!("{address} stops working when you save.");
+    let warning = release_warning(address);
+    let detail = warning[lead.len()..].to_owned();
+    Container::new(
+        Row::new()
+            .spacing(12)
+            .align_y(Alignment::Start)
+            .push(
+                Container::new(
+                    icon::warning_icon()
+                        .size(16)
+                        .style(|t: &theme::Theme| theme::tenshu::text::tone(t, Tone::Warn)),
+                )
+                .padding(iced::Padding::default().top(2)),
+            )
+            .push(
+                rich_text([span::<(), _>(lead).font(font::BOLD), span(detail)])
+                    .font(font::REGULAR)
+                    .size(14)
+                    .line_height(iced::widget::text::LineHeight::Relative(1.45))
+                    .style(theme::tenshu::text::ink),
+            ),
+    )
+    .padding([14, 16])
+    .width(Length::Fill)
+    .style(|t: &theme::Theme| iced::widget::container::Style {
+        background: Some(iced::Background::Color(t.colors.shell.panel)),
         border: iced::Border {
-            color: t.colors.cards.simple.border.unwrap_or(color::GREY_5),
-            width: 0.2,
-            radius: 16.0.into(),
+            color: t.colors.shell.line,
+            width: 1.0,
+            radius: 10.0.into(),
         },
         ..Default::default()
+    })
+    .into()
+}
+
+/// The availability line under the username field: checking, taken or
+/// invalid (the field shows those as its error), or available.
+fn availability<'a>(
+    state: &'a ConnectCubePanel,
+    current: Option<&str>,
+) -> Element<'a, ConnectCubeMessage> {
+    let username = state.ln_username_input.as_str();
+    if username.is_empty() || state.ln_username_error.is_some() {
+        Space::new().into()
+    } else if state.ln_checking {
+        page::status(page::Status::Busy, localized_copy("Checking…"))
+    } else if !lightning_username_differs(current, username) {
+        page::status(
+            page::Status::Off,
+            localized_copy("This is your current username"),
+        )
+    } else if state.ln_username_available == Some(true) {
+        page::status(
+            page::Status::Ok,
+            format!("{username}{LN_ADDRESS_DOMAIN} is available"),
+        )
+    } else {
+        Space::new().into()
     }
 }
 
-pub fn lightning_address_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage> {
+/// The username field with the domain attached, its availability and the
+/// rules.
+fn username_field<'a>(
+    state: &'a ConnectCubePanel,
+    label: &'static str,
+    current: Option<&str>,
+    busy: bool,
+    on_submit: Option<ConnectCubeMessage>,
+) -> Element<'a, ConnectCubeMessage> {
+    let mut field = text_field(
+        USERNAME_ID,
+        label,
+        &state.ln_username_input,
+        ConnectCubeMessage::FocusAction,
+    )
+    .segmented_suffix(LN_ADDRESS_DOMAIN, 112.0)
+    .placeholder("satoshi")
+    .error_maybe(state.ln_username_error.as_deref())
+    .on_input_maybe((!busy).then_some(ConnectCubeMessage::LnUsernameChanged));
+    if let Some(message) = on_submit {
+        field = field.on_submit(message);
+    }
+    Column::new()
+        .spacing(6)
+        .width(Length::Fill)
+        .push(field)
+        .push(availability(state, current))
+        .push(page::muted(USERNAME_RULES))
+        .into()
+}
+
+/// Spark › Settings › Lightning address. No heading repeats the tab name: a
+/// bound address is headed "Your Lightning address", an unbound one offers
+/// the claim form.
+pub fn settings_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage> {
     let current_address = state
         .lightning_address
         .as_ref()
-        .and_then(|la| la.lightning_address.clone())
-        .map(|a| normalize_lightning_address(&a));
-    let has_address = current_address.is_some();
-    let current_username = current_address.as_deref().and_then(lightning_username);
+        .and_then(|la| la.lightning_address.as_deref())
+        .map(normalize_lightning_address);
+    let Some(address) = current_address else {
+        return claim_view(state);
+    };
+    let current_username = lightning_username(&address);
 
-    let card_content: Element<ConnectCubeMessage> = if has_address && state.ln_editing {
-        // Edit mode: in-place rename form on the claimed-address card.
-        let address = current_address.clone().unwrap_or_default();
-        let username = &state.ln_username_input;
-        let differs = lightning_username_differs(current_username.as_deref(), username);
-        let can_change = can_change_lightning_address(
+    let editing = state.ln_editing;
+    let row = Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(
+            Column::new()
+                .spacing(2)
+                .width(Length::Fill)
+                .push(
+                    tenshu::title(address.clone())
+                        .line_height(iced::widget::text::LineHeight::Relative(1.3))
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                )
+                .push(page::muted(localized_copy(
+                    "Anyone can send you bitcoin with this address.",
+                ))),
+        )
+        .push(action(
+            COPY_ID,
+            coincube_ui::locale::copy("Copy"),
+            if editing {
+                ActionKind::Secondary
+            } else {
+                ActionKind::Primary
+            },
+            Some(ConnectCubeMessage::CopyToClipboard(address.clone())),
+        ))
+        .push(
+            action(
+                CHANGE_ID,
+                coincube_ui::locale::copy("Change"),
+                ActionKind::Secondary,
+                (!state.ln_editing && !state.ln_changing)
+                    .then_some(ConnectCubeMessage::BeginEditLightningAddress),
+            )
+            .style(move |theme, status| {
+                let mut appearance =
+                    button::action(theme, status, ActionKind::Secondary, ActionShape::Compact);
+                if editing {
+                    appearance.background =
+                        Some(iced::Background::Color(theme.colors.shell.selected));
+                    appearance.border.color = theme.colors.shell.accent_ink;
+                    appearance.text_color = theme.colors.shell.ink;
+                }
+                appearance
+            }),
+        );
+
+    let mut content = Column::new()
+        .width(Length::Fill)
+        .push(Space::new().height(Length::Fixed(page::GROUP_GAP)))
+        .push(page::heading(localized_copy("Your Lightning address")))
+        .push(Space::new().height(Length::Fixed(12.0)))
+        .push(page::rule())
+        .push(Container::new(row).padding([12, 0]));
+
+    if let Some(err) = state.ln_reconcile_needs_reregister.as_deref() {
+        // API↔SDK divergence — the DB confirms the address but the Spark SDK
+        // isn't bound to it on this device. Retry does an idempotent SDK
+        // delete followed by a fresh register against the DB-confirmed name.
+        content = content.push(page::note(
+            Tone::Bad,
+            Column::new()
+                .spacing(4)
+                .push(tenshu::label(localized_copy(
+                    "This address needs re-registration",
+                )))
+                .push(page::muted(err)),
+            Some(
+                action(
+                    RETRY_ID,
+                    if state.ln_reregistering {
+                        "Retrying…"
+                    } else {
+                        "Retry"
+                    },
+                    ActionKind::Secondary,
+                    (!state.ln_reregistering)
+                        .then_some(ConnectCubeMessage::RetryLightningAddressReregister),
+                )
+                .into(),
+            ),
+        ));
+    }
+
+    if state.ln_editing {
+        let username = state.ln_username_input.as_str();
+        let can_save = can_change_lightning_address(
             username,
             state.ln_username_error.as_deref(),
             state.ln_username_available,
             current_username.as_deref(),
             state.ln_changing,
         );
-
-        let status: Element<ConnectCubeMessage> = if state.ln_checking {
-            text::p2_regular("Checking…").color(color::GREY_3).into()
-        } else if let Some(err) = &state.ln_username_error {
-            text::p2_regular(err.as_str()).color(color::RED).into()
-        } else if !differs && !username.is_empty() {
-            text::p2_regular("This is your current username")
-                .color(color::GREY_3)
-                .into()
-        } else if state.ln_username_available == Some(true) {
-            text::p2_regular("✓ Available").color(color::GREEN).into()
-        } else if username.is_empty() {
-            text::p2_regular("Choose a new username")
-                .color(color::GREY_3)
-                .into()
-        } else {
-            text::p2_regular(" ").into()
-        };
-
-        let cancel_btn = button::secondary(None, "Cancel").on_press_maybe(
-            (!state.ln_changing).then_some(ConnectCubeMessage::CancelEditLightningAddress),
-        );
-        let change_btn: Element<ConnectCubeMessage> = if state.ln_changing {
-            iced::widget::button(
-                container(text::p1_regular("Changing…").color(color::GREY_3))
-                    .center_x(Length::Fixed(140.0))
-                    .center_y(Length::Fill),
-            )
-            .height(Length::Fixed(44.0))
-            .style(theme::button::primary)
-            .into()
-        } else {
-            button::primary(None, "Change")
-                .on_press_maybe(
-                    can_change.then_some(ConnectCubeMessage::RequestChangeLightningAddress),
-                )
-                .into()
-        };
-
-        container(
-            Column::new()
-                .push(text::p1_bold("Your Lightning Address").style(theme::text::primary))
-                .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                .push(text::p2_regular(format!("Current: {}", address)).color(color::GREY_3))
-                .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-                .push(
-                    Row::new()
-                        .push(
-                            TextInput::new("new username", username)
-                                .on_input_maybe(
-                                    (!state.ln_changing)
-                                        .then_some(ConnectCubeMessage::LnUsernameChanged),
-                                )
-                                .on_submit_maybe(
-                                    can_change.then_some(
-                                        ConnectCubeMessage::RequestChangeLightningAddress,
-                                    ),
-                                )
-                                .size(16)
-                                .padding(15),
-                        )
-                        .push(
-                            container(text::p1_regular(LN_ADDRESS_DOMAIN).color(color::GREY_3))
-                                .padding(15)
-                                .center_y(Length::Fixed(50.0)),
-                        )
-                        .align_y(Alignment::Center),
-                )
-                .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
-                .push(status)
-                .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-                .push(
-                    Row::new()
-                        .push(cancel_btn)
-                        .push(iced::widget::Space::new().width(Length::Fill))
-                        .push(change_btn)
-                        .align_y(Alignment::Center),
-                )
-                .push_maybe(state.ln_claim_error.as_deref().map(|err| {
-                    Column::new()
-                        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                        .push(text::p2_regular(err).color(color::RED))
-                }))
-                .padding(20)
-                .spacing(2),
-        )
-        .style(|t| container::Style {
-            background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-            border: iced::Border {
-                color: color::ORANGE,
-                width: 0.5,
-                radius: 16.0.into(),
-            },
-            ..Default::default()
-        })
-        .width(Length::Fill)
-        .into()
-    } else if has_address {
-        // Display the claimed address
-        let address = current_address.clone().unwrap_or_default();
-
-        container(
-            Column::new()
-                .push(text::p1_bold("Your Lightning Address").style(theme::text::primary))
-                .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-                .push(
-                    container(
-                        Row::new()
-                            .push(text::h3(address.clone()).color(color::ORANGE))
-                            .push(iced::widget::Space::new().width(Length::Fill))
-                            .push(
-                                button::secondary(Some(clipboard_icon()), "Copy")
-                                    .on_press(ConnectCubeMessage::CopyToClipboard(address)),
-                            )
-                            .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-                            .push(
-                                button::secondary(None, "Change")
-                                    .on_press(ConnectCubeMessage::BeginEditLightningAddress),
-                            )
-                            .align_y(Alignment::Center),
+        let save = can_save.then_some(ConnectCubeMessage::SaveLightningAddress);
+        let submit = save.clone();
+        let form = crate::app::view::responsive(move |size| {
+            let field = username_field(
+                state,
+                "New username",
+                current_username.as_deref(),
+                state.ln_changing,
+                submit.clone(),
+            );
+            if size.width < 760.0 {
+                Column::new()
+                    .spacing(20)
+                    .push(field)
+                    .push(release_callout(&address))
+                    .into()
+            } else {
+                let field_width = ((size.width - 40.0) * 13.0 / 24.0).min(520.0);
+                Row::new()
+                    .spacing(40)
+                    .align_y(Alignment::Start)
+                    .push(Container::new(field).width(field_width))
+                    .push(
+                        Container::new(release_callout(&address))
+                            .padding(iced::Padding::default().top(29))
+                            .width((size.width - field_width - 40.0).min(440.0)),
                     )
-                    .padding(16)
-                    .width(Length::Fill),
-                )
-                .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                .push(
-                    text::p2_regular(
-                        "Anyone can send you bitcoin using this address. \
-                         This app must be open and active to receive payments.",
-                    )
-                    .color(color::GREY_3),
-                )
-                .push_maybe(state.ln_reconcile_needs_reregister.as_deref().map(|err| {
-                    // API↔SDK divergence — the DB confirms the
-                    // address but the Spark SDK isn't bound to it on
-                    // this device. The retry button fires
-                    // `RetryLightningAddressReregister`, which does
-                    // an idempotent SDK delete followed by a fresh
-                    // register against the DB-confirmed username.
-                    let retry_label = if state.ln_reregistering {
-                        "Retrying…"
-                    } else {
-                        "Retry"
-                    };
-                    Column::new()
-                        .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-                        .push(
-                            text::p2_bold("Lightning address needs re-registration")
-                                .color(color::RED),
-                        )
-                        .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
-                        .push(text::p2_regular(err).color(color::GREY_3))
-                        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                        .push(
-                            button::secondary(None, retry_label)
-                                .on_press_maybe((!state.ln_reregistering).then_some(
-                                    ConnectCubeMessage::RetryLightningAddressReregister,
-                                )),
-                        )
-                }))
-                .padding(20)
-                .spacing(2),
-        )
-        .style(|t| container::Style {
-            background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-            border: iced::Border {
-                color: color::ORANGE,
-                width: 0.5,
-                radius: 16.0.into(),
-            },
-            ..Default::default()
-        })
-        .width(Length::Fill)
-        .into()
-    } else {
-        // Claim form
-        let username = &state.ln_username_input;
-        let can_claim = can_claim_lightning_address(
-            username,
-            state.ln_username_error.as_deref(),
-            state.ln_username_available,
-            state.ln_claiming,
-        );
-
-        // Status indicator
-        let status: Element<ConnectCubeMessage> = if state.ln_checking {
-            text::p2_regular("Checking…").color(color::GREY_3).into()
-        } else if let Some(err) = &state.ln_username_error {
-            text::p2_regular(err.as_str()).color(color::RED).into()
-        } else if state.ln_username_available == Some(true) {
-            text::p2_regular("✓ Available").color(color::GREEN).into()
-        } else if username.is_empty() {
-            text::p2_regular("Choose a username for your Lightning Address")
-                .color(color::GREY_3)
-                .into()
-        } else {
-            // Waiting for debounce
-            text::p2_regular(" ").into()
-        };
-
-        let claim_button: Element<ConnectCubeMessage> = if state.ln_claiming {
-            iced::widget::button(
-                container(text::p1_regular("Claiming…").color(color::GREY_3))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
-            )
+                    .into()
+            }
+        });
+        let buttons = Row::new()
+            .spacing(8)
+            .push(action(
+                SAVE_ID,
+                if state.ln_changing {
+                    "Saving…"
+                } else {
+                    "Save new address"
+                },
+                ActionKind::Primary,
+                save,
+            ))
+            .push(action(
+                CANCEL_ID,
+                coincube_ui::locale::copy("Cancel"),
+                ActionKind::Secondary,
+                (!state.ln_changing).then_some(ConnectCubeMessage::CancelEditLightningAddress),
+            ));
+        let mut edit = Column::new()
+            .spacing(24)
             .width(Length::Fill)
-            .height(Length::Fixed(44.0))
-            .style(theme::button::primary)
-            .into()
-        } else {
-            button::primary(None, "Claim Lightning Address")
-                .on_press_maybe(can_claim.then_some(ConnectCubeMessage::ClaimLightningAddress))
-                .width(Length::Fill)
-                .into()
-        };
-
-        container(
-            Column::new()
-                .push(text::p1_bold("Claim Your Lightning Address").color(color::ORANGE))
-                .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
-                .push(
-                    text::p2_regular(
-                        "Get a free Lightning Address to receive bitcoin from anyone.",
-                    )
-                    .color(color::GREY_3),
-                )
-                .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
-                .push(
-                    Row::new()
-                        .push(
-                            TextInput::new("satoshi", username)
-                                .on_input(ConnectCubeMessage::LnUsernameChanged)
-                                .on_submit_maybe(
-                                    can_claim.then_some(ConnectCubeMessage::ClaimLightningAddress),
-                                )
-                                .size(16)
-                                .padding(15),
-                        )
-                        .push(
-                            container(text::p1_regular(LN_ADDRESS_DOMAIN).color(color::GREY_3))
-                                .padding(15)
-                                .center_y(Length::Fixed(50.0)),
-                        )
-                        .align_y(Alignment::Center),
-                )
-                .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
-                .push(status)
-                .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-                .push(claim_button)
-                .push_maybe(state.ln_claim_error.as_deref().map(|err| {
-                    let mut col = Column::new()
-                        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                        .push(text::p2_regular(err).color(color::RED));
-                    if state.registration_error.is_some() {
-                        col = col
-                            .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-                            .push(
-                                button::primary(None, "Retry Connection")
-                                    .on_press(ConnectCubeMessage::RetryRegistration)
-                                    .width(Length::Fill),
-                            );
-                    }
-                    col
-                }))
-                .padding(20)
-                .spacing(2),
-        )
-        .style(card_style)
-        .width(Length::Fill)
-        .into()
-    };
-
-    let body: Element<ConnectCubeMessage> = Column::new()
-        .push(text::h4_bold("Lightning Address").style(theme::text::primary))
-        .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
-        .push(card_content)
-        .spacing(0)
-        .width(Length::Fill)
-        .into();
-
-    if let Some(proposed) = state.ln_change_confirm_pending.clone() {
-        let current_addr = current_address.clone().unwrap_or_default();
-        let new_addr = format!("{}{}", proposed, LN_ADDRESS_DOMAIN);
-        let confirm_card = container(
-            Column::new()
-                .push(text::h4_bold("Change your Lightning Address?").color(color::ORANGE))
-                .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-                .push(text::p1_regular(format!(
-                    "Your current address {} will stop working immediately.",
-                    current_addr
-                )))
-                .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
-                .push(text::p1_regular(
-                    "Anyone using the old address won't be able to send you bitcoin.",
-                ))
-                .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
-                .push(text::p1_regular(format!(
-                    "You can claim a different name later, but {} may be taken \
-                     by someone else once you release it.",
-                    current_addr
-                )))
-                .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
-                .push(text::p1_bold(format!("New address: {}", new_addr)).color(color::ORANGE))
-                .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-                .push(
-                    Row::new()
-                        .push(
-                            button::secondary(None, "Cancel")
-                                .on_press(ConnectCubeMessage::DismissChangeConfirmation),
-                        )
-                        .push(iced::widget::Space::new().width(Length::Fill))
-                        .push(
-                            button::primary(None, "Yes, change it")
-                                .on_press(ConnectCubeMessage::ConfirmChangeLightningAddress),
-                        )
-                        .align_y(Alignment::Center),
-                )
-                .padding(24)
-                .spacing(0),
-        )
-        .style(card_style)
-        .width(Length::Fixed(560.0));
-
-        Modal::new(body, confirm_card)
-            .on_blur(Some(ConnectCubeMessage::DismissChangeConfirmation))
-            .into()
-    } else {
-        body
+            .push(form)
+            .push(buttons);
+        if let Some(err) = state.ln_claim_error.as_deref() {
+            edit = edit.push(page::status(page::Status::Bad, err));
+        }
+        content =
+            content.push(Container::new(edit).padding(iced::Padding::default().top(4).bottom(28)));
     }
+    content.push(page::rule()).into()
+}
+
+/// No address yet: the username field and Claim.
+fn claim_view<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage> {
+    let can_claim = can_claim_lightning_address(
+        &state.ln_username_input,
+        state.ln_username_error.as_deref(),
+        state.ln_username_available,
+        state.ln_claiming,
+    );
+    let claim = can_claim.then_some(ConnectCubeMessage::ClaimLightningAddress);
+    let mut body = Column::new()
+        .spacing(16)
+        .width(Length::Fill)
+        .push(
+            Container::new(username_field(
+                state,
+                "Username",
+                None,
+                state.ln_claiming,
+                claim.clone(),
+            ))
+            .max_width(480),
+        )
+        .push(action(
+            CLAIM_ID,
+            if state.ln_claiming {
+                localized_copy("Claiming…")
+            } else {
+                localized_copy("Claim address")
+            },
+            ActionKind::Primary,
+            claim,
+        ));
+    if let Some(err) = state.ln_claim_error.as_deref() {
+        body = body.push(page::status(page::Status::Bad, err));
+        if state.registration_error.is_some() {
+            body = body.push(action(
+                RETRY_ID,
+                coincube_ui::locale::copy("Retry connection"),
+                ActionKind::Secondary,
+                Some(ConnectCubeMessage::RetryRegistration),
+            ));
+        }
+    }
+    page::group(
+        "Claim a Lightning address",
+        Some("A free address anyone can use to send you bitcoin.".into()),
+        body,
+    )
 }
 
 fn normalize_lightning_address(address: &str) -> String {
@@ -439,6 +464,144 @@ fn can_change_lightning_address(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::view::shared::landing::capture;
+    use crate::services::coincube::LightningAddress;
+
+    fn panel(address: Option<&str>) -> ConnectCubePanel {
+        let mut connect = ConnectCubePanel::new(
+            None,
+            "synthetic-cube".into(),
+            "Test Cube".into(),
+            "bitcoin".into(),
+            false,
+        );
+        connect.lightning_address = address.map(|a| LightningAddress {
+            lightning_address: Some(a.into()),
+        });
+        connect
+    }
+
+    fn inspect(state: &ConnectCubePanel) -> capture::Inspection {
+        capture::inspect(
+            "spark-settings-ln-address",
+            settings_view(state),
+            (1440, 900),
+            "dark",
+            coincube_ui::theme::Theme::dark(),
+        )
+    }
+
+    /// One heading, the address, what it is for, Copy and Change; nothing
+    /// says payments need Tenshu open (they arrive while it is closed).
+    #[test]
+    fn settings_shows_one_heading_and_the_address() {
+        let state = panel(Some("robert@coincube.io"));
+        let probe = inspect(&state);
+        for label in [
+            "Your Lightning address",
+            "robert@coincube.io",
+            "Anyone can send you bitcoin with this address.",
+            "Copy",
+            "Change",
+        ] {
+            assert!(probe.contains(label), "{}", label);
+        }
+        assert!(!probe.contains("open and active"));
+        assert!(!probe.text.iter().any(|(t, _)| t == "Lightning address"));
+        let copied = capture::activate(
+            settings_view(&state),
+            iced::advanced::widget::Id::new(COPY_ID),
+            (1440, 900),
+            true,
+        );
+        assert!(copied.iter().any(|m| matches!(
+            m,
+            ConnectCubeMessage::CopyToClipboard(a) if a == "robert@coincube.io"
+        )));
+    }
+
+    /// Change opens in place: the field with the domain attached, live
+    /// availability, the rules, and the release warning before Save. Save
+    /// changes the address directly, with no confirmation modal.
+    #[test]
+    fn change_expands_in_place_and_saves_without_a_modal() {
+        let mut state = panel(Some("robert@coincube.io"));
+        state.ln_editing = true;
+        state.ln_username_input = "robert-allen".into();
+        state.ln_username_available = Some(true);
+        let probe = inspect(&state);
+        for label in [
+            "New username",
+            "@coincube.io",
+            "robert-allen@coincube.io is available",
+            USERNAME_RULES,
+            "Save new address",
+            "Cancel",
+        ] {
+            assert!(probe.contains(label), "{}", label);
+        }
+        assert!(!probe.contains("Change your Lightning Address"));
+        let saved = capture::activate(
+            settings_view(&state),
+            iced::advanced::widget::Id::new(SAVE_ID),
+            (1440, 900),
+            true,
+        );
+        assert!(saved
+            .iter()
+            .any(|m| matches!(m, ConnectCubeMessage::SaveLightningAddress)));
+
+        assert!(probe.has_focus(iced::advanced::widget::Id::new(SAVE_ID)));
+
+        // The current name can't be saved again: Save is disabled.
+        state.ln_username_input = "robert".into();
+        let same = inspect(&state);
+        assert!(same.contains("This is your current username"));
+        assert!(!same.has_focus(iced::advanced::widget::Id::new(SAVE_ID)));
+    }
+
+    /// Render the production edit view in both themes and at wide/minimum
+    /// desktop widths. R06A_CAPTURE_DIR optionally writes the review frames.
+    #[test]
+    fn change_form_fits_desktop_widths_and_themes() {
+        let mut state = panel(Some("alex@coincube.io"));
+        state.ln_editing = true;
+        state.ln_username_input = "alex-new".into();
+        state.ln_username_available = Some(true);
+        for (appearance, theme) in [
+            ("dark", coincube_ui::theme::Theme::dark()),
+            ("light", coincube_ui::theme::Theme::light()),
+        ] {
+            for (outer, width) in [((1440, 900), 1120), ((1024, 768), 720)] {
+                let probe = capture::inspect_wide_content(
+                    "spark-ln-address-edit",
+                    settings_view(&state),
+                    outer,
+                    appearance,
+                    theme,
+                    width,
+                );
+                assert!(probe.contains("@coincube.io"));
+                assert!(probe.contains("alex-new@coincube.io is available"));
+                for id in [COPY_ID, USERNAME_ID, SAVE_ID, CANCEL_ID] {
+                    assert!(
+                        probe.has_focus(iced::advanced::widget::Id::new(id)),
+                        "{}",
+                        id
+                    );
+                }
+                assert!(!probe.has_focus(iced::advanced::widget::Id::new(CHANGE_ID)));
+            }
+        }
+    }
+
+    #[test]
+    fn without_an_address_settings_offers_the_claim_form() {
+        let probe = inspect(&panel(None));
+        assert!(probe.contains("Claim a Lightning address"));
+        assert!(probe.contains("Claim address"));
+        assert!(probe.contains(USERNAME_RULES));
+    }
 
     #[test]
     fn normalize_lightning_address_adds_domain_only_for_bare_usernames() {

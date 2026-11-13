@@ -24,6 +24,7 @@ pub enum BootstrapError {
     Cache(ConnectCacheError),
     Channel(CreateChannelError),
     Rpc(tonic::Status),
+    Superseded,
 }
 
 impl std::fmt::Display for BootstrapError {
@@ -32,6 +33,9 @@ impl std::fmt::Display for BootstrapError {
             Self::Cache(e) => write!(f, "Connect cache error: {}", e),
             Self::Channel(e) => write!(f, "gRPC channel error: {}", e),
             Self::Rpc(s) => write!(f, "RegisterDevice RPC error: {}", s),
+            Self::Superseded => {
+                write!(f, "Re-registration was superseded by a newer Connect login")
+            }
         }
     }
 }
@@ -75,18 +79,79 @@ pub async fn ensure_device_registered(
     app_version: String,
     os_version: String,
 ) -> Result<String, BootstrapError> {
-    if let Some(existing) = Account::from_cache(network_dir, email)
-        .ok()
-        .flatten()
-        .and_then(|a| a.device_id)
-        .filter(|id| !id.trim().is_empty())
-    {
-        tracing::debug!(
-            "SignerDevice already registered for {} (device_id={})",
+    register_device(
+        DeviceRegistration {
+            grpc_url,
+            tokens,
+            network_dir,
             email,
-            existing,
-        );
-        return Ok(existing);
+            device_name,
+            app_version,
+            os_version,
+        },
+        None,
+    )
+    .await
+}
+
+pub struct DeviceRegistration<'a> {
+    pub grpc_url: &'a str,
+    pub tokens: Arc<RwLock<AccessTokenResponse>>,
+    pub network_dir: &'a NetworkDirectory,
+    pub email: &'a str,
+    pub device_name: String,
+    pub app_version: String,
+    pub os_version: String,
+}
+
+pub async fn register_device_for_claim(
+    registration: DeviceRegistration<'_>,
+    claim: &str,
+) -> Result<String, BootstrapError> {
+    register_device(registration, Some(claim)).await
+}
+
+async fn register_device(
+    registration: DeviceRegistration<'_>,
+    claim: Option<&str>,
+) -> Result<String, BootstrapError> {
+    let DeviceRegistration {
+        grpc_url,
+        tokens,
+        network_dir,
+        email,
+        device_name,
+        app_version,
+        os_version,
+    } = registration;
+    if let Some(claim) = claim {
+        let owns_claim = Account::from_cache(network_dir, email)?
+            .is_some_and(|account| account.reregister_claim.as_deref() == Some(claim));
+        if !owns_claim {
+            return Err(BootstrapError::Superseded);
+        }
+    }
+    if claim.is_none() {
+        let cached = Account::from_cache(network_dir, email).ok().flatten();
+        if cached.as_ref().is_some_and(|account| {
+            cache::has_live_reregister_claim_for_account(network_dir, account)
+        }) {
+            // A live About request owns this registration, including one in
+            // another Tenshu process sharing the cache. Exited owners can be
+            // superseded without touching a live request.
+            return Err(BootstrapError::Superseded);
+        }
+        if let Some(existing) = cached
+            .and_then(|account| account.device_id)
+            .filter(|id| !id.trim().is_empty())
+        {
+            tracing::debug!(
+                "SignerDevice already registered for {} (device_id={})",
+                email,
+                existing
+            );
+            return Ok(existing);
+        }
     }
 
     // Mint (or load) this device's ECIES transport key before registering, so
@@ -104,7 +169,8 @@ pub async fn ensure_device_registered(
         });
 
     let channel = create_channel(grpc_url).await?;
-    let access_token = tokens.read().await.access_token.clone();
+    let current_tokens = tokens.read().await.clone();
+    let access_token = current_tokens.access_token;
     let mut device = GrpcDeviceClient::new(channel, AuthInterceptor::new(&access_token));
 
     let resp = device
@@ -120,13 +186,52 @@ pub async fn ensure_device_registered(
         )));
     }
 
-    cache::set_device_id_for_email(network_dir, email, Some(&resp.device_id)).await?;
+    if let Some(claim) = claim {
+        if !cache::finish_device_reregistration(network_dir, email, claim, Some(&resp.device_id))
+            .await?
+        {
+            return Err(BootstrapError::Superseded);
+        }
+    } else {
+        if !persist_registered_device_for_current_session(
+            &tokens,
+            network_dir,
+            email,
+            &resp.device_id,
+        )
+        .await?
+        {
+            // A claim or newer authentication may have started while this
+            // RPC was in flight.
+            return Err(BootstrapError::Superseded);
+        }
+    }
     tracing::info!(
         "Registered SignerDevice for {} (device_id={})",
         email,
         resp.device_id,
     );
     Ok(resp.device_id)
+}
+
+async fn persist_registered_device_for_current_session(
+    tokens: &Arc<RwLock<AccessTokenResponse>>,
+    network_dir: &NetworkDirectory,
+    email: &str,
+    device_id: &str,
+) -> Result<bool, ConnectCacheError> {
+    // Refresh may rotate this same session while the RPC is in flight.
+    // Hold the Arc read guard through the cache commit so the token and
+    // file checks see one ordering. A later login uses another Arc and
+    // still fails the active-cache token check.
+    let current_tokens = tokens.read().await;
+    cache::set_device_id_for_email_if_token(
+        network_dir,
+        email,
+        device_id,
+        &current_tokens.refresh_token,
+    )
+    .await
 }
 
 /// Best-effort wrapper around `ensure_device_registered` that swallows
@@ -158,5 +263,60 @@ pub async fn ensure_device_registered_best_effort(
             tracing::warn!("Best-effort SignerDevice registration failed: {}", e);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::connect::client::cache::{
+        persist_refreshed_tokens, CONNECT_CACHE_FILENAME,
+    };
+
+    #[tokio::test]
+    async fn same_session_refresh_during_rpc_can_commit_device_id() {
+        let path =
+            std::env::temp_dir().join(format!("connect-register-refresh-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let dir = NetworkDirectory::new(path.clone());
+        let email = "alice@example.com";
+        let old = AccessTokenResponse {
+            access_token: "old-access".into(),
+            refresh_token: "old-refresh".into(),
+            expires_at: 100,
+        };
+        let new = AccessTokenResponse {
+            access_token: "new-access".into(),
+            refresh_token: "new-refresh".into(),
+            expires_at: 200,
+        };
+        std::fs::write(
+            path.join(CONNECT_CACHE_FILENAME),
+            serde_json::to_vec(&serde_json::json!({
+                "active_email": email,
+                "accounts": [{ "email": email, "tokens": old }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let shared = Arc::new(RwLock::new(old));
+        persist_refreshed_tokens(&dir, email, "old-refresh", &new)
+            .await
+            .unwrap();
+        *shared.write().await = new;
+        assert!(
+            persist_registered_device_for_current_session(&shared, &dir, email, "device-a")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            Account::from_cache(&dir, email)
+                .unwrap()
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some("device-a")
+        );
+        let _ = std::fs::remove_dir_all(path);
     }
 }

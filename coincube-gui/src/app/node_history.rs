@@ -18,7 +18,7 @@ use coincubed::{
     commands::CoinStatus,
     config::{BitcoinBackend, BitcoindConfig},
 };
-use std::{collections::BTreeSet, convert::TryFrom, sync::Arc};
+use std::{collections::BTreeSet, convert::TryFrom, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -52,8 +52,20 @@ pub struct Context {
     pub network: Network,
     pub chain: ChainId,
     pub config: BitcoindConfig,
+    pub managed_owner: Option<PathBuf>,
     pub daemon: Arc<dyn Daemon + Send + Sync>,
     pub wallet: Arc<Wallet>,
+}
+
+const OTHER_CUBE_OWNS_NODE: &str =
+    "Another Cube owns the managed node. Close it before changing node settings here.";
+
+fn record_temporary_finish_error(status: &mut Status, error: String) {
+    if error == OTHER_CUBE_OWNS_NODE {
+        tracing::debug!("Deferring temporary retention finish while another Cube owns the node");
+    } else {
+        status.error = Some(error);
+    }
 }
 
 pub fn parse_start(value: &str) -> Result<Start, String> {
@@ -77,6 +89,24 @@ pub enum Start {
 }
 
 impl Context {
+    async fn exclusive_lifecycle(
+        &self,
+    ) -> Result<crate::node::bitcoind::ManagedNodeLifecycle, String> {
+        let root = self.datadir.clone();
+        let owner = self.managed_owner.clone();
+        tokio::task::spawn_blocking(move || {
+            let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                &root,
+                crate::node::bitcoind::NodeChainFamily::Bitcoin,
+            )
+            .map_err(|e| e.to_string())?;
+            lifecycle.ensure_exclusive_settings_owner(owner.as_deref())?;
+            Ok::<_, String>(lifecycle)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     pub async fn run(self, action: Action) -> Result<Outcome, String> {
         let vault = self
             .wallet
@@ -130,6 +160,7 @@ impl Context {
                 Phase::Paused
             };
             job.last_error = None;
+            job.transient_failures = 0;
             history::write_json(&path, &job)?;
             status.job = Some(job);
             if !matches!(action, Action::Cancel) {
@@ -167,6 +198,7 @@ impl Context {
                 .await
                 .map_err(|e| e.to_string())?
                 .coins;
+            let mut settings_lifecycle = None;
             if starting {
                 if status
                     .job
@@ -209,9 +241,13 @@ impl Context {
                 job.phase = Phase::Paused;
                 job.import_requested = matches!(action, Action::Import);
                 job.last_error = Some("Recovery setup was interrupted; resume to continue".into());
+                settings_lifecycle = Some(self.exclusive_lifecycle().await?);
                 let _lease = history::HistoryLease::acquire(&directory)?;
                 history::write_json(&path, &job)?;
                 status.job = Some(job);
+            }
+            if settings_lifecycle.is_none() {
+                settings_lifecycle = Some(self.exclusive_lifecycle().await?);
             }
             status.policy = Some(match action {
                 Action::Retain(days) => retention::configure(
@@ -240,13 +276,15 @@ impl Context {
                 ))
                 .map_err(|e| e.to_string())?;
                 let (cfg, started) =
-                    super::state::vault::settings::bitcoind::ensure_tor_and_start_managed(
+                    super::state::vault::settings::bitcoind::ensure_tor_and_start_managed_with_lifecycle(
                         self.datadir.clone(),
                         self.network,
                         conf.flavor,
                         None,
                         true,
                         None,
+                        self.managed_owner.clone(),
+                        settings_lifecycle.take(),
                     )
                     .await?;
                 if cfg != self.config {
@@ -255,6 +293,7 @@ impl Context {
                 node = Some(started);
                 rpc = NodeRpc::new(&self.config, &wallet_path, self.chain).await?;
             }
+            drop(settings_lifecycle);
             let local = rpc.check_chain(self.network).await?;
             if local["pruned"].as_bool() != Some(true)
                 || local["automatic_pruning"].as_bool() != Some(false)
@@ -291,11 +330,8 @@ impl Context {
             rpc.prepare_wallet(&wallet_path, vault, range).await?;
             job.wallet_ready = true;
             if job.import_requested {
-                let source = match config.bitcoin_backend.as_ref() {
-                    Some(BitcoinBackend::Esplora(source)) => Some(source),
-                    _ => config.fallback_esplora.as_ref(),
-                }
-                .ok_or("No Connect/Esplora source is configured for transaction proofs")?;
+                let source = history::outspend_source(config)
+                    .ok_or("No Connect/Esplora source is configured for transaction proofs")?;
                 let txids: BTreeSet<_> = coins
                     .iter()
                     .flat_map(|coin| {
@@ -313,19 +349,22 @@ impl Context {
                             .transactions,
                     );
                 }
-                let fallback = history::import_transactions(&rpc, source, &transactions)
-                    .await?
-                    .into_iter()
-                    .min();
-                let missing = history::reconcile_coins(&rpc, &coins).await?;
-                // Even complete proof imports get a final tail/mempool scan.
-                job.start = fallback
-                    .into_iter()
-                    .chain(missing)
-                    .min()
-                    .unwrap_or(tip.saturating_sub(history::BATCH_BLOCKS - 1));
-                job.next = job.start;
-                job.download_next = job.start;
+                // Blocks whose transaction had no proof or was refused (a spend
+                // with no change back to this Vault) are scanned one by one.
+                let unproved = history::import_transactions(&rpc, source, &transactions).await?;
+                let mut plan = history::plan_coin_scans(&rpc, &coins, Some(source)).await?;
+                plan.blocks.extend(unproved);
+                // Even complete proof imports get a final tail/mempool scan,
+                // started lower only when some coin needs every block.
+                let mut tail = tip.saturating_sub(history::BATCH_BLOCKS - 1);
+                let mut fallback = None;
+                if let Some((floor, reason)) = plan.floor {
+                    if floor < tail {
+                        tail = floor;
+                        fallback = Some(reason);
+                    }
+                }
+                job.plan(plan.blocks, tail, fallback);
                 job.import_requested = false;
             }
             job.phase = if job.next > job.target {
@@ -336,6 +375,7 @@ impl Context {
             };
             job.fetch_attempts = 0;
             job.last_error = None;
+            job.transient_failures = 0;
             history::write_json(&path, &job)?;
             status.job = Some(job);
         } else if let Some(job) = &status.job {
@@ -346,9 +386,10 @@ impl Context {
                         history::read_json(&path)?.ok_or("Missing recovery progress")?;
                     saved.phase = Phase::FetchingForLoad;
                     saved.wallet_ready = false;
-                    saved.db_replayed = false;
-                    saved.next = saved.start;
-                    saved.download_next = saved.start;
+                    saved.rewind(Some(
+                        "The local wallet had to be reloaded, so Tenshu scans every block again."
+                            .into(),
+                    ));
                     history::write_json(&path, &saved)?;
                     status.job = Some(saved);
                     return Ok(Outcome { status, node });
@@ -415,14 +456,20 @@ impl Context {
                 .await
                 .map_err(|e| e.to_string())?
                 .coins;
-            status.reconciled = history::reconcile_coins(&rpc, &coins).await?.is_none();
+            status.reconciled =
+                history::reconcile_coins(&rpc, &coins, history::outspend_source(config))
+                    .await?
+                    .is_none();
             if !status.reconciled {
                 status.error=Some("The scan finished, but Connect and the local wallet still disagree about transaction/spend history. Sync Connect, then import or recover again before switching.".into());
                 let mut saved: Recovery =
                     history::read_json(&path)?.ok_or("Missing recovery progress")?;
                 saved.phase = Phase::Paused;
-                saved.db_replayed = false;
-                saved.next = saved.start;
+                // Resuming scans every block, the check single blocks missed.
+                saved.rewind(Some(
+                    "Checking single blocks left Connect and your node disagreeing, so Tenshu scans every block."
+                        .into(),
+                ));
                 saved.last_error = status.error.clone();
                 history::write_json(&path, &saved)?;
                 status.job = Some(saved);
@@ -455,19 +502,39 @@ impl Context {
                 .map_err(|e| e.to_string())?;
             }
         }
-        if retention::finish_temporary(&self.datadir, self.network)? {
+        // `finish_temporary` rewrites bitcoin.conf before the restart. Only
+        // call it when its current policy could finish, with the same owner
+        // guard held until the replacement node has claimed its lock.
+        let mut finish_lifecycle = if status.policy.as_ref().is_some_and(|p| p.temporary)
+            && retention::unfinished(&directory)?.is_empty()
+        {
+            // Another Cube may currently own the node. Keep this poll's status
+            // and retry the finish after that owner releases it.
+            match self.exclusive_lifecycle().await {
+                Ok(lifecycle) => Some(lifecycle),
+                Err(error) => {
+                    record_temporary_finish_error(&mut status, error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if finish_lifecycle.is_some() && retention::finish_temporary(&self.datadir, self.network)? {
             let conf = InternalBitcoindConfig::from_file(&internal_bitcoind_config_path(
                 &internal_bitcoind_datadir(&self.datadir),
             ))
             .map_err(|e| e.to_string())?;
             let (cfg, started) =
-                super::state::vault::settings::bitcoind::ensure_tor_and_start_managed(
+                super::state::vault::settings::bitcoind::ensure_tor_and_start_managed_with_lifecycle(
                     self.datadir.clone(),
                     self.network,
                     conf.flavor,
                     None,
                     true,
                     None,
+                    self.managed_owner.clone(),
+                    finish_lifecycle.take(),
                 )
                 .await?;
             if cfg != self.config {
@@ -476,6 +543,7 @@ impl Context {
             node = Some(started);
             status.policy = None;
         } else if status.policy.is_some() {
+            drop(finish_lifecycle);
             if let Err(error) = retention::maintain(&self.datadir, self.network, &rpc, now()).await
             {
                 status.error = Some(error);
@@ -495,6 +563,38 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporary_finish_defers_owner_refusal_without_losing_poll_status() {
+        let mut status = Status {
+            busy: true,
+            reconciled: true,
+            error: Some("Existing recovery warning".into()),
+            ..Status::default()
+        };
+        record_temporary_finish_error(&mut status, OTHER_CUBE_OWNS_NODE.into());
+        assert!(status.busy);
+        assert!(status.reconciled);
+        assert_eq!(status.error.as_deref(), Some("Existing recovery warning"));
+    }
+
+    #[test]
+    fn temporary_finish_surfaces_unexpected_lifecycle_failure_in_status() {
+        let mut status = Status {
+            busy: true,
+            ..Status::default()
+        };
+        record_temporary_finish_error(
+            &mut status,
+            "Could not enumerate managed-node owners".into(),
+        );
+        assert!(status.busy);
+        assert_eq!(
+            status.error.as_deref(),
+            Some("Could not enumerate managed-node owners")
+        );
+    }
+
     #[test]
     fn start_accepts_exact_heights_and_calendar_dates() {
         assert!(matches!(

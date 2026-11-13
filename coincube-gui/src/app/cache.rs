@@ -74,6 +74,31 @@ pub enum SparkNotice {
     StableBalanceOffWithHolding,
 }
 
+/// The user's names for this Cube's wallets, as the side panel shows them:
+/// `Spark · ‹spark›` and `Vault · ‹vault›`. `None` shows the plain wallet
+/// name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WalletNames {
+    /// The Spark nickname,
+    /// [`CubeSettings::spark_alias`](crate::app::settings::CubeSettings::spark_alias).
+    pub spark: Option<String>,
+    /// The Vault's alias,
+    /// [`Wallet::alias`](crate::app::wallet::Wallet::alias).
+    pub vault: Option<String>,
+}
+
+impl WalletNames {
+    pub fn new(
+        cube: &crate::app::settings::CubeSettings,
+        vault: Option<&crate::app::wallet::Wallet>,
+    ) -> Self {
+        Self {
+            spark: cube.spark_alias.clone(),
+            vault: vault.and_then(|wallet| wallet.alias.clone()),
+        }
+    }
+}
+
 /// Identity of one `App` instance — one per Cube open (`#393`).
 ///
 /// A task an `App` spawned can complete after the tab has replaced that `App`
@@ -147,6 +172,9 @@ pub struct Cache {
     pub background_node_install: BackgroundNodeInstall,
     pub node_history: super::node_history::Status,
     pub node_history_switch_requested: bool,
+    /// Keep the transfer checklist through the backend handoff and its success.
+    /// Presentation only: this never authorizes recovery or an automatic switch.
+    pub local_node_transfer_visible: bool,
     pub network: Network,
     /// The `last_poll_timestamp` when starting the application.
     pub last_poll_at_startup: Option<u32>,
@@ -167,8 +195,8 @@ pub struct Cache {
     /// Display-only account status shared across tabs. Never authorizes Cube operations.
     pub sidebar_connect_signed_in: bool,
     /// Whether a Connect account session exists for this install — a
-    /// launch-time restore from `connect.json`, or a live remote-backend
-    /// session — *independent of* whether the Connect panel has advanced to
+    /// launch-time restore from `connect.json`, or a live in-app sign-in —
+    /// *independent of* whether the Connect panel has advanced to
     /// its `Dashboard` UI step yet. Distinct from `connect_authenticated`,
     /// which only tracks that panel step and therefore lags a session that
     /// was restored at launch (or never visited). Surfaces that must treat a
@@ -177,12 +205,22 @@ pub struct Cache {
     /// "Sign with Connect" — read this, OR'd with `connect_authenticated`.
     /// Cleared on logout.
     pub has_connect_session: bool,
+    /// The account panel can restore its own keyring session in this Cube.
+    pub restorable_connect_session: bool,
     /// Whether this cube has a vault wallet configured
     pub has_vault: bool,
     /// This Cube owns a pending or installed public Bitcoin wallet import.
     pub has_imported_bitcoin: bool,
+    /// The loaded Vault records which of its keys came from the COINCUBE
+    /// Keychain, and none did. A Keychain key can only enter a Vault when it
+    /// is created, so no phone can ever pair for it and Settings hides the
+    /// Keychain tab. `false` while unknown, so the tab shows.
+    pub vault_lacks_keychain_key: bool,
     /// Display name of the current Cube
     pub cube_name: String,
+    /// The wallet names the side panel shows after "Spark" and "Vault".
+    /// Synced from the Cube settings and the loaded Vault by the App.
+    pub wallet_names: WalletNames,
     /// The Connect account that owns this Cube
     /// ([`crate::app::settings::CubeSettings::connect_owner`]). Lets the Vault
     /// signing picker tell a user signed in under a different account to switch
@@ -198,14 +236,6 @@ pub struct Cache {
     /// Cube. Drives the soft "not backed up" warning banners on the Vault
     /// and Liquid home screens. Mirrors `CubeSettings::backed_up`.
     pub current_cube_backed_up: bool,
-    /// Session-scoped dismissal of the "not backed up" banner. Defaults
-    /// to `false` for every new `Cache`, so each Tab (one Cube per Tab)
-    /// starts with the banner visible, and it's also reset if
-    /// `current_cube_backed_up` ever transitions back to `false`. Set to
-    /// `true` only by the user clicking the dismiss button. Cleared on
-    /// app restart — the reminder keeps surfacing until the user
-    /// actually backs up.
-    pub backup_warning_dismissed: bool,
     /// A Spark Stable Balance condition the user should know about,
     /// rendered as a banner at the top of every page by the `dashboard`
     /// wrapper. `None` when there is nothing to say or the user dismissed
@@ -236,10 +266,9 @@ pub struct Cache {
     /// account panel alongside `marketplace_flags`; and whether a Liquid wallet
     /// already exists on disk, resolved once at cube-open.
     ///
-    /// Starts [`LiquidGate::HIDDEN`](crate::app::features::LiquidGate::HIDDEN),
-    /// but note this is **not** fail-closed in the Marketplace sense — the
-    /// local-state input can't be cleared by an API response, so an existing
-    /// wallet stays reachable when Connect is down. See
+    /// Starts [`LiquidGate::HIDDEN`](crate::app::features::LiquidGate::HIDDEN).
+    /// Since Tenshu v175 the gate hides Liquid whatever these inputs say; they
+    /// are still recorded so Liquid can be reopened. See
     /// [`crate::app::features::LiquidGate`].
     pub liquid_gate: crate::app::features::LiquidGate,
     /// Whether this Cube can start a Bitcoin Blake2b **claim** — mirrored
@@ -259,11 +288,6 @@ pub struct Cache {
     /// not about the session, and a Connect outage must not make an existing
     /// claim target look absent.
     pub btcb2_already_claimed: bool,
-    /// A local paired Claim can be resumed from this fork Vault; not authority.
-    pub btcb2_claim_resume: bool,
-    /// Display-only evidence from the open Claim panel. Never spend authority;
-    /// removed when that panel no longer has a current paired review.
-    pub split_deposit: Option<(coincube_core::miniscript::bitcoin::OutPoint, Instant)>,
     /// Other-chain transaction presence for either side of the fork,
     /// keyed by the deposit's txid: whether the same transaction exists on
     /// the twin Bitcoin chain, and when that was resolved. Only *resolved*
@@ -277,8 +301,50 @@ pub struct Cache {
         coincube_core::miniscript::bitcoin::Txid,
         crate::services::entangled::CachedEntanglement,
     >,
+    /// Ancestry check results for Vault coins, keyed by outpoint: what the
+    /// Chains column calls *verified* or *couldn't verify*. Display only;
+    /// loaded from and saved to the Vault's data directory
+    /// ([`crate::services::chain_status::store`]). Every batch enters through
+    /// [`Self::chain_proofs_landed`].
+    pub chain_proofs: std::collections::HashMap<
+        coincube_core::miniscript::bitcoin::OutPoint,
+        crate::services::chain_status::ProofEntry,
+    >,
+    /// This Vault's split records ([`crate::services::split_coins::journal`]).
+    pub split_records: Vec<crate::services::split_coins::SplitRecord>,
+    /// Outputs of this Vault's splits still short of their confirmations.
+    pub splitting: std::collections::HashMap<coincube_core::miniscript::bitcoin::OutPoint, u32>,
+    /// Outputs of this Vault's signature splits past their confirmations,
+    /// shown as split but unconfirmed.
+    pub split_unconfirmed: std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
+    /// Coins whose twin copy a split-key split on the twin Cube spent, as
+    /// Connect last showed it deep on the twin chain, each with the instant
+    /// that check stops counting. Read through
+    /// [`crate::services::split_coins::is_separated`], so an expired check
+    /// stops counting even if no refresh pass lands.
+    pub separated:
+        std::collections::HashMap<coincube_core::miniscript::bitcoin::OutPoint, std::time::Instant>,
     /// Current theme mode (dark/light) — used for theme-aware widget rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
+    /// The effective reduce-motion preference: the Connect light holds steady
+    /// instead of pulsing.
+    pub reduce_motion: bool,
+    /// The pulsing Connect light's dim phase, flipped by a slow tick only
+    /// while it pulses.
+    pub connect_light_dim: bool,
+    /// Progress of giving this Cube a Lightning address automatically (a
+    /// random name such as `orangezebra@coincube.io`), mirrored from the
+    /// Connect Cube panel for Receive.
+    pub lightning_address_setup: LightningAddressSetup,
+    /// Presentation input for the shared top-bar balance eye. `None` until the
+    /// GUI preferences owner publishes a resolved or unresolved privacy state.
+    pub balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
+    /// Transient shell disclosures. These belong to this open Cube and are
+    /// deliberately not persisted with wallet or device settings.
+    pub cube_switcher_open: bool,
+    /// The Connect control's panel is open.
+    pub connect_panel_open: bool,
+    pub cube_lock_confirmation: bool,
     /// BTC price in USD, always fetched regardless of the user's selected fiat
     /// currency. Used for converting USDt (which is pegged to USD) into sats.
     pub btc_usd_price: Option<f64>,
@@ -287,6 +353,8 @@ pub struct Cache {
     /// Cached Lightning Address for display in the sidebar across all panels
     pub lightning_address: Option<String>,
     /// Cached avatar image handle for display in the sidebar across all panels
+    /// Avatar regenerations the Connect account has left, when known.
+    pub avatar_regenerations_remaining: Option<i32>,
     pub avatar_handle: Option<iced::widget::image::Handle>,
     /// Id of the current Cube.
     pub cube_id: String,
@@ -357,7 +425,7 @@ pub struct Cache {
     /// — the Keychain "Sign via Keychain" button stays disabled while
     /// this is `None`.
     pub connect_grpc_url: Option<String>,
-    /// Shared `Arc<RwLock<AccessTokenResponse>>` from the remote backend,
+    /// Shared `Arc<RwLock<AccessTokenResponse>>` for the Connect session,
     /// mirrored into Cache so deep panels (PsbtState et al.) can spin up
     /// a `GrpcSessionClient` on demand without re-plumbing the auth
     /// handle. `None` when no live or persisted Connect session is available.
@@ -370,6 +438,14 @@ pub struct Cache {
     /// `Inactive` for local-daemon installs and any session before the
     /// first `Message::ConnectStreamReady` has fired.
     pub connect_stream_status: crate::app::ConnectionStatus,
+    /// Set when Connect, not the user, signed this computer out. Cleared by
+    /// the next sign-in or by Not now.
+    pub connect_signed_out_by: Option<crate::app::SignedOutBy>,
+    /// The Vault's alert while its recent polls fail (C8), recomputed by the
+    /// App after every update.
+    pub vault_alert: Option<crate::app::VaultAlert>,
+    /// The Vault reads its blockchain data through COINCUBE | Connect.
+    pub vault_via_connect: bool,
     /// `SignerDevice.id` returned by the API's `RegisterDevice` RPC.
     /// Surfaced on the Settings → About page so the user can confirm
     /// this desktop is registered, and to drive the "Re-register"
@@ -404,6 +480,7 @@ impl std::default::Default for Cache {
             node_net_stats: None,
             node_history: super::node_history::Status::default(),
             node_history_switch_requested: false,
+            local_node_transfer_visible: false,
             background_node_install: Default::default(),
             network: Network::Bitcoin,
             last_poll_at_startup: None,
@@ -416,28 +493,41 @@ impl std::default::Default for Cache {
             connect_authenticated: false,
             sidebar_connect_signed_in: false,
             has_connect_session: false,
+            restorable_connect_session: false,
             has_vault: false,
             has_imported_bitcoin: false,
+            vault_lacks_keychain_key: false,
             cube_name: String::new(),
+            wallet_names: WalletNames::default(),
             cube_connect_owner: None,
             cube_owned_by_other_account: false,
             current_cube_backed_up: false,
-            backup_warning_dismissed: false,
             spark_notice: None,
             has_p2p: false,
             p2p_test_coordinator: false,
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
             btcb2_server_enabled: false,
             btcb2_already_claimed: false,
-            btcb2_claim_resume: false,
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             entangled: std::collections::HashMap::new(),
-            split_deposit: None,
+            chain_proofs: std::collections::HashMap::new(),
+            split_records: Vec::new(),
+            splitting: std::collections::HashMap::new(),
+            split_unconfirmed: std::collections::HashSet::new(),
+            separated: std::collections::HashMap::new(),
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+            reduce_motion: false,
+            connect_light_dim: false,
+            lightning_address_setup: LightningAddressSetup::Idle,
+            balance_privacy: None,
+            cube_switcher_open: false,
+            connect_panel_open: false,
+            cube_lock_confirmation: false,
             btc_usd_price: None,
             show_direction_badges: true,
             lightning_address: None,
             avatar_handle: None,
+            avatar_regenerations_remaining: None,
             cube_id: String::new(),
             current_cube_server_id: None,
             current_descriptor_fingerprint: None,
@@ -447,6 +537,9 @@ impl std::default::Default for Cache {
             connect_grpc_url: None,
             connect_tokens: None,
             connect_stream_status: crate::app::ConnectionStatus::default(),
+            connect_signed_out_by: None,
+            vault_alert: None,
+            vault_via_connect: false,
             connect_device_id: None,
             connect_email: None,
         }
@@ -454,6 +547,14 @@ impl std::default::Default for Cache {
 }
 
 impl Cache {
+    /// Passive amounts are visible only after the GUI has published an
+    /// accepted installation-wide Show receipt. Missing or unresolved state
+    /// always masks, including the first frame of a newly opened Cube.
+    pub fn balance_amounts_masked(&self) -> bool {
+        self.balance_privacy
+            .is_none_or(|chrome| chrome.privacy.masks_amounts())
+    }
+
     /// Retain the Cube identity across storage and recovery boundaries.
     pub fn chain(&self) -> crate::chain::ChainId {
         self.fiat_chain
@@ -571,6 +672,168 @@ impl Cache {
         self.accept_entanglement(origin, chain, answers)
     }
 
+    /// The facts the Chains column has about one Vault coin.
+    pub fn chain_evidence(
+        &self,
+        outpoint: &coincube_core::miniscript::bitcoin::OutPoint,
+    ) -> crate::services::chain_status::CoinEvidence {
+        self.chain_evidence_at(outpoint, std::time::Instant::now())
+    }
+
+    /// [`Self::chain_evidence`] as of `now`.
+    pub fn chain_evidence_at(
+        &self,
+        outpoint: &coincube_core::miniscript::bitcoin::OutPoint,
+        now: std::time::Instant,
+    ) -> crate::services::chain_status::CoinEvidence {
+        crate::services::chain_status::CoinEvidence {
+            entanglement: self
+                .entangled
+                .get(&outpoint.txid)
+                .map(|cached| cached.answer),
+            proof: self
+                .chain_proofs
+                .get(outpoint)
+                .and_then(|entry| entry.outcome()),
+            splitting: self.splitting.get(outpoint).copied(),
+            signature_split: self.split_unconfirmed.contains(outpoint),
+            separated: crate::services::split_coins::is_separated(&self.separated, outpoint, now),
+        }
+    }
+
+    /// The Chains column status of one Vault coin.
+    pub fn chain_status(
+        &self,
+        outpoint: &coincube_core::miniscript::bitcoin::OutPoint,
+    ) -> crate::services::chain_status::ChainStatus {
+        crate::services::chain_status::classify(self.chain_evidence(outpoint))
+    }
+
+    /// Vault coins that can serve as a split key: unspent, with a verified
+    /// ancestry path, and not spent by a pending split. A coin shown as
+    /// separated by the twin Cube's split is not one: its twin copy is gone
+    /// but it still descends from a both-chain coin. The split builder
+    /// re-qualifies the chosen key before anything is built.
+    pub fn split_keys(
+        &self,
+    ) -> Vec<(
+        &Coin,
+        &coincube_core::claim_ancestry::retained::RetainedPath,
+    )> {
+        let pending: std::collections::HashSet<_> = self
+            .split_records
+            .iter()
+            .filter(|record| record.confirmations == 0)
+            .flat_map(|record| record.inputs.iter().chain(record.key.iter()).copied())
+            .collect();
+        let mut keys: Vec<_> = self
+            .coins()
+            .iter()
+            .filter(|coin| {
+                coin.spend_info.is_none() && !coin.is_immature && coin.block_height.is_some()
+            })
+            .filter(|coin| !pending.contains(&coin.outpoint))
+            .filter_map(|coin| match self.chain_proofs.get(&coin.outpoint) {
+                Some(crate::services::chain_status::ProofEntry::Verified(path))
+                    if self.entanglement_of(&coin.outpoint.txid)
+                        != crate::services::entangled::Entanglement::Entangled =>
+                {
+                    Some((coin, path))
+                }
+                _ => None,
+            })
+            .collect();
+        // The smallest key wastes the least when it is spent with the coins.
+        keys.sort_by_key(|(coin, _)| (coin.amount, coin.outpoint));
+        keys
+    }
+
+    /// The proof to re-qualify for `key` as a split key of the spend `spend`:
+    /// the path a check verified in this session, else the one the split's
+    /// journal record was built with (a restart leaves only a
+    /// [`crate::services::chain_status::ProofEntry::Saved`] copy). Neither
+    /// counts by itself; the PSBT screen re-qualifies it against both chains.
+    pub fn split_key_path(
+        &self,
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+    ) -> Option<coincube_core::claim_ancestry::retained::RetainedPath> {
+        use coincube_core::claim_ancestry::retained::RetainedPath;
+        if let Some(crate::services::chain_status::ProofEntry::Verified(path)) =
+            self.chain_proofs.get(&key)
+        {
+            return Some(path.clone());
+        }
+        self.split_records
+            .iter()
+            .find(|record| record.txid == spend && record.key == Some(key))
+            .and_then(|record| hex::decode(record.key_path.as_ref()?).ok())
+            .and_then(|bytes| RetainedPath::decode(key, &bytes).ok())
+    }
+
+    /// Whether [`Self::split_key_path`] has a proof to offer, without
+    /// copying or decoding it (the PSBT screen asks on every render).
+    pub fn has_split_key_path(
+        &self,
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+    ) -> bool {
+        matches!(
+            self.chain_proofs.get(&key),
+            Some(crate::services::chain_status::ProofEntry::Verified(_))
+        ) || self.split_records.iter().any(|record| {
+            record.txid == spend && record.key == Some(key) && record.key_path.is_some()
+        })
+    }
+
+    /// The split key of `spend` if this Cube's journal records it as a
+    /// split-key split.
+    pub fn recorded_split_key(
+        &self,
+        spend: coincube_core::miniscript::bitcoin::Txid,
+    ) -> Option<coincube_core::miniscript::bitcoin::OutPoint> {
+        self.split_records
+            .iter()
+            .find(|record| record.txid == spend)
+            .and_then(|record| record.key)
+    }
+
+    /// An ancestry check batch landed. Like [`Self::entangled_batch_landed`],
+    /// a batch issued by this `App` instance releases its whole claim first.
+    /// Unlike entanglement, a result is about one Vault's coin, so a batch
+    /// from a predecessor instance is dropped whole. A verified path is never
+    /// replaced by a later miss or failure. Returns whether the cache changed.
+    pub fn chain_proofs_landed(
+        &mut self,
+        in_flight: &mut std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>,
+        origin: LookupOrigin,
+        claimed: &[coincube_core::miniscript::bitcoin::OutPoint],
+        results: Vec<(
+            coincube_core::miniscript::bitcoin::OutPoint,
+            crate::services::chain_status::ProofEntry,
+        )>,
+    ) -> bool {
+        use crate::services::chain_status::ProofEntry;
+        if !self.issued_here(origin) {
+            return false;
+        }
+        for outpoint in claimed {
+            in_flight.remove(outpoint);
+        }
+        let mut changed = false;
+        for (outpoint, entry) in results {
+            if matches!(
+                self.chain_proofs.get(&outpoint),
+                Some(ProofEntry::Verified(_))
+            ) {
+                continue;
+            }
+            self.chain_proofs.insert(outpoint, entry);
+            changed = true;
+        }
+        changed
+    }
+
     pub fn blockheight(&self) -> i32 {
         self.daemon_cache.blockheight
     }
@@ -593,6 +856,32 @@ impl Cache {
 
     pub fn history_sync(&self) -> &coincubed::commands::HistorySync {
         &self.daemon_cache.history_sync
+    }
+}
+
+#[cfg(test)]
+mod balance_privacy_tests {
+    use super::Cache;
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+
+    #[test]
+    fn passive_amounts_fail_closed_until_an_accepted_show_is_published() {
+        let mut cache = Cache::default();
+        assert!(cache.balance_amounts_masked());
+        for privacy in [BalancePrivacy::Unresolved, BalancePrivacy::Hidden] {
+            cache.balance_privacy = Some(BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: false,
+            });
+            assert!(cache.balance_amounts_masked());
+        }
+        cache.balance_privacy = Some(BalancePrivacyChrome {
+            privacy: BalancePrivacy::Shown,
+            busy: false,
+            interactive: false,
+        });
+        assert!(!cache.balance_amounts_masked());
     }
 }
 
@@ -823,6 +1112,116 @@ mod entangled_cache_tests {
         assert!(cache.record_entanglement(txid, Entanglement::Entangled, older));
         assert_eq!(cache.entanglement_of(&txid), Entanglement::Entangled);
         assert_eq!(cache.entangled[&txid].resolved_at, older);
+    }
+
+    /// A Chains-column ancestry batch: one from another `App` instance is
+    /// dropped whole and releases nothing; this instance's own batch releases
+    /// its claim and records its results.
+    #[test]
+    fn chain_proof_batches_are_scoped_to_their_app_instance() {
+        use crate::services::chain_status::{ChainStatus, ProofEntry};
+        use coincube_core::miniscript::bitcoin::OutPoint;
+        let a = Cache::default();
+        let mut b = Cache::default();
+        let outpoint = OutPoint::new(txid(4), 0);
+        let mut in_flight: std::collections::HashSet<OutPoint> = [outpoint].into();
+        let checked = ProofEntry::NoQualifyingAncestry {
+            checked_at: std::time::SystemTime::now(),
+        };
+        let from = |cache: &Cache| LookupOrigin {
+            app: cache.app_generation,
+            chain: ChainId::Bitcoin,
+        };
+        assert!(!b.chain_proofs_landed(
+            &mut in_flight,
+            from(&a),
+            &[outpoint],
+            vec![(outpoint, checked.clone())],
+        ));
+        assert!(in_flight.contains(&outpoint));
+        assert!(b.chain_proofs.is_empty());
+
+        b.record_entanglement(outpoint.txid, Entanglement::NotEntangled, Instant::now());
+        assert_eq!(b.chain_status(&outpoint), ChainStatus::NotSeen);
+        assert!(b.chain_proofs_landed(
+            &mut in_flight,
+            from(&b),
+            &[outpoint],
+            vec![(outpoint, checked)],
+        ));
+        assert!(in_flight.is_empty());
+        assert_eq!(b.chain_status(&outpoint), ChainStatus::CouldntVerify);
+    }
+
+    /// Only a coin with a verified ancestry path is a split key; a coin the
+    /// twin Cube's split separated shows as one-chain but is not a key.
+    #[test]
+    fn split_keys_need_a_verified_path_not_a_separated_status() {
+        use crate::services::chain_status::{ChainStatus, ProofEntry};
+        use coincube_core::{
+            claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+            miniscript::bitcoin::{
+                absolute, bip32::ChildNumber, consensus::serialize, script::Builder, transaction,
+                Address, Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+            },
+        };
+        use std::str::FromStr;
+        let coinbase = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: Builder::new().push_int(962_000).push_int(1).into_script(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(30_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let key = OutPoint::new(coinbase.compute_txid(), 0);
+        let separated = OutPoint::new(txid(5), 0);
+        let coin = |outpoint| Coin {
+            amount: Amount::from_sat(30_000),
+            outpoint,
+            address: Address::from_str("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+                .unwrap()
+                .assume_checked(),
+            block_height: Some(100),
+            derivation_index: ChildNumber::from_normal_idx(0).unwrap(),
+            spend_info: None,
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        };
+        let mut cache = Cache::default();
+        cache.daemon_cache.coins = vec![coin(key), coin(separated)];
+        cache.chain_proofs.insert(
+            key,
+            ProofEntry::Verified(
+                RetainedPath::new(
+                    key,
+                    vec![OwnedLink {
+                        transaction: serialize(&coinbase),
+                        parent_input: None,
+                    }],
+                )
+                .unwrap(),
+            ),
+        );
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        cache.separated.insert(separated, until);
+        assert_eq!(cache.chain_status(&separated), ChainStatus::OnlyHere);
+        assert_ne!(
+            crate::services::chain_status::classify(
+                cache.chain_evidence_at(&separated, until + std::time::Duration::from_secs(1))
+            ),
+            ChainStatus::OnlyHere,
+            "an expired twin check stops showing the coin as one-chain without a refresh"
+        );
+        let keys: Vec<_> = cache.split_keys().iter().map(|(c, _)| c.outpoint).collect();
+        assert_eq!(keys, vec![key]);
     }
 
     /// `#393`: a reply issued by App instance A, arriving after the tab has
@@ -1279,4 +1678,16 @@ mod btcb2_fiat_tests {
         assert!(cache.clear_btcb2_fiat() || cache.display_mode == DisplayMode::BitcoinNative);
         assert_eq!(cache.display_mode, DisplayMode::BitcoinNative);
     }
+}
+
+/// Where automatic Lightning address assignment stands for this Cube.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LightningAddressSetup {
+    /// Not started (or the Cube has an address).
+    #[default]
+    Idle,
+    /// Picking a free random name and claiming it.
+    Assigning,
+    /// The last attempt failed; the message says why.
+    Failed(String),
 }

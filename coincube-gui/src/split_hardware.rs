@@ -2,7 +2,6 @@
 //! hardware account source. Existing Split callers keep their current paths.
 
 pub mod bind;
-pub mod flow;
 pub mod policy;
 pub mod sign;
 

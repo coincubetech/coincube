@@ -7,13 +7,14 @@ use tracing::error;
 use tracing_subscriber::filter::LevelFilter;
 
 use coincube_core::miniscript::bitcoin;
-use coincube_ui::{component::text, font, image};
+use coincube_ui::{font, image};
 
 use coincube_gui::{
     app::settings::global::{GlobalSettings, WindowConfig},
+    daemon::stopping,
     dir::CoincubeDirectory,
     gui::{Config, GUI},
-    node::bitcoind::delete_all_bitcoind_locks_for_process,
+    node::bitcoind::{delete_all_bitcoind_locks_for_process, wait_for_managed_node_cleanup},
     VERSION,
 };
 
@@ -21,7 +22,6 @@ use coincube_gui::{
 enum Arg {
     DatadirPath(CoincubeDirectory),
     Network(bitcoin::Network),
-    EnableBtcb2Split,
 }
 
 fn parse_args(args: Vec<String>) -> Result<Vec<Arg>, Box<dyn Error>> {
@@ -45,7 +45,6 @@ Options:
     --testnet           Use testnet network
     --signet            Use signet network
     --regtest           Use regtest network
-    --enable-btcb2-split Enable paired BTCB2 signing and broadcast reviews for this run
         "#
         );
         process::exit(1);
@@ -58,8 +57,6 @@ Options:
             } else {
                 return Err("missing arg to --datadir".into());
             }
-        } else if arg == "--enable-btcb2-split" {
-            res.push(Arg::EnableBtcb2Split);
         } else if arg.contains("--") {
             let network = bitcoin::Network::from_str(args[i].trim_start_matches("--"))?;
             res.push(Arg::Network(network));
@@ -91,9 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "linux")]
     coincube_gui::linux_backend::prefer_x11_over_wayland();
 
-    let mut args = parse_args(std::env::args().collect())?;
-    let live_split = args.contains(&Arg::EnableBtcb2Split);
-    args.retain(|arg| *arg != Arg::EnableBtcb2Split);
+    let args = parse_args(std::env::args().collect())?;
     let config = match args.as_slice() {
         [] => {
             let datadir_path = CoincubeDirectory::new_default().unwrap();
@@ -113,8 +108,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    if live_split {
-        coincube_gui::live_split::enable_for_this_process();
+    // The final-root creator proof must precede the logger's create_dir_all,
+    // all global side reads, and GUI construction. Both default and --datadir
+    // reach this same boundary. A malformed global file remains untouched;
+    // GUI's strict load will keep the first view masked and offer a retry.
+    if let Err(error) = config.coincube_directory.bootstrap_privacy()? {
+        eprintln!("{}", error);
     }
 
     let log_level = if let Ok(l) = std::env::var("LOG_LEVEL") {
@@ -129,7 +128,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         id: Some("Vault".to_string()),
         antialiasing: true,
         vsync: true,
-        default_text_size: text::P1_SIZE.into(),
+        default_text_size: 14u32.into(),
         default_font: coincube_ui::font::REGULAR,
         fonts: font::load(),
     };
@@ -149,29 +148,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         iced::window::Settings::default().size
     };
+    // The saved size is at 100%, and iced opens the window at size × zoom.
+    let zoom = GlobalSettings::load_preferences(&global_config_path)
+        .map(|preferences| preferences.zoom)
+        .unwrap_or_default();
+    let initial_size = initial_size * (1.0 / zoom.factor());
 
-    #[allow(unused_mut)]
-    let mut window_settings = iced::window::Settings {
-        size: initial_size,
-        icon: Some(image::coincube_window_icon()),
-        position: iced::window::Position::Centered,
-        min_size: Some(Size {
-            width: 1024.0,
-            height: 800.0,
-        }),
-        exit_on_close_request: false,
-        ..Default::default()
-    };
+    let window_settings = window_settings(initial_size);
 
-    #[cfg(target_os = "linux")]
-    {
-        window_settings.platform_specific = iced::window::settings::PlatformSpecific {
-            application_id: "CoincubeVault".to_string(),
-            ..Default::default()
-        };
-    }
-
-    if let Err(e) = iced::application(
+    let result = iced::application(
         move || GUI::new(config.clone(), log_level),
         GUI::update,
         GUI::view,
@@ -182,13 +167,49 @@ fn main() -> Result<(), Box<dyn Error>> {
     .subscription(GUI::subscription)
     .settings(settings)
     .window(window_settings)
-    .run()
-    {
+    .run();
+    // A Cube locked just before quitting may still be stopping its daemon.
+    if !stopping::wait_for_all(std::time::Duration::from_secs(120)) {
+        tracing::warn!("Timed out waiting for a daemon to stop");
+    }
+    // Final-owner release runs off the UI thread. Keep a normal process exit
+    // from abandoning that work after the last window closes.
+    if !wait_for_managed_node_cleanup(std::time::Duration::from_secs(120)) {
+        tracing::warn!(
+            "Timed out waiting for managed-node cleanup; remaining owner locks will be reconciled on the next start"
+        );
+    }
+    if let Err(e) = result {
         log::error!("{}", e);
         Err(format!("Failed to launch UI: {}", e).into())
     } else {
         Ok(())
     }
+}
+
+fn window_settings(initial_size: Size) -> iced::window::Settings {
+    #[allow(unused_mut)]
+    let mut settings = iced::window::Settings {
+        size: initial_size,
+        icon: Some(image::coincube_window_icon()),
+        position: iced::window::Position::Centered,
+        min_size: Some(Size {
+            width: 1024.0,
+            height: 768.0,
+        }),
+        exit_on_close_request: false,
+        ..Default::default()
+    };
+
+    #[cfg(target_os = "linux")]
+    {
+        settings.platform_specific = iced::window::settings::PlatformSpecific {
+            application_id: "CoincubeVault".to_string(),
+            ..Default::default()
+        };
+    }
+
+    settings
 }
 
 // A panic in any thread should stop the main thread, and print the panic.
@@ -230,21 +251,16 @@ mod tests {
     use coincube_gui::dir::CoincubeDirectory;
 
     #[test]
-    fn live_split_option_preserves_default_wallet_directory_and_network() {
-        for input in [
-            "coincube --enable-btcb2-split",
-            "coincube --enable-btcb2-split --bitcoin",
-            "coincube --bitcoin --enable-btcb2-split",
-        ] {
-            let mut args =
-                parse_args(input.split_whitespace().map(str::to_owned).collect()).unwrap();
-            assert!(args.contains(&Arg::EnableBtcb2Split));
-            args.retain(|arg| *arg != Arg::EnableBtcb2Split);
-            assert!(args.is_empty() || args == vec![Arg::Network(bitcoin::Network::Bitcoin)]);
-        }
-        assert!(!parse_args(vec!["coincube".into()])
-            .unwrap()
-            .contains(&Arg::EnableBtcb2Split));
+    fn window_settings_allow_compact_shell_size() {
+        let settings = window_settings(Size::new(1440.0, 900.0));
+        assert_eq!(settings.min_size, Some(Size::new(1024.0, 768.0)));
+    }
+
+    /// The removed live-testing launch gate no longer exists: Split coins
+    /// follows Bitcoin Blake2b being on, not a launch flag.
+    #[test]
+    fn the_removed_split_launch_flag_is_not_an_option() {
+        assert!(parse_args(vec!["coincube".into(), "--enable-btcb2-split".into()]).is_err());
     }
 
     #[test]

@@ -49,9 +49,11 @@ pub fn parse_slippage_bps(input: &str) -> Result<Option<u32>, String> {
         .parse()
         .map_err(|_| "Slippage must be a whole number of basis points.".to_string())?;
     if !(MIN_SLIPPAGE_BPS..=MAX_SLIPPAGE_BPS).contains(&bps) {
-        return Err(format!(
+        return Err(coincube_ui::localized_format!(
             "Slippage must be between {MIN_SLIPPAGE_BPS} and {MAX_SLIPPAGE_BPS} basis points \
              ({:.2}%–{:.0}%).",
+            "El deslizamiento debe estar entre {MIN_SLIPPAGE_BPS} y {MAX_SLIPPAGE_BPS} puntos \
+             básicos ({:.2} %–{:.0} %).",
             MIN_SLIPPAGE_BPS as f64 / 100.0,
             MAX_SLIPPAGE_BPS as f64 / 100.0,
         ));
@@ -63,7 +65,7 @@ pub fn parse_slippage_bps(input: &str) -> Result<Option<u32>, String> {
 /// has to read as something a user recognises — "Ethereum / EVM", not "evm".
 fn family_label(family: &str) -> &str {
     match family {
-        "evm" => "an EVM chain",
+        "evm" => coincube_ui::locale::copy("an EVM chain"),
         "solana" => "Solana",
         "tron" => "Tron",
         other => other,
@@ -79,9 +81,11 @@ fn family_label(family: &str) -> &str {
 /// funds. So the detected chain and asset are stated explicitly, in words,
 /// rather than being left implicit in a dropdown the user will not read.
 pub fn chain_confirmation(address: &CrossChainAddress, route: &CrossChainRoute) -> String {
-    format!(
+    coincube_ui::localized_format!(
         "Sending {} on {} — this address was detected as {}. \
          Funds sent to the wrong network cannot be recovered.",
+        "Enviando {} en {}: esta dirección se detectó como {}. \
+         Los fondos enviados a la red equivocada no se pueden recuperar.",
         route.asset,
         route.chain,
         family_label(&address.family),

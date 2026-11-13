@@ -1,5 +1,6 @@
 #![allow(deprecated)]
 
+use coincube_ui::locale::copy as localized_copy;
 pub mod template;
 
 use iced::widget::{container, pick_list, slider, Button, Space};
@@ -56,11 +57,11 @@ pub fn define_descriptor_advanced_settings<'a>(
     allow_taproot: bool,
 ) -> Element<'a, Message> {
     if !allow_taproot {
-        return text("Bitcoin Blake2b Vaults use P2WSH").into();
+        return text(localized_copy("Bitcoin Blake2b Vaults use P2WSH")).into();
     }
     let col_wallet = Column::new()
         .spacing(10)
-        .push(text("Descriptor type").bold())
+        .push(text(localized_copy("Descriptor type")).bold())
         .push(container(
             pick_list(
                 &DESCRIPTOR_KINDS[..],
@@ -87,8 +88,10 @@ pub fn define_descriptor_advanced_settings<'a>(
             // upstream app-version wording this notice used to carry.
             .push(if use_taproot {
                 Some(
-                    p1_regular("Taproot requires Bitcoin Core or Knots 26.0 or above")
-                        .style(theme::text::secondary),
+                    p1_regular(localized_copy(
+                        "Taproot requires Bitcoin Core or Knots 26.0 or above",
+                    ))
+                    .style(theme::text::secondary),
                 )
             } else {
                 None
@@ -110,7 +113,11 @@ pub fn path(
     Container::new(
         Column::new()
             .spacing(10)
-            .push(title.map(|t| Row::new().push(Space::new().width(10)).push(p1_bold(t))))
+            .push(title.map(|t| {
+                Row::new()
+                    .push(Space::new().width(10))
+                    .push(p1_bold(localized_copy(&t).to_owned()))
+            }))
             .push(defined_sequence(sequence, warning))
             .push(
                 Column::new()
@@ -133,9 +140,9 @@ pub fn path(
                             button::secondary(
                                 Some(icon::plus_icon()),
                                 if sequence.path_kind() == PathKind::SafetyNet {
-                                    "Add Safety Net key"
+                                    localized_copy("Add Safety Net key")
                                 } else {
-                                    "Add key"
+                                    localized_copy("Add key")
                                 },
                             )
                             .on_press(message::DefinePath::AddKey),
@@ -171,10 +178,15 @@ pub fn uneditable_defined_key<'a>(
                     .push(
                         Row::new()
                             .spacing(10)
-                            .push(p1_regular(title.into()).style(theme::text::secondary))
+                            .push(
+                                p1_regular(
+                                    localized_copy(&Into::<Cow<str>>::into(title)).to_owned(),
+                                )
+                                .style(theme::text::secondary),
+                            )
                             .push(p1_bold(alias)),
                     )
-                    .push(warning.map(|w| p2_regular(w).style(theme::text::error))),
+                    .push(warning.map(|w| p2_regular(localized_copy(w)).style(theme::text::error))),
             )
             .push(if warning.is_none() {
                 Some(icon::check_icon().style(theme::text::success))
@@ -209,10 +221,13 @@ pub fn defined_key<'a>(
                     .push(
                         Row::new()
                             .spacing(10)
-                            .push(p1_regular(title).style(theme::text::secondary))
+                            .push(
+                                p1_regular(localized_copy(&title).to_owned())
+                                    .style(theme::text::secondary),
+                            )
                             .push(p1_bold(alias)),
                     )
-                    .push(warning.map(|w| p2_regular(w).style(theme::text::error))),
+                    .push(warning.map(|w| p2_regular(localized_copy(w)).style(theme::text::error))),
             )
             .push(if warning.is_none() {
                 Some(icon::check_icon().style(theme::text::success))
@@ -220,7 +235,7 @@ pub fn defined_key<'a>(
                 None
             })
             .push(
-                button::secondary(Some(icon::pencil_icon()), "Edit")
+                button::secondary(Some(icon::pencil_icon()), localized_copy("Edit"))
                     .on_press(message::DefineKey::EditAlias),
             )
             .push(if fixed {
@@ -253,15 +268,12 @@ pub fn undefined_key<'a>(
                     .size(H3_SIZE)
                     .style(theme::text::adaptive(color)),
             )
-            .push(
-                Column::new()
-                    .width(Length::Fill)
-                    .spacing(5)
-                    .push(p1_bold(title.into())),
-            )
+            .push(Column::new().width(Length::Fill).spacing(5).push(p1_bold(
+                localized_copy(&Into::<Cow<str>>::into(title)).to_owned(),
+            )))
             .push(if liquid {
                 Some(
-                    button::primary(Some(icon::pencil_icon()), "Set")
+                    button::primary(Some(icon::pencil_icon()), localized_copy("Set"))
                         .on_press(message::DefineKey::Edit),
                 )
             } else {
@@ -334,12 +346,49 @@ pub fn format_sequence_duration(sequence: u16, short_format: bool) -> Vec<(u32, 
     formatted_duration
 }
 
+/// One long-format unit from [`format_sequence_duration`], e.g. "2 months".
+fn long_duration_label(n: u32, unit: &str) -> String {
+    let plural = n > 1;
+    let spanish = match (unit, plural) {
+        ("year", false) => Some("año"),
+        ("year", true) => Some("años"),
+        ("month", false) => Some("mes"),
+        ("month", true) => Some("meses"),
+        ("day", false) => Some("día"),
+        ("day", true) => Some("días"),
+        ("hour", false) => Some("hora"),
+        ("hour", true) => Some("horas"),
+        ("minute", false) => Some("minuto"),
+        ("minute", true) => Some("minutos"),
+        _ => None,
+    };
+    match (coincube_ui::locale::language(), spanish) {
+        (coincube_ui::locale::Language::Spanish, Some(spanish)) => format!("{} {}", n, spanish),
+        _ => format!("{} {}{}", n, unit, if plural { "s" } else { "" }),
+    }
+}
+
+/// One short-format unit from [`format_sequence_duration`], e.g. "2m".
+pub fn short_duration_label(n: u32, unit: &str) -> String {
+    let spanish = match unit {
+        "y" => "a",
+        "mn" => "min",
+        other => other,
+    };
+    match coincube_ui::locale::language() {
+        coincube_ui::locale::Language::Spanish => format!("{}{}", n, spanish),
+        coincube_ui::locale::Language::English => format!("{}{}", n, unit),
+    }
+}
+
 pub fn edit_sequence_modal<'a>(sequence: &form::Value<String>) -> Element<'a, Message> {
     let mut col = Column::new()
         .width(Length::Fill)
         .spacing(20)
         .align_x(Alignment::Center)
-        .push(text("Keys can move the funds after inactivity of:"))
+        .push(text(localized_copy(
+            "Keys can move the funds after inactivity of:",
+        )))
         .push(
             Row::new()
                 .push(
@@ -351,54 +400,53 @@ pub fn edit_sequence_modal<'a>(sequence: &form::Value<String>) -> Element<'a, Me
                                 ),
                             )
                         })
-                        .warning("Value must be superior to 0 and inferior to 65535"),
+                        .warning(localized_copy(
+                            "Value must be superior to 0 and inferior to 65535",
+                        )),
                     )
                     .width(Length::Fixed(200.0)),
                 )
                 .spacing(10)
-                .push(text("blocks").bold())
+                .push(text(localized_copy("blocks")).bold())
                 .align_y(alignment::Vertical::Center),
         );
 
-    if let Some(sequence) = sequence
-        .valid
-        .then(|| u16::from_str(&sequence.value))
-        .and_then(Result::ok)
-    {
-        col = col
-            .push(format_sequence_duration(sequence, false).iter().fold(
-                Row::new().spacing(5).push(text("~ ").bold()),
-                |row, (n, unit)| {
-                    row.push(if *n > 0 {
-                        Some(
-                            text(format!("{} {}{}", n, unit, if *n > 1 { "s" } else { "" })).bold(),
-                        )
-                    } else {
-                        None
-                    })
-                },
-            ))
-            .push(
-                Container::new(
-                    slider(1..=u16::MAX, sequence, |v| {
-                        Message::DefineDescriptor(
-                            message::DefineDescriptor::ThresholdSequenceModal(
-                                message::ThresholdSequenceModal::SequenceEdited(
-                                    // Since slider starts at 1, intermediate values are off by 1 from intended values.
-                                    // Subtract 1 to align with expected sequence values, except for edge cases (1 and u16::MAX)
-                                    (if v > 1 && v != u16::MAX { v - 1 } else { v }).to_string(),
+    if sequence.valid {
+        if let Ok(sequence) = u16::from_str(&sequence.value) {
+            col = col
+                .push(format_sequence_duration(sequence, false).iter().fold(
+                    Row::new().spacing(5).push(text("~ ").bold()),
+                    |row, (n, unit)| {
+                        row.push(if *n > 0 {
+                            Some(text(long_duration_label(*n, unit)).bold())
+                        } else {
+                            None
+                        })
+                    },
+                ))
+                .push(
+                    Container::new(
+                        slider(1..=u16::MAX, sequence, |v| {
+                            Message::DefineDescriptor(
+                                message::DefineDescriptor::ThresholdSequenceModal(
+                                    message::ThresholdSequenceModal::SequenceEdited(
+                                        // Since slider starts at 1, intermediate values are off by 1 from intended values.
+                                        // Subtract 1 to align with expected sequence values, except for edge cases (1 and u16::MAX)
+                                        (if v > 1 && v != u16::MAX { v - 1 } else { v })
+                                            .to_string(),
+                                    ),
                                 ),
-                            ),
-                        )
-                    })
-                    .step(4383_u16), // 4383 blocks per month
-                )
-                .width(Length::Fixed(500.0)),
-            );
+                            )
+                        })
+                        .step(4383_u16), // 4383 blocks per month
+                    )
+                    .width(Length::Fixed(500.0)),
+                );
+        }
     }
 
     card::modal(col.push(if sequence.valid {
-        button::primary(None, "Apply")
+        button::primary(None, localized_copy("Apply"))
             .on_press(Message::DefineDescriptor(
                 message::DefineDescriptor::ThresholdSequenceModal(
                     message::ThresholdSequenceModal::Confirm,
@@ -406,7 +454,7 @@ pub fn edit_sequence_modal<'a>(sequence: &form::Value<String>) -> Element<'a, Me
             ))
             .width(Length::Fixed(200.0))
     } else {
-        button::primary(None, "Apply").width(Length::Fixed(200.0))
+        button::primary(None, localized_copy("Apply")).width(Length::Fixed(200.0))
     }))
     .width(Length::Fixed(800.0))
     .into()
@@ -428,7 +476,7 @@ pub fn edit_threshold_modal<'a>(threshold: (usize, usize)) -> Element<'a, Messag
                 },
             ))
             .push(
-                button::primary(None, "Apply")
+                button::primary(None, localized_copy("Apply"))
                     .on_press(Message::DefineDescriptor(
                         message::DefineDescriptor::ThresholdSequenceModal(
                             message::ThresholdSequenceModal::Confirm,
@@ -516,7 +564,7 @@ mod threshsold_input {
             Column::new()
                 .width(Length::Fixed(150.0))
                 .push(button(icon::up_icon().size(30), Event::IncrementPressed))
-                .push(text("Threshold:").small().bold())
+                .push(text(coincube_ui::locale::copy("Threshold:")).small().bold())
                 .push(
                     Container::new(text(format!("{}/{}", self.value, self.max)).size(30))
                         .align_y(alignment::Vertical::Center),
@@ -535,40 +583,4 @@ mod threshsold_input {
             component(numeric_input)
         }
     }
-}
-
-pub(super) fn template_key_warning(
-    use_taproot: bool,
-    key: &crate::installer::descriptor::Key,
-) -> Option<&'static str> {
-    if use_taproot && !key.source.is_compatible_taproot() {
-        Some("This device does not support Taproot")
-    } else {
-        None
-    }
-}
-
-pub(super) fn template_primary_key<'a>(
-    i: usize,
-    primary_key: &'a Option<crate::installer::descriptor::Key>,
-    use_taproot: bool,
-    primary_path: &'a crate::installer::descriptor::Path,
-) -> Element<'a, message::DefinePath> {
-    if let Some(key) = primary_key {
-        defined_key(
-            &key.name,
-            coincube_ui::color::GREEN,
-            format!("Primary key #{}", i + 1),
-            crate::installer::view::editor::template_key_warning(use_taproot, key),
-            true,
-        )
-    } else {
-        undefined_key(
-            coincube_ui::color::GREEN,
-            format!("Primary key #{}", i + 1),
-            !primary_path.keys[0..i].iter().any(|k| k.is_none()),
-            true,
-        )
-    }
-    .map(move |msg| message::DefinePath::Key(i, msg))
 }

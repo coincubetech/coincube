@@ -17,6 +17,7 @@ pub mod pairing_listener;
 pub mod pairing_run;
 pub mod pairing_store;
 pub mod pairing_transaction;
+pub mod policy;
 pub mod protocol;
 mod signatures;
 pub mod tls;
@@ -35,7 +36,8 @@ use tokio::sync::Mutex;
 
 use async_hwi::{AddressScript, DeviceKind, Error as HwiError, Version, HWI};
 
-use crate::phone_signer::pairing_store::PairedPhone;
+use crate::phone_signer::pairing_store::{PairedPhone, SignerBinding};
+use crate::phone_signer::policy::{PhonePolicy, PhonePolicyKind};
 use crate::phone_signer::protocol::{
     cancel_envelope, present_session_envelope, Correlator, SignResponse,
 };
@@ -78,8 +80,8 @@ pub struct PhoneSigner {
     /// sealed to.
     pub(crate) paired_phone: PairedPhone,
 
-    /// The vault's canonical descriptor — exactly
-    /// `CoincubeDescriptor::to_string()`, checksum included.
+    /// The canonical transport descriptor for this Vault or imported wallet,
+    /// checksum included.
     ///
     /// Sealed per session into `descriptor_envelopes` so the phone can verify
     /// its own xpub membership in what it decrypts rather than trusting the
@@ -87,7 +89,11 @@ pub struct PhoneSigner {
     /// `register_wallet` (the trait's one descriptor-shaped hook) is a no-op
     /// for this signer.
     pub(crate) descriptor: String,
+    pub(crate) policy: PhonePolicy,
     pub(crate) chain: crate::chain::ChainId,
+    /// Re-read imported pairing authority just before sealing a request.
+    /// A row removed or replaced after the hardware refresh cannot sign.
+    pub(crate) pairing_dir: crate::dir::CoincubeDirectory,
 
     /// `descriptor_id_fingerprint` of [`Self::descriptor`], 8 lowercase hex.
     ///
@@ -122,8 +128,21 @@ impl std::fmt::Debug for PhoneSigner {
 }
 
 impl PhoneSigner {
-    /// `descriptor` is the vault's canonical descriptor — exactly
-    /// `CoincubeDescriptor::to_string()`, checksum included. It is both what
+    fn current_binding(&self) -> Result<&SignerBinding, HwiError> {
+        match self.policy.kind() {
+            PhonePolicyKind::Vault(_) => self.paired_phone.exact_signer_for(&self.policy),
+            PhonePolicyKind::Imported { .. } => {
+                let current = pairing_store::load(&self.pairing_dir).map_err(|_| {
+                    HwiError::Device("Could not read the Keychain pairing; pair it again.".into())
+                })?;
+                current.unique_signer_for(&self.paired_phone, &self.policy)
+            }
+        }
+        .map_err(HwiError::Device)
+    }
+
+    /// `descriptor` is the policy's canonical transport descriptor, checksum
+    /// included. It is both what
     /// gets sealed into `descriptor_envelopes` and the preimage of the
     /// session's `descriptor_id`, which is why the id is **derived here rather
     /// than taken as a parameter**: the two are one value, and accepting them
@@ -135,12 +154,14 @@ impl PhoneSigner {
         fingerprint: Fingerprint,
         version: Option<Version>,
         paired_phone: PairedPhone,
-        descriptor: String,
-        chain: crate::chain::ChainId,
+        policy: PhonePolicy,
+        pairing_dir: crate::dir::CoincubeDirectory,
         transport_key: Option<Arc<crate::services::connect::crypto::DeviceTransportKey>>,
     ) -> Self {
         let (reader, writer) = transport.split();
         let correlator = Arc::new(Correlator::spawn(reader));
+        let descriptor = policy.descriptor().to_owned();
+        let chain = policy.chain();
         let descriptor_id =
             crate::app::wallet::descriptor_id_fingerprint_of_bytes(descriptor.as_bytes())
                 .to_string();
@@ -151,7 +172,9 @@ impl PhoneSigner {
             version,
             paired_phone,
             descriptor,
+            policy,
             chain,
+            pairing_dir,
             descriptor_id,
             transport_key,
         }
@@ -229,10 +252,7 @@ impl HWI for PhoneSigner {
             return Err(HwiError::Device(protocol::phone_unpaired_text()));
         }
 
-        let binding = self
-            .paired_phone
-            .exact_signer(&self.descriptor)
-            .map_err(HwiError::Device)?;
+        let binding = self.current_binding()?;
         // Fee-source authentication (P2-A) before anything is sealed or sent:
         // every input must carry the complete previous transaction its outpoint
         // commits to. A witness-only (imported or legacy) PSBT would let
@@ -418,8 +438,20 @@ impl HWI for PhoneSigner {
                 "Signed transaction differs from the request.".into(),
             ));
         }
-        signatures::merge_verified(psbt, &signed, &self.descriptor, binding)
-            .map_err(HwiError::Device)?;
+        // A local unpair or replacement while the phone was reviewing this
+        // request withdraws imported signing authority before any merge.
+        if matches!(self.policy.kind(), PhonePolicyKind::Imported { .. }) {
+            self.current_binding()?;
+        }
+        match self.policy.kind() {
+            PhonePolicyKind::Vault(_) => {
+                signatures::merge_verified(psbt, &signed, &self.descriptor, binding)
+            }
+            PhonePolicyKind::Imported { wallet, .. } => {
+                signatures::merge_imported_verified(psbt, &signed, wallet, binding)
+            }
+        }
+        .map_err(HwiError::Device)?;
         Ok(())
     }
 }
@@ -508,3 +540,7 @@ mod tests {
 #[cfg(test)]
 #[path = "signature_tests.rs"]
 mod signature_tests;
+
+#[cfg(test)]
+#[path = "imported_phone_tests.rs"]
+mod imported_phone_tests;

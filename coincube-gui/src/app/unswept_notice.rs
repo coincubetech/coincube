@@ -201,10 +201,10 @@ mod tests {
     }
     #[tokio::test]
     async fn unswept_notice_app_ignores_old_callbacks_and_revokes_live_evidence() {
-        use crate::app::{cache::AppGeneration, claim_step1_tests::bitcoin_app, message::Message};
+        use crate::app::{cache::AppGeneration, message::Message, shell_tests::bitcoin_app};
         let root = std::env::temp_dir().join(format!("coincube-notice-{}", uuid::Uuid::new_v4()));
         let (mut app, _) = bitcoin_app(&root);
-        let generation = *app.panels.claim_generation.borrow();
+        let generation = *app.panels.session_generation.borrow();
         app.unswept_in_flight = Some(generation);
         let _ = app.update(Message::UnsweptNotice {
             app: AppGeneration::next(),
@@ -230,7 +230,7 @@ mod tests {
         app.revoke_claim();
         assert!(app.cache.unswept_notice.is_none());
         assert!(app.unswept_in_flight.is_none());
-        assert_ne!(*app.panels.claim_generation.borrow(), generation);
+        assert_ne!(*app.panels.session_generation.borrow(), generation);
         let _ = app.update(Message::UnsweptNotice {
             app: app.cache.app_generation,
             generation,
@@ -240,15 +240,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
     #[test]
-    fn unswept_notice_account_and_provider_replacement_without_claim_panel_revokes() {
-        use crate::app::{claim_step1_tests::bitcoin_app, message::Message, view};
+    fn unswept_notice_account_and_provider_replacement_revokes() {
+        use crate::app::{message::Message, shell_tests::bitcoin_app, view};
         let _guard = crate::app::session::test_guard();
         let root =
             std::env::temp_dir().join(format!("coincube-notice-session-{}", uuid::Uuid::new_v4()));
         for provider_change in [false, true] {
             let (mut app, _) = bitcoin_app(&root);
-            app.panels.claim = None;
-            app.panels.fork_claim = None;
             app.panels.connect.account.user = Some(crate::services::coincube::User {
                 id: 7,
                 email: "fixture@example.invalid".into(),
@@ -268,7 +266,7 @@ mod tests {
             );
             app.unswept_session = app.claim_connect_session();
             assert!(app.unswept_session.is_some());
-            let generation = *app.panels.claim_generation.borrow();
+            let generation = *app.panels.session_generation.borrow();
             app.unswept_in_flight = Some(generation);
             drop(app.update(Message::View(view::Message::ConnectAccount(
                 view::ConnectAccountMessage::PlanLoaded(None, 0),
@@ -293,18 +291,19 @@ mod tests {
             ))));
             assert!(app.unswept_in_flight.is_none());
             assert!(app.unswept_session.is_none());
-            assert_ne!(*app.panels.claim_generation.borrow(), generation);
+            assert_ne!(*app.panels.session_generation.borrow(), generation);
         }
         let _ = std::fs::remove_dir_all(root);
     }
-    #[tokio::test]
-    async fn unswept_notice_positive_callback_displays_until_local_spend() {
-        use crate::app::{claim_step1_tests::bitcoin_app, message::Message};
-        let root =
-            std::env::temp_dir().join(format!("coincube-notice-positive-{}", uuid::Uuid::new_v4()));
+    /// A Bitcoin app with one owned pre-fork coin and a live Connect session,
+    /// holding a request in flight at the current session generation.
+    fn app_with_unswept_request(
+        root: &std::path::Path,
+    ) -> (crate::app::App, std::sync::Arc<Wallet>, u64) {
+        use crate::app::shell_tests::bitcoin_app;
         let (mut app, wallet) = {
             let _guard = crate::app::session::test_guard();
-            bitcoin_app(&root)
+            bitcoin_app(root)
         };
         let (cache, _live) = setup();
         app.cache.daemon_cache = cache.daemon_cache;
@@ -327,14 +326,25 @@ mod tests {
             crate::services::coincube::CoincubeClient::for_test("https://notice.example.invalid");
         app.panels.connect.account.client.set_token("fixture-token");
         app.unswept_session = app.claim_connect_session();
-        let generation = *app.panels.claim_generation.borrow();
+        let generation = *app.panels.session_generation.borrow();
         app.unswept_in_flight = Some(generation);
-        let proof = KnownUnspent::for_notice_test(
+        (app, wallet, generation)
+    }
+    fn proof_for(app: &crate::app::App, wallet: &Wallet, generation: u64) -> KnownUnspent {
+        KnownUnspent::for_notice_test(
             owned(&app.cache, &wallet.main_descriptor),
             generation,
-            app.panels.claim_generation.subscribe(),
+            app.panels.session_generation.subscribe(),
             Instant::now(),
-        );
+        )
+    }
+    #[tokio::test]
+    async fn unswept_notice_positive_callback_displays_until_local_spend() {
+        use crate::app::message::Message;
+        let root =
+            std::env::temp_dir().join(format!("coincube-notice-positive-{}", uuid::Uuid::new_v4()));
+        let (mut app, wallet, generation) = app_with_unswept_request(&root);
+        let proof = proof_for(&app, &wallet, generation);
         assert!(app.cache.unswept_recovery_notice().is_none());
         drop(app.update(Message::UnsweptNotice {
             app: app.cache.app_generation,
@@ -348,6 +358,59 @@ mod tests {
             height: None,
         });
         assert!(app.cache.unswept_recovery_notice().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+    /// Each sync tick refreshes the evidence. The visible notice must survive
+    /// the refresh until its callback replaces it, or the line blinks off and
+    /// on every few seconds; ineligibility and a negative answer still withdraw it.
+    #[tokio::test]
+    async fn unswept_notice_survives_sync_refresh_until_its_callback() {
+        use crate::app::message::Message;
+        let root =
+            std::env::temp_dir().join(format!("coincube-notice-refresh-{}", uuid::Uuid::new_v4()));
+        let (mut app, wallet, generation) = app_with_unswept_request(&root);
+        let proof = proof_for(&app, &wallet, generation);
+        drop(app.update(Message::UnsweptNotice {
+            app: app.cache.app_generation,
+            generation,
+            result: Ok(Some(proof)),
+        }));
+        assert!(app.cache.unswept_recovery_notice().is_some());
+        assert!(app.unswept_in_flight.is_none());
+
+        drop(app.unswept_notice_task());
+        assert_eq!(app.unswept_in_flight, Some(generation), "refresh started");
+        assert!(
+            app.cache.unswept_recovery_notice().is_some(),
+            "starting a refresh must not blank the notice"
+        );
+        drop(app.unswept_notice_task());
+        assert!(
+            app.cache.unswept_recovery_notice().is_some(),
+            "a refresh already in flight must not blank the notice"
+        );
+
+        drop(app.update(Message::UnsweptNotice {
+            app: app.cache.app_generation,
+            generation,
+            result: Ok(None),
+        }));
+        assert!(app.cache.unswept_recovery_notice().is_none());
+
+        let proof = proof_for(&app, &wallet, generation);
+        app.unswept_in_flight = Some(generation);
+        drop(app.update(Message::UnsweptNotice {
+            app: app.cache.app_generation,
+            generation,
+            result: Ok(Some(proof)),
+        }));
+        assert!(app.cache.unswept_recovery_notice().is_some());
+        app.cache.btcb2_server_enabled = false;
+        drop(app.unswept_notice_task());
+        assert!(
+            app.cache.unswept_notice.is_none(),
+            "ineligible refresh withdraws"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -419,7 +482,7 @@ mod tests {
             [
                 (
                     "vault recovery",
-                    labels(recovery(&vault_menu, cache, Vec::new(), None)),
+                    labels(recovery(&vault_menu, cache, Vec::new(), None, None)),
                 ),
                 (
                     "settings recovery",
@@ -431,11 +494,14 @@ mod tests {
                         &unit,
                         &[],
                         false,
+                        false,
                         &backup,
                         &pin,
                         None,
                         None,
                         None,
+                        None,
+                        false,
                     )),
                 ),
             ]

@@ -1,72 +1,57 @@
-use iced::{
-    alignment,
-    widget::{tooltip, Container, Space},
-    Alignment, Length,
-};
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
+use iced::{Alignment, Length};
 
 use coincube_ui::{
     color,
     component::{
         button, collapse,
-        text::{h3, p1_regular, text, Text},
+        text::{text, Text},
     },
     icon, theme,
     widget::*,
 };
 
 use crate::installer::{
-    descriptor::{Path, ENABLE_SAFETY_NET_KEYS},
+    descriptor::Path,
     message::{self, Message},
     view::{
         editor::{
             define_descriptor_advanced_settings, defined_key, path,
-            template::diagram::{policy_timeline, PolicyRow, Timelock},
+            template::diagram::{PolicyRow, Timelock},
             undefined_key,
         },
-        layout,
+        layout_with_actions,
     },
 };
 
-const SAFETY_NET_DESCRIPTION: &str = "This adds a final recovery option containing keys from professional key agents.\n\nUse this option if you have been provided one or more Safety Net tokens.";
-
-pub fn custom_template_description(progress: (usize, usize)) -> Element<'static, Message> {
-    layout(
+pub fn custom_template_description(
+    progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
+) -> Element<'static, Message> {
+    super::template_introduction(
         progress,
-        None,
-        "Introduction",
-        Column::new()
-            .align_x(Alignment::Start)
-            .push(h3("Build your own"))
-            .max_width(800.0)
-            .push(Container::new(
-                p1_regular("For this setup you will need to define your primary and recovery spending policies. For security reasons, we suggest you use a separate Hardware Wallet for each key belonging to them.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(Container::new(
-                p1_regular("The keys belonging to your primary policy can always spend. Those belonging to the recovery policies will be able to spend only after a defined time of wallet inactivity, allowing for secure recovery and advanced spending policies.")
-                .style(theme::text::secondary)
-                .align_x(alignment::Horizontal::Left)
-            ).align_x(alignment::Horizontal::Left).width(Length::Fill))
-            .push(policy_timeline(vec![
-                PolicyRow {
-                    label: "Primary spending policy:",
-                    keys: vec![(1, color::GREEN)],
-                    box_label: "Primary Keys",
-                    timelock: Timelock::None,
-                },
-                PolicyRow {
-                    label: "Recovery spending policy:",
-                    keys: vec![(2, color::ORANGE)],
-                    box_label: "Recovery Keys",
-                    timelock: Timelock::After(0.5),
-                },
-            ]))
-            .push(Row::new().push(Space::new().width(Length::Fill)).push(button::primary(None, "Next").width(Length::Fixed(200.0)).on_press(Message::Next)))
-            .push(Space::new().height(50.0))
-            .spacing(20),
-        true,
-        Some(Message::Previous),
+        ui_instance,
+        show_keychain_tip,
+        "Build your own",
+        "Define your primary and recovery spending policies.",
+        "Your primary policy can always spend. Each recovery option becomes available after its configured inactivity delay.",
+        "Choose separate signing devices where practical. You can define more recovery options in the next step.",
+        vec![
+            PolicyRow {
+                label: "Primary spending policy",
+                keys: vec![(1, color::GREEN)],
+                box_label: "Primary Keys",
+                timelock: Timelock::None,
+            },
+            PolicyRow {
+                label: "Recovery spending policy",
+                keys: vec![(2, color::ORANGE)],
+                box_label: "Recovery Keys",
+                timelock: Timelock::After(0.5),
+            },
+        ],
     )
 }
 
@@ -82,9 +67,8 @@ pub fn custom_template<'a>(
     valid: bool,
 ) -> Element<'a, Message> {
     let prim_keys_fixed = primary_path.keys.len() < 2; // can only delete a primary key if there are 2 or more
-    layout(
+    layout_with_actions(
         progress,
-        None,
         "Set keys",
         Column::new()
             .align_x(Alignment::Start)
@@ -95,7 +79,7 @@ pub fn custom_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapse_icon()),
                     )
                     .style(theme::button::transparent)
@@ -105,7 +89,7 @@ pub fn custom_template<'a>(
                         Row::new()
                             .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Advanced settings").small().bold())
+                            .push(text(localized_copy("Advanced settings")).small().bold())
                             .push(icon::collapsed_icon()),
                     )
                     .style(theme::button::transparent)
@@ -124,13 +108,27 @@ pub fn custom_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(i, primary_key)| {
-                            custom_template_primary_key(
-                                i,
-                                primary_key,
-                                use_taproot,
-                                primary_path,
-                                prim_keys_fixed,
-                            )
+                            if let Some(key) = primary_key {
+                                defined_key(
+                                    &key.name,
+                                    color::GREEN,
+                                    "Primary key".to_string(),
+                                    if use_taproot && !key.source.is_compatible_taproot() {
+                                        Some("This device does not support Taproot")
+                                    } else {
+                                        None
+                                    },
+                                    prim_keys_fixed,
+                                )
+                            } else {
+                                undefined_key(
+                                    color::GREEN,
+                                    "Primary key",
+                                    !primary_path.keys[0..i].iter().any(|k| k.is_none()),
+                                    prim_keys_fixed,
+                                )
+                            }
+                            .map(move |msg| message::DefinePath::Key(i, msg))
                         })
                         .collect(),
                     false,
@@ -143,7 +141,11 @@ pub fn custom_template<'a>(
                     col.push(
                         path(
                             color::ORANGE,
-                            Some(format!("Recovery option #{}:", i + 1)),
+                            Some(localized_format!(
+                                "Recovery option #{}:",
+                                "Opción de recuperación #{}:",
+                                i + 1
+                            )),
                             p.sequence,
                             p.warning,
                             p.threshold,
@@ -151,13 +153,31 @@ pub fn custom_template<'a>(
                                 .iter()
                                 .enumerate()
                                 .map(|(j, recovery_key)| {
-                                    custom_template_recovery_key(
-                                        j,
-                                        recovery_key,
-                                        use_taproot,
-                                        p,
-                                        num_non_primary_paths,
-                                    )
+                                    // We cannot delete a key if doing so would remove all recovery paths,
+                                    // i.e. if there is only 1 recovery path and it contains only 1 key,
+                                    // and there is no safety net path.
+                                    let fixed = num_non_primary_paths < 2 && p.keys.len() < 2;
+                                    if let Some(key) = recovery_key {
+                                        defined_key(
+                                            &key.name,
+                                            color::ORANGE,
+                                            "Recovery key".to_string(),
+                                            if use_taproot && !key.source.is_compatible_taproot() {
+                                                Some("This device does not support Taproot")
+                                            } else {
+                                                None
+                                            },
+                                            fixed,
+                                        )
+                                    } else {
+                                        undefined_key(
+                                            color::ORANGE,
+                                            "Recovery key",
+                                            !p.keys[0..j].iter().any(|k| k.is_none()),
+                                            fixed,
+                                        )
+                                    }
+                                    .map(move |msg| message::DefinePath::Key(j, msg))
                                 })
                                 .collect(),
                             false,
@@ -174,26 +194,14 @@ pub fn custom_template<'a>(
             .push(
                 Row::new()
                     .push(
-                        button::secondary(Some(icon::plus_icon()), "Add recovery option")
-                            .width(Length::Fixed(210.0))
-                            .on_press(Message::DefineDescriptor(
-                                message::DefineDescriptor::AddRecoveryPath,
-                            )),
-                    )
-                    .push(
-                        (ENABLE_SAFETY_NET_KEYS && safety_net_path.is_none()).then_some(
-                            tooltip::Tooltip::new(
-                                button::secondary(Some(icon::plus_icon()), "Add Safety Net")
-                                    .width(Length::Fixed(210.0))
-                                    .on_press(Message::DefineDescriptor(
-                                        message::DefineDescriptor::AddSafetyNetPath,
-                                    )),
-                                Container::new(text(SAFETY_NET_DESCRIPTION))
-                                    .style(theme::card::simple)
-                                    .padding(10),
-                                tooltip::Position::Bottom,
-                            ),
-                        ),
+                        button::secondary(
+                            Some(icon::plus_icon()),
+                            localized_copy("Add recovery option"),
+                        )
+                        .width(Length::Fixed(210.0))
+                        .on_press(Message::DefineDescriptor(
+                            message::DefineDescriptor::AddRecoveryPath,
+                        )),
                     )
                     .spacing(10),
             )
@@ -209,13 +217,30 @@ pub fn custom_template<'a>(
                         .iter()
                         .enumerate()
                         .map(|(i, sn_key)| {
-                            custom_template_sn_key(
-                                i,
-                                sn_key,
-                                use_taproot,
-                                sn_path,
-                                num_non_primary_paths,
-                            )
+                            // Cannot delete safety net key if doing so would remove the safety net path
+                            // and there are no other recovery paths.
+                            let fixed = num_non_primary_paths < 2 && sn_path.keys.len() < 2;
+                            if let Some(key) = sn_key {
+                                defined_key(
+                                    &key.name,
+                                    color::WHITE,
+                                    "Safety Net key".to_string(),
+                                    if use_taproot && !key.source.is_compatible_taproot() {
+                                        Some("This key source does not support Taproot")
+                                    } else {
+                                        None
+                                    },
+                                    fixed,
+                                )
+                            } else {
+                                undefined_key(
+                                    color::WHITE,
+                                    "Safety Net key",
+                                    !sn_path.keys[0..i].iter().any(|k| k.is_none()),
+                                    fixed,
+                                )
+                            }
+                            .map(move |msg| message::DefinePath::Key(i, msg))
                         })
                         .collect(),
                     false,
@@ -225,113 +250,9 @@ pub fn custom_template<'a>(
                     Message::DefineDescriptor(message::DefineDescriptor::Path(sn_index + 1, msg))
                 })
             }))
-            .push(Space::new().height(10))
-            .push(
-                Row::new()
-                    .push(
-                        button::secondary(None, "Clear All")
-                            .width(Length::Fixed(200.0))
-                            .on_press(Message::DefineDescriptor(message::DefineDescriptor::Reset)),
-                    )
-                    .push(Space::new().width(Length::Fill))
-                    .push(
-                        button::primary(None, "Continue")
-                            .width(Length::Fixed(200.0))
-                            .on_press_maybe(if valid { Some(Message::Next) } else { None }),
-                    ),
-            )
-            .push(Space::new().height(100.0))
             .spacing(20),
         true,
         Some(Message::Previous),
+        super::template_actions(valid, false),
     )
-}
-
-fn custom_template_primary_key<'a>(
-    i: usize,
-    primary_key: &'a Option<crate::installer::descriptor::Key>,
-    use_taproot: bool,
-    primary_path: &'a Path,
-    prim_keys_fixed: bool,
-) -> Element<'a, message::DefinePath> {
-    if let Some(key) = primary_key {
-        defined_key(
-            &key.name,
-            color::GREEN,
-            "Primary key".to_string(),
-            crate::installer::view::editor::template_key_warning(use_taproot, key),
-            prim_keys_fixed,
-        )
-    } else {
-        undefined_key(
-            color::GREEN,
-            "Primary key",
-            !primary_path.keys[0..i].iter().any(|k| k.is_none()),
-            prim_keys_fixed,
-        )
-    }
-    .map(move |msg| message::DefinePath::Key(i, msg))
-}
-
-fn custom_template_recovery_key<'a>(
-    j: usize,
-    recovery_key: &'a Option<crate::installer::descriptor::Key>,
-    use_taproot: bool,
-    p: &'a Path,
-    num_non_primary_paths: usize,
-) -> Element<'a, message::DefinePath> {
-    // We cannot delete a key if doing so would remove all recovery paths,
-    // i.e. if there is only 1 recovery path and it contains only 1 key,
-    // and there is no safety net path.
-    let fixed = num_non_primary_paths < 2 && p.keys.len() < 2;
-    if let Some(key) = recovery_key {
-        defined_key(
-            &key.name,
-            color::ORANGE,
-            "Recovery key".to_string(),
-            crate::installer::view::editor::template_key_warning(use_taproot, key),
-            fixed,
-        )
-    } else {
-        undefined_key(
-            color::ORANGE,
-            "Recovery key",
-            !p.keys[0..j].iter().any(|k| k.is_none()),
-            fixed,
-        )
-    }
-    .map(move |msg| message::DefinePath::Key(j, msg))
-}
-
-fn custom_template_sn_key<'a>(
-    i: usize,
-    sn_key: &'a Option<crate::installer::descriptor::Key>,
-    use_taproot: bool,
-    sn_path: &'a Path,
-    num_non_primary_paths: usize,
-) -> Element<'a, message::DefinePath> {
-    // Cannot delete safety net key if doing so would remove the safety net path
-    // and there are no other recovery paths.
-    let fixed = num_non_primary_paths < 2 && sn_path.keys.len() < 2;
-    if let Some(key) = sn_key {
-        defined_key(
-            &key.name,
-            color::WHITE,
-            "Safety Net key".to_string(),
-            if use_taproot && !key.source.is_compatible_taproot() {
-                Some("This key source does not support Taproot")
-            } else {
-                None
-            },
-            fixed,
-        )
-    } else {
-        undefined_key(
-            color::WHITE,
-            "Safety Net key",
-            !sn_path.keys[0..i].iter().any(|k| k.is_none()),
-            fixed,
-        )
-    }
-    .map(move |msg| message::DefinePath::Key(i, msg))
 }

@@ -1,7 +1,7 @@
 use iced::widget::button::{Catalog, Status, Style, StyleFn};
 use iced::{Background, Border, Color};
 
-use super::palette::{Button, ButtonPalette};
+use super::palette::Button;
 use super::Theme;
 
 impl Catalog for Theme {
@@ -60,46 +60,90 @@ pub fn orange_outline(theme: &Theme, status: Status) -> Style {
     button(&theme.colors.buttons.orange_outline, status)
 }
 
-fn palette_style(palette: ButtonPalette) -> Style {
-    Style {
-        background: Some(Background::Color(palette.background)),
-        text_color: palette.text,
-        border: if let Some(color) = palette.border {
-            Border {
-                radius: 25.0.into(),
-                width: 1.0,
-                color,
-            }
-        } else {
-            Border {
-                ..Default::default()
-            }
-        },
-        ..Default::default()
-    }
-}
-
+/// Bordered buttons take the Tenshu `.btn` corner (8px), not a pill: the
+/// artboards keep pills only for wallet actions such as Send and Receive.
 fn button(p: &Button, status: Status) -> Style {
     match status {
-        Status::Active => palette_style(p.active),
-        Status::Pressed => match p.pressed {
-            Some(pressed) => palette_style(pressed),
-            None => button(p, Status::Active),
+        Status::Active => Style {
+            background: Some(Background::Color(p.active.background)),
+            text_color: p.active.text,
+            border: if let Some(color) = p.active.border {
+                Border {
+                    radius: super::tenshu::radius::CONTROL.into(),
+                    width: 1.0,
+                    color,
+                }
+            } else {
+                Border {
+                    ..Default::default()
+                }
+            },
+            ..Default::default()
         },
-        Status::Hovered => palette_style(p.hovered),
+        Status::Pressed => {
+            if let Some(pressed) = p.pressed {
+                Style {
+                    background: Some(Background::Color(pressed.background)),
+                    text_color: pressed.text,
+                    border: if let Some(color) = pressed.border {
+                        Border {
+                            radius: super::tenshu::radius::CONTROL.into(),
+                            width: 1.0,
+                            color,
+                        }
+                    } else {
+                        Border {
+                            ..Default::default()
+                        }
+                    },
+                    ..Default::default()
+                }
+            } else {
+                button(p, Status::Active)
+            }
+        }
+        Status::Hovered => Style {
+            background: Some(Background::Color(p.hovered.background)),
+            text_color: p.hovered.text,
+            border: if let Some(color) = p.hovered.border {
+                Border {
+                    radius: super::tenshu::radius::CONTROL.into(),
+                    width: 1.0,
+                    color,
+                }
+            } else {
+                Border {
+                    ..Default::default()
+                }
+            },
+            ..Default::default()
+        },
         Status::Disabled => {
             if let Some(disabled) = p.disabled {
                 Style {
+                    background: Some(Background::Color(disabled.background)),
                     text_color: Color {
                         a: 0.2,
                         r: disabled.text.r,
                         g: disabled.text.g,
                         b: disabled.text.b,
                     },
-                    ..palette_style(disabled)
+                    border: if let Some(color) = disabled.border {
+                        Border {
+                            radius: super::tenshu::radius::CONTROL.into(),
+                            width: 1.0,
+                            color,
+                        }
+                    } else {
+                        Border {
+                            ..Default::default()
+                        }
+                    },
+                    ..Default::default()
                 }
             } else {
                 let active: Style = button(p, Status::Active);
+
                 Style {
                     text_color: Color {
                         a: 0.2,
@@ -117,6 +161,39 @@ pub fn tab(theme: &Theme, status: Status) -> Style {
     style.border.radius = 0.0.into();
     style.border.width = 0.0;
     style
+}
+
+/// Text-first rows of the Tenshu sidebar and Cube switcher.
+pub fn shell_nav(theme: &Theme, status: Status) -> Style {
+    shell_nav_with_state(theme, status, false)
+}
+
+pub fn shell_nav_active(theme: &Theme, status: Status) -> Style {
+    shell_nav_with_state(theme, status, true)
+}
+
+fn shell_nav_with_state(theme: &Theme, status: Status, selected: bool) -> Style {
+    let colors = &theme.colors.shell;
+    let background = if matches!(status, Status::Hovered | Status::Pressed) {
+        colors.hover
+    } else if selected {
+        colors.selected
+    } else {
+        Color::TRANSPARENT
+    };
+    Style {
+        background: Some(Background::Color(background)),
+        text_color: if matches!(status, Status::Disabled) {
+            colors.muted
+        } else {
+            colors.ink
+        },
+        border: Border {
+            radius: 8.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 /// Inactive primary-rail item. Square corners, no border, transparent

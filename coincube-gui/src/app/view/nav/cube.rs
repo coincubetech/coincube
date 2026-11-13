@@ -13,6 +13,12 @@ pub fn items(_ctx: &NavContext) -> Vec<SubItem> {
             |m| matches!(m, Menu::Cube(CubeSubMenu::Overview)),
         ),
         SubItem::new(
+            "Activity",
+            coincube_ui::icon::receipt_icon,
+            Menu::Cube(CubeSubMenu::Activity),
+            |m| matches!(m, Menu::Cube(CubeSubMenu::Activity)),
+        ),
+        SubItem::new(
             "Settings",
             settings_icon,
             Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),

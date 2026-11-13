@@ -12,7 +12,9 @@
 //!      typically closes immediately on connections that arrive
 //!      *before* the user scans the QR; without the retry loop the
 //!      QR vanishes on the first such failure and the user never
-//!      has time to scan.
+//!      has time to scan. A phone that removed this desktop answers
+//!      with `Unpaired` instead of closing, until the QR is scanned;
+//!      that is redialed the same way (see [`pairing_complete_from`]).
 //!   4. Validate the wallet fingerprint claim against the local
 //!      wallet's keys.
 //!   5. Stage the exact binding and exchange explicit durable completion
@@ -249,14 +251,7 @@ async fn try_pair_once(
         Err(_) => return Err(PairingError::OfferExpired),
     };
     run.check()?;
-    let complete = match envelope.payload {
-        Some(local_v1::local_envelope::Payload::PairingComplete(c)) => c,
-        _ => {
-            return Err(PairingError::InternalError(
-                "expected PairingComplete envelope".into(),
-            ));
-        }
-    };
+    let complete = pairing_complete_from(envelope)?;
 
     if complete.completion_protocol != 1 {
         return Err(PairingError::InternalError(
@@ -423,6 +418,7 @@ async fn try_pair_once(
         xpub: reported.xpub.clone(),
         fingerprint,
         descriptor_sha256: reported.descriptor_sha256.clone(),
+        imported_scope: None,
     });
 
     let name = if complete.device_name.is_empty() {
@@ -505,6 +501,35 @@ async fn try_pair_once(
     result.map_err(|error| {
         PairingError::InternalError(format!("Pairing incomplete: {}. Pair again.", error))
     })
+}
+
+/// The phone's first frame on a pairing dial, read as its `PairingComplete`.
+///
+/// `Unpaired` is a retriable [`PairingError::NetworkError`], not a failure.
+/// A phone that removed this desktop keeps trusting its cert for a few
+/// connections so it can say so (Keychain's `RevokedDesktop`), and this
+/// desktop dials as soon as the QR is on screen, so before the scan that is
+/// what answers. Once the QR is scanned the phone routes this desktop to its
+/// pairing handler, which always writes `PairingComplete` first, so a redial
+/// is all it takes. Nothing has been staged at this point.
+fn pairing_complete_from(
+    envelope: LocalEnvelope,
+) -> Result<local_v1::PairingComplete, PairingError> {
+    match envelope.payload {
+        Some(local_v1::local_envelope::Payload::PairingComplete(c)) => Ok(c),
+        Some(local_v1::local_envelope::Payload::Unpaired(_)) => Err(PairingError::NetworkError(
+            "phone still lists this desktop as removed; redialing until the QR is scanned".into(),
+        )),
+        Some(local_v1::local_envelope::Payload::Error(e)) => {
+            Err(PairingError::InternalError(format!(
+                "The phone refused the connection ({}: {}).",
+                e.code, e.message
+            )))
+        }
+        _ => Err(PairingError::InternalError(
+            "expected PairingComplete envelope".into(),
+        )),
+    }
 }
 
 // `prost::Message` is used implicitly via the generated proto types'
@@ -648,6 +673,147 @@ mod tests {
         let other = discovered("deadbeef", "192.168.1.42:50000");
         let picked = pick_current_target("c5bf643c", &[other], &snapshot);
         assert_eq!(picked.addr, snapshot.addr);
+    }
+
+    fn envelope(payload: local_v1::local_envelope::Payload) -> LocalEnvelope {
+        LocalEnvelope {
+            payload: Some(payload),
+        }
+    }
+
+    fn unpaired() -> LocalEnvelope {
+        envelope(local_v1::local_envelope::Payload::Unpaired(
+            local_v1::Unpaired {
+                reason: "removed on phone".into(),
+            },
+        ))
+    }
+
+    #[test]
+    fn pairing_complete_is_the_first_frame_we_want() {
+        let complete = local_v1::PairingComplete {
+            device_name: "phone".into(),
+            completion_protocol: 1,
+            ..Default::default()
+        };
+        let got = pairing_complete_from(envelope(
+            local_v1::local_envelope::Payload::PairingComplete(complete.clone()),
+        ))
+        .expect("PairingComplete passes through");
+        assert_eq!(got, complete);
+    }
+
+    /// Regression: a phone that removed this desktop answers the pre-scan
+    /// dial with `Unpaired`. Treating that as fatal tore the QR down before
+    /// it could be scanned ("expected PairingComplete envelope").
+    #[test]
+    fn unpaired_first_frame_is_redialed() {
+        let err = pairing_complete_from(unpaired()).expect_err("not a pairing");
+        assert!(is_dial_retriable(&err), "got {:?}", err);
+    }
+
+    #[test]
+    fn phone_error_first_frame_is_terminal_and_says_what_the_phone_said() {
+        let err = pairing_complete_from(envelope(local_v1::local_envelope::Payload::Error(
+            local_v1::ErrorEnvelope {
+                code: "internal".into(),
+                message: "pairing store lookup failed".into(),
+                session_id: String::new(),
+            },
+        )))
+        .expect_err("not a pairing");
+        assert!(!is_dial_retriable(&err));
+        let text = err.to_string();
+        assert!(text.contains("internal"), "{}", text);
+        assert!(text.contains("pairing store lookup failed"), "{}", text);
+    }
+
+    #[test]
+    fn any_other_first_frame_is_terminal() {
+        for env in [
+            LocalEnvelope { payload: None },
+            envelope(local_v1::local_envelope::Payload::PairingStep(
+                Default::default(),
+            )),
+        ] {
+            let err = pairing_complete_from(env).expect_err("not a pairing");
+            assert!(!is_dial_retriable(&err), "got {:?}", err);
+        }
+    }
+
+    /// The same regression end to end over a real loopback TLS session: a
+    /// "phone" that answers with `Unpaired` must leave the dial retriable.
+    #[tokio::test]
+    async fn dial_answered_with_unpaired_is_retriable() {
+        use crate::phone_signer::pairing::{generate_offer, OfferedKey};
+        use prost::Message;
+        use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+
+        let kp = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("keygen");
+        let cert = CertificateParams::new(vec!["coincube-phone.local".to_string()])
+            .expect("params")
+            .self_signed(&kp)
+            .expect("self-sign");
+        let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("versions")
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![cert.der().clone()],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(kp.serialize_der())),
+        )
+        .expect("server cert");
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let phone = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.expect("accept");
+            let mut tls = acceptor.accept(tcp).await.expect("tls accept");
+            let body = unpaired().encode_to_vec();
+            tls.write_all(&(body.len() as u32).to_be_bytes())
+                .await
+                .expect("len");
+            tls.write_all(&body).await.expect("body");
+            let _ = tls.shutdown().await;
+        });
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("coincube-pairing-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("mkdir tempdir");
+        let dir = CoincubeDirectory::new(path.clone());
+        let identity = crate::phone_signer::identity::load_or_create(&dir).expect("identity");
+        let vault = Fingerprint::from([1, 2, 3, 4]);
+        let offer = generate_offer(
+            vault,
+            &identity,
+            "keychain-test".into(),
+            OfferedKey::default(),
+        )
+        .offer;
+
+        let err = try_pair_once(
+            &identity,
+            &offer,
+            &discovered("c5bf643c", &addr.to_string()),
+            vault,
+            &[vault],
+            vault,
+            &dir,
+            &PairingRun::default(),
+        )
+        .await
+        .expect_err("Unpaired must not pair");
+        assert!(is_dial_retriable(&err), "got {:?}", err);
+
+        phone.await.expect("phone task");
+        let _ = std::fs::remove_dir_all(&path);
     }
 
     /// Only ACCEPT names the desktop; every other step leaves it empty.

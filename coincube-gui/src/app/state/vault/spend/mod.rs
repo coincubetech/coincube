@@ -42,6 +42,7 @@ pub struct CreateSpendPanel {
     /// immediately, without the user first picking a feerate — but only once,
     /// so a later re-entry doesn't clobber a feerate they set.
     initial_feerate_requested: bool,
+    mcp_prepared: bool,
 }
 
 impl CreateSpendPanel {
@@ -81,6 +82,7 @@ impl CreateSpendPanel {
             coins: coins.to_vec(),
             tip_height: blockheight.try_into().expect("i32 by consensus"),
             initial_feerate_requested: false,
+            mcp_prepared: false,
         }
     }
 
@@ -130,6 +132,51 @@ impl CreateSpendPanel {
             coins: coins.to_vec(),
             tip_height: blockheight.try_into().expect("i32 by consensus"),
             initial_feerate_requested: false,
+            mcp_prepared: false,
+        }
+    }
+
+    /// Send with exactly `preselected` chosen, from Coin control's Send
+    /// selected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_coins(
+        wallet: Arc<Wallet>,
+        coins: &[Coin],
+        blockheight: u32,
+        preselected_coins: &[OutPoint],
+        network: Network,
+        balance: Amount,
+        unconfirmed_balance: Amount,
+        sync_status: SyncStatus,
+        bitcoin_unit: BitcoinDisplayUnit,
+    ) -> Self {
+        Self {
+            draft: step::TransactionDraft::new(network, None),
+            current: 0,
+            steps: vec![
+                Box::new(
+                    step::DefineSpend::new(
+                        network,
+                        wallet.clone(),
+                        coins,
+                        blockheight,
+                        None,
+                        true,
+                        balance,
+                        unconfirmed_balance,
+                        sync_status,
+                        bitcoin_unit,
+                    )
+                    .with_preselected_coins(preselected_coins)
+                    .with_user_coin_selection()
+                    .with_coins_sorted(blockheight),
+                ),
+                Box::new(step::SaveSpend::new(wallet)),
+            ],
+            coins: coins.to_vec(),
+            tip_height: blockheight.try_into().expect("i32 by consensus"),
+            initial_feerate_requested: false,
+            mcp_prepared: false,
         }
     }
 
@@ -171,10 +218,38 @@ impl CreateSpendPanel {
             coins: coins.to_vec(),
             tip_height: blockheight.try_into().expect("i32 by consensus"),
             initial_feerate_requested: false,
+            mcp_prepared: false,
+        }
+    }
+
+    /// Open only an already validated unsigned construction in the existing
+    /// review/signing UI. No daemon write, signing or broadcast is dispatched.
+    #[cfg(feature = "mcp-transactions")]
+    pub(crate) fn from_mcp_prepared(
+        wallet: Arc<Wallet>,
+        native: crate::app::local_mcp::transactions::NativeDraft,
+        tip_height: i32,
+    ) -> Self {
+        let coins = native.coins.clone();
+        let draft = step::TransactionDraft::from_mcp(native);
+        let mut review: Box<dyn step::Step> =
+            Box::new(step::SaveSpend::new(wallet).with_mcp_review());
+        review.load(&coins, tip_height, &draft);
+        Self {
+            draft,
+            current: 0,
+            steps: vec![review],
+            coins,
+            tip_height,
+            initial_feerate_requested: true,
+            mcp_prepared: true,
         }
     }
 
     pub fn keep_state(&self) -> bool {
+        if self.mcp_prepared {
+            return false;
+        }
         if self.draft.is_recovery() {
             // For recovery spend, retain the state if user is on the first two steps
             // (choosing recovery path and defining spend)
@@ -205,16 +280,45 @@ impl State for CreateSpendPanel {
         message: Message,
     ) -> Task<Message> {
         let daemon = daemon.expect("Daemon required for vault spend panel");
+        if self.mcp_prepared
+            && matches!(
+                message,
+                Message::View(view::Message::Previous | view::Message::Close)
+            )
+        {
+            return redirect(Menu::Cube(crate::app::menu::CubeSubMenu::Settings(
+                crate::app::menu::CubeSettingsOption::AiAccess,
+            )));
+        }
         if matches!(message, Message::View(view::Message::Close)) {
             return redirect(Menu::Vault(VaultSubMenu::PSBTs(None)));
         }
 
-        if matches!(message, Message::View(view::Message::Next)) && !self.advance_step() {
-            return Task::none();
+        if matches!(message, Message::View(view::Message::Next)) {
+            if let Some(step) = self.steps.get(self.current) {
+                if !step.can_advance() {
+                    return Task::none();
+                }
+                step.apply(&mut self.draft);
+            }
+
+            if let Some(step) = self.steps.get_mut(self.current + 1) {
+                self.current += 1;
+                step.load(&self.coins, self.tip_height, &self.draft);
+            }
         }
 
         if matches!(message, Message::View(view::Message::Previous)) {
-            self.previous_step();
+            self.steps[self.current].interrupt();
+            let previous = self.current.saturating_sub(1);
+            if let Some(step) = self.steps.get_mut(previous) {
+                self.current = previous;
+                // For recovery spends, ensure all steps use the latest coins and tip height.
+                // TODO: consider doing this for all spend kinds, not just recovery.
+                if self.draft.is_recovery() {
+                    step.load(&self.coins, self.tip_height, &self.draft);
+                }
+            }
         }
 
         if let Message::CoinsTipHeight(Ok(coins), Ok(tip)) = &message {
@@ -331,36 +435,6 @@ impl State for CreateSpendPanel {
             ))));
         }
         Task::batch(tasks)
-    }
-}
-
-impl CreateSpendPanel {
-    fn advance_step(&mut self) -> bool {
-        if let Some(step) = self.steps.get(self.current) {
-            if !step.can_advance() {
-                return false;
-            }
-            step.apply(&mut self.draft);
-        }
-
-        if let Some(step) = self.steps.get_mut(self.current + 1) {
-            self.current += 1;
-            step.load(&self.coins, self.tip_height, &self.draft);
-        }
-
-        true
-    }
-    fn previous_step(&mut self) {
-        self.steps[self.current].interrupt();
-        let previous = self.current.saturating_sub(1);
-        if let Some(step) = self.steps.get_mut(previous) {
-            self.current = previous;
-            // For recovery spends, ensure all steps use the latest coins and tip height.
-            // TODO: consider doing this for all spend kinds, not just recovery.
-            if self.draft.is_recovery() {
-                step.load(&self.coins, self.tip_height, &self.draft);
-            }
-        }
     }
 }
 

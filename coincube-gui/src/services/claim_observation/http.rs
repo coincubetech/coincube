@@ -1,7 +1,6 @@
 //! Anonymous fresh Esplora reads and a separate authenticated anchor context.
 use super::*;
 use crate::services::coincube::{network_anchor::AnchorStartupError, CoincubeClient};
-use coincube_core::miniscript::bitcoin::OutPoint;
 use serde::Deserialize;
 use std::{
     convert::TryFrom,
@@ -14,16 +13,7 @@ mod ancestry;
 mod discovery;
 pub use ancestry::{CanonicalCoinbase, CoinbasePair};
 pub use discovery::diagnostics::Report as AncestryTimingReport;
-#[cfg(test)]
-pub(crate) use discovery::diagnostics::{
-    Outcome as AncestryTimingOutcome, Stage as AncestryTimingStage,
-};
-pub use discovery::{
-    AncestryContext, ClaimPairError, CollectedAncestry, CollectedAncestrySweep,
-    CollectedFundingCoin, CollectedFundingPair, CollectedPostBitcoinInputs, CollectedSpendInputs,
-    DiscoveredAncestry, DiscoveryError, FundingContext, FundingProofStatus, OwnedClaimFunding,
-    OwnedSplitFunding, SplitPairError, MAX_ANCESTRY_CANDIDATES,
-};
+pub use discovery::{DiscoveredAncestry, DiscoveryError};
 
 const BODY_LIMIT: usize = 256 * 1024;
 // Esplora /tx includes every input and prevout, so its JSON can be much larger
@@ -31,6 +21,8 @@ const BODY_LIMIT: usize = 256 * 1024;
 const TRANSACTION_METADATA_LIMIT: usize = 2 * 1024 * 1024;
 const TRANSACTION_HEX_LIMIT: usize = 2 * coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+// A raw block can approach 4 MB; at 5 s that would need about 6.4 Mbit/s.
+const RAW_BLOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Immutable snapshot. Recreate on account/provider change; revoke its generation
 /// before dropping old consumers. No inherited authenticated client headers are
@@ -44,28 +36,10 @@ pub struct HttpObservationSource {
     budget: Option<std::sync::Arc<discovery::CollectionBudget>>,
     ancestry_trace: Option<std::sync::Arc<discovery::diagnostics::Trace>>,
     ancestry_timing_observer: Option<discovery::diagnostics::Observer>,
-    funding_observer: Option<discovery::FundingProofObserver>,
     #[cfg(all(test, feature = "regtest-harness"))]
     test_ancestry_history: Option<crate::services::coincube::client::TestAncestryHistory>,
 }
 
-#[derive(Clone)]
-pub(crate) struct ObservationContextGuard {
-    provider: String,
-    expected: u64,
-    generation: watch::Receiver<u64>,
-}
-impl ObservationContextGuard {
-    pub(crate) fn validate(&self, provider: &str, generation: u64) -> Result<(), FailureKind> {
-        if provider.trim_end_matches('/') != self.provider {
-            return Err(FailureKind::Changed);
-        }
-        if generation != self.expected || !session_current(&self.generation, self.expected) {
-            return Err(FailureKind::Cancelled);
-        }
-        Ok(())
-    }
-}
 impl HttpObservationSource {
     /// Construct a source bound to the supplied provider and session context
     /// for the supported Bitcoin/BTCB2 pair. Validate the provider URL and
@@ -112,63 +86,9 @@ impl HttpObservationSource {
             budget: None,
             ancestry_trace: None,
             ancestry_timing_observer: None,
-            funding_observer: None,
             #[cfg(all(test, feature = "regtest-harness"))]
             test_ancestry_history,
         })
-    }
-    /// Attach diagnostics to this read-only source. No observer result grants
-    /// authority; callers still enter through the saved reservation admission.
-    pub(crate) fn with_funding_observer(
-        mut self,
-        observer: discovery::FundingProofObserver,
-    ) -> Self {
-        self.funding_observer = Some(observer);
-        self
-    }
-
-    /// Attach an identifier-free read-only ancestry timing observer. Reports
-    /// cannot manufacture proofs, signer permits or broadcast permission.
-    pub(crate) fn with_ancestry_timing_observer(
-        mut self,
-        observer: discovery::diagnostics::Observer,
-    ) -> Self {
-        self.ancestry_timing_observer = Some(observer);
-        self
-    }
-
-    /// Notify the optional observer of a chain-specific diagnostic, or do
-    /// nothing when no observer is installed. The callback cannot manufacture
-    /// a paired proof, signer permit or permission to spend.
-    fn report_funding(&self, chain: ChainId, status: FundingProofStatus) {
-        if let Some(observer) = &self.funding_observer {
-            observer(chain, status);
-        }
-    }
-
-    /// Stable identity shared with the Claim journal. Bind the admitted pair
-    /// through its fixed Bitcoin endpoint, without account tokens or credentials.
-    /// Preserve this encoding when reopening existing journals.
-    pub(crate) fn provider_identity(&self) -> String {
-        format!("bitcoin|{}/api/v1/esplora/bitcoin/mainnet", self.base)
-    }
-
-    /// Bind every result, including stable negative ancestry observations, to
-    /// the same admitted provider and live session generation as its consumer.
-    pub(crate) fn validate_context(
-        &self,
-        provider: &str,
-        generation: u64,
-    ) -> Result<(), FailureKind> {
-        self.context_guard().validate(provider, generation)
-    }
-
-    pub(crate) fn context_guard(&self) -> ObservationContextGuard {
-        ObservationContextGuard {
-            provider: self.provider_identity(),
-            expected: self.expected,
-            generation: self.generation.clone(),
-        }
     }
 
     fn prefix(chain: ChainId) -> Result<&'static str, FailureKind> {
@@ -182,6 +102,13 @@ impl HttpObservationSource {
         &self,
         future: impl Future<Output = Result<T, FailureKind>>,
     ) -> Result<T, FailureKind> {
+        self.bounded_within(REQUEST_TIMEOUT, future).await
+    }
+    async fn bounded_within<T>(
+        &self,
+        deadline: Duration,
+        future: impl Future<Output = Result<T, FailureKind>>,
+    ) -> Result<T, FailureKind> {
         let mut generation = self.generation.clone();
         if !session_current(&generation, self.expected) {
             return Err(FailureKind::Cancelled);
@@ -191,7 +118,7 @@ impl HttpObservationSource {
         };
         let result = tokio::select! { biased;
             _ = cancelled => Err(FailureKind::Cancelled),
-            result = tokio::time::timeout(REQUEST_TIMEOUT, future) => result.map_err(|_| FailureKind::Deadline)?,
+            result = tokio::time::timeout(deadline, future) => result.map_err(|_| FailureKind::Deadline)?,
         };
         if !session_current(&generation, self.expected) {
             return Err(FailureKind::Cancelled);
@@ -224,6 +151,19 @@ impl HttpObservationSource {
         fresh: bool,
         body_limit: usize,
     ) -> Result<(u16, Vec<u8>, HeaderMap, i64), (FailureKind, bool)> {
+        self.get_body_within(chain, path, fresh, body_limit, REQUEST_TIMEOUT)
+            .await
+    }
+    /// [`Self::get_body_detailed`] with its own deadline for the whole
+    /// request, body included.
+    async fn get_body_within(
+        &self,
+        chain: ChainId,
+        path: &str,
+        fresh: bool,
+        body_limit: usize,
+        deadline: Duration,
+    ) -> Result<(u16, Vec<u8>, HeaderMap, i64), (FailureKind, bool)> {
         let prefix = Self::prefix(chain).map_err(|error| (error, false))?;
         let request_stage = if path.starts_with("tx/") && path.ends_with("/hex") {
             discovery::diagnostics::Stage::RawTransaction
@@ -232,127 +172,91 @@ impl HttpObservationSource {
         } else {
             discovery::diagnostics::Stage::ChainView
         };
-        self.bounded(self.read_body_response(chain, prefix, path, fresh, body_limit))
-            .await
-            .map_err(|error| {
-                if error == FailureKind::Deadline {
-                    if let Some(trace) = &self.ancestry_trace {
-                        trace.emit_with_stage(
-                            chain,
-                            discovery::diagnostics::Outcome::RequestDeadline5s,
-                            Some(request_stage),
-                        );
-                    }
-                }
-                (error, false)
-            })?
-            .map_err(|()| (FailureKind::Malformed, true))
-    }
-
-    /// Keep request admission, freshness checks and response streaming within
-    /// the caller's existing cancellation/deadline boundary.
-    async fn read_body_response(
-        &self,
-        chain: ChainId,
-        prefix: &str,
-        path: &str,
-        fresh: bool,
-        body_limit: usize,
-    ) -> Result<Result<(u16, Vec<u8>, HeaderMap, i64), ()>, FailureKind> {
-        if crate::services::esplora_backoff::remaining(&self.base).is_some() {
-            return Err(FailureKind::Http(429));
-        }
-        let stamp = self.now();
-        if let Some(budget) = &self.budget {
-            budget.charge_request(0)?;
-        }
-        if let Some(trace) = &self.ancestry_trace {
-            trace.request(chain, 0);
-        }
-        let mut request = self
-            .anonymous
-            .get(format!("{}/api/v1/esplora/{}/{}", self.base, prefix, path))
-            .header(CACHE_CONTROL, "no-cache");
-        if fresh {
-            request = request.header("X-Coincube-Observation", "fresh");
-        }
-        let response = request.send().await.map_err(|error| {
-            if error.is_timeout() {
-                FailureKind::Deadline
-            } else {
-                FailureKind::Unavailable
+        self.bounded_within(deadline, async {
+            if crate::services::esplora_backoff::remaining(&self.base).is_some() {
+                return Err(FailureKind::Http(429));
             }
-        })?;
-        let status = response.status().as_u16();
-        if status == 429 {
-            crate::services::esplora_backoff::record(&self.base, response.headers());
-        }
-        if status != 200 && status != 404 {
-            return Err(FailureKind::Http(status));
-        }
-        let headers = response.headers().clone();
-        if fresh {
-            Self::check_fresh_headers(chain, stamp, &headers)?;
-        }
-        let bytes = match self
-            .read_response_bytes(chain, response, body_limit)
-            .await?
-        {
-            Ok(bytes) => bytes,
-            Err(()) => return Ok(Err(())),
-        };
-        Ok(Ok((status, bytes, headers, stamp)))
-    }
-    fn check_fresh_headers(
-        chain: ChainId,
-        stamp: i64,
-        headers: &HeaderMap,
-    ) -> Result<(), FailureKind> {
-        let mut markers = headers.get_all("x-coincube-observation").iter();
-        if markers.next().and_then(|v| v.to_str().ok()) != Some("fresh") || markers.next().is_some()
-        {
-            return Err(FailureKind::FreshnessUnverified);
-        }
-        FreshRead::from_response(chain, (), stamp, headers)?;
-
-        Ok(())
-    }
-    /// Charge shared bytes before applying the local body cap, as before.
-    async fn read_response_bytes(
-        &self,
-        chain: ChainId,
-        mut response: reqwest::Response,
-        body_limit: usize,
-    ) -> Result<Result<Vec<u8>, ()>, FailureKind> {
-        if response
-            .content_length()
-            .is_some_and(|n| n > body_limit as u64)
-        {
-            return Ok(Err(()));
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|error| {
-            if error.is_timeout() {
-                FailureKind::Deadline
-            } else {
-                FailureKind::Unavailable
-            }
-        })? {
+            let stamp = self.now();
             if let Some(budget) = &self.budget {
-                budget.charge_bytes(chunk.len())?;
+                budget.charge_request(0)?;
             }
             if let Some(trace) = &self.ancestry_trace {
-                trace.bytes(chain, chunk.len());
+                trace.request(chain, 0);
             }
-            if chunk.len() > body_limit.saturating_sub(bytes.len()) {
+            let mut request = self
+                .anonymous
+                .get(format!("{}/api/v1/esplora/{}/{}", self.base, prefix, path))
+                .header(CACHE_CONTROL, "no-cache")
+                .timeout(deadline);
+            if fresh {
+                request = request.header("X-Coincube-Observation", "fresh");
+            }
+            let mut response = request.send().await.map_err(|error| {
+                if error.is_timeout() {
+                    FailureKind::Deadline
+                } else {
+                    FailureKind::Unavailable
+                }
+            })?;
+            let status = response.status().as_u16();
+            if status == 429 {
+                crate::services::esplora_backoff::record(&self.base, response.headers());
+            }
+            if status != 200 && status != 404 {
+                return Err(FailureKind::Http(status));
+            }
+            let headers = response.headers().clone();
+            if fresh {
+                let mut markers = headers.get_all("x-coincube-observation").iter();
+                if markers.next().and_then(|v| v.to_str().ok()) != Some("fresh")
+                    || markers.next().is_some()
+                {
+                    return Err(FailureKind::FreshnessUnverified);
+                }
+                FreshRead::from_response(chain, (), stamp, &headers)?;
+            }
+            if response
+                .content_length()
+                .is_some_and(|n| n > body_limit as u64)
+            {
                 return Ok(Err(()));
             }
-            bytes.extend_from_slice(&chunk);
-        }
-
-        Ok(Ok(bytes))
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|error| {
+                if error.is_timeout() {
+                    FailureKind::Deadline
+                } else {
+                    FailureKind::Unavailable
+                }
+            })? {
+                if let Some(budget) = &self.budget {
+                    budget.charge_bytes(chunk.len())?;
+                }
+                if let Some(trace) = &self.ancestry_trace {
+                    trace.bytes(chain, chunk.len());
+                }
+                if chunk.len() > body_limit.saturating_sub(bytes.len()) {
+                    return Ok(Err(()));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(Ok((status, bytes, headers, stamp)))
+        })
+        .await
+        .map_err(|error| {
+            if error == FailureKind::Deadline {
+                if let Some(trace) = &self.ancestry_trace {
+                    trace.emit_with_stage(
+                        chain,
+                        discovery::diagnostics::Outcome::RequestDeadline5s,
+                        Some(request_stage),
+                    );
+                }
+            }
+            (error, false)
+        })?
+        .map_err(|()| (FailureKind::Malformed, true))
     }
-
     /// Fetch one bounded ancestry link using the anonymous immutable-data route.
     /// Txid authentication permits cache hits, but proves neither canonical
     /// inclusion nor witness validity. These bytes must never become FreshRead
@@ -406,6 +310,26 @@ impl HttpObservationSource {
         }
         Ok(raw)
     }
+    /// Fetch one raw block, on the same anonymous immutable-data route as
+    /// [`Self::ancestry_transaction`]. Nothing here authenticates the bytes:
+    /// the caller checks them against a block hash it read fresh
+    /// (`coincube_core::btcb2_block::confirmed_transaction`).
+    pub async fn raw_block(&self, chain: ChainId, hash: BlockHash) -> Result<Vec<u8>, FailureKind> {
+        let (status, bytes, _, _) = self
+            .get_body_within(
+                chain,
+                &format!("block/{}/raw", hash),
+                false,
+                coincube_core::btcb2_block::MAX_BLOCK_BYTES,
+                RAW_BLOCK_TIMEOUT,
+            )
+            .await
+            .map_err(|(error, _)| error)?;
+        if status != 200 {
+            return Err(FailureKind::Http(status));
+        }
+        Ok(bytes)
+    }
     /// Six-block fee estimate from the paired fork provider, without account
     /// headers or Bitcoin-provider fallback. A quote never authorizes a spend.
     pub async fn claim_fee_rate(&self) -> Result<u64, FailureKind> {
@@ -445,35 +369,6 @@ impl HttpObservationSource {
     }
 }
 
-#[cfg(test)]
-mod session_tests {
-    use super::*;
-
-    #[test]
-    fn paired_observation_binding_revokes_on_same_value_refresh() {
-        let (sender, generation) = watch::channel(7);
-        let mut client = CoincubeClient::new();
-        client.base_url = "https://api.coincube.io/".into();
-        client.set_token("synthetic-test-token");
-        let source = HttpObservationSource::new(
-            client,
-            ChainId::Bitcoin,
-            ChainId::BitcoinBlake2b,
-            CollectionContext {
-                expected_generation: 7,
-                generation,
-            },
-        )
-        .unwrap();
-        let provider = source.provider_identity();
-        assert_eq!(source.validate_context(&provider, 7), Ok(()));
-        sender.send(7).unwrap();
-        assert_eq!(
-            source.validate_context(&provider, 7),
-            Err(FailureKind::Cancelled)
-        );
-    }
-}
 #[derive(Deserialize)]
 struct BlockStatus {
     in_best_chain: bool,
@@ -489,33 +384,6 @@ struct TxStatus {
 struct TransactionInfo {
     txid: Txid,
     status: TxStatus,
-}
-/// A fresh current-output read from one chain. This is provider evidence,
-/// never proof that the outpoint does not exist on the other chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct OutspendStatus {
-    pub spent: bool,
-}
-impl HttpObservationSource {
-    /// Require an explicit 200 fresh response for the exact outpoint. A 404,
-    /// cached response or unavailable provider is indeterminate, not unspent.
-    pub async fn outspend(
-        &self,
-        chain: ChainId,
-        outpoint: OutPoint,
-    ) -> Result<FreshRead<OutspendStatus>, FailureKind> {
-        let (status, bytes, headers, stamp) = self
-            .get(
-                chain,
-                &format!("tx/{}/outspend/{}", outpoint.txid, outpoint.vout),
-            )
-            .await?;
-        if status != 200 {
-            return Err(FailureKind::Http(status));
-        }
-        let value = serde_json::from_slice(&bytes).map_err(|_| FailureKind::Malformed)?;
-        FreshRead::from_response(chain, value, stamp, &headers)
-    }
 }
 #[async_trait]
 impl ObservationSource for HttpObservationSource {
@@ -655,52 +523,9 @@ impl ObservationSource for HttpObservationSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coincube_core::miniscript::bitcoin::OutPoint;
     use httpmock::prelude::*;
     use serde_json::json;
-
-    async fn assert_outspend_case(chain: ChainId, case: &str, outpoint: OutPoint) {
-        let server = MockServer::start();
-        let (source, _sender) = source(&server);
-        let path = format!(
-            "/api/v1/esplora/{}/tx/{}/outspend/2",
-            HttpObservationSource::prefix(chain).unwrap(),
-            outpoint.txid,
-        );
-        let mock = server.mock(|when, then| {
-            when.method(GET)
-                .path(path)
-                .header("x-coincube-observation", "fresh");
-            then.status(if case == "missing" { 404 } else { 200 })
-                .header("x-coincube-observation", "fresh")
-                .header("x-cache", if case == "cached" { "HIT" } else { "BYPASS" })
-                .header("cache-control", "no-store")
-                .body(match case {
-                    "spent" => r#"{"spent":true}"#,
-                    "malformed" => r#"{"other":false}"#,
-                    _ => r#"{"spent":false}"#,
-                });
-        });
-        let result = source.outspend(chain, outpoint).await;
-        match case {
-            "unspent" => assert!(!result.unwrap().value().spent),
-            "spent" => assert!(result.unwrap().value().spent),
-            "missing" => assert_eq!(result.unwrap_err(), FailureKind::Http(404)),
-            "cached" => assert_eq!(result.unwrap_err(), FailureKind::FreshnessUnverified),
-            "malformed" => assert_eq!(result.unwrap_err(), FailureKind::Malformed),
-            _ => unreachable!(),
-        }
-        mock.assert_hits(1);
-    }
-
-    #[tokio::test]
-    async fn outspend_requires_fresh_explicit_status_on_each_chain() {
-        let outpoint = OutPoint::new(Txid::from_str(&"11".repeat(32)).unwrap(), 2);
-        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
-            for case in ["unspent", "spent", "missing", "cached", "malformed"] {
-                assert_outspend_case(chain, case, outpoint).await;
-            }
-        }
-    }
 
     pub(super) fn source(server: &MockServer) -> (HttpObservationSource, watch::Sender<u64>) {
         let mut client = CoincubeClient::for_test(server.base_url());
@@ -765,6 +590,55 @@ mod tests {
             ));
             mock.assert_hits(1);
         }
+    }
+    #[tokio::test]
+    async fn raw_blocks_are_anonymous_bounded_immutable_reads() {
+        let server = MockServer::start();
+        let (source, _sender) = source(&server);
+        let hash = BlockHash::from_str(&"ab".repeat(32)).unwrap();
+        let path = format!("/api/v1/esplora/bitcoin-blake2b/mainnet/block/{}/raw", hash);
+        let mut mock = server.mock(|when, then| {
+            when.method(GET).path(path.clone()).matches(|request| {
+                request.headers.as_ref().is_none_or(|headers| {
+                    headers.iter().all(|(name, _)| {
+                        !["authorization", "cookie", "x-coincube-observation"]
+                            .iter()
+                            .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+                    })
+                })
+            });
+            then.status(200).body([1u8, 2, 3]);
+        });
+        assert_eq!(
+            source.raw_block(ChainId::BitcoinBlake2b, hash).await,
+            Ok(vec![1, 2, 3])
+        );
+        mock.assert_hits(1);
+        mock.delete();
+
+        mock = server.mock(|when, then| {
+            when.method(GET).path(path.clone());
+            then.status(200)
+                .body(vec![0u8; coincube_core::btcb2_block::MAX_BLOCK_BYTES + 1]);
+        });
+        assert_eq!(
+            source.raw_block(ChainId::BitcoinBlake2b, hash).await,
+            Err(FailureKind::Malformed)
+        );
+        mock.delete();
+
+        server.mock(|when, then| {
+            when.method(GET).path(path.clone());
+            then.status(404);
+        });
+        assert_eq!(
+            source.raw_block(ChainId::BitcoinBlake2b, hash).await,
+            Err(FailureKind::Http(404))
+        );
+        assert_eq!(
+            source.raw_block(ChainId::Testnet4, hash).await,
+            Err(FailureKind::WrongChain)
+        );
     }
     pub(super) fn ancestry_fixture() -> (Txid, Vec<u8>) {
         use coincube_core::miniscript::bitcoin::{

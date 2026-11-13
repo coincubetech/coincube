@@ -46,7 +46,8 @@ impl PriceSource {
     /// Required attribution for the price source, if any.
     pub fn attribution(&self) -> Option<String> {
         match self {
-            Self::Coincube => Some("Powered by Coincube"),
+            // Our own source needs no credit line.
+            Self::Coincube => None,
             // See https://www.coingecko.com/en/api_terms
             Self::CoinGecko => Some("Powered by CoinGecko"),
             Self::MempoolSpace => None,
@@ -198,10 +199,7 @@ mod tests {
 
     #[test]
     fn attribution_and_user_agent_match_upstream_requirements() {
-        assert_eq!(
-            PriceSource::Coincube.attribution(),
-            Some("Powered by Coincube".to_string())
-        );
+        assert_eq!(PriceSource::Coincube.attribution(), None);
         assert_eq!(
             PriceSource::CoinGecko.attribution(),
             Some("Powered by CoinGecko".to_string())

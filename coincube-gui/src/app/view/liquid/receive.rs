@@ -1,12 +1,16 @@
 use coincube_core::miniscript::bitcoin::{Amount, Denomination};
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::localized_format;
 
 use crate::app::wallets::{DomainPaymentDetails, DomainPaymentStatus};
+use coincube_ui::locale::Text as CopyText;
 
 use coincube_ui::{
     color,
     component::{
         amount::DisplayAmount,
         button, card, form,
+        tenshu::{segment, segmented},
         text::*,
         transaction::{TransactionDirection, TransactionListItem},
     },
@@ -32,6 +36,8 @@ use crate::app::{
 
 #[allow(clippy::too_many_arguments)]
 pub fn liquid_receive_view<'a>(
+    cube_name: &'a str,
+    network: coincube_core::miniscript::bitcoin::Network,
     receive_method: &'a ReceiveMethod,
     address: Option<&'a String>,
     qr_data: Option<&'a qr_code::Data>,
@@ -45,35 +51,58 @@ pub fn liquid_receive_view<'a>(
     onchain_limits: Option<(u64, u64)>,
     receive_asset: SendAsset,
     sender_network: SenderNetwork,
+    stablecoin_available: bool,
     recent_transaction: &[RecentTransaction],
     btc_balance: Amount,
     usdt_balance: u64,
     show_direction_badges: bool,
+    mask_amounts: bool,
 ) -> Element<'a, LiquidReceiveMessage> {
-    let mut content = Column::new().spacing(20).width(Length::Fill);
+    let mut content = Column::new()
+        .spacing(16)
+        .width(Length::Fill)
+        .push(
+            Container::new(
+                Row::new()
+                    .spacing(12)
+                    .align_y(Alignment::Center)
+                    .push(h4_bold(localized_copy("Payment details")).width(Length::Fill))
+                    .push(receive_kind_selector(receive_asset, stablecoin_available)),
+            )
+            .padding([16, 24]),
+        )
+        .push(iced::widget::rule::horizontal(1));
 
-    // ── Two-card "You Receive ← They Send" layout ───────────────────────────
-    content = content.push(receive_cards(
-        receive_asset,
-        sender_network,
-        btc_balance,
-        usdt_balance,
-        bitcoin_unit,
-    ));
+    // Asset first, then only the receive rails implemented for that asset.
+    // The sender-network picker is the validated SideShift entry for USDt;
+    // it never turns prototype rail fixtures into wallet capabilities.
+    content = content.push(
+        Container::new(receive_method_selector(receive_asset, sender_network)).padding([0, 24]),
+    );
+    content = content.push(iced::widget::rule::horizontal(1));
+
+    // ── Two-card "They Send → You Receive" layout ───────────────────────────
+    content =
+        content.push(Container::new(receive_cards(receive_asset, sender_network)).padding([0, 24]));
 
     // ── Input section (matches Send layout) ─────────────────────────────────
     match receive_method {
         ReceiveMethod::Lightning => {
-            content = content.push(input_fields(
-                amount_input,
-                description_input,
-                bitcoin_unit,
-                lightning_limits,
-                loading,
-            ));
+            content = content.push(
+                Container::new(input_fields(
+                    amount_input,
+                    description_input,
+                    bitcoin_unit,
+                    lightning_limits,
+                    loading,
+                ))
+                .padding([0, 24]),
+            );
         }
         ReceiveMethod::Usdt => {
-            content = content.push(usdt_input_fields(usdt_amount_input, loading));
+            content = content.push(
+                Container::new(usdt_input_fields(usdt_amount_input, loading)).padding([0, 24]),
+            );
         }
         _ => {
             // Liquid / OnChain: only show generate button if no address is displayed
@@ -84,12 +113,15 @@ pub fn liquid_receive_view<'a>(
                 // depends on them and we don't want to show a receive address
                 // without the user first seeing the constraints.
                 if *receive_method == ReceiveMethod::OnChain && onchain_limits.is_none() {
-                    content = content.push(onchain_warning_box(onchain_limits, bitcoin_unit));
+                    content = content.push(
+                        Container::new(onchain_warning_box(onchain_limits, bitcoin_unit))
+                            .padding([0, 24]),
+                    );
                     content = content.push(crate::loading::loading_indicator(Some(
                         "Fetching swap limits",
                     )));
                 } else {
-                    content = content.push(generate_button());
+                    content = content.push(Container::new(generate_button()).padding([0, 24]));
                 }
             }
         }
@@ -99,7 +131,7 @@ pub fn liquid_receive_view<'a>(
         content = content.push(crate::loading::loading_indicator(Some(
             "Generating Address",
         )));
-    } else if let (Some(addr), Some(_qr)) = (address, qr_data) {
+    } else if let Some(addr) = address {
         // Clean on-chain addresses for display
         let display_addr = if *receive_method == ReceiveMethod::OnChain {
             let cleaned = addr.strip_prefix("bitcoin:").unwrap_or(addr);
@@ -108,7 +140,8 @@ pub fn liquid_receive_view<'a>(
             addr
         };
 
-        // Address card (Vault-style): scrollable address + copy icon + action buttons
+        // The generated request is already encoded in state. Keep the copy
+        // action bound to that same request while showing its QR inline.
         let address_row = Row::new()
             .push(
                 Container::new(
@@ -129,9 +162,9 @@ pub fn liquid_receive_view<'a>(
                 .width(Length::Fill),
             )
             .push(
-                iced::widget::Button::new(icon::clipboard_icon().style(theme::text::secondary))
+                button::primary(None, localized_copy("Copy"))
                     .on_press(LiquidReceiveMessage::Copy)
-                    .style(theme::button::transparent_border),
+                    .width(Length::Fixed(80.0)),
             )
             .align_y(Alignment::Center);
 
@@ -139,15 +172,22 @@ pub fn liquid_receive_view<'a>(
 
         if *receive_method == ReceiveMethod::OnChain || *receive_method == ReceiveMethod::Usdt {
             button_row = button_row.push(
-                button::secondary(None, "Generate New Address")
+                button::secondary(None, localized_copy("Generate New Address"))
                     .on_press(LiquidReceiveMessage::GenerateAddress),
             );
             button_row = button_row.push(Space::new().width(Length::Fill));
         }
 
-        button_row = button_row.push(
-            button::secondary(None, "Show QR Code").on_press(LiquidReceiveMessage::ShowQrCode),
-        );
+        if qr_data.is_some() {
+            button_row = button_row.push(
+                button::secondary(None, localized_copy("Enlarge QR"))
+                    .on_press(LiquidReceiveMessage::ShowQrCode),
+            );
+        } else {
+            button_row = button_row.push(p2_regular(localized_copy(
+                "QR unavailable · copy the address instead",
+            )));
+        }
 
         // Descriptive text inside the card
         let description = match receive_method {
@@ -161,30 +201,58 @@ pub fn liquid_receive_view<'a>(
             }
         };
 
-        let mut card_col = Column::new().spacing(10).push(address_row);
+        let label = match receive_method {
+            ReceiveMethod::Lightning => localized_copy("Lightning invoice"),
+            ReceiveMethod::Liquid => localized_copy("Liquid address"),
+            ReceiveMethod::OnChain => localized_copy("Swap address"),
+            ReceiveMethod::Usdt => "Liquid USDt address",
+        };
+        let mut details = Column::new()
+            .spacing(10)
+            .width(Length::Fill)
+            .push(p1_bold(label))
+            .push(address_row);
 
         if let Some(desc) = description {
-            card_col = card_col.push(p2_regular(desc).style(theme::text::secondary));
+            details = details.push(p2_regular(desc).style(theme::text::secondary));
         }
 
-        card_col = card_col.push(button_row);
+        details = details.push(button_row);
 
-        content = content.push(card::simple(card_col));
+        let ready_body: Element<'_, LiquidReceiveMessage> = if let Some(qr) = qr_data {
+            Row::new()
+                .spacing(24)
+                .align_y(Alignment::Start)
+                .width(Length::Fill)
+                .push(QRCode::<coincube_ui::theme::Theme>::new(qr).total_size(160))
+                .push(details)
+                .into()
+        } else {
+            details.into()
+        };
+
+        content = content.push(Container::new(card::simple(ready_body)).padding([0, 24]));
 
         // OnChain warning box
         if *receive_method == ReceiveMethod::OnChain {
-            content = content.push(onchain_warning_box(onchain_limits, bitcoin_unit));
+            content = content.push(
+                Container::new(onchain_warning_box(onchain_limits, bitcoin_unit)).padding([0, 24]),
+            );
         }
     }
 
     // ── Last transactions (matching Send screen) ────────────────────────────
-    content = content.push(Column::new().spacing(10).push(h4_bold("Last transactions")));
+    let mut recent = Column::new()
+        .spacing(10)
+        .push(h4_bold(localized_copy("Last transactions")));
 
     if recent_transaction.is_empty() {
-        content = content.push(coincube_ui::component::empty_placeholder(
+        recent = recent.push(coincube_ui::component::empty_placeholder(
             icon::receipt_icon().size(80),
-            "No transactions yet",
-            "Your transaction history will appear here once you send or receive coins.",
+            coincube_ui::locale::copy("No transactions yet"),
+            coincube_ui::locale::copy(
+                "Your transaction history will appear here once you send or receive coins.",
+            ),
         ));
     } else {
         for (idx, tx) in recent_transaction.iter().enumerate() {
@@ -226,7 +294,9 @@ pub fn liquid_receive_view<'a>(
                 .with_label(tx.description.clone())
                 .with_time_ago(tx.time_ago.clone());
 
-            if let Some(ref usdt_str) = tx.usdt_display {
+            if mask_amounts {
+                item = item.with_amount_override("••••••".into());
+            } else if let Some(ref usdt_str) = tx.usdt_display {
                 item = item.with_amount_override(usdt_str.clone());
             } else {
                 let fiat_str = tx
@@ -248,7 +318,7 @@ pub fn liquid_receive_view<'a>(
                                 .style(move |_| iced::widget::text::Style { color: Some(fg) }),
                         )
                         .push(
-                            text("Pending")
+                            text(localized_copy("Pending"))
                                 .bold()
                                 .size(14)
                                 .style(move |_| iced::widget::text::Style { color: Some(fg) }),
@@ -270,7 +340,7 @@ pub fn liquid_receive_view<'a>(
             let tx_element: Element<'_, LiquidReceiveMessage> = item
                 .view(LiquidReceiveMessage::SelectTransaction(idx))
                 .into();
-            content = content.push(tx_element);
+            recent = recent.push(tx_element);
         }
 
         // "View All Transactions" button
@@ -281,7 +351,7 @@ pub fn liquid_receive_view<'a>(
                     color: Some(color::ORANGE),
                 });
 
-            let label = text("View All Transactions")
+            let label = text(localized_copy("View All Transactions"))
                 .size(15)
                 .style(|_theme: &theme::Theme| iced::widget::text::Style {
                     color: Some(color::ORANGE),
@@ -299,7 +369,7 @@ pub fn liquid_receive_view<'a>(
                     border: iced::Border {
                         color: color::ORANGE,
                         width: 1.5,
-                        radius: 20.0.into(),
+                        radius: 8.0.into(),
                     },
                     ..Default::default()
                 },
@@ -308,7 +378,7 @@ pub fn liquid_receive_view<'a>(
                 background: Some(Background::Color(color::TRANSPARENT)),
                 text_color: color::ORANGE,
                 border: iced::Border {
-                    radius: 20.0.into(),
+                    radius: 8.0.into(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -316,7 +386,7 @@ pub fn liquid_receive_view<'a>(
             .on_press(LiquidReceiveMessage::History)
         };
 
-        content = content
+        recent = recent
             .push(Space::new().height(Length::Fixed(20.0)))
             .push(
                 Container::new(view_tx_button)
@@ -326,25 +396,182 @@ pub fn liquid_receive_view<'a>(
             .push(Space::new().height(Length::Fixed(40.0)));
     }
 
+    let network_name = match network {
+        coincube_core::miniscript::bitcoin::Network::Bitcoin => "Liquid network",
+        coincube_core::miniscript::bitcoin::Network::Testnet
+        | coincube_core::miniscript::bitcoin::Network::Signet
+        | coincube_core::miniscript::bitcoin::Network::Regtest => "Liquid test network",
+        _ => "Liquid network",
+    };
+    let balance = if mask_amounts {
+        "••••••".to_owned()
+    } else if receive_asset == SendAsset::Usdt {
+        format!("{} USDt", format_usdt_display(usdt_balance))
+    } else {
+        format!(
+            "{} {}",
+            btc_balance.to_formatted_string_with_unit(bitcoin_unit),
+            if matches!(bitcoin_unit, BitcoinDisplayUnit::BTC) {
+                "BTC"
+            } else {
+                "SATS"
+            }
+        )
+    };
+    let header = Column::new()
+        .spacing(4)
+        .push(
+            iced_button(text(format!("‹ Liquid · {}", cube_name)).color(color::ORANGE))
+                .padding([2, 0])
+                .style(theme::button::transparent)
+                .on_press(LiquidReceiveMessage::BackToOverview),
+        )
+        .push(h3(localized_copy("Receive")).bold())
+        .push(
+            p2_regular(format!("{} · {}", cube_name, network_name)).style(theme::text::secondary),
+        );
+    let aside = Column::new()
+        .spacing(8)
+        .push(p2_regular(localized_copy("Receiving into")).style(theme::text::secondary))
+        .push(p1_bold(format!("Liquid · {}", cube_name)))
+        .push(p2_bold(balance))
+        .push(iced::widget::rule::horizontal(1))
+        .push(
+            button::transparent_border(None, localized_copy("See all in Activity"))
+                .on_press(LiquidReceiveMessage::History),
+        );
+    let body = Column::new()
+        .spacing(20)
+        .width(Length::Fill)
+        .push(header)
+        .push(
+            Row::new()
+                .spacing(40)
+                .align_y(Alignment::Start)
+                .push(
+                    Container::new(content)
+                        .padding(iced::Padding::default().bottom(18.0))
+                        .width(Length::Fixed(680.0))
+                        .style(payment_card_style),
+                )
+                .push(Container::new(aside).width(Length::Fixed(240.0)))
+                .wrap()
+                .vertical_spacing(20),
+        )
+        .push(recent);
     if let Some(err) = error {
         Column::new()
             .push(
                 Container::new(
-                    Container::new(text(err).size(14).color(color::RED))
-                        .padding(10)
-                        .center_x(Length::Fill)
-                        .style(theme::card::error)
-                        .width(Length::Fill)
-                        .max_width(800),
+                    Container::new(
+                        text(coincube_ui::locale::notice(err.clone()))
+                            .size(14)
+                            .color(color::RED),
+                    )
+                    .padding(10)
+                    .center_x(Length::Fill)
+                    .style(theme::card::error)
+                    .width(Length::Fill)
+                    .max_width(800),
                 )
                 .width(Length::Fill)
                 .padding([20, 0])
                 .align_x(Alignment::Center),
             )
-            .push(content)
+            .push(
+                Container::new(Container::new(body).width(Length::Fill).max_width(960.0))
+                    .width(Length::Fill),
+            )
             .into()
     } else {
-        content.into()
+        Container::new(Container::new(body).width(Length::Fill).max_width(960.0))
+            .width(Length::Fill)
+            .into()
+    }
+}
+
+fn receive_kind_selector(
+    asset: SendAsset,
+    stablecoin_available: bool,
+) -> Element<'static, LiquidReceiveMessage> {
+    let mut selector = Column::new().spacing(4).push(
+        segmented(
+            [
+                segment("liquid-receive-kind-bitcoin", SendAsset::Lbtc, "Bitcoin"),
+                segment(
+                    "liquid-receive-kind-stablecoin",
+                    SendAsset::Usdt,
+                    localized_copy("Stablecoin"),
+                )
+                .enabled(stablecoin_available),
+            ],
+            Some(asset),
+            LiquidReceiveMessage::FocusAction,
+        )
+        .on_select(LiquidReceiveMessage::SetReceiveAsset),
+    );
+    if !stablecoin_available {
+        selector = selector.push(p2_regular(localized_copy(
+            "USDt is unavailable on this network.",
+        )));
+    }
+    selector.into()
+}
+
+fn receive_method_selector(
+    asset: SendAsset,
+    sender: SenderNetwork,
+) -> Element<'static, LiquidReceiveMessage> {
+    let methods = if asset == SendAsset::Lbtc {
+        vec![
+            segment(
+                "liquid-receive-method-lightning",
+                SenderNetwork::Lightning,
+                "Lightning invoice",
+            ),
+            segment(
+                "liquid-receive-method-liquid",
+                SenderNetwork::Liquid,
+                "Liquid address",
+            ),
+            segment(
+                "liquid-receive-method-bitcoin",
+                SenderNetwork::Bitcoin,
+                "Bitcoin address · on-chain swap",
+            ),
+        ]
+    } else {
+        vec![segment(
+            "liquid-receive-method-usdt",
+            SenderNetwork::Liquid,
+            "Liquid USDt address",
+        )]
+    };
+    let row = segmented(methods, Some(sender), LiquidReceiveMessage::FocusAction)
+        .on_select(LiquidReceiveMessage::SetSenderNetwork);
+    let mut content = Column::new()
+        .spacing(8)
+        .push(p1_bold(localized_copy("Method")))
+        .push(row);
+    if asset == SendAsset::Usdt {
+        content = content.push(
+            button::secondary(None, localized_copy("From another network"))
+                .on_press(LiquidReceiveMessage::OpenSenderPicker),
+        );
+    }
+    content.into()
+}
+
+fn payment_card_style(theme: &theme::Theme) -> container::Style {
+    let shell = &theme.colors.shell;
+    container::Style {
+        background: Some(Background::Color(shell.panel)),
+        border: iced::Border {
+            color: shell.line,
+            width: 1.0,
+            radius: 16.0.into(),
+        },
+        ..Default::default()
     }
 }
 
@@ -396,7 +623,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                         color::GREY_2
                     },
                     border: iced::Border {
-                        radius: 50.0.into(),
+                        radius: 6.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -410,7 +637,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                 color::TRANSPARENT
             })),
             border: iced::Border {
-                radius: 50.0.into(),
+                radius: 6.0.into(),
                 color: if lightning_liquid {
                     color::ORANGE
                 } else {
@@ -463,7 +690,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                         color::GREY_2
                     },
                     border: iced::Border {
-                        radius: 50.0.into(),
+                        radius: 6.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -477,7 +704,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                 color::TRANSPARENT
             })),
             border: iced::Border {
-                radius: 50.0.into(),
+                radius: 6.0.into(),
                 color: if onchain_liquid {
                     color::ORANGE
                 } else {
@@ -531,7 +758,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                         color::GREY_2
                     },
                     border: iced::Border {
-                        radius: 50.0.into(),
+                        radius: 6.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -545,7 +772,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                 color::TRANSPARENT
             })),
             border: iced::Border {
-                radius: 50.0.into(),
+                radius: 6.0.into(),
                 color: if liquid_active {
                     color::ORANGE
                 } else {
@@ -599,7 +826,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                         color::GREY_2
                     },
                     border: iced::Border {
-                        radius: 50.0.into(),
+                        radius: 6.0.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -613,7 +840,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                 color::TRANSPARENT
             })),
             border: iced::Border {
-                radius: 50.0.into(),
+                radius: 6.0.into(),
                 color: if usdt_active {
                     color::ORANGE
                 } else {
@@ -638,7 +865,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
         background: Some(Background::Color(iced::color!(0x202020))),
         border: iced::Border {
             color: iced::color!(0x202020),
-            radius: 50.0.into(),
+            radius: 10.0.into(),
             width: 2.0,
         },
         ..Default::default()
@@ -678,8 +905,9 @@ fn input_fields<'a>(
         let min_btc = Amount::from_sat(min_sat);
         let max_btc = Amount::from_sat(max_sat);
         hints = hints.push(
-            text(format!(
+            text(localized_format!(
                 "Enter an amount between {} and {} {}",
+                "Introduce un importe entre {} y {} {}",
                 min_btc.to_formatted_string_with_unit(bitcoin_unit),
                 max_btc.to_formatted_string_with_unit(bitcoin_unit),
                 bitcoin_unit,
@@ -690,24 +918,31 @@ fn input_fields<'a>(
     }
 
     let amount_form = if matches!(bitcoin_unit, BitcoinDisplayUnit::BTC) {
-        form::Form::new_amount_btc("Enter amount", amount_input, |v| {
-            LiquidReceiveMessage::AmountInput(v)
-        })
+        form::Form::new_amount_btc(
+            coincube_ui::locale::copy("Enter amount"),
+            amount_input,
+            LiquidReceiveMessage::AmountInput,
+        )
+        .maybe_warning(amount_input.warning.map(coincube_ui::locale::copy))
         .size(16)
         .padding(15)
     } else {
-        form::Form::new_amount_sats("Enter amount", amount_input, |v| {
-            LiquidReceiveMessage::AmountInput(v)
-        })
+        form::Form::new_amount_sats(
+            coincube_ui::locale::copy("Enter amount"),
+            amount_input,
+            LiquidReceiveMessage::AmountInput,
+        )
+        .maybe_warning(amount_input.warning.map(coincube_ui::locale::copy))
         .size(16)
         .padding(15)
     };
 
-    let description_input_field = TextInput::new("Description (optional)", description_input)
-        .on_input(LiquidReceiveMessage::DescriptionInput)
-        .padding(15)
-        .size(16)
-        .width(Length::Fill);
+    let description_input_field =
+        TextInput::new(localized_copy("Description (optional)"), description_input)
+            .on_input(LiquidReceiveMessage::DescriptionInput)
+            .padding(15)
+            .size(16)
+            .width(Length::Fill);
 
     let next_btn = Container::new(
         iced::widget::button(
@@ -731,7 +966,7 @@ fn input_fields<'a>(
         Column::new()
             .spacing(12)
             .width(Length::Fill)
-            .push(h4_bold("Invoice details"))
+            .push(h4_bold(localized_copy("Invoice details")))
             .push(hints)
             .push(
                 Row::new()
@@ -757,7 +992,7 @@ fn usdt_input_fields<'a>(
             .is_some_and(|units| units > 0);
 
     let amount_input = TextInput::new(
-        "USDt amount (optional, e.g. 1.50)",
+        localized_copy("USDt amount (optional, e.g. 1.50)"),
         &usdt_amount_input.value,
     )
     .on_input(LiquidReceiveMessage::UsdtAmountInput)
@@ -785,7 +1020,7 @@ fn usdt_input_fields<'a>(
         Column::new()
             .spacing(12)
             .width(Length::Fill)
-            .push(h4_bold("USDt amount"))
+            .push(h4_bold(localized_copy("USDt amount")))
             .push(
                 Row::new()
                     .spacing(10)
@@ -802,7 +1037,7 @@ fn usdt_input_fields<'a>(
 
 fn generate_button<'a>() -> Element<'a, LiquidReceiveMessage> {
     Container::new(
-        button::primary(None, "Generate Address")
+        button::primary(None, localized_copy("Generate Address"))
             .on_press(LiquidReceiveMessage::GenerateAddress)
             .width(Length::Fixed(200.0))
             .padding(15),
@@ -820,19 +1055,23 @@ fn onchain_warning_box<'a>(
         Row::new()
             .spacing(8)
             .push(icon::warning_icon().size(16).color(color::ORANGE))
-            .push(text("Bitcoin onchain → L-BTC swap").size(14).bold().style(
-                |_theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(color::ORANGE),
-                },
-            )),
+            .push(
+                text(localized_copy("Bitcoin onchain → L-BTC swap"))
+                    .size(14)
+                    .bold()
+                    .style(|_theme: &theme::Theme| iced::widget::text::Style {
+                        color: Some(color::ORANGE),
+                    }),
+            ),
     );
 
     if let Some((min_sat, max_sat)) = onchain_limits {
         let min_btc = Amount::from_sat(min_sat);
         let max_btc = Amount::from_sat(max_sat);
         warning_content = warning_content.push(
-            text(format!(
+            text(localized_format!(
                 "- Send between {} and {} — outside this range the swap cannot settle.",
+                "- Enviar entre {} y {} - fuera de esta gama el swap no puede establecerse.",
                 min_btc.to_formatted_string_with_unit(bitcoin_unit),
                 max_btc.to_formatted_string_with_unit(bitcoin_unit),
             ))
@@ -841,7 +1080,7 @@ fn onchain_warning_box<'a>(
         );
     } else {
         warning_content = warning_content.push(
-            text("- Fetching current swap limits…")
+            text(localized_copy("- Fetching current swap limits…"))
                 .size(14)
                 .style(theme::text::secondary),
         );
@@ -849,15 +1088,15 @@ fn onchain_warning_box<'a>(
 
     warning_content = warning_content
         .push(
-            text("- Use this address for ONE deposit only.")
+            text(localized_copy("- Use this address for ONE deposit only."))
                 .size(14)
                 .style(theme::text::secondary),
         )
         .push(
-            text(
+            text(localized_copy(
                 "- If your deposit is outside the range or the swap fails, \
                  funds are recoverable via Refund in the Transactions tab.",
-            )
+            ))
             .size(14)
             .style(theme::text::secondary),
         );
@@ -933,15 +1172,15 @@ pub fn usdt_only_receive_view<'a>(
                 )
                 .push(address_row)
                 .push(
-                    text(
+                    text(localized_copy(
                         "Share this address to receive USDt (Liquid Tether) from any Liquid wallet",
-                    )
+                    ))
                     .size(13)
                     .style(theme::text::secondary),
                 )
                 .push(
                     Container::new(
-                        button::secondary(None, "Generate New Address")
+                        button::secondary(None, localized_copy("Generate New Address"))
                             .on_press(LiquidReceiveMessage::GenerateAddress)
                             .width(Length::Fixed(200.0))
                             .padding(10),
@@ -956,12 +1195,16 @@ pub fn usdt_only_receive_view<'a>(
         Column::new()
             .push(
                 Container::new(
-                    Container::new(text(err).size(14).color(color::RED))
-                        .padding(10)
-                        .center_x(Length::Fill)
-                        .style(theme::card::error)
-                        .width(Length::Fill)
-                        .max_width(800),
+                    Container::new(
+                        text(coincube_ui::locale::notice(err.clone()))
+                            .size(14)
+                            .color(color::RED),
+                    )
+                    .padding(10)
+                    .center_x(Length::Fill)
+                    .style(theme::card::error)
+                    .width(Length::Fill)
+                    .max_width(800),
                 )
                 .width(Length::Fill)
                 .padding([20, 40])
@@ -979,9 +1222,6 @@ pub fn usdt_only_receive_view<'a>(
 fn receive_cards(
     receive_asset: SendAsset,
     sender_network: SenderNetwork,
-    btc_balance: Amount,
-    usdt_balance: u64,
-    bitcoin_unit: BitcoinDisplayUnit,
 ) -> Element<'static, LiquidReceiveMessage> {
     let they_send_card = {
         let asset_label = match (receive_asset, sender_network) {
@@ -1008,7 +1248,7 @@ fn receive_cards(
         let card_content = Column::new()
             .spacing(6)
             .push(
-                text("THEY SEND")
+                text(localized_copy("THEY SEND"))
                     .size(P2_SIZE)
                     .style(theme::text::secondary),
             )
@@ -1046,7 +1286,7 @@ fn receive_cards(
                 .padding(16)
                 .width(Length::Fill)
                 .height(Length::Fixed(160.0))
-                .style(theme::card::simple),
+                .style(route_card_style),
         )
         .padding(0)
         .on_press(LiquidReceiveMessage::OpenSenderPicker)
@@ -1059,7 +1299,7 @@ fn receive_cards(
                     color::TRANSPARENT
                 },
                 width: 1.0,
-                radius: 16.0.into(),
+                radius: 8.0.into(),
             },
             ..Default::default()
         })
@@ -1077,18 +1317,10 @@ fn receive_cards(
         let ico: Element<'static, LiquidReceiveMessage> =
             asset_network_logo(asset_slug, "liquid", 40.0);
 
-        let balance_text = match receive_asset {
-            SendAsset::Lbtc => format!(
-                "Balance: {}",
-                btc_balance.to_formatted_string_with_unit(bitcoin_unit)
-            ),
-            SendAsset::Usdt => format!("Balance: {} USDt", format_usdt_display(usdt_balance)),
-        };
-
         let card_content = Column::new()
             .spacing(6)
             .push(
-                text("YOU RECEIVE")
+                text(localized_copy("YOU RECEIVE"))
                     .size(P2_SIZE)
                     .style(theme::text::secondary),
             )
@@ -1105,7 +1337,7 @@ fn receive_cards(
                     ),
             )
             .push(
-                text(balance_text)
+                text(localized_copy("Any amount"))
                     .size(P2_SIZE)
                     .style(theme::text::secondary),
             )
@@ -1127,7 +1359,7 @@ fn receive_cards(
                 .padding(16)
                 .width(Length::Fill)
                 .height(Length::Fixed(160.0))
-                .style(theme::card::simple),
+                .style(route_card_style),
         )
         .padding(0)
         .on_press(LiquidReceiveMessage::OpenReceivePicker)
@@ -1140,22 +1372,35 @@ fn receive_cards(
                     color::TRANSPARENT
                 },
                 width: 1.0,
-                radius: 16.0.into(),
+                radius: 8.0.into(),
             },
             ..Default::default()
         })
     };
 
-    let arrow = text("←").size(H3_SIZE).style(theme::text::secondary);
+    let arrow = text("→").size(H3_SIZE).style(theme::text::secondary);
 
     Row::new()
         .spacing(12)
         .align_y(Alignment::Center)
         .width(Length::Fill)
-        .push(Container::new(you_receive_card).width(Length::FillPortion(1)))
-        .push(arrow)
         .push(Container::new(they_send_card).width(Length::FillPortion(1)))
+        .push(arrow)
+        .push(Container::new(you_receive_card).width(Length::FillPortion(1)))
         .into()
+}
+
+fn route_card_style(theme: &theme::Theme) -> container::Style {
+    let shell = &theme.colors.shell;
+    container::Style {
+        background: Some(Background::Color(shell.background)),
+        border: iced::Border {
+            color: shell.line,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    }
 }
 
 // ── Picker modals ───────────────────────────────────────────────────────────
@@ -1172,7 +1417,7 @@ pub fn received_celebration_page<'a>(
         amount_display,
         quote,
         image_handle,
-        "has arrived.",
+        CopyText::HasArrived.get(),
         LiquidReceiveMessage::DismissCelebration,
     )
 }
@@ -1208,7 +1453,7 @@ pub fn qr_modal<'a>(
 
 /// "You Receive" asset picker modal.
 pub fn receive_asset_picker_modal(current: SendAsset) -> Element<'static, LiquidReceiveMessage> {
-    let title = text("YOU RECEIVE").size(16).bold();
+    let title = text(localized_copy("YOU RECEIVE")).size(16).bold();
 
     let lbtc_row = receive_picker_row(
         asset_network_logo("lbtc", "liquid", 36.0),
@@ -1241,7 +1486,7 @@ pub fn sender_network_picker_modal(
     receive_asset: SendAsset,
     current_network: SenderNetwork,
 ) -> Element<'static, LiquidReceiveMessage> {
-    let title = text("THEY SEND").size(16).bold();
+    let title = text(localized_copy("THEY SEND")).size(16).bold();
 
     let options = SenderNetwork::options_for_receive_asset(receive_asset);
 
@@ -1324,14 +1569,14 @@ fn receive_picker_row<'a>(
             .style(if is_selected {
                 picker_row_selected
             } else {
-                theme::card::simple
+                crate::app::view::shared::picker::picker_row_idle
             }),
     )
     .on_press(on_press)
     .style(|_: &theme::Theme, _| iced::widget::button::Style {
         background: Some(Background::Color(color::TRANSPARENT)),
         border: iced::Border {
-            radius: 12.0.into(),
+            radius: 8.0.into(),
             ..Default::default()
         },
         ..Default::default()
@@ -1351,8 +1596,333 @@ fn picker_row_selected(theme: &theme::Theme) -> iced::widget::container::Style {
         border: iced::Border {
             color: color::ORANGE,
             width: 1.0,
-            radius: 12.0.into(),
+            radius: 8.0.into(),
         },
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn receive_payment_hierarchy_and_focus_hold_at_compact_and_wide_sizes() {
+        let input = form::Value::<String>::default();
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                let mounted = capture::inspect_wide_content(
+                    "liquid-receive-payment-hierarchy",
+                    liquid_receive_view(
+                        "Everyday",
+                        coincube_core::miniscript::bitcoin::Network::Bitcoin,
+                        &ReceiveMethod::Liquid,
+                        None,
+                        None,
+                        false,
+                        &input,
+                        &input,
+                        "",
+                        BitcoinDisplayUnit::Sats,
+                        None,
+                        None,
+                        None,
+                        SendAsset::Lbtc,
+                        SenderNetwork::Liquid,
+                        true,
+                        &[],
+                        Amount::from_sat(42_000),
+                        0,
+                        false,
+                        false,
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                    outer.0 - 248 - 48,
+                );
+                for label in [
+                    "‹ Liquid",
+                    "Receive",
+                    "Everyday · Liquid network",
+                    "Payment details",
+                    "Receiving into",
+                    "Method",
+                    "Liquid address",
+                ] {
+                    assert!(
+                        mounted.contains(label),
+                        "{} missing at {} {:?}",
+                        label,
+                        appearance,
+                        outer
+                    );
+                }
+                for id in [
+                    "liquid-receive-kind-bitcoin",
+                    "liquid-receive-kind-stablecoin",
+                    "liquid-receive-method-lightning",
+                    "liquid-receive-method-liquid",
+                    "liquid-receive-method-bitcoin",
+                ] {
+                    assert!(
+                        mounted.has_focus(iced::advanced::widget::Id::new(id)),
+                        "{} not focusable",
+                        id
+                    );
+                }
+                assert!(!mounted.contains("✓"));
+                let x = |label| {
+                    mounted
+                        .text
+                        .iter()
+                        .find(|(value, _)| value == label)
+                        .unwrap()
+                        .1
+                        .x
+                };
+                assert!(x("THEY SEND") < x("YOU RECEIVE"));
+            }
+        }
+        let messages = capture::activate(
+            receive_kind_selector(SendAsset::Lbtc, true),
+            iced::advanced::widget::Id::new("liquid-receive-kind-bitcoin"),
+            (1024, 768),
+            false,
+        );
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            LiquidReceiveMessage::SetReceiveAsset(SendAsset::Lbtc)
+        )));
+    }
+
+    #[test]
+    fn address_remains_copyable_when_qr_encoding_is_unavailable() {
+        let input = form::Value::<String>::default();
+        let address = "lq1q-test-address".to_string();
+        let mounted = capture::inspect_wide_content(
+            "liquid-receive-no-qr",
+            liquid_receive_view(
+                "Everyday",
+                coincube_core::miniscript::bitcoin::Network::Bitcoin,
+                &ReceiveMethod::Liquid,
+                Some(&address),
+                None,
+                false,
+                &input,
+                &input,
+                "",
+                BitcoinDisplayUnit::Sats,
+                None,
+                None,
+                None,
+                SendAsset::Lbtc,
+                SenderNetwork::Liquid,
+                true,
+                &[],
+                Amount::ZERO,
+                0,
+                false,
+                false,
+            ),
+            (1024, 768),
+            "light",
+            theme::Theme::light(),
+            1024 - 248 - 48,
+        );
+        assert!(mounted.contains(&address));
+        assert!(mounted.contains("QR unavailable"));
+    }
+
+    #[test]
+    fn generated_liquid_address_shows_inline_qr_and_copy_action() {
+        let input = form::Value::<String>::default();
+        let address = "lq1qsyntheticreceive7q".to_owned();
+        let qr = qr_code::Data::new(&address).expect("synthetic address fits a QR code");
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                let mounted = capture::inspect_wide_content(
+                    "liquid-receive-ready",
+                    liquid_receive_view(
+                        "Everyday",
+                        coincube_core::miniscript::bitcoin::Network::Bitcoin,
+                        &ReceiveMethod::Liquid,
+                        Some(&address),
+                        Some(&qr),
+                        false,
+                        &input,
+                        &input,
+                        "",
+                        BitcoinDisplayUnit::Sats,
+                        None,
+                        None,
+                        None,
+                        SendAsset::Lbtc,
+                        SenderNetwork::Liquid,
+                        true,
+                        &[],
+                        Amount::ZERO,
+                        0,
+                        false,
+                        false,
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                    outer.0 - 248 - 48,
+                );
+                assert!(mounted.contains(&address));
+                assert!(mounted.contains("Copy"));
+                assert!(mounted.contains("Enlarge QR"));
+                assert!(!mounted.contains("QR unavailable"));
+                let ready_label = mounted
+                    .text
+                    .iter()
+                    .filter(|(label, _)| label == "Liquid address")
+                    .max_by(|(_, a), (_, b)| a.y.total_cmp(&b.y))
+                    .map(|(_, bounds)| *bounds)
+                    .expect("ready card label");
+                assert!(
+                    ready_label.x > 180.0,
+                    "ready details must sit beside the QR at {} {:?}: {:?}",
+                    appearance,
+                    outer,
+                    ready_label,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_stablecoin_has_network_explanation() {
+        let mounted = capture::inspect(
+            "liquid-receive-regtest",
+            receive_kind_selector(SendAsset::Lbtc, false),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Stablecoin"));
+        assert!(mounted.contains("USDt is unavailable on this network"));
+    }
+
+    #[test]
+    fn receive_passive_balances_and_recent_rows_follow_global_mask() {
+        let input = form::Value::<String>::default();
+        let rows = vec![
+            RecentTransaction {
+                description: "Bitcoin payment".into(),
+                time_ago: "just now".into(),
+                amount: Amount::from_sat(98_765_432),
+                fees_sat: Amount::ZERO,
+                fiat_amount: Some(
+                    crate::app::view::vault::fiat::FiatAmount::new(
+                        3456.78,
+                        crate::services::fiat::Currency::USD,
+                    )
+                    .unwrap(),
+                ),
+                is_incoming: true,
+                status: DomainPaymentStatus::Complete,
+                details: DomainPaymentDetails::Lightning {
+                    swap_id: None,
+                    description: "Bitcoin payment".into(),
+                    payer_note: None,
+                },
+                usdt_display: None,
+            },
+            RecentTransaction {
+                description: "Token payment".into(),
+                time_ago: "just now".into(),
+                amount: Amount::ZERO,
+                fees_sat: Amount::ZERO,
+                fiat_amount: None,
+                is_incoming: false,
+                status: DomainPaymentStatus::Complete,
+                details: DomainPaymentDetails::LiquidAsset {
+                    asset_id: "usdt".into(),
+                    asset_info: None,
+                    description: "Token payment".into(),
+                    payer_note: None,
+                },
+                usdt_display: Some("2468.13 USDt".into()),
+            },
+        ];
+        let method = ReceiveMethod::Liquid;
+        let render = |mask_amounts, receive_asset| {
+            liquid_receive_view(
+                "Everyday",
+                coincube_core::miniscript::bitcoin::Network::Bitcoin,
+                &method,
+                None,
+                None,
+                false,
+                &input,
+                &input,
+                "",
+                BitcoinDisplayUnit::Sats,
+                None,
+                None,
+                None,
+                receive_asset,
+                SenderNetwork::Liquid,
+                true,
+                &rows,
+                Amount::from_sat(12_345_678),
+                135_791_113,
+                true,
+                mask_amounts,
+            )
+        };
+        let hidden = capture::inspect(
+            "liquid-receive-hidden",
+            render(true, SendAsset::Lbtc),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(hidden.contains("••••••"));
+        for sentinel in ["12,345,678", "98,765,432", "2468.13", "3,456.78"] {
+            assert!(
+                !hidden.contains(sentinel),
+                "hidden Liquid receive amount {}",
+                sentinel
+            );
+        }
+        let shown = capture::inspect(
+            "liquid-receive-shown",
+            render(false, SendAsset::Lbtc),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown.contains("12,345,678"));
+        assert!(shown.contains("98,765,432"));
+        assert!(shown.contains("2468.13"));
+        assert!(shown.contains("3,456.78"));
+        let hidden_usdt = capture::inspect(
+            "liquid-receive-usdt-hidden",
+            render(true, SendAsset::Usdt),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        let usdt_balance = format!("{} USDt", format_usdt_display(135_791_113));
+        assert!(!hidden_usdt.contains(&usdt_balance));
+        let shown_usdt = capture::inspect(
+            "liquid-receive-usdt-shown",
+            render(false, SendAsset::Usdt),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(shown_usdt.contains(&usdt_balance));
     }
 }

@@ -39,6 +39,52 @@ pub const MAX_FEE: bitcoin::Amount = bitcoin::Amount::ONE_BTC;
 /// Assume that paying more than 1000sat/vb in feerate is a bug.
 pub const MAX_FEERATE: u64 = 1_000;
 
+const MCP_FEE_CAP_PREFIX: &[u8] = b"coincube";
+const MCP_FEE_CAP_SUBTYPE: u8 = 0xfc;
+const MCP_FEE_CAP_KEY: &[u8] = b"fee-cap";
+
+fn mcp_fee_cap_key() -> bitcoin::psbt::raw::ProprietaryKey {
+    bitcoin::psbt::raw::ProprietaryKey {
+        prefix: MCP_FEE_CAP_PREFIX.to_vec(),
+        subtype: MCP_FEE_CAP_SUBTYPE,
+        key: MCP_FEE_CAP_KEY.to_vec(),
+    }
+}
+
+/// Remember the caller's fee ceiling and requested sat/vB on the PSBT.
+///
+/// The value stored for the rate is the request, not an estimate. Broadcast
+/// reads it back and checks the fee against the maximum signed size used at
+/// preparation, along with the total fee ceiling.
+pub fn stamp_mcp_fee_cap(psbt: &mut Psbt, max_fee_sats: u64, max_fee_rate_sat_vb: u64) {
+    let mut value = Vec::with_capacity(16);
+    value.extend_from_slice(&max_fee_sats.to_le_bytes());
+    value.extend_from_slice(&max_fee_rate_sat_vb.to_le_bytes());
+    psbt.proprietary.insert(mcp_fee_cap_key(), value);
+}
+
+/// Fee ceiling and requested sat/vB previously stamped by [`stamp_mcp_fee_cap`].
+pub fn mcp_fee_cap(psbt: &Psbt) -> Option<(u64, u64)> {
+    let value = psbt.proprietary.get(&mcp_fee_cap_key())?;
+    if value.len() != 16 {
+        return None;
+    }
+    let max_fee = u64::from_le_bytes(value[0..8].try_into().ok()?);
+    let max_rate = u64::from_le_bytes(value[8..16].try_into().ok()?);
+    if max_fee == 0 || max_rate == 0 {
+        return None;
+    }
+    Some((max_fee, max_rate))
+}
+
+/// Whether the final fee exceeds the cap measured at preparation.
+///
+/// `prepared_vsize` is the same maximum-witness estimate used to choose and
+/// review the fee. A shorter signature must not make an unchanged fee fail.
+pub fn signed_fee_exceeds_cap(fee: u64, prepared_vsize: u64, max_fee: u64, max_rate: u64) -> bool {
+    prepared_vsize == 0 || fee > max_fee || fee.div_ceil(prepared_vsize) > max_rate
+}
+
 /// Do not set locktime if tip age in seconds is older than this.
 // See also https://github.com/bitcoin/bitcoin/blob/ecd23656db174adef61d3bd753d02698c3528192/src/wallet/spend.cpp#L906.
 pub const MAX_ANTI_FEE_SNIPING_TIP_AGE_SECS: u64 = 8 * 60 * 60; // 8 hours
@@ -155,8 +201,8 @@ impl fmt::Display for SpendCreationError {
             Self::CoinSelection(e) => write!(f, "Coin selection error: '{}'", e),
             Self::SanityCheckFailure(psbt) => write!(
                 f,
-                "BUG! Please report this. Failed sanity checks for PSBT '{}'.",
-                psbt
+                "BUG! Please report this. Failed sanity checks for PSBT {}.",
+                psbt.unsigned_tx.compute_txid()
             ),
             Self::FeeEstimationFailed => write!(f, "Fee Estimation Failed"),
         }
@@ -168,6 +214,17 @@ impl std::error::Error for SpendCreationError {}
 // Sanity check the value of a transaction output.
 pub(crate) fn check_output_value(value: bitcoin::Amount) -> Result<(), SpendCreationError> {
     if value > bitcoin::Amount::MAX_MONEY || value.to_sat() < DUST_OUTPUT_SATS {
+        Err(SpendCreationError::InvalidOutputValue(value))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_network_output_value(
+    value: bitcoin::Amount,
+    script: &bitcoin::Script,
+) -> Result<(), SpendCreationError> {
+    if value > bitcoin::Amount::MAX_MONEY || value < script.minimal_non_dust() {
         Err(SpendCreationError::InvalidOutputValue(value))
     } else {
         Ok(())
@@ -436,6 +493,8 @@ pub(crate) fn select_coins_for_spend(
     max_sat_weight: u64,
     is_segwit: bool,
     must_have_change: bool,
+    min_change_sats: u64,
+    use_economic_change_policy: bool,
 ) -> Result<CoinSelectionRes, InsufficientFunds> {
     let out_value_nochange = base_tx.output.iter().map(|o| o.value.to_sat()).sum();
     let out_weight_nochange = {
@@ -503,9 +562,11 @@ pub(crate) fn select_coins_for_spend(
         }
     }
 
-    // Now set the change policy. We use a policy which ensures no change output is created with a
-    // lower value than our custom dust limit. NOTE: the change output weight must not account for
-    // a potential difference in the size of the outputs count varint.
+    // Now set the change policy. Ordinary spends omit uneconomical change. MCP
+    // drafts keep change at the network minimum so a valid output is not
+    // silently converted to fee and rejected by the caller's fee cap.
+    // NOTE: the change output weight must not account for a potential
+    // difference in the size of the outputs count varint.
     let feerate = FeeRate::from_sat_per_vb(feerate_vb);
     let long_term_feerate = FeeRate::from_sat_per_vb(LONG_TERM_FEERATE_VB);
     let change_output_weight = change_txo.weight().to_wu();
@@ -515,13 +576,17 @@ pub(crate) fn select_coins_for_spend(
         n_outputs: 1, // we only want a single change output
     };
     // As of bdk_coin_select v0.3.0, the min change value is exclusive so we must subtract 1.
-    let change_min_value = DUST_OUTPUT_SATS.saturating_sub(1);
-    let change_policy = ChangePolicy::min_value_and_waste(
-        drain_weights,
-        change_min_value,
-        feerate,
-        long_term_feerate,
-    );
+    let change_min_value = min_change_sats.saturating_sub(1);
+    let change_policy = if use_economic_change_policy {
+        ChangePolicy::min_value_and_waste(
+            drain_weights,
+            change_min_value,
+            feerate,
+            long_term_feerate,
+        )
+    } else {
+        ChangePolicy::min_value(drain_weights, change_min_value)
+    };
 
     // Finally, run the coin selection algorithm. We use an opportunistic BnB and if it couldn't
     // find any solution we fall back to selecting coins by descending value.
@@ -569,13 +634,30 @@ pub(crate) fn select_coins_for_spend(
             e
         );
 
-        select_descending(
-            &mut selector,
-            target,
-            change_policy,
-            must_have_change,
-            drain_weights,
-        )?;
+        selector.sort_candidates_by_descending_value_pwu();
+        // Select more coins until target is met and change condition satisfied.
+        loop {
+            let drain = selector.drain(target, change_policy);
+            if selector.is_target_met_with_drain(target, drain)
+                && (drain.is_some() || !must_have_change)
+            {
+                break;
+            }
+            if !selector.select_next() {
+                // If the solution must have change, we calculate how much is missing from the current
+                // selection in order for there to be a change output with the smallest possible value.
+                let drain = if must_have_change {
+                    bdk_coin_select::Drain {
+                        weights: drain_weights,
+                        value: min_change_sats,
+                    }
+                } else {
+                    drain
+                };
+                let missing = selector.excess(target, drain).unsigned_abs();
+                return Err(InsufficientFunds { missing });
+            }
+        }
     }
     // By now, selection is complete and we can check how much change to give according to our policy.
     let drain = selector.drain(target, change_policy);
@@ -699,6 +781,7 @@ pub enum SpendTxFees {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CreateSpendWarning {
     ChangeAddedToFee(u64),
+    NetworkDustChangeAddedToFee { amount: u64, minimum: u64 },
     AdditionalFeeForAncestors(u64),
 }
 
@@ -713,6 +796,11 @@ impl fmt::Display for CreateSpendWarning {
                 DUST_OUTPUT_SATS,
                 amt,
                 if *amt > 1 { "s" } else { "" },
+            ),
+            CreateSpendWarning::NetworkDustChangeAddedToFee { amount, minimum } => write!(
+                f,
+                "A change output of {} sats was added to the fee because it did not meet the {}-sat network dust limit.",
+                amount, minimum,
             ),
             CreateSpendWarning::AdditionalFeeForAncestors(amt) => write!(
                 f,
@@ -756,9 +844,9 @@ pub struct CreateSpendRes {
 ///   coin selection algorithm will be run to spend the most efficient subset of them to meet the
 ///   `destinations` requirements.
 /// * `fees`: the target feerate (in sats/vb) and, if necessary, minimum absolute fee for this tx.
-/// * `change_addr`: the address to use for a change output if we need to create one. Can be set to
-///   an external address (if combined with an empty list of `destinations` it's useful to sweep some
-///   or all coins of a wallet to an external address).
+/// * `change_addr`: the address to use for a change output if we need to create one. The daemon
+///   accepts an external address only when `destinations` is empty, which sweeps the selected
+///   coins to that single output. A partial payment must use a change-branch address of the wallet.
 /// * `locktime`: the locktime to use for the transaction.
 #[allow(clippy::too_many_arguments)]
 pub fn create_spend(
@@ -784,6 +872,33 @@ pub fn create_spend(
     )
 }
 
+/// Create a capped MCP Vault spend using each output script's network dust
+/// minimum. Ordinary spends retain the wallet's 500-sat output floor.
+#[allow(clippy::too_many_arguments)]
+pub fn create_spend_with_network_dust(
+    main_descriptor: &descriptors::CoincubeDescriptor,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    destinations: &[(SpendOutputAddress, bitcoin::Amount)],
+    candidate_coins: &[CandidateCoin],
+    fees: SpendTxFees,
+    change_addr: SpendOutputAddress,
+    locktime: LockTime,
+) -> Result<CreateSpendRes, SpendCreationError> {
+    create_spend_with_output_floor(
+        main_descriptor,
+        secp,
+        tx_getter,
+        destinations,
+        candidate_coins,
+        fees,
+        change_addr,
+        locktime,
+        None,
+        true,
+    )
+}
+
 // Only the bounded Claim builder supplies a poison script. Ordinary spend
 // construction keeps the exact historical path by passing None.
 #[allow(clippy::too_many_arguments)]
@@ -797,6 +912,33 @@ pub(crate) fn create_spend_with_poison(
     change_addr: SpendOutputAddress,
     locktime: LockTime,
     poison: Option<bitcoin::ScriptBuf>,
+) -> Result<CreateSpendRes, SpendCreationError> {
+    create_spend_with_output_floor(
+        main_descriptor,
+        secp,
+        tx_getter,
+        destinations,
+        candidate_coins,
+        fees,
+        change_addr,
+        locktime,
+        poison,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_spend_with_output_floor(
+    main_descriptor: &descriptors::CoincubeDescriptor,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    destinations: &[(SpendOutputAddress, bitcoin::Amount)],
+    candidate_coins: &[CandidateCoin],
+    fees: SpendTxFees,
+    change_addr: SpendOutputAddress,
+    locktime: LockTime,
+    poison: Option<bitcoin::ScriptBuf>,
+    network_dust_only: bool,
 ) -> Result<CreateSpendRes, SpendCreationError> {
     // This method does quite a few things. In addition, we support different modes (coin control
     // vs automated coin selection, self-spend, sweep, etc..) which make the logic a bit more
@@ -833,7 +975,11 @@ pub(crate) fn create_spend_with_poison(
     // sanity check each output's value.
     let mut psbt_outs = Vec::with_capacity(destinations.len());
     for (address, amount) in destinations {
-        check_output_value(*amount)?;
+        if network_dust_only {
+            check_network_output_value(*amount, &address.addr.script_pubkey())?;
+        } else {
+            check_output_value(*amount)?;
+        }
 
         tx.output.push(bitcoin::TxOut {
             value: *amount,
@@ -841,7 +987,16 @@ pub(crate) fn create_spend_with_poison(
         });
         // If it's an address of ours, signal it as change to signing devices by adding the
         // BIP32 derivation path to the PSBT output.
-        let psbt_out = output_metadata(main_descriptor, secp, address.info);
+        let mut psbt_out = PsbtOut::default();
+        if let Some(AddrInfo { index, is_change }) = address.info {
+            let desc = if is_change {
+                main_descriptor.change_descriptor()
+            } else {
+                main_descriptor.receive_descriptor()
+            };
+            desc.derive(index, secp)
+                .update_change_psbt_out(&mut psbt_out)
+        }
         psbt_outs.push(psbt_out);
     }
     assert_eq!(tx.output.is_empty(), is_self_send);
@@ -862,6 +1017,11 @@ pub(crate) fn create_spend_with_poison(
     let mut change_txo = bitcoin::TxOut {
         value: bitcoin::Amount::MAX,
         script_pubkey: change_addr.addr.script_pubkey(),
+    };
+    let min_change_sats = if network_dust_only {
+        change_txo.script_pubkey.minimal_non_dust().to_sat()
+    } else {
+        DUST_OUTPUT_SATS
     };
     // If no candidates have relative locktime, then we should use the primary spending path.
     // Note we set this value before actually selecting the coins, but we expect either all
@@ -903,6 +1063,8 @@ pub(crate) fn create_spend_with_poison(
             max_sat_wu,
             true,
             is_self_send,
+            min_change_sats,
+            !network_dust_only,
         )
         .map_err(SpendCreationError::CoinSelection)?
     };
@@ -911,20 +1073,40 @@ pub(crate) fn create_spend_with_poison(
     // return an error. In any case, the PSBT sanity check will catch a transaction with no outputs.
     let has_change = change_amount.to_sat() > 0;
     if has_change {
-        check_output_value(change_amount)?;
+        if network_dust_only {
+            check_network_output_value(change_amount, &change_txo.script_pubkey)?;
+        } else {
+            check_output_value(change_amount)?;
+        }
 
         // If the change address is ours, tell the signers by setting the BIP32 derivations in the
         // PSBT output.
-        let psbt_out = output_metadata(main_descriptor, secp, change_addr.info);
+        let mut psbt_out = PsbtOut::default();
+        if let Some(AddrInfo { index, is_change }) = change_addr.info {
+            let desc = if is_change {
+                main_descriptor.change_descriptor()
+            } else {
+                main_descriptor.receive_descriptor()
+            };
+            desc.derive(index, secp)
+                .update_change_psbt_out(&mut psbt_out);
+        }
 
         // TODO: shuffle once we have Taproot
         change_txo.value = change_amount;
         tx.output.push(change_txo);
         psbt_outs.push(psbt_out);
     } else if max_change_amount.to_sat() > 0 {
-        warnings.push(CreateSpendWarning::ChangeAddedToFee(
-            max_change_amount.to_sat(),
-        ));
+        if network_dust_only {
+            warnings.push(CreateSpendWarning::NetworkDustChangeAddedToFee {
+                amount: max_change_amount.to_sat(),
+                minimum: min_change_sats,
+            });
+        } else {
+            warnings.push(CreateSpendWarning::ChangeAddedToFee(
+                max_change_amount.to_sat(),
+            ));
+        }
     }
 
     if fee_for_ancestors.to_sat() > 0 {
@@ -934,71 +1116,8 @@ pub(crate) fn create_spend_with_poison(
     }
 
     // Iterate through selected coins and add necessary information to the PSBT inputs.
-    let psbt_ins = selected_psbt_inputs(main_descriptor, secp, tx_getter, &selected, &mut tx)?;
-
-    // Finally, create the PSBT with all inputs and outputs, sanity check it and return it.
-    let psbt = Psbt {
-        unsigned_tx: tx,
-        version: 0,
-        xpub: BTreeMap::new(),
-        proprietary: BTreeMap::new(),
-        unknown: BTreeMap::new(),
-        inputs: psbt_ins,
-        outputs: psbt_outs,
-    };
-    sanity_check_psbt(main_descriptor, &psbt, use_primary_path)?;
-    // TODO: maybe check for common standardness rules (max size, ..)?
-
-    Ok(CreateSpendRes {
-        psbt,
-        has_change,
-        warnings,
-    })
-}
-
-fn select_descending(
-    selector: &mut CoinSelector<'_>,
-    target: Target,
-    change_policy: ChangePolicy,
-    must_have_change: bool,
-    drain_weights: DrainWeights,
-) -> Result<(), InsufficientFunds> {
-    selector.sort_candidates_by_descending_value_pwu();
-    // Select more coins until target is met and change condition satisfied.
-    loop {
-        let drain = selector.drain(target, change_policy);
-        if selector.is_target_met_with_drain(target, drain)
-            && (drain.is_some() || !must_have_change)
-        {
-            break;
-        }
-        if !selector.select_next() {
-            // If the solution must have change, we calculate how much is missing from the current
-            // selection in order for there to be a change output with the smallest possible value.
-            let drain = if must_have_change {
-                bdk_coin_select::Drain {
-                    weights: drain_weights,
-                    value: DUST_OUTPUT_SATS,
-                }
-            } else {
-                drain
-            };
-            let missing = selector.excess(target, drain).unsigned_abs();
-            return Err(InsufficientFunds { missing });
-        }
-    }
-    Ok(())
-}
-
-fn selected_psbt_inputs(
-    main_descriptor: &descriptors::CoincubeDescriptor,
-    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
-    tx_getter: &mut impl TxGetter,
-    selected: &[CandidateCoin],
-    tx: &mut bitcoin::Transaction,
-) -> Result<Vec<PsbtIn>, SpendCreationError> {
     let mut psbt_ins = Vec::with_capacity(selected.len());
-    for cand in selected {
+    for cand in &selected {
         let sequence = cand
             .sequence
             .unwrap_or(bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME);
@@ -1045,25 +1164,24 @@ fn selected_psbt_inputs(
         psbt_ins.push(psbt_in);
     }
 
-    Ok(psbt_ins)
-}
+    // Finally, create the PSBT with all inputs and outputs, sanity check it and return it.
+    let psbt = Psbt {
+        unsigned_tx: tx,
+        version: 0,
+        xpub: BTreeMap::new(),
+        proprietary: BTreeMap::new(),
+        unknown: BTreeMap::new(),
+        inputs: psbt_ins,
+        outputs: psbt_outs,
+    };
+    sanity_check_psbt(main_descriptor, &psbt, use_primary_path)?;
+    // TODO: maybe check for common standardness rules (max size, ..)?
 
-fn output_metadata(
-    main_descriptor: &descriptors::CoincubeDescriptor,
-    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
-    info: Option<AddrInfo>,
-) -> PsbtOut {
-    let mut psbt_out = PsbtOut::default();
-    if let Some(AddrInfo { index, is_change }) = info {
-        let desc = if is_change {
-            main_descriptor.change_descriptor()
-        } else {
-            main_descriptor.receive_descriptor()
-        };
-        desc.derive(index, secp)
-            .update_change_psbt_out(&mut psbt_out)
-    }
-    psbt_out
+    Ok(CreateSpendRes {
+        psbt,
+        has_change,
+        warnings,
+    })
 }
 
 #[cfg(test)]
@@ -1670,5 +1788,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn prepared_fee_cap_uses_the_reviewed_size() {
+        // 400 sats across the 200 vB preparation estimate is 2 sat/vB.
+        // A 199 vB final signature would have a higher apparent rate, but
+        // the same reviewed 400 sat fee must remain valid at broadcast.
+        assert!(!signed_fee_exceeds_cap(400, 200, 1_000, 2));
+        assert!(signed_fee_exceeds_cap(401, 200, 1_000, 2));
+        assert!(signed_fee_exceeds_cap(1_001, 200, 1_000, 2));
+        assert!(signed_fee_exceeds_cap(400, 0, 1_000, 2));
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
+        assert_eq!(mcp_fee_cap(&psbt), None);
+        stamp_mcp_fee_cap(&mut psbt, 1_000, 2);
+        assert_eq!(mcp_fee_cap(&psbt), Some((1_000, 2)));
     }
 }

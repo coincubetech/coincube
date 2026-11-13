@@ -1,27 +1,33 @@
 {
-  "commit": "ba5e510a3189f32d11cb57e10267284b7109cb39",
-  "tree": "578d9d2943ddab9f2ab52c06a886e3b9d5cd7781",
-  "crate_checksum": "77720f45707c27d8c5e00b4428d72086711bb58362af5f1efc3dd2cf55f31b5a",
+  "commit": "6292bbd0c6a720e5c9273a4f4e8b827097db6e5e",
+  "tree": "93d1941261080250c6f39a3ded0b7deac52e23d3",
+  "crate_checksum": "7a8a135dbf6e1966c9debb9d619edd56d4eb27ebf57bed896c21d36ac7ed4b74",
   "manifest_delta": "reqwest 0.13.4 json,rustls -> 0.12.18 json,rustls-tls; original manifest hash recorded separately",
-  "upstream_manifest_sha256": "ebc5512afff931e59cd515c77892a670b023935d9a66bb7dc95871b87c018df4",
+  "upstream_manifest_sha256": "0c54ee8f0eaf0bfc8b6ffa80f86260898a123de0c73a7c1283ea37a1bd28b133",
   "files": {
-    "CHANGELOG.md": "6ad09c204127b1fdfb0643996efc9d86c17acab998802a08787f1b25402888b9",
+    "CHANGELOG.md": "a5f065bce262950048d9fca3719c2761ac716be2f40d30dbed004a65ce1498cd",
     "LICENSE": "b2af7f6161eeadab7e77515855e2515359c1b1967de20c23528a9034a1b25f5c",
-    "README.md": "9e6b351fe0a006381ceba52f58c296a73185a7a4667799a7c65c57b197a86773",
-    "examples/branta_example.rs": "9b946ddc02ddfed09ce2969e18005e82dd5e81e12c1ddb4ad658d91c08e422a4",
-    "src/enums.rs": "6129a6b4390b6e4f37d93daabb7686803e581354d98cb4e29012f5018faf0c79",
-    "src/error.rs": "ceaef9880267d92692f8eb9a84ad119646100db4f6fad57562e94372fecf1e1a",
-    "src/extensions.rs": "911542aaf36d56a1ee8b19e8d61df4dc8e7a9350ae215f20400b5a40071def26",
-    "src/lib.rs": "3d60ec8b1c4dffe82c0a506cc59b063b590baf89242e282292682d0dbf7f91da",
-    "src/models.rs": "bbefccc693652fc6fd56bef4739ce12d9cb0dc7ee804a8497673c3a67ca3732e",
-    "src/options.rs": "10644e568ea9fd6a00e391f537e892bbda253b9822e745c02c868361a6fae772",
-    "src/v2/builder.rs": "bd7540c3750b32c9b78311d9400b1ca09f63b38fb62738fb94e51778e9301f9e",
-    "src/v2/client.rs": "f9c8e58ac7967017b8da8f313b5d045fbbaa1d675ac6ea42c858d2e200f2a99e",
-    "src/v2/encryption.rs": "be8a36f5b9cb0c107a661161d6c4ce808d4fffdd4ac6699c5a0cf1d6357efd5e",
-    "src/v2/mod.rs": "fa7a42b1c57f267593dc60e200c8bc25eff76c1467dfe6eacb7f9a6fb01a706f",
-    "src/v2/parser.rs": "907ba1359166ab5f80b9a0a48659a6f0fe7d7ff7c4e1221f3eaa449fd6693526",
+    "README.md": "ae1d2c04afbc483d6b6bd2f351be951996902584a37286f75838159a48d15994",
+    "examples/branta_example.rs": "bc97a57406b8d67ae186e9397a580eea82e0636075b658c0b197f2ade08479a8",
+    "src/enums.rs": "0fb63c0c14c15c5ce1b4acbf780d27a56aa31a8cbbf34b650bdae1ea8efdccac",
+    "src/error.rs": "16eb584b0ac85a6e0ae7f5d7cd309040ffb154abc41c37895d972e7f9a866bd2",
+    "src/extensions.rs": "b4c1d9e59a4bdf7c68dc2479ce987adfd15c6925c0d9c773d567f53335140d6e",
+    "src/lib.rs": "d434652efc62f6e19c21affae2bb37d9809be12e4c9b85a33127d2a6629af1b5",
+    "src/models.rs": "844d8739a75921655f44c5df0c125e6444bd269b9a9ea2557ebb65bf687cfa6e",
+    "src/options.rs": "aa80995df67d9219faa7fae3d22e5b91f4f720dd39f0c87c559ae0a2750c9063",
+    "src/v2/builder.rs": "76ce2fc2342f3cdaf3b33454d2b85ea6f4c92c06142bbae2c0eb01ac681184c2",
+    "src/v2/encryption.rs": "98ec6a05ad8af54526daa383bbb47f865d7da1b4a0e15da5ca0772033df365b8",
+    "src/v2/mod.rs": "ddfae72960fc6a618cec448b6691f213e9388d492543f9803b4c5ee3c00cb286",
+    "src/v2/parser.rs": "dcf7014bc180914f5963e2b32a1068252c68cf188fcb331eced48048c655af76",
     "src/v2/secret_generator.rs": "026426541079991168475b703bf89408276df972338302e9c3c52e9d63f0fa06",
-    "src/v2/service.rs": "bb9e91023482e14424c93ddba1862ef3b38106ec601ebb6e94aa97a90a8271c0"
+    "src/v2/service.rs": "19a26c2dbacc7be2525d8cdf9da5fcf928dc07c851b0096938608e83a8ccc915"
   },
-  "adapted_manifest_sha256": "586bc37d59e660b19a2f864cf151c633470c45553bba4a7462c1fbec2d4d63bf"
+  "patched_files": {
+    "src/v2/client.rs": {
+      "upstream_sha256": "b4a16f8d2bbad4bffcb5f08ce17bc240a7c52348ee6e8a1c0af71f8db8a83d7b",
+      "patched_sha256": "700763f913dfec1ed9784caf3aeaf477448302a04df4870e785e9e849260e977",
+      "patch": "Tenshu hardening: no redirects, 256 KiB lookup body cap, four offline tests; diff in TENSHU_PROVENANCE.md"
+    }
+  },
+  "adapted_manifest_sha256": "1c693a2fad8146ecd396908a09fc7c7fcf3ed200201f6bf72bb72404f4f9d551"
 }

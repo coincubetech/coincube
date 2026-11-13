@@ -248,6 +248,11 @@ impl LiquidTransactions {
         self.selected_payment = Some(payment);
     }
 
+    pub fn preselect_refundable(&mut self, refundable: DomainRefundableSwap) {
+        self.selected_payment = None;
+        self.selected_refundable = Some(refundable);
+    }
+
     fn calculate_balance(&self) -> Amount {
         let usdt_id = usdt_asset_id(self.breez_client.network()).unwrap_or("");
         let mut balance: i64 = 0;
@@ -308,6 +313,7 @@ impl State for LiquidTransactions {
                     cache.bitcoin_unit,
                     usdt_asset_id(self.breez_client.network()).unwrap_or(""),
                     &refundable_swap_addresses,
+                    cache.balance_amounts_masked(),
                 ),
             )
         } else if let Some(refundable) = &self.selected_refundable {
@@ -315,6 +321,7 @@ impl State for LiquidTransactions {
                 menu,
                 cache,
                 view::liquid::refundable_detail_view(
+                    cache.chain(),
                     refundable,
                     fiat_converter,
                     cache.bitcoin_unit,
@@ -324,6 +331,7 @@ impl State for LiquidTransactions {
                     self.pending_fee_priority,
                     self.in_flight_refunds.get(&refundable.swap_address),
                     cache.has_vault,
+                    cache.balance_amounts_masked(),
                 ),
             )
         } else {
@@ -347,6 +355,7 @@ impl State for LiquidTransactions {
                     self.is_last_page,
                     self.processing,
                     &self.swap_tx_ids,
+                    cache.balance_amounts_masked(),
                 ),
             )
         };
@@ -361,15 +370,24 @@ impl State for LiquidTransactions {
                 let modal_content = match state {
                     ImportExportState::Ended => Column::new()
                         .spacing(20)
-                        .push(text("Export successful!").size(20).bold())
                         .push(
-                            coincube_ui::component::button::primary(None, "Close")
-                                .width(150)
-                                .on_press(ViewMessage::ImportExport(ImportExportMessage::Close)),
+                            text(coincube_ui::locale::copy("Export successful!"))
+                                .size(20)
+                                .bold(),
+                        )
+                        .push(
+                            coincube_ui::component::button::primary(
+                                None,
+                                coincube_ui::locale::copy("Close"),
+                            )
+                            .width(150)
+                            .on_press(ViewMessage::ImportExport(ImportExportMessage::Close)),
                         ),
-                    _ => Column::new()
-                        .spacing(20)
-                        .push(text("Exporting payments...").size(20).bold()),
+                    _ => Column::new().spacing(20).push(
+                        text(coincube_ui::locale::copy("Exporting payments..."))
+                            .size(20)
+                            .bold(),
+                    ),
                 };
 
                 Modal::new(content, modal_content)
@@ -856,7 +874,11 @@ impl State for LiquidTransactions {
                 // back to the transactions list on the next render.
                 Task::done(Message::View(view::Message::ShowToast(
                     log::Level::Info,
-                    format!("Refund broadcast · {}", txid.get(..10).unwrap_or(&txid)),
+                    coincube_ui::localized_format!(
+                        "Refund broadcast · {}",
+                        "Reembolso publicado · {}",
+                        txid.get(..10).unwrap_or(&txid)
+                    ),
                 )))
             }
             Message::RefundCompleted {

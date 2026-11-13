@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::LazyLock;
 
 use iced::widget::image;
@@ -41,6 +41,23 @@ static ALL_QUOTES: LazyLock<Vec<Quote>> = LazyLock::new(|| {
         .expect("loading-quotes.json must be valid")
         .quotes
 });
+
+static SPANISH_QUOTES: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../../static/loading-quotes.es.json"))
+        .expect("Spanish quote catalog must be valid")
+});
+
+impl Quote {
+    /// Resolve text at render time so changing language preserves the selected quote.
+    pub fn localized_text(&self) -> &str {
+        if crate::locale::language() == crate::locale::Language::Spanish {
+            if let Some(text) = SPANISH_QUOTES.get(&self.id) {
+                return text;
+            }
+        }
+        &self.text
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Embedded images (context defaults)
@@ -123,48 +140,6 @@ impl QuoteProvider {
         Self::default()
     }
 
-    fn context_pool(&self, context: &str, fallback_context: Option<&str>) -> Vec<&'static Quote> {
-        let by_context = |ctx: &str| -> Vec<&'static Quote> {
-            ALL_QUOTES
-                .iter()
-                .filter(|q| q.contexts.iter().any(|c| c == ctx))
-                .collect()
-        };
-
-        let exact_all = by_context(context);
-        let exact_fresh: Vec<&Quote> = exact_all
-            .iter()
-            .copied()
-            .filter(|q| !self.recent_ids.contains(&q.id))
-            .collect();
-
-        // Preference order:
-        //   1. Exact context, excluding recently shown.
-        //   2. Exact context, including recently shown (recency
-        //      window exhausted).
-        //   3. Fallback context, excluding recently shown.
-        //   4. Fallback context, including recently shown.
-        if !exact_fresh.is_empty() {
-            exact_fresh
-        } else if !exact_all.is_empty() {
-            exact_all
-        } else if let Some(fb) = fallback_context {
-            let fb_all = by_context(fb);
-            let fb_fresh: Vec<&Quote> = fb_all
-                .iter()
-                .copied()
-                .filter(|q| !self.recent_ids.contains(&q.id))
-                .collect();
-            if !fb_fresh.is_empty() {
-                fb_fresh
-            } else {
-                fb_all
-            }
-        } else {
-            Vec::new()
-        }
-    }
-
     /// Select a quote for the given context key.
     ///
     /// Filters by context, excludes recently shown quotes, prefers short
@@ -203,7 +178,45 @@ impl QuoteProvider {
             None
         };
 
-        let pool = self.context_pool(context, fallback_context);
+        let by_context = |ctx: &str| -> Vec<&'static Quote> {
+            ALL_QUOTES
+                .iter()
+                .filter(|q| q.contexts.iter().any(|c| c == ctx))
+                .collect()
+        };
+
+        let exact_all = by_context(context);
+        let exact_fresh: Vec<&Quote> = exact_all
+            .iter()
+            .copied()
+            .filter(|q| !self.recent_ids.contains(&q.id))
+            .collect();
+
+        // Preference order:
+        //   1. Exact context, excluding recently shown.
+        //   2. Exact context, including recently shown (recency
+        //      window exhausted).
+        //   3. Fallback context, excluding recently shown.
+        //   4. Fallback context, including recently shown.
+        let pool: Vec<&Quote> = if !exact_fresh.is_empty() {
+            exact_fresh
+        } else if !exact_all.is_empty() {
+            exact_all
+        } else if let Some(fb) = fallback_context {
+            let fb_all = by_context(fb);
+            let fb_fresh: Vec<&Quote> = fb_all
+                .iter()
+                .copied()
+                .filter(|q| !self.recent_ids.contains(&q.id))
+                .collect();
+            if !fb_fresh.is_empty() {
+                fb_fresh
+            } else {
+                fb_all
+            }
+        } else {
+            Vec::new()
+        };
 
         // Prefer short quotes for brief-duration states
         let final_pool = if prefer_short {
@@ -227,13 +240,17 @@ impl QuoteProvider {
             .copied()
             .unwrap_or_else(|| ALL_QUOTES.first().expect("quotes must not be empty"));
 
-        // Track recency
-        self.recent_ids.push_back(chosen.id.clone());
+        self.remember(chosen);
+        chosen.clone()
+    }
+
+    /// Count a quote picked elsewhere (e.g. by [`random_quote`]) as shown,
+    /// so the next selection does not repeat it.
+    pub fn remember(&mut self, quote: &Quote) {
+        self.recent_ids.push_back(quote.id.clone());
         if self.recent_ids.len() > RECENCY_WINDOW {
             self.recent_ids.pop_front();
         }
-
-        chosen.clone()
     }
 }
 
@@ -253,6 +270,9 @@ pub fn image_handle_for_context(context: &str) -> image::Handle {
 
 /// Props for the [`quote_display`] component.
 pub struct QuoteDisplayProps<'a> {
+    slot: Option<crate::illustration::Slot>,
+    payment: Option<crate::illustration::PaymentArt>,
+    existing_only: bool,
     pub quote: &'a Quote,
     pub image_handle: &'a image::Handle,
     pub image_size: u16,
@@ -264,12 +284,34 @@ impl<'a> QuoteDisplayProps<'a> {
     pub fn new(context: &str, quote: &'a Quote, image_handle: &'a image::Handle) -> Self {
         let (_, default_size) = default_image_for_context(context);
         Self {
+            slot: match context {
+                "loading" | "syncing" => Some(crate::illustration::Slot::Opening),
+                "empty-wallet" => Some(crate::illustration::Slot::EmptyHistory),
+                "first-launch" | "idle" | "backup-reminder" | "error" => {
+                    Some(crate::illustration::Slot::Mascot)
+                }
+                _ => None,
+            },
+            payment: crate::illustration::PaymentArt::from_context(context),
+            existing_only: matches!(context, "liquid-send" | "liquid-receive"),
             quote,
             image_handle,
             image_size: default_size,
             show_quote: true,
             show_separator: true,
         }
+    }
+
+    pub(crate) fn illustration_slot(mut self, slot: crate::illustration::Slot) -> Self {
+        self.slot = Some(slot);
+        self
+    }
+
+    /// Use the existing set on deprecated Liquid-only screens.
+    pub fn existing_artwork(mut self) -> Self {
+        self.existing_only = true;
+        self.payment = None;
+        self
     }
 
     pub fn image_size(mut self, size: u16) -> Self {
@@ -300,9 +342,13 @@ impl<'a> QuoteDisplayProps<'a> {
 /// ```
 pub fn display<'a, M: 'a>(props: &QuoteDisplayProps<'a>) -> Container<'a, M> {
     // Image — uses a pre-built handle to avoid flicker from recreating on every render
-    let img = iced::widget::image(props.image_handle.clone())
-        .height(Length::Fixed(props.image_size as f32))
-        .content_fit(iced::ContentFit::ScaleDown);
+    let img = crate::illustration::quote_image(
+        props.slot,
+        props.image_handle.clone(),
+        props.image_size,
+        props.payment,
+        props.existing_only,
+    );
 
     let img_container = Container::new(img).center_x(Length::Fill);
 
@@ -323,7 +369,7 @@ pub fn display<'a, M: 'a>(props: &QuoteDisplayProps<'a>) -> Container<'a, M> {
 
     // Quote + attribution
     if props.show_quote {
-        let quote_text = iced::widget::text(&props.quote.text)
+        let quote_text = iced::widget::text(props.quote.localized_text())
             .size(P2_SIZE)
             .font(font::REGULAR)
             .style(theme::text::secondary)
@@ -363,5 +409,24 @@ fn format_attribution(quote: &Quote) -> Option<String> {
     match quote.category.as_str() {
         "scripture" => Some(format!("\u{2014} {}", quote.author)),
         _ => Some(format!("\u{2014} {}, {}", quote.author, quote.source)),
+    }
+}
+
+#[cfg(test)]
+mod localization_tests {
+    use super::*;
+
+    #[test]
+    fn spanish_quotes_cover_every_bundled_id_and_keep_selection() {
+        assert_eq!(SPANISH_QUOTES.len(), ALL_QUOTES.len());
+        for quote in ALL_QUOTES.iter() {
+            let spanish = SPANISH_QUOTES.get(&quote.id).expect("Spanish quote by ID");
+            assert!(!spanish.trim().is_empty());
+            assert_eq!(quote.localized_text(), quote.text);
+            crate::locale::render_in(crate::locale::Language::Spanish, || {
+                assert_eq!(quote.localized_text(), spanish);
+            });
+            assert_eq!(quote.localized_text(), quote.text);
+        }
     }
 }

@@ -17,6 +17,12 @@
 //! `duress-state.json`, `duress-queue.json`, `duress.key`,
 //! `duress-wipe.journal`, and the cached Connect auth under `connect/`.
 //!
+//! Connect tokens stay on purpose. The cryptic screen calls `get_duress_state`
+//! with the cached session before it asks for a credential; wiping the tokens
+//! would leave that check with no session and trap the user on the screen.
+//! Enrollment itself is not stored as grep-able JSON: `duress-state.json` and
+//! a nonempty queue are sealed with `duress.key`.
+//!
 //! Secure-erase guarantees on SSDs are weak (wear-levelling relocates blocks),
 //! so the zero-overwrite is defence-in-depth layered on top of the
 //! filesystem-level delete — the real guarantee is "the file is gone", not

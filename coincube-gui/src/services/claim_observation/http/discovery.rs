@@ -1,13 +1,7 @@
 //! Bounded network discovery, retaining raw evidence without authorizing a spend.
 use super::*;
-mod binding;
-mod collect;
 pub(crate) mod diagnostics;
-mod funding;
-mod preferred;
 mod prune;
-mod sweep;
-pub use binding::AncestryContext;
 use coincube_core::{
     claim_ancestry::{
         self,
@@ -15,17 +9,10 @@ use coincube_core::{
     },
     miniscript::bitcoin::OutPoint,
 };
-pub use collect::CollectedAncestry;
-pub use funding::{
-    ClaimPairError, CollectedFundingCoin, CollectedFundingPair, CollectedPostBitcoinInputs,
-    CollectedSpendInputs, FundingContext, OwnedClaimFunding, OwnedSplitFunding, SplitPairError,
-};
-pub use preferred::MAX_ANCESTRY_CANDIDATES;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-pub use sweep::CollectedAncestrySweep;
 
 // A pair with several shared Vault coins rechecks each coin on both chains in
 // addition to the two funding paths. Keep a finite cap alongside the shared
@@ -53,9 +40,6 @@ impl CollectionBudget {
             bytes: AtomicUsize::new(MAX_RESPONSE_BYTES),
         }
     }
-    fn restrict_to_collection(&self) {
-        self.requests.fetch_min(MAX_REQUESTS, Ordering::Relaxed);
-    }
     pub(super) fn charge_request(&self, reserved_bytes: usize) -> Result<(), FailureKind> {
         self.requests
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
@@ -76,32 +60,9 @@ pub enum DiscoveryError {
     Structural(claim_ancestry::Error),
     Observation(FailureKind),
 }
-/// Display-only search diagnostics. Even PathFound is not a paired proof or
-/// permission to sign. A missing result must never imply the other chain passed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FundingProofStatus {
-    /// No final chain diagnostic is retained for this attempt. Work may be
-    /// unattempted, reset or interrupted; this never means verification passed.
-    #[default]
-    Pending,
-    /// One candidate has qualifying ancestry, while ownership, current wallet
-    /// state and the complete paired review may still require verification.
-    /// The current paired review supplies completed-verification UI separately.
-    PathFound,
-    /// The bounded candidate search returned no qualifying path. This alone is
-    /// not a general proof of deposit unsuitability or advice to send more funds.
-    NoQualifyingAncestry,
-    /// A typed refusal from this chain's search or known validation step.
-    /// Its cause can be incomplete evidence or a positive incompatibility;
-    /// callers must not treat every refusal as proof of unsuitable funds.
-    Failed(DiscoveryError),
-}
-pub(crate) type FundingProofObserver = Arc<dyn Fn(ChainId, FundingProofStatus) + Send + Sync>;
 
 #[derive(Debug)]
 pub struct DiscoveredAncestry {
-    provider: String,
-    live_generation: watch::Receiver<u64>,
     links: Vec<OwnedLink>,
     pair: CoinbasePair,
     observed_at: i64,
@@ -135,7 +96,6 @@ impl HttpObservationSource {
     fn discovery_snapshot(&self) -> Self {
         Self {
             authenticated: self.authenticated.clone(),
-            funding_observer: self.funding_observer.clone(),
             anonymous: self.anonymous.clone(),
             base: self.base.clone(),
             generation: self.generation.clone(),
@@ -255,8 +215,6 @@ impl HttpObservationSource {
             return Err(DiscoveryError::Observation(FailureKind::Cancelled));
         }
         Ok(DiscoveredAncestry {
-            provider: snapshot.provider_identity(),
-            live_generation: snapshot.generation.clone(),
             links: path.links().to_vec(),
             pair,
             observed_at,
@@ -286,50 +244,6 @@ impl HttpObservationSource {
             .await
     }
 
-    /// Preserve paired node reads, raw-error precedence and canonical
-    /// pruning order before advancing the existing graph search.
-    async fn provide_ancestry_node(
-        &self,
-        search: &mut Search,
-        pruning: &mut prune::PruneContext,
-        root_chain: ChainId,
-        txid: Txid,
-        max_bytes: usize,
-        policy: Policy,
-    ) -> Result<(), DiscoveryError> {
-        let observation = DiscoveryError::Observation;
-        let trace = self.ancestry_trace.as_ref().unwrap();
-
-        trace.stage(root_chain, diagnostics::Stage::TransactionReads);
-        // Both reads concern this same node and fit the existing
-        // shared request/byte budget. Keep raw-read error
-        // precedence and perform canonical pruning only after
-        // both bounded reads have finished.
-        let (raw, transaction) = tokio::join!(
-            self.ancestry_transaction_search(root_chain, txid, max_bytes),
-            self.transaction(root_chain, txid)
-        );
-        let raw = raw.map_err(|(error, exceeded_graph_bytes)| {
-            if exceeded_graph_bytes && max_bytes < claim_ancestry::MAX_TRANSACTION_BYTES {
-                DiscoveryError::Structural(claim_ancestry::Error::ByteLimit)
-            } else {
-                DiscoveryError::Observation(error)
-            }
-        })?;
-        let transaction = transaction.map_err(observation)?;
-        trace.stage(root_chain, diagnostics::Stage::PreForkCheck);
-        let pre_fork = pruning
-            .inspect_prefetched(self, txid, policy, transaction)
-            .await
-            .map_err(observation)?;
-        search
-            .provide_with_pruning(raw, pre_fork)
-            .map_err(DiscoveryError::Structural)?;
-        trace.visited(root_chain, pre_fork);
-
-        Ok(())
-    }
-
     async fn discover_ancestry_for(
         &self,
         selected: OutPoint,
@@ -350,16 +264,34 @@ impl HttpObservationSource {
             loop {
                 match search.step().map_err(DiscoveryError::Structural)? {
                     Step::Fetch { txid, max_bytes } => {
-                        snapshot
-                            .provide_ancestry_node(
-                                &mut search,
-                                &mut pruning,
-                                root_chain,
-                                txid,
-                                max_bytes,
-                                policy,
-                            )
-                            .await?;
+                        trace.stage(root_chain, diagnostics::Stage::TransactionReads);
+                        // Both reads concern this same node and fit the existing
+                        // shared request/byte budget. Keep raw-read error
+                        // precedence and perform canonical pruning only after
+                        // both bounded reads have finished.
+                        let (raw, transaction) = tokio::join!(
+                            snapshot.ancestry_transaction_search(root_chain, txid, max_bytes),
+                            snapshot.transaction(root_chain, txid)
+                        );
+                        let raw = raw.map_err(|(error, exceeded_graph_bytes)| {
+                            if exceeded_graph_bytes
+                                && max_bytes < claim_ancestry::MAX_TRANSACTION_BYTES
+                            {
+                                DiscoveryError::Structural(claim_ancestry::Error::ByteLimit)
+                            } else {
+                                observation(error)
+                            }
+                        })?;
+                        let transaction = transaction.map_err(observation)?;
+                        trace.stage(root_chain, diagnostics::Stage::PreForkCheck);
+                        let pre_fork = pruning
+                            .inspect_prefetched(&snapshot, txid, policy, transaction)
+                            .await
+                            .map_err(observation)?;
+                        search
+                            .provide_with_pruning(raw, pre_fork)
+                            .map_err(DiscoveryError::Structural)?;
+                        trace.visited(root_chain, pre_fork);
                     }
                     Step::Candidate(candidate) => {
                         trace.stage(root_chain, diagnostics::Stage::RootQualification);
@@ -380,8 +312,6 @@ impl HttpObservationSource {
                             Err(error) => return Err(observation(error)),
                             Ok((pair, observed_at)) => {
                                 return Ok(Some(DiscoveredAncestry {
-                                    provider: snapshot.provider_identity(),
-                                    live_generation: snapshot.generation.clone(),
                                     links: candidate.links,
                                     pair,
                                     observed_at,
@@ -438,30 +368,7 @@ mod tests {
     fn policy() -> Policy {
         Policy {
             max_observation_age_seconds: 60,
-            expiry_margin_seconds: 600,
         }
-    }
-
-    #[test]
-    fn final_phase_clamps_without_resetting_shared_requests_or_bytes() {
-        let budget = CollectionBudget::for_discovery();
-        for _ in 0..(MAX_DISCOVERY_REQUESTS - 7) {
-            budget.charge_request(0).unwrap();
-        }
-        budget.charge_bytes(123).unwrap();
-        budget.restrict_to_collection();
-        assert_eq!(budget.requests.load(Ordering::Relaxed), 7);
-        assert_eq!(
-            budget.bytes.load(Ordering::Relaxed),
-            MAX_RESPONSE_BYTES - 123
-        );
-        for _ in 0..7 {
-            budget.charge_request(0).unwrap();
-        }
-        assert_eq!(budget.charge_request(0), Err(FailureKind::CollectionLimit));
-        let budget = CollectionBudget::for_discovery();
-        budget.restrict_to_collection();
-        assert_eq!(budget.requests.load(Ordering::Relaxed), MAX_REQUESTS);
     }
 
     #[tokio::test]
@@ -1068,7 +975,6 @@ mod tests {
                     OutPoint::new(selected.compute_txid(), 0),
                     Policy {
                         max_observation_age_seconds: 60,
-                        expiry_margin_seconds: 600,
                     },
                 )
                 .await;

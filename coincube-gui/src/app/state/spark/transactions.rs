@@ -130,6 +130,37 @@ impl SparkTransactions {
         )
     }
 
+    /// Re-fetch the page the user is on without moving them. Used for
+    /// `PaymentUpdated`: late metadata (e.g. conversion details) on an
+    /// already-listed payment changes no row positions, so resetting to
+    /// page 0 the way `reload` does would just throw the user off the page
+    /// they were reading.
+    ///
+    /// Targets an in-flight Prev/Next's page when there is one, leaving
+    /// `pending_page` set so `DataLoaded` still commits that navigation —
+    /// the fresh fetch supersedes the navigation's own by token. Leaves
+    /// `loading` alone so the current rows stay on screen meanwhile.
+    pub fn refresh_in_place(&mut self) -> Task<Message> {
+        let page = self.pending_page.unwrap_or(self.current_page);
+        self.fetch_page(page)
+    }
+
+    /// Point an open detail pane at its freshly fetched row, so late
+    /// metadata shows while the user is looking at the payment. A payment
+    /// that isn't on the fetched page keeps its existing snapshot.
+    fn refresh_selected_payment(&mut self) {
+        let Some(selected) = &self.selected_payment else {
+            return;
+        };
+        if let Some(fresh) = self
+            .recent_transactions
+            .iter()
+            .find(|row| row.id == selected.id)
+        {
+            self.selected_payment = Some(fresh.clone());
+        }
+    }
+
     fn rebuild_rows(&mut self, cache: &Cache) {
         let fiat_converter: Option<FiatAmountConverter> =
             cache.fiat_price.as_ref().and_then(|p| p.try_into().ok());
@@ -160,13 +191,18 @@ impl State for SparkTransactions {
         // body with the detail view; the back button clears the state
         // via `Message::Close` and we fall through to the list again.
         if let Some(payment) = &self.selected_payment {
-            return crate::app::view::dashboard(
+            return crate::app::view::dashboard_headed(
                 menu,
                 cache,
+                crate::app::view::spark_page_head(
+                    cache,
+                    crate::app::view::spark::transactions::transaction_detail_title(payment),
+                ),
                 crate::app::view::spark::transactions::transaction_detail_view(
                     payment,
                     fiat_converter,
                     cache.bitcoin_unit,
+                    cache.balance_amounts_masked(),
                 ),
             );
         }
@@ -181,9 +217,10 @@ impl State for SparkTransactions {
             SparkTransactionsStatus::Loaded(self.payments.clone())
         };
 
-        let content = crate::app::view::dashboard(
+        let content = crate::app::view::dashboard_headed(
             menu,
             cache,
+            crate::app::view::spark_page_head(cache, "Transactions"),
             SparkTransactionsView {
                 status,
                 recent_transactions: &self.recent_transactions,
@@ -195,6 +232,7 @@ impl State for SparkTransactions {
                 current_page: self.current_page,
                 is_last_page: self.is_last_page,
                 processing: self.processing,
+                mask_amounts: cache.balance_amounts_masked(),
             }
             .render(),
         );
@@ -209,15 +247,24 @@ impl State for SparkTransactions {
                 let modal_content = match state {
                     ImportExportState::Ended => Column::new()
                         .spacing(20)
-                        .push(text("Export successful!").size(20).bold())
                         .push(
-                            coincube_ui::component::button::primary(None, "Close")
-                                .width(150)
-                                .on_press(view::Message::ImportExport(ImportExportMessage::Close)),
+                            text(coincube_ui::locale::copy("Export successful!"))
+                                .size(20)
+                                .bold(),
+                        )
+                        .push(
+                            coincube_ui::component::button::primary(
+                                None,
+                                coincube_ui::locale::copy("Close"),
+                            )
+                            .width(150)
+                            .on_press(view::Message::ImportExport(ImportExportMessage::Close)),
                         ),
-                    _ => Column::new()
-                        .spacing(20)
-                        .push(text("Exporting payments…").size(20).bold()),
+                    _ => Column::new().spacing(20).push(
+                        text(coincube_ui::locale::copy("Exporting payments…"))
+                            .size(20)
+                            .bold(),
+                    ),
                 };
 
                 Modal::new(content, modal_content)
@@ -279,6 +326,7 @@ impl State for SparkTransactions {
                     self.payments = payments;
                     self.error = None;
                     self.rebuild_rows(cache);
+                    self.refresh_selected_payment();
                 }
                 view::SparkTransactionsMessage::Error(token, err) => {
                     // Stale error from a superseded fetch — ignore it so it
@@ -436,6 +484,7 @@ mod tests {
             },
             method: "lightning".to_string(),
             description: Some(format!("payment {id}")),
+            details: Default::default(),
         }
     }
 
@@ -624,6 +673,63 @@ mod tests {
             Message::View(ViewMessage::Close),
         );
         assert!(panel.selected_payment.is_none());
+    }
+
+    #[test]
+    fn data_loaded_refreshes_open_detail_pane() {
+        let mut panel = SparkTransactions::new(None);
+        panel.fetch_token = 1;
+        update(
+            &mut panel,
+            SparkTransactionsMessage::DataLoaded(1, payments(2)),
+        );
+        update(&mut panel, SparkTransactionsMessage::Select(1));
+
+        // A later fetch carries new data for the open payment.
+        let mut fresh = payments(2);
+        fresh[1].amount_sat = 99_000;
+        panel.fetch_token = 2;
+        update(&mut panel, SparkTransactionsMessage::DataLoaded(2, fresh));
+
+        let selected = panel.selected_payment.as_ref().expect("still open");
+        assert_eq!(selected.id, "payment-1");
+        assert_eq!(selected.amount.to_sat(), 99_000);
+    }
+
+    #[test]
+    fn data_loaded_keeps_detail_snapshot_when_payment_not_on_page() {
+        let mut panel = SparkTransactions::new(None);
+        panel.fetch_token = 1;
+        update(
+            &mut panel,
+            SparkTransactionsMessage::DataLoaded(1, payments(2)),
+        );
+        update(&mut panel, SparkTransactionsMessage::Select(1));
+
+        panel.fetch_token = 2;
+        update(
+            &mut panel,
+            SparkTransactionsMessage::DataLoaded(2, vec![payment("other", 5_000)]),
+        );
+
+        assert_eq!(
+            panel.selected_payment.as_ref().map(|p| p.id.as_str()),
+            Some("payment-1")
+        );
+    }
+
+    #[test]
+    fn in_place_refresh_result_keeps_current_page() {
+        // `refresh_in_place` fetches without a `pending_page`; its result
+        // must leave the user on the page they were reading.
+        let mut panel = SparkTransactions::new(None);
+        panel.current_page = 2;
+        panel.fetch_token = 4;
+        update(
+            &mut panel,
+            SparkTransactionsMessage::DataLoaded(4, payments(3)),
+        );
+        assert_eq!(panel.current_page, 2);
     }
 
     #[test]

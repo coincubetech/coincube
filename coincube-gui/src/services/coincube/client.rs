@@ -1,17 +1,18 @@
+mod avatar;
+
 use super::{
-    get_countries, AddVaultMemberRequest, ApiResponse, AvatarGenerateData, AvatarGenerateRequest,
-    AvatarSelectData, AvatarSelectRequest, BillingHistoryEntry, ChargeStatusResponse,
+    get_countries, AddVaultMemberRequest, ApiResponse, BillingHistoryEntry, ChargeStatusResponse,
     CheckoutRequest, CheckoutResponse, CoincubeError, ConnectPlan, ConnectVaultResponse, Contact,
     ContactCube, Country, CreateConnectVaultRequest, CreateInviteRequest,
     CubeEncryptionPubkeyResponse, CubeInviteOrAddResult, CubeKeyRaw, CubeLimitsResponse,
-    CubeResponse, DownloadStats, FeaturesResponse, GetAvatarData, Invite, LightningAddress,
+    CubeResponse, DownloadStats, FeaturesResponse, Invite, LightningAddress,
     LightningAddressAvailability, LoginActivity, LoginResponse, OtpRequest, OtpVerifyRequest,
-    PatchConnectVaultRequest, PublicAvatarData, PutCubeEncryptionPubkeyRequest, ReceivedInvite,
-    RecoveryKit, RecoveryKitStatus, RedeemCampaignRequest, RedeemCampaignResponse,
-    RefreshTokenRequest, RegenerationData, RegisterCubeRequest, ReportEnvelopeInvalidRequest,
-    ReserveLightningAddressRequest, SaveQuoteRequest, SaveQuoteResponse, StatsPeriod,
-    TimeseriesResponse, TodayStats, UpdateCubeRequest, UpdateLightningAddressRequest,
-    UpsertRecoveryKitRequest, User, VaultMemberResponse, VerifiedDevice,
+    PatchConnectVaultRequest, PutCubeEncryptionPubkeyRequest, ReceivedInvite, RecoveryKit,
+    RecoveryKitStatus, RedeemCampaignRequest, RedeemCampaignResponse, RefreshTokenRequest,
+    RegisterCubeRequest, ReportEnvelopeInvalidRequest, ReserveLightningAddressRequest,
+    SaveQuoteRequest, SaveQuoteResponse, StatsPeriod, TimeseriesResponse, TodayStats,
+    UpdateCubeRequest, UpdateLightningAddressRequest, UpsertRecoveryKitRequest, User,
+    VaultMemberResponse, VerifiedDevice,
 };
 use reqwest::{Client, Method};
 use serde::Deserialize;
@@ -66,10 +67,6 @@ pub struct CoincubeClient {
     /// Production builds cannot construct or observe this field.
     #[cfg(all(test, feature = "regtest-harness"))]
     test_ancestry_history: Option<TestAncestryHistory>,
-    /// Test-only: let the Claim build search for input ancestry although the
-    /// production gate is closed. Production builds cannot set or read this.
-    #[cfg(test)]
-    test_ancestry_discovery: bool,
 }
 
 impl std::fmt::Debug for CoincubeClient {
@@ -99,6 +96,27 @@ impl Default for CoincubeClient {
 }
 
 impl CoincubeClient {
+    /// Build every API transport from the captured device identity and current
+    /// token. Specialized transports retain their own timeout/redirect policy.
+    fn client_builder(
+        base_url: &str,
+        identity_headers: &reqwest::header::HeaderMap,
+        token: Option<&str>,
+        timeout: Duration,
+    ) -> Result<reqwest::ClientBuilder, CoincubeError> {
+        let mut headers = identity_headers.clone();
+        if let Some(token) = token {
+            let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
+                .map_err(|_| CoincubeError::Api("Invalid authorization header".into()))?;
+            value.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
+        Ok(Client::builder()
+            .timeout(timeout)
+            .https_only(!base_url.starts_with("http://"))
+            .default_headers(headers))
+    }
+
     pub fn new() -> Self {
         let base_url = crate::services::coincube_api_base_url();
 
@@ -108,23 +126,23 @@ impl CoincubeClient {
             cfg!(not(debug_assertions))
         );
 
-        let https_only = !base_url.starts_with("http://");
         let identity_headers = device_headers();
 
         Self {
-            client: reqwest::ClientBuilder::new()
-                .timeout(std::time::Duration::from_secs(20))
-                .https_only(https_only)
-                .default_headers(identity_headers.clone())
-                .build()
-                .unwrap(),
+            client: Self::client_builder(
+                &base_url,
+                &identity_headers,
+                None,
+                Duration::from_secs(20),
+            )
+            .unwrap()
+            .build()
+            .unwrap(),
             base_url,
             token: None,
             identity_headers,
             #[cfg(all(test, feature = "regtest-harness"))]
             test_ancestry_history: None,
-            #[cfg(test)]
-            test_ancestry_discovery: false,
         }
     }
 
@@ -135,19 +153,15 @@ impl CoincubeClient {
         // allocation before the new value takes its place.
         self.token = Some(Zeroizing::new(token.to_string()));
 
-        let mut headers = self.identity_headers.clone();
-        headers.append(
-            "Authorization",
-            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
-        );
-
-        let https_only = !self.base_url.starts_with("http://");
-        self.client = reqwest::ClientBuilder::new()
-            .timeout(std::time::Duration::from_secs(20))
-            .https_only(https_only)
-            .default_headers(headers)
-            .build()
-            .unwrap();
+        self.client = Self::client_builder(
+            &self.base_url,
+            &self.identity_headers,
+            self.token(),
+            Duration::from_secs(20),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
     }
 
     /// Explicit logout helper: drops the token (the `Zeroizing`
@@ -163,32 +177,29 @@ impl CoincubeClient {
     /// reallocating the whole struct.
     pub fn clear_token(&mut self) {
         self.token = None;
-        let https_only = !self.base_url.starts_with("http://");
-        self.client = reqwest::ClientBuilder::new()
-            .timeout(std::time::Duration::from_secs(20))
-            .https_only(https_only)
-            .default_headers(self.identity_headers.clone())
-            .build()
-            .unwrap();
+        self.client = Self::client_builder(
+            &self.base_url,
+            &self.identity_headers,
+            None,
+            Duration::from_secs(20),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
     }
 
     /// A bounded anchor transport preserves this client's login identity while
     /// refusing redirects. No device identity filesystem access occurs here.
     pub(super) fn anchor_transport(&self) -> Result<reqwest::Client, CoincubeError> {
-        let mut headers = self.identity_headers.clone();
-        if let Some(token) = self.token() {
-            let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
-                .map_err(|_| CoincubeError::Api("Invalid authorization header".into()))?;
-            value.set_sensitive(true);
-            headers.insert(reqwest::header::AUTHORIZATION, value);
-        }
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(10))
-            .https_only(!self.base_url.starts_with("http://"))
-            .default_headers(headers)
-            .build()
-            .map_err(CoincubeError::from)
+        Self::client_builder(
+            &self.base_url,
+            &self.identity_headers,
+            self.token(),
+            Duration::from_secs(10),
+        )?
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(CoincubeError::from)
     }
 
     pub fn token(&self) -> Option<&str> {
@@ -621,7 +632,6 @@ impl CoincubeClient {
             identity_headers: reqwest::header::HeaderMap::new(),
             #[cfg(feature = "regtest-harness")]
             test_ancestry_history: None,
-            test_ancestry_discovery: false,
         }
     }
 
@@ -650,20 +660,6 @@ impl CoincubeClient {
             shared_history_height,
             shared_history_hash,
         });
-        // The live ancestry case exercises the automatic search end to end.
-        self.open_ancestry_discovery_for_test();
-    }
-
-    /// Let this test client's Claim builds run ancestry discovery while the
-    /// production gate stays closed. Signing remains refused by the gate.
-    #[cfg(test)]
-    pub(crate) fn open_ancestry_discovery_for_test(&mut self) {
-        self.test_ancestry_discovery = true;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn ancestry_discovery_opened_for_test(&self) -> bool {
-        self.test_ancestry_discovery
     }
 
     #[cfg(all(test, feature = "regtest-harness"))]
@@ -807,113 +803,6 @@ impl CoincubeClient {
         let res = res.check_success().await?;
         let resp: ApiResponse<LightningAddress> = res.json().await?;
         Ok(resp.data)
-    }
-}
-
-impl CoincubeClient {
-    /// Builds an Authorization HeaderMap from the stored token.
-    fn auth_headers(&self) -> reqwest::header::HeaderMap {
-        let mut map = reqwest::header::HeaderMap::new();
-        if let Some(ref t) = self.token {
-            // Deref through `Zeroizing<String>` to `&str` for the
-            // format — `Zeroizing` doesn't implement Display so a
-            // direct `{}` placeholder wouldn't compile.
-            if let Ok(val) =
-                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", t.as_str()))
-            {
-                map.insert("Authorization", val);
-            }
-        }
-        map
-    }
-
-    /// GET /api/v1/connect/cubes/{cubeId}/avatar
-    pub async fn get_avatar(&self, cube_id: &str) -> Result<GetAvatarData, CoincubeError> {
-        let url = format!("{}/api/v1/connect/cubes/{}/avatar", self.base_url, cube_id);
-        let res = self.client.get(&url).send().await?;
-        let res = res.check_success().await?;
-        let resp: ApiResponse<GetAvatarData> = res.json().await?;
-        Ok(resp.data)
-    }
-
-    /// POST /api/v1/connect/cubes/{cubeId}/avatar/generate
-    pub async fn post_avatar_generate(
-        &self,
-        cube_id: &str,
-        req: AvatarGenerateRequest,
-    ) -> Result<AvatarGenerateData, CoincubeError> {
-        let slow_client = reqwest::ClientBuilder::new()
-            .timeout(std::time::Duration::from_secs(120))
-            .https_only(!self.base_url.starts_with("http://"))
-            .default_headers(self.auth_headers())
-            .build()
-            .map_err(CoincubeError::Network)?;
-
-        let url = format!(
-            "{}/api/v1/connect/cubes/{}/avatar/generate",
-            self.base_url, cube_id
-        );
-        let res = slow_client.post(&url).json(&req).send().await?;
-        let res = res.check_success().await?;
-        let resp: ApiResponse<AvatarGenerateData> = res.json().await?;
-        Ok(resp.data)
-    }
-
-    /// POST /api/v1/connect/cubes/{cubeId}/avatar/select
-    pub async fn post_avatar_select(
-        &self,
-        cube_id: &str,
-        req: AvatarSelectRequest,
-    ) -> Result<AvatarSelectData, CoincubeError> {
-        let url = format!(
-            "{}/api/v1/connect/cubes/{}/avatar/select",
-            self.base_url, cube_id
-        );
-        let res = self.client.post(&url).json(&req).send().await?;
-        let res = res.check_success().await?;
-        let resp: ApiResponse<AvatarSelectData> = res.json().await?;
-        Ok(resp.data)
-    }
-
-    /// GET /api/v1/connect/cubes/{cubeId}/avatar/regenerations
-    pub async fn get_avatar_regenerations(
-        &self,
-        cube_id: &str,
-    ) -> Result<RegenerationData, CoincubeError> {
-        let url = format!(
-            "{}/api/v1/connect/cubes/{}/avatar/regenerations",
-            self.base_url, cube_id
-        );
-        let res = self.client.get(&url).send().await?;
-        let res = res.check_success().await?;
-        let resp: ApiResponse<RegenerationData> = res.json().await?;
-        Ok(resp.data)
-    }
-
-    /// GET /api/v1/connect/avatar/public/{lightning_address} (public, no cube scope)
-    pub async fn get_public_avatar(
-        &self,
-        lightning_address: &str,
-    ) -> Result<PublicAvatarData, CoincubeError> {
-        let url = format!(
-            "{}/api/v1/connect/avatar/public/{}",
-            self.base_url, lightning_address
-        );
-        let res = self.client.get(&url).send().await?;
-        let res = res.check_success().await?;
-        let resp: ApiResponse<PublicAvatarData> = res.json().await?;
-        Ok(resp.data)
-    }
-
-    /// GET /api/v1/connect/avatar/image/{id} (public, no cube scope)
-    pub async fn fetch_avatar_image(&self, variant_id: u64) -> Result<Vec<u8>, CoincubeError> {
-        let url = format!(
-            "{}/api/v1/connect/avatar/image/{}",
-            self.base_url, variant_id
-        );
-        let res = self.client.get(&url).send().await?;
-        let res = res.check_success().await?;
-        Ok(res.bytes().await.map_err(CoincubeError::Network)?.to_vec())
     }
 }
 
@@ -4301,5 +4190,185 @@ mod owner_keychain_recovery_tests {
             err,
             CoincubeError::Unsuccessful(info) if info.status_code == 423
         ));
+    }
+}
+
+impl CoincubeClient {
+    pub async fn get_worldview(
+        &self,
+    ) -> Result<super::worldview::Snapshot, super::worldview::Error> {
+        self.worldview_request(reqwest::Method::GET, None, None)
+            .await
+    }
+
+    pub async fn share_worldview(
+        &self,
+        current: &super::worldview::Snapshot,
+        selection: Option<super::worldview::Selection>,
+    ) -> Result<super::worldview::Snapshot, super::worldview::Error> {
+        use super::worldview::Error;
+        let method = if selection.is_some() {
+            reqwest::Method::PUT
+        } else {
+            reqwest::Method::DELETE
+        };
+        let next = self
+            .worldview_request(method, Some(&current.etag), selection)
+            .await?;
+        if next.account_uuid != current.account_uuid
+            || Some(next.revision) != current.revision.checked_add(1)
+            || next.selection != selection
+        {
+            return Err(Error::Unavailable);
+        }
+        Ok(next)
+    }
+
+    async fn worldview_request(
+        &self,
+        method: reqwest::Method,
+        etag: Option<&str>,
+        selection: Option<super::worldview::Selection>,
+    ) -> Result<super::worldview::Snapshot, super::worldview::Error> {
+        use super::worldview::{Error, Snapshot};
+        let mut request = self.client.request(
+            method,
+            format!("{}/api/v1/connect/worldview", self.base_url),
+        );
+        if let Some(etag) = etag {
+            request = request.header(reqwest::header::IF_MATCH, etag);
+        }
+        if let Some(selection) = selection {
+            request = request.json(&selection);
+        }
+        let response = request.send().await.map_err(|_| Error::Unavailable)?;
+        match response.status().as_u16() {
+            200 => {}
+            412 | 428 => return Err(Error::Conflict),
+            423 => return Err(Error::Locked),
+            _ => return Err(Error::Unavailable),
+        }
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .ok_or(Error::Unavailable)?
+            .to_owned();
+        let body = response.bytes().await.map_err(|_| Error::Unavailable)?;
+        Snapshot::decode(&body, &etag)
+    }
+}
+
+#[cfg(test)]
+mod transport_identity_tests {
+    use super::*;
+    use crate::services::coincube::AvatarGenerateRequest;
+    use httpmock::{Method as MockMethod, MockServer};
+
+    fn identity() -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "x-device-fingerprint",
+            "frozen-fingerprint".parse().unwrap(),
+        );
+        headers.insert("x-device-name", "fixture-desktop".parse().unwrap());
+        headers.insert("x-platform", "desktop".parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn raw_client_debug_does_not_reveal_authorization() {
+        let mut client = CoincubeClient::for_test("http://127.0.0.1:0");
+        client.set_token("transport-canary-first");
+        assert!(!format!("{:?}", client.client).contains("transport-canary-first"));
+        client.set_token("transport-canary-second");
+        assert!(!format!("{:?}", client.client).contains("transport-canary-second"));
+    }
+
+    #[tokio::test]
+    async fn normal_avatar_and_anchor_transports_keep_captured_identity_and_current_token() {
+        let server = MockServer::start();
+        let mut client = CoincubeClient::for_test_with_identity(server.base_url(), identity());
+        for token in [Some("first-token"), Some("second-token"), None] {
+            if let Some(token) = token {
+                client.set_token(token);
+            } else {
+                client.clear_token();
+            }
+            let expected_auth = token.map(|token| format!("Bearer {}", token));
+            let normal = server.mock(|when, then| {
+                let when = when
+                    .method(MockMethod::GET)
+                    .path("/identity-check")
+                    .header("x-device-fingerprint", "frozen-fingerprint")
+                    .header("x-device-name", "fixture-desktop")
+                    .header("x-platform", "desktop");
+                if let Some(auth) = expected_auth {
+                    when.header("authorization", auth);
+                } else {
+                    when.matches(|request| {
+                        request.headers.as_ref().is_none_or(|headers| {
+                            headers
+                                .iter()
+                                .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
+                        })
+                    });
+                }
+                then.status(200);
+            });
+            client
+                .client
+                .get(format!("{}/identity-check", server.base_url()))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap();
+            client
+                .anchor_transport()
+                .unwrap()
+                .get(format!("{}/identity-check", server.base_url()))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap();
+            normal.assert_hits(2);
+            let expected_auth = token.map(|token| format!("Bearer {}", token));
+            let mut avatar = server.mock(|when, then| {
+                let when = when
+                    .method(MockMethod::POST)
+                    .path("/api/v1/connect/cubes/7/avatar/generate")
+                    .header("x-device-fingerprint", "frozen-fingerprint")
+                    .header("x-device-name", "fixture-desktop")
+                    .header("x-platform", "desktop");
+                if let Some(auth) = expected_auth {
+                    when.header("authorization", auth);
+                } else {
+                    when.matches(|request| {
+                        request.headers.as_ref().is_none_or(|headers| {
+                            headers
+                                .iter()
+                                .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
+                        })
+                    });
+                }
+                // No image generation: only verify the real request reached the local fixture.
+                then.status(503);
+            });
+            assert!(client
+                .post_avatar_generate(
+                    "7",
+                    AvatarGenerateRequest {
+                        user_traits: Default::default()
+                    }
+                )
+                .await
+                .is_err());
+            avatar.assert();
+            avatar.delete();
+            let mut normal = normal;
+            normal.delete();
+        }
     }
 }

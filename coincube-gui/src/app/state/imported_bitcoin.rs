@@ -16,14 +16,15 @@ use std::{
 };
 
 use coincube_core::{
-    foreign_split::FinalizeError,
     imported_spend::{finalize_imported_spend, verify_imported_signatures, ImportedFinalizeError},
     miniscript::{
         bitcoin::{address, psbt::Psbt, secp256k1, Address, Network, Txid},
         DescriptorPublicKey, ForEachKey,
     },
+    public_wallet_finalize::FinalizeError,
     wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor},
 };
+use coincube_ui::locale::copy as localized_copy;
 use coincube_ui::{
     component::{button, date_picker, spinner, text::*},
     theme,
@@ -56,7 +57,11 @@ use crate::{
     wallet_source_form::{self, Source, SourceFormCopy, WalletSourceForm},
 };
 
-/// Coordinate local imported receive allocation with Claim's address selection.
+mod keys;
+
+use keys::{KeySource, KeyStatus, KeysState};
+
+/// Serialize imported receive allocation per public source across sessions.
 /// Source and paired target descriptors have the same source digest. The guard
 /// is released before callers request a poll; it never owns daemon shutdown.
 pub(crate) async fn reserve_receive_address(
@@ -65,17 +70,17 @@ pub(crate) async fn reserve_receive_address(
     daemon: Arc<dyn Daemon + Send + Sync>,
 ) -> Result<model::GetAddressResult, String> {
     let source = descriptor.as_imported().and_then(|imported| {
-        coincube_core::foreign_split::SplitSource::new(
+        coincube_core::public_wallet_source::SplitSource::new(
             imported.receive_descriptor().clone(),
             Some(imported.change_descriptor().clone()),
         )
         .ok()
     });
-    // Scan-only policies cannot enter Claim and retain ordinary Receive.
+    // Scan-only policies have no change branch and take no lock.
     let _guard = match source {
         Some(source) => Some(
             tokio::task::spawn_blocking(move || {
-                bitcoin_import::pairing::legacy::source_reservation_lock(&root, &source)
+                bitcoin_import::pairing::source_lock::source_reservation_lock(&root, &source)
             })
             .await
             .map_err(|_| "Reserving the receive address was interrupted.".to_string())??,
@@ -98,6 +103,44 @@ fn birthday_timestamp(date: chrono::NaiveDate) -> Result<u32, String> {
     }
     let timestamp = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
     u32::try_from(timestamp).map_err(|_| "The wallet creation date is out of range.".into())
+}
+
+/// Show an English error or notice from this panel or its services in the
+/// window's language. State keeps the English; the panel's own templates are
+/// matched here and everything else goes to `locale::notice`, which copies
+/// unknown diagnostics exactly.
+fn shown_notice(english: &str) -> String {
+    if let Some(error) = english.strip_prefix("Hardware wallet: ") {
+        return coincube_ui::localized_format!(
+            "Hardware wallet: {}",
+            "Cartera de hardware: {}",
+            shown_notice(error)
+        );
+    }
+    if let Some(error) = english.strip_prefix("Could not expand the wallet history search: ") {
+        return coincube_ui::localized_format!(
+            "Could not expand the wallet history search: {}",
+            "No se pudo ampliar la búsqueda del historial de la cartera: {}",
+            shown_notice(error)
+        );
+    }
+    if let Some(error) = english.strip_prefix("Could not read signed PSBT: ") {
+        return coincube_ui::localized_format!(
+            "Could not read signed PSBT: {}",
+            "No se pudo leer la PSBT firmada: {}",
+            error
+        );
+    }
+    if let Some(missing) = english
+        .strip_prefix("Insufficient funds: ")
+        .and_then(|rest| rest.strip_suffix(" more satoshis are needed."))
+    {
+        return coincube_ui::localized_format!(
+            "Insufficient funds: {missing} more satoshis are needed.",
+            "Fondos insuficientes: faltan {missing} satoshis."
+        );
+    }
+    coincube_ui::locale::notice(english.to_owned())
 }
 
 static NEXT_PANEL_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -127,10 +170,10 @@ impl Provider {
 
 fn public_server_label(endpoint: &str) -> String {
     let Ok(url) = reqwest::Url::parse(endpoint) else {
-        return "Configured server".into();
+        return localized_copy("Configured server").into();
     };
     let Some(host) = url.host_str() else {
-        return "Configured server".into();
+        return localized_copy("Configured server").into();
     };
     let port = url
         .port()
@@ -138,16 +181,39 @@ fn public_server_label(endpoint: &str) -> String {
     format!("{}://{host}{port}", url.scheme())
 }
 
+/// Recovery words (and passphrase) derive exactly `expected`: its
+/// fingerprint, origin and xpub, found in both descriptor branches.
+fn check_words(
+    descriptor: &ImportedWalletDescriptor,
+    expected: &coincube_core::imported_keys::ImportedAccount,
+    words: zeroize::Zeroizing<String>,
+    passphrase: zeroize::Zeroizing<String>,
+) -> Result<(), String> {
+    let key = coincube_core::imported_keys::verify_imported_account(
+        descriptor,
+        &expected.origin,
+        words,
+        passphrase,
+    )
+    .map_err(|error| error.to_string())?;
+    if key.account() != expected {
+        return Err(
+            coincube_core::imported_keys::ImportedKeyError::KeyDoesNotMatchWallet.to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn wallet_summary(descriptor: &ImportedWalletDescriptor) -> (&'static str, String, String) {
     let receive = descriptor.receive_descriptor().to_string();
     let script = if receive.starts_with("sh(wpkh(") {
-        "Nested SegWit"
+        localized_copy("Nested SegWit")
     } else if receive.starts_with("wpkh(") {
-        "Native SegWit"
+        localized_copy("Native SegWit")
     } else if receive.starts_with("pkh(") {
-        "Legacy"
+        localized_copy("Legacy")
     } else {
-        "Multisig SegWit"
+        localized_copy("Multisig SegWit")
     };
     let mut fingerprints = BTreeSet::new();
     let mut signer_keys = 0usize;
@@ -164,8 +230,13 @@ fn wallet_summary(descriptor: &ImportedWalletDescriptor) -> (&'static str, Strin
         .split_once("multi(")
         .and_then(|(_, rest)| rest.split_once(','))
         .map_or_else(
-            || "1 signer".to_string(),
-            |(required, _)| format!("{required} of {signer_keys} signers"),
+            || localized_copy("1 signer").to_string(),
+            |(required, _)| {
+                coincube_ui::localized_format!(
+                    "{required} of {signer_keys} signers",
+                    "{required} de {signer_keys} firmantes"
+                )
+            },
         );
     let fingerprints = fingerprints.into_iter().collect::<Vec<_>>().join(", ");
     (script, threshold, fingerprints)
@@ -269,6 +340,23 @@ fn import_signed_psbt_value(
     ))
 }
 
+/// Typed recovery words or passphrase on their way from the input to the
+/// Keys step. Debug never prints them.
+#[derive(Clone)]
+pub struct SecretInput(zeroize::Zeroizing<String>);
+
+impl std::fmt::Debug for SecretInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretInput([REDACTED])")
+    }
+}
+
+impl SecretInput {
+    pub fn new(value: String) -> Self {
+        Self(zeroize::Zeroizing::new(value))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ImportMessage {
     Source(wallet_source_form::Message),
@@ -292,6 +380,26 @@ pub enum ImportMessage {
     CopyAddress,
     ToggleDetails,
     Abandon,
+    /// Scan → Done while the scan carries on.
+    ContinueFromScan,
+    /// Close, or Done's Open Cube: back to the Cube.
+    LeaveJourney,
+    /// Keys: where signer `n`'s key is.
+    KeySourcePicked(usize, KeySource),
+    KeyWordsEdited(usize, SecretInput),
+    KeyPassphraseEdited(usize, SecretInput),
+    VerifyWords(usize),
+    CheckDevice(usize),
+    /// Keys → Review.
+    KeysDone,
+    /// Review → Keys.
+    BackToKeys,
+    /// Store the verified words again after a failed attempt.
+    RetryStoreKeys,
+    /// Vault settings: add recovery words to the attached wallet.
+    AddKeys,
+    /// The Vault page's Continue import: back to Import or restore.
+    ResumeJourney,
     ShowSend,
     CloseSend,
     RecipientEdited(String),
@@ -302,8 +410,10 @@ pub enum ImportMessage {
     CopyPsbt,
     SignedPsbtEdited(String),
     ImportSignedPsbt,
-    SavePsbt,
-    LoadSignedPsbt,
+    /// Carries the language of the view that offered it, for the file
+    /// dialog's title.
+    SavePsbt(coincube_ui::locale::Language),
+    LoadSignedPsbt(coincube_ui::locale::Language),
     Broadcast,
     Hardware(HardwareWalletMessage),
     SignWithDevice(String),
@@ -322,6 +432,13 @@ type SignedSpend = (Psbt, Vec<usize>, Option<Txid>);
 #[derive(Debug)]
 pub enum ImportEvent {
     Start,
+    /// (generation, signer, check id, result)
+    WordsVerified(u64, usize, u64, Result<(), String>),
+    DeviceVerified(u64, usize, u64, Result<(), String>),
+    /// (storage epoch, result)
+    KeysStored(u64, Result<usize, String>),
+    /// (storage epoch, local key records for this wallet)
+    KeysInventory(u64, Result<usize, String>),
     Installed(u64, Result<(), String>),
     Resumed(u64, Result<Option<settings::WalletId>, String>),
     Opened(u64, Result<Arc<dyn Daemon + Send + Sync>, String>),
@@ -397,6 +514,28 @@ impl ScanDisplay {
     }
 }
 
+/// The import's steps after the Cube, on Import or restore's stepper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JourneyStep {
+    Source,
+    Keys,
+    Review,
+    Scan,
+    Done,
+}
+
+impl JourneyStep {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Source => "Source",
+            Self::Keys => "Keys",
+            Self::Review => "Review",
+            Self::Scan => "Scan",
+            Self::Done => "Done",
+        }
+    }
+}
+
 pub struct ImportedBitcoinPanel {
     directory: NetworkDirectory,
     cube_id: String,
@@ -442,6 +581,36 @@ pub struct ImportedBitcoinPanel {
     connect_token: Option<String>,
     hardware_root: Option<CoincubeDirectory>,
     hardware_wallets: Option<HardwareWallets>,
+    /// Import or restore (P-Restore) holds the window from Source until the
+    /// user leaves Done. It opens for a Cube with no wallet attached yet,
+    /// new or resumed, and stays through this session's scan.
+    journey: bool,
+    /// The user moved on from Scan to Done before the scan finished.
+    scan_continued: bool,
+    /// The Keys step's signers, from the reviewed descriptor.
+    keys: Option<KeysState>,
+    /// Keys → Review happened for the current review.
+    keys_confirmed: bool,
+    /// Storing the verified recovery words in this Cube.
+    keys_stored: KeysStored,
+    /// Import or restore reopened at Keys to add words to the attached
+    /// wallet.
+    adding_keys: bool,
+    /// Local key records for the attached wallet, once read.
+    stored_keys: Option<usize>,
+    /// Key storage and inventory reads end only with the panel. A refresh
+    /// or a wider history search must not drop their results.
+    keys_gate: Arc<AtomicU64>,
+}
+
+/// Where storing the Keys step's recovery words stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeysStored {
+    /// Nothing to store yet, or no recovery words were given.
+    None,
+    Storing,
+    Stored(usize),
+    Failed(String),
 }
 
 impl ImportedBitcoinPanel {
@@ -457,7 +626,6 @@ impl ImportedBitcoinPanel {
         Self {
             directory,
             cube_id,
-            import,
             source: WalletSourceForm::default(),
             birthday: String::new(),
             birthday_calendar_open: false,
@@ -497,6 +665,20 @@ impl ImportedBitcoinPanel {
             connect_token: None,
             hardware_root: None,
             hardware_wallets: None,
+            journey: import.active_attachment().is_none(),
+            scan_continued: false,
+            // A resumed install has lost the words it was given; its keys are
+            // asked for again before Retry.
+            keys: import
+                .attachment()
+                .filter(|_| import.active_attachment().is_none())
+                .map(|wallet| KeysState::new(&wallet.descriptor)),
+            keys_confirmed: false,
+            keys_stored: KeysStored::None,
+            adding_keys: false,
+            stored_keys: None,
+            keys_gate: Arc::new(AtomicU64::new(fresh_generation())),
+            import,
         }
     }
 
@@ -540,66 +722,6 @@ impl ImportedBitcoinPanel {
                         })
                 })
             })
-    }
-
-    /// Bind a claim to the active public policy and the daemon's completed
-    /// discovery coverage. Allocated receive/change indices also need to fit
-    /// inside the fork scan, including the current next address.
-    pub fn claim_source(
-        &self,
-        cube: &settings::CubeSettings,
-    ) -> Result<crate::imported_claim::ImportedClaimSource, String> {
-        if cube.id != self.cube_id
-            || cube.network != ChainId::Bitcoin
-            || cube.bitcoin_import.as_deref() != Some(&self.import)
-            || !self.is_ready()
-            || self.snapshot_failed
-            || self.sync_failed
-        {
-            return Err("The imported Bitcoin wallet is not ready for a claim. Finish its scan and refresh the wallet.".into());
-        }
-        let wallet = self
-            .import
-            .active_attachment()
-            .ok_or_else(|| "The imported Bitcoin attachment is unavailable.".to_string())?;
-        wallet.validate(ChainId::Bitcoin)?;
-        let info = self
-            .info
-            .as_ref()
-            .ok_or_else(|| "The imported Bitcoin scan is unavailable.".to_string())?;
-        if !self.info_matches_attachment(info) {
-            return Err("The imported Bitcoin scan no longer matches this wallet.".into());
-        }
-        let status = info
-            .imported_wallet
-            .as_ref()
-            .ok_or_else(|| "The imported Bitcoin scan is unavailable.".to_string())?;
-        let address_window = status
-            .discovery_target
-            .max(status.receive_scanned)
-            .max(status.change_scanned)
-            .max(
-                info.receive_index
-                    .checked_add(1)
-                    .ok_or_else(|| "The receive address index is out of range.".to_string())?,
-            )
-            .max(
-                info.change_index
-                    .checked_add(1)
-                    .ok_or_else(|| "The change address index is out of range.".to_string())?,
-            );
-        if address_window == 0 || address_window > 10_000 {
-            return Err(
-                "The imported Bitcoin address window exceeds the supported claim range.".into(),
-            );
-        }
-        Ok(crate::imported_claim::ImportedClaimSource {
-            cube_id: cube.id.clone(),
-            name: cube.name.clone(),
-            external: wallet.descriptor.receive_descriptor().to_string(),
-            internal: wallet.descriptor.change_descriptor().to_string(),
-            address_window,
-        })
     }
 
     pub fn authoritative_balance(&self) -> Option<coincube_core::miniscript::bitcoin::Amount> {
@@ -740,9 +862,53 @@ impl ImportedBitcoinPanel {
         true
     }
 
+    /// Tests: the attached policy's full scan finished at `block_height`
+    /// with `coins`, as a refresh after the daemon attests it reports.
+    #[cfg(test)]
+    pub(crate) fn complete_scan_for_tests(&mut self, block_height: i32, coins: Vec<model::Coin>) {
+        let wallet = self
+            .import
+            .active_attachment()
+            .expect("an attached policy")
+            .clone();
+        let descriptor = wallet.descriptor.clone();
+        self.import.stage = BitcoinImportStage::Ready {
+            wallet: wallet.clone(),
+        };
+        self.info = Some(model::GetInfoResult {
+            version: "test".into(),
+            network: self.chain().bitcoin_network(),
+            chain_id: Some(self.chain()),
+            block_height,
+            sync: 1.0,
+            descriptors: coincubed::commands::GetInfoDescriptors {
+                main: WalletDescriptor::Imported(descriptor.clone()),
+            },
+            imported_wallet: Some(coincubed::commands::ImportedWalletSync {
+                wallet_identity: descriptor.identity(self.chain()).unwrap().to_string(),
+                chain_id: self.chain(),
+                birthday: wallet.birthday,
+                initial_lookahead: wallet.initial_lookahead,
+                discovery_target: wallet.initial_lookahead,
+                receive_scanned: wallet.initial_lookahead,
+                change_scanned: wallet.initial_lookahead,
+                history_complete: true,
+            }),
+            rescan_progress: None,
+            refused_reorg_depth: None,
+            chain_divergence: false,
+            timestamp: 0,
+            last_poll_timestamp: Some(1),
+            history_sync: Default::default(),
+            receive_index: 0,
+            change_index: 0,
+        });
+        self.coins = Some(coincubed::commands::ListCoinsResult { coins });
+    }
+
     pub fn handles_route(&self, menu: &Menu) -> bool {
         match menu {
-            Menu::Vault(VaultSubMenu::Recovery | VaultSubMenu::Claim) => false,
+            Menu::Vault(VaultSubMenu::Recovery) => false,
             Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning))) => false,
             Menu::Vault(_) if !self.is_ready() => true,
             Menu::Vault(
@@ -768,7 +934,10 @@ impl ImportedBitcoinPanel {
         match menu {
             Menu::Vault(VaultSubMenu::Send | VaultSubMenu::PSBTs(_)) => {
                 if self.chain().is_blake2b() {
-                    self.error = Some("Sending from paired imported BTCB2 wallets is not available yet. Use the paired Claim flow.".into());
+                    self.error = Some(
+                        "Sending from paired imported Bitcoin Blake2b wallets is not available."
+                            .into(),
+                    );
                     return Task::none();
                 }
                 self.error = self.ensure_hardware_wallets().err();
@@ -885,6 +1054,12 @@ impl ImportedBitcoinPanel {
         self.address_reserving = false;
         self.review = None;
         self.review_connect_epoch = None;
+        self.keys = None;
+        self.keys_confirmed = false;
+        if self.import.active_attachment().is_none() {
+            // Bound to the reviewed descriptor's policy.
+            self.hardware_wallets = None;
+        }
         self.error = None;
     }
 
@@ -1000,10 +1175,7 @@ impl ImportedBitcoinPanel {
         connect_epoch: u64,
     ) -> Task<Message> {
         if self.chain().is_blake2b() && matches!(message, ImportMessage::ExpandDiscovery) {
-            self.error = Some(
-                "Search more addresses in the original Bitcoin Cube before continuing paired Claim."
-                    .into(),
-            );
+            self.error = Some("Search more addresses in the original Bitcoin Cube.".into());
             return Task::none();
         }
         self.set_connect_client(client.as_ref());
@@ -1016,17 +1188,29 @@ impl ImportedBitcoinPanel {
                     | ImportMessage::CopyPsbt
                     | ImportMessage::SignedPsbtEdited(_)
                     | ImportMessage::ImportSignedPsbt
-                    | ImportMessage::SavePsbt
-                    | ImportMessage::LoadSignedPsbt
+                    | ImportMessage::SavePsbt(_)
+                    | ImportMessage::LoadSignedPsbt(_)
                     | ImportMessage::Broadcast
                     | ImportMessage::Hardware(_)
                     | ImportMessage::SignWithDevice(_)
             )
         {
-            self.error = Some("Sending from paired imported BTCB2 wallets is not available yet. Use the paired Claim flow.".into());
+            self.error = Some(
+                "Sending from paired imported Bitcoin Blake2b wallets is not available.".into(),
+            );
             return Task::none();
         }
-        if self.busy && (!matches!(&message, ImportMessage::PollProgress) || self.address_reserving)
+        // Moving between Import or restore and the Cube changes only what is
+        // shown, so it stays open while a refresh keeps the panel busy.
+        let presentation = matches!(
+            &message,
+            ImportMessage::LeaveJourney
+                | ImportMessage::ResumeJourney
+                | ImportMessage::ContinueFromScan
+        );
+        if self.busy
+            && !presentation
+            && (!matches!(&message, ImportMessage::PollProgress) || self.address_reserving)
         {
             return Task::none();
         }
@@ -1050,6 +1234,7 @@ impl ImportedBitcoinPanel {
         match message {
             ImportMessage::Source(message) => {
                 let task = match message {
+                    wallet_source_form::Message::Focus(id) => iced::widget::operation::focus(id),
                     wallet_source_form::Message::SourceSelected(source) => {
                         if self.source.select_source(source) {
                             self.invalidate();
@@ -1145,6 +1330,11 @@ impl ImportedBitcoinPanel {
                     Ok(wallet)
                 }) {
                     Ok(wallet) => {
+                        let keys = KeysState::new(&wallet.descriptor);
+                        // A descriptor without signer origins names no key to
+                        // check; it goes straight to Review.
+                        self.keys_confirmed = keys.slots.is_empty();
+                        self.keys = Some(keys);
                         self.review = Some(wallet);
                         self.review_connect_epoch =
                             (self.provider == Provider::Connect).then_some(connect_epoch);
@@ -1156,8 +1346,100 @@ impl ImportedBitcoinPanel {
             ImportMessage::Edit => {
                 self.birthday_calendar_open = false;
                 self.review = None;
+                self.keys = None;
+                self.keys_confirmed = false;
+                if self.import.active_attachment().is_none() {
+                    // Bound to the reviewed descriptor's policy.
+                    self.hardware_wallets = None;
+                }
                 self.error = None;
                 Task::none()
+            }
+            ImportMessage::KeySourcePicked(index, source) => {
+                if let Some(slot) = self.key_slot(index) {
+                    slot.source = source;
+                    slot.check = 0;
+                    slot.words = zeroize::Zeroizing::new(String::new());
+                    slot.passphrase = zeroize::Zeroizing::new(String::new());
+                    slot.status = if source == KeySource::Elsewhere {
+                        KeyStatus::Verified
+                    } else {
+                        KeyStatus::Missing
+                    };
+                }
+                if source == KeySource::Hardware {
+                    if let Err(error) = self.ensure_review_hardware_wallets() {
+                        self.error = Some(error);
+                    }
+                }
+                Task::none()
+            }
+            ImportMessage::KeyWordsEdited(index, SecretInput(value)) => {
+                if let Some(slot) = self.key_slot(index) {
+                    slot.words = value;
+                    slot.check = 0;
+                    slot.status = KeyStatus::Missing;
+                }
+                Task::none()
+            }
+            ImportMessage::KeyPassphraseEdited(index, SecretInput(value)) => {
+                if let Some(slot) = self.key_slot(index) {
+                    slot.passphrase = value;
+                    slot.check = 0;
+                    slot.status = KeyStatus::Missing;
+                }
+                Task::none()
+            }
+            ImportMessage::VerifyWords(index) => self.verify_words(index),
+            ImportMessage::CheckDevice(index) => self.check_device(index),
+            ImportMessage::KeysDone if self.adding_keys => {
+                if self.keys_stored == KeysStored::Storing
+                    || !self.keys.as_ref().is_some_and(KeysState::ready_to_add)
+                {
+                    return Task::none();
+                }
+                if let Err(error) = self.storage_preflight() {
+                    self.error = Some(error);
+                    return Task::none();
+                }
+                self.keys_confirmed = true;
+                self.error = None;
+                self.store_keys()
+            }
+            ImportMessage::KeysDone => {
+                if self.keys.as_ref().is_some_and(KeysState::ready) {
+                    self.keys_confirmed = true;
+                    self.error = None;
+                }
+                Task::none()
+            }
+            ImportMessage::AddKeys => {
+                let Some(wallet) = self.import.active_attachment() else {
+                    return Task::none();
+                };
+                if self.stored_keys != Some(0) || self.adding_keys {
+                    return Task::none();
+                }
+                self.keys = Some(KeysState::new(&wallet.descriptor));
+                self.keys_confirmed = false;
+                self.keys_stored = KeysStored::None;
+                self.adding_keys = true;
+                self.journey = true;
+                self.error = None;
+                Task::none()
+            }
+            ImportMessage::BackToKeys => {
+                if self.keys.is_some() && !self.writing_setup() {
+                    self.keys_confirmed = false;
+                }
+                Task::none()
+            }
+            ImportMessage::RetryStoreKeys => {
+                if matches!(self.keys_stored, KeysStored::Failed(_)) {
+                    self.store_keys()
+                } else {
+                    Task::none()
+                }
             }
             ImportMessage::Confirm | ImportMessage::Retry => {
                 if self.provider == Provider::Connect
@@ -1176,6 +1458,16 @@ impl ImportedBitcoinPanel {
                     self.error = Some("Review a public Bitcoin wallet before importing it.".into());
                     return Task::none();
                 };
+                if self.keys.is_some() && !self.keys_confirmed {
+                    self.error = Some("Add the wallet's keys before importing it.".into());
+                    return Task::none();
+                }
+                // Installing cannot be undone, so the words must be storable
+                // before the wallet is attached.
+                if let Err(error) = self.storage_preflight() {
+                    self.error = Some(error);
+                    return Task::none();
+                }
                 let config = match self.config(&wallet, client.as_ref()) {
                     Ok(config) => config,
                     Err(error) => {
@@ -1472,7 +1764,7 @@ impl ImportedBitcoinPanel {
                     },
                 )
             }
-            ImportMessage::SavePsbt => {
+            ImportMessage::SavePsbt(language) => {
                 let Some(draft) = &self.draft else {
                     return Task::none();
                 };
@@ -1482,11 +1774,14 @@ impl ImportedBitcoinPanel {
                 let gate = self.generation_gate.clone();
                 self.busy = true;
                 self.error = None;
+                let title = coincube_ui::locale::render_in(language, || {
+                    localized_copy("Save unsigned Bitcoin PSBT").to_owned()
+                });
                 Task::perform(
                     async move {
                         let name = format!("bitcoin-spend-{}.psbt", &id.to_string()[..12]);
                         let Some(handle) = rfd::AsyncFileDialog::new()
-                            .set_title("Save unsigned Bitcoin PSBT")
+                            .set_title(title)
                             .set_file_name(&name)
                             .save_file()
                             .await
@@ -1512,7 +1807,7 @@ impl ImportedBitcoinPanel {
                     },
                 )
             }
-            ImportMessage::LoadSignedPsbt => {
+            ImportMessage::LoadSignedPsbt(language) => {
                 let Some(draft) = &self.draft else {
                     return Task::none();
                 };
@@ -1532,10 +1827,13 @@ impl ImportedBitcoinPanel {
                 let gate = self.generation_gate.clone();
                 self.busy = true;
                 self.error = None;
+                let title = coincube_ui::locale::render_in(language, || {
+                    localized_copy("Choose a signed Bitcoin PSBT").to_owned()
+                });
                 Task::perform(
                     async move {
                         let Some(handle) = rfd::AsyncFileDialog::new()
-                            .set_title("Choose a signed Bitcoin PSBT")
+                            .set_title(title)
                             .add_filter("Bitcoin PSBT", &["psbt", "txt"])
                             .pick_file()
                             .await
@@ -1757,6 +2055,43 @@ impl ImportedBitcoinPanel {
                     },
                 )
             }
+            ImportMessage::ContinueFromScan => {
+                if self.import.active_attachment().is_some() {
+                    self.scan_continued = true;
+                }
+                Task::none()
+            }
+            ImportMessage::LeaveJourney => {
+                if !self.writing_setup() && self.keys_stored != KeysStored::Storing {
+                    // Closing an import that never installed its wallet
+                    // abandons it: the Cube made for it goes too, through
+                    // the Launcher's delete confirmation, where the user can
+                    // still keep it. A finished import only closes.
+                    let abandoned = !self.adding_keys && self.can_delete_cube();
+                    self.journey = false;
+                    // Typed words do not outlive the screen they were typed on.
+                    if let Some(keys) = &mut self.keys {
+                        keys.forget_words();
+                    }
+                    if self.import.active_attachment().is_none() {
+                        self.keys_confirmed = false;
+                    }
+                    if self.adding_keys {
+                        self.adding_keys = false;
+                        self.keys = None;
+                    }
+                    if abandoned {
+                        return Task::done(Message::View(view::Message::DeleteUnfinishedCube));
+                    }
+                }
+                Task::none()
+            }
+            ImportMessage::ResumeJourney => {
+                if self.import.active_attachment().is_none() {
+                    self.journey = true;
+                }
+                Task::none()
+            }
             ImportMessage::Abandon => {
                 if self.import.active_attachment().is_some() {
                     self.error =
@@ -1802,7 +2137,7 @@ impl ImportedBitcoinPanel {
                     )
                 }
                 BitcoinImportStage::Syncing { .. } | BitcoinImportStage::Ready { .. } => {
-                    self.open_daemon()
+                    Task::batch([self.open_daemon(), self.load_key_inventory()])
                 }
             },
             ImportEvent::Installed(generation, result) if generation == self.generation => {
@@ -1812,7 +2147,14 @@ impl ImportedBitcoinPanel {
                         if let Some(wallet) = self.review.clone() {
                             self.import.stage = BitcoinImportStage::Syncing { wallet };
                         }
-                        self.open_daemon()
+                        let store = self.store_keys();
+                        let inventory = if self.keys_stored == KeysStored::Storing {
+                            Task::none()
+                        } else {
+                            // A device-only import: say what this device holds.
+                            self.load_key_inventory()
+                        };
+                        Task::batch([self.open_daemon(), store, inventory])
                     }
                     Err(error) => {
                         self.error = Some(error);
@@ -1827,7 +2169,9 @@ impl ImportedBitcoinPanel {
                         if let Some(wallet) = self.review.clone() {
                             self.import.stage = BitcoinImportStage::Syncing { wallet };
                         }
-                        self.open_daemon()
+                        // The words given before the interruption were not
+                        // kept; the inventory says whether any were stored.
+                        Task::batch([self.open_daemon(), self.load_key_inventory()])
                     }
                     Ok(None) => {
                         self.error = Some(
@@ -1991,7 +2335,10 @@ impl ImportedBitcoinPanel {
             ImportEvent::Abandoned(generation, result) if generation == self.generation => {
                 self.busy = false;
                 match result {
-                    Ok(()) => self.abandoned = true,
+                    Ok(()) => {
+                        self.abandoned = true;
+                        self.keys = None;
+                    }
                     Err(error) => self.error = Some(error),
                 }
                 Task::none()
@@ -2020,10 +2367,10 @@ impl ImportedBitcoinPanel {
                 if generation == self.generation =>
             {
                 self.busy = false;
-                if !self
+                if self
                     .draft
                     .as_ref()
-                    .is_some_and(|draft| draft.psbt.unsigned_tx.compute_txid() == draft_id)
+                    .is_none_or(|draft| draft.psbt.unsigned_tx.compute_txid() != draft_id)
                 {
                     return Task::none();
                 }
@@ -2092,10 +2439,10 @@ impl ImportedBitcoinPanel {
                 if generation == self.generation =>
             {
                 self.busy = false;
-                if !self
+                if self
                     .draft
                     .as_ref()
-                    .is_some_and(|draft| draft.psbt.unsigned_tx.compute_txid() == draft_id)
+                    .is_none_or(|draft| draft.psbt.unsigned_tx.compute_txid() != draft_id)
                 {
                     return Task::none();
                 }
@@ -2117,6 +2464,54 @@ impl ImportedBitcoinPanel {
                     }
                     Ok(None) => {}
                     Err(error) => self.error = Some(error),
+                }
+                Task::none()
+            }
+            ImportEvent::WordsVerified(generation, index, check, result)
+            | ImportEvent::DeviceVerified(generation, index, check, result)
+                if generation == self.generation =>
+            {
+                if let Some(slot) = self.key_slot(index) {
+                    // Only the check this slot is waiting for may land: an
+                    // edit, a new source or a newer check makes it stale.
+                    if slot.status == KeyStatus::Checking && slot.check == check && check != 0 {
+                        slot.check = 0;
+                        slot.status = match result {
+                            Ok(()) => KeyStatus::Verified,
+                            Err(error) => KeyStatus::Failed(error),
+                        };
+                    }
+                }
+                Task::none()
+            }
+            ImportEvent::KeysInventory(epoch, result)
+                if epoch == self.keys_gate.load(Ordering::SeqCst) =>
+            {
+                self.stored_keys = result.ok();
+                Task::none()
+            }
+            ImportEvent::KeysStored(epoch, result)
+                if epoch == self.keys_gate.load(Ordering::SeqCst) =>
+            {
+                match result {
+                    Ok(count) => {
+                        self.keys_stored = KeysStored::Stored(count);
+                        self.stored_keys = Some(count);
+                        // The words now live only in the Cube's encrypted
+                        // key records.
+                        if let Some(keys) = &mut self.keys {
+                            for slot in &mut keys.slots {
+                                slot.words = zeroize::Zeroizing::new(String::new());
+                                slot.passphrase = zeroize::Zeroizing::new(String::new());
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.keys_stored = KeysStored::Failed(error);
+                        // Once the words are gone, Add recovery words is the
+                        // way back; it needs the current count.
+                        return self.load_key_inventory();
+                    }
                 }
                 Task::none()
             }
@@ -2318,7 +2713,19 @@ impl ImportedBitcoinPanel {
         )
     }
 
-    pub fn stop(&mut self) {
+    /// Like [`Self::stop`], but the owned daemon stops on its own thread so
+    /// locking the Cube does not wait for its in-flight network request.
+    pub fn stop_in_background(&mut self) {
+        if let Some(daemon) = self.release_daemon() {
+            crate::daemon::stopping::stop_in_background(daemon, || {});
+        }
+    }
+
+    fn release_daemon(&mut self) -> Option<Arc<dyn Daemon + Send + Sync>> {
+        self.keys_gate.fetch_add(1, Ordering::SeqCst);
+        if let Some(keys) = &mut self.keys {
+            keys.forget_words();
+        }
         self.birthday_calendar_open = false;
         self.generation = fresh_generation();
         self.generation_gate
@@ -2331,7 +2738,11 @@ impl ImportedBitcoinPanel {
         self.source.clear_transient();
         let owns_daemon = self.owns_daemon;
         self.owns_daemon = false;
-        if let Some(daemon) = self.daemon.take().filter(|_| owns_daemon) {
+        self.daemon.take().filter(|_| owns_daemon)
+    }
+
+    pub fn stop(&mut self) {
+        if let Some(daemon) = self.release_daemon() {
             let runtime = tokio::runtime::Handle::try_current().ok();
             let result = std::thread::spawn(move || {
                 if let Some(handle) = runtime {
@@ -2356,29 +2767,727 @@ impl ImportedBitcoinPanel {
         }
     }
 
+    /// The setup step as one column: its form over its action row.
+    #[cfg(test)]
     fn setup_view(&self) -> Element<'_, view::Message> {
-        let mut content = Column::new()
+        let (form, actions) = self.setup_step();
+        Column::new()
             .spacing(16)
             .max_width(800)
-            .push(h2(if self.review.is_none() { "Import a Bitcoin wallet" } else { "Review Bitcoin wallet" }))
-            .push(p1_regular("Use your existing Bitcoin wallet in this Cube. Signing stays with your original wallet or hardware device.").style(theme::text::secondary));
-        if self.review.is_none() {
-            let beginning = if self.scan_from_beginning {
-                button::primary(None, "From the beginning")
+            .push(form)
+            .push(actions)
+            .into()
+    }
+
+    /// Done's account of where the wallet's keys are.
+    fn keys_line(&self) -> Option<Element<'_, view::Message>> {
+        if self.keys_stored == KeysStored::None && !self.adding_keys {
+            // A resumed install or a device-only import: say what this
+            // device holds and offer to add words.
+            if let Some(view) = self.stored_keys_view() {
+                return Some(view);
+            }
+        }
+        let keys = self.keys.as_ref().filter(|keys| !keys.slots.is_empty())?;
+        let devices = keys
+            .slots
+            .iter()
+            .filter(|slot| slot.source == KeySource::Hardware && slot.provided())
+            .count();
+        let elsewhere = keys
+            .slots
+            .iter()
+            .filter(|slot| slot.source == KeySource::Elsewhere)
+            .count();
+        let mut parts = Vec::new();
+        match &self.keys_stored {
+            KeysStored::Stored(count) => parts.push(coincube_ui::localized_format!(
+                "{count} from recovery words, stored encrypted on this device for this Cube. \
+                 They are not in the Recovery Kit yet, so keep your original backup",
+                "{count} con palabras de recuperación, guardadas cifradas en este dispositivo \
+                 para este Cube. Todavía no están en el Kit de recuperación, así que conserva \
+                 tu copia original"
+            )),
+            KeysStored::Storing => {
+                parts.push(localized_copy("storing the recovery words…").to_string())
+            }
+            KeysStored::Failed(error) => {
+                return Some(
+                    p1_regular(coincube_ui::localized_format!(
+                        "Keys: the recovery words were not stored. {}",
+                        "Claves: no se guardaron las palabras de recuperación. {}",
+                        shown_notice(error)
+                    ))
+                    .style(theme::text::error)
+                    .into(),
+                )
+            }
+            KeysStored::None => (),
+        }
+        if devices > 0 {
+            parts.push(coincube_ui::localized_format!(
+                "{devices} on a hardware wallet",
+                "{devices} en una cartera de hardware"
+            ));
+        }
+        if elsewhere > 0 {
+            parts.push(coincube_ui::localized_format!(
+                "{elsewhere} signs elsewhere",
+                "{elsewhere} con firma externa"
+            ));
+        }
+        (!parts.is_empty()).then(|| {
+            p1_regular(coincube_ui::localized_format!(
+                "Keys: {}",
+                "Claves: {}",
+                parts.join(" · ")
+            ))
+            .into()
+        })
+    }
+
+    fn key_slot(&mut self, index: usize) -> Option<&mut keys::KeySlot> {
+        self.keys
+            .as_mut()
+            .and_then(|keys| keys.slots.get_mut(index))
+    }
+
+    /// A connected hardware wallet with this signer's fingerprint. A paired
+    /// phone joins the same list but is not a hardware wallet.
+    fn connected_device(
+        &self,
+        account: &coincube_core::imported_keys::ImportedAccount,
+    ) -> Option<Arc<dyn async_hwi::HWI + Send + Sync>> {
+        self.hardware_wallets
+            .as_ref()?
+            .list
+            .iter()
+            .filter(|listed| !listed.is_lan_phone())
+            .find_map(|listed| match listed {
+                HardwareWallet::Supported {
+                    device,
+                    fingerprint,
+                    ..
+                } if *fingerprint == account.fingerprint => Some(device.clone()),
+                _ => None,
+            })
+    }
+
+    fn device_connected(&self, account: &coincube_core::imported_keys::ImportedAccount) -> bool {
+        self.connected_device(account).is_some()
+    }
+
+    /// The device list for the Keys step, before the wallet is installed.
+    fn ensure_review_hardware_wallets(&mut self) -> Result<(), String> {
+        if self.hardware_wallets.is_some() {
+            return Ok(());
+        }
+        let root = self
+            .hardware_root
+            .clone()
+            .ok_or("Hardware wallet access is unavailable.")?;
+        let wallet = self
+            .review
+            .as_ref()
+            .ok_or("Review the wallet before checking a device.")?;
+        let policy = imported_policy(&wallet.descriptor).map_err(|error| error.to_string())?;
+        self.hardware_wallets = Some(
+            HardwareWallets::new(root, self.chain().bitcoin_network())
+                .with_public_policy(policy.name().to_owned(), policy.descriptor().to_owned()),
+        );
+        Ok(())
+    }
+
+    /// Check typed recovery words against signer `index`: the derived account
+    /// must be that signer's fingerprint, origin and xpub in both branches.
+    fn verify_words(&mut self, index: usize) -> Task<Message> {
+        let Some(wallet) = self.review.clone() else {
+            return Task::none();
+        };
+        let generation = self.generation;
+        let gate = self.generation_gate.clone();
+        let Some(slot) = self.key_slot(index) else {
+            return Task::none();
+        };
+        if slot.source != KeySource::Words || slot.status == KeyStatus::Checking {
+            return Task::none();
+        }
+        // BIP39 words are lowercase and single-spaced. Built in place so no
+        // unwiped copy of the phrase is left behind.
+        let mut words = zeroize::Zeroizing::new(String::with_capacity(slot.words.len()));
+        for word in slot.words.split_whitespace() {
+            if !words.is_empty() {
+                words.push(' ');
+            }
+            for c in word.chars() {
+                for lower in c.to_lowercase() {
+                    words.push(lower);
+                }
+            }
+        }
+        slot.words = words.clone();
+        let passphrase = slot.passphrase.clone();
+        let expected = slot.account.clone();
+        let check = keys::next_check();
+        slot.check = check;
+        slot.status = KeyStatus::Checking;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    if gate.load(Ordering::SeqCst) != generation {
+                        return Err("The key check was cancelled.".to_string());
+                    }
+                    check_words(&wallet.descriptor, &expected, words, passphrase)
+                })
+                .await
+                .map_err(|_| "The key check stopped unexpectedly.".to_string())?
+            },
+            move |result| {
+                Message::ImportedBitcoin(Box::new(ImportEvent::WordsVerified(
+                    generation, index, check, result,
+                )))
+            },
+        )
+    }
+
+    /// Check the connected device for signer `index`. It keeps its seed.
+    fn check_device(&mut self, index: usize) -> Task<Message> {
+        let Some(wallet) = self.review.clone() else {
+            return Task::none();
+        };
+        let Some(account) = self
+            .keys
+            .as_ref()
+            .and_then(|keys| keys.slots.get(index))
+            .filter(|slot| slot.source == KeySource::Hardware && slot.status != KeyStatus::Checking)
+            .map(|slot| slot.account.clone())
+        else {
+            return Task::none();
+        };
+        let Some(device) = self.connected_device(&account) else {
+            self.error = Some("Connect and unlock the device with this fingerprint.".into());
+            return Task::none();
+        };
+        let generation = self.generation;
+        let gate = self.generation_gate.clone();
+        let check = keys::next_check();
+        if let Some(slot) = self.key_slot(index) {
+            slot.check = check;
+            slot.status = KeyStatus::Checking;
+        }
+        Task::perform(
+            async move {
+                crate::services::imported_device_identity::verify_device_account(
+                    device,
+                    &wallet.descriptor,
+                    &account,
+                    || gate.load(Ordering::SeqCst) == generation,
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            },
+            move |result| {
+                Message::ImportedBitcoin(Box::new(ImportEvent::DeviceVerified(
+                    generation, index, check, result,
+                )))
+            },
+        )
+    }
+
+    /// Store the verified recovery words in this Cube's encrypted key
+    /// records, once the wallet they belong to is attached.
+    fn store_keys(&mut self) -> Task<Message> {
+        let entries = match &self.keys {
+            None => return Task::none(),
+            Some(keys) => keys
+                .slots
+                .iter()
+                .filter(|slot| slot.source == KeySource::Words && slot.provided())
+                .map(|slot| {
+                    coincube_core::imported_key_crypt::ImportedKeySecret::new(
+                        slot.words.clone(),
+                        slot.passphrase.clone(),
+                    )
+                    .map(|secret| (slot.account.clone(), secret))
+                    .map_err(|error| error.to_string())
+                })
+                .collect::<Result<Vec<_>, String>>(),
+        };
+        let entries = match entries {
+            Ok(entries) if entries.is_empty() => {
+                self.keys_stored = KeysStored::None;
+                return Task::none();
+            }
+            Ok(entries) => entries,
+            Err(error) => {
+                self.keys_stored = KeysStored::Failed(error);
+                return Task::none();
+            }
+        };
+        let Some(attachment) = self.import.active_attachment().cloned() else {
+            return Task::none();
+        };
+        let directory = self.directory.clone();
+        let cube_id = self.cube_id.clone();
+        let gate = self.keys_gate.clone();
+        let epoch = gate.load(Ordering::SeqCst);
+        self.keys_stored = KeysStored::Storing;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let settings = settings::Settings::from_file(&directory)
+                        .map_err(|_| "Cannot read this Cube's settings.".to_string())?;
+                    let cube = settings
+                        .cubes
+                        .iter()
+                        .find(|cube| cube.id == cube_id)
+                        .ok_or("This Cube no longer exists.")?;
+                    let repository = crate::services::imported_keys::LocalKeyRepository::new(
+                        &directory,
+                        cube,
+                        &attachment,
+                    )?;
+                    repository
+                        .admit_new_batch(entries, || gate.load(Ordering::SeqCst) == epoch)
+                        .map(|records| records.len())
+                })
+                .await
+                .map_err(|_| "Storing the keys stopped unexpectedly.".to_string())?
+            },
+            move |result| {
+                Message::ImportedBitcoin(Box::new(ImportEvent::KeysStored(epoch, result)))
+            },
+        )
+    }
+
+    /// Words can be stored only for the unlocked Cube and never while Duress
+    /// Mode is set up. Checked before installing, which cannot be undone.
+    fn storage_preflight(&self) -> Result<(), String> {
+        let words = self.keys.as_ref().is_some_and(|keys| {
+            keys.slots
+                .iter()
+                .any(|slot| slot.source == KeySource::Words && slot.provided())
+        });
+        if !words {
+            return Ok(());
+        }
+        if crate::app::session::current_cube_id().as_deref() != Some(self.cube_id.as_str()) {
+            return Err("Unlock this Cube again before storing recovery words.".into());
+        }
+        let root = self
+            .directory
+            .path()
+            .parent()
+            .ok_or("Missing Cube data root.")?;
+        let duress = crate::services::duress::DuressLocalState::load(root)
+            .map_err(|_| "Cannot check Duress Mode.".to_string())?;
+        if duress.enrolled || duress.arming || duress.active {
+            return Err(
+                "Recovery words cannot be stored while Duress Mode is set up. Use a \
+                        hardware wallet for this key, or turn off Duress Mode first."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Read how many local key records the attached wallet has.
+    pub fn load_key_inventory(&self) -> Task<Message> {
+        let Some(attachment) = self.import.active_attachment().cloned() else {
+            return Task::none();
+        };
+        let directory = self.directory.clone();
+        let cube_id = self.cube_id.clone();
+        let epoch = self.keys_gate.load(Ordering::SeqCst);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let settings = settings::Settings::from_file(&directory)
+                        .map_err(|_| "Cannot read this Cube's settings.".to_string())?;
+                    let cube = settings
+                        .cubes
+                        .iter()
+                        .find(|cube| cube.id == cube_id)
+                        .ok_or("This Cube no longer exists.")?;
+                    crate::services::imported_keys::LocalKeyRepository::new(
+                        &directory,
+                        cube,
+                        &attachment,
+                    )?
+                    .records()
+                    .map(|records| records.len())
+                })
+                .await
+                .map_err(|_| "Reading the stored keys stopped unexpectedly.".to_string())?
+            },
+            move |result| {
+                Message::ImportedBitcoin(Box::new(ImportEvent::KeysInventory(epoch, result)))
+            },
+        )
+    }
+
+    /// Where this wallet's recovery words stand on this device, with Add
+    /// recovery words when none are stored.
+    fn stored_keys_view(&self) -> Option<Element<'_, view::Message>> {
+        let count = self.stored_keys?;
+        let mut content = Column::new()
+            .spacing(8)
+            .push(p1_bold(localized_copy("Keys on this device")));
+        if count == 0 {
+            content = content
+                .push(
+                    p1_regular(localized_copy("No recovery words for this wallet are stored on this device. If you hold any of its keys as recovery words, add them."))
+                    .style(theme::text::secondary),
+                )
+                .push(
+                    button::secondary(None, localized_copy("Add recovery words"))
+                        .width(iced::Length::Shrink)
+                        .on_press_maybe(
+                            (!self.adding_keys)
+                                .then_some(view::Message::ImportedBitcoin(ImportMessage::AddKeys)),
+                        ),
+                );
+        } else {
+            content = content.push(
+                p1_regular(coincube_ui::localized_format!(
+                    "{count} from recovery words, stored encrypted on this device for this \
+                     Cube. They are not in the Recovery Kit yet, so keep your original backup.",
+                    "{count} con palabras de recuperación, guardadas cifradas en este \
+                     dispositivo para este Cube. Todavía no están en el Kit de recuperación, \
+                     así que conserva tu copia original."
+                ))
+                .style(theme::text::secondary),
+            );
+        }
+        Some(content.into())
+    }
+
+    /// The Vault page while the import is unfinished and Import or restore
+    /// is closed.
+    fn resume_view(&self) -> Element<'_, view::Message> {
+        Column::new()
+            .spacing(16)
+            .max_width(800)
+            .push(h3(localized_copy("Finish importing your Bitcoin wallet")))
+            .push(
+                p1_regular(localized_copy("This Cube is waiting for your existing Bitcoin wallet. Continue in Import or restore, or use a new Vault instead."))
+                    .style(theme::text::secondary),
+            )
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .push(button::primary(None, localized_copy("Continue import")).on_press(
+                        view::Message::ImportedBitcoin(ImportMessage::ResumeJourney),
+                    ))
+                    .push(
+                        button::secondary(None, localized_copy("Use a new Vault instead")).on_press_maybe(
+                            (!self.busy).then_some(view::Message::ImportedBitcoin(
+                                ImportMessage::Abandon,
+                            )),
+                        ),
+                    )
+                    .push(self.delete_cube_button()),
+            )
+            .push_maybe(
+                self.error
+                    .as_ref()
+                    .map(|error| p1_regular(shown_notice(error)).style(theme::text::error)),
+            )
+            .into()
+    }
+
+    /// True while Import or restore holds the window instead of the Cube.
+    /// An install or abandon is being written. Refreshes during the scan
+    /// also set `busy`, but leaving then interrupts nothing.
+    fn writing_setup(&self) -> bool {
+        self.busy && self.import.active_attachment().is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_journey_for_tests(&mut self) {
+        self.journey = true;
+    }
+
+    pub fn journey_open(&self) -> bool {
+        self.journey && !self.abandoned
+    }
+
+    /// Where the import stands on Import or restore's stepper.
+    fn journey_step(&self) -> JourneyStep {
+        if self.adding_keys {
+            return if self.keys_confirmed {
+                JourneyStep::Done
             } else {
-                button::secondary(None, "From the beginning")
+                JourneyStep::Keys
+            };
+        }
+        if self.import.active_attachment().is_none() {
+            if self.review.is_none() {
+                JourneyStep::Source
+            } else if self.keys.is_some() && !self.keys_confirmed {
+                JourneyStep::Keys
+            } else {
+                JourneyStep::Review
+            }
+        } else if self.is_ready() || self.scan_continued {
+            JourneyStep::Done
+        } else {
+            JourneyStep::Scan
+        }
+    }
+
+    /// Import or restore around the import's steps after the Cube exists:
+    /// the Launcher's header, path list and stepper, with no Cube menu.
+    pub fn journey_view<'a>(
+        &'a self,
+        cache: &'a Cache,
+        passkey: bool,
+    ) -> Element<'a, view::Message> {
+        use crate::home::restore_frame;
+        use iced::{widget::Space, Alignment, Length};
+
+        let light = matches!(
+            cache.theme_mode,
+            coincube_ui::theme::palette::ThemeMode::Light
+        );
+        let step = self.journey_step();
+        let _ = passkey;
+        let steps = restore_frame::import_steps();
+        let active = steps
+            .iter()
+            .position(|label| *label == step.label())
+            .unwrap_or(steps.len() - 1);
+        // The stepper's labels are compared in English above and shown here.
+        let shown_steps: Vec<&'static str> =
+            steps.iter().map(|label| localized_copy(label)).collect();
+        let (form, actions): (Element<'a, view::Message>, Element<'a, view::Message>) = match step {
+            JourneyStep::Source | JourneyStep::Review => self.setup_step(),
+            JourneyStep::Keys => match &self.keys {
+                Some(keys) => keys::step(
+                    keys,
+                    self.adding_keys,
+                    |account| self.device_connected(account),
+                    self.error.as_ref(),
+                ),
+                None => self.setup_step(),
+            },
+            JourneyStep::Scan => (
+                self.scan_content(Column::new().spacing(16))
+                    .push(
+                        Row::new()
+                            .spacing(10)
+                            .align_y(Alignment::Center)
+                            .push(
+                                button::secondary(None, localized_copy("Receive"))
+                                    .width(Length::Shrink),
+                            )
+                            .push(
+                                caption(localized_copy(
+                                    "Wait for the complete Bitcoin history scan before receiving.",
+                                ))
+                                .style(theme::text::secondary),
+                            ),
+                    )
+                    .push_maybe(
+                        self.error
+                            .as_ref()
+                            .map(|error| p1_regular(shown_notice(error)).style(theme::text::error)),
+                    )
+                    .into(),
+                Row::new()
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        button::primary(None, localized_copy("Continue"))
+                            .width(Length::Shrink)
+                            .on_press(view::Message::ImportedBitcoin(
+                                ImportMessage::ContinueFromScan,
+                            )),
+                    )
+                    .into(),
+            ),
+            JourneyStep::Done => (
+                self.done_content(cache),
+                Row::new()
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        button::primary(None, localized_copy("Open Cube"))
+                            .width(Length::Shrink)
+                            .on_press_maybe((self.keys_stored != KeysStored::Storing).then_some(
+                                view::Message::ImportedBitcoin(ImportMessage::LeaveJourney),
+                            )),
+                    )
+                    .into(),
+            ),
+        };
+        // The Cube now exists, so the import is the only path left open.
+        let nav = restore_frame::nav()
+            .push(restore_frame::nav_label(localized_copy("Overview"), false))
+            .push(restore_frame::nav_label(
+                localized_copy("Import Bitcoin wallet"),
+                true,
+            ));
+        let body = iced::widget::scrollable(
+            Column::new()
+                .spacing(20)
+                .padding([24, 28])
+                .push_maybe(
+                    (step != JourneyStep::Done)
+                        .then(|| h2(localized_copy("Import Bitcoin wallet"))),
+                )
+                .push(form),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+        let region = restore_frame::region(
+            Some(restore_frame::step_rail(&shown_steps, active)),
+            body,
+            Some(actions),
+        );
+        // Close before the wallet is installed asks the Launcher to delete
+        // the Cube made for the import; a kept Cube's Vault page reopens it.
+        // Done has its own Open Cube.
+        let close: Element<'a, view::Message> = if step != JourneyStep::Done {
+            restore_frame::close_plain(
+                (!self.writing_setup() && self.keys_stored != KeysStored::Storing)
+                    .then_some(view::Message::ImportedBitcoin(ImportMessage::LeaveJourney)),
+            )
+        } else {
+            Space::new().into()
+        };
+        let header = restore_frame::sheet_header(
+            localized_copy("Import or restore"),
+            restore_frame::network_chip(self.chain(), light),
+            close,
+        );
+        restore_frame::standalone(restore_frame::sheet(
+            header,
+            restore_frame::with_nav(nav.into(), region),
+            None,
+        ))
+    }
+
+    /// Done: the Sumi-e art, "[Cube] is ready" and one short line. Only a
+    /// stalled scan or a failed key store adds its own retry.
+    fn done_content<'a>(&'a self, cache: &'a Cache) -> Element<'a, view::Message> {
+        let light = matches!(
+            cache.theme_mode,
+            coincube_ui::theme::palette::ThemeMode::Light
+        );
+        let ready = self.is_ready();
+        let stalled = matches!(
+            ScanDisplay::from_info(self.info.as_ref(), self.sync_failed),
+            ScanDisplay::Retrying | ScanDisplay::NeedsAttention
+        );
+        let line = if ready {
+            localized_copy(
+                "Your wallet is now this Cube's Vault. Open it to receive or review its history.",
+            )
+        } else if stalled {
+            localized_copy(
+                "The history scan stopped before it finished. Retry it here or from the Vault page.",
+            )
+        } else {
+            localized_copy(
+                "Your wallet is now this Cube's Vault. Its history appears when the scan finishes.",
+            )
+        };
+        Column::new()
+            .spacing(16)
+            .width(iced::Length::Fill)
+            .align_x(iced::Alignment::Center)
+            .push(crate::home::restore_frame::done_art(light))
+            .push(h3(coincube_ui::localized_format!(
+                "{} is ready",
+                "{} está listo",
+                cache.cube_name
+            )))
+            .push(p1_regular(line).style(theme::text::secondary))
+            .push_maybe((!ready && stalled).then(|| {
+                button::secondary(
+                    None,
+                    if self.sync_requesting {
+                        localized_copy("Retrying…")
+                    } else {
+                        localized_copy(self.synchronization_action_label())
+                    },
+                )
+                .width(iced::Length::Shrink)
+                .on_press_maybe((!self.busy && !self.sync_requesting).then_some(
+                    view::Message::ImportedBitcoin(ImportMessage::RetrySynchronization),
+                ))
+            }))
+            .push_maybe(matches!(self.keys_stored, KeysStored::Failed(_)).then(|| {
+                Column::new()
+                    .spacing(8)
+                    .align_x(iced::Alignment::Center)
+                    .push_maybe(self.keys_line())
+                    .push(
+                        button::secondary(None, localized_copy("Store keys again"))
+                            .width(iced::Length::Shrink)
+                            .on_press(view::Message::ImportedBitcoin(
+                                ImportMessage::RetryStoreKeys,
+                            )),
+                    )
+            }))
+            .into()
+    }
+
+    /// This Cube was created for the import. Until a wallet is installed
+    /// in it, the user can delete it instead of keeping an empty Cube; the
+    /// Launcher's delete confirmation does the deleting.
+    fn delete_cube_button(&self) -> Element<'_, view::Message> {
+        button::secondary(None, localized_copy("Delete this Cube"))
+            .width(iced::Length::Shrink)
+            .on_press_maybe(
+                self.can_delete_cube()
+                    .then_some(view::Message::DeleteUnfinishedCube),
+            )
+            .into()
+    }
+
+    fn can_delete_cube(&self) -> bool {
+        !self.busy
+            && self.import.active_attachment().is_none()
+            && matches!(self.keys_stored, KeysStored::None | KeysStored::Failed(_))
+    }
+
+    /// Source, or Review once the form parses: the step's form and its
+    /// action row.
+    fn setup_step(&self) -> (Element<'_, view::Message>, Element<'_, view::Message>) {
+        let mut content = Column::new().spacing(16);
+        let mut footer = Row::new()
+            .spacing(10)
+            .align_y(iced::Alignment::Center)
+            .push(
+                button::secondary(None, localized_copy("Use a new Vault instead"))
+                    .width(iced::Length::Shrink)
+                    .on_press_maybe(
+                        (!self.busy)
+                            .then_some(view::Message::ImportedBitcoin(ImportMessage::Abandon)),
+                    ),
+            )
+            .push(self.delete_cube_button())
+            .push(iced::widget::Space::new().width(iced::Length::Fill));
+        if self.review.is_none() {
+            content = content.push(p1_regular(localized_copy("Use your existing Bitcoin wallet in this Cube. The descriptor describes the wallet; you add its keys on the next step.")).style(theme::text::secondary));
+            let beginning = if self.scan_from_beginning {
+                button::primary(None, localized_copy("From the beginning"))
+            } else {
+                button::secondary(None, localized_copy("From the beginning"))
             };
             let dated = if self.scan_from_beginning {
-                button::secondary(None, "From a creation date")
+                button::secondary(None, localized_copy("From a creation date"))
             } else {
-                button::primary(None, "From a creation date")
+                button::primary(None, localized_copy("From a creation date"))
             };
             content = content
                 .push(wallet_source_form::view(&self.source, &SourceFormCopy::import()).map(|m| {
                     view::Message::ImportedBitcoin(ImportMessage::Source(m))
                 }))
                 .push(iced::widget::Space::new().height(8))
-                .push(p1_bold("Where should the history scan start?"))
+                .push(p1_bold(localized_copy("Where should the history scan start?")))
                 .push(Row::new().spacing(10)
                     .push(beginning
                         .width(iced::Length::Fill)
@@ -2390,7 +3499,7 @@ impl ImportedBitcoinPanel {
                     Row::new()
                         .spacing(10)
                         .align_y(iced::Alignment::Center)
-                        .push(text_input("YYYY-MM-DD", &self.birthday)
+                        .push(text_input(localized_copy("YYYY-MM-DD"), &self.birthday)
                             .on_input(|s| view::Message::ImportedBitcoin(ImportMessage::BirthdayEdited(s)))
                             .padding(10))
                         .push(date_picker::calendar_button(
@@ -2403,18 +3512,18 @@ impl ImportedBitcoinPanel {
                         ).map(view::Message::ImportedBitcoin))
                 }))
                 .push(caption(if self.scan_from_beginning {
-                    "Starts at Bitcoin's first block. Choose this if you do not know when the wallet was created; it may take longer."
+                    localized_copy("Starts at Bitcoin's first block. Choose this if you do not know when the wallet was created; it may take longer.")
                 } else {
-                    "Choose the original wallet's creation date or an earlier date so older transactions are included."
+                    localized_copy("Choose the original wallet's creation date or an earlier date so older transactions are included.")
                 }).style(theme::text::secondary))
                 .push(iced::widget::Space::new().height(8))
-                .push(p1_bold("Addresses to search per branch"))
+                .push(p1_bold(localized_copy("Addresses to search per branch")))
                 .push(text_input("200", &self.lookahead)
                     .on_input(|s| view::Message::ImportedBitcoin(ImportMessage::LookaheadEdited(s)))
                     .padding(10))
-                .push(caption("Start with 200 receive and 200 change addresses. You can search further after the scan finishes.").style(theme::text::secondary))
+                .push(caption(localized_copy("Start with 200 receive and 200 change addresses. You can search further after the scan finishes.")).style(theme::text::secondary))
                 .push(iced::widget::Space::new().height(8))
-                .push(p1_bold("Bitcoin server"));
+                .push(p1_bold(localized_copy("Bitcoin server")));
             let mut providers = Column::new().spacing(8);
             let mut provider_row = Row::new().spacing(8);
             for provider in [
@@ -2424,9 +3533,9 @@ impl ImportedBitcoinPanel {
                 Provider::Electrum,
             ] {
                 let button = if self.provider == provider {
-                    button::primary(None, provider.label())
+                    button::primary(None, localized_copy(provider.label()))
                 } else {
-                    button::secondary(None, provider.label())
+                    button::secondary(None, localized_copy(provider.label()))
                 };
                 provider_row = provider_row.push(button.width(iced::Length::Fill).on_press(
                     view::Message::ImportedBitcoin(ImportMessage::ProviderSelected(provider)),
@@ -2439,66 +3548,75 @@ impl ImportedBitcoinPanel {
             content = content.push(providers);
             if matches!(self.provider, Provider::Esplora | Provider::Electrum) {
                 content = content.push(
-                    text_input("Server URL", &self.endpoint)
+                    text_input(localized_copy("Server URL"), &self.endpoint)
                         .on_input(|s| {
                             view::Message::ImportedBitcoin(ImportMessage::EndpointEdited(s))
                         })
                         .padding(10),
                 );
             }
-            content = content.push(
-                button::primary(None, "Review wallet")
+            footer = footer.push(
+                button::primary(None, localized_copy("Review wallet"))
+                    .width(iced::Length::Shrink)
                     .on_press(view::Message::ImportedBitcoin(ImportMessage::Review)),
             );
         } else if let Some(wallet) = &self.review {
             let retry = matches!(&self.import.stage, BitcoinImportStage::Installing { .. });
             let (script, threshold, fingerprints) = wallet_summary(&wallet.descriptor);
             let sample_address = sample_receive_address(&wallet.descriptor)
-                .unwrap_or_else(|_| "Unable to derive a sample address".into());
+                .unwrap_or_else(|_| localized_copy("Unable to derive a sample address").into());
             content = content
-                .push(p1_bold("Wallet details"))
-                .push(p1_regular(format!("Bitcoin mainnet · {script} · {threshold}")))
-                .push(p1_regular(format!("Signer fingerprints: {}", if fingerprints.is_empty() { "Not provided" } else { &fingerprints })))
-                .push(p1_bold("First receive address"))
+                .push(h3(localized_copy("Review Bitcoin wallet")))
+                .push(p1_bold(localized_copy("Wallet details")))
+                .push(p1_regular(format!("{} · {script} · {threshold}", crate::chain::canonical_network_name(wallet.descriptor.chain()))))
+                .push(p1_regular(coincube_ui::localized_format!("Signer fingerprints: {}", "Huellas de los firmantes: {}", if fingerprints.is_empty() { localized_copy("Not provided") } else { &fingerprints })))
+                .push_maybe(self.keys.as_ref().filter(|keys| !keys.slots.is_empty()).map(|keys| p1_regular(keys.summary())))
+                .push(p1_bold(localized_copy("First receive address")))
                 .push(p1_regular(sample_address.clone()).wrapping(iced::widget::text::Wrapping::WordOrGlyph))
-                .push(button::secondary_compact(None, "Copy address")
+                .push(button::secondary_compact(None, localized_copy("Copy address"))
                     .on_press(view::Message::CopyWithToast(sample_address, "Address copied".into())))
-                .push(caption("Compare this address with your original wallet before importing.").style(theme::text::secondary))
-                .push(p1_regular(format!("History starts: {}",
-                    if wallet.birthday == 0 { "Beginning".to_string() } else {
+                .push(caption(localized_copy("Compare this address with your original wallet before importing.")).style(theme::text::secondary))
+                .push(p1_regular(coincube_ui::localized_format!("History starts: {}", "El historial empieza: {}",
+                    if wallet.birthday == 0 { localized_copy("Beginning").to_string() } else {
                         chrono::DateTime::from_timestamp(i64::from(wallet.birthday), 0)
                             .map(|date| date.format("%Y-%m-%d").to_string())
-                            .unwrap_or_else(|| "Invalid date".into())
+                            .unwrap_or_else(|| localized_copy("Invalid date").into())
                     })))
-                .push(p1_regular(format!("Address search: {} receive and {} change addresses", wallet.initial_lookahead, wallet.initial_lookahead)))
-                .push(caption("Your balance and transactions will appear after the scan finishes. Then update the Cube Recovery Kit to include this wallet.").style(theme::text::secondary))
-                .push(button::secondary_compact(None, if self.show_details { "Hide descriptor details" } else { "Show descriptor details" })
+                .push(p1_regular(coincube_ui::localized_format!("Address search: {} receive and {} change addresses", "Búsqueda de direcciones: {} de recepción y {} de cambio", wallet.initial_lookahead, wallet.initial_lookahead)))
+                .push(caption(localized_copy("Your balance and transactions will appear after the scan finishes. Then update the Cube Recovery Kit to include this wallet.")).style(theme::text::secondary))
+                .push(button::secondary_compact(None, if self.show_details { localized_copy("Hide descriptor details") } else { localized_copy("Show descriptor details") })
                     .on_press(view::Message::ImportedBitcoin(ImportMessage::ToggleDetails)));
             if self.show_details {
                 content = content
-                    .push(caption(format!(
+                    .push(caption(coincube_ui::localized_format!(
                         "Wallet identity: {}",
+                        "Identidad de la cartera: {}",
                         wallet.wallet_id.descriptor_checksum
                     )))
                     .push(
-                        caption(format!(
+                        caption(coincube_ui::localized_format!(
                             "Receive: {}",
+                            "Recepción: {}",
                             wallet.descriptor.receive_descriptor()
                         ))
                         .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
                         .style(theme::text::secondary),
                     )
                     .push(
-                        caption(format!("Change: {}", wallet.descriptor.change_descriptor()))
-                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
-                            .style(theme::text::secondary),
+                        caption(coincube_ui::localized_format!(
+                            "Change: {}",
+                            "Cambio: {}",
+                            wallet.descriptor.change_descriptor()
+                        ))
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                        .style(theme::text::secondary),
                     );
             }
             content = content
-                .push(p1_bold("Bitcoin server"))
-                .push(p1_regular(self.provider.label()));
+                .push(p1_bold(localized_copy("Bitcoin server")))
+                .push(p1_regular(localized_copy(self.provider.label())));
             if retry {
-                content = content.push(caption("The wallet identity is locked to this Cube. Choose the Bitcoin server to finish an interrupted import."));
+                content = content.push(caption(localized_copy("The wallet identity is locked to this Cube. Choose the Bitcoin server to finish an interrupted import.")));
                 let mut providers = Column::new().spacing(8);
                 let mut provider_row = Row::new().spacing(8);
                 for provider in [
@@ -2508,9 +3626,9 @@ impl ImportedBitcoinPanel {
                     Provider::Electrum,
                 ] {
                     let option = if self.provider == provider {
-                        button::primary(None, provider.label())
+                        button::primary(None, localized_copy(provider.label()))
                     } else {
-                        button::secondary(None, provider.label())
+                        button::secondary(None, localized_copy(provider.label()))
                     };
                     provider_row =
                         provider_row.push(option.width(iced::Length::Fill).on_press_maybe(
@@ -2526,7 +3644,7 @@ impl ImportedBitcoinPanel {
                 content = content.push(providers);
                 if matches!(self.provider, Provider::Esplora | Provider::Electrum) {
                     content = content.push(
-                        text_input("Server URL", &self.endpoint)
+                        text_input(localized_copy("Server URL"), &self.endpoint)
                             .on_input(|value| {
                                 view::Message::ImportedBitcoin(ImportMessage::EndpointEdited(value))
                             })
@@ -2538,30 +3656,44 @@ impl ImportedBitcoinPanel {
                 content = content.push(caption(public_server_label(&self.endpoint)));
             }
             if self.provider == Provider::Public {
-                content = content.push(caption("Public server: mempool.space, with blockstream.info fallback. This reveals wallet addresses to those providers."));
+                content = content.push(caption(localized_copy("Public server: mempool.space, with blockstream.info fallback. This reveals wallet addresses to those providers.")));
             }
             if self.provider == Provider::Connect {
-                content = content.push(caption("Connect server: COINCUBE's authenticated Bitcoin proxy, with public fallback servers."));
+                content = content.push(caption(localized_copy("Connect server: COINCUBE's authenticated Bitcoin proxy, with public fallback servers.")));
             }
-            content = content.push(
+            footer = footer.push(
                 Row::new()
                     .spacing(10)
-                    .push(button::secondary(None, "Edit wallet").on_press_maybe(
-                        (!retry).then_some(view::Message::ImportedBitcoin(ImportMessage::Edit)),
-                    ))
+                    .push(
+                        button::secondary(
+                            None,
+                            if self.keys.is_some() {
+                                localized_copy("Back to keys")
+                            } else {
+                                localized_copy("Edit wallet")
+                            },
+                        )
+                        .width(iced::Length::Shrink)
+                        .on_press_maybe(if self.keys.is_some() {
+                            (!self.busy).then_some(view::Message::ImportedBitcoin(
+                                ImportMessage::BackToKeys,
+                            ))
+                        } else {
+                            (!retry).then_some(view::Message::ImportedBitcoin(ImportMessage::Edit))
+                        }),
+                    )
                     .push(
                         button::primary(
                             None,
                             if self.busy {
-                                "Importing…"
+                                localized_copy("Importing…")
+                            } else if retry {
+                                localized_copy("Retry import")
                             } else {
-                                if retry {
-                                    "Retry import"
-                                } else {
-                                    "Import and scan wallet"
-                                }
+                                localized_copy("Import and scan wallet")
                             },
                         )
+                        .width(iced::Length::Shrink)
                         .on_press_maybe(
                             (!self.busy)
                                 .then_some(view::Message::ImportedBitcoin(ImportMessage::Confirm)),
@@ -2570,17 +3702,12 @@ impl ImportedBitcoinPanel {
             );
         }
         if let Some(error) = &self.error {
-            content = content.push(p1_regular(error).style(theme::text::error));
+            content = content.push(p1_regular(shown_notice(error)).style(theme::text::error));
         }
-        content = content.push(
-            button::secondary_compact(None, "Use a new Vault instead").on_press_maybe(
-                (!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::Abandon)),
-            ),
-        );
-        content.into()
+        (content.into(), footer.into())
     }
 
-    fn wallet_view(&self) -> Element<'_, view::Message> {
+    fn wallet_view(&self, mask_amounts: bool) -> Element<'_, view::Message> {
         let ready = self.is_ready();
         let mut content = Column::new()
             .spacing(16)
@@ -2588,37 +3715,44 @@ impl ImportedBitcoinPanel {
             .push(h2("Vault"));
         if ready {
             if let Some(balance) = self.authoritative_balance() {
-                content = content.push(h3(format!("{} sats available", balance.to_sat())));
+                content = content.push(h3(coincube_ui::localized_format!(
+                    "{} available",
+                    "{} disponible",
+                    passive_wallet_amount(balance.to_sat(), mask_amounts)
+                )));
             }
             content = content
-                .push(p1_regular("The signing keys remain in your original wallet or hardware devices. Your Cube recovery seed cannot sign for this Bitcoin wallet."))
-                .push(p1_regular("Update the Cube Recovery Kit now that this wallet is attached."))
+                .push(p1_regular(localized_copy("The signing keys remain in your original wallet or hardware devices. Your Cube recovery seed cannot sign for this Bitcoin wallet.")))
+                .push(p1_regular(localized_copy("Update the Cube Recovery Kit now that this wallet is attached.")))
                 .push(Row::new().spacing(10)
-                    .push_maybe((!self.chain().is_blake2b()).then(||button::primary(None, "Send").on_press(view::Message::ImportedBitcoin(ImportMessage::ShowSend))))
-                    .push(button::primary(None, "Receive").on_press(view::Message::ImportedBitcoin(ImportMessage::Receive)))
-                    .push(button::secondary(None, "Refresh").on_press(view::Message::ImportedBitcoin(ImportMessage::Refresh))));
+                    .push_maybe((!self.chain().is_blake2b()).then(||button::primary(None, localized_copy("Send")).on_press(view::Message::ImportedBitcoin(ImportMessage::ShowSend))))
+                    .push(button::primary(None, localized_copy("Receive")).on_press(view::Message::ImportedBitcoin(ImportMessage::Receive)))
+                    .push(button::secondary(None, localized_copy("Refresh")).on_press(view::Message::ImportedBitcoin(ImportMessage::Refresh))));
             if let Some(address) = &self.address {
                 content = content.push(p1_regular(address.address.to_string())).push(
-                    button::secondary(None, "Copy address")
+                    button::secondary(None, localized_copy("Copy address"))
                         .on_press(view::Message::ImportedBitcoin(ImportMessage::CopyAddress)),
                 );
             }
-            content = content.push(p1_bold("Recent transactions"));
+            content = content.push(p1_bold(localized_copy("Recent transactions")));
             if self.history.is_empty() {
-                content = content.push(caption("No transactions found in the completed scan."));
+                content = content.push(caption(localized_copy(
+                    "No transactions found in the completed scan.",
+                )));
             } else {
                 for tx in self.history.iter().take(20) {
                     let (direction, amount) = match tx.kind {
                         model::TransactionKind::IncomingSinglePayment(_)
                         | model::TransactionKind::IncomingPaymentBatch(_) => {
-                            ("Received", tx.incoming_amount.to_sat())
+                            (localized_copy("Received"), tx.incoming_amount.to_sat())
                         }
-                        model::TransactionKind::SendToSelf => {
-                            ("Moved within wallet", tx.incoming_amount.to_sat())
-                        }
+                        model::TransactionKind::SendToSelf => (
+                            localized_copy("Moved within wallet"),
+                            tx.incoming_amount.to_sat(),
+                        ),
                         model::TransactionKind::OutgoingSinglePayment(_)
                         | model::TransactionKind::OutgoingPaymentBatch(_) => {
-                            ("Sent", tx.outgoing_amount.to_sat())
+                            (localized_copy("Sent"), tx.outgoing_amount.to_sat())
                         }
                     };
                     let date = tx
@@ -2627,16 +3761,21 @@ impl ImportedBitcoinPanel {
                             chrono::DateTime::from_timestamp(i64::from(time), 0)
                                 .map(|date| date.format("%Y-%m-%d").to_string())
                         })
-                        .unwrap_or_else(|| "Date unknown".into());
+                        .unwrap_or_else(|| localized_copy("Date unknown").into());
                     let confirmation = match (tx.height, self.info.as_ref()) {
                         (Some(height), Some(info)) if height > 0 && info.block_height >= height => {
-                            format!("{} confirmations", info.block_height - height + 1)
+                            coincube_ui::localized_format!(
+                                "{} confirmations",
+                                "{} confirmaciones",
+                                info.block_height - height + 1
+                            )
                         }
-                        _ => "Unconfirmed".into(),
+                        _ => localized_copy("Unconfirmed").into(),
                     };
                     content = content
                         .push(p1_regular(format!(
-                            "{direction} · {amount} sats · {date} · {confirmation}"
+                            "{direction} · {} · {date} · {confirmation}",
+                            passive_wallet_amount(amount, mask_amounts)
                         )))
                         .push(caption(tx.txid.to_string()));
                 }
@@ -2649,160 +3788,191 @@ impl ImportedBitcoinPanel {
                 if !self.chain().is_blake2b() && status.discovery_target < 10_000 {
                     content = content
                         .push(iced::widget::Space::new().height(8))
-                        .push(p1_bold("Missing an older transaction?"))
-                        .push(caption("Search 200 more receive and change addresses. This starts another history scan.").style(theme::text::secondary))
-                        .push(button::secondary_compact(None, "Search more addresses")
+                        .push(p1_bold(localized_copy("Missing an older transaction?")))
+                        .push(caption(localized_copy("Search 200 more receive and change addresses. This starts another history scan.")).style(theme::text::secondary))
+                        .push(button::secondary_compact(None, localized_copy("Search more addresses"))
                             .on_press_maybe((!self.busy).then_some(
                                 view::Message::ImportedBitcoin(ImportMessage::ExpandDiscovery)
                             )));
                 }
             }
         } else {
-            let scan = ScanDisplay::from_info(self.info.as_ref(), self.sync_failed);
-            let label = match scan {
-                ScanDisplay::Starting => "Finding your wallet's Bitcoin history",
-                ScanDisplay::Scanning { .. } => "Scanning your Bitcoin wallet history",
-                ScanDisplay::Saving => "Finishing your Bitcoin history scan",
-                ScanDisplay::Retrying => "Bitcoin history scan was interrupted",
-                ScanDisplay::NeedsAttention => "Bitcoin history needs attention",
-            };
-            content = content.push(h3(label));
-            if matches!(
-                scan,
-                ScanDisplay::Starting | ScanDisplay::Scanning { .. } | ScanDisplay::Saving
-            ) {
-                content = content.push(
-                    p1_regular("Your balance and transactions will appear when the scan finishes.")
-                        .style(theme::text::secondary),
-                );
-            }
-            match scan {
-                ScanDisplay::Scanning {
-                    checked,
-                    expected,
-                    progress,
-                } => {
-                    content = content
-                        .push(
-                            progress_bar(0.0..=1.0, progress as f32)
-                                .style(theme::progress_bar::primary),
-                        )
-                        .push(
-                            caption(format!(
-                                "{:.0}% · {checked} addresses checked (about {expected} expected)",
-                                progress * 100.0
-                            ))
-                            .style(theme::text::secondary),
-                        );
-                }
-                ScanDisplay::Starting | ScanDisplay::Saving => {
-                    content = content.push(spinner::typing_text_carousel(
-                        "...",
-                        true,
-                        Duration::from_millis(2000),
-                        |value| caption(value).style(theme::text::secondary),
-                    ));
-                }
-                ScanDisplay::Retrying | ScanDisplay::NeedsAttention => {
-                    if self.error.is_none() {
-                        content = content.push(
-                            p1_regular(
-                                "Check your connection and Bitcoin server, then retry the scan.",
-                            )
-                            .style(theme::text::secondary),
-                        );
-                    }
-                    content = content.push(
-                        button::secondary_compact(
-                            None,
-                            if self.sync_requesting {
-                                "Retrying…"
-                            } else {
-                                self.synchronization_action_label()
-                            },
-                        )
-                        .on_press_maybe(
-                            (!self.busy && !self.sync_requesting).then_some(
-                                view::Message::ImportedBitcoin(ImportMessage::RetrySynchronization),
-                            ),
-                        ),
-                    );
-                }
-            }
-            if matches!(
-                scan,
-                ScanDisplay::Starting | ScanDisplay::Scanning { .. } | ScanDisplay::Saving
-            ) {
-                content = content.push(
-                    caption("Progress updates automatically. Keep Tenshu open while it scans.")
-                        .style(theme::text::secondary),
-                );
-            }
+            content = self.scan_content(content);
         }
         if let Some(error) = &self.error {
-            content = content.push(p1_regular(error).style(theme::text::error));
+            content = content.push(p1_regular(shown_notice(error)).style(theme::text::error));
         }
         content.into()
     }
 
+    /// The history scan's heading, progress and retry, under `content`.
+    fn scan_content<'a>(
+        &'a self,
+        mut content: Column<'a, view::Message>,
+    ) -> Column<'a, view::Message> {
+        let scan = ScanDisplay::from_info(self.info.as_ref(), self.sync_failed);
+        let label = match scan {
+            ScanDisplay::Starting => localized_copy("Finding your wallet's Bitcoin history"),
+            ScanDisplay::Scanning { .. } => localized_copy("Scanning your Bitcoin wallet history"),
+            ScanDisplay::Saving => localized_copy("Finishing your Bitcoin history scan"),
+            ScanDisplay::Retrying => localized_copy("Bitcoin history scan was interrupted"),
+            ScanDisplay::NeedsAttention => localized_copy("Bitcoin history needs attention"),
+        };
+        content = content.push(h3(label));
+        if matches!(
+            scan,
+            ScanDisplay::Starting | ScanDisplay::Scanning { .. } | ScanDisplay::Saving
+        ) {
+            content = content.push(
+                p1_regular(localized_copy(
+                    "Your balance and transactions will appear when the scan finishes.",
+                ))
+                .style(theme::text::secondary),
+            );
+        }
+        match scan {
+            ScanDisplay::Scanning {
+                checked,
+                expected,
+                progress,
+            } => {
+                content = content
+                    .push(
+                        progress_bar(0.0..=1.0, progress as f32)
+                            .style(theme::progress_bar::primary),
+                    )
+                    .push(
+                        caption(coincube_ui::localized_format!(
+                            "{:.0}% · {checked} addresses checked (about {expected} expected)",
+                            "{:.0}% · {checked} direcciones revisadas (se esperan unas {expected})",
+                            progress * 100.0
+                        ))
+                        .style(theme::text::secondary),
+                    );
+            }
+            ScanDisplay::Starting | ScanDisplay::Saving => {
+                content = content.push(spinner::typing_text_carousel(
+                    "...",
+                    true,
+                    Duration::from_millis(2000),
+                    |value| caption(value).style(theme::text::secondary),
+                ));
+            }
+            ScanDisplay::Retrying | ScanDisplay::NeedsAttention => {
+                if self.error.is_none() {
+                    content = content.push(
+                        p1_regular(localized_copy(
+                            "Check your connection and Bitcoin server, then retry the scan.",
+                        ))
+                        .style(theme::text::secondary),
+                    );
+                }
+                content = content.push(
+                    button::secondary_compact(
+                        None,
+                        if self.sync_requesting {
+                            localized_copy("Retrying…")
+                        } else {
+                            localized_copy(self.synchronization_action_label())
+                        },
+                    )
+                    .on_press_maybe(
+                        (!self.busy && !self.sync_requesting).then_some(
+                            view::Message::ImportedBitcoin(ImportMessage::RetrySynchronization),
+                        ),
+                    ),
+                );
+            }
+        }
+        if matches!(
+            scan,
+            ScanDisplay::Starting | ScanDisplay::Scanning { .. } | ScanDisplay::Saving
+        ) {
+            content = content.push(
+                caption(localized_copy(
+                    "Progress updates automatically. Keep Tenshu open while it scans.",
+                ))
+                .style(theme::text::secondary),
+            );
+        }
+        content
+    }
+
     fn send_view(&self, psbts_only: bool) -> Element<'_, view::Message> {
         if self.chain().is_blake2b() {
-            return Column::new().spacing(16).push(h2("Send")).push(p1_regular("Sending from paired imported BTCB2 wallets is not available yet. Use the paired Claim flow.")).into();
+            return Column::new()
+                .spacing(16)
+                .push(h2(localized_copy("Send")))
+                .push(p1_regular(localized_copy(
+                    "Sending from paired imported Bitcoin Blake2b wallets is not available.",
+                )))
+                .into();
         }
         let mut content = Column::new()
             .spacing(14)
-            .push(h2(if psbts_only { "PSBTs" } else { "Send Bitcoin" }))
-            .push(p1_regular("Spend from the imported wallet using its original signer or hardware device. Your Cube seed cannot sign this transaction."))
-            .push(button::secondary(None, "Back to overview")
+            .push(h2(if psbts_only { "PSBTs" } else { localized_copy("Send Bitcoin") }))
+            .push(p1_regular(localized_copy("Spend from the imported wallet using its original signer or hardware device. Your Cube seed cannot sign this transaction.")))
+            .push(button::secondary(None, localized_copy("Back to overview"))
                 .on_press(view::Message::Menu(Menu::Vault(VaultSubMenu::Overview))));
         if let Some(txid) = self.last_broadcast_txid {
-            content = content.push(p1_bold(format!("Broadcast transaction: {txid}")));
+            content = content.push(p1_bold(coincube_ui::localized_format!(
+                "Broadcast transaction: {txid}",
+                "Transacción publicada: {txid}"
+            )));
         }
         if let Some(notice) = &self.broadcast_notice {
-            content = content.push(caption(notice));
+            content = content.push(caption(shown_notice(notice)));
         }
         if let Some(notice) = &self.file_notice {
-            content = content.push(caption(notice));
+            content = content.push(caption(shown_notice(notice)));
         }
         if let Some(draft) = &self.draft {
             content = content
-                .push(p1_bold("Review transaction"))
-                .push(caption(format!(
+                .push(p1_bold(localized_copy("Review transaction")))
+                .push(p1_regular(crate::chain::canonical_network_name(
+                    self.chain(),
+                )))
+                .push(caption(coincube_ui::localized_format!(
                     "Draft ID: {}",
+                    "ID del borrador: {}",
                     draft.psbt.unsigned_tx.compute_txid()
                 )));
             for output in &draft.psbt.unsigned_tx.output {
                 let address = Address::from_script(&output.script_pubkey, Network::Bitcoin)
                     .map(|address| address.to_string())
-                    .unwrap_or_else(|_| "Unsupported output script".into());
+                    .unwrap_or_else(|_| localized_copy("Unsupported output script").into());
                 content = content.push(p1_regular(format!(
                     "{} sats → {address}",
                     output.value.to_sat()
                 )));
             }
             if let Ok(fee) = draft.psbt.fee() {
-                content = content.push(p1_regular(format!("Network fee: {} sats", fee.to_sat())));
+                content = content.push(p1_regular(coincube_ui::localized_format!(
+                    "Network fee: {} sats",
+                    "Comisión de red: {} sats",
+                    fee.to_sat()
+                )));
             }
             for warning in &draft.warnings {
-                content = content.push(caption(warning));
+                content = content.push(caption(shown_notice(warning)));
             }
             content = content
-                .push(caption(format!("Valid signer signatures per input: {}",
+                .push(caption(coincube_ui::localized_format!("Valid signer signatures per input: {}", "Firmas válidas por entrada: {}",
                     draft.signatures_per_input.iter().map(|count| count.to_string()).collect::<Vec<_>>().join(", "))))
-                .push(p1_regular("Save or copy this PSBT for the original signing wallet. Load the signed file or paste its base64 below. For multisig, repeat with each signer."))
+                .push(p1_regular(localized_copy("Save or copy this PSBT for the original signing wallet. Load the signed file or paste its base64 below. For multisig, repeat with each signer.")))
                 .push(Row::new().spacing(10)
-                    .push(button::secondary(None, "Save PSBT file")
-                        .on_press_maybe((!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::SavePsbt))))
-                    .push(button::secondary(None, "Load signed PSBT")
-                        .on_press_maybe((!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::LoadSignedPsbt))))
-                    .push(button::secondary(None, "Copy PSBT")
+                    .push(button::secondary(None, localized_copy("Save PSBT file"))
+                        .on_press_maybe((!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::SavePsbt(coincube_ui::locale::language())))))
+                    .push(button::secondary(None, localized_copy("Load signed PSBT"))
+                        .on_press_maybe((!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::LoadSignedPsbt(coincube_ui::locale::language())))))
+                    .push(button::secondary(None, localized_copy("Copy PSBT"))
                         .on_press(view::Message::ImportedBitcoin(ImportMessage::CopyPsbt))))
-                .push(p1_bold("Sign with a connected device"));
+                .push(p1_bold(localized_copy("Sign with a connected device")));
             if let Some(listing) = &self.hardware_wallets {
                 if listing.list.is_empty() {
-                    content = content.push(caption(
+                    content = content.push(caption(localized_copy(
                         "Connect and unlock a hardware wallet to sign here.",
-                    ));
+                    )));
                 }
                 for device in &listing.list {
                     let label = match device {
@@ -2811,49 +3981,64 @@ impl ImportedBitcoinPanel {
                         } => {
                             format!("{kind} · {fingerprint}")
                         }
-                        HardwareWallet::Locked { kind, .. } => format!("{kind} · unlock device"),
-                        HardwareWallet::Unsupported { kind, .. } => format!("{kind} · unsupported"),
+                        HardwareWallet::Locked { kind, .. } => coincube_ui::localized_format!(
+                            "{kind} · unlock device",
+                            "{kind} · desbloquea el dispositivo"
+                        ),
+                        HardwareWallet::Unsupported { kind, .. } => {
+                            coincube_ui::localized_format!(
+                                "{kind} · unsupported",
+                                "{kind} · no compatible"
+                            )
+                        }
                     };
                     content = content.push(caption(label));
                     if device.is_supported() {
-                        content =
-                            content.push(button::secondary(None, "Sign PSBT").on_press_maybe(
+                        content = content.push(
+                            button::secondary(None, localized_copy("Sign PSBT")).on_press_maybe(
                                 (!self.busy).then_some(view::Message::ImportedBitcoin(
                                     ImportMessage::SignWithDevice(device.id().clone()),
                                 )),
-                            ));
+                            ),
+                        );
                     }
                 }
             }
             content = content
                 .push(
-                    text_input("Paste signed PSBT (base64)", &self.signed_psbt_text)
-                        .on_input(|value| {
-                            view::Message::ImportedBitcoin(ImportMessage::SignedPsbtEdited(value))
-                        })
-                        .padding(10),
+                    text_input(
+                        localized_copy("Paste signed PSBT (base64)"),
+                        &self.signed_psbt_text,
+                    )
+                    .on_input(|value| {
+                        view::Message::ImportedBitcoin(ImportMessage::SignedPsbtEdited(value))
+                    })
+                    .padding(10),
                 )
-                .push(button::secondary(None, "Import signatures").on_press_maybe(
-                    (!self.busy && !self.signed_psbt_text.trim().is_empty()).then_some(
-                        view::Message::ImportedBitcoin(ImportMessage::ImportSignedPsbt),
+                .push(
+                    button::secondary(None, localized_copy("Import signatures")).on_press_maybe(
+                        (!self.busy && !self.signed_psbt_text.trim().is_empty()).then_some(
+                            view::Message::ImportedBitcoin(ImportMessage::ImportSignedPsbt),
+                        ),
                     ),
-                ));
+                );
             let draft_id = draft.psbt.unsigned_tx.compute_txid();
             let already_broadcast = self.spend_drafts.iter().any(|entry| {
                 entry.psbt.unsigned_tx.compute_txid() == draft_id && entry.broadcast_txid.is_some()
             });
             if let Some(final_txid) = draft.final_txid {
                 content = content
-                    .push(p1_bold(format!(
-                        "Ready to broadcast · Final transaction ID: {final_txid}"
+                    .push(p1_bold(coincube_ui::localized_format!(
+                        "Ready to broadcast · Final transaction ID: {final_txid}",
+                        "Lista para publicar · ID de la transacción final: {final_txid}"
                     )))
                     .push(
                         button::primary(
                             None,
                             if self.busy {
-                                "Broadcasting…"
+                                localized_copy("Broadcasting…")
                             } else {
-                                "Broadcast transaction"
+                                localized_copy("Broadcast transaction")
                             },
                         )
                         .on_press_maybe(
@@ -2863,33 +4048,37 @@ impl ImportedBitcoinPanel {
                         ),
                     );
                 if already_broadcast {
-                    content =
-                        content.push(caption("This saved transaction was already broadcast."));
+                    content = content.push(caption(localized_copy(
+                        "This saved transaction was already broadcast.",
+                    )));
                 }
             } else {
-                content = content.push(caption(
+                content = content.push(caption(localized_copy(
                     "Waiting for enough valid signatures on every input.",
-                ));
+                )));
             }
         } else if !psbts_only {
             content = content
-                .push(p1_bold("New transaction"))
+                .push(p1_bold(localized_copy("New transaction")))
                 .push(
-                    text_input("Bitcoin recipient address", &self.send_recipient)
-                        .on_input(|value| {
-                            view::Message::ImportedBitcoin(ImportMessage::RecipientEdited(value))
-                        })
-                        .padding(10),
+                    text_input(
+                        localized_copy("Bitcoin recipient address"),
+                        &self.send_recipient,
+                    )
+                    .on_input(|value| {
+                        view::Message::ImportedBitcoin(ImportMessage::RecipientEdited(value))
+                    })
+                    .padding(10),
                 )
                 .push(
-                    text_input("Amount in satoshis", &self.send_amount)
+                    text_input(localized_copy("Amount in satoshis"), &self.send_amount)
                         .on_input(|value| {
                             view::Message::ImportedBitcoin(ImportMessage::AmountEdited(value))
                         })
                         .padding(10),
                 )
                 .push(
-                    text_input("Fee rate in sat/vB", &self.send_feerate)
+                    text_input(localized_copy("Fee rate in sat/vB"), &self.send_feerate)
                         .on_input(|value| {
                             view::Message::ImportedBitcoin(ImportMessage::FeerateEdited(value))
                         })
@@ -2899,9 +4088,9 @@ impl ImportedBitcoinPanel {
                     button::primary(
                         None,
                         if self.busy {
-                            "Preparing…"
+                            localized_copy("Preparing…")
                         } else {
-                            "Review PSBT"
+                            localized_copy("Review PSBT")
                         },
                     )
                     .on_press_maybe(
@@ -2912,84 +4101,98 @@ impl ImportedBitcoinPanel {
         }
         if psbts_only && self.draft.is_none() {
             content = content.push(
-                button::primary(None, "New transaction")
+                button::primary(None, localized_copy("New transaction"))
                     .on_press(view::Message::Menu(Menu::Vault(VaultSubMenu::Send))),
             );
         }
         if !self.spend_drafts.is_empty() {
-            content = content.push(p1_bold("Saved transactions"));
+            content = content.push(p1_bold(localized_copy("Saved transactions")));
             for entry in self.spend_drafts.iter().take(10) {
                 let id = entry.psbt.unsigned_tx.compute_txid();
-                content = content.push(caption(format!("Draft {id}"))).push(
-                    button::secondary(None, "Open saved PSBT").on_press_maybe(
-                        (!self.busy).then_some(view::Message::ImportedBitcoin(
-                            ImportMessage::SelectDraft(id),
-                        )),
-                    ),
-                );
+                content = content
+                    .push(caption(coincube_ui::localized_format!(
+                        "Draft {id}",
+                        "Borrador {id}"
+                    )))
+                    .push(
+                        button::secondary(None, localized_copy("Open saved PSBT")).on_press_maybe(
+                            (!self.busy).then_some(view::Message::ImportedBitcoin(
+                                ImportMessage::SelectDraft(id),
+                            )),
+                        ),
+                    );
             }
         }
         if let Some(error) = &self.error {
-            content = content.push(p1_regular(error).style(theme::text::error));
+            content = content.push(p1_regular(shown_notice(error)).style(theme::text::error));
         }
         content.into()
     }
 
     fn settings_view(&self, option: Option<SettingsOption>) -> Element<'_, view::Message> {
-        let mut content = Column::new().spacing(16).push(h2("Vault settings"));
+        let mut content = Column::new()
+            .spacing(16)
+            .push(h2(localized_copy("Vault settings")));
         match option.unwrap_or(SettingsOption::Node) {
-            SettingsOption::Node => {
-                content = content
-                    .push(p1_bold("Bitcoin server"))
-                    .push(p1_regular(if self.provider_known {
-                        self.provider.label()
-                    } else {
-                        "Server settings unavailable"
-                    }))
-                    .push(caption(public_server_label(&self.endpoint)))
-                    .push(
-                        button::secondary(None, "Retry synchronization").on_press_maybe(
-                            (!self.busy)
-                                .then_some(view::Message::ImportedBitcoin(ImportMessage::Refresh)),
-                        ),
-                    );
+            SettingsOption::Node | SettingsOption::Connections => {
+                content =
+                    content
+                        .push(p1_bold(localized_copy("Bitcoin server")))
+                        .push(p1_regular(if self.provider_known {
+                            localized_copy(self.provider.label())
+                        } else {
+                            localized_copy("Server settings unavailable")
+                        }))
+                        .push(caption(public_server_label(&self.endpoint)))
+                        .push(
+                            button::secondary(None, localized_copy("Retry synchronization"))
+                                .on_press_maybe((!self.busy).then_some(
+                                    view::Message::ImportedBitcoin(ImportMessage::Refresh),
+                                )),
+                        );
                 if let Some(status) = self
                     .info
                     .as_ref()
                     .and_then(|info| info.imported_wallet.as_ref())
                 {
-                    content = content.push(caption(format!(
+                    content = content.push(caption(coincube_ui::localized_format!(
                         "History checked: receive {} · change {} · target {} per branch",
-                        status.receive_scanned, status.change_scanned, status.discovery_target
+                        "Historial revisado: recepción {} · cambio {} · objetivo {} por rama",
+                        status.receive_scanned,
+                        status.change_scanned,
+                        status.discovery_target
                     )));
                     if !self.chain().is_blake2b() && status.discovery_target < 10_000 {
                         content = content.push(
-                            button::secondary(None, "Search 200 more addresses").on_press_maybe(
-                                (self.is_ready() && !self.busy).then_some(
+                            button::secondary(None, localized_copy("Search 200 more addresses"))
+                                .on_press_maybe((self.is_ready() && !self.busy).then_some(
                                     view::Message::ImportedBitcoin(ImportMessage::ExpandDiscovery),
-                                ),
-                            ),
+                                )),
                         );
                     }
                 }
             }
             SettingsOption::Wallet | SettingsOption::ImportExport => {
                 content = content
-                    .push(p1_regular("This Vault uses the imported wallet's original signer keys. The Cube seed unlocks the Cube but cannot sign its Bitcoin transactions."))
-                    .push(p1_regular("Keep the Cube Recovery Kit current after importing this wallet or reserving a new receive address."));
+                    .push(p1_regular(localized_copy("This Vault uses the imported wallet's original signer keys. The Cube seed unlocks the Cube but cannot sign its Bitcoin transactions.")))
+                    .push(p1_regular(localized_copy("Keep the Cube Recovery Kit current after importing this wallet or reserving a new receive address.")))
+                    .push_maybe(self.stored_keys_view());
                 if let Some(wallet) = self.import.active_attachment() {
-                    content = content.push(caption(format!(
+                    content = content.push(caption(coincube_ui::localized_format!(
                         "Wallet ID: {}",
+                        "ID de la cartera: {}",
                         wallet.wallet_id.descriptor_checksum
                     )));
                     if self.show_details {
                         content = content
-                            .push(caption(format!(
+                            .push(caption(coincube_ui::localized_format!(
                                 "Receive: {}",
+                                "Recepción: {}",
                                 wallet.descriptor.receive_descriptor()
                             )))
-                            .push(caption(format!(
+                            .push(caption(coincube_ui::localized_format!(
                                 "Change: {}",
+                                "Cambio: {}",
                                 wallet.descriptor.change_descriptor()
                             )));
                     }
@@ -2997,9 +4200,9 @@ impl ImportedBitcoinPanel {
                         button::secondary(
                             None,
                             if self.show_details {
-                                "Hide public descriptors"
+                                localized_copy("Hide public descriptors")
                             } else {
-                                "Show public descriptors"
+                                localized_copy("Show public descriptors")
                             },
                         )
                         .on_press(view::Message::ImportedBitcoin(ImportMessage::ToggleDetails)),
@@ -3009,24 +4212,35 @@ impl ImportedBitcoinPanel {
             SettingsOption::LocalSigning => {}
         }
         if let Some(error) = &self.error {
-            content = content.push(p1_regular(error).style(theme::text::error));
+            content = content.push(p1_regular(shown_notice(error)).style(theme::text::error));
         }
         content.into()
+    }
+}
+
+fn passive_wallet_amount(sats: u64, mask_amounts: bool) -> String {
+    if mask_amounts {
+        "••••".to_owned()
+    } else {
+        format!("{sats} sats")
     }
 }
 
 impl State for ImportedBitcoinPanel {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
         let body = if self.import.active_attachment().is_none() {
-            self.setup_view()
+            self.resume_view()
         } else if !self.is_ready() {
-            self.wallet_view()
+            self.wallet_view(cache.balance_amounts_masked())
         } else {
             match menu {
                 Menu::Vault(VaultSubMenu::Send) => self.send_view(false),
                 Menu::Vault(VaultSubMenu::PSBTs(_)) => self.send_view(true),
                 Menu::Vault(VaultSubMenu::Settings(option)) => self.settings_view(*option),
-                _ => self.wallet_view(),
+                // Unreachable once ready: `App` routes only Send, PSBTs and
+                // Settings here, and the Vault page (with its Tools links)
+                // serves the rest.
+                _ => self.wallet_view(cache.balance_amounts_masked()),
             }
         };
         view::dashboard(menu, cache, body)
@@ -3070,6 +4284,302 @@ impl State for ImportedBitcoinPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_source_keyboard_actions_keep_import_setup_operable() {
+        use crate::app::view::shared::landing::capture;
+        use iced::{advanced::widget::Id, keyboard::key::Named};
+
+        let directory = NetworkDirectory::new(
+            std::env::temp_dir().join(format!("import-source-keyboard-{}", uuid::Uuid::new_v4())),
+        );
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "keyboard".into(), BitcoinImport::pending());
+        let size = (1024, 768);
+        let mounted = capture::inspect_full_window(
+            "import-source-keyboard",
+            panel.setup_view(),
+            size,
+            "light",
+            theme::Theme::light(),
+        );
+        for id in [
+            "tenshu.source.descriptor",
+            "tenshu.source.hardware",
+            "tenshu.source.receive",
+            "tenshu.source.change",
+        ] {
+            assert!(
+                mounted.has_focus(Id::new(id)),
+                "import source focus: {}",
+                id
+            );
+        }
+        for key in [Named::Enter, Named::Space] {
+            assert!(matches!(
+                capture::activate_with_key(
+                    panel.setup_view(),
+                    Id::new("tenshu.source.hardware"),
+                    size,
+                    false,
+                    key
+                )
+                .as_slice(),
+                [view::Message::ImportedBitcoin(ImportMessage::Source(
+                    wallet_source_form::Message::SourceSelected(Source::Hardware)
+                ))]
+            ));
+        }
+        let focus = panel.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Focus(Id::new(
+                "tenshu.source.hardware",
+            ))),
+            None,
+            0,
+        );
+        assert!(focus.units() > 0);
+        assert_eq!(
+            panel.source.source(),
+            Source::Descriptor,
+            "focus never changes import source"
+        );
+        let _ = panel.update_view(
+            ImportMessage::Source(wallet_source_form::Message::SourceSelected(
+                Source::Hardware,
+            )),
+            None,
+            0,
+        );
+        let hardware = capture::inspect_full_window(
+            "import-source-keyboard-hardware",
+            panel.setup_view(),
+            size,
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(hardware.has_focus(
+            panel
+                .source
+                .hardware_action_id("tenshu.hardware.purpose.bip84")
+        ));
+        assert!(hardware.has_focus(panel.source.hardware_action_id("tenshu.hardware.account")));
+    }
+
+    #[test]
+    fn imported_setup_hardware_read_restores_focus_after_loaded_result() {
+        use crate::services::public_hardware_source::tests::{
+            add_fake_device, assert_focus_task, loaded_for_test, unique_temp_root,
+        };
+        use crate::split_hardware::HardwareMessage;
+
+        let root = unique_temp_root("import-keyboard-read-return");
+        for succeeds in [true, false] {
+            let directory = NetworkDirectory::new(root.join(format!("import-{succeeds}")));
+            let mut panel =
+                ImportedBitcoinPanel::new(directory, "keyboard".into(), BitcoinImport::pending());
+            panel.source.select_source(Source::Hardware);
+            add_fake_device(panel.source.hardware_mut(), &root);
+            let reading = panel.update_view(
+                ImportMessage::Source(wallet_source_form::Message::Hardware(
+                    HardwareMessage::Read("dev-1".into()),
+                )),
+                None,
+                0,
+            );
+            assert_focus_task(
+                reading,
+                panel.setup_view().map(Message::View),
+                panel
+                    .source
+                    .hardware_action_id("tenshu.hardware.purpose.bip84"),
+            );
+            let generation = panel.source.hardware_mut().generation_for_test();
+            let action_scope = panel.source.hardware_mut().action_scope_for_test();
+            let loaded = panel.update_view(
+                ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
+                    generation,
+                    succeeds,
+                    action_scope,
+                ))),
+                None,
+                0,
+            );
+            assert_focus_task(
+                loaded,
+                panel.setup_view().map(Message::View),
+                panel
+                    .source
+                    .hardware_action_id("tenshu.hardware.read:5:dev-1"),
+            );
+            assert_eq!(panel.source.hardware_account().is_some(), succeeds);
+            if succeeds {
+                let _ = panel.update_view(
+                    ImportMessage::Source(wallet_source_form::Message::Hardware(
+                        HardwareMessage::PurposeSelected(crate::split_hardware::Purpose::Bip84),
+                    )),
+                    None,
+                    0,
+                );
+                assert!(panel.source.hardware_account().is_some());
+                let _ = panel.update_view(
+                    ImportMessage::Source(wallet_source_form::Message::Hardware(
+                        HardwareMessage::PurposeSelected(crate::split_hardware::Purpose::Bip49),
+                    )),
+                    None,
+                    0,
+                );
+                assert!(panel.source.hardware_account().is_none());
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hardware_result_from_one_import_tab_cannot_focus_another() {
+        use crate::services::public_hardware_source::tests::{
+            add_fake_device, assert_focus_task, assert_focus_task_outcome, loaded_for_test,
+            unique_temp_root,
+        };
+        use crate::split_hardware::HardwareMessage;
+
+        let root = unique_temp_root("import-hardware-focus-ownership");
+        let mut first = ImportedBitcoinPanel::new(
+            NetworkDirectory::new(root.join("first")),
+            "same-cube".into(),
+            BitcoinImport::pending(),
+        );
+        let mut second = ImportedBitcoinPanel::new(
+            NetworkDirectory::new(root.join("second")),
+            "same-cube".into(),
+            BitcoinImport::pending(),
+        );
+        for panel in [&mut first, &mut second] {
+            panel.source.select_source(Source::Hardware);
+            add_fake_device(panel.source.hardware_mut(), &root);
+        }
+        let first_read = first
+            .source
+            .hardware_action_id("tenshu.hardware.read:5:dev-1");
+        let second_read = second
+            .source
+            .hardware_action_id("tenshu.hardware.read:5:dev-1");
+        assert_ne!(first_read, second_read);
+        let _ = first.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(
+                HardwareMessage::Read("dev-1".into()),
+            )),
+            None,
+            0,
+        );
+        let generation = first.source.hardware_mut().generation_for_test();
+        let action_scope = first.source.hardware_mut().action_scope_for_test();
+        let first_generation = generation;
+        let completion = || {
+            ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
+                generation,
+                true,
+                action_scope,
+            )))
+        };
+        assert_focus_task_outcome(
+            first.update_view(completion(), None, 0),
+            second.setup_view().map(Message::View),
+            None,
+            None,
+        );
+        // Re-enter Reading to get another matching completion for the focused case.
+        let _ = first.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(
+                HardwareMessage::Read("dev-1".into()),
+            )),
+            None,
+            0,
+        );
+        let generation = first.source.hardware_mut().generation_for_test();
+        let action_scope = first.source.hardware_mut().action_scope_for_test();
+        let loaded = first.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
+                generation,
+                true,
+                action_scope,
+            ))),
+            None,
+            0,
+        );
+        assert_focus_task_outcome(
+            loaded,
+            second.setup_view().map(Message::View),
+            Some(second_read.clone()),
+            Some(second_read),
+        );
+        let _ = first.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(
+                HardwareMessage::Read("dev-1".into()),
+            )),
+            None,
+            0,
+        );
+        let generation = first.source.hardware_mut().generation_for_test();
+        let action_scope = first.source.hardware_mut().action_scope_for_test();
+        let loaded = first.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
+                generation,
+                true,
+                action_scope,
+            ))),
+            None,
+            0,
+        );
+        assert_focus_task(loaded, first.setup_view().map(Message::View), first_read);
+        let mut recreated = ImportedBitcoinPanel::new(
+            NetworkDirectory::new(root.join("recreated")),
+            "same-cube".into(),
+            BitcoinImport::pending(),
+        );
+        assert_ne!(
+            recreated
+                .source
+                .hardware_action_id("tenshu.hardware.read:5:dev-1"),
+            first
+                .source
+                .hardware_action_id("tenshu.hardware.read:5:dev-1")
+        );
+        recreated.source.select_source(Source::Hardware);
+        add_fake_device(recreated.source.hardware_mut(), &root);
+        let _ = recreated.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(
+                HardwareMessage::Read("dev-1".into()),
+            )),
+            None,
+            0,
+        );
+        assert_eq!(
+            recreated.source.hardware_mut().generation_for_test(),
+            first_generation
+        );
+        let old_owner = recreated.update_view(
+            ImportMessage::Source(wallet_source_form::Message::Hardware(loaded_for_test(
+                first_generation,
+                true,
+                action_scope,
+            ))),
+            None,
+            0,
+        );
+        assert_focus_task_outcome(
+            old_owner,
+            recreated.setup_view().map(Message::View),
+            None,
+            None,
+        );
+        assert!(matches!(
+            recreated.source.hardware_mut().status(),
+            crate::split_hardware::HardwareStatus::Reading(_)
+        ));
+        assert!(recreated.source.hardware_account().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     use coincube_core::miniscript::bitcoin::{
         absolute::LockTime,
         bip32::{ChildNumber, DerivationPath, Xpriv, Xpub},
@@ -3084,10 +4594,15 @@ mod tests {
     #[derive(Debug)]
     struct NoRpcClient;
 
+    #[async_trait::async_trait]
+
     impl crate::daemon::client::Client for NoRpcClient {
         type Error = crate::daemon::DaemonError;
 
-        fn request<S: Serialize + std::fmt::Debug, D: DeserializeOwned + std::fmt::Debug>(
+        async fn request<
+            S: Serialize + std::fmt::Debug + Send,
+            D: DeserializeOwned + std::fmt::Debug + Send,
+        >(
             &self,
             _method: &str,
             _params: Option<S>,
@@ -3299,7 +4814,7 @@ mod tests {
     async fn imported_receive_shares_source_claim_lock_and_releases_after_daemon_error() {
         let panel = ready_import_panel();
         let imported = panel.import.active_attachment().unwrap().descriptor.clone();
-        let source = coincube_core::foreign_split::SplitSource::new(
+        let source = coincube_core::public_wallet_source::SplitSource::new(
             imported.receive_descriptor().clone(),
             Some(imported.change_descriptor().clone()),
         )
@@ -3318,7 +4833,7 @@ mod tests {
         let daemon: Arc<dyn Daemon + Send + Sync> =
             Arc::new(EmbeddedDaemon::unstarted_for_test(config, None));
         let guard =
-            bitcoin_import::pairing::legacy::source_reservation_lock(&root, &source).unwrap();
+            bitcoin_import::pairing::source_lock::source_reservation_lock(&root, &source).unwrap();
         for descriptor in [imported.clone(), imported.paired_blake2b().unwrap()] {
             let error = reserve_receive_address(root.clone(), descriptor.into(), daemon.clone())
                 .await
@@ -3334,7 +4849,8 @@ mod tests {
                 .unwrap_err();
             assert!(!error.contains("reserving addresses"), "{}", error);
             assert!(
-                bitcoin_import::pairing::legacy::source_reservation_lock(&root, &source).is_ok()
+                bitcoin_import::pairing::source_lock::source_reservation_lock(&root, &source)
+                    .is_ok()
             );
         }
         std::fs::remove_dir_all(root.path()).unwrap();
@@ -3696,88 +5212,6 @@ mod tests {
     }
 
     #[test]
-    fn claim_source_requires_attested_completed_scan_and_covers_allocated_indices() {
-        let mut panel = ready_import_panel();
-        let mut cube = settings::CubeSettings::new_with_raw_id(
-            "cube-1".into(),
-            "Imported".into(),
-            ChainId::Bitcoin,
-        );
-        cube.bitcoin_import = Some(Box::new(panel.import.clone()));
-        let source = panel.claim_source(&cube).unwrap();
-        assert_eq!(source.address_window, 200);
-        assert_eq!(source.cube_id, cube.id);
-        assert_eq!(
-            source.external,
-            panel
-                .import
-                .active_attachment()
-                .unwrap()
-                .descriptor
-                .receive_descriptor()
-                .to_string()
-        );
-        assert_eq!(
-            source.internal,
-            panel
-                .import
-                .active_attachment()
-                .unwrap()
-                .descriptor
-                .change_descriptor()
-                .to_string()
-        );
-
-        // A harmless background refresh can be in flight while the last
-        // completed snapshot is still authoritative. Claim scans afresh.
-        panel.busy = true;
-        panel.sync_requesting = true;
-        assert!(panel.claim_source(&cube).is_ok());
-        panel.busy = false;
-        panel.sync_requesting = false;
-
-        panel.info.as_mut().unwrap().receive_index = 250;
-        assert_eq!(panel.claim_source(&cube).unwrap().address_window, 251);
-        // Completed discovery can extend beyond both the configured gap and
-        // allocated indices. Claim includes that entire attested history.
-        {
-            let status = panel
-                .info
-                .as_mut()
-                .unwrap()
-                .imported_wallet
-                .as_mut()
-                .unwrap();
-            status.receive_scanned = 450;
-            status.change_scanned = 500;
-        }
-        assert_eq!(panel.claim_source(&cube).unwrap().address_window, 500);
-        panel.info.as_mut().unwrap().change_index = 10_000;
-        assert!(panel.claim_source(&cube).is_err());
-        panel.info.as_mut().unwrap().change_index = 0;
-        panel
-            .info
-            .as_mut()
-            .unwrap()
-            .history_sync
-            .full_scan_in_progress = true;
-        assert!(panel.claim_source(&cube).is_err());
-        panel
-            .info
-            .as_mut()
-            .unwrap()
-            .history_sync
-            .full_scan_in_progress = false;
-        panel.snapshot_failed = true;
-        assert!(panel.claim_source(&cube).is_err());
-        panel.snapshot_failed = false;
-        cube.name = "Renamed".into();
-        assert_eq!(panel.claim_source(&cube).unwrap().name, "Renamed");
-        cube.bitcoin_import = Some(Box::new(BitcoinImport::pending()));
-        assert!(panel.claim_source(&cube).is_err());
-    }
-
-    #[test]
     fn imported_home_available_balance_matches_vault_coin_ownership() {
         let mut panel = ready_import_panel();
         let txid =
@@ -3866,6 +5300,814 @@ mod tests {
         assert!(!panel.error.as_deref().unwrap().contains("<!DOCTYPE"));
     }
 
+    use crate::home::restore_frame::rendered_labels;
+
+    fn assert_labels(shown: &[String], present: &[&str], absent: &[&str]) {
+        for label in present {
+            assert!(
+                shown.iter().any(|text| text == label),
+                "missing {:?} in {:?}",
+                label,
+                shown
+            );
+        }
+        for label in absent {
+            assert!(
+                !shown.iter().any(|text| text == label),
+                "unexpected {:?} in {:?}",
+                label,
+                shown
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pending_import_opens_import_or_restore_at_source() {
+        let directory = NetworkDirectory::new(std::env::temp_dir().join("import-journey-source"));
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "cube-1".into(), BitcoinImport::pending());
+        let cache = Cache {
+            cube_name: "Family savings".into(),
+            ..Cache::default()
+        };
+        assert!(panel.journey_open());
+        assert_eq!(panel.journey_step(), JourneyStep::Source);
+        let shown = rendered_labels(panel.journey_view(&cache, false)).await;
+        assert_labels(
+            &shown,
+            &[
+                "Import or restore",
+                "Bitcoin SHA-256 · Mainnet",
+                "Overview",
+                "Import Bitcoin wallet",
+                "Cube",
+                "Backup",
+                "Source",
+                "Scan",
+                "Done",
+                "Review wallet",
+                "Use a new Vault instead",
+                "Delete this Cube",
+                "Close",
+            ],
+            // The Cube's own menu and the pre-redesign title stay out.
+            &["Passkey", "Import a Bitcoin wallet", "Vault", "Open Cube"],
+        );
+        // Import sets a PIN only, so even a passkey Cube's rail has no
+        // Passkey step.
+        let passkey = rendered_labels(panel.journey_view(&cache, true)).await;
+        assert_labels(&passkey, &["Cube"], &["Passkey"]);
+
+        // Close abandons an import that never installed its wallet: it asks
+        // the Launcher to delete the Cube. Kept there, the Cube's Vault page
+        // reopens the import.
+        let task = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(asks_to_delete_the_cube(task).await);
+        assert!(!panel.journey_open());
+        let resume = rendered_labels(panel.resume_view()).await;
+        assert_labels(
+            &resume,
+            &[
+                "Finish importing your Bitcoin wallet",
+                "Continue import",
+                "Delete this Cube",
+            ],
+            &["Review wallet"],
+        );
+        let _ = panel.update_view(ImportMessage::ResumeJourney, None, 0);
+        assert!(panel.journey_open());
+
+        // Close cannot leave while an import is being written.
+        panel.busy = true;
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(panel.journey_open());
+    }
+
+    #[test]
+    fn the_cube_can_be_deleted_only_until_a_wallet_is_installed() {
+        let directory = NetworkDirectory::new(std::env::temp_dir().join("import-journey-delete"));
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "cube-1".into(), BitcoinImport::pending());
+        assert!(panel.can_delete_cube());
+        panel.busy = true;
+        assert!(!panel.can_delete_cube());
+        panel.busy = false;
+        panel.keys_stored = KeysStored::Storing;
+        assert!(!panel.can_delete_cube());
+        panel.keys_stored = KeysStored::Stored(1);
+        assert!(!panel.can_delete_cube());
+        panel.keys_stored = KeysStored::Failed("synthetic".into());
+        assert!(panel.can_delete_cube());
+
+        // An installed wallet makes it a Cube with a wallet, deleted only
+        // from the Launcher.
+        assert!(!ready_import_panel().can_delete_cube());
+    }
+
+    #[tokio::test]
+    async fn the_scan_continues_to_done_and_open_cube_returns_to_the_cube() {
+        let mut panel = ready_import_panel();
+        let cache = Cache {
+            cube_name: "Family savings".into(),
+            ..Cache::default()
+        };
+        // A Cube reopened with its wallet attached starts in the Cube.
+        assert!(!panel.journey_open());
+        // This session's import: the scan is still running.
+        panel.journey = true;
+        let info = panel.info.take();
+        assert_eq!(panel.journey_step(), JourneyStep::Scan);
+        let scan = rendered_labels(panel.journey_view(&cache, false)).await;
+        assert_labels(
+            &scan,
+            &[
+                "Finding your wallet's Bitcoin history",
+                "Receive",
+                "Wait for the complete Bitcoin history scan before receiving.",
+                "Continue",
+                "Close",
+            ],
+            &["Open Cube"],
+        );
+        // ResumeJourney only reopens an unfinished import.
+        panel.journey = false;
+        let _ = panel.update_view(ImportMessage::ResumeJourney, None, 0);
+        assert!(!panel.journey_open());
+        panel.journey = true;
+
+        // A refresh during the scan keeps the panel busy; moving on still works.
+        panel.busy = true;
+        let _ = panel.update_view(ImportMessage::ContinueFromScan, None, 0);
+        assert_eq!(panel.journey_step(), JourneyStep::Done);
+        panel.busy = false;
+        let early = rendered_labels(panel.journey_view(&cache, false)).await;
+        assert_labels(
+            &early,
+            &[
+                "Family savings is ready",
+                "Your wallet is now this Cube's Vault. Its history appears when the scan finishes.",
+                "Open Cube",
+            ],
+            // Done has no Back, tag chips or summary list.
+            &[
+                "Continue",
+                "Close",
+                "Back",
+                "Recovery Kit: update it from Cube settings to include this wallet",
+            ],
+        );
+
+        // A stopped scan says so on Done and offers its retry there.
+        panel.sync_failed = true;
+        let stalled = rendered_labels(panel.journey_view(&cache, false)).await;
+        assert_labels(
+            &stalled,
+            &[
+                "The history scan stopped before it finished. Retry it here or from the Vault page.",
+                panel.synchronization_action_label(),
+            ],
+            &["Your wallet is now this Cube's Vault. Its history appears when the scan finishes."],
+        );
+        panel.sync_failed = false;
+
+        // The finished scan reaches Done on its own.
+        panel.scan_continued = false;
+        panel.info = info;
+        assert!(panel.is_ready());
+        assert_eq!(panel.journey_step(), JourneyStep::Done);
+        let done = rendered_labels(panel.journey_view(&cache, false)).await;
+        assert_labels(
+            &done,
+            &["Your wallet is now this Cube's Vault. Open it to receive or review its history."],
+            &[],
+        );
+        panel.busy = true;
+        let task = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(!panel.journey_open());
+        // A finished import only closes; its Cube is never offered for
+        // deletion.
+        assert!(!asks_to_delete_the_cube(task).await);
+        panel.busy = false;
+        panel.journey = true;
+        let task = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(!asks_to_delete_the_cube(task).await);
+        assert!(!panel.can_delete_cube());
+    }
+
+    async fn asks_to_delete_the_cube(task: Task<Message>) -> bool {
+        use iced_runtime::futures::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return false;
+        };
+        stream.collect::<Vec<_>>().await.iter().any(|action| {
+            matches!(
+                action,
+                iced_runtime::Action::Output(Message::View(view::Message::DeleteUnfinishedCube))
+            )
+        })
+    }
+
+    /// Import or restore's Source, Review, Scan and Done through the wgpu
+    /// renderer. Opt-in: `LAUNCHER_CAPTURE_DIR=<dir> cargo test -p
+    /// coincube-gui --lib import_journey_capture -- --ignored`.
+    #[test]
+    #[ignore]
+    fn import_journey_capture() {
+        use crate::home::launcher_capture::{renderer, save};
+        let Ok(directory) = std::env::var("LAUNCHER_CAPTURE_DIR") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut renderer = renderer().expect("wgpu headless renderer");
+        let size = iced::Size::new(1440.0, 900.0);
+        let ready = ready_import_panel();
+        let wallet = ready.import.active_attachment().cloned().unwrap();
+        for light in [false, true] {
+            let appearance = if light { "light" } else { "dark" };
+            let palette = if light {
+                coincube_ui::theme::Theme::light()
+            } else {
+                coincube_ui::theme::Theme::dark()
+            };
+            let cache = Cache {
+                cube_name: "Family savings".into(),
+                theme_mode: if light {
+                    coincube_ui::theme::palette::ThemeMode::Light
+                } else {
+                    coincube_ui::theme::palette::ThemeMode::Dark
+                },
+                ..Cache::default()
+            };
+            let directory_for = |name: &str| {
+                NetworkDirectory::new(std::env::temp_dir().join(format!("import-capture-{name}")))
+            };
+            let source = ImportedBitcoinPanel::new(
+                directory_for("source"),
+                "cube-1".into(),
+                BitcoinImport::pending(),
+            );
+            let mut review = ImportedBitcoinPanel::new(
+                directory_for("review"),
+                "cube-1".into(),
+                BitcoinImport::pending(),
+            );
+            review.review = Some(wallet.clone());
+            let mut scan = ready_import_panel();
+            scan.journey = true;
+            scan.info = None;
+            let mut done = ready_import_panel();
+            done.journey = true;
+            let mut keyed = KeysState::new(&wallet.descriptor);
+            keyed.slots[0].status = keys::KeyStatus::Verified;
+            done.keys = Some(keyed);
+            done.keys_stored = KeysStored::Stored(1);
+            let multisig =
+                ImportedWalletAttachment::new(two_of_three(), ChainId::Bitcoin, 0, 200).unwrap();
+            let mut keys_step = ImportedBitcoinPanel::new(
+                directory_for("keys"),
+                "cube-1".into(),
+                BitcoinImport::pending(),
+            );
+            let mut slots = KeysState::new(&multisig.descriptor);
+            slots.slots[0].status = keys::KeyStatus::Verified;
+            slots.slots[1].source = KeySource::Hardware;
+            slots.slots[2].source = KeySource::Elsewhere;
+            slots.slots[2].status = keys::KeyStatus::Verified;
+            keys_step.keys = Some(slots);
+            keys_step.review = Some(multisig);
+            for (name, panel) in [
+                ("source", &source),
+                ("keys", &keys_step),
+                ("review", &review),
+                ("scan", &scan),
+                ("done", &done),
+            ] {
+                save(
+                    &mut renderer,
+                    panel.journey_view(&cache, false),
+                    size,
+                    &palette,
+                    directory.join(format!("import-{name}-{appearance}.png")),
+                );
+            }
+        }
+    }
+
+    /// A Bitcoin account from a known phrase: its descriptor key text and
+    /// its public account.
+    fn phrase_account(entropy: u8) -> (String, coincube_core::imported_keys::ImportedAccount) {
+        let mnemonic = bip39::Mnemonic::from_entropy(&[entropy; 16]).unwrap();
+        let seed = mnemonic.to_seed("");
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(Network::Bitcoin, &seed).unwrap();
+        let origin = DerivationPath::from_str("m/48'/0'/0'/2'").unwrap();
+        let xpub = Xpub::from_priv(&secp, &master.derive_priv(&secp, &origin).unwrap());
+        let fingerprint = master.fingerprint(&secp);
+        (
+            format!("[{fingerprint}/48'/0'/0'/2']{xpub}"),
+            coincube_core::imported_keys::ImportedAccount {
+                fingerprint,
+                origin,
+                xpub,
+            },
+        )
+    }
+
+    fn phrase(entropy: u8) -> zeroize::Zeroizing<String> {
+        zeroize::Zeroizing::new(
+            bip39::Mnemonic::from_entropy(&[entropy; 16])
+                .unwrap()
+                .to_string(),
+        )
+    }
+
+    /// A 2-of-3 wallet whose keys come from phrases 1, 2 and 3.
+    fn two_of_three() -> ImportedWalletDescriptor {
+        let keys: Vec<String> = (1..=3).map(|entropy| phrase_account(entropy).0).collect();
+        let branch = |n: u8| {
+            format!(
+                "wsh(sortedmulti(2,{}/{n}/*,{}/{n}/*,{}/{n}/*))",
+                keys[0], keys[1], keys[2]
+            )
+        };
+        ImportedWalletDescriptor::parse(&branch(0), Some(&branch(1)), ChainId::Bitcoin).unwrap()
+    }
+
+    #[test]
+    fn keys_lists_each_signer_and_the_threshold() {
+        let wallet = two_of_three();
+        let keys = KeysState::new(&wallet);
+        assert_eq!(keys.slots.len(), 3);
+        assert_eq!(keys.threshold, 2);
+        assert!(keys.multisig());
+        for entropy in 1..=3 {
+            let (_, account) = phrase_account(entropy);
+            assert!(keys.slots.iter().any(|slot| slot.account == account));
+        }
+        let single = ready_import_panel()
+            .import
+            .active_attachment()
+            .cloned()
+            .unwrap();
+        let single = KeysState::new(&single.descriptor);
+        assert_eq!((single.slots.len(), single.threshold), (1, 1));
+        assert!(!single.multisig());
+    }
+
+    #[test]
+    fn words_must_derive_the_exact_signer() {
+        let wallet = two_of_three();
+        let (_, first) = phrase_account(1);
+        let (_, second) = phrase_account(2);
+        let none = || zeroize::Zeroizing::new(String::new());
+        assert_eq!(check_words(&wallet, &first, phrase(1), none()), Ok(()));
+        // Another signer's words, a passphrase the wallet never used, or a
+        // phrase outside the wallet: all refused.
+        assert!(check_words(&wallet, &first, phrase(2), none()).is_err());
+        assert!(check_words(&wallet, &second, phrase(1), none()).is_err());
+        assert!(check_words(
+            &wallet,
+            &first,
+            phrase(1),
+            zeroize::Zeroizing::new("extra".into())
+        )
+        .is_err());
+        assert!(check_words(&wallet, &first, phrase(9), none()).is_err());
+        assert!(check_words(
+            &wallet,
+            &first,
+            zeroize::Zeroizing::new("not words".into()),
+            none()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn enough_keys_to_sign_lets_the_rest_sign_elsewhere() {
+        let wallet = two_of_three();
+        let mut keys = KeysState::new(&wallet);
+        assert!(!keys.ready());
+        keys.slots[0].status = keys::KeyStatus::Verified;
+        keys.slots[2].source = KeySource::Elsewhere;
+        keys.slots[2].status = keys::KeyStatus::Verified;
+        // One key of the two needed: not yet.
+        assert!(!keys.ready());
+        keys.slots[1].source = KeySource::Hardware;
+        keys.slots[1].status = keys::KeyStatus::Verified;
+        assert!(keys.ready());
+        assert_eq!(keys.provided(), 2);
+        let summary = keys.summary();
+        assert!(summary.contains("2 of 3 provided"), "{}", summary);
+        assert!(summary.contains("1 signs elsewhere"), "{}", summary);
+        // A signer left unsettled still blocks Review.
+        keys.slots[2].source = KeySource::Words;
+        keys.slots[2].status = keys::KeyStatus::Missing;
+        assert!(!keys.ready());
+    }
+
+    #[tokio::test]
+    async fn the_keys_step_sits_between_source_and_review() {
+        let directory = NetworkDirectory::new(std::env::temp_dir().join("import-journey-keys"));
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "cube-1".into(), BitcoinImport::pending());
+        let wallet =
+            ImportedWalletAttachment::new(two_of_three(), ChainId::Bitcoin, 0, 200).unwrap();
+        // What a successful Review of the Source form leaves behind.
+        panel.keys = Some(KeysState::new(&wallet.descriptor));
+        panel.review = Some(wallet);
+        assert_eq!(panel.journey_step(), JourneyStep::Keys);
+        let cache = Cache::default();
+        let shown = rendered_labels(panel.journey_view(&cache, false)).await;
+        assert_labels(
+            &shown,
+            &[
+                "Keys",
+                "Add the wallet's keys",
+                "Signs elsewhere",
+                "Verify key",
+                "Review wallet",
+            ],
+            &["Import and scan wallet"],
+        );
+        // Review stays shut, and so does importing.
+        let _ = panel.update_view(ImportMessage::KeysDone, None, 0);
+        assert_eq!(panel.journey_step(), JourneyStep::Keys);
+        let _ = panel.update_view(ImportMessage::Confirm, None, 0);
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Add the wallet's keys before importing it.")
+        );
+
+        // Each check carries an id; only the check a slot waits for lands.
+        let check_of = |panel: &ImportedBitcoinPanel, index: usize| {
+            panel.keys.as_ref().unwrap().slots[index].check
+        };
+        let status_of = |panel: &ImportedBitcoinPanel, index: usize| {
+            panel.keys.as_ref().unwrap().slots[index].status.clone()
+        };
+        let _ = panel.update_view(
+            ImportMessage::KeyWordsEdited(0, SecretInput::new(phrase(1).to_string())),
+            None,
+            0,
+        );
+        let _ = panel.update_view(ImportMessage::VerifyWords(0), None, 0);
+        let first = check_of(&panel, 0);
+        assert_eq!(status_of(&panel, 0), keys::KeyStatus::Checking);
+        // Edit while checking, then check the new words: the first result is
+        // stale and cannot mark the second words verified.
+        let _ = panel.update_view(
+            ImportMessage::KeyWordsEdited(0, SecretInput::new(phrase(4).to_string())),
+            None,
+            0,
+        );
+        assert_eq!(status_of(&panel, 0), keys::KeyStatus::Missing);
+        let _ = panel.update_view(ImportMessage::VerifyWords(0), None, 0);
+        let second = check_of(&panel, 0);
+        assert_ne!(first, second);
+        let generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 0, first, Ok(())));
+        assert_eq!(status_of(&panel, 0), keys::KeyStatus::Checking);
+        // A result from another generation never lands either.
+        let _ = panel.update_event(ImportEvent::WordsVerified(
+            generation + 1,
+            0,
+            second,
+            Ok(()),
+        ));
+        assert_eq!(status_of(&panel, 0), keys::KeyStatus::Checking);
+        let _ = panel.update_event(ImportEvent::WordsVerified(
+            generation,
+            0,
+            second,
+            Err("This key does not match the selected wallet account.".into()),
+        ));
+        assert!(matches!(status_of(&panel, 0), keys::KeyStatus::Failed(_)));
+        let _ = panel.update_view(
+            ImportMessage::KeyWordsEdited(0, SecretInput::new(phrase(1).to_string())),
+            None,
+            0,
+        );
+        let _ = panel.update_view(ImportMessage::VerifyWords(0), None, 0);
+        let third = check_of(&panel, 0);
+        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 0, third, Ok(())));
+        assert_eq!(status_of(&panel, 0), keys::KeyStatus::Verified);
+        // A words result cannot land on a slot moved to another source.
+        let _ = panel.update_view(
+            ImportMessage::KeyWordsEdited(2, SecretInput::new(phrase(3).to_string())),
+            None,
+            0,
+        );
+        let _ = panel.update_view(ImportMessage::VerifyWords(2), None, 0);
+        let moved = check_of(&panel, 2);
+        let _ = panel.update_view(
+            ImportMessage::KeySourcePicked(2, KeySource::Hardware),
+            None,
+            0,
+        );
+        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 2, moved, Ok(())));
+        assert_eq!(status_of(&panel, 2), keys::KeyStatus::Missing);
+        // A review-bound device list goes with an edited source.
+        let _ = panel.update_view(ImportMessage::KeySourcePicked(2, KeySource::Words), None, 0);
+
+        let _ = panel.update_view(
+            ImportMessage::KeySourcePicked(1, KeySource::Elsewhere),
+            None,
+            0,
+        );
+        let _ = panel.update_view(
+            ImportMessage::KeySourcePicked(2, KeySource::Elsewhere),
+            None,
+            0,
+        );
+        let _ = panel.update_view(ImportMessage::KeysDone, None, 0);
+        assert_eq!(
+            panel.journey_step(),
+            JourneyStep::Keys,
+            "one key cannot sign a 2-of-3"
+        );
+        let _ = panel.update_view(ImportMessage::KeySourcePicked(1, KeySource::Words), None, 0);
+        let _ = panel.update_view(
+            ImportMessage::KeyWordsEdited(1, SecretInput::new(phrase(2).to_string())),
+            None,
+            0,
+        );
+        let _ = panel.update_view(ImportMessage::VerifyWords(1), None, 0);
+        let check = check_of(&panel, 1);
+        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 1, check, Ok(())));
+        let _ = panel.update_view(ImportMessage::KeysDone, None, 0);
+        assert_eq!(panel.journey_step(), JourneyStep::Review);
+        let review = rendered_labels(panel.journey_view(&cache, false)).await;
+        assert!(
+            review
+                .iter()
+                .any(|text| text.starts_with("Keys: 2 of 3 provided")),
+            "{:?}",
+            review
+        );
+        assert_labels(&review, &["Back to keys"], &[]);
+        let _ = panel.update_view(ImportMessage::BackToKeys, None, 0);
+        assert_eq!(panel.journey_step(), JourneyStep::Keys);
+        // Editing the source starts the keys over.
+        let _ = panel.update_view(ImportMessage::Edit, None, 0);
+        assert!(panel.keys.is_none() && panel.review.is_none());
+    }
+
+    #[test]
+    fn storing_keys_reports_its_outcome_and_clears_the_words() {
+        let mut panel = ready_import_panel();
+        let wallet = panel.import.active_attachment().cloned().unwrap();
+        let mut keys = KeysState::new(&wallet.descriptor);
+        keys.slots[0].words = phrase(1);
+        keys.slots[0].status = keys::KeyStatus::Verified;
+        panel.keys = Some(keys);
+        let epoch = panel.keys_gate.load(Ordering::SeqCst);
+        // The store is under way when its result arrives.
+        panel.keys_stored = KeysStored::Storing;
+        let _ = panel.update_event(ImportEvent::KeysStored(epoch, Err("synthetic".into())));
+        assert_eq!(panel.keys_stored, KeysStored::Failed("synthetic".into()));
+        // The words stay for a retry.
+        assert!(!panel.keys.as_ref().unwrap().slots[0].words.is_empty());
+        let _ = panel.update_event(ImportEvent::KeysStored(epoch, Ok(1)));
+        assert_eq!(panel.keys_stored, KeysStored::Stored(1));
+        assert!(panel.keys.as_ref().unwrap().slots[0].words.is_empty());
+        // A hardware or elsewhere signer has no words to store.
+        let mut device = KeysState::new(&wallet.descriptor);
+        device.slots[0].source = KeySource::Hardware;
+        device.slots[0].status = keys::KeyStatus::Verified;
+        panel.keys = Some(device);
+        let _ = panel.store_keys();
+        assert_eq!(panel.keys_stored, KeysStored::None);
+    }
+
+    /// A panel whose 1-of-1 key is verified recovery words, rooted in a
+    /// fresh data directory so Duress Mode state can be written beside it.
+    fn verified_words_panel(root: &std::path::Path) -> ImportedBitcoinPanel {
+        let ready = ready_import_panel();
+        let wallet = ready.import.active_attachment().cloned().unwrap();
+        let directory = NetworkDirectory::new(root.join("bitcoin"));
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "cube-1".into(), BitcoinImport::pending());
+        let mut keys = KeysState::new(&wallet.descriptor);
+        keys.slots[0].words = phrase(1);
+        keys.slots[0].status = keys::KeyStatus::Verified;
+        panel.keys = Some(keys);
+        panel.keys_confirmed = true;
+        panel.review = Some(wallet);
+        panel
+    }
+
+    /// Installing cannot be undone, so words that could not be stored stop
+    /// the import before it attaches the wallet.
+    #[test]
+    fn words_that_cannot_be_stored_stop_the_import_first() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("import-preflight-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("bitcoin")).unwrap();
+        let mut panel = verified_words_panel(&root);
+        crate::app::session::close();
+        let _ = panel.update_view(ImportMessage::Confirm, None, 0);
+        assert_eq!(
+            panel.error.as_deref(),
+            Some("Unlock this Cube again before storing recovery words.")
+        );
+        assert!(!panel.busy, "nothing was installed");
+
+        crate::app::session::open("cube-1", zeroize::Zeroizing::new("synthetic PIN".into()));
+        crate::services::duress::DuressLocalState {
+            enrolled: true,
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        panel.error = None;
+        let _ = panel.update_view(ImportMessage::Confirm, None, 0);
+        assert!(
+            panel
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Duress Mode")),
+            "{:?}",
+            panel.error
+        );
+        assert!(!panel.busy);
+
+        // A device-only import stores nothing, so the preflight passes.
+        panel.keys.as_mut().unwrap().slots[0].source = KeySource::Hardware;
+        assert_eq!(panel.storage_preflight(), Ok(()));
+        crate::app::session::close();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Recovery words can be added to an attached wallet that has none, from
+    /// Vault settings or Done; Storing survives a refresh or a wider search.
+    #[test]
+    fn recovery_words_can_be_added_after_the_wallet_attaches() {
+        let _guard = crate::app::session::test_guard();
+        let mut panel = ready_import_panel();
+        let epoch = panel.keys_gate.load(Ordering::SeqCst);
+        // Unknown inventory: nothing offered.
+        let _ = panel.update_view(ImportMessage::AddKeys, None, 0);
+        assert!(!panel.adding_keys);
+        // An older read never lands.
+        let _ = panel.update_event(ImportEvent::KeysInventory(epoch + 7, Ok(0)));
+        assert_eq!(panel.stored_keys, None);
+        let _ = panel.update_event(ImportEvent::KeysInventory(epoch, Ok(0)));
+        assert_eq!(panel.stored_keys, Some(0));
+
+        let _ = panel.update_view(ImportMessage::AddKeys, None, 0);
+        assert!(panel.adding_keys && panel.journey_open());
+        assert_eq!(panel.journey_step(), JourneyStep::Keys);
+        // Nothing verified yet: Store words stays shut.
+        let _ = panel.update_view(ImportMessage::KeysDone, None, 0);
+        assert_eq!(panel.journey_step(), JourneyStep::Keys);
+        let _ = panel.update_view(
+            ImportMessage::KeyWordsEdited(0, SecretInput::new(phrase(1).to_string())),
+            None,
+            0,
+        );
+        let _ = panel.update_view(ImportMessage::VerifyWords(0), None, 0);
+        let check = panel.keys.as_ref().unwrap().slots[0].check;
+        let generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::WordsVerified(generation, 0, check, Ok(())));
+        // Locked: refused before storing.
+        crate::app::session::close();
+        let _ = panel.update_view(ImportMessage::KeysDone, None, 0);
+        assert_eq!(panel.keys_stored, KeysStored::None);
+        assert_eq!(panel.journey_step(), JourneyStep::Keys);
+        crate::app::session::open("cube-1", zeroize::Zeroizing::new("synthetic PIN".into()));
+        let _ = panel.update_view(ImportMessage::KeysDone, None, 0);
+        assert_eq!(panel.keys_stored, KeysStored::Storing);
+        assert_eq!(panel.journey_step(), JourneyStep::Done);
+        // Close waits for the store.
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(panel.journey_open());
+
+        // A wider history search bumps the panel generation, not the key
+        // storage epoch, so the result still lands.
+        panel.generation = fresh_generation();
+        let _ = panel.update_event(ImportEvent::KeysStored(epoch, Ok(1)));
+        assert_eq!(panel.keys_stored, KeysStored::Stored(1));
+        assert_eq!(panel.stored_keys, Some(1));
+        assert!(panel.keys.as_ref().unwrap().slots[0].words.is_empty());
+        // A second store is not offered once one exists.
+        let _ = panel.update_view(ImportMessage::RetryStoreKeys, None, 0);
+        assert_eq!(panel.keys_stored, KeysStored::Stored(1));
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        assert!(!panel.journey_open() && !panel.adding_keys && panel.keys.is_none());
+        let _ = panel.update_view(ImportMessage::AddKeys, None, 0);
+        assert!(!panel.adding_keys, "words are already stored");
+
+        // Closing the Cube ends the epoch: a late result is dropped.
+        panel.stop();
+        let _ = panel.update_event(ImportEvent::KeysStored(epoch, Ok(2)));
+        assert_eq!(panel.stored_keys, Some(1));
+        crate::app::session::close();
+    }
+
+    #[test]
+    fn leaving_or_abandoning_forgets_typed_words() {
+        let root = std::env::temp_dir().join(format!("import-forget-{}", uuid::Uuid::new_v4()));
+        let mut panel = verified_words_panel(&root);
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        let slot = &panel.keys.as_ref().unwrap().slots[0];
+        assert!(slot.words.is_empty() && slot.status == keys::KeyStatus::Missing);
+        assert!(!panel.keys_confirmed, "the words must be typed again");
+
+        let mut panel = verified_words_panel(&root);
+        let generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::Abandoned(generation, Ok(())));
+        assert!(panel.keys.is_none());
+    }
+
+    /// Leaving while a device check runs must not leave the slot Checking:
+    /// its result can no longer land, and Checking disables every control.
+    #[test]
+    fn leaving_during_a_device_check_frees_the_keys_step() {
+        let root =
+            std::env::temp_dir().join(format!("import-leave-check-{}", uuid::Uuid::new_v4()));
+        let mut panel = verified_words_panel(&root);
+        panel.keys_confirmed = false;
+        {
+            let slot = &mut panel.keys.as_mut().unwrap().slots[0];
+            slot.source = KeySource::Hardware;
+            slot.status = keys::KeyStatus::Checking;
+            slot.check = keys::next_check();
+        }
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        let _ = panel.update_view(ImportMessage::ResumeJourney, None, 0);
+        let keys = panel.keys.as_ref().unwrap();
+        assert!(!keys.checking(), "the Keys step must be usable again");
+        assert_eq!(keys.slots[0].status, keys::KeyStatus::Missing);
+    }
+
+    /// A failed store asks for the inventory, so Add recovery words is
+    /// offered in the same session once the typed words are gone.
+    #[test]
+    fn a_failed_store_reads_the_inventory_for_add_recovery_words() {
+        let mut panel = ready_import_panel();
+        let wallet = panel.import.active_attachment().cloned().unwrap();
+        let mut keys = KeysState::new(&wallet.descriptor);
+        keys.slots[0].words = phrase(1);
+        keys.slots[0].status = keys::KeyStatus::Verified;
+        panel.keys = Some(keys);
+        panel.journey = true;
+        panel.keys_stored = KeysStored::Storing;
+        let epoch = panel.keys_gate.load(Ordering::SeqCst);
+        let task = panel.update_event(ImportEvent::KeysStored(epoch, Err("synthetic".into())));
+        assert!(task.units() > 0, "the inventory read is scheduled");
+        let _ = panel.update_view(ImportMessage::LeaveJourney, None, 0);
+        let _ = panel.update_event(ImportEvent::KeysInventory(epoch, Ok(0)));
+        let _ = panel.update_view(ImportMessage::AddKeys, None, 0);
+        assert!(panel.adding_keys && panel.journey_open());
+    }
+
+    #[test]
+    fn editing_the_source_drops_its_device_list() {
+        let root = std::env::temp_dir().join(format!("import-hw-{}", uuid::Uuid::new_v4()));
+        let mut panel = verified_words_panel(&root);
+        panel.set_hardware_root(CoincubeDirectory::new(root.clone()));
+        panel.keys_confirmed = false;
+        let _ = panel.update_view(
+            ImportMessage::KeySourcePicked(0, KeySource::Hardware),
+            None,
+            0,
+        );
+        assert!(
+            panel.hardware_wallets.is_some(),
+            "listing bound to the reviewed policy"
+        );
+        let _ = panel.update_view(ImportMessage::Edit, None, 0);
+        assert!(panel.hardware_wallets.is_none());
+    }
+
+    #[test]
+    fn a_plain_multi_threshold_is_read_too() {
+        let keys: Vec<String> = (1..=3).map(|entropy| phrase_account(entropy).0).collect();
+        let branch = |n: u8| {
+            format!(
+                "wsh(multi(2,{}/{n}/*,{}/{n}/*,{}/{n}/*))",
+                keys[0], keys[1], keys[2]
+            )
+        };
+        let wallet =
+            ImportedWalletDescriptor::parse(&branch(0), Some(&branch(1)), ChainId::Bitcoin)
+                .unwrap();
+        let state = KeysState::new(&wallet);
+        assert_eq!((state.slots.len(), state.threshold), (3, 2));
+    }
+
+    #[test]
+    fn typed_words_never_reach_debug_output() {
+        let secret =
+            "abandon ability able about above absent absorb abstract absurd abuse access accident";
+        let message = ImportMessage::KeyWordsEdited(0, SecretInput::new(secret.into()));
+        let debug = format!("{:?}", message);
+        assert!(!debug.contains("abandon"), "{}", debug);
+        let passphrase = ImportMessage::KeyPassphraseEdited(0, SecretInput::new("hunter2".into()));
+        assert!(!format!("{:?}", passphrase).contains("hunter2"));
+    }
+
     #[test]
     fn pending_import_uses_vault_routes_but_never_inheritance_actions() {
         let directory = NetworkDirectory::new(std::env::temp_dir().join("import-panel-route-test"));
@@ -3874,7 +6116,6 @@ mod tests {
         assert!(panel.handles_route(&Menu::Vault(VaultSubMenu::Receive)));
         assert!(panel.handles_route(&Menu::Vault(VaultSubMenu::Send)));
         assert!(!panel.handles_route(&Menu::Vault(VaultSubMenu::Recovery)));
-        assert!(!panel.handles_route(&Menu::Vault(VaultSubMenu::Claim)));
         assert!(
             !panel.handles_route(&Menu::Vault(VaultSubMenu::Settings(Some(
                 SettingsOption::LocalSigning,

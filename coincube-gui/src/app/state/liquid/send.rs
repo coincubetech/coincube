@@ -621,6 +621,7 @@ impl State for LiquidSend {
                     cache.bitcoin_unit,
                     usdt_asset_id(self.breez_client.network()).unwrap_or(""),
                     &[],
+                    cache.balance_amounts_masked(),
                 ),
             )
         } else {
@@ -709,7 +710,16 @@ impl State for LiquidSend {
 
         if let Message::View(view::Message::LiquidSend(ref msg)) = message {
             match msg {
-                view::LiquidSendMessage::PresetAsset(asset) => {
+                view::LiquidSendMessage::FocusAction(id) => {
+                    return iced::widget::operation::focus(id.clone());
+                }
+                view::LiquidSendMessage::PresetAsset(asset)
+                | view::LiquidSendMessage::SelectMasterAsset(asset) => {
+                    if matches!(msg, view::LiquidSendMessage::SelectMasterAsset(_))
+                        && self.from_asset == *asset
+                    {
+                        return Task::none();
+                    }
                     // Set both "You Send" and "They Receive" to the same asset
                     self.from_asset = *asset;
                     self.to_asset = *asset;
@@ -844,8 +854,9 @@ impl State for LiquidSend {
                     let description = if let Some(input_type) = &self.input_type {
                         match input_type {
                             InputType::BitcoinAddress { address } => {
-                                format!(
+                                coincube_ui::localized_format!(
                                     "Sending money to {}",
+                                    "Enviando dinero a {}",
                                     display_abbreviated(address.address.clone())
                                 )
                             }
@@ -873,8 +884,9 @@ impl State for LiquidSend {
                                 {
                                     description.to_string()
                                 } else {
-                                    format!(
+                                    coincube_ui::localized_format!(
                                         "Sending money to {}",
+                                        "Enviando dinero a {}",
                                         display_abbreviated(invoice.bolt11.clone())
                                     )
                                 }
@@ -901,12 +913,17 @@ impl State for LiquidSend {
                                 }
 
                                 if let Some(bip353_address) = bip353_address {
-                                    format!("Sending money to {}", bip353_address.clone())
+                                    coincube_ui::localized_format!(
+                                        "Sending money to {}",
+                                        "Enviando dinero a {}",
+                                        bip353_address.clone()
+                                    )
                                 } else if let Some(description) = offer.description.clone() {
                                     description
                                 } else {
-                                    format!(
+                                    coincube_ui::localized_format!(
                                         "Sending money to {}",
+                                        "Enviando dinero a {}",
                                         display_abbreviated(offer.offer.clone())
                                     )
                                 }
@@ -975,12 +992,13 @@ impl State for LiquidSend {
                                         self.amount_input.warning = None;
                                     }
                                 }
-                                format!(
+                                coincube_ui::localized_format!(
                                     "Sending money to {}",
+                                    "Enviando dinero a {}",
                                     display_abbreviated(address.address.clone())
                                 )
                             }
-                            _ => String::from("Send Payment"),
+                            _ => coincube_ui::localized_format!("Send Payment", "Enviar pago"),
                         }
                     } else {
                         String::from("")
@@ -1058,7 +1076,7 @@ impl State for LiquidSend {
                                         ..
                                     } if is_usdt_payment => {
                                         let fallback = if description.is_empty() {
-                                            "USDt Transfer"
+                                            coincube_ui::locale::copy("USDt Transfer")
                                         } else {
                                             description.as_str()
                                         };
@@ -1596,8 +1614,9 @@ impl State for LiquidSend {
                                         match kind.asset_id(network) {
                                             Some(id) => Some(id.to_string()),
                                             None => {
-                                                self.error = Some(format!(
+                                                self.error = Some(coincube_ui::localized_format!(
                                                     "{} not available on this network",
+                                                    "{} no está disponible en esta red",
                                                     kind.ticker()
                                                 ));
                                                 return Task::none();
@@ -1672,8 +1691,9 @@ impl State for LiquidSend {
                                 let from_asset_id = match from_kind.asset_id(network) {
                                     Some(id) => id.to_string(),
                                     None => {
-                                        self.error = Some(format!(
+                                        self.error = Some(coincube_ui::localized_format!(
                                             "{} not available on this network",
+                                            "{} no está disponible en esta red",
                                             from_kind.ticker()
                                         ));
                                         return Task::none();
@@ -2189,7 +2209,11 @@ impl State for LiquidSend {
                             }
                         }
                         Err(e) => {
-                            self.error = Some(format!("Failed to estimate max: {}", e));
+                            self.error = Some(coincube_ui::localized_format!(
+                                "Failed to estimate max: {}",
+                                "No se pudo estimar el máximo: {}",
+                                e
+                            ));
                         }
                     }
                 }
@@ -2477,20 +2501,34 @@ impl State for LiquidSend {
                 view::LiquidSendMessage::OpenSendPicker => {
                     self.send_picker_open = true;
                     self.receive_picker_open = false;
-                    return Task::none();
+                    return iced::widget::operation::focus(iced::advanced::widget::Id::new(
+                        view::liquid::send_asset_action_id(self.from_asset),
+                    ));
                 }
                 view::LiquidSendMessage::OpenReceivePicker => {
                     self.receive_picker_open = true;
                     self.send_picker_open = false;
-                    return Task::none();
+                    return iced::widget::operation::focus(iced::advanced::widget::Id::new(
+                        view::liquid::receive_target_action_id(self.to_asset, self.receive_network),
+                    ));
                 }
                 view::LiquidSendMessage::ClosePicker => {
+                    let return_to = if self.send_picker_open {
+                        view::liquid::SEND_ROUTE_ACTION_ID
+                    } else {
+                        view::liquid::RECEIVE_ROUTE_ACTION_ID
+                    };
                     self.send_picker_open = false;
                     self.receive_picker_open = false;
-                    return Task::none();
+                    return iced::widget::operation::focus(iced::advanced::widget::Id::new(
+                        return_to,
+                    ));
                 }
                 view::LiquidSendMessage::SetSendAsset(asset) => {
                     self.send_picker_open = false;
+                    let focus_source = iced::widget::operation::focus(
+                        iced::advanced::widget::Id::new(view::liquid::SEND_ROUTE_ACTION_ID),
+                    );
                     if self.from_asset != *asset {
                         self.from_asset = *asset;
                         self.to_asset = *asset;
@@ -2506,12 +2544,15 @@ impl State for LiquidSend {
                         self.uri_asset = None;
                         self.error = None;
                         self.sideshift_flow = None;
-                        return self.load_balance();
+                        return Task::batch([self.load_balance(), focus_source]);
                     }
-                    return Task::none();
+                    return focus_source;
                 }
                 view::LiquidSendMessage::SetReceiveTarget(asset, network) => {
                     self.receive_picker_open = false;
+                    let focus_destination = iced::widget::operation::focus(
+                        iced::advanced::widget::Id::new(view::liquid::RECEIVE_ROUTE_ACTION_ID),
+                    );
                     self.to_asset = *asset;
                     self.receive_network = *network;
                     // If cross-asset, set from_asset differently
@@ -2526,7 +2567,7 @@ impl State for LiquidSend {
                     self.uri_asset = None;
                     self.error = None;
                     self.sideshift_flow = None;
-                    return self.load_balance();
+                    return Task::batch([self.load_balance(), focus_destination]);
                 }
             }
         }
@@ -2638,6 +2679,97 @@ mod tests {
                     .collect::<Vec<_>>()
                     .await
             })
+    }
+
+    fn sends_focus_operation(panel: &mut LiquidSend, msg: view::LiquidSendMessage) -> bool {
+        use iced_runtime::futures::futures::StreamExt;
+
+        let task = panel.update(
+            None,
+            &cache(),
+            Message::View(view::Message::LiquidSend(msg)),
+        );
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return false;
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                stream
+                    .any(|action| async move { matches!(action, iced_runtime::Action::Widget(_)) })
+                    .await
+            })
+    }
+
+    #[test]
+    fn picker_close_and_selection_return_to_the_compose_route() {
+        let mut panel = panel();
+        assert!(sends_focus_operation(
+            &mut panel,
+            view::LiquidSendMessage::OpenSendPicker
+        ));
+        assert!(panel.send_picker_open());
+        assert!(!panel.receive_picker_open());
+        assert!(sends_focus_operation(
+            &mut panel,
+            view::LiquidSendMessage::ClosePicker
+        ));
+        assert!(!panel.send_picker_open());
+        assert!(!panel.receive_picker_open());
+
+        assert!(sends_focus_operation(
+            &mut panel,
+            view::LiquidSendMessage::OpenReceivePicker
+        ));
+        assert!(panel.receive_picker_open());
+        assert!(sends_focus_operation(
+            &mut panel,
+            view::LiquidSendMessage::ClosePicker
+        ));
+        assert!(!panel.receive_picker_open());
+
+        send(&mut panel, view::LiquidSendMessage::OpenSendPicker);
+        assert!(sends_focus_operation(
+            &mut panel,
+            view::LiquidSendMessage::SetSendAsset(SendAsset::Lbtc),
+        ));
+        assert!(!panel.send_picker_open());
+        send(&mut panel, view::LiquidSendMessage::OpenReceivePicker);
+        send(
+            &mut panel,
+            view::LiquidSendMessage::SetReceiveTarget(SendAsset::Lbtc, ReceiveNetwork::Liquid),
+        );
+        assert!(!panel.receive_picker_open());
+    }
+
+    #[test]
+    fn reselecting_current_asset_keeps_typed_draft() {
+        let mut panel = panel();
+        panel.from_asset = SendAsset::Usdt;
+        panel.to_asset = SendAsset::Usdt;
+        panel.input.value = "1.50".to_owned();
+        panel.amount = Amount::from_sat(12345);
+        send(
+            &mut panel,
+            view::LiquidSendMessage::SelectMasterAsset(SendAsset::Usdt),
+        );
+        assert_eq!(panel.from_asset, SendAsset::Usdt);
+        assert_eq!(panel.to_asset, SendAsset::Usdt);
+        assert_eq!(panel.input.value, "1.50");
+        assert_eq!(panel.amount, Amount::from_sat(12345));
+    }
+
+    #[test]
+    fn overview_preset_still_starts_a_fresh_send() {
+        let mut panel = panel();
+        panel.input.value = "old destination".to_owned();
+        send(
+            &mut panel,
+            view::LiquidSendMessage::PresetAsset(SendAsset::Lbtc),
+        );
+        assert!(panel.input.value.is_empty());
     }
 
     fn liquid_input(address: &str) -> InputType {

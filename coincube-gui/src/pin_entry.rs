@@ -1,19 +1,23 @@
-use iced::widget::{image, Space};
-use iced::{Alignment, Length, Task};
+use coincube_ui::locale::{copy as localized_copy, notice as localized_notice};
+use iced::widget::Space;
+use iced::{Length, Task};
 
 use coincube_ui::{
     component::{
-        button,
-        quote_display::{self, Quote, QuoteDisplayProps},
-        text::{h3, p1_regular, text},
+        quote_display::{self, Quote},
+        text::p1_regular,
     },
-    icon, theme,
-    widget::{Column, Container, Element, Row},
+    theme,
+    widget::{Column, Element},
 };
 
 use crate::app::settings::CubeSettings;
 use crate::pin_input;
 use crate::services::unlock::{self, PinOutcome};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 pub struct PinEntry {
     cube: CubeSettings,
@@ -38,7 +42,6 @@ pub struct PinEntry {
     /// sovereign (no-Connect) enrollment.
     duress_account_id: Option<String>,
     loading_quote: Quote,
-    loading_image_handle: image::Handle,
 }
 
 pub enum PinEntrySuccess {
@@ -76,16 +79,80 @@ pub enum Message {
     /// Carries only a classification, never the decrypted seed. Key material
     /// must not enter the message queue — iced clones messages, and every clone
     /// would be another copy of the mnemonic on the heap.
-    Classified(Result<Verdict, String>),
+    Classified(u64, Result<Verdict, String>),
     ForkClassified(u64, Result<Verdict, String>),
 }
 
 /// What [`Message::Classified`] reports back to the UI thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Verdict {
     Unlock,
-    Duress,
+    Duress(VerifiedUnlockDuress),
     Wrong,
+}
+
+/// One-use emergency evidence minted only by a completed PIN trial. The
+/// captured origin survives Back, tab close, or a new PinEntry under the same
+/// tab id; it never borrows the currently visible Cube's identity.
+#[derive(Clone)]
+pub struct VerifiedUnlockDuress {
+    root: std::path::PathBuf,
+    cube_id: String,
+    chain: crate::chain::ChainId,
+    account_id: Option<String>,
+    claimed: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for VerifiedUnlockDuress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VerifiedUnlockDuress(<redacted>)")
+    }
+}
+
+impl VerifiedUnlockDuress {
+    fn from_classification(
+        root: std::path::PathBuf,
+        cube_id: String,
+        chain: crate::chain::ChainId,
+        account_id: Option<String>,
+    ) -> Self {
+        Self {
+            root,
+            cube_id,
+            chain,
+            account_id,
+            claimed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn origin(&self) -> (&std::path::Path, &str, crate::chain::ChainId) {
+        (&self.root, &self.cube_id, self.chain)
+    }
+
+    pub(crate) fn claim(
+        self,
+    ) -> Option<(
+        std::path::PathBuf,
+        String,
+        crate::chain::ChainId,
+        Option<String>,
+    )> {
+        (!self.claimed.swap(true, Ordering::AcqRel)).then_some((
+            self.root,
+            self.cube_id,
+            self.chain,
+            self.account_id,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        root: std::path::PathBuf,
+        cube_id: String,
+        chain: crate::chain::ChainId,
+    ) -> Self {
+        Self::from_classification(root, cube_id, chain, None)
+    }
 }
 
 fn next_fork_generation() -> u64 {
@@ -97,21 +164,14 @@ type ForkSignerSlot =
     std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<coincube_core::signer::MasterSigner>>>>;
 
 fn retain_unlocked_signer(
-    chain: crate::chain::ChainId,
-    cube_id: &str,
+    _chain: crate::chain::ChainId,
+    _cube_id: &str,
     slot: &ForkSignerSlot,
     signer: coincube_core::signer::MasterSigner,
 ) -> Result<Verdict, String> {
-    if chain.is_blake2b() {
-        *slot
-            .lock()
-            .map_err(|_| "Unlock state unavailable".to_string())? =
-            Some(std::sync::Arc::new(signer));
-    } else {
-        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
-        let fingerprint = signer.fingerprint(&secp);
-        crate::app::session::store_unlocked_signer(cube_id, fingerprint, signer);
-    }
+    *slot
+        .lock()
+        .map_err(|_| "Unlock state unavailable".to_string())? = Some(std::sync::Arc::new(signer));
     Ok(Verdict::Unlock)
 }
 
@@ -128,7 +188,6 @@ impl PinEntry {
             .map(|client| client.base_url.clone())
             .unwrap_or_else(crate::services::coincube_api_base_url);
         let loading_quote = quote_display::random_quote("loading");
-        let loading_image_handle = quote_display::image_handle_for_context("loading");
         Self {
             cube,
             fork_signer: Default::default(),
@@ -143,7 +202,6 @@ impl PinEntry {
             on_success,
             duress_account_id,
             loading_quote,
-            loading_image_handle,
         }
     }
 
@@ -151,11 +209,40 @@ impl PinEntry {
         &self.cube
     }
 
+    /// The loading view a submitted PIN puts up, without classifying one.
+    #[cfg(test)]
+    pub(crate) fn start_loading_for_test(&mut self) {
+        self.loading = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reviewer_trial_generation(&self) -> u64 {
+        self.fork_generation
+    }
+
     pub fn pin(&self) -> zeroize::Zeroizing<String> {
         self.pin_input.value()
     }
 
     pub(crate) fn requires_connect(&self) -> bool {
+        let PinEntrySuccess::LoadApp {
+            wallet_settings,
+            connect_client,
+            ..
+        } = &self.on_success;
+        // A fork Cube without a Vault has no backend to admit yet. Signed
+        // out, it opens under the local feature check; signed in, its
+        // account and feature are checked as for a Connect-backed Vault.
+        self.connect_capable()
+            && (wallet_settings.is_some()
+                || connect_client
+                    .as_ref()
+                    .is_some_and(|client| client.token().is_some()))
+    }
+
+    /// A fork Cube that a Connect session can serve: anything but a Vault
+    /// on the managed local node.
+    fn connect_capable(&self) -> bool {
         let PinEntrySuccess::LoadApp {
             datadir,
             wallet_settings,
@@ -182,7 +269,7 @@ impl PinEntry {
         client: crate::services::coincube::CoincubeClient,
         expected_user: u32,
     ) -> bool {
-        if !self.requires_connect()
+        if !self.connect_capable()
             || !crate::chain::same_path(&self.datadir_root, root.path())
             || self.connect_provider.trim_end_matches('/') != client.base_url.trim_end_matches('/')
             || client.token().is_none_or(|token| token.trim().is_empty())
@@ -209,6 +296,13 @@ impl PinEntry {
         self.fork_signer.lock().ok()?.take()
     }
 
+    /// The blocking worker holds only this private slot. Move the signer into
+    /// the process session after the matching PIN trial is accepted by its
+    /// still-live tab; a cancelled worker may never write the global session.
+    pub(crate) fn take_bitcoin_signer(&self) -> Option<coincube_core::signer::MasterSigner> {
+        Arc::try_unwrap(self.take_fork_signer()?).ok()
+    }
+
     pub fn fail_open(&mut self, reason: String) {
         self.loading = false;
         self.error = Some(reason);
@@ -224,11 +318,21 @@ impl PinEntry {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let message = match message {
             Message::ForkClassified(generation, verdict) => {
-                if generation != self.fork_generation {
+                if generation != self.fork_generation || !self.loading {
                     return Task::none();
                 }
                 self.fork_task.take();
-                Message::Classified(verdict)
+                self.fork_generation = next_fork_generation();
+                Message::Classified(generation, verdict)
+            }
+            Message::Classified(generation, verdict) => {
+                if generation != self.fork_generation || !self.loading {
+                    return Task::none();
+                }
+                // A repeated callback cannot affect a later attempt, even
+                // when this same PinEntry remains on screen after Wrong.
+                self.fork_generation = next_fork_generation();
+                Message::Classified(generation, verdict)
             }
             msg => msg,
         };
@@ -237,6 +341,9 @@ impl PinEntry {
                 // Enter key pressed in a PIN field — trigger submit
                 self.update(Message::Submit)
             }
+            // The face stays up while the PIN is checked; its digits are
+            // already submitted.
+            Message::PinInput(_) if self.loading => Task::none(),
             Message::PinInput(msg) => {
                 self.error = None;
                 self.pin_input.update(msg).map(Message::PinInput)
@@ -282,6 +389,7 @@ impl PinEntry {
                 let connect_client = connect_client.clone();
                 let requires_connect = self.requires_connect();
                 let expected_user = self.connect_expected_user;
+                let duress_account_id = self.duress_account_id.clone();
                 let generation = self.fork_generation;
                 let is_fork = cube.network.is_blake2b();
                 let task = Task::perform(
@@ -316,10 +424,19 @@ impl PinEntry {
                         }
                         tokio::task::spawn_blocking(move || {
                             let loc = unlock::CubeLocation::new(&root, &cube);
-                            let result = if cube.network.is_blake2b() {
-                                unlock::unlock_connect_fork(&loc, &pin)
+                            let attempt = if cube.network.is_blake2b() {
+                                unlock::throttle::classify_connect_fork(&root, &loc, &pin)
                             } else {
-                                unlock::unlock_blocking(&loc, &pin)
+                                unlock::throttle::classify_pin(&root, &loc, &pin)
+                            };
+                            let result = match attempt {
+                                Ok(unlock::throttle::PinAttempt::Classified(outcome)) => {
+                                    Ok(outcome)
+                                }
+                                Ok(unlock::throttle::PinAttempt::Locked(remaining)) => {
+                                    return Err(unlock::throttle::lockout_message(remaining));
+                                }
+                                Err(error) => Err(error),
                             };
                             match result {
                                 Ok(PinOutcome::Unlock(signer)) => retain_unlocked_signer(
@@ -328,7 +445,14 @@ impl PinEntry {
                                     &fork_signer,
                                     *signer,
                                 ),
-                                Ok(PinOutcome::Duress) => Ok(Verdict::Duress),
+                                Ok(PinOutcome::Duress) => {
+                                    Ok(Verdict::Duress(VerifiedUnlockDuress::from_classification(
+                                        root,
+                                        cube.id,
+                                        cube.network,
+                                        duress_account_id,
+                                    )))
+                                }
                                 Ok(PinOutcome::Wrong) => Ok(Verdict::Wrong),
                                 // Everything else — a missing seed, a missing
                                 // keyring entry, an unreachable keychain — is an
@@ -352,7 +476,7 @@ impl PinEntry {
                         if is_fork {
                             Message::ForkClassified(generation, result)
                         } else {
-                            Message::Classified(result)
+                            Message::Classified(generation, result)
                         }
                     },
                 );
@@ -364,18 +488,12 @@ impl PinEntry {
                     task
                 }
             }
-            Message::Classified(Ok(Verdict::Unlock)) => {
-                unlock::throttle::ThrottleState::load(&self.datadir_root)
-                    .record_success(&self.datadir_root, &self.cube.id);
+            Message::Classified(_, Ok(Verdict::Unlock)) => {
                 // Stay in `loading` — the Breez/Spark load runs next and the
                 // screen must not flash back to the keypad in between.
                 Task::done(Message::PinVerified)
             }
-            Message::Classified(Ok(Verdict::Duress)) => {
-                // Clear the counter too: it must not survive as evidence that
-                // someone was guessing, and this Cube is about to be wiped.
-                unlock::throttle::ThrottleState::load(&self.datadir_root)
-                    .record_success(&self.datadir_root, &self.cube.id);
+            Message::Classified(_, Ok(Verdict::Duress(_proof))) => {
                 // Clear the buffer and bubble up the enrolled account id so the
                 // parent can drive the orchestrator. The neutral loading screen
                 // stays up during the brief async activation gap: it is
@@ -386,10 +504,10 @@ impl PinEntry {
                 let account_id = self.duress_account_id.clone();
                 Task::done(Message::DuressDetected { account_id })
             }
-            Message::Classified(Ok(Verdict::Wrong)) => {
+            Message::Classified(_, Ok(Verdict::Wrong)) => {
                 self.loading = false;
                 let penalty = unlock::throttle::ThrottleState::load(&self.datadir_root)
-                    .record_failure(&self.datadir_root, &self.cube.id);
+                    .current_penalty(&self.cube.id);
                 self.error = Some(if penalty.is_zero() {
                     "Incorrect PIN. Please try again.".to_string()
                 } else {
@@ -398,7 +516,7 @@ impl PinEntry {
                 self.pin_input.clear();
                 Task::none()
             }
-            Message::Classified(Err(e)) => {
+            Message::Classified(_, Err(e)) => {
                 // Deliberately NOT "Incorrect PIN". This is a locked keychain, a
                 // missing keyring entry, or unreadable files — telling a user
                 // their PIN is wrong in that situation is how they conclude
@@ -418,76 +536,95 @@ impl PinEntry {
     }
 
     pub fn view(&self) -> Element<Message> {
-        if self.loading {
-            // Full-screen loading with Kage quote while BreezClient loads
-            return Container::new(
-                Column::new()
-                    .width(Length::Fill)
-                    .spacing(20)
-                    .align_x(Alignment::Center)
-                    .push(Space::new().height(Length::Fill))
-                    .push(quote_display::display(&QuoteDisplayProps::new(
-                        "loading",
-                        &self.loading_quote,
-                        &self.loading_image_handle,
-                    )))
-                    .push(crate::loading::loading_indicator(None))
-                    .push(text("Loading your Cube...").style(theme::text::secondary))
-                    .push(Space::new().height(Length::Fill)),
+        self.view_with_theme(crate::home::launcher_presenter::saved_unlock_theme(
+            &self.datadir_root,
+        ))
+    }
+
+    pub(crate) fn is_loading(&self) -> bool {
+        self.loading
+    }
+
+    /// The quote this screen's loading view shows.
+    pub(crate) fn loading_quote(&self) -> &Quote {
+        &self.loading_quote
+    }
+
+    pub fn view_with_theme(
+        &self,
+        mode: coincube_ui::theme::palette::ThemeMode,
+    ) -> Element<Message> {
+        self.view_with_theme_and_floor(mode, None)
+    }
+
+    pub(crate) fn view_with_theme_and_floor<'a>(
+        &'a self,
+        mode: coincube_ui::theme::palette::ThemeMode,
+        floor: Option<&'a crate::home::LauncherSceneContext>,
+    ) -> Element<'a, Message> {
+        if let Some(floor) = floor {
+            crate::home::launcher_presenter::unlock_face_on_floor(
+                &self.cube,
+                mode,
+                floor,
+                move || self.unlock_controls(),
             )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(50)
-            .into();
+        } else {
+            crate::home::launcher_presenter::unlock_face(&self.cube, mode, move || {
+                self.unlock_controls()
+            })
         }
+    }
 
-        let back_button = button::secondary(Some(icon::previous_icon()), "Back")
-            .width(Length::Fixed(150.0))
-            .on_press(Message::Back);
-
-        let header = Row::new()
-            .align_y(Alignment::Center)
-            .push(Container::new(back_button).center_x(Length::FillPortion(2)))
-            .push(Space::new().width(Length::FillPortion(8)))
-            .push(Space::new().width(Length::FillPortion(2)));
-
-        let title = h3(format!("Enter PIN for {}", self.cube.name));
-
-        let mut content = Column::new()
-            .spacing(30)
-            .width(Length::Fill)
-            .align_x(Alignment::Center)
-            .push(title)
-            .push(self.pin_input.view().map(Message::PinInput));
-
+    /// The prototype's unlock `.fc` below its heading: the PIN fieldset,
+    /// Unlock, the network-checks note and Cancel.
+    fn unlock_controls(&self) -> Element<Message> {
+        use crate::home::launcher_presenter as face;
+        let mut fields = Column::new()
+            .push(Space::new().height(Length::Fixed(24.0)))
+            .push(face::face_words(
+                "PIN",
+                13.0,
+                coincube_ui::font::MEDIUM,
+                false,
+            ))
+            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(self.pin_input.face_view().map(Message::PinInput))
+            .push(Space::new().height(Length::Fixed(6.0)))
+            .push(face::face_words(
+                if self.loading {
+                    localized_copy("Checking your PIN…")
+                } else {
+                    localized_copy("Enter this Cube's PIN.")
+                },
+                12.0,
+                coincube_ui::font::REGULAR,
+                true,
+            ));
         if let Some(error) = &self.error {
-            content = content.push(p1_regular(error).style(theme::text::error));
+            fields = fields.push(Space::new().height(Length::Fixed(6.0))).push(
+                p1_regular(localized_notice(error.clone()))
+                    .size(12)
+                    .style(theme::text::error),
+            );
         }
-
-        let can_submit = self.pin_input.is_complete();
-
-        let submit_button = button::primary(None, "Submit")
-            .width(Length::Fixed(200.0))
-            .on_press_maybe(if can_submit {
-                Some(Message::Submit)
-            } else {
-                None
-            });
-
-        content = content.push(submit_button);
-
-        Container::new(
-            Column::new()
-                .width(Length::Fill)
-                .push(Space::new().height(Length::Fixed(100.0)))
-                .push(header)
-                .push(Space::new().height(Length::Fixed(100.0)))
-                .push(Container::new(content).center_x(Length::Fill)),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(20)
-        .into()
+        let unlock = iced::widget::button(face::face_button_label(if self.loading {
+            localized_copy("Unlocking…")
+        } else {
+            localized_copy("Unlock")
+        }))
+        .height(Length::Fixed(36.0))
+        .padding([0.0, 16.0])
+        .style(face::face_primary_style)
+        .on_press_maybe((!self.loading && self.pin_input.is_complete()).then_some(Message::Submit));
+        let fields = fields
+            .push(Space::new().height(Length::Fixed(20.0)))
+            .push(unlock);
+        let cancel = iced::widget::button(face::face_link_label(localized_copy("Cancel")))
+            .padding([2.0, 4.0])
+            .style(face::face_link_style)
+            .on_press_maybe((!self.loading).then_some(Message::Back));
+        face::unlock_face_body(fields.into(), cancel.into())
     }
 }
 
@@ -511,6 +648,62 @@ mod fork_handoff_tests {
             None,
         )
     }
+    #[test]
+    fn spanish_pin_unlock_renders_wrong_pin_and_lockout() {
+        use crate::app::view::shared::landing::capture;
+        use coincube_ui::locale::{render_in, Language};
+
+        let mut pin = entry(crate::chain::ChainId::Bitcoin);
+        for (error, expected) in [
+            (
+                "Incorrect PIN. Please try again.".to_owned(),
+                "PIN incorrecto. Inténtalo de nuevo.",
+            ),
+            (
+                unlock::throttle::lockout_message(std::time::Duration::from_secs(30)),
+                "Demasiados intentos con un PIN incorrecto. Inténtalo de nuevo en 30 s.",
+            ),
+        ] {
+            pin.error = Some(error);
+            let view = render_in(Language::Spanish, || pin.unlock_controls());
+            let shown = capture::inspect(
+                "pin-error-es",
+                view,
+                (1024, 768),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(shown.contains("Ingresa el PIN de este Cube."));
+            assert!(shown.contains("Desbloquear"));
+            assert!(shown.contains(expected));
+        }
+    }
+
+    #[test]
+    fn the_unlock_face_stays_up_while_the_pin_is_checked() {
+        let mut pin = entry(crate::chain::ChainId::Bitcoin);
+        for (index, digit) in "1234".chars().enumerate() {
+            drop(
+                pin.update(Message::PinInput(pin_input::Message::DigitChanged(
+                    index,
+                    digit.to_string(),
+                ))),
+            );
+        }
+        pin.start_loading_for_test();
+        // The submitted digits cannot be edited while they are checked.
+        drop(
+            pin.update(Message::PinInput(pin_input::Message::DigitChanged(
+                0,
+                "9".to_string(),
+            ))),
+        );
+        assert_eq!(pin.pin().as_str(), "1234");
+        // The face, not a separate loading screen, is what shows.
+        drop(pin.view_with_theme(coincube_ui::theme::palette::ThemeMode::Dark));
+        assert!(pin.is_loading());
+    }
+
     #[tokio::test]
     async fn local_pin_reopen_uses_anonymous_capability_and_keeps_chain_bound_signer() {
         use httpmock::prelude::*;
@@ -653,7 +846,7 @@ mod fork_handoff_tests {
             let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
             let mut cube = CubeSettings::new("Pending fork".into(), chain);
             if case == "imported" {
-                let (source, _, _) = crate::imported_claim::tests::fixture();
+                let source = crate::services::bitcoin_import::pairing::tests::imported_cube();
                 let import = source.bitcoin_import.unwrap();
                 let source_wallet = import.active_attachment().unwrap().clone();
                 let wallet = crate::app::settings::ImportedWalletAttachment::new(
@@ -780,7 +973,7 @@ mod fork_handoff_tests {
     }
 
     #[test]
-    fn production_handoff_keeps_fork_signer_out_of_legacy_bitcoin_cache() {
+    fn blocking_handoff_keeps_both_signers_private_until_accepted() {
         let _guard = crate::app::session::test_guard();
         crate::app::session::close();
         crate::app::session::open("same-id", zeroize::Zeroizing::new("1234".to_string()));
@@ -792,6 +985,7 @@ mod fork_handoff_tests {
         let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
         let fp = signer.fingerprint(&secp);
         let twin = signer.try_clone().unwrap();
+        let bitcoin = entry(crate::chain::ChainId::Bitcoin);
         retain_unlocked_signer(
             crate::chain::ChainId::BitcoinBlake2b,
             "same-id",
@@ -803,13 +997,16 @@ mod fork_handoff_tests {
         retain_unlocked_signer(
             crate::chain::ChainId::Bitcoin,
             "same-id",
-            &fork.fork_signer,
+            &bitcoin.fork_signer,
             twin,
         )
         .unwrap();
-        assert!(crate::app::session::unlocked_signer("same-id", fp).is_some());
+        assert!(crate::app::session::unlocked_signer("same-id", fp).is_none());
         assert!(fork.take_fork_signer().is_some());
         assert!(fork.take_fork_signer().is_none());
+        let accepted = bitcoin.take_bitcoin_signer().unwrap();
+        crate::app::session::store_unlocked_signer("same-id", fp, accepted);
+        assert!(crate::app::session::unlocked_signer("same-id", fp).is_some());
         crate::app::session::close();
     }
 

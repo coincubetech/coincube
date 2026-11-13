@@ -34,6 +34,49 @@ use crate::{
 
 #[derive(Debug)]
 pub enum Message {
+    /// A shown toast's expiry timer fired. Ignored unless the toast is still
+    /// on screen and its deadline has passed (see `App::arm_toast_timers`).
+    ExpireToast(usize),
+    /// The Cube name typed in Settings was written to this device's Cube
+    /// settings (`Ok(name)`) or could not be.
+    CubeNameSaved(Result<String, String>),
+    /// Connect accepted (`Ok`) or refused the renamed Cube.
+    CubeNameSynced {
+        cube_id: String,
+        result: Result<(), String>,
+    },
+    /// The Spark nickname typed in Settings was written to this device's
+    /// Cube settings (`Ok`, `None` for plain "Spark") or could not be.
+    /// `cube_id` is the Cube whose settings were written: a save that lands
+    /// after the tab has opened another Cube is not this App's.
+    SparkNicknameSaved {
+        cube_id: String,
+        result: Result<Option<String>, String>,
+    },
+    ActivityVaultLoaded(u64, Result<(Vec<HistoryTransaction>, bool), String>),
+    ActivityPsbtLoaded(u64, Result<Vec<SpendTx>, String>),
+    ActivitySparkLoaded(
+        u64,
+        Result<(Vec<coincube_spark_protocol::PaymentSummary>, bool), String>,
+    ),
+    /// A wallet page's quiet refresh of Spark's first page: it replaces the
+    /// loaded rows instead of extending them like a "Load older" page.
+    ActivitySparkRefreshed(
+        u64,
+        Result<(Vec<coincube_spark_protocol::PaymentSummary>, bool), String>,
+    ),
+    ActivityLiquidLoaded(
+        u64,
+        Result<(Vec<crate::app::wallets::DomainPayment>, bool), String>,
+    ),
+    ActivityRefundablesLoaded(
+        u64,
+        Result<Vec<crate::app::wallets::DomainRefundableSwap>, String>,
+    ),
+    ActivityOpenDetail(super::state::activity::ActivityTarget),
+    /// A label save from Activity, by its request number: the entry id, the
+    /// stored key and the label.
+    ActivityLabelSaved(u64, Result<(String, String, Option<String>), String>),
     ImportedBitcoin(Box<super::state::imported_bitcoin::ImportEvent>),
     VaultSpendPrepared {
         generation: u64,
@@ -41,7 +84,12 @@ pub enum Message {
         identities: Vec<(usize, crate::services::branta::LookupResult)>,
     },
     Tick,
-    LocalForkFeatureChecked(bool),
+    /// Answer to the fork feature check `attempt` (see
+    /// `App::fork_feature_check`); `enabled` is false when the feature is off.
+    LocalForkFeatureChecked {
+        attempt: u64,
+        enabled: bool,
+    },
     UpdateDaemonCache(Result<DaemonCache, Error>),
     CacheUpdated,
     /// Outcome of clearing a restored Vault's pending-rescan marker after a
@@ -70,39 +118,6 @@ pub enum Message {
     Fiat(FiatMessage),
     UpdatePanelCache(/* is current panel */ bool),
     View(view::Message),
-    /// Results of the claim step-1 panel's own async work (preconditions
-    /// probe, build, finalise, review, submit, track). Carries the panel's
-    /// coordinator session back and forth, so no other handler ever sees it.
-    Claim(super::state::vault::claim::ClaimEvent),
-    ForkClaim(Box<super::state::vault::claim::fork_panel::Event>),
-    ForkClaimOpened(Box<super::state::vault::claim::fork_load::Opened>),
-    /// Results of the Split step-1 panel's own tasks (#568 B1b). Carries the
-    /// panel's coordinator back and forth, so no other handler sees it.
-    Split(Box<super::state::vault::split::SplitEvent>),
-    /// #625 F3a: the Split journal discovery, run off the UI thread, for
-    /// this Cube and Vault.
-    SplitDiscovered {
-        cube: String,
-        wallet: crate::app::settings::WalletId,
-        panel: Option<Box<super::state::vault::split::SplitPanel>>,
-    },
-    /// #625 F3c: the Split ports a refresh built off the UI thread, under
-    /// its sequence number (`None`: the build did not finish).
-    SplitPortsBuilt(u64, Option<Box<super::SplitPorts>>),
-    /// Completion of the read-only Split destination reservation (with the
-    /// daemon's post-reservation sync state and coin history, to prove the
-    /// address fresh) and bounded BTCB2 fee-rate lookup (`None` =
-    /// unavailable). It never carries a PSBT or signing capability.
-    SplitTargetPrepared {
-        generation: u64,
-        result: Result<
-            (
-                Box<crate::services::foreign_psbt::TargetReservation>,
-                Option<u64>,
-            ),
-            String,
-        >,
-    },
     LoadDaemonConfig(Box<DaemonConfig>),
     DaemonConfigLoaded(Result<(), Error>),
     /// Result of an off-UI-thread daemon restart (a backend switch). Carries the
@@ -312,6 +327,63 @@ pub enum Message {
         claimed: Vec<coincube_core::miniscript::bitcoin::Txid>,
         answers: Vec<crate::services::entangled::LookupAnswer>,
     },
+    /// Coin control asks the app for what the Split coins overlay needs: the
+    /// chain's fee rate and, without a split key, a fresh receive address.
+    SplitFetch {
+        fee: bool,
+        address: bool,
+    },
+    /// The chain-tagged Connect fee rate for the overlay; `None` is
+    /// unavailable, never a guess.
+    SplitFeeRate(Option<u64>),
+    /// A fresh receive address for a split key, or why there isn't one.
+    SplitAddress(Result<String, String>),
+    /// Build the split the overlay shows ([`crate::services::split_coins::prepare`]).
+    SplitRequest {
+        method: crate::services::split_coins::Method,
+        coins: Vec<coincube_core::miniscript::bitcoin::OutPoint>,
+        key: Option<coincube_core::miniscript::bitcoin::OutPoint>,
+        feerate_vb: u64,
+    },
+    /// The split was built and stored with the daemon, or why not.
+    SplitPrepared(Result<Box<crate::services::split_coins::SplitRecord>, String>),
+    /// Open Send with exactly these coins chosen.
+    SendSelectedCoins(Vec<coincube_core::miniscript::bitcoin::OutPoint>),
+    /// The daemon's copies of this Vault's recorded split transactions, for
+    /// the Chains column ([`crate::services::split_coins::derive`]).
+    SplitTransactions {
+        origin: crate::app::cache::LookupOrigin,
+        transactions: std::collections::HashMap<
+            coincube_core::miniscript::bitcoin::Txid,
+            coincube_core::miniscript::bitcoin::Transaction,
+        >,
+        /// The pass's number; only a newer pass than the last applied one
+        /// is applied ([`crate::services::split_coins::newer_pass`]).
+        seq: u64,
+        /// The twin Cube's split journal as read for this pass.
+        twin_records: Vec<crate::services::split_coins::SplitRecord>,
+        /// Every twin split this pass nominated, with the inputs of its
+        /// transaction if Connect showed it deep enough on the twin chain
+        /// ([`crate::services::split_coins::TwinCheck::spent`]).
+        twin_checked: Vec<(
+            coincube_core::miniscript::bitcoin::Txid,
+            Option<std::collections::HashSet<coincube_core::miniscript::bitcoin::OutPoint>>,
+        )>,
+        /// When the twin lookups started, before any read; orders them
+        /// against other passes'.
+        twin_checked_at: std::time::Instant,
+    },
+    /// A sync-driven ancestry check batch for the Chains column finished
+    /// ([`crate::services::chain_status::check_ancestry`]). `claimed` is the
+    /// batch's single-flight claim; see [`crate::app::cache::Cache::chain_proofs_landed`].
+    ChainProofs {
+        origin: crate::app::cache::LookupOrigin,
+        claimed: Vec<coincube_core::miniscript::bitcoin::OutPoint>,
+        results: Vec<(
+            coincube_core::miniscript::bitcoin::OutPoint,
+            crate::services::chain_status::ProofEntry,
+        )>,
+    },
     /// The spend screen re-checked the entanglement of a replayable spend's
     /// inputs at the moment it matters (`#276` I13). Every resolved answer is
     /// cached by the app — each under its own observation instant, so a
@@ -331,16 +403,46 @@ pub enum Message {
         generation: u64,
         answers: Vec<crate::services::entangled::LookupAnswer>,
     },
+    /// The spend screen asks for the split key `key` of the spend `spend` to
+    /// be re-qualified against both chains
+    /// ([`crate::services::split_coins::requalify`]) before it counts toward
+    /// signing or broadcast. `generation` is the screen's check generation.
+    SplitKeyCheck {
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+        generation: u64,
+    },
+    /// The answer to [`Self::SplitKeyCheck`], routed to the current panel.
+    /// The screen accepts it only for the generation it has in flight.
+    SplitKeyChecked {
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        key: coincube_core::miniscript::bitcoin::OutPoint,
+        generation: u64,
+        result: Result<(), String>,
+    },
     /// Latest UpdateTip/blockheaders line streamed from the pending internal
     /// bitcoind's debug.log.  `None` means no matching line found yet.
     PendingBitcoindLog(Option<String>),
     InstallStats(InstallStatsMessage),
     /// Connect realtime stream event forwarded from the gRPC subscription.
     /// `None` payload means "no grpc_url available; stream stays offline".
-    ConnectStreamReady(Option<crate::services::connect::grpc::stream::ConnectStreamConfig>),
+    ConnectStreamReady(
+        Option<(
+            crate::services::connect::grpc::stream::ConnectStreamConfig,
+            String,
+        )>,
+    ),
     /// One message from the live Connect realtime stream subscription.
     /// Routed to the active vault PSBT modal in PR B; PR A logs only.
     ConnectStream(crate::services::connect::grpc::ConnectStreamMessage),
+    /// The wait between automatic renewal attempts is over (C1).
+    ConnectRenewalRetry,
+    /// Flips the pulsing Connect light between its bright and dim phase.
+    ConnectLightTick,
+    /// Connect, not the user, ended the session: shown as Signed out by
+    /// Connect until the user signs in or presses Not now. Sent just before
+    /// the account panel's `LogOut`.
+    ConnectSignedOutBy(crate::app::SignedOutBy),
     /// Routed to the open `KeychainSignModal` on the active PSBT, when
     /// any. Wraps the modal's internal lifecycle messages so they can
     /// be dispatched through Iced's top-level update loop.
@@ -357,6 +459,21 @@ pub enum Message {
         token: String,
         refresh_token: String,
         email: String,
+        epoch: u64,
+    },
+    /// Commit a verified App-panel OTP or refresh to connect.json before the
+    /// panel/keyring can adopt the bearer.
+    InAppConnectAuthReady {
+        login: crate::services::coincube::LoginResponse,
+        epoch: u64,
+        /// None for OTP login, Some for a keyring refresh.
+        previous_refresh_token: Option<String>,
+    },
+    InAppConnectAuthPersisted {
+        login: crate::services::coincube::LoginResponse,
+        epoch: u64,
+        previous_refresh_token: Option<String>,
+        tokens: Option<crate::services::connect::client::auth::AccessTokenResponse>,
     },
     /// Internal: chains from `InAppConnectLoginCompleted` once
     /// tokens have been persisted and a device_id registered. The

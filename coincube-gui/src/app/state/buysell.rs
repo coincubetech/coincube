@@ -27,7 +27,14 @@ impl State for BuySellPanel {
         menu: &'a Menu,
         cache: &'a Cache,
     ) -> coincube_ui::widget::Element<'a, view::Message> {
-        view::dashboard(menu, cache, self.view())
+        // No pinned page head (plan L3 exception): Buy/Sell keeps its own
+        // heading and Back bar inside the provider column, whose steps own
+        // them (`view::buysell::panel`).
+        view::dashboard(
+            menu,
+            cache,
+            self.view(cache.balance_amounts_masked(), cache.liquid_gate.show()),
+        )
     }
 
     fn update(
@@ -416,16 +423,24 @@ impl State for BuySellPanel {
                 // provider's raw message; neither belongs on screen. The code
                 // becomes the support reference instead, so the pair is still
                 // recoverable from the log.
-                return iced::Task::done(Message::View(view::Message::ShowError(
-                    crate::user_error::UserError::logged(
-                        "That didn't work",
-                        "Check the details and try again. If it keeps failing, contact support and quote the reference below.",
-                        description,
-                        true,
-                        &error,
-                    )
-                    .toast(),
-                )));
+                let failure = crate::user_error::UserError::logged(
+                    "That didn't work",
+                    "Check the details and try again. If it keeps failing, contact support and quote the reference below.",
+                    description,
+                    true,
+                    &error,
+                );
+                // Same line as `UserError::toast()`. Composed here because the
+                // reference is a step code, not a `CC-…` code, so the notice
+                // lookup at display can't split and translate it.
+                let toast = coincube_ui::localized_format!(
+                    "{} — {} (Ref: {})",
+                    "{} — {} (Ref.: {})",
+                    coincube_ui::locale::copy(&failure.title),
+                    coincube_ui::locale::copy(&failure.guidance),
+                    failure.reference
+                );
+                return iced::Task::done(Message::View(view::Message::ShowError(toast)));
             }
 
             // state specific messages

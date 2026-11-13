@@ -239,22 +239,25 @@ pub(crate) mod tests {
     };
 
     use coincube_core::{
-        chain::ChainId,
-        foreign_split::{create_split_step1, SplitInputs, SplitStep1},
-        miniscript::bitcoin::{
-            absolute::LockTime,
-            bip32::{DerivationPath, Xpriv, Xpub},
-            hashes::{sha256, Hash},
-            secp256k1::Secp256k1,
-            BlockHash, Network, Psbt,
+        miniscript::{
+            bitcoin::{
+                absolute::LockTime,
+                bip32::{DerivationPath, Xpriv, Xpub},
+                hashes::{sha256, Hash},
+                secp256k1::Secp256k1,
+                transaction, Amount, Network, Psbt, Sequence, Transaction, TxIn, TxOut,
+            },
+            psbt::PsbtExt,
+            Descriptor,
         },
+        public_wallet_source::SplitSource,
     };
 
     use super::*;
     use crate::{
         dir::CoincubeDirectory,
         services::{
-            foreign_split_inventory::FreshIndex,
+            foreign_scan::Branch,
             split_source::split_source,
             split_test_wallets::{self as fixture, Shape},
         },
@@ -446,31 +449,67 @@ pub(crate) mod tests {
         }
     }
 
-    /// A step-1 construction over the fixture wallet of `shape`: two coins,
-    /// signable by `master(1)` (and `master(2)` for the 2-of-3 shapes).
-    pub(crate) fn construction(shape: Shape) -> SplitStep1 {
+    /// An unsigned PSBT over the fixture wallet of `shape`, with its source.
+    pub(crate) struct Construction {
+        source: SplitSource,
+        psbt: Psbt,
+    }
+
+    impl Construction {
+        pub(crate) fn source(&self) -> &SplitSource {
+            &self.source
+        }
+        pub(crate) fn psbt(&self) -> &Psbt {
+            &self.psbt
+        }
+    }
+
+    /// The fixture wallet of `shape` spending its two coins to a fresh
+    /// receive address of the same wallet, with each input's previous
+    /// transaction, witness UTXO when segwit, and the descriptor's scripts
+    /// and key origins. Signable by `master(1)` (and `master(2)` for the
+    /// 2-of-3 shapes).
+    pub(crate) fn construction(shape: Shape) -> Construction {
         let wallet = fixture::wallet(shape);
-        let inventory = fixture::inventory(&wallet);
-        let coins = inventory.splittable_coins();
+        let coins = fixture::shared_coins(&wallet);
         let source = split_source(&wallet.external, Some(&wallet.internal)).unwrap();
-        let FreshIndex::Proven(destination) = inventory.fresh_receive() else {
-            panic!("fixture has a fresh index");
+        let derive = |branch: Branch, index: u32| {
+            match branch {
+                Branch::External => source.external(),
+                Branch::Internal => source.internal().unwrap(),
+            }
+            .at_derivation_index(index)
+            .unwrap()
         };
-        let tip = inventory.bitcoin_tip_height();
-        create_split_step1(
-            &SplitInputs {
-                chain: ChainId::Bitcoin,
-                source: &source,
-                coins: &coins,
-                fork_height: inventory.fork_height(),
-                destination,
-            },
-            2,
-            LockTime::from_height(tip).unwrap(),
-            tip,
-            BlockHash::from_byte_array([7; 32]),
-        )
-        .unwrap()
+        let total: u64 = coins.iter().map(|coin| coin.output.value.to_sat()).sum();
+        let destination = derive(Branch::External, fixture::FRESH_RECEIVE);
+        let tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: LockTime::from_height(fixture::BITCOIN_TIP_HEIGHT).unwrap(),
+            input: coins
+                .iter()
+                .map(|coin| TxIn {
+                    previous_output: coin.outpoint,
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    ..TxIn::default()
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: Amount::from_sat(total - 2_000),
+                script_pubkey: destination.script_pubkey(),
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
+        for (index, coin) in coins.iter().enumerate() {
+            let definite = derive(coin.branch, coin.index);
+            psbt.inputs[index].non_witness_utxo = Some(coin.previous.clone());
+            if !matches!(definite, Descriptor::Pkh(_)) {
+                psbt.inputs[index].witness_utxo = Some(coin.output.clone());
+            }
+            psbt.update_input_with_descriptor(index, &definite).unwrap();
+        }
+        psbt.update_output_with_descriptor(0, &destination).unwrap();
+        Construction { source, psbt }
     }
 
     /// An ephemeral listing rooted at `root`, bound to `policy` when given,
@@ -857,23 +896,5 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(calls.len(), 1, "{:?}", calls);
         assert!(opener.contains("tokio::task::spawn_blocking(hid_ledger_candidates)"));
-    }
-
-    /// B4a F5 carried forward: the device flow's output is unverified and
-    /// enters the verified import seams only. `flow.rs` names no finalizer.
-    #[test]
-    fn split_device_flow_never_finalizes_directly() {
-        let flow = include_str!("flow.rs");
-        for forbidden in [
-            "finalize_split_step1",
-            "finalize_split_step2",
-            "VerifiedSplitStep1",
-            "VerifiedSplitStep2",
-            "finalize_mut",
-            "finalize_split",
-        ] {
-            assert!(!flow.contains(forbidden), "flow.rs names {}", forbidden);
-        }
-        assert!(flow.contains("UnverifiedDeviceSignatures"));
     }
 }

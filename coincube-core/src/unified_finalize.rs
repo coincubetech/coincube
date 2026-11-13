@@ -561,14 +561,20 @@ fn satisfy_preferring_unified(
                 subset.insert(**key, legacy[*key].clone());
             }
         }
-        let Ok((w, r)) = satisfy_input(input_index, context, &subset, locks) else {
-            continue;
-        };
-        if r.unified_used == 0 {
-            continue;
-        }
-        if better_unified_witness(&w, &r, best.as_ref()) {
-            best = Some((w, r));
+        if let Ok((w, r)) = satisfy_input(input_index, context, &subset, locks) {
+            if r.unified_used == 0 {
+                continue;
+            }
+            let better = match &best {
+                None => true,
+                Some((bw, br)) => {
+                    r.unified_used > br.unified_used
+                        || (r.unified_used == br.unified_used && w.size() < bw.size())
+                }
+            };
+            if better {
+                best = Some((w, r));
+            }
         }
     }
     Ok(best.unwrap_or((witness, report)))
@@ -578,7 +584,7 @@ fn satisfy_preferring_unified(
 /// byte — any trailing byte, so a stray `DER || 0x21` is caught as well as a
 /// `DER || 0x01`. Used only to refuse elements the finaliser did not place;
 /// script pushes (empty, `1`, hash preimages, keys) never look like this.
-fn looks_like_der_signature(element: &[u8]) -> bool {
+pub(crate) fn looks_like_der_signature(element: &[u8]) -> bool {
     match element.split_last() {
         Some((_, der)) => {
             der.len() > 8 && der[0] == 0x30 && secp256k1::ecdsa::Signature::from_der(der).is_ok()
@@ -842,17 +848,3 @@ pub fn spent_amount(psbt: &UnifiedPsbt, input_index: usize) -> Option<Amount> {
 #[cfg(test)]
 #[path = "unified_finalize/tests.rs"]
 mod tests;
-
-fn better_unified_witness(
-    w: &Witness,
-    r: &InputWitnessReport,
-    best: Option<&(Witness, InputWitnessReport)>,
-) -> bool {
-    match best {
-        None => true,
-        Some((bw, br)) => {
-            r.unified_used > br.unified_used
-                || (r.unified_used == br.unified_used && w.size() < bw.size())
-        }
-    }
-}

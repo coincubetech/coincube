@@ -2,11 +2,12 @@ pub(crate) mod bitcoind;
 mod wallet;
 
 use std::convert::From;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use iced::Task;
 
-use coincube_ui::{component::form, widget::Element};
+use coincube_ui::widget::Element;
 
 use bitcoind::BitcoindSettingsState;
 use wallet::{update_aliases, WalletSettingsState};
@@ -24,7 +25,7 @@ use crate::{
         wallet::Wallet,
         Config,
     },
-    daemon::{Daemon, DaemonBackend},
+    daemon::Daemon,
     dir::CoincubeDirectory,
     export::{ImportExportMessage, ImportExportType},
 };
@@ -35,8 +36,8 @@ pub struct SettingsState {
     data_dir: CoincubeDirectory,
     wallet: Arc<Wallet>,
     setting: Option<Box<dyn State>>,
-    daemon_backend: DaemonBackend,
     internal_bitcoind: bool,
+    managed_owner: Arc<Mutex<Option<PathBuf>>>,
     config: Arc<Config>,
 }
 
@@ -44,7 +45,6 @@ impl SettingsState {
     pub fn new(
         data_dir: CoincubeDirectory,
         wallet: Arc<Wallet>,
-        daemon_backend: DaemonBackend,
         internal_bitcoind: bool,
         config: Arc<Config>,
     ) -> Self {
@@ -52,10 +52,27 @@ impl SettingsState {
             data_dir,
             wallet,
             setting: None,
-            daemon_backend,
             internal_bitcoind,
+            managed_owner: Arc::new(Mutex::new(None)),
             config,
         }
+    }
+
+    pub(crate) fn with_managed_owner(mut self, owner: Option<PathBuf>) -> Self {
+        self.set_managed_owner(owner);
+        self
+    }
+
+    pub(crate) fn set_managed_owner(&mut self, owner: Option<PathBuf>) {
+        *self.managed_owner.lock().unwrap_or_else(|e| e.into_inner()) = owner;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn managed_owner_path(&self) -> Option<PathBuf> {
+        self.managed_owner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -70,18 +87,6 @@ impl State for SettingsState {
             tracing::warn!("SettingsState::update called without daemon");
             return Task::none();
         };
-        if self.wallet.chain.is_blake2b()
-            && matches!(
-                &message,
-                Message::View(view::Message::Settings(
-                    view::SettingsMessage::EditRemoteBackendSettings
-                ))
-            )
-        {
-            return Task::done(Message::View(view::Message::ShowError(
-                "Remote daemon backends are unavailable for Bitcoin Blake2b.".into(),
-            )));
-        }
         match &message {
             Message::View(view::Message::Settings(view::SettingsMessage::EditBitcoindSettings)) => {
                 self.setting = Some(
@@ -91,6 +96,7 @@ impl State for SettingsState {
                         !daemon.backend().is_embedded(),
                         self.internal_bitcoind,
                     )
+                    .with_managed_owner(self.managed_owner.clone())
                     .into(),
                 );
                 let wallet = self.wallet.clone();
@@ -98,12 +104,6 @@ impl State for SettingsState {
                     .as_mut()
                     .map(|s| s.reload(Some(daemon), Some(wallet)))
                     .unwrap_or_else(Task::none)
-            }
-            Message::View(view::Message::Settings(
-                view::SettingsMessage::EditRemoteBackendSettings,
-            )) => {
-                self.setting = Some(BackendSettingsState::new().into());
-                Task::none()
             }
             Message::View(view::Message::Settings(view::SettingsMessage::ImportExportSection)) => {
                 self.setting = Some(
@@ -161,11 +161,7 @@ impl State for SettingsState {
         if let Some(setting) = &self.setting {
             setting.view(menu, cache)
         } else {
-            view::vault::settings::list(
-                menu,
-                cache,
-                self.daemon_backend == DaemonBackend::RemoteBackend,
-            )
+            view::vault::settings::list(menu, cache)
         }
     }
 
@@ -194,6 +190,7 @@ pub struct ImportExportSettingsState {
     #[allow(dead_code)] // Reserved for future error handling
     warning: Option<Error>,
     modal: Option<VaultExportModal>,
+    plaintext_export_review: bool,
     wallet: Arc<Wallet>,
     config: Arc<Config>,
 }
@@ -203,6 +200,7 @@ impl ImportExportSettingsState {
         Self {
             warning: None,
             modal: None,
+            plaintext_export_review: false,
             wallet,
             config,
         }
@@ -221,6 +219,16 @@ impl State for ImportExportSettingsState {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
         let content =
             view::vault::settings::import_export(menu, cache, self.wallet.supports_inheritance());
+        if self.plaintext_export_review {
+            return coincube_ui::widget::modal::Modal::new(
+                content,
+                view::vault::settings::plaintext_export_review(),
+            )
+            .on_blur(Some(view::Message::Settings(
+                view::SettingsMessage::CancelPlaintextDescriptorExport,
+            )))
+            .into();
+        }
         if let Some(modal) = &self.modal {
             modal.view(content)
         } else {
@@ -252,6 +260,19 @@ impl State for ImportExportSettingsState {
             return Task::none();
         };
         match message {
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::ReviewPlaintextDescriptorExport,
+            )) => {
+                self.plaintext_export_review =
+                    self.modal.is_none() && self.wallet.inheritance_descriptor().is_some();
+                return Task::none();
+            }
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::CancelPlaintextDescriptorExport,
+            )) => {
+                self.plaintext_export_review = false;
+                return Task::none();
+            }
             Message::View(view::Message::ImportExport(ImportExportMessage::Close)) => {
                 self.modal = None;
             }
@@ -263,7 +284,6 @@ impl State for ImportExportSettingsState {
                             self.wallet.clone(),
                             None,
                             aliases.into_iter().map(|(fg, ks)| (fg, ks.name)).collect(),
-                            daemon.clone(),
                         ),
                         Message::WalletUpdated,
                     );
@@ -279,12 +299,31 @@ impl State for ImportExportSettingsState {
             Message::View(view::Message::Settings(
                 view::SettingsMessage::ExportEncryptedDescriptor,
             )) => {
-                return self.export_encrypted_descriptor(daemon);
+                if self.modal.is_none() {
+                    let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
+                        return Task::none();
+                    };
+                    let modal = VaultExportModal::new(
+                        Some(daemon),
+                        ImportExportType::ExportEncryptedDescriptor(Box::new(descriptor)),
+                    );
+                    launch!(self, modal, true);
+                }
             }
             Message::View(view::Message::Settings(
                 view::SettingsMessage::ExportPlaintextDescriptor,
             )) => {
-                return self.export_plaintext_descriptor(daemon);
+                if self.plaintext_export_review && self.modal.is_none() {
+                    self.plaintext_export_review = false;
+                    let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
+                        return Task::none();
+                    };
+                    let modal = VaultExportModal::new(
+                        Some(daemon),
+                        ImportExportType::Descriptor(descriptor),
+                    );
+                    launch!(self, modal, true);
+                }
             }
             Message::View(view::Message::Settings(view::SettingsMessage::ExportTransactions)) => {
                 if self.modal.is_none() {
@@ -335,142 +374,8 @@ impl State for ImportExportSettingsState {
     }
 }
 
-impl ImportExportSettingsState {
-    fn export_encrypted_descriptor(
-        &mut self,
-        daemon: Arc<dyn Daemon + Sync + Send>,
-    ) -> Task<Message> {
-        if self.modal.is_none() {
-            let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
-                return Task::none();
-            };
-            let modal = VaultExportModal::new(
-                Some(daemon),
-                ImportExportType::ExportEncryptedDescriptor(Box::new(descriptor)),
-            );
-            launch!(self, modal, true);
-        }
-
-        Task::none()
-    }
-    fn export_plaintext_descriptor(
-        &mut self,
-        daemon: Arc<dyn Daemon + Sync + Send>,
-    ) -> Task<Message> {
-        if self.modal.is_none() {
-            let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
-                return Task::none();
-            };
-            let modal =
-                VaultExportModal::new(Some(daemon), ImportExportType::Descriptor(descriptor));
-            launch!(self, modal, true);
-        }
-
-        Task::none()
-    }
-}
-
 impl From<ImportExportSettingsState> for Box<dyn State> {
     fn from(s: ImportExportSettingsState) -> Box<dyn State> {
-        Box::new(s)
-    }
-}
-
-#[derive(Default)]
-pub struct BackendSettingsState {
-    email_form: form::Value<String>,
-    processing: bool,
-    success: bool,
-    warning: Option<Error>,
-}
-
-impl BackendSettingsState {
-    pub fn new() -> Self {
-        Self {
-            email_form: form::Value::default(),
-            processing: false,
-            success: false,
-            warning: None,
-        }
-    }
-}
-
-impl State for BackendSettingsState {
-    fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
-        view::vault::settings::remote_backend_section(
-            menu,
-            cache,
-            &self.email_form,
-            self.processing,
-            self.success,
-        )
-    }
-
-    fn update(
-        &mut self,
-        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
-        _cache: &Cache,
-        message: Message,
-    ) -> Task<Message> {
-        let Some(daemon) = daemon else {
-            tracing::warn!("BackendSettingsState::update called without daemon");
-            return Task::none();
-        };
-        match message {
-            Message::View(view::Message::Settings(
-                view::SettingsMessage::RemoteBackendSettings(message),
-            )) => match message {
-                view::RemoteBackendSettingsMessage::SendInvitation => {
-                    if !self.email_form.valid {
-                        return Task::none();
-                    }
-                    let email = self.email_form.value.clone();
-                    self.processing = true;
-                    self.success = false;
-                    self.warning = None;
-                    Task::perform(
-                        async move {
-                            daemon.send_wallet_invitation(&email).await?;
-                            Ok(())
-                        },
-                        Message::Updated,
-                    )
-                }
-                view::RemoteBackendSettingsMessage::EditInvitationEmail(email) => {
-                    if !self.processing {
-                        self.email_form.valid = email_address::EmailAddress::parse_with_options(
-                            &email,
-                            email_address::Options::default().with_required_tld(),
-                        )
-                        .is_ok();
-                        self.email_form.value = email;
-                        self.success = false;
-                    }
-                    Task::none()
-                }
-            },
-            Message::Updated(res) => {
-                self.processing = false;
-                match res {
-                    Ok(()) => {
-                        self.success = true;
-                        Task::none()
-                    }
-                    Err(e) => {
-                        self.success = false;
-                        let err_msg = crate::user_error::report(&e);
-                        self.warning = Some(e);
-                        Task::done(Message::View(view::Message::ShowError(err_msg)))
-                    }
-                }
-            }
-            _ => Task::none(),
-        }
-    }
-}
-
-impl From<BackendSettingsState> for Box<dyn State> {
-    fn from(s: BackendSettingsState) -> Box<dyn State> {
         Box::new(s)
     }
 }
@@ -479,8 +384,135 @@ impl From<BackendSettingsState> for Box<dyn State> {
 mod chain_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn plaintext_export_requires_review_and_an_inheritance_descriptor() {
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let wallet = Arc::new(Wallet::new(descriptor).with_chain(crate::chain::ChainId::Bitcoin));
+        let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+            crate::daemon::client::Coincubed::new(crate::utils::mock::Daemon::new(vec![]).run()),
+        );
+        let config = Arc::new(Config::new(false));
+        let cache = Cache::default();
+        let mut state = ImportExportSettingsState::new(wallet.clone(), config.clone());
+        let send = |state: &mut ImportExportSettingsState, intent| {
+            state.update(
+                Some(daemon.clone()),
+                &cache,
+                Message::View(view::Message::Settings(intent)),
+            )
+        };
+
+        assert!(iced_runtime::task::into_stream(send(
+            &mut state,
+            view::SettingsMessage::ExportPlaintextDescriptor,
+        ))
+        .is_none());
+        assert!(state.modal.is_none());
+        drop(send(
+            &mut state,
+            view::SettingsMessage::ReviewPlaintextDescriptorExport,
+        ));
+        drop(send(
+            &mut state,
+            view::SettingsMessage::CancelPlaintextDescriptorExport,
+        ));
+        assert!(iced_runtime::task::into_stream(send(
+            &mut state,
+            view::SettingsMessage::ExportPlaintextDescriptor,
+        ))
+        .is_none());
+        assert!(state.modal.is_none());
+
+        let mut reentered = ImportExportSettingsState::new(wallet, config.clone());
+        assert!(!reentered.plaintext_export_review);
+        let intent = |intent| Message::View(view::Message::Settings(intent));
+        drop(reentered.update(
+            Some(daemon.clone()),
+            &cache,
+            intent(view::SettingsMessage::ReviewPlaintextDescriptorExport),
+        ));
+        let launch = reentered.update(
+            Some(daemon.clone()),
+            &cache,
+            intent(view::SettingsMessage::ExportPlaintextDescriptor),
+        );
+        assert!(iced_runtime::task::into_stream(launch).is_some());
+        assert_eq!(
+            reentered.modal.as_ref().map(VaultExportModal::modal_title),
+            Some("Export Descriptor"),
+        );
+        assert!(!reentered.plaintext_export_review);
+        assert!(iced_runtime::task::into_stream(reentered.update(
+            Some(daemon.clone()),
+            &cache,
+            intent(view::SettingsMessage::ExportPlaintextDescriptor),
+        ))
+        .is_none());
+
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
+        let master = coincube_core::miniscript::bitcoin::bip32::Xpriv::new_master(
+            coincube_core::miniscript::bitcoin::Network::Bitcoin,
+            &[44; 32],
+        )
+        .unwrap();
+        let path: coincube_core::miniscript::bitcoin::bip32::DerivationPath =
+            "m/84'/0'/0'".parse().unwrap();
+        let account = master.derive_priv(&secp, &path).unwrap();
+        let key = format!(
+            "[{}/84'/0'/0']{}",
+            master.fingerprint(&secp),
+            coincube_core::miniscript::bitcoin::bip32::Xpub::from_priv(&secp, &account)
+        );
+        let imported = coincube_core::wallet_descriptor::ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            crate::chain::ChainId::Bitcoin,
+        )
+        .unwrap();
+        let imported_wallet = Arc::new(Wallet::new(
+            coincube_core::wallet_descriptor::WalletDescriptor::Imported(imported),
+        ));
+        assert!(!imported_wallet.supports_inheritance());
+        let mut ineligible = ImportExportSettingsState::new(imported_wallet, config);
+        drop(ineligible.update(
+            Some(daemon.clone()),
+            &cache,
+            intent(view::SettingsMessage::ReviewPlaintextDescriptorExport),
+        ));
+        assert!(!ineligible.plaintext_export_review);
+        assert!(iced_runtime::task::into_stream(ineligible.update(
+            Some(daemon.clone()),
+            &cache,
+            intent(view::SettingsMessage::ExportPlaintextDescriptor),
+        ))
+        .is_none());
+        assert!(ineligible.modal.is_none());
+    }
+
     #[test]
-    fn fork_node_navigation_opens_the_guarded_page_and_remote_backend_stays_closed() {
+    fn open_node_settings_reads_replaced_owner_token() {
+        let path = std::env::temp_dir().join(format!("settings-owner-{}", uuid::Uuid::new_v4()));
+        let datadir = CoincubeDirectory::new(path.clone());
+        let cache = Cache {
+            datadir_path: datadir.clone(),
+            ..Cache::default()
+        };
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let wallet = Arc::new(Wallet::new(descriptor));
+        let mut settings = SettingsState::new(datadir, wallet, true, Arc::new(Config::new(false)))
+            .with_managed_owner(Some(PathBuf::from("old-owner.lock")));
+        let open = BitcoindSettingsState::new(None, &cache, false, true)
+            .with_managed_owner(settings.managed_owner.clone());
+        settings.set_managed_owner(Some(PathBuf::from("replacement-owner.lock")));
+        assert_eq!(
+            open.managed_owner_path(),
+            Some(PathBuf::from("replacement-owner.lock"))
+        );
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn fork_node_navigation_opens_the_guarded_page() {
         use crate::chain::ChainId;
         for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
             let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
@@ -503,27 +535,14 @@ mod chain_tests {
             let daemon = Arc::new(crate::daemon::embedded::EmbeddedDaemon::unstarted_for_test(
                 config, None,
             ));
-            let mut state = SettingsState::new(
-                dir.clone(),
-                wallet,
-                DaemonBackend::EmbeddedCoincubed(None),
-                false,
-                Arc::new(Config::new(false)),
-            );
+            let mut state =
+                SettingsState::new(dir.clone(), wallet, false, Arc::new(Config::new(false)));
             let cache = Cache {
                 fiat_chain: chain,
                 network: chain.bitcoin_network(),
                 datadir_path: dir.clone(),
                 ..Cache::default()
             };
-            drop(state.update(
-                Some(daemon.clone()),
-                &cache,
-                Message::View(view::Message::Settings(
-                    view::SettingsMessage::EditRemoteBackendSettings,
-                )),
-            ));
-            assert!(state.setting.is_none());
             drop(state.update(
                 Some(daemon),
                 &cache,

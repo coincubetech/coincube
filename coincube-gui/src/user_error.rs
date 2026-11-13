@@ -258,9 +258,9 @@ fn lan_keychain_error(error: &Error, connect_available: bool) -> UserError {
             "This Keychain needs to be paired again",
             if connect_available {
                 "Send the request through COINCUBE | Connect instead, or pair the phone again \
-                 in Settings > Pair with Keychain."
+                 in Settings > Keychain."
             } else {
-                "Pair the phone again in Settings > Pair with Keychain."
+                "Pair the phone again in Settings > Keychain."
             },
             CC_HW_LAN_REPAIR,
             false,
@@ -366,34 +366,6 @@ impl From<&Error> for UserError {
                 ),
 
                 DaemonError::ConnectAnchor(error) => anchor_startup_error(error),
-                DaemonError::PoisonSubmission(error) => {
-                    use coincubed::poison_broadcast::SubmissionError;
-                    // Exhaustive: a new outcome must explicitly decide whether
-                    // it can truthfully promise that transport never started.
-                    match error {
-                        SubmissionError::Uncertain { .. } | SubmissionError::AlreadyStarted => UserError::new(
-                            "Transaction submission is uncertain",
-                            "The transaction may have been submitted. Check its exact transaction status before taking another action.",
-                            CC_DMN_RPC,
-                            false,
-                        ),
-                        // Each guard returns before broadcast_tx:
-                        SubmissionError::UnsupportedChain // Bitcoin-mainnet boundary.
-                        | SubmissionError::RetiredRoute // Historical transport is closed.
-                        | SubmissionError::DescriptorMismatch // Construction identity check.
-                        | SubmissionError::OutputMismatch // Split step-2 target check.
-                        | SubmissionError::BackendUnavailable // Backend acquisition.
-                        | SubmissionError::GateMismatch // Transaction-bound gate check.
-                        | SubmissionError::Revoked // Revocation at gate entry.
-                        | SubmissionError::Expired // Freshness at gate entry.
-                        => UserError::new(
-                            "Transaction was not submitted",
-                            "The submission context is no longer valid. Review the transaction state before continuing.",
-                            CC_DMN_RPC,
-                            false,
-                        ),
-                    }
-                },
 
                 DaemonError::Start(_) => UserError::new(
                     "The wallet engine didn't start",
@@ -434,6 +406,20 @@ impl From<&Error> for UserError {
                     "Not supported by this backend",
                     "Switch to a different Bitcoin backend in Settings to use this feature.",
                     CC_DMN_UNSUPPORTED,
+                    false,
+                ),
+
+                DaemonError::FeeCeilingExceeded => UserError::new(
+                    "Fee is above the limit",
+                    "The transaction fee is above the ceiling supplied for this payment. Lower the fee or raise the limit, then try again.",
+                    CC_DMN_COINSELECT,
+                    false,
+                ),
+
+                DaemonError::FeeRateExceeded => UserError::new(
+                    "Fee rate is above the request",
+                    "The constructed transaction's fee rate is above the rate supplied for this payment. Choose a higher rate or a smaller payment, then try again.",
+                    CC_DMN_COINSELECT,
                     false,
                 ),
             },
@@ -706,6 +692,7 @@ impl From<&TransferError> for UserError {
                 "Nothing was sent and your balances are unchanged."
             }
             TransferFailurePoint::WhileSending => "Your funds were not moved.",
+            TransferFailurePoint::OutcomeUnknown => "Your transfer may have been sent.",
         };
         let and_then = |next: &str| format!("{reassurance} {next}");
 
@@ -779,6 +766,12 @@ impl From<&TransferError> for UserError {
                 CC_XFER_BROADCAST,
                 true,
             ),
+            TransferError::BroadcastOutcomeUnknown { .. } => (
+                "Transfer status unknown".to_string(),
+                and_then("Check Activity in the sending Cube before starting another transfer."),
+                CC_XFER_BROADCAST,
+                false,
+            ),
         };
 
         UserError::logged(title, guidance, reference, retryable, e.detail())
@@ -824,51 +817,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn submission_copy_distinguishes_every_current_transport_outcome() {
-        use coincube_core::miniscript::bitcoin::{hashes::Hash, Txid, Wtxid};
-        use coincubed::poison_broadcast::SubmissionError;
-        for (error, uncertain) in [
-            (SubmissionError::UnsupportedChain, false),
-            (SubmissionError::RetiredRoute, false),
-            (SubmissionError::DescriptorMismatch, false),
-            (SubmissionError::BackendUnavailable, false),
-            (SubmissionError::GateMismatch, false),
-            (SubmissionError::Revoked, false),
-            (SubmissionError::Expired, false),
-            (SubmissionError::AlreadyStarted, true),
-            (
-                SubmissionError::Uncertain {
-                    txid: Txid::all_zeros(),
-                    wtxid: Wtxid::all_zeros(),
-                },
-                true,
-            ),
-        ] {
-            let user: UserError = (&Error::Daemon(DaemonError::PoisonSubmission(error))).into();
-            assert_eq!(
-                user.title,
-                if uncertain {
-                    "Transaction submission is uncertain"
-                } else {
-                    "Transaction was not submitted"
-                }
-            );
-            assert_eq!(
-                user.guidance,
-                if uncertain {
-                    "The transaction may have been submitted. Check its exact transaction status before taking another action."
-                } else {
-                    "The submission context is no longer valid. Review the transaction state before continuing."
-                }
-            );
-            assert!(
-                !user.retryable,
-                "never offer an automatic transaction retry"
-            );
-        }
-    }
-
-    #[test]
     fn retry_action_is_offered_only_for_retryable_errors() {
         let transient = UserError::new("t", "g", CC_NET_TIMEOUT, true);
         assert_eq!(transient.retry_action(42), Some(("Try again", 42)));
@@ -893,7 +841,7 @@ mod tests {
         assert!(u
             .guidance
             .starts_with("Send the request through COINCUBE | Connect"));
-        assert!(u.guidance.contains("Pair with Keychain"), "{}", u.guidance);
+        assert!(u.guidance.contains("Settings > Keychain"), "{}", u.guidance);
 
         let u = lan_keychain_error(&stale, false);
         assert!(
@@ -1199,6 +1147,9 @@ mod tests {
             T::DestinationRejected {
                 detail: "detail".into(),
             },
+            T::BroadcastOutcomeUnknown {
+                detail: "detail".into(),
+            },
         ];
         for w in wallets {
             all.push(T::WalletUnavailable(w));
@@ -1270,12 +1221,14 @@ mod tests {
                     e,
                     u.guidance
                 ),
-                TransferFailurePoint::WhileSending => assert!(
-                    !u.guidance.contains("Nothing was sent"),
-                    "{:?} was submitted — it must not claim nothing was sent: {:?}",
-                    e,
-                    u.guidance
-                ),
+                TransferFailurePoint::WhileSending | TransferFailurePoint::OutcomeUnknown => {
+                    assert!(
+                        !u.guidance.contains("Nothing was sent"),
+                        "{:?} was submitted — it must not claim nothing was sent: {:?}",
+                        e,
+                        u.guidance
+                    )
+                }
             }
         }
     }
@@ -1293,6 +1246,7 @@ mod tests {
             T::PreparationExpired,
             T::InvalidFeerate,
             T::DestinationRejected { detail: "x".into() },
+            T::BroadcastOutcomeUnknown { detail: "x".into() },
         ] {
             let u: UserError = (&e).into();
             assert!(!u.retryable, "{:?} should not offer a retry", e);

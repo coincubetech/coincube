@@ -18,6 +18,8 @@
 
 use coincube_core::miniscript::bitcoin::Amount;
 use coincube_spark_protocol::PaymentSummary;
+use coincube_ui::locale::copy as localized_copy;
+use coincube_ui::locale::Text as CopyText;
 use iced::widget::image;
 
 use crate::app::wallets::DomainPaymentStatus;
@@ -66,43 +68,41 @@ pub struct SparkTransactionsView<'a> {
     pub current_page: u32,
     pub is_last_page: bool,
     pub processing: bool,
+    pub mask_amounts: bool,
 }
 
 impl<'a> SparkTransactionsView<'a> {
     pub fn render(self) -> Element<'a, Message> {
         let mut content = Column::new().spacing(20).width(Length::Fill);
 
+        // The title is in the page head (`state::spark::transactions`).
         content = content.push(
-            Row::new()
-                .push(Container::new(h3("Transactions").bold()))
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    button::secondary(Some(icon::backup_icon()), "Export")
-                        .on_press(ImportExportMessage::Open.into()),
-                ),
+            Row::new().push(Space::new().width(Length::Fill)).push(
+                button::secondary(Some(icon::backup_icon()), localized_copy("Export"))
+                    .on_press(ImportExportMessage::Open.into()),
+            ),
         );
 
         match self.status {
             SparkTransactionsStatus::Unavailable => {
-                content = content.push(Column::new().spacing(10).push(p1_regular(
+                content = content.push(Column::new().spacing(10).push(p1_regular(localized_copy(
                     "Spark is not configured for this cube. Set up a Spark \
                              signer to see your payment history here.",
-                )));
+                ))));
                 return content.into();
             }
             SparkTransactionsStatus::Loading => {
-                content = content.push(
-                    Column::new()
-                        .push(p1_regular("Loading payment history from the Spark bridge…")),
-                );
+                content = content.push(Column::new().push(p1_regular(localized_copy(
+                    "Loading payment history from the Spark bridge…",
+                ))));
                 return content.into();
             }
             SparkTransactionsStatus::Error(err) => {
                 content = content.push(
                     Column::new()
                         .spacing(10)
-                        .push(p1_regular("Failed to load payment history"))
-                        .push(p2_regular(err)),
+                        .push(p1_regular(localized_copy("Failed to load payment history")))
+                        .push(p2_regular(coincube_ui::locale::notice(err.to_owned()))),
                 );
                 return content.into();
             }
@@ -127,25 +127,23 @@ impl<'a> SparkTransactionsView<'a> {
                     )))
                     .push(Space::new().height(Length::Fixed(10.0)))
                     .push(
-                        text(
-                            "Your Spark wallet is ready. Once you send or receive\nfunds, they'll show up here.",
-                        )
-                        .size(16)
-                        .style(theme::text::secondary)
-                        .wrapping(iced::widget::text::Wrapping::Word)
-                        .align_x(iced::alignment::Horizontal::Center),
+                        text(CopyText::SparkHistoryEmpty.get())
+                            .size(16)
+                            .style(theme::text::secondary)
+                            .wrapping(iced::widget::text::Wrapping::Word)
+                            .align_x(iced::alignment::Horizontal::Center),
                     )
                     .push(
                         Row::new()
                             .spacing(15)
                             .push(
-                                button::primary(None, "Send sats")
+                                button::primary(None, localized_copy("Send"))
                                     .on_press(Message::Menu(Menu::Spark(SparkSubMenu::Send)))
                                     .padding(15)
                                     .width(Length::Fixed(150.0)),
                             )
                             .push(
-                                button::transparent_border(None, "Receive sats")
+                                button::transparent_border(None, CopyText::ReceiveSats.get())
                                     .on_press(Message::Menu(Menu::Spark(SparkSubMenu::Receive)))
                                     .padding(15)
                                     .width(Length::Fixed(150.0)),
@@ -164,6 +162,7 @@ impl<'a> SparkTransactionsView<'a> {
                     self.fiat_converter,
                     self.bitcoin_unit,
                     self.show_direction_badges,
+                    self.mask_amounts,
                 ))
             },
         );
@@ -194,6 +193,7 @@ fn transaction_row<'a>(
     fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: BitcoinDisplayUnit,
     show_direction_badges: bool,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let direction = if tx.is_incoming {
         TransactionDirection::Incoming
@@ -210,19 +210,18 @@ fn transaction_row<'a>(
 
     // Outgoing amount includes fees so the headline figure matches what
     // actually left the wallet. Incoming shows the net credit.
-    let display_amount = if tx.is_incoming {
-        tx.amount
-    } else {
-        tx.amount + tx.fees_sat
-    };
+    let display_amount = tx.display_amount();
 
     let mut item = TransactionListItem::new(direction, &display_amount, bitcoin_unit)
         .with_label(tx.description.clone())
         .with_time_ago(tx.time_ago.clone())
         .with_custom_icon(combo_icon)
         .with_show_direction_badge(show_direction_badges);
+    if mask_amounts {
+        item = item.with_amount_override("••••••".to_owned());
+    }
 
-    if let Some(token_str) = tx.token_display.as_ref() {
+    if let Some(token_str) = tx.token_display.as_ref().filter(|_| !mask_amounts) {
         item = item.with_amount_override(token_str.clone());
     }
 
@@ -230,7 +229,9 @@ fn transaction_row<'a>(
     // dollar value (USDB is pegged 1:1 to USD); for sat rows we
     // derive fiat off the display_amount via the converter so it
     // matches what the user sees in the headline figure.
-    let fiat_label = if tx.token_display.is_some() {
+    let fiat_label = if mask_amounts {
+        None
+    } else if tx.token_display.is_some() {
         tx.fiat_amount
             .as_ref()
             .map(|f| format!("{} {}", f.to_formatted_string(), f.currency()))
@@ -250,6 +251,15 @@ fn transaction_row<'a>(
     .into()
 }
 
+/// The detail page's title, shown in its page head.
+pub fn transaction_detail_title(tx: &SparkRecentTransaction) -> &'static str {
+    if tx.is_incoming {
+        localized_copy("Incoming payment")
+    } else {
+        localized_copy("Outgoing payment")
+    }
+}
+
 /// Render the single-payment detail pane. Consumed by
 /// `SparkTransactions` state when `selected_payment` is `Some`, and
 /// also by Overview/Send/Receive's preselect flow. Richer than the
@@ -258,17 +268,15 @@ fn transaction_row<'a>(
 /// (Lightning / On-chain Bitcoin / Spark transfer), and a Status row
 /// that reflects every `DomainPaymentStatus` variant the bridge can
 /// emit — not just Complete/Pending.
+///
+/// Its title goes in the page head ([`transaction_detail_title`]).
 pub fn transaction_detail_view<'a>(
     tx: &'a SparkRecentTransaction,
     fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let is_incoming = tx.is_incoming;
-    let title = if is_incoming {
-        "Incoming payment"
-    } else {
-        "Outgoing payment"
-    };
     let sign = if is_incoming { "+" } else { "-" };
 
     // For outgoing, the headline number bundles fees so the detail
@@ -280,11 +288,7 @@ pub fn transaction_detail_view<'a>(
     // because the payment is denominated in token base units, not
     // sats. For those we keep the precomputed `tx.fiat_amount` (the
     // dollar value of the token leg) and skip the converter entirely.
-    let total_amount = if is_incoming {
-        tx.amount
-    } else {
-        tx.amount + tx.fees_sat
-    };
+    let total_amount = tx.display_amount();
     let total_fiat = if tx.token_display.is_some() {
         tx.fiat_amount
     } else {
@@ -297,14 +301,17 @@ pub fn transaction_detail_view<'a>(
         SparkPaymentMethod::Spark => asset_network_logo::<Message>("btc", "spark", 56.0),
         SparkPaymentMethod::StableBalance => asset_network_logo::<Message>("btc", "spark", 56.0),
     };
-    let method_text = payment_method_text(tx.method, is_incoming);
-    let status_text = payment_status_text(tx.status);
+    let method_text = localized_copy(payment_method_text(tx.method, is_incoming));
+    let status_text = localized_copy(payment_status_text(tx.status));
     let date_text = format_timestamp(tx.timestamp).unwrap_or_else(|| "Unknown".to_string());
     let fiat_str = total_fiat
         .as_ref()
+        .filter(|_| !mask_amounts)
         .map(|f| format!("{} {}", f.to_formatted_string(), f.currency()));
 
-    let amount_row = if let Some(token_str) = tx.token_display.as_ref() {
+    let amount_row = if mask_amounts {
+        Row::new().push(text("••••••").size(H1_SIZE))
+    } else if let Some(token_str) = tx.token_display.as_ref() {
         Row::new()
             .spacing(10)
             .align_y(Alignment::Center)
@@ -352,22 +359,25 @@ pub fn transaction_detail_view<'a>(
 
     let mut info = Column::new()
         .spacing(15)
-        .push(kv("Date", text(date_text).into()))
-        .push(kv("Status", text(status_text).into()))
-        .push(kv("Method", text(method_text).into()))
-        .push(kv("Payment ID", payment_id_row));
+        .push(kv(localized_copy("Date"), text(date_text).into()))
+        .push(kv(localized_copy("Status"), text(status_text).into()))
+        .push(kv(localized_copy("Method"), text(method_text).into()))
+        .push(kv(localized_copy("Payment ID"), payment_id_row));
 
     if tx.fees_sat.to_sat() > 0 {
         info = info.push(kv(
-            "Fees",
-            amount_with_size_and_unit::<Message>(&tx.fees_sat, P1_SIZE, bitcoin_unit).into(),
+            localized_copy("Fees"),
+            if mask_amounts {
+                text("••••••").into()
+            } else {
+                amount_with_size_and_unit::<Message>(&tx.fees_sat, P1_SIZE, bitcoin_unit).into()
+            },
         ));
     }
 
     Column::new()
         .spacing(20)
         .push(detail_back_button())
-        .push(Container::new(h3(title)).width(Length::Fill))
         .push(
             Row::new()
                 .spacing(16)
@@ -413,7 +423,7 @@ fn payment_status_text(status: DomainPaymentStatus) -> &'static str {
 }
 
 fn detail_back_button() -> Element<'static, Message> {
-    button::secondary(None, "< Back")
+    button::secondary(None, localized_copy("< Back"))
         .width(Length::Fixed(150.0))
         .on_press(Message::Close)
         .into()

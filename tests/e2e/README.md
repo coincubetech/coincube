@@ -4,6 +4,12 @@
 tests/e2e/run --qa-fresh --qa-run-dir /private/qa/run-001
 ```
 
+Fresh runs use strict delivery and Home-refresh acceptance by default. Before
+the phone process is pinned, the launcher builds and installs a signed QA app
+from the exact Keychain revision in the private workstation configuration.
+Every full run then executes environment, account, saved credential/network
+and signer-capacity gates before creating a Cube or requesting funding.
+
 The fresh flow generates its Cube, recovery material, 2-of-3 vault, phone signer,
 funding request and transaction. It does not take an existing vault, descriptor,
 PSBT, address, PIN or recovery phrase as input. Repeat the **same command and
@@ -40,7 +46,8 @@ remain separate. The Keychain steps operate the actual iPhone interface.
    Install a primary **2-of-3 Master / Keychain / Border Wallet** vault with a
    delayed Border Wallet recovery path through the production installer. Verify
    its Cube appears on the phone through Connect.
-6. Request Testnet4 faucet funding once, then require two independent explorers
+6. Request Testnet4 faucet funding once. If it is unavailable or delayed, use
+   the configured disposable QA funding pool automatically. Require two independent explorers
    to agree on the funded outpoint and raw previous transaction. No prepared
    funding transaction or local Bitcoin Core synchronization is required.
 7. Generate a recoverable test recipient and change address, construct a full
@@ -67,7 +74,7 @@ broadcast, and two independent explorers verify its acceptance.
 
 The fresh flow needs a signed-in disposable QA account shared by Tenshu and
 Keychain. Account signup/email OTP, Apple trust/unlock/Developer Mode and
-certificate provisioning remain workstation prerequisites. They are not
+access to the team's Apple signing credentials remain workstation prerequisites. They are not
 reported as successful test stages. The runner never logs out or replaces an
 existing master. An existing passkey master cannot become an unattended PIN
 signer merely by creating another key: it reports `PHONE_MASTER_NOT_OWNED`.
@@ -83,12 +90,12 @@ or vault. A legacy cache is optional: when absent, the suite reads the normal
 desktop session from macOS Keychain and performs supported device registration.
 `desktop_session_namespace` is `development` for a debug Tenshu build and
 `production` for the release app; this selects only its existing Keychain
-namespace. Both API endpoint values always remain pinned to production. `ios.minimum_build` must identify the installed
+namespace. Both API endpoint values always remain pinned to production. `ios.minimum_build` must identify the minimum
 reviewed Keychain build. Fresh onboarding also requires accessibility forwarding
 through Keychain's screenshot-protection wrapper: build 36 hides the recovery
 controls from XCTest, and cannot complete this flow. The example selects build
-38, which also routes PIN-backed signer entropy through real PIN verification and
-exposes non-spoken signing-session/empty-entry accessibility identifiers. A build
+41. Build 38 introduced real PIN verification for PIN-backed signer entropy and
+non-spoken signing-session/empty-entry accessibility identifiers. A build
 number alone is not source or acceptance evidence.
 The QA account must have capacity for a new signer key. The exact **Key limit
 reached** screen produces `SIGNER_LIMIT` immediately; the runner never changes a
@@ -96,7 +103,28 @@ plan, deletes existing keys, or reuses an existing signer as a fresh fixture.
 `ios.xctestrun` can identify an already-signed WebDriverAgent
 runner so the suite starts it automatically when needed.
 
-Install Appium 3.9.0 and XCUITest 12.22.8, plus Python 3.11+, Xcode and the pinned
+Set `ios.qa_build.checkout` to an absolute clone of
+`coincubetech/keychain-app`, `revision` to the full reviewed commit SHA, and
+`flutter` to the absolute Flutter executable matching that source's `.fvmrc`.
+The example's all-zero revision is a placeholder and cannot build. The source
+is exported from Git into the private run directory, so dirty caller files and
+its `.env` are never included. The build generates production endpoint settings,
+enables `COINCUBE_QA_HOME_REFRESH=true`, archives the app, and exports a signed
+release-testing IPA using the existing COINCUBE Apple account. No release tag,
+TestFlight upload or distribution is performed by this command.
+
+The app's signature, bundle/team, minimum version, production push/passkey
+entitlements, production REST/gRPC settings, profile expiration and target
+device coverage must pass before USB installation. The receipt records the
+source revision, QA define and signed binary/IPA hashes. Compilation output
+stays in private `qa-build/build.log`. The ordinary USB lease covers the build,
+installation and entire test run, preventing another run from replacing its app.
+On resume, the receipt and installed version are checked again, and the pinned
+process must remain unchanged. Resume never rebuilds, reinstalls or relaunches
+the app after its strict process identity has been recorded. A changed source,
+device or installed build requires a new run directory.
+
+Install Appium 3.9.0 and XCUITest 12.22.8, plus Python 3.11.4+, CocoaPods, Xcode and the pinned
 Rust toolchain. The launcher installs pinned Python dependencies once. Fresh
 mode builds both Rust helpers and signs the provisioning helper with the normal
 COINCUBE Developer ID/profile automatically. No TestFlight upload is required
@@ -106,7 +134,8 @@ for a correctly signed build already installed over USB.
 # Synthetic tests only: no phone, network, credentials or funds.
 tests/e2e/run --self-test
 
-# Read-only environment checks; no onboarding, Cube, funding or signing.
+# Build/install the QA app and check account, PIN setup, network and capacity.
+# A fresh QA account may be onboarded; no Cube, signer key or funds are created.
 tests/e2e/run --qa-fresh --qa-run-dir /private/qa/run-001 --qa-preflight
 
 # Full live flow. Repeat this exact command after an interruption.
@@ -119,14 +148,17 @@ phone at a time; the suite holds a USB lease and exclusive run/account locks.
 
 ## Strict delivery and Home-refresh acceptance (version 1)
 
-For a **new** fresh run, add `"strict_acceptance": {"version": 1}` to the
-private version-2 workstation configuration and set `ios.minimum_build` to 39
-or newer. The installed QA build must include the opt-in
-`COINCUBE_QA_HOME_REFRESH=true` compile-time hook; its production default is
-false. Build number alone cannot prove the hook exists: missing or ambiguous
-markers block the test. Absence of `strict_acceptance` preserves normal mode;
-null, false and unsupported versions are rejected. The configuration and mode
+For a **new** fresh run, the launcher supplies `"strict_acceptance": {"version": 1}`
+when omitted. The example also records it explicitly. Set `ios.minimum_build`
+to the reviewed QA build, at least 39. The automated build enables the
+`COINCUBE_QA_HOME_REFRESH=true` compile-time hook. Build number alone cannot
+prove the hook exists: missing or ambiguous markers block the test. Null,
+false and unsupported versions are rejected. The configuration and mode
 are journal-bound, so an old or completed run cannot be relabeled strict.
+For an intentional historical non-strict replay, `--qa-compatibility` must be
+explicit and its configuration must omit both `strict_acceptance` and
+`ios.qa_build`. It produces ordinary-mode evidence and does not build/install a
+QA app. Existing old checkpoints cannot be silently upgraded to strict mode.
 
 Strict mode attaches to the already foreground app without activating it. It
 sets Appium's `defaultActiveApplication` to Keychain before binding the process,
@@ -199,9 +231,55 @@ pipe; do not invoke them with stdout forwarded to a terminal or log.
 A faucet timeout leaves a durable claim intent. A rerun checks that address
 instead of requesting another payment. Explicit empty/rate-limit responses
 retain the service's retry window. The public faucet can be unavailable; that
-is `BLOCKED`, not successful funding. Its developer API uses `btc-testnet` for
+uses the automatic disposable QA fallback when configured; an exhausted pool
+remains `BLOCKED`. Its developer API uses `btc-testnet` for
 Testnet4 ([official API](https://www.cypherfaucet.com/api),
 [service source](https://github.com/Tech1k/cypherfaucet.com)).
+
+The default workstation example enables `qa_funding`. Configure its `sources`
+once with completed disposable QA runs belonging to the same account, optionally
+including `source_sponsor_dir` for one original version-1 sponsor receipt (see
+[SPONSOR.md](SPONSOR.md)). Normal `--qa-fresh` runs need no funding approval or
+additional command. Historical configurations without this field keep their
+faucet-only behavior. Automatic funding requires strict acceptance and the signed
+QA build preflight; screenshot protection remains enabled.
+
+After a bounded faucet grace period, the runner freezes the actual target's
+public provisioning evidence and selects one unspent, explicitly authorized QA
+change output. The native sponsor reconstructs its keys locally and signs only
+the frozen Testnet4 plan: 100,000–500,000 sats (enough for this run's spend,
+fee and change), a 100–1,000-sat fee and at least
+1,000 sats returned to the source. A host-wide private registry locks and reserves
+the source outpoint before signing, saves signed bytes before broadcasting, and
+reconciles those exact bytes through both explorers after any uncertain response.
+Retries retain the same source and transaction. Late faucet deposits are checked
+before reservation and before the first sponsor broadcast. Conflicting, spent or
+ambiguous outputs block rather than create another payment.
+
+Only fully completed strict runs with two signatures, actual PIN/Home-refresh
+proof and dual-explorer broadcast verification enter the reusable pool. Their
+public source snapshots retain the original run/profile identity and are scoped
+to the configured authorization roots; unrelated runs are never scanned or
+imported merely because they share an account. One original sponsor-change hop
+is supported; nested sponsor hops remain rejected. Keep the run profiles, native
+credential storage and the registry at
+`~/Library/Application Support/COINCUBE QA/funding-v1` for recovery. Reservations
+never expire automatically. The pool is finite: depletion, revoked sources,
+missing credentials, unavailable USB hardware or failed strict acceptance stop
+the flow with a specific blocker. Signing, spend broadcast and final txid
+verification continue through the normal strict stages after funding.
+
+A late faucet releases a donor only when this invocation created its reservation
+and has not invoked the helper or created helper output. The external funding
+outcome and both reservation indices are saved atomically, so a crash cannot
+reacquire that donor for the same target. Signed and resumed reservations remain
+quarantined: an unspent outpoint does not prove that valid signed bytes cannot
+still be broadcast. Explorer propagation disagreement is retried within the run
+deadline, never treated as an empty address. Source account, descriptor and
+binding failures deliberately stop the pool rather than silently switch donors.
+Keep explicitly configured historical seed runs unchanged; their native parent
+receipts bind exact public evidence. New completed-source snapshots isolate
+ordinary verification updates without weakening those bindings.
 
 A PIN attempt is recorded before entry and blocks further attempts across
 process restarts and different run directories until the exact key/signature
@@ -348,7 +426,7 @@ npm install -g appium@3.9.0
 appium driver install xcuitest@12.22.8
 ```
 
-Python 3.11+ is required. `run` creates `tests/e2e/.venv` and installs the pinned
+Python 3.11.4+ is required. `run` creates `tests/e2e/.venv` and installs the pinned
 Python dependencies once. It also finds a versioned Homebrew Python when macOS
 `python3` is older. Later runs reuse that environment.
 
@@ -449,3 +527,104 @@ The read-only standalone diagnostics remain available:
 
 References: [Appium attach to running WDA](https://appium.github.io/appium-xcuitest-driver/latest/guides/attach-to-running-wda/),
 [real-device prerequisites](https://appium.github.io/appium-xcuitest-driver/latest/preparation/real-device-config/).
+
+### Interrupted signing abort (separate evidence, no retry)
+
+`./sign-abort --source-run /absolute/original-run --config /absolute/original-config.json
+--output-dir /absolute/separate-abort-directory --native-binary /absolute/testnet4_provision
+--signing-binary /absolute/testnet4_connect --authorize-abort 'owner instruction reference'`
+
+This narrowly reconciles a saved, interrupted signing PIN dispatch. Stop the
+original runner first. The helper locks but never rewrites its run directory,
+validates its account, transaction, approval and credential bindings, then uses
+production Connect's supported Cancel RPC only for the exact unsigned active
+request (states 1–4), or verifies that same request was already cancelled (8).
+It refetches and requires cancelled status with zero submissions. Other terminal
+states, changed bindings and signature races block credential reconciliation.
+
+A durable `abort-intent.json` pins the original encrypted credential revision.
+`abort-terminal.json` is written and read back before any encrypted credential
+change. The native secret store compare-and-swap removes only that original
+pending signing purpose and appends `cancelled_signing_attempts`; the local PIN
+outcome stays **unresolved** in this retained audit. Existing key-generation
+audit and all credentials remain intact. Exact replay does not clear a newer
+pending attempt. The helper cannot sign or broadcast and does not make the old
+strict run pass. Use a new run for new acceptance evidence. After an uncertain
+RPC/CAS response, rerun with the identical inputs and output directory.
+
+### Repeatable disposable fixture retirement
+
+The workstation template enables `qa_cleanup: {"version": 1, "preserve_runs": []}`.
+This is separate authorization from `qa_funding`; configurations that omit it
+remain read-only at the signer limit. Add **every historical QA funding source**
+not already listed in `qa_funding.sources` to `preserve_runs` by absolute run
+path. These protected paths are resolved to exact Cube/key provenance, including
+recovered signers whose labels differ from their run UUID. Personal or shared
+objects are never discovered or deleted by a `QA` name prefix.
+
+A fully passed strict run enrolls its exact owner, Cube UUID/ID, vault descriptor
+fingerprint, signer ID/fingerprint, immutable public snapshot and retained local
+recovery files in the same private host registry used for funding. Older runs
+are not auto-discovered: their one-time retirement requires a separate explicit
+audit. At authenticated Testnet4 signer capacity, the next strict run can retire
+at most one enrolled fixture. It first proves the native Master/Border backup
+is readable, checks pending signing **and recovery-decrypt** requests over gRPC,
+rechecks both explorers, and excludes explicit funding sources, usable unspent
+managed donors and uncertain funding-claim dependencies. Available-capacity runs
+and already-created signer resumes start no new retirement; an already journaled
+cleanup finishes first.
+
+Retirement deletes cloud metadata in order **Vault → Signer → Cube**, with a
+private durable intent before every DELETE and exact-ID readback afterward.
+Interrupted cleanup reconciles that same fixture and cannot select a second one
+for the same consumer run. A failure deleting the signer prevents Cube deletion.
+New shared members, key references, pending requests, unexpected funds, changed
+balance or missing recovery material stop cleanup. Screenshot protection and
+strict phone-process acceptance remain enforced.
+
+No coins are swept and no local profile, checkpoint, descriptor, encrypted native
+backup, signed transaction or sponsorship evidence is deleted. A small residual
+(for example 89,000 Testnet4 sats) is explicitly recorded as still recoverable
+with the retained Master and Border keys. A cloud tombstone excludes the retired
+managed donor from future funding selection without invalidating its local
+transaction/recovery history. Keep those local files and macOS Keychain items.
+
+Enrollment has two durable phases: the live `verify` stage records the exact
+strict proof and recovery tree, then the final pytest session callback seals it
+only after the real JUnit file contains all 15 passed stages. A lost callback
+can seal that same enrolled proof later; it never invents a new phone/process
+proof. Unfinished or failed JUnit evidence cannot authorize retirement. Cleanup
+holds the candidate's original `run.lock` through all guards, DELETEs, readbacks
+and its final tombstone, and resumes a pending retirement before considering a
+newly freed slot or an already-created current signer.
+
+The retained manifest includes the entire owned profile and run history,
+including encrypted mnemonic backups, wallet database/configuration, transport
+key/cache, public funding/signing files, phone key, final JUnit and build
+receipt/log/ExportOptions. Only known synchronization locks and the live
+checkpoint are excluded; the completed checkpoint is pinned in the immutable
+source snapshot. Reproducible `qa-build/source`, `derived`, `Runner.xcarchive`,
+`export` and `validated` trees are excluded from the recovery/history manifest.
+Nothing in those directories is deleted by cleanup. Any missing or changed
+retained file, malformed tombstone or inconsistent explorer outspend/UTXO view
+fails closed before further destructive work.
+
+A spent change output is never treated as a zero balance. Both explorers must
+agree on the exact spender transaction/input. Cleanup recognizes only already
+accepted automatic QA sponsorships with matching private intent/receipt hashes,
+source and target snapshots, native receipt, authorization roots and exact raw
+transaction bytes. It follows the existing v1 sponsorship and its one supported
+v2 hop, then checks the known remaining source change (for example 1,000 sats)
+on both explorers. Usable unspent change remains protected as a funding source.
+An unknown, conflicting, missing, deeper or unindexed spend blocks retirement;
+cleanup neither constructs a transaction nor broadens the sponsorship protocol.
+
+Shared-key protection discovers both owned Cubes and `shared-with-me` Cubes across
+all networks. Every other discovered Cube requires a fresh, typed `/keys`
+inventory and complete Cube detail before any DELETE; nullable `hasVault` and
+omitted list projections never prove that no references exist. Owned Cube vaults
+are also read independently. Shared vault membership comes from the member-visible
+Cube detail and key inventory because the separate `/vault` read is owner-only.
+Missing, failed, malformed or contradictory inventories block cleanup before it
+deletes the disposable fixture's own Vault, even if the API would later refuse
+signer deletion through its additional server-side reference guard.

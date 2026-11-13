@@ -9,10 +9,7 @@ use crate::{
     dir::CoincubeDirectory,
     installer::descriptor::PathKind,
     node::bitcoind::{Bitcoind, InternalBitcoindConfig, NodeFlavor},
-    services::{
-        coincube::CoincubeClient,
-        connect::client::backend::{BackendClient, BackendWalletClient},
-    },
+    services::coincube::CoincubeClient,
     signer::Signer,
 };
 use async_hwi::DeviceKind;
@@ -41,36 +38,6 @@ pub struct ConnectVaultMemberPayload {
     /// inference; all members currently default to `Keyholder` per the
     /// 2026-04-18 plan direction.
     pub path_kind: PathKind,
-}
-
-#[derive(Debug, Clone)]
-pub enum RemoteBackend {
-    Undefined,
-    None,
-    // The installer will have to create a wallet from the created descriptor.
-    WithoutWallet(BackendClient),
-    // The installer will have to fetch the wallet and only install the missing configuration files.
-    WithWallet(BackendWalletClient),
-}
-
-impl RemoteBackend {
-    pub fn user_email(&self) -> Option<&str> {
-        match self {
-            Self::WithWallet(b) => Some(b.user_email()),
-            Self::WithoutWallet(b) => Some(b.user_email()),
-            _ => None,
-        }
-    }
-
-    pub fn is_none(&self) -> bool {
-        matches!(self, RemoteBackend::None)
-    }
-    pub fn is_some(&self) -> bool {
-        matches!(
-            self,
-            RemoteBackend::WithoutWallet { .. } | RemoteBackend::WithWallet { .. }
-        )
-    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +76,10 @@ pub enum RestoreSource {
 
 #[derive(Clone)]
 pub struct Context {
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) mcp_proposal: Option<Arc<super::proposal::Session>>,
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) creation_lease: Arc<std::sync::Mutex<Option<super::proposal::Lease>>>,
     pub bitcoin_config: BitcoinConfig,
     pub bitcoin_backend: Option<BitcoinBackend>,
     pub descriptor_template: DescriptorTemplate,
@@ -130,11 +101,11 @@ pub struct Context {
     pub recovered_signer: Option<Arc<Signer>>,
     /// A new fork Cube needs its own PIN-bound master seed, even for a watch-only Vault.
     pub fresh_fork_cube: bool,
+    /// A Vault for a Bitcoin Blake2b Cube that is already open: the Cube and
+    /// its master seed exist, and, like a fresh fork Cube, its Vault may run
+    /// on a local node without Connect.
+    pub in_cube_fork_vault: bool,
     pub fresh_fork_seed_backed_up: bool,
-    /// A fork Cube being rebuilt, seed and Vault, from its Connect backup (a
-    /// password Recovery Kit or the owner's phone). Set at construction from
-    /// the flow, so the install boundary knows what material it must carry.
-    pub fork_restore: bool,
     /// How the descriptor being installed was restored, if it was.
     ///
     /// Not derivable from the other fields. A `Full` restore leaves
@@ -164,6 +135,9 @@ pub struct Context {
     /// (`CoincubeConnectStep` or `RecoveryKitRestoreStep`) and the
     /// downstream step that copies it into `EsploraConfig.token`.
     pub connect_jwt: Option<zeroize::Zeroizing<String>>,
+    /// The installer was launched with a signed-in Connect session, which
+    /// `CoincubeConnectStep` adopts without showing its sign-in form.
+    pub connect_signed_in_at_launch: bool,
     pub install_node_alongside_connect: bool,
     /// Managed-node flavour chosen on the node-management step. Connect-first
     /// installs persist it for background provisioning after the Vault opens;
@@ -181,7 +155,6 @@ pub struct Context {
     /// sync. Connect-first setup leaves this empty until background install
     /// completes and the running app records the pending node.
     pub pending_bitcoind_config: Option<coincubed::config::BitcoindConfig>,
-    pub remote_backend: RemoteBackend,
     pub backup: Option<Backup>,
     pub wallet_alias: String,
     /// Cube UUID (from CubeSettings.id) — present when the Vault installer
@@ -284,6 +257,12 @@ pub struct Context {
 }
 
 impl Context {
+    /// A Bitcoin Blake2b Vault being built here may run on a local node
+    /// without Connect: a fresh fork Cube, or a Vault for an open one.
+    pub fn fork_local_vault_allowed(&self) -> bool {
+        self.fresh_fork_cube || self.in_cube_fork_vault
+    }
+
     /// The password to encrypt seed material under, preferring the restore PIN
     /// the user just chose over a session PIN inherited from another Cube, and
     /// falling back to the passkey Cube's seed-derived password.
@@ -376,14 +355,12 @@ impl Context {
     pub fn new(
         network: bitcoin::Network,
         coincube_directory: CoincubeDirectory,
-        remote_backend: RemoteBackend,
         cube_settings: Option<&crate::app::settings::CubeSettings>,
         coincube_client: Option<CoincubeClient>,
     ) -> Self {
         Self::new_for_chain(
             network.into(),
             coincube_directory,
-            remote_backend,
             cube_settings,
             coincube_client,
         )
@@ -395,12 +372,15 @@ impl Context {
     pub fn new_for_chain(
         chain: crate::chain::ChainId,
         coincube_directory: CoincubeDirectory,
-        remote_backend: RemoteBackend,
         cube_settings: Option<&crate::app::settings::CubeSettings>,
         coincube_client: Option<CoincubeClient>,
     ) -> Self {
         let network = chain.bitcoin_network();
         Self {
+            #[cfg(feature = "mcp-proposals")]
+            mcp_proposal: None,
+            #[cfg(feature = "mcp-proposals")]
+            creation_lease: Arc::new(std::sync::Mutex::new(None)),
             descriptor_template: DescriptorTemplate::default(),
             bitcoin_config: BitcoinConfig::new(chain, Duration::from_secs(10)),
             hws: Vec::new(),
@@ -414,13 +394,14 @@ impl Context {
             hw_is_used: false,
             recovered_signer: None,
             fresh_fork_cube: false,
+            in_cube_fork_vault: false,
             fresh_fork_seed_backed_up: false,
-            fork_restore: false,
             restore_source: None,
             restored_wallet_birthday: None,
             bitcoind_is_external: true,
             use_coincube_connect: false,
             connect_jwt: None,
+            connect_signed_in_at_launch: false,
             install_node_alongside_connect: false,
             node_flavor: if chain.is_blake2b() {
                 NodeFlavor::KnotsBlake2b
@@ -430,7 +411,6 @@ impl Context {
             internal_bitcoind_config: None,
             internal_bitcoind: None,
             pending_bitcoind_config: None,
-            remote_backend,
             wallet_alias: String::new(),
             backup: None,
             cube_id: cube_settings.map(|cs| cs.id.clone()),
@@ -451,7 +431,7 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
-    use super::{Context, RemoteBackend};
+    use super::Context;
     use crate::dir::CoincubeDirectory;
     use crate::installer::step::Step;
     use coincube_core::miniscript::bitcoin::Network;
@@ -462,13 +442,8 @@ mod tests {
     fn explicit_chain_context_keeps_encoding_and_identity_separate() {
         use crate::chain::ChainId;
         for chain in ChainId::ALL {
-            let context = Context::new_for_chain(
-                chain,
-                CoincubeDirectory::new(PathBuf::new()),
-                RemoteBackend::None,
-                None,
-                None,
-            );
+            let context =
+                Context::new_for_chain(chain, CoincubeDirectory::new(PathBuf::new()), None, None);
             assert_eq!(context.bitcoin_config.chain, chain);
             assert_eq!(context.network, chain.bitcoin_network());
             assert_eq!(context.bitcoin_config.network, chain.bitcoin_network());
@@ -501,7 +476,6 @@ mod tests {
         Context::new(
             Network::Bitcoin,
             CoincubeDirectory::new(PathBuf::new()),
-            RemoteBackend::None,
             None,
             None,
         )
