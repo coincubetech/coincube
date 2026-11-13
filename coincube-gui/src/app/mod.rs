@@ -5299,6 +5299,11 @@ impl App {
                 .as_ref()
                 .is_some_and(|panel| panel.handles_route(&menu))
             {
+                // Leaving a panel for the imported wallet's route interrupts
+                // it like any other route change (Transfer locks another Cube).
+                if let Some(panel) = self.panels.current_mut() {
+                    panel.interrupt();
+                }
                 self.panels.current = menu.clone();
                 return self
                     .panels
