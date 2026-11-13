@@ -1910,7 +1910,7 @@ pub(crate) fn fixed_tile_style(theme: &theme::Theme) -> container::Style {
 
 /// The tappable THEY RECEIVE tile: the button draws the tile itself, so the
 /// hover outline is not hidden under an inner card.
-fn receive_tile_button_style(
+pub(crate) fn receive_tile_button_style(
     theme: &theme::Theme,
     status: iced::widget::button::Status,
 ) -> iced::widget::button::Style {
@@ -2073,7 +2073,7 @@ pub struct SendMenus<'a> {
 
 /// A route tile while its menu is open: the hovered tile's surface with the
 /// accent line, so the tile reads as the menu's owner.
-fn open_tile_button_style(
+pub(crate) fn open_tile_button_style(
     theme: &theme::Theme,
     _: iced::widget::button::Status,
 ) -> iced::widget::button::Style {
