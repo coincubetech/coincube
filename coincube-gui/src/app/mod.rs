@@ -1,6 +1,7 @@
 mod activity_routing;
 mod connect_auth;
 mod connect_stream;
+mod cube_name;
 
 pub mod breez_liquid;
 pub mod breez_spark;
@@ -10127,116 +10128,13 @@ impl App {
             Message::View(view::Message::Settings(view::SettingsMessage::CubeNameSubmitted(
                 name,
             ))) => {
-                let name = name.trim().to_owned();
-                if name.is_empty() || name == self.cube_settings.name {
-                    let daemon = self.daemon.clone();
-                    return self.panels.global_settings.update(
-                        daemon,
-                        &self.cache,
-                        Message::View(view::Message::Settings(
-                            view::SettingsMessage::CubeNameSubmitted(name),
-                        )),
-                    );
-                }
-                let network_dir = self.datadir.network_directory(self.cube_settings.network);
-                let cube_id = self.cube_settings.id.clone();
-                return Task::perform(
-                    async move {
-                        let saved = name.clone();
-                        settings::update_settings_file(&network_dir, move |mut s| {
-                            if let Some(c) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
-                                c.name = saved;
-                                c.remote_synced = false;
-                            }
-                            Some(s)
-                        })
-                        .await
-                        .map(|_| name)
-                        .map_err(|e| e.to_string())
-                    },
-                    Message::CubeNameSaved,
-                );
+                return self.route_cube_name_submitted(name);
             }
             Message::CubeNameSaved(result) => {
-                let name = match result {
-                    Ok(name) => name,
-                    Err(e) => {
-                        return Task::done(Message::View(view::Message::ShowError(
-                            coincube_ui::localized_format!(
-                                "Couldn't save the Cube name: {}",
-                                "No se pudo guardar el nombre del Cube: {}",
-                                e
-                            ),
-                        )));
-                    }
-                };
-                self.cube_settings.name = name.clone();
-                self.cache.cube_name = name.clone();
-                // A later registration retry submits the panel's name.
-                self.panels.connect.cube.cube_name = name.clone();
-                let daemon = self.daemon.clone();
-                let settle = self.panels.global_settings.update(
-                    daemon,
-                    &self.cache,
-                    Message::View(view::Message::Settings(
-                        view::SettingsMessage::CubeNameSubmitted(name.clone()),
-                    )),
-                );
-                let (Some(client), Some(server_id)) = (
-                    self.authenticated_coincube_client(),
-                    self.panels.connect.cube.server_cube_id,
-                ) else {
-                    return settle;
-                };
-                let cube_id = self.cube_settings.id.clone();
-                let network_dir = self.datadir.network_directory(self.cube_settings.network);
-                let synced_name = name.clone();
-                let request = crate::services::coincube::UpdateCubeRequest {
-                    name: Some(name),
-                    status: None,
-                    // Name-only rename: leave server Vault presence and the
-                    // Spark Stable Balance record untouched.
-                    has_vault: None,
-                    spark_stable_balance: None,
-                };
-                let remote = Task::perform(
-                    {
-                        let cube_id = cube_id.clone();
-                        async move {
-                            client
-                                .update_cube(&server_id.to_string(), request)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            settings::update_settings_file(&network_dir, move |mut s| {
-                                // A newer rename may have been written while
-                                // this one was in flight; leave it unsynced.
-                                if let Some(c) = s
-                                    .cubes
-                                    .iter_mut()
-                                    .find(|c| c.id == cube_id && c.name == synced_name)
-                                {
-                                    c.remote_synced = true;
-                                }
-                                Some(s)
-                            })
-                            .await
-                            .map(|_| ())
-                            .map_err(|e| e.to_string())
-                        }
-                    },
-                    move |result| Message::CubeNameSynced {
-                        cube_id: cube_id.clone(),
-                        result,
-                    },
-                );
-                return Task::batch([settle, remote]);
+                return self.route_cube_name_saved(result);
             }
             Message::CubeNameSynced { cube_id, result } => {
-                // Left unsynced on failure; the Launcher's catch-up retries it.
-                if let Err(e) = result {
-                    warn!("Cube {} rename not yet synced to Connect: {}", cube_id, e);
-                }
-                return Task::none();
+                return self.route_cube_name_synced(cube_id, result);
             }
             // Vault Recovery Alerts dispatch (Estate Notifications — PR 2).
             // Like the Recovery Kit above, the handler needs the
@@ -19451,5 +19349,144 @@ mod toast_layer_tree_tests {
                 assert!(messages.is_empty());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cube_name_routing_tests {
+    use super::*;
+    use iced::futures::StreamExt;
+
+    fn with_session(test: impl std::future::Future<Output = ()>) {
+        let _guard = crate::app::session::test_guard();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(test);
+    }
+
+    #[test]
+    fn submitted_name_is_saved_unsynced_before_completion_changes_memory() {
+        with_session(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+            let network_dir = app.datadir.network_directory(app.cube_settings.network);
+            let mut saved = app.cube_settings.clone();
+            saved.remote_synced = true;
+            let sibling =
+                settings::CubeSettings::new("Sibling".into(), crate::chain::ChainId::Bitcoin);
+            let sibling_id = sibling.id.clone();
+            settings::update_settings_file(&network_dir, move |mut settings| {
+                settings.cubes = vec![saved, sibling];
+                Some(settings)
+            })
+            .await
+            .unwrap();
+            let old_name = app.cube_settings.name.clone();
+            let task = app.update(Message::View(view::Message::Settings(
+                view::SettingsMessage::CubeNameSubmitted("  New name  ".into()),
+            )));
+            assert_eq!(app.cube_settings.name, old_name);
+            let output = iced_runtime::task::into_stream(task)
+                .unwrap()
+                .next()
+                .await
+                .unwrap();
+            assert!(
+                matches!(output, iced_runtime::Action::Output(Message::CubeNameSaved(Ok(name))) if name == "New name")
+            );
+            assert_eq!(app.cube_settings.name, old_name);
+            let persisted = settings::Settings::from_file(&network_dir).unwrap();
+            let own = persisted
+                .cubes
+                .iter()
+                .find(|cube| cube.id == app.cube_settings.id)
+                .unwrap();
+            assert_eq!(own.name, "New name");
+            assert!(!own.remote_synced);
+            assert_eq!(
+                persisted
+                    .cubes
+                    .iter()
+                    .find(|cube| cube.id == sibling_id)
+                    .unwrap()
+                    .name,
+                "Sibling"
+            );
+        });
+    }
+
+    #[test]
+    fn saved_cube_name_settles_all_local_owners_without_navigating() {
+        with_session(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+            let route = Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::About));
+            app.panels.current = route.clone();
+            app.panels.connect.cube.server_cube_id = None;
+
+            drop(app.update(Message::CubeNameSaved(Ok("New name".into()))));
+
+            assert_eq!(app.cube_settings.name, "New name");
+            assert_eq!(app.cache.cube_name, "New name");
+            assert_eq!(app.panels.connect.cube.cube_name, "New name");
+            assert_eq!(app.panels.current, route);
+        });
+    }
+
+    #[test]
+    fn failed_cube_name_save_reports_error_without_mutating_names_or_route() {
+        with_session(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+            let before = (
+                app.cube_settings.name.clone(),
+                app.cache.cube_name.clone(),
+                app.panels.connect.cube.cube_name.clone(),
+                app.panels.current.clone(),
+            );
+            let task = app.update(Message::CubeNameSaved(Err("synthetic disk failure".into())));
+            let output = iced_runtime::task::into_stream(task)
+                .unwrap()
+                .next()
+                .await
+                .unwrap();
+            assert!(matches!(output, iced_runtime::Action::Output(Message::View(
+            view::Message::ShowError(error)
+        )) if error.contains("synthetic disk failure")));
+            assert_eq!(
+                (
+                    app.cube_settings.name.clone(),
+                    app.cache.cube_name.clone(),
+                    app.panels.connect.cube.cube_name.clone(),
+                    app.panels.current.clone()
+                ),
+                before
+            );
+        });
+    }
+
+    #[test]
+    fn remote_name_completion_never_replaces_local_name_or_route() {
+        with_session(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+            app.cube_settings.name = "Newer local name".into();
+            app.cache.cube_name = "Newer local name".into();
+            app.panels.connect.cube.cube_name = "Newer local name".into();
+            let route = app.panels.current.clone();
+            for result in [Ok(()), Err("synthetic remote failure".into())] {
+                let task = app.update(Message::CubeNameSynced {
+                    cube_id: "older-cube".into(),
+                    result,
+                });
+                assert!(iced_runtime::task::into_stream(task).is_none());
+                assert_eq!(app.cube_settings.name, "Newer local name");
+                assert_eq!(app.cache.cube_name, "Newer local name");
+                assert_eq!(app.panels.connect.cube.cube_name, "Newer local name");
+                assert_eq!(app.panels.current, route);
+            }
+        });
     }
 }
