@@ -5594,6 +5594,7 @@ impl Home {
                         self.creation_kit_error.as_deref(),
                         self.can_create_recovery_kit(),
                         self.creation_backup_hub(),
+                        self.network,
                     )),
             )
             .max_width(760)
@@ -6442,6 +6443,7 @@ impl Home {
                                         self.creation_kit_error.as_deref(),
                                         self.can_create_recovery_kit(),
                                         self.creation_backup_hub(),
+                                        self.network,
                                     );
                                     // No sheet footer here, so the hub's
                                     // actions sit under it.
@@ -7320,6 +7322,7 @@ fn creation_backup_view<'a>(
     kit_error: Option<&'a str>,
     kit_available: bool,
     hub: CreationBackupHub,
+    chain: ChainId,
 ) -> Element<'a, ViewMessage> {
     use crate::app::view::settings::backup;
 
@@ -7330,7 +7333,7 @@ fn creation_backup_view<'a>(
             backup::intro_view(*checked, None, ViewMessage::CreationBackup)
         }
         CreationBackupStep::Phrase => match words {
-            Some(words) => backup::recovery_phrase_view(words, ViewMessage::CreationBackup),
+            Some(words) => backup::recovery_phrase_view(words, chain, ViewMessage::CreationBackup),
             // Only reachable if the seed was scrubbed underneath the view;
             // `update_creation_backup` turns the same condition into an error
             // and abandons. Render nothing rather than an empty word grid.
@@ -14252,6 +14255,7 @@ mod tests {
                                 err,
                                 kit_available,
                                 hub,
+                                ChainId::BitcoinBlake2b,
                             );
                             let _ = creation_choice_footer(saving, hub);
                         }
@@ -14268,6 +14272,7 @@ mod tests {
                         err,
                         kit_available,
                         CreationBackupHub::default(),
+                        ChainId::Bitcoin,
                     );
                 }
             }
