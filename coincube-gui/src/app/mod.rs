@@ -19314,122 +19314,136 @@ mod cube_name_routing_tests {
     use super::*;
     use iced::futures::StreamExt;
 
-    #[tokio::test]
-    async fn submitted_name_is_saved_unsynced_before_completion_changes_memory() {
+    fn with_session(test: impl std::future::Future<Output = ()>) {
         let _guard = crate::app::session::test_guard();
-        let root = tempfile::tempdir().unwrap();
-        let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
-        let network_dir = app.datadir.network_directory(app.cube_settings.network);
-        let mut saved = app.cube_settings.clone();
-        saved.remote_synced = true;
-        let sibling = settings::CubeSettings::new("Sibling".into(), crate::chain::ChainId::Bitcoin);
-        let sibling_id = sibling.id.clone();
-        settings::update_settings_file(&network_dir, move |mut settings| {
-            settings.cubes = vec![saved, sibling];
-            Some(settings)
-        })
-        .await
-        .unwrap();
-        let old_name = app.cube_settings.name.clone();
-        let task = app.update(Message::View(view::Message::Settings(
-            view::SettingsMessage::CubeNameSubmitted("  New name  ".into()),
-        )));
-        assert_eq!(app.cube_settings.name, old_name);
-        let output = iced_runtime::task::into_stream(task)
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .unwrap()
-            .next()
+            .block_on(test);
+    }
+
+    #[test]
+    fn submitted_name_is_saved_unsynced_before_completion_changes_memory() {
+        with_session(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+            let network_dir = app.datadir.network_directory(app.cube_settings.network);
+            let mut saved = app.cube_settings.clone();
+            saved.remote_synced = true;
+            let sibling =
+                settings::CubeSettings::new("Sibling".into(), crate::chain::ChainId::Bitcoin);
+            let sibling_id = sibling.id.clone();
+            settings::update_settings_file(&network_dir, move |mut settings| {
+                settings.cubes = vec![saved, sibling];
+                Some(settings)
+            })
             .await
             .unwrap();
-        assert!(
-            matches!(output, iced_runtime::Action::Output(Message::CubeNameSaved(Ok(name))) if name == "New name")
-        );
-        assert_eq!(app.cube_settings.name, old_name);
-        let persisted = settings::Settings::from_file(&network_dir).unwrap();
-        let own = persisted
-            .cubes
-            .iter()
-            .find(|cube| cube.id == app.cube_settings.id)
-            .unwrap();
-        assert_eq!(own.name, "New name");
-        assert!(!own.remote_synced);
-        assert_eq!(
-            persisted
+            let old_name = app.cube_settings.name.clone();
+            let task = app.update(Message::View(view::Message::Settings(
+                view::SettingsMessage::CubeNameSubmitted("  New name  ".into()),
+            )));
+            assert_eq!(app.cube_settings.name, old_name);
+            let output = iced_runtime::task::into_stream(task)
+                .unwrap()
+                .next()
+                .await
+                .unwrap();
+            assert!(
+                matches!(output, iced_runtime::Action::Output(Message::CubeNameSaved(Ok(name))) if name == "New name")
+            );
+            assert_eq!(app.cube_settings.name, old_name);
+            let persisted = settings::Settings::from_file(&network_dir).unwrap();
+            let own = persisted
                 .cubes
                 .iter()
-                .find(|cube| cube.id == sibling_id)
-                .unwrap()
-                .name,
-            "Sibling"
-        );
+                .find(|cube| cube.id == app.cube_settings.id)
+                .unwrap();
+            assert_eq!(own.name, "New name");
+            assert!(!own.remote_synced);
+            assert_eq!(
+                persisted
+                    .cubes
+                    .iter()
+                    .find(|cube| cube.id == sibling_id)
+                    .unwrap()
+                    .name,
+                "Sibling"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn saved_cube_name_settles_all_local_owners_without_navigating() {
-        let _guard = crate::app::session::test_guard();
-        let root = tempfile::tempdir().unwrap();
-        let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
-        let route = Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::About));
-        app.panels.current = route.clone();
-        app.panels.connect.cube.server_cube_id = None;
+    #[test]
+    fn saved_cube_name_settles_all_local_owners_without_navigating() {
+        with_session(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+            let route = Menu::Cube(menu::CubeSubMenu::Settings(menu::CubeSettingsOption::About));
+            app.panels.current = route.clone();
+            app.panels.connect.cube.server_cube_id = None;
 
-        drop(app.update(Message::CubeNameSaved(Ok("New name".into()))));
+            drop(app.update(Message::CubeNameSaved(Ok("New name".into()))));
 
-        assert_eq!(app.cube_settings.name, "New name");
-        assert_eq!(app.cache.cube_name, "New name");
-        assert_eq!(app.panels.connect.cube.cube_name, "New name");
-        assert_eq!(app.panels.current, route);
+            assert_eq!(app.cube_settings.name, "New name");
+            assert_eq!(app.cache.cube_name, "New name");
+            assert_eq!(app.panels.connect.cube.cube_name, "New name");
+            assert_eq!(app.panels.current, route);
+        });
     }
 
-    #[tokio::test]
-    async fn failed_cube_name_save_reports_error_without_mutating_names_or_route() {
-        let _guard = crate::app::session::test_guard();
-        let root = tempfile::tempdir().unwrap();
-        let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
-        let before = (
-            app.cube_settings.name.clone(),
-            app.cache.cube_name.clone(),
-            app.panels.connect.cube.cube_name.clone(),
-            app.panels.current.clone(),
-        );
-        let task = app.update(Message::CubeNameSaved(Err("synthetic disk failure".into())));
-        let output = iced_runtime::task::into_stream(task)
-            .unwrap()
-            .next()
-            .await
-            .unwrap();
-        assert!(matches!(output, iced_runtime::Action::Output(Message::View(
-            view::Message::ShowError(error)
-        )) if error.contains("synthetic disk failure")));
-        assert_eq!(
-            (
+    #[test]
+    fn failed_cube_name_save_reports_error_without_mutating_names_or_route() {
+        with_session(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+            let before = (
                 app.cube_settings.name.clone(),
                 app.cache.cube_name.clone(),
                 app.panels.connect.cube.cube_name.clone(),
-                app.panels.current.clone()
-            ),
-            before
-        );
+                app.panels.current.clone(),
+            );
+            let task = app.update(Message::CubeNameSaved(Err("synthetic disk failure".into())));
+            let output = iced_runtime::task::into_stream(task)
+                .unwrap()
+                .next()
+                .await
+                .unwrap();
+            assert!(matches!(output, iced_runtime::Action::Output(Message::View(
+            view::Message::ShowError(error)
+        )) if error.contains("synthetic disk failure")));
+            assert_eq!(
+                (
+                    app.cube_settings.name.clone(),
+                    app.cache.cube_name.clone(),
+                    app.panels.connect.cube.cube_name.clone(),
+                    app.panels.current.clone()
+                ),
+                before
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn remote_name_completion_never_replaces_local_name_or_route() {
-        let _guard = crate::app::session::test_guard();
-        let root = tempfile::tempdir().unwrap();
-        let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
-        app.cube_settings.name = "Newer local name".into();
-        app.cache.cube_name = "Newer local name".into();
-        app.panels.connect.cube.cube_name = "Newer local name".into();
-        let route = app.panels.current.clone();
-        for result in [Ok(()), Err("synthetic remote failure".into())] {
-            let task = app.update(Message::CubeNameSynced {
-                cube_id: "older-cube".into(),
-                result,
-            });
-            assert!(iced_runtime::task::into_stream(task).is_none());
-            assert_eq!(app.cube_settings.name, "Newer local name");
-            assert_eq!(app.cache.cube_name, "Newer local name");
-            assert_eq!(app.panels.connect.cube.cube_name, "Newer local name");
-            assert_eq!(app.panels.current, route);
-        }
+    #[test]
+    fn remote_name_completion_never_replaces_local_name_or_route() {
+        with_session(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut app, _) = super::shell_tests::bitcoin_app(root.path());
+            app.cube_settings.name = "Newer local name".into();
+            app.cache.cube_name = "Newer local name".into();
+            app.panels.connect.cube.cube_name = "Newer local name".into();
+            let route = app.panels.current.clone();
+            for result in [Ok(()), Err("synthetic remote failure".into())] {
+                let task = app.update(Message::CubeNameSynced {
+                    cube_id: "older-cube".into(),
+                    result,
+                });
+                assert!(iced_runtime::task::into_stream(task).is_none());
+                assert_eq!(app.cube_settings.name, "Newer local name");
+                assert_eq!(app.cache.cube_name, "Newer local name");
+                assert_eq!(app.panels.connect.cube.cube_name, "Newer local name");
+                assert_eq!(app.panels.current, route);
+            }
+        });
     }
 }
