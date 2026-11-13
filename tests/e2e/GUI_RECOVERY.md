@@ -113,7 +113,16 @@ It exposes no opaque secret-reference input, Keychain lookup or protected-file
 reader/transport. A chat can drive public GUI steps, but a protected random PIN
 cannot currently be loaded into those string arguments through a documented
 secret handle. No unsupported Codex IPC, internal token discovery or runtime
-filesystem assumption is part of this design. The returned CUA confirmation
-policy also requires handoff when changing authentication credentials; the
-implementation must resolve the applicable credential flow before claiming
-unattended operation. These are concrete blockers, not a completed adapter.
+filesystem assumption is part of this design. The owner has explicitly authorized creation and storage of disposable QA PINs;
+that scope does not require a new permission prompt. The missing supported opaque
+secret-input and protected artifact transport capabilities remain concrete
+blockers to unattended operation, not a completed adapter.
+
+The verifier intentionally accepts only a one-input, one-output self-transfer
+sweep: fund exactly one recognized fixture coin, choose the GUI self-transfer
+mode and sweep the available value minus the bounded fee to one descriptor-derived
+change output. This is not a general recipient-send or two-output verifier. Read-only parsing of the prior public exported PSBTs confirmed one input and one
+output on each chain (Bitcoin output 999585 sats; Blake2b output 999738 sats).
+This shape check is historical evidence only, not a new GUI pass or full verifier
+compatibility claim. A future real worker must inspect the actual exported map
+shape and stop if it differs; do not silently remove outputs or regenerate it.

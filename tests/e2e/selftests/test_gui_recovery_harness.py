@@ -275,3 +275,21 @@ def test_new_profile_does_not_establish_keychain_cache_isolation(config, tmp_pat
         with pytest.raises(Blocked, match='Cube-UUID Keychain'): runner.run(gui.CHAINS[0], 'preflight')
         assert not (runner.root / gui.CHAINS[0] / 'original').exists()
     finally: runner.close()
+
+
+@pytest.mark.parametrize('chain', gui.CHAINS)
+def test_valid_replacement_export_cannot_inherit_original_gui_provenance(config, tmp_path, chain):
+    worker = OfflineWorker(); runner = gui.GuiRecovery(config, tmp_path / 'run', worker=worker, offline=True)
+    try:
+        for stage in gui.STAGES[:gui.STAGES.index('verify')]: runner.run(chain, stage)
+        replacement, manifest = signature_case(chain)
+        # A distinct, still valid PSBT for exactly the same transaction, input,
+        # descriptor and signature: an additional global public metadata entry.
+        replacement.g.map[0xfc] = {b'\x04test\x01': b'different export'}
+        raw = replacement.serialize()
+        gui_verify.verify_export(raw, manifest)  # Crypto alone would accept it.
+        atomic_write(runner.directory(chain) / 'gui-signed.psbt', raw)
+        with pytest.raises(Failed, match='EXPORT_CHANGED'): runner.run(chain, 'verify')
+        assert 'signature_proof' not in runner.state(chain)
+        assert 'acceptance' not in runner.state(chain)
+    finally: runner.close()

@@ -319,7 +319,9 @@ class GuiRecovery:
         identity = self.state(chain)["identity"]
         manifest = {**identity, **self.state(chain)["derivation"], "funding": self.state(chain)["funding"],
                     "maximum_fee_sats": self.config["maximum_fee_sats"], "broadcast": False}
-        proof = verify_export(private_read(self.directory(chain) / "gui-signed.psbt"), manifest)
+        raw = private_read(self.directory(chain) / "gui-signed.psbt")
+        require(hashlib.sha256(raw).hexdigest() == self.state(chain)["export_sha256"], "EXPORT_CHANGED")
+        proof = verify_export(raw, manifest)
         self.save(chain, "signature_proof", proof)
 
     def stage_retain(self, chain):
