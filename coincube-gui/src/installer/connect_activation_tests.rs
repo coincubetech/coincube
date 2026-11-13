@@ -18,7 +18,54 @@ fn enable_beta(root: &CoincubeDirectory) {
     crate::app::settings::global::GlobalSettings::update_bitcoin_blake2b_beta(&path, true).unwrap();
 }
 
-fn assert_only_beta_settings_files(root: &CoincubeDirectory, cube: Option<&str>) {
+/// An open Bitcoin Blake2b Cube: its PIN-encrypted master seed file and the
+/// settings that record it. Vault creation runs inside such a Cube; it never
+/// mints a master of its own.
+fn fork_cube(root: &CoincubeDirectory, chain: ChainId) -> crate::app::settings::CubeSettings {
+    let master = crate::signer::Signer::generate(chain.bitcoin_network()).unwrap();
+    let mut cube = crate::app::settings::CubeSettings::new("Synthetic".into(), chain)
+        .with_master_signer(master.fingerprint());
+    cube.backed_up = true;
+    master
+        .store_encrypted_seed_only_for_chain(root, chain, "2468", &cube.id, None)
+        .unwrap();
+    cube
+}
+
+/// The Vault installer for `cube`, admitted from that Cube's open session.
+/// The session is closed again before any `await`; the installer keeps the
+/// Cube's PIN in its context.
+fn in_cube_installer(
+    root: &CoincubeDirectory,
+    cube: &crate::app::settings::CubeSettings,
+    client: CoincubeClient,
+) -> Installer {
+    let _guard = crate::app::session::test_guard();
+    crate::app::session::open(cube.id.clone(), zeroize::Zeroizing::new("2468".into()));
+    let built = Installer::try_new_for_chain(
+        root.clone(),
+        cube.network,
+        UserFlow::CreateWallet,
+        true,
+        Some(cube.clone()),
+        None,
+        None,
+        false,
+        Some(client),
+    );
+    crate::app::session::close();
+    let (installer, _) = built.unwrap();
+    assert!(installer.context.in_cube_fork_vault);
+    installer
+}
+
+/// Only the global settings, the optional admission lock and, when given, the
+/// Cube's own master seed exist: no wallet, daemon or chain state.
+fn assert_only_beta_settings_files(
+    root: &CoincubeDirectory,
+    cube: Option<&str>,
+    cube_seed: Option<ChainId>,
+) {
     let mut names: Vec<_> = std::fs::read_dir(root.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -27,6 +74,21 @@ fn assert_only_beta_settings_files(root: &CoincubeDirectory, cube: Option<&str>)
         "global_settings.json".to_owned(),
         "global_settings.lock".to_owned(),
     ];
+    if let Some(chain) = cube_seed {
+        let chain_dir = root.network_directory(chain);
+        let entries: Vec<_> = std::fs::read_dir(chain_dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["mnemonics".to_owned()]);
+        let seeds = std::fs::read_dir(
+            coincube_core::signer::MasterSigner::mnemonics_folder_for_chain(root.path(), chain),
+        )
+        .unwrap()
+        .count();
+        assert_eq!(seeds, 1, "only the Cube's own master seed");
+        expected.push(chain.dir_name().to_owned());
+    }
     #[cfg(feature = "mcp-proposals")]
     if let Some(cube) = cube {
         use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash};
@@ -51,18 +113,6 @@ fn client(server: &MockServer) -> CoincubeClient {
     client.base_url = server.base_url();
     client.set_token("synthetic-activation-token");
     client
-}
-
-/// Model the already-open Cube that launches Vault creation. This helper is
-/// memory-only; persistence is explicit in the install/reopen case below.
-fn unlocked_cube(chain: ChainId) -> (crate::app::settings::CubeSettings, Signer) {
-    let master = coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
-    let fingerprint = master.fingerprint(&bitcoin::secp256k1::Secp256k1::new());
-    let cube = crate::app::settings::CubeSettings::new("Synthetic".into(), chain)
-        .with_master_signer(fingerprint);
-    crate::app::session::open(&cube.id, zeroize::Zeroizing::new("2468".into()));
-    crate::app::session::store_unlocked_signer(&cube.id, fingerprint, master.try_clone().unwrap());
-    (cube, Signer::new(master))
 }
 
 async fn output<T: Send + 'static>(task: Task<T>) -> Vec<T> {
@@ -226,9 +276,7 @@ async fn activation_anchor_timestamp_is_generated_for_each_request() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // Serialize this synthetic Cube's session through reopen.
 async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound() {
-    let _guard = crate::app::session::test_guard();
     let server = ActivationServer::start(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -244,40 +292,8 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
     let mut client = CoincubeClient::new();
     client.base_url = server.base_url.clone();
     client.set_token("synthetic-activation-token");
-    assert_only_beta_settings_files(&root, None);
-    let (cube, master) = unlocked_cube(ChainId::BitcoinBlake2b);
-    // Cube creation owns this seed, before its Vault is installed. v2 is a
-    // synthetic no-keystore fixture, not a device-bound recovery claim.
-    master
-        .store_encrypted_seed_only_for_chain(&root, ChainId::BitcoinBlake2b, "2468", &cube.id, None)
-        .unwrap();
-    let seed_path = std::fs::read_dir(
-        coincube_core::signer::MasterSigner::mnemonics_folder_for_chain(
-            root.path(),
-            ChainId::BitcoinBlake2b,
-        ),
-    )
-    .unwrap()
-    .next()
-    .unwrap()
-    .unwrap()
-    .path();
-    let seed_before = std::fs::read(&seed_path).unwrap();
-    let (mut installer, _) = Installer::try_new_for_chain(
-        root.clone(),
-        ChainId::BitcoinBlake2b,
-        UserFlow::CreateWallet,
-        true,
-        Some(cube),
-        None,
-        None,
-        false,
-        Some(client.clone()),
-    )
-    .unwrap();
-    assert!(!installer.context.fresh_fork_cube);
-    assert!(installer.context.in_cube_fork_vault);
-    assert_eq!(installer.master_signer_fingerprint(), master.fingerprint());
+    let cube = fork_cube(&root, ChainId::BitcoinBlake2b);
+    let mut installer = in_cube_installer(&root, &cube, client.clone());
     installer.context.descriptor = Some(DESCRIPTOR.parse().unwrap());
     installer.context.bitcoin_backend =
         Some(BitcoinBackend::Esplora(coincubed::config::EsploraConfig {
@@ -288,9 +304,11 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
             secondary_fallback_addr: None,
             secondary_fallback_token: None,
         }));
-    let cube_id = installer.context.seed_cube_id().to_owned();
+    assert_eq!(installer.context.seed_cube_id(), cube.id);
     let fingerprint = installer.master_signer_fingerprint();
+    assert_eq!(Some(fingerprint), cube.master_signer_fingerprint);
     let wallet_id = WalletId::generate(installer.context.descriptor.as_ref().unwrap());
+    assert_only_beta_settings_files(&root, None, Some(ChainId::BitcoinBlake2b));
     let settings = install_local_wallet(
         installer.context.clone(),
         wallet_id,
@@ -298,10 +316,6 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
     )
     .await
     .unwrap();
-    assert!(
-        std::fs::read(seed_path).unwrap() == seed_before,
-        "Vault installation must retain the Cube's existing master seed file"
-    );
     assert!(!root_path.join("bitcoin").exists());
     let cfg_path = root
         .network_directory(ChainId::BitcoinBlake2b)
@@ -313,14 +327,6 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
         .unwrap()
         .contains("synthetic-activation-token"));
 
-    let mut cube = crate::app::settings::CubeSettings::new_with_raw_id(
-        cube_id,
-        "Synthetic".into(),
-        ChainId::BitcoinBlake2b,
-    );
-    cube.master_signer_fingerprint = Some(fingerprint);
-    cube.backed_up = true;
-    crate::app::session::close();
     let mut entry = crate::pin_entry::PinEntry::new(
         cube,
         root_path.clone(),
@@ -378,14 +384,11 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
         3
     );
     assert_eq!(server.bitcoin.load(std::sync::atomic::Ordering::Relaxed), 0);
-    crate::app::session::close();
     std::fs::remove_dir_all(root_path).unwrap();
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)] // Keep the matching synthetic root scoped through refusal.
 async fn feature_refusals_precede_anchor_requests_and_all_fork_filesystem_writes() {
-    let _guard = crate::app::session::test_guard();
     for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
         for (status, flag) in [
             (200, None),
@@ -415,19 +418,8 @@ async fn feature_refusals_precede_anchor_requests_and_all_fork_filesystem_writes
             enable_beta(&root);
             let settings_path = crate::app::settings::global::GlobalSettings::path(&root);
             let settings_before = std::fs::read(&settings_path).unwrap();
-            let (cube, _) = unlocked_cube(chain);
-            let (mut installer, _) = Installer::try_new_for_chain(
-                root,
-                chain,
-                UserFlow::CreateWallet,
-                true,
-                Some(cube),
-                None,
-                None,
-                false,
-                Some(client(&server)),
-            )
-            .unwrap();
+            let cube = fork_cube(&root, chain);
+            let mut installer = in_cube_installer(&root, &cube, client(&server));
             installer.context.descriptor = Some(DESCRIPTOR.parse().unwrap());
             installer.context.bitcoin_backend =
                 Some(BitcoinBackend::Esplora(coincubed::config::EsploraConfig {
@@ -452,12 +444,12 @@ async fn feature_refusals_precede_anchor_requests_and_all_fork_filesystem_writes
             assert_only_beta_settings_files(
                 &CoincubeDirectory::new(root_path.clone()),
                 cube_id.as_deref(),
+                Some(chain),
             );
             assert_eq!(std::fs::read(&settings_path).unwrap(), settings_before);
             std::fs::remove_dir_all(root_path).unwrap();
             features.assert_hits_async(1).await;
             anchor.assert_hits_async(0).await;
-            crate::app::session::close();
         }
     }
 }

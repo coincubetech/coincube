@@ -7611,7 +7611,7 @@ mod single_open_lifecycle_tests {
     use crate::{app, chain::ChainId};
 
     #[test]
-    fn accepted_import_and_restore_retire_the_old_app_before_installer() {
+    fn accepted_create_import_and_restore_retire_the_old_app_before_installer() {
         let result = std::thread::Builder::new()
             .name("installer-admission-owner".into())
             .stack_size(8 * 1024 * 1024)
@@ -7623,6 +7623,8 @@ mod single_open_lifecycle_tests {
                 let _enter = runtime.enter();
                 let _guard = app::session::test_guard();
                 for (chain, flow) in [
+                    // Vault creation needs an already-open Cube on every
+                    // chain; a fork Cube restore still retires the old app.
                     (
                         ChainId::BitcoinBlake2b,
                         crate::installer::UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
@@ -7688,55 +7690,61 @@ mod single_open_lifecycle_tests {
     }
 
     #[test]
-    fn cubeless_vault_creation_keeps_the_current_app_and_session_on_every_chain() {
+    fn cubeless_vault_creation_keeps_the_current_app_and_session() {
+        // Home has no Cube master on any chain: Bitcoin Blake2b Cubes are
+        // created by the Cube journey, and their Vaults inside the open Cube.
+        for chain in ChainId::ALL {
+            cubeless_vault_creation_is_refused_before_teardown(chain);
+        }
+    }
+
+    fn cubeless_vault_creation_is_refused_before_teardown(chain: ChainId) {
         let _guard = app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let _enter = runtime.enter();
-        for chain in ChainId::ALL {
-            let path =
-                std::env::temp_dir().join(format!("refused-vault-create-{}", uuid::Uuid::new_v4()));
-            let (source, _) = app::shell_tests::bitcoin_app(&path);
-            let source_id = source.cube_settings().id.clone();
-            let root = source.datadir().clone();
-            let (home, startup) = home::Home::new_for_chain(root.clone(), Some(chain));
-            drop(startup);
-            let mut gui = GUI::reviewer_app_home_gui(source, home);
-            let pane_id = gui.focus.unwrap();
-            app::session::open(source_id.clone(), zeroize::Zeroizing::new("2468".into()));
-            drop(gui.update(Message::Pane(
-                pane_id,
-                pane::Message::tab(
-                    2,
-                    tab::Message::Launch(home::Message::Install(
-                        root,
-                        chain,
-                        crate::installer::UserFlow::CreateWallet,
-                        None,
-                    )),
-                ),
-            )));
-            let pane = gui.panes.get(pane_id).unwrap();
-            assert!(
-                matches!(&pane.tabs[0].state, tab::State::App(app) if app.cube_settings().id == source_id)
-            );
-            assert_eq!(app::session::current_cube_id(), Some(source_id));
-            assert!(pane
-                .tabs
-                .iter()
-                .all(|tab| !matches!(tab.state, tab::State::Installer(_))));
-            let tab::State::Home(home) = &pane.tabs[1].state else {
-                panic!("refusal stays on the Launcher")
-            };
-            assert!(home
-                .error()
-                .is_some_and(|error| error.contains("Create or unlock a Cube")));
-            app::session::close();
-            drop(gui);
-            std::fs::remove_dir_all(path).ok();
-        }
+        let path =
+            std::env::temp_dir().join(format!("refused-vault-create-{}", uuid::Uuid::new_v4()));
+        let (source, _) = app::shell_tests::bitcoin_app(&path);
+        let source_id = source.cube_settings().id.clone();
+        let root = source.datadir().clone();
+        let (home, startup) = home::Home::new_for_chain(root.clone(), Some(chain));
+        drop(startup);
+        let mut gui = GUI::reviewer_app_home_gui(source, home);
+        let pane_id = gui.focus.unwrap();
+        app::session::open(source_id.clone(), zeroize::Zeroizing::new("2468".into()));
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                2,
+                tab::Message::Launch(home::Message::Install(
+                    root,
+                    chain,
+                    crate::installer::UserFlow::CreateWallet,
+                    None,
+                )),
+            ),
+        )));
+        let pane = gui.panes.get(pane_id).unwrap();
+        assert!(
+            matches!(&pane.tabs[0].state, tab::State::App(app) if app.cube_settings().id == source_id)
+        );
+        assert_eq!(app::session::current_cube_id(), Some(source_id));
+        assert!(pane
+            .tabs
+            .iter()
+            .all(|tab| !matches!(tab.state, tab::State::Installer(_))));
+        let tab::State::Home(home) = &pane.tabs[1].state else {
+            panic!("refusal stays on the Launcher")
+        };
+        assert!(home
+            .error()
+            .is_some_and(|error| error.contains("Create or unlock a Cube")));
+        app::session::close();
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
     }
 
     #[test]

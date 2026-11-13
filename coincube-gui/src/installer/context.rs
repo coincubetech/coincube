@@ -99,14 +99,10 @@ pub struct Context {
     // In case a user entered a mnemonic,
     // we dont want to override the generated signer with it.
     pub recovered_signer: Option<Arc<Signer>>,
-    /// Legacy standalone-fork state, never set by production constructors.
-    /// Retained persistence/exit helpers and their synthetic fixtures still
-    /// enforce its PIN-bound seed and backup checks.
-    pub fresh_fork_cube: bool,
     /// A Vault for a Bitcoin Blake2b Cube that is already open: the Cube and
-    /// its master seed exist, and its Vault may run on a local node without Connect.
+    /// its master seed exist, and its Vault may run on a local node without
+    /// Connect.
     pub in_cube_fork_vault: bool,
-    pub fresh_fork_seed_backed_up: bool,
     /// How the descriptor being installed was restored, if it was.
     ///
     /// Not derivable from the other fields. A `Full` restore leaves
@@ -259,9 +255,9 @@ pub struct Context {
 
 impl Context {
     /// A Bitcoin Blake2b Vault being built here may run on a local node
-    /// without Connect: a fresh fork Cube, or a Vault for an open one.
+    /// without Connect: only a Vault for an open Cube.
     pub fn fork_local_vault_allowed(&self) -> bool {
-        self.fresh_fork_cube || self.in_cube_fork_vault
+        self.in_cube_fork_vault
     }
 
     /// The password to encrypt seed material under, preferring the restore PIN
@@ -394,9 +390,7 @@ impl Context {
             network,
             hw_is_used: false,
             recovered_signer: None,
-            fresh_fork_cube: false,
             in_cube_fork_vault: false,
-            fresh_fork_seed_backed_up: false,
             restore_source: None,
             restored_wallet_birthday: None,
             bitcoind_is_external: true,

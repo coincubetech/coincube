@@ -1661,8 +1661,8 @@ impl Tab {
                 if !crate::chain::same_path(root.path(), home.datadir_path.path()) {
                     return Err("The installation belongs to another data directory.".into());
                 }
-                // Home has no Cube master to supply to Vault creation.
-                // Refuse before GUI retires the unrelated open Cube/session.
+                // Home has no Cube master to supply to Vault creation on any
+                // chain. Refuse before GUI retires the unrelated open Cube/session.
                 if matches!(flow, UserFlow::CreateWallet) {
                     return Err("Create or unlock a Cube before creating its Vault".into());
                 }
@@ -2886,7 +2886,8 @@ impl Tab {
                             wallet_settings: settings_opt.map(|s| *s),
                             connect_client: i.context.coincube_client.clone(),
                         };
-                        // Fresh fork creation still opens the target's own PIN screen.
+                        // A Cube this installer minted (a claim target or a
+                        // restore) opens its own PIN screen.
                         self.state =
                             unlock_state(cube, i.datadir.path().to_path_buf(), on_success, None);
                         return Task::none();
@@ -5264,11 +5265,7 @@ pub(crate) fn installer_exit_identity(i: &Installer) -> Option<RestoreCubeIdenti
     i.context
         .cube_id
         .clone()
-        .zip(i.context.cube_name.clone().or_else(|| {
-            i.context
-                .fresh_fork_cube
-                .then(|| i.context.wallet_alias.clone())
-        }))
+        .zip(i.context.cube_name.clone())
         .map(|(uuid, name)| RestoreCubeIdentity { uuid, name })
 }
 
@@ -5323,11 +5320,11 @@ fn reopen_claim_source(
 /// its seed file belongs to, the PIN that file was written under, and whether
 /// that seed is backed up.
 ///
-/// Three flows reach this seam and each answers from a different place — a
-/// Recovery-Kit restore from `restore_pin` + `recovered_signer`, a fresh fork
-/// Cube from the installer's own signer, and a Bitcoin Blake2b **claim** from
-/// the source Cube it reuses. A flow missing here mints a Cube with no master
-/// signer recorded.
+/// Two flows reach this seam and each answers from a different place — a
+/// Recovery-Kit restore from `restore_pin` + `recovered_signer`, and a Bitcoin
+/// Blake2b **claim** from the source Cube it reuses. Vault creation never
+/// mints a Cube here: it runs inside an existing one. A flow missing here
+/// mints a Cube with no master signer recorded.
 pub(crate) fn installer_exit_seed(i: &Installer) -> Option<RestoreCubeSeed> {
     if let Some(source) = &i.context.claim_source {
         // The claim target's seed file is the source Cube's mnemonic, written
@@ -5355,20 +5352,12 @@ pub(crate) fn installer_exit_seed(i: &Installer) -> Option<RestoreCubeSeed> {
     }
     match (
         i.context.restore_pin.clone(),
-        i.context
-            .recovered_signer
-            .as_ref()
-            .map(|s| s.fingerprint())
-            .or_else(|| {
-                i.context
-                    .fresh_fork_cube
-                    .then(|| i.master_signer_fingerprint())
-            }),
+        i.context.recovered_signer.as_ref().map(|s| s.fingerprint()),
     ) {
         (Some(pin), Some(fp)) => Some(RestoreCubeSeed {
             pin,
             master_signer_fingerprint: fp,
-            seed_backed_up: i.context.fresh_fork_seed_backed_up,
+            seed_backed_up: false,
             passkey: None,
         }),
         _ => None,
@@ -7870,10 +7859,14 @@ mod fork_completion_tests {
         )
         .expect("a Bitcoin fixture installer");
         installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
-        installer.context.fresh_fork_cube = true;
         installer.context.use_coincube_connect = !local_capability;
-        installer.context.fresh_fork_seed_backed_up = true;
+        // A restored fork Cube: the exit seam mints it from the recovered
+        // signer and its chosen PIN, under the original identity.
+        installer.context.recovered_signer = Some(std::sync::Arc::new(
+            crate::signer::Signer::generate(bitcoin::Network::Bitcoin).unwrap(),
+        ));
         installer.context.cube_id = Some("synthetic-save-cube".into());
+        installer.context.cube_name = Some("fork-vault".into());
         installer.context.restore_pin = Some(zeroize::Zeroizing::new("2468".to_string()));
         let mut tab = Box::new(Tab::new(1, State::Installer(Box::new(installer))));
         let mut save = Some(tab.update(Message::Install(installer::Message::Exit(

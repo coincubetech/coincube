@@ -901,7 +901,8 @@ impl Installer {
 
         let restore = RestorePath::of(&user_flow).map(|path| (path, chain));
         // A Vault created inside an open Cube, Bitcoin Blake2b included: its
-        // steps carry the same stages. Cube-less Vault creation is refused.
+        // steps carry the same stages. Restore and claim flows are not framed
+        // as Vault creation.
         let create_vault = launched_from_app
             && matches!(user_flow, UserFlow::CreateWallet)
             && (!chain.is_blake2b() || context.in_cube_fork_vault);
@@ -960,7 +961,6 @@ impl Installer {
                         Final::new().into(),
                     ],
                     UserFlow::CreateWallet if chain.is_blake2b() => vec![
-                        RestorePinSetupStep::new().into(),
                         ChooseDescriptorTemplate::default().into(),
                         DescriptorTemplateDescription::default().into(),
                         DefineDescriptor::new(network, signer.clone()).into(),
@@ -1883,11 +1883,6 @@ fn seed_password(ctx: &Context) -> Result<zeroize::Zeroizing<String>, Error> {
 fn seed_device_secret(
     ctx: &Context,
 ) -> Result<Option<coincube_core::seed_crypt::DeviceSecret>, Error> {
-    // Fresh fork Cubes use PIN encryption plus the mandatory mnemonic backup.
-    // Device sealing/migration is not enabled by this Connect-only capability.
-    if ctx.fresh_fork_cube {
-        return Ok(None);
-    }
     let cube_id = ctx.seed_cube_id();
     if cube_id.is_empty() {
         return Ok(None);
@@ -1965,20 +1960,7 @@ fn pending_rescan(ctx: &Context) -> Option<crate::app::settings::PendingRescan> 
     )
 }
 
-fn validate_fork_creation_material(ctx: &Context) -> Result<(), Error> {
-    if ctx.fresh_fork_cube
-        && (!ctx.bitcoin_config.chain.is_blake2b()
-            || ctx.seed_cube_id().is_empty()
-            || ctx.restore_pin.as_ref().is_none_or(|p| p.is_empty())
-            || !ctx.fresh_fork_seed_backed_up)
-    {
-        return Err(Error::Unexpected("Choose a Cube PIN and confirm the master seed backup before creating this Bitcoin Blake2b Vault".into()));
-    }
-    Ok(())
-}
-
 fn require_installable_chain(ctx: &Context) -> Result<(), Error> {
-    validate_fork_creation_material(ctx)?;
     if let crate::chain::RuntimeSupport::Dormant { reason } =
         crate::chain::authenticated_connect_support(ctx.bitcoin_config.chain)
     {
@@ -2109,11 +2091,11 @@ async fn install_local_wallet_with_seed_mode(
     }
 
     info!("daemon checked");
-    // Every fork Cube gets a master seed file of its own in the fork chain's
-    // own `mnemonics` folder. Which seed goes in it is the one thing that
-    // differs between creating a fresh fork Cube and creating a claim target,
-    // and `claim::target_master_seed` is where that is decided — see the
-    // invariant recorded there.
+    // A claim target is a new fork Cube and needs a master seed file of its
+    // own in the fork chain's `mnemonics` folder: the source Cube's mnemonic,
+    // as decided by `claim::target_master_seed` (see the invariant recorded
+    // there). A Vault created inside an existing Cube uses that Cube's master
+    // seed file, which already exists, and the installer never mints one.
     let claim_target_seed = ctx
         .claim_source
         .as_ref()
@@ -2128,15 +2110,6 @@ async fn install_local_wallet_with_seed_mode(
             seed_device_secret(&ctx)?.as_ref(),
         )
         .map_err(claim_seed_error)?;
-    } else if ctx.fresh_fork_cube {
-        persist_cube_master_seed(
-            &signer.lock().unwrap(),
-            &ctx.coincube_directory,
-            ctx.bitcoin_config.chain,
-            seed_password(&ctx)?.as_str(),
-            ctx.seed_cube_id(),
-            seed_device_secret(&ctx)?.as_ref(),
-        )?;
     }
 
     // Step needed because of ValueAfterTable error in the toml serialize implementation.
@@ -2517,8 +2490,9 @@ impl std::fmt::Display for Error {
 }
 
 /// Select the existing Cube's authenticated master, never an SDK client's
-/// unscoped signer. Vault creation requires a Cube on every chain; import and
-/// restore flows replace their placeholder with explicitly recovered keys.
+/// unscoped signer. Vault creation never mints a master: on every chain it
+/// requires an existing Cube, whose master was created with the Cube. Import
+/// and restore flows replace their placeholder with explicitly recovered keys.
 fn installer_master(
     datadir: &CoincubeDirectory,
     chain: crate::chain::ChainId,
@@ -2563,6 +2537,8 @@ fn installer_master(
             }
             signer
         } else {
+            // Without a Cube there is no master to derive the Cube Key from.
+            // Minting one here would create a root outside any Cube.
             return Err(Error::Unexpected(
                 "Create or unlock a Cube before creating its Vault".into(),
             ));
@@ -2786,34 +2762,6 @@ mod cube_signer_tests {
     use super::*;
     use crate::app::{breez_liquid::BreezClient, settings::CubeSettings};
     use coincube_core::signer::MasterSigner;
-
-    #[test]
-    fn vault_creation_without_a_cube_is_refused_on_every_chain_and_mode() {
-        let _guard = crate::app::session::test_guard();
-        crate::app::session::close();
-        for chain in crate::chain::ChainId::ALL {
-            for developer_mode in [false, true] {
-                let root =
-                    std::env::temp_dir().join(format!("no-cube-vault-{}", uuid::Uuid::new_v4()));
-                let error = Installer::try_new_for_chain(
-                    CoincubeDirectory::new(root.clone()),
-                    chain,
-                    UserFlow::CreateWallet,
-                    false,
-                    None,
-                    None,
-                    None,
-                    developer_mode,
-                    None,
-                )
-                .err()
-                .expect("Vault creation requires an existing Cube on every chain");
-                assert!(error.to_string().contains("Create or unlock a Cube"));
-                assert!(!root.exists(), "refusal must not create files");
-                assert!(!crate::app::session::is_open());
-            }
-        }
-    }
 
     #[test]
     fn vault_keys_come_from_the_cube_master_on_every_chain_and_in_every_mode() {
@@ -3622,7 +3570,6 @@ mod pending_rescan_tests {
                 None,
             )
             .unwrap();
-            assert!(!installer.context.fresh_fork_cube);
             assert!(installer.context.in_cube_fork_vault);
             assert!(installer.context.fork_local_vault_allowed());
             assert_eq!(installer.master_signer_fingerprint(), master.fingerprint());
@@ -3721,69 +3668,48 @@ mod pending_rescan_tests {
         }
     }
 
+    /// Vault creation never mints a master. Without a Cube there is no root
+    /// to derive the Cube Key from, so every chain refuses before any key,
+    /// SDK handle or file exists — including Bitcoin Blake2b, whose Cubes are
+    /// created by Home's Cube journey like Bitcoin's.
     #[test]
-    fn internal_fork_builder_refuses_a_missing_cube_before_io() {
-        for chain in [
-            crate::chain::ChainId::BitcoinBlake2b,
-            crate::chain::ChainId::BitcoinBlake2bTestnet4,
-        ] {
-            let root = std::env::temp_dir().join(format!("fork-builder-{}", uuid::Uuid::new_v4()));
-            let error = Installer::build_for_chain(
-                CoincubeDirectory::new(root.clone()),
-                chain,
-                UserFlow::CreateWallet,
-                false,
-                None,
-                None,
-                None,
-                false,
-                None,
-            )
-            .err()
-            .expect("internal construction must also require a Cube");
-            assert!(error.to_string().contains("Create or unlock a Cube"));
+    fn vault_creation_without_a_cube_is_refused_on_every_chain_and_mode() {
+        for chain in crate::chain::ChainId::ALL {
+            let root =
+                std::env::temp_dir().join(format!("cubeless-vault-{}", uuid::Uuid::new_v4()));
+            for launched_from_app in [false, true] {
+                for developer_mode in [false, true] {
+                    let built = Installer::build_for_chain(
+                        CoincubeDirectory::new(root.clone()),
+                        chain,
+                        UserFlow::CreateWallet,
+                        launched_from_app,
+                        None,
+                        None,
+                        None,
+                        developer_mode,
+                        None,
+                    );
+                    assert!(
+                        built.is_err(),
+                        "{:?} built a Cube-less Vault installer",
+                        chain
+                    );
+                    let admitted = Installer::try_new_for_chain(
+                        CoincubeDirectory::new(root.clone()),
+                        chain,
+                        UserFlow::CreateWallet,
+                        launched_from_app,
+                        None,
+                        None,
+                        None,
+                        developer_mode,
+                        None,
+                    );
+                    assert!(admitted.is_err(), "{:?} admitted a Cube-less Vault", chain);
+                }
+            }
             assert!(!root.exists(), "refusal must not touch a datadir");
-        }
-    }
-
-    #[test]
-    fn local_chain_constructor_creates_no_files_or_sdk_handles() {
-        let _guard = crate::app::session::test_guard();
-        for chain in [
-            crate::chain::ChainId::BitcoinBlake2b,
-            crate::chain::ChainId::BitcoinBlake2bTestnet4,
-        ] {
-            let temp =
-                std::env::temp_dir().join(format!("btcb2-installer-{}", uuid::Uuid::new_v4()));
-            let master =
-                coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
-            let fingerprint = master.fingerprint(&bitcoin::secp256k1::Secp256k1::new());
-            let cube = crate::app::settings::CubeSettings::new("Fork".into(), chain)
-                .with_master_signer(fingerprint);
-            crate::app::session::store_unlocked_signer(&cube.id, fingerprint, master);
-            let result = Installer::try_new_for_chain(
-                CoincubeDirectory::new(temp.clone()),
-                chain,
-                UserFlow::CreateWallet,
-                true,
-                Some(cube),
-                None,
-                None,
-                false,
-                None,
-            );
-            let (installer, task) = result.unwrap();
-            drop(task);
-            assert!(!installer.context.fresh_fork_cube);
-            assert!(installer.context.in_cube_fork_vault);
-            assert_eq!(installer.context.bitcoin_config.chain, chain);
-            assert_eq!(installer.context.network, chain.bitcoin_network());
-            assert!(!installer.context.install_node_alongside_connect);
-            assert!(installer.context.internal_bitcoind.is_none());
-            assert!(installer.context.coincube_client.is_none());
-            assert!(installer.breez_client.is_none() && installer.spark_backend.is_none());
-            assert!(!temp.exists());
-            crate::app::session::close();
         }
     }
 
@@ -3828,23 +3754,6 @@ mod pending_rescan_tests {
             assert!(require_installable_chain(&context).is_err());
             assert!(!temp.exists());
         }
-    }
-
-    #[test]
-    fn fresh_fork_creation_refuses_missing_pin_identity_or_backup() {
-        let mut ctx = Context::new_for_chain(
-            crate::chain::ChainId::BitcoinBlake2b,
-            CoincubeDirectory::new(Default::default()),
-            None,
-            None,
-        );
-        ctx.fresh_fork_cube = true;
-        assert!(validate_fork_creation_material(&ctx).is_err());
-        ctx.cube_id = Some("synthetic-new-cube".into());
-        ctx.restore_pin = Some(zeroize::Zeroizing::new("synthetic-pin".into()));
-        assert!(validate_fork_creation_material(&ctx).is_err());
-        ctx.fresh_fork_seed_backed_up = true;
-        assert!(validate_fork_creation_material(&ctx).is_ok());
     }
 
     #[test]
@@ -4400,7 +4309,7 @@ mod chain_provider_tests {
 }
 
 #[cfg(test)]
-mod fresh_fork_seed_retry_tests {
+mod cube_master_seed_retry_tests {
     use super::*;
     use coincube_core::{
         chain::ChainId,
@@ -4426,7 +4335,7 @@ mod fresh_fork_seed_retry_tests {
             );
             let signer = Signer::generate(Network::Bitcoin).unwrap();
             let cube = uuid::Uuid::new_v4().to_string();
-            // This is the same helper the fresh-fork install calls before the
+            // This is the same helper the claim-target install calls before the
             // fallible daemon/config writes. A retry must retain its bytes.
             persist_cube_master_seed(
                 &signer,
@@ -4759,8 +4668,8 @@ mod create_vault_frame_tests {
         }
     }
 
-    /// Cube-less Bitcoin Blake2b creation is refused. In-Cube Vault restore
-    /// and descriptor import keep the installer's layout.
+    /// A Bitcoin Blake2b install that is not inside an open Cube, and the
+    /// in-Cube Vault restore, keep the installer's layout.
     #[test]
     fn only_create_vault_is_framed() {
         let root = || {
@@ -4866,34 +4775,6 @@ mod create_vault_frame_tests {
                 );
             }
         }
-    }
-
-    #[tokio::test]
-    async fn descriptor_import_keeps_the_installer_layout() {
-        let root = CoincubeDirectory::new(
-            std::env::temp_dir().join(format!("create-vault-{}", uuid::Uuid::new_v4())),
-        );
-        let fresh = Installer::try_new_for_chain(
-            root,
-            ChainId::Bitcoin,
-            UserFlow::AddWallet,
-            false,
-            None,
-            None,
-            None,
-            false,
-            None,
-        )
-        .unwrap()
-        .0;
-        assert!(!fresh.create_vault);
-        let shown = rendered_labels(fresh.view()).await;
-        assert!(
-            !shown.iter().any(|t| t == CREATE_VAULT_TITLE),
-            "{:?}",
-            shown
-        );
-        assert!(shown.iter().any(|t| t.contains(" | ")), "{:?}", shown);
     }
 }
 

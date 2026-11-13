@@ -107,7 +107,6 @@ impl Session {
             || ctx.backup.is_some()
             || ctx.restored_imported_wallet.is_some()
             || ctx.claim_source.is_some()
-            || ctx.fresh_fork_cube
             || ctx.keys.values().any(|key| key.provider_key.is_some())
             || ctx.install_node_alongside_connect
             || ctx.pending_bitcoind_config.is_some()
