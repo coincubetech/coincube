@@ -976,14 +976,21 @@ impl State for GlobalHome {
 
     /// The side menu is leaving Transfer (it's a page now, not a modal that
     /// blocked the menu): lock another Cube opened for this transfer, so
-    /// coming back asks for its PIN or passkey again. Its pick starts over in
-    /// To. A send in flight is left alone; it locks the Cube when it ends.
+    /// coming back asks for its PIN or passkey again, and its pick starts
+    /// over in To.
     fn interrupt(&mut self) {
         self.wallet_picker = None;
-        if self.is_sending {
+        if self.other_scope.is_none() && self.other_cube_selected.is_none() {
             return;
         }
-        if self.other_scope.is_none() && self.other_cube_selected.is_none() {
+        if self.is_sending {
+            // A send or PSBT preparation in flight already has the checked
+            // address and needs the Cube no more: lock it now, whatever the
+            // outcome. If it fails, Confirm finds the Cube locked and starts
+            // its unlock over; Done still says it is locked again.
+            let was_open = self.other_scope.is_some();
+            self.lock_other_cube();
+            self.other_locked_again |= was_open;
             return;
         }
         self.reset_other_cube();
@@ -4238,7 +4245,8 @@ impl GlobalHome {
     fn finish_other_cube(&mut self) {
         let was_open = self.other_scope.is_some();
         self.lock_other_cube();
-        self.other_locked_again = was_open;
+        // Leaving mid-send may have locked it already.
+        self.other_locked_again |= was_open;
     }
 
     /// The other Cube's credential was checked. Open only its selected receiving wallet.
@@ -7262,12 +7270,27 @@ mod tests {
                 assert_eq!(home.current_view.step, 1, "from step {}", step);
                 assert_eq!(home.transfer_page, TransferPage::Wallets);
             }
-            // A send in flight finishes first; it locks the Cube itself.
+            // A send or PSBT preparation in flight keeps its step, but the
+            // Cube locks now: whether it then fails or succeeds, nothing
+            // reuses the unlock.
             unlocked(&mut home, 2);
             home.is_sending = true;
             home.interrupt();
-            assert!(home.other_address.is_some());
+            assert!(home.other_address.is_none() && home.other_scope.is_none());
+            assert_eq!(home.other_phase, UnlockPhase::default());
             assert_eq!(home.current_view.step, 2);
+            assert!(
+                home.check_other_review_address(&transfer_cache()).is_err(),
+                "a failed send can't confirm against the locked Cube"
+            );
+            // The send fails: the busy flag clears, the Cube stays locked.
+            send(
+                &mut home,
+                &transfer_cache(),
+                HomeMessage::Error(TransferError::PreparationExpired),
+            );
+            assert!(!home.is_sending);
+            assert!(home.other_scope.is_none() && home.other_address.is_none());
         }
 
         #[test]
