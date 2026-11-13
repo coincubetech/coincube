@@ -31,7 +31,6 @@ pub mod view;
 pub mod wallet;
 pub mod wallets;
 
-use coincube_ui::locale::Text as CopyText;
 use std::collections::{HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -1006,6 +1005,8 @@ pub struct App {
     spark_nickname_queued: Option<Option<String>>,
     received_celebration_amount: String,
     received_celebration_context: String,
+    /// The receipt's "Into …" line for the payment shown, untranslated.
+    received_celebration_wallet: &'static str,
     received_celebration_quote: coincube_ui::component::quote_display::Quote,
     received_celebration_image: iced::widget::image::Handle,
     /// tx_ids of recent incoming payments we've already toasted for in
@@ -3901,6 +3902,7 @@ impl App {
             spark_nickname_queued: None,
             received_celebration_amount: String::new(),
             received_celebration_context: "transaction-received".to_string(),
+            received_celebration_wallet: "",
             received_celebration_quote: coincube_ui::component::quote_display::random_quote(
                 "transaction-received",
             ),
@@ -4182,6 +4184,7 @@ impl App {
                 spark_nickname_queued: None,
                 received_celebration_amount: String::new(),
                 received_celebration_context: "transaction-received".to_string(),
+                received_celebration_wallet: "",
                 received_celebration_quote: coincube_ui::component::quote_display::random_quote(
                     "transaction-received",
                 ),
@@ -9131,6 +9134,13 @@ impl App {
                 }
                 return Task::batch([task, auth_bootstrap, refresh_recovery_kit, persist_grant]);
             }
+            Message::View(view::Message::ReceivedCelebrationActivity) => {
+                return Task::done(Message::View(view::Message::DismissReceivedCelebration)).chain(
+                    Task::done(Message::View(view::Message::Menu(Menu::Cube(
+                        crate::app::menu::CubeSubMenu::Activity,
+                    )))),
+                );
+            }
             Message::View(view::Message::DismissReceivedCelebration) => {
                 self.show_received_celebration = false;
                 // Panels that render their own celebration overlay
@@ -9510,13 +9520,18 @@ impl App {
                 // claim — only `DepositsChanged` — so the celebration is fired
                 // explicitly from the auto-claim watcher in `GlobalHome`).
                 use coincube_ui::component::amount::DisplayAmount;
-                self.received_celebration_amount = bitcoin::Amount::from_sat(amount_sat)
-                    .to_formatted_string_with_unit(self.cache.bitcoin_unit);
+                self.received_celebration_amount = format!(
+                    "{} {}",
+                    bitcoin::Amount::from_sat(amount_sat)
+                        .to_formatted_string_with_unit(self.cache.bitcoin_unit),
+                    self.cache.bitcoin_unit.label()
+                );
                 self.received_celebration_quote =
                     coincube_ui::component::quote_display::random_quote(&context);
                 self.received_celebration_image =
                     coincube_ui::component::quote_display::image_handle_for_context(&context);
                 self.received_celebration_context = context.clone();
+                self.received_celebration_wallet = "Into Spark";
                 self.show_received_celebration = true;
                 // A Spark swap's bitcoin just landed. Forward the arrival to the
                 // cross-network Receive flow so it advances from "Bitcoin
@@ -9820,10 +9835,15 @@ impl App {
                                     crate::app::breez_liquid::assets::format_usdt_display(minor)
                                 )
                             } else {
-                                bitcoin::Amount::from_sat(details.amount_sat)
-                                    .to_formatted_string_with_unit(self.cache.bitcoin_unit)
+                                format!(
+                                    "{} {}",
+                                    bitcoin::Amount::from_sat(details.amount_sat)
+                                        .to_formatted_string_with_unit(self.cache.bitcoin_unit),
+                                    self.cache.bitcoin_unit.label()
+                                )
                             };
                             self.received_celebration_context = context.to_string();
+                            self.received_celebration_wallet = "Into Liquid";
                             self.received_celebration_quote =
                                 coincube_ui::component::quote_display::random_quote(context);
                             self.received_celebration_image =
@@ -10715,14 +10735,21 @@ impl App {
         } else {
             &self.received_celebration_amount
         };
-        coincube_ui::component::received_celebration_page(
-            &self.received_celebration_context,
+        use coincube_ui::component::payment_result::{payment_result, Outcome};
+        let mut page = payment_result(
+            Outcome::Received,
             displayed_amount,
+            &self.received_celebration_context,
             &self.received_celebration_quote,
             &self.received_celebration_image,
-            CopyText::HasArrived.get(),
             view::Message::DismissReceivedCelebration,
         )
+        .voice(coincube_ui::worldview_copy::VoiceLine::PaymentReceived.get())
+        .on_activity(view::Message::ReceivedCelebrationActivity);
+        if !self.received_celebration_wallet.is_empty() {
+            page = page.detail(coincube_ui::locale::copy(self.received_celebration_wallet));
+        }
+        page.into()
     }
 
     /// Starts the expiry clock of each toast that has just come on screen and
@@ -16670,7 +16697,9 @@ mod received_celebration_privacy_tests {
             "dark",
             coincube_ui::theme::Theme::dark(),
         );
-        assert!(shown.contains("12,345 SATS"));
+        // The receipt sets the unit beside the figure as its own text.
+        assert!(shown.contains("+12,345"));
+        assert!(shown.contains("SATS"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

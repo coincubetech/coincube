@@ -338,9 +338,13 @@ impl State for VaultOverview {
                             .is_none_or(|prev| prev.outpoint != newest.outpoint);
                         if is_incoming && is_new && !self.payments.list.is_empty() {
                             use coincube_ui::component::amount::DisplayAmount;
-                            self.received_amount_display = newest
-                                .amount
-                                .to_formatted_string_with_unit(cache.bitcoin_unit);
+                            self.received_amount_display = format!(
+                                "{} {}",
+                                newest
+                                    .amount
+                                    .to_formatted_string_with_unit(cache.bitcoin_unit),
+                                cache.bitcoin_unit.label()
+                            );
                             self.received_quote =
                                 coincube_ui::component::quote_display::random_quote(
                                     "bitcoin-receive",
@@ -1046,7 +1050,10 @@ mod received_privacy_tests {
                 theme::Theme::dark(),
             );
             if privacy == Some(BalancePrivacy::Shown) {
-                assert!(mounted.contains(amount));
+                // The receipt sets the unit beside the figure as its own text.
+                let (figure, unit) = amount.rsplit_once(' ').unwrap_or((amount, ""));
+                assert!(mounted.contains(figure));
+                assert!(mounted.contains(unit));
             } else {
                 assert!(mounted.contains("••••••"));
                 assert!(!mounted.contains(amount));

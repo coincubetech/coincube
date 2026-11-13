@@ -3265,5 +3265,14 @@
   "Share this address to receive USDB from another Spark wallet.": "Comparte esta dirección para recibir USDB de otra cartera de Spark.",
   "USDB sent to this Spark address arrives as USDB. Ask the payer to send USDB on Spark.": "Los USDB enviados a esta dirección Spark llegan como USDB. Pide al pagador que envíe USDB en Spark.",
   "Kept as USDB": "Se mantiene en USDB",
-  "in Spark": "en Spark"
+  "in Spark": "en Spark",
+  "Total": "Total",
+  "View in Activity": "Ver en Actividad",
+  "Enter or Esc closes this": "Enter o Esc lo cierra",
+  "Into Spark": "En Spark",
+  "Into Liquid": "En Liquid",
+  "Into Vault": "En Vault",
+  "Paid from Liquid": "Pagado desde Liquid",
+  "The coins return to this wallet once the cancellation confirms.": "Las monedas vuelven a esta cartera cuando se confirme la cancelación.",
+  "You can close this. Activity updates when it confirms.": "Puedes cerrar esto. Actividad se actualiza cuando se confirme."
 }
