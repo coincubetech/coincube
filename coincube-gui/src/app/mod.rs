@@ -5324,6 +5324,16 @@ impl App {
         if let Some(panel) = self.panels.current_mut() {
             panel.interrupt();
         }
+        if matches!(
+            menu,
+            Menu::Spark(menu::SparkSubMenu::Overview) | Menu::Vault(menu::VaultSubMenu::Overview)
+        ) {
+            // The page's Transfer needs to know whether another Cube can
+            // receive: one catalog read per visit, not per frame.
+            self.panels
+                .global_home
+                .refresh_other_cube_receivers(&self.cache);
+        }
 
         match &menu {
             // Cube → Settings → {General/About/Stats}: auto-dispatch the
@@ -9445,6 +9455,29 @@ impl App {
                     },
                 ));
             }
+            Message::View(view::Message::Home(view::HomeMessage::TransferFromWallet(wallet))) => {
+                // A wallet page's Transfer: the flow lives on the Overview
+                // route, so switch there (the side menu keeps the wallet
+                // selected), then open it from this wallet. A press that
+                // raced the button's state changing does nothing.
+                if self
+                    .panels
+                    .global_home
+                    .wallet_transfer_entry(&self.cache, wallet)
+                    != view::global_home::WalletTransferEntry::Ready
+                {
+                    return Task::none();
+                }
+                let switch = self.update(Message::View(view::Message::Menu(Menu::Cube(
+                    menu::CubeSubMenu::Overview,
+                ))));
+                let start = self.panels.global_home.start_transfer_from(
+                    self.daemon.clone(),
+                    &self.cache,
+                    wallet,
+                );
+                return Task::batch([switch, start]);
+            }
             msg @ Message::View(view::Message::Home(_)) => {
                 return self
                     .panels
@@ -10900,10 +10933,15 @@ impl App {
                 &self.panels.connect.cube,
             );
             let (activity, cache) = (&self.panels.activity, &self.cache);
+            let transfer = self
+                .panels
+                .global_home
+                .wallet_transfer_entry(cache, view::global_home::WalletKind::Spark);
             self.panels.spark_overview.view_with_lightning_share(
                 &self.panels.current,
                 &self.cache,
                 lightning_address,
+                transfer,
                 move || {
                     view::activity::recent_activity(
                         activity,
@@ -10931,9 +10969,14 @@ impl App {
             // The Vault page's "Recent activity" and its detail pane are
             // Activity's rows and pane, filtered to the Vault.
             let (activity, cache) = (&self.panels.activity, &self.cache);
+            let transfer = self
+                .panels
+                .global_home
+                .wallet_transfer_entry(cache, view::global_home::WalletKind::Vault);
             panel.view_with_recent_activity(
                 &self.panels.current,
                 cache,
+                transfer,
                 move |unknown_history| {
                     view::activity::recent_activity(
                         activity,
