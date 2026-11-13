@@ -142,9 +142,9 @@ def offline_protocol(config, tmp_path, monkeypatch, crash_retirement=False):
     def worker(executable,request,directory,access_token=None):
         action=request['action'];cfg=request['config'];calls.append((cfg['chain'],action))
         case=Path(cfg['case_root']);state_path=case/'state.json'
-        pid={'admit_create':9,'preflight':10,'bind_auth':11,'create_export':100,'wipe_original':150,'restore':200,'reopen_sign':300,'retire_remote':400}[action]
+        pid={'refresh_auth':12,'admit_create':9,'preflight':10,'bind_auth':11,'create_export':100,'wipe_original':150,'restore':200,'reopen_sign':300,'retire_remote':400}[action]
         record={'pid':pid,'start_id':str(pid),'exited':True,'returncode':0}
-        if action in ('admit_create','preflight','bind_auth'):return record
+        if action in ('admit_create','refresh_auth','preflight','bind_auth'):return record
         if action=='create_export':
             case.mkdir(mode=0o700);(case/'original').mkdir(mode=0o700)
             psbt,identity=fixture(cfg['chain'])
@@ -179,7 +179,7 @@ def test_offline_orchestration_orders_both_chains_and_retirement_without_gui_cla
         assert list(result['chains'])==list(public.CHAINS)
         assert result['gui'] is result['funded'] is result['broadcast'] is False
         assert all(result['chains'][c]['verified_key_count']==2 for c in public.CHAINS)
-        assert calls==[(c,a) for c in public.CHAINS for a in ('admit_create','preflight','bind_auth',*native.ACTIONS,'retire_remote')]
+        assert calls==[(c,a) for c in public.CHAINS for a in ('admit_create','preflight','bind_auth','create_export','refresh_auth','wipe_original','refresh_auth','restore','refresh_auth','reopen_sign','refresh_auth','retire_remote')]
         before=list(calls);suite.execute({'tokens':{'access_token':'unit-not-a-credential'}},1)
         assert calls==before  # Same consumer resumes retained proof, not a new run.
     finally:suite.close()
@@ -449,6 +449,41 @@ def test_available_blake2b_creation_needs_no_ordinary_testnet4_cleanup_context(c
             pytest.fail('B2 available capacity must not construct ordinary-T4 cleanup admission')
         monkeypatch.setattr(native,'NativeCleanupContext',forbidden)
         suite.execute(account,1,cleanup_runner=object())
-        assert calls == [(chain,a) for a in ('admit_create','preflight','bind_auth',*native.ACTIONS,'retire_remote')]
+        assert calls == [(chain,a) for a in ('admit_create','preflight','bind_auth','create_export','refresh_auth','wipe_original','refresh_auth','restore','refresh_auth','reopen_sign','refresh_auth','retire_remote')]
     finally:
         suite.close()
+
+
+def test_delayed_retirement_refreshes_current_token_without_resetting_completed_actions(config,tmp_path,monkeypatch):
+    calls=offline_protocol(config,tmp_path,monkeypatch,crash_retirement=True)
+    original=native.process;tokens=[]
+    def worker(executable,request,directory,access_token=None):
+        if request['action']=='refresh_auth':tokens.append(access_token)
+        return original(executable,request,directory,access_token=access_token)
+    monkeypatch.setattr(native,'process',worker)
+    suite=native.NativeRecovery(config,tmp_path/'run',{'consumer':'offline-only-test'})
+    try:
+        with pytest.raises(Blocked):suite.execute({'tokens':{'access_token':'old-unit-token'}},1)
+        saved=deepcopy(suite.journal.data['artifacts']['testnet4']['bind_auth'])
+        before=list(calls);tokens.clear()
+        suite.execute({'tokens':{'access_token':'current-unit-token'}},1)
+        assert tokens and all(token=='current-unit-token' for token in tokens)
+        assert suite.journal.data['artifacts']['testnet4']['bind_auth']==saved
+        assert ('testnet4','create_export') not in calls[len(before):]
+        assert ('testnet4','refresh_auth') in calls[len(before):]
+    finally:suite.close()
+
+
+def test_failed_child_identity_is_durable_before_wait_and_never_contains_token(tmp_path):
+    import os
+    if os.name!='posix':pytest.skip('Native process supervision is POSIX-only')
+    executable=tmp_path/'offline-child'
+    executable.write_text('#!/usr/bin/env python3\nimport sys,json,pathlib\nroot=pathlib.Path('+repr(str(tmp_path))+')\nrows=list((root/"native-processes").glob("*.json"))\nassert rows and json.loads(rows[0].read_text())["payload_sent"]\njson.load(sys.stdin)\nprint(json.dumps({"ok":False,"code":"native_unit_failure"}))\nsys.exit(2)\n')
+    executable.chmod(0o700)
+    with pytest.raises(native.NativeActionBlocked):
+        native.process(executable,{'action':'refresh_auth','config':{'unit':'offline-only'}},tmp_path,access_token='unit-token-must-not-persist')
+    rows=list((tmp_path/'native-processes').glob('*.json'));assert len(rows)==1
+    raw=rows[0].read_text();identity=json.loads(raw)
+    assert identity['pid']>0 and identity['start_id'] and identity['exited'] is True and identity['returncode']==2
+    assert identity['code']=='native_unit_failure' and 'unit-token-must-not-persist' not in raw
+    assert rows[0].stat().st_mode&0o077==0

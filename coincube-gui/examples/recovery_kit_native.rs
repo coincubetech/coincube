@@ -87,6 +87,35 @@ mod native {
             self.access_token.zeroize();
         }
     }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct OrphanInput {
+        config: Config,
+        old_directory: PathBuf,
+        old_checkpoint_sha256: String,
+        old_state_sha256: String,
+        access_token: String,
+    }
+    impl Drop for OrphanInput {
+        fn drop(&mut self) {
+            use zeroize::Zeroize;
+            self.access_token.zeroize();
+        }
+    }
+    #[derive(Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct OrphanState {
+        config: Config,
+        origin_uuid: uuid::Uuid,
+        remote_id: u64,
+        kit_sha256: String,
+        old_checkpoint_sha256: String,
+        old_state_sha256: String,
+        old_files: Vec<(PathBuf, String)>,
+        old_dp: Vec<(String, String)>,
+        phase: String,
+        oracle: Option<recovery_native::UnfundedProof>,
+    }
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct State {
@@ -98,6 +127,8 @@ mod native {
         identity: Option<Identity>,
         kit: Option<Kit>,
         original_manifest: Option<String>,
+        #[serde(default)]
+        original_files: Option<Vec<(PathBuf, String)>>,
         wipe_manifest: Option<String>,
         wipe_oracle: Option<recovery_native::UnfundedProof>,
         retirement_oracle: Option<recovery_native::UnfundedProof>,
@@ -305,7 +336,7 @@ mod native {
             ),
         }
     }
-    fn manifest(path: &Path) -> Result<String> {
+    fn manifest_files(path: &Path) -> Result<Vec<(PathBuf, String)>> {
         fn walk(root: &Path, path: &Path, rows: &mut Vec<(PathBuf, String)>) -> Result<()> {
             let mut entries = fs::read_dir(path)
                 .map_err(|_| "native_profile_inventory")?
@@ -333,12 +364,20 @@ mod native {
         let mut rows = Vec::new();
         walk(path, path, &mut rows)?;
         check(!rows.is_empty(), "native_profile_empty")?;
+        Ok(rows)
+    }
+    fn files_digest(rows: &[(PathBuf, String)]) -> Result<String> {
         Ok(hash(
-            &serde_json::to_vec(&rows).map_err(|_| "native_inventory_encode")?,
+            &serde_json::to_vec(rows).map_err(|_| "native_inventory_encode")?,
         ))
     }
+    fn manifest(path: &Path) -> Result<String> {
+        files_digest(&manifest_files(path)?)
+    }
     fn binding(state: &State) -> Result<Vec<u8>> {
-        let bytes = serde_json::to_vec(&(
+        // Preserve the actual215 ABI tuple exactly. Future per-file inventories
+        // are directly sealed as well as bound by the aggregate digest.
+        let common = (
             &state.config,
             &state.identity,
             &state.kit,
@@ -346,7 +385,12 @@ mod native {
             &state.original_factor,
             &state.canary_uuid,
             &state.canary,
-        ))
+        );
+        let bytes = if state.original_files.is_some() {
+            serde_json::to_vec(&(common, &state.original_files))
+        } else {
+            serde_json::to_vec(&common)
+        }
         .map_err(|_| "native_binding_encode")?;
         Ok(hash(&bytes).into_bytes())
     }
@@ -482,13 +526,92 @@ mod native {
             "native_retirement_approval",
         )
     }
+    async fn remote_guard(
+        http: &reqwest::Client,
+        jwt: &str,
+        client: &CoincubeClient,
+        identity: &Identity,
+    ) -> Result<()> {
+        use coincube_gui::services::connect::grpc::{
+            self, interceptor::AuthInterceptor, session::GrpcSessionClient,
+        };
+        let base = format!("/connect/cubes/{}", identity.remote_cube_id);
+        let cube = raw(http, jwt, &base, false)
+            .await?
+            .ok_or("native_retirement_schema")?;
+        let keys = raw(http, jwt, &format!("{base}/keys"), false)
+            .await?
+            .ok_or("native_retirement_schema")?;
+        let approvals = raw(http, jwt, "/approvals", false)
+            .await?
+            .ok_or("native_retirement_schema")?;
+        no_references(&cube, &keys, &approvals, identity)?;
+        check(
+            raw(http, jwt, &format!("{base}/vault"), true)
+                .await?
+                .is_none(),
+            "native_retirement_vault",
+        )?;
+        let channel = grpc::create_channel("https://grpc.coincube.io:443")
+            .await
+            .map_err(|_| "native_retirement_pending_blocked")?;
+        let mut pending = GrpcSessionClient::new(channel, AuthInterceptor::new(jwt));
+        check(
+            pending
+                .list_pending_sessions()
+                .await
+                .map_err(|_| "native_retirement_pending_blocked")?
+                .sessions
+                .is_empty()
+                && pending
+                    .list_pending_decrypt_requests()
+                    .await
+                    .map_err(|_| "native_retirement_pending_blocked")?
+                    .requests
+                    .is_empty(),
+            "native_retirement_pending",
+        )?;
+        // Re-read exact sharing/key inventory immediately before the ONE DELETE.
+        let fresh = raw(http, jwt, &base, false)
+            .await?
+            .ok_or("native_retirement_schema")?;
+        let fresh_keys = raw(http, jwt, &format!("{base}/keys"), false)
+            .await?
+            .ok_or("native_retirement_schema")?;
+        let fresh_approvals = raw(http, jwt, "/approvals", false)
+            .await?
+            .ok_or("native_retirement_schema")?;
+        no_references(&fresh, &fresh_keys, &fresh_approvals, identity)?;
+        check(
+            client
+                .get_user()
+                .await
+                .map_err(|_| "native_auth_blocked")?
+                .id
+                == identity.owner_id,
+            "native_account_changed",
+        )?;
+        check(
+            pending
+                .list_pending_sessions()
+                .await
+                .map_err(|_| "native_retirement_pending_blocked")?
+                .sessions
+                .is_empty()
+                && pending
+                    .list_pending_decrypt_requests()
+                    .await
+                    .map_err(|_| "native_retirement_pending_blocked")?
+                    .requests
+                    .is_empty(),
+            "native_retirement_pending",
+        )?;
+        Ok(())
+    }
     fn may_reconcile_absence(pending: Option<&str>, delete_started: bool) -> bool {
         pending == Some("retire_remote") && delete_started
     }
     async fn retire(c: &Config, state: &mut State, root: &Path, restored: &Path) -> Result<()> {
-        use coincube_gui::services::connect::grpc::{
-            self, interceptor::AuthInterceptor, session::GrpcSessionClient,
-        };
         let identity = state.identity.clone().ok_or("native_identity_missing")?;
         let (client, jwt) = auth(c)?;
         check(
@@ -509,7 +632,7 @@ mod native {
         let kit = state.kit.clone().ok_or("native_kit_missing")?;
         let pw = string(load(c, "recovery_password")?)?;
         recovery_native::validate_kit(&kit.api(), &pw, &identity)?;
-        let Some(cube) = raw(&http, &jwt, &base, true).await? else {
+        let Some(_cube) = raw(&http, &jwt, &base, true).await? else {
             // A prior acknowledged intent may have lost the DELETE response.
             check(
                 may_reconcile_absence(state.pending.as_deref(), state.remote_delete_started),
@@ -533,76 +656,11 @@ mod native {
                 &CoincubeDirectory::new(restored.to_owned()),
                 &identity,
                 client.clone(),
+                &c.case_root.join("oracle-retirement.jsonl"),
             )
             .await?,
         );
-        let keys = raw(&http, &jwt, &format!("{base}/keys"), false)
-            .await?
-            .ok_or("native_retirement_schema")?;
-        let approvals = raw(&http, &jwt, "/approvals", false)
-            .await?
-            .ok_or("native_retirement_schema")?;
-        no_references(&cube, &keys, &approvals, &identity)?;
-        check(
-            raw(&http, &jwt, &format!("{base}/vault"), true)
-                .await?
-                .is_none(),
-            "native_retirement_vault",
-        )?;
-        let channel = grpc::create_channel("https://grpc.coincube.io:443")
-            .await
-            .map_err(|_| "native_retirement_pending_blocked")?;
-        let mut pending = GrpcSessionClient::new(channel, AuthInterceptor::new(&jwt));
-        check(
-            pending
-                .list_pending_sessions()
-                .await
-                .map_err(|_| "native_retirement_pending_blocked")?
-                .sessions
-                .is_empty()
-                && pending
-                    .list_pending_decrypt_requests()
-                    .await
-                    .map_err(|_| "native_retirement_pending_blocked")?
-                    .requests
-                    .is_empty(),
-            "native_retirement_pending",
-        )?;
-        // Re-read exact sharing/key inventory immediately before the ONE DELETE.
-        let fresh = raw(&http, &jwt, &base, false)
-            .await?
-            .ok_or("native_retirement_schema")?;
-        let fresh_keys = raw(&http, &jwt, &format!("{base}/keys"), false)
-            .await?
-            .ok_or("native_retirement_schema")?;
-        let fresh_approvals = raw(&http, &jwt, "/approvals", false)
-            .await?
-            .ok_or("native_retirement_schema")?;
-        no_references(&fresh, &fresh_keys, &fresh_approvals, &identity)?;
-        check(
-            client
-                .get_user()
-                .await
-                .map_err(|_| "native_auth_blocked")?
-                .id
-                == c.owner_id,
-            "native_account_changed",
-        )?;
-        check(
-            pending
-                .list_pending_sessions()
-                .await
-                .map_err(|_| "native_retirement_pending_blocked")?
-                .sessions
-                .is_empty()
-                && pending
-                    .list_pending_decrypt_requests()
-                    .await
-                    .map_err(|_| "native_retirement_pending_blocked")?
-                    .requests
-                    .is_empty(),
-            "native_retirement_pending",
-        )?;
+        remote_guard(&http, &jwt, &client, &identity).await?;
         state.remote_delete_started = true;
         save(root, state)?;
         client
@@ -800,6 +858,7 @@ mod native {
                 && state.kit.is_none()
                 && state.restorer.is_none()
                 && state.original_manifest.is_none()
+                && state.original_files.is_none()
                 && state.wipe_manifest.is_none()
                 && state.wipe_oracle.is_none()
                 && state.retirement_oracle.is_none()
@@ -934,6 +993,429 @@ mod native {
         Ok(())
     }
 
+    const ORPHAN_SOURCE: &str = "21503b253ebc29285da651c2b43dd7c3b5a8fbb1";
+    const ORPHAN_HELPER: &str = "0f039ee515d7918b288f916872272a26224bded02e89388beaf88f7a16fefaff";
+
+    fn orphan_save(root: &Path, state: &OrphanState) -> Result<()> {
+        write(
+            root,
+            "orphan.next",
+            &serde_json::to_vec(state).map_err(|_| "native_orphan_state")?,
+        )?;
+        fs::rename(root.join("orphan.next"), root.join("orphan.json"))
+            .map_err(|_| "native_orphan_state")?;
+        fs::File::open(root)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| "native_orphan_state")
+    }
+    fn orphan_origin_valid(state: &State, case: &Path, id: uuid::Uuid, owner: u32) -> Result<()> {
+        let c = &state.config;
+        check(
+            c.version == 1
+                && c.case_root == case
+                && c.run_id == id
+                && c.chain == ChainId::Testnet4
+                && c.owner_id == owner
+                && c.source_head == ORPHAN_SOURCE
+                && c.auth_account == account(c, "auth"),
+            "native_orphan_origin",
+        )?;
+        let identity = state.identity.as_ref().ok_or("native_identity_missing")?;
+        validate_identity(c, identity, state.kit.as_ref().ok_or("native_kit_missing")?)?;
+        check(
+            state.stage == "exported"
+                && state.pending.as_deref() == Some("wipe_original")
+                && state.restorer.is_none()
+                && state.restored_factor.is_none()
+                && state.wipe_manifest.is_none()
+                && state.wipe_oracle.is_none()
+                && state.retirement_oracle.is_none()
+                && state.proof_sha256.is_none()
+                && !state.remote_delete_started
+                && state.original_manifest.is_some()
+                && state.original_files.is_none()
+                && state.original_factor.is_some()
+                && state.canary_uuid.is_some()
+                && state.canary.is_some(),
+            "native_orphan_phase",
+        )
+    }
+    fn orphan_dp(state: &State) -> Result<Vec<(String, String)>> {
+        let c = &state.config;
+        check(
+            load(c, "provenance")?.as_slice() == binding(state)?.as_slice(),
+            "native_provenance_changed",
+        )?;
+        let factor =
+            device_secret::load(&c.run_id.to_string()).map_err(|_| "native_original_factor")?;
+        check(
+            Some(hash(factor.as_ref())) == state.original_factor,
+            "native_original_factor_changed",
+        )?;
+        check(
+            device_secret::integration::load(&account(c, "quarantined_factor"))
+                .map_err(|_| "native_keychain_blocked")?
+                .is_none(),
+            "native_orphan_quarantine_exists",
+        )?;
+        let mut values = vec![("original_factor".into(), hash(factor.as_ref()))];
+        for role in [
+            "original_pin",
+            "recovery_password",
+            "restored_pin",
+            "canary",
+            "provenance",
+            "auth",
+        ] {
+            // Do not persist a brute-forceable digest of a four-digit PIN.
+            // The retained high-entropy original device factor keys this audit.
+            use coincube_core::miniscript::bitcoin::hashes::{
+                hmac::{Hmac, HmacEngine},
+                HashEngine,
+            };
+            let mut engine = HmacEngine::<sha256::Hash>::new(factor.as_ref());
+            engine.input(role.as_bytes());
+            engine.input(&load(c, role)?);
+            values.push((
+                role.into(),
+                Hmac::<sha256::Hash>::from_engine(engine).to_string(),
+            ));
+        }
+        check(
+            Some(hash(&load(c, "canary")?)) == state.canary,
+            "native_canary_changed",
+        )?;
+        let canary = device_secret::load(
+            &state
+                .canary_uuid
+                .ok_or("native_canary_missing")?
+                .to_string(),
+        )
+        .map_err(|_| "native_canary_missing")?;
+        check(
+            Some(hash(canary.as_ref())) == state.canary,
+            "native_canary_changed",
+        )?;
+        values.push(("production_canary".into(), hash(canary.as_ref())));
+        Ok(values)
+    }
+    fn orphan_snapshot_matches(
+        files: &[(PathBuf, String)],
+        dp: &[(String, String)],
+        state: &OrphanState,
+    ) -> bool {
+        files == state.old_files && dp == state.old_dp
+    }
+    fn orphan_local_unchanged(old: &Path, state: &State, current: &OrphanState) -> Result<()> {
+        check(
+            orphan_snapshot_matches(&manifest_files(old)?, &orphan_dp(state)?, current),
+            "native_orphan_local_changed",
+        )
+    }
+    fn orphan_claim_key(state: &OrphanState, intent: bool) -> String {
+        hash(
+            format!(
+                "orphan-remote-215-v1:{}:{}:{}:{}:{}",
+                state.remote_id,
+                state.origin_uuid,
+                ORPHAN_SOURCE,
+                state.kit_sha256,
+                if intent { "delete" } else { "consumer" }
+            )
+            .as_bytes(),
+        )
+    }
+    fn orphan_claim_value(state: &OrphanState, intent: bool) -> Result<String> {
+        if intent {
+            Ok(hash(
+                &serde_json::to_vec(state).map_err(|_| "native_orphan_claim")?,
+            ))
+        } else {
+            Ok(hash(
+                &serde_json::to_vec(&state.config).map_err(|_| "native_orphan_claim")?,
+            ))
+        }
+    }
+    fn orphan_claim_matches(existing: Option<&[u8]>, value: &str) -> bool {
+        existing.is_some_and(|bytes| bytes == value.as_bytes())
+    }
+    fn orphan_claim(state: &OrphanState, intent: bool) -> Result<()> {
+        let key = orphan_claim_key(state, intent);
+        let value = orphan_claim_value(state, intent)?;
+        let _ = device_secret::integration::add(&key, value.as_bytes())
+            .map_err(|_| "native_orphan_claim")?;
+        device_secret::integration::verify(&key).map_err(|_| "native_orphan_claim")?;
+        let existing = device_secret::integration::load(&key).map_err(|_| "native_orphan_claim")?;
+        check(
+            orphan_claim_matches(existing.as_ref().map(|bytes| bytes.as_slice()), &value),
+            "native_orphan_claim_conflict",
+        )
+    }
+    fn orphan_verify_claim(state: &OrphanState, intent: bool) -> Result<()> {
+        let key = orphan_claim_key(state, intent);
+        let value = orphan_claim_value(state, intent)?;
+        device_secret::integration::verify(&key).map_err(|_| "native_orphan_claim_missing")?;
+        let existing =
+            device_secret::integration::load(&key).map_err(|_| "native_orphan_claim_missing")?;
+        check(
+            orphan_claim_matches(existing.as_ref().map(|bytes| bytes.as_slice()), &value),
+            "native_orphan_claim_missing",
+        )
+    }
+    async fn retire_orphan_215(input: &OrphanInput) -> Result<()> {
+        let c = &input.config;
+        preflight(c)?; // Always the current compiled source, never origin compatibility.
+        check(c.chain == ChainId::Testnet4, "native_orphan_chain")?;
+        let mut client = CoincubeClient::new();
+        client.set_token(&input.access_token);
+        check(
+            client
+                .get_user()
+                .await
+                .map_err(|_| "native_auth_blocked")?
+                .id
+                == c.owner_id,
+            "native_account_changed",
+        )?;
+        let old = &input.old_directory;
+        check(
+            old.is_absolute()
+                && old.canonicalize().map_err(|_| "native_orphan_directory")? == *old
+                && old != c.case_root.parent().ok_or("native_orphan_directory")?,
+            "native_orphan_directory",
+        )?;
+        check(
+            !c.case_root.starts_with(old) && !old.starts_with(&c.case_root),
+            "native_orphan_directory",
+        )?;
+        let parent = c.case_root.parent().ok_or("native_orphan_directory")?;
+        check(
+            parent
+                .canonicalize()
+                .map_err(|_| "native_orphan_directory")?
+                == parent,
+            "native_orphan_directory",
+        )?;
+        let parent_metadata = fs::metadata(parent).map_err(|_| "native_orphan_directory")?;
+        check(
+            parent_metadata.is_dir()
+                && parent_metadata.uid() == unsafe { libc::geteuid() }
+                && parent_metadata.permissions().mode() & 0o077 == 0,
+            "native_orphan_directory",
+        )?;
+        let metadata = fs::symlink_metadata(old).map_err(|_| "native_orphan_directory")?;
+        check(
+            metadata.is_dir()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.permissions().mode() & 0o077 == 0,
+            "native_orphan_directory",
+        )?;
+        let suite_lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(old.join("run.lock"))
+            .map_err(|_| "native_orphan_lock")?;
+        check(
+            unsafe { libc::flock(suite_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+            "native_orphan_busy",
+        )?;
+        let id = legacy_case_id(old, "testnet4");
+        let case = old.join(id.to_string());
+        check(
+            case.canonicalize().map_err(|_| "native_orphan_directory")? == case,
+            "native_orphan_directory",
+        )?;
+        let case_lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(case.join("run.lock"))
+            .map_err(|_| "native_orphan_lock")?;
+        check(
+            unsafe { libc::flock(case_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+            "native_orphan_busy",
+        )?;
+        let cp_raw = private(&old.join("checkpoint.json"))?;
+        let state_raw = private(&case.join("state.json"))?;
+        check(
+            hash(&cp_raw) == input.old_checkpoint_sha256
+                && hash(&state_raw) == input.old_state_sha256,
+            "native_orphan_snapshot",
+        )?;
+        let cp: serde_json::Value =
+            serde_json::from_slice(&cp_raw).map_err(|_| "native_orphan_snapshot")?;
+        check(
+            cp.pointer("/artifacts/build/source/head")
+                .and_then(|v| v.as_str())
+                == Some(ORPHAN_SOURCE)
+                && cp
+                    .pointer("/artifacts/build/sha256")
+                    .and_then(|v| v.as_str())
+                    == Some(ORPHAN_HELPER),
+            "native_orphan_source",
+        )?;
+        let origin: State =
+            serde_json::from_slice(&state_raw).map_err(|_| "native_orphan_snapshot")?;
+        orphan_origin_valid(&origin, &case, id, c.owner_id)?;
+        process_absent(&origin.creator)?;
+        for forbidden in ["quarantined-original", "restored", "state.next"] {
+            check(absent(&case.join(forbidden))?, "native_orphan_shape")?;
+        }
+        check(case.join("original").is_dir(), "native_orphan_shape")?;
+        let identity = origin.identity.as_ref().ok_or("native_identity_missing")?;
+        let kit = origin.kit.as_ref().ok_or("native_kit_missing")?;
+        let old_dp = orphan_dp(&origin)?;
+        let pw = string(load(&origin.config, "recovery_password")?)?;
+        recovery_native::validate_kit(&kit.api(), &pw, identity)?;
+        let old_files = manifest_files(old)?; // Current snapshot, NOT a claimed historical baseline.
+        let root = &c.case_root;
+        if absent(root)? {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(root)
+                .map_err(|_| "native_orphan_work")?;
+        }
+        let meta = fs::symlink_metadata(root).map_err(|_| "native_orphan_work")?;
+        check(
+            meta.is_dir()
+                && !meta.file_type().is_symlink()
+                && meta.uid() == unsafe { libc::geteuid() }
+                && meta.permissions().mode() & 0o077 == 0,
+            "native_orphan_work",
+        )?;
+        let work_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(root.join("run.lock"))
+            .map_err(|_| "native_orphan_lock")?;
+        check(
+            unsafe { libc::flock(work_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+            "native_orphan_busy",
+        )?;
+        // Only a NEW scope's auth item may change; every old item is preserved.
+        if device_secret::integration::load(&c.auth_account)
+            .map_err(|_| "native_auth_protection")?
+            .is_some()
+        {
+            device_secret::integration::update(&c.auth_account, input.access_token.as_bytes())
+                .map_err(|_| "native_auth_refresh")?;
+        } else {
+            put(c, "auth", input.access_token.as_bytes())?;
+        }
+        let mut state = if root.join("orphan.json").exists() {
+            serde_json::from_slice::<OrphanState>(&private(&root.join("orphan.json"))?)
+                .map_err(|_| "native_orphan_state")?
+        } else {
+            OrphanState {
+                config: c.clone(),
+                origin_uuid: id,
+                remote_id: identity.remote_cube_id,
+                kit_sha256: hash(&serde_json::to_vec(kit).map_err(|_| "native_orphan_state")?),
+                old_checkpoint_sha256: hash(&cp_raw),
+                old_state_sha256: hash(&state_raw),
+                old_files,
+                old_dp,
+                phase: "new".into(),
+                oracle: None,
+            }
+        };
+        check(
+            state.config == *c
+                && state.origin_uuid == id
+                && state.remote_id == identity.remote_cube_id
+                && state.old_checkpoint_sha256 == hash(&cp_raw)
+                && state.old_state_sha256 == hash(&state_raw)
+                && state.kit_sha256
+                    == hash(&serde_json::to_vec(kit).map_err(|_| "native_orphan_state")?),
+            "native_orphan_state",
+        )?;
+        orphan_local_unchanged(old, &origin, &state)?;
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|_| "native_retirement_http")?;
+        let base = format!("/connect/cubes/{}", identity.remote_cube_id);
+        let cube = raw(&http, &input.access_token, &base, true).await?;
+        if cube.is_none() {
+            check(
+                state.phase == "delete_started" || state.phase == "complete",
+                "native_retirement_unexpected_absence",
+            )?;
+            // The sealed intent is identical to the durable delete_started state.
+            let mut intent_state = state;
+            intent_state.phase = "delete_started".into();
+            orphan_verify_claim(&intent_state, false)?;
+            orphan_verify_claim(&intent_state, true)?;
+            intent_state.phase = "complete".into();
+            orphan_local_unchanged(old, &origin, &intent_state)?;
+            orphan_save(root, &intent_state)?;
+            return Ok(());
+        }
+        check(
+            state.phase == "new" || state.phase == "delete_started",
+            "native_orphan_phase",
+        )?;
+        let server = client
+            .download_recovery_kit(identity.remote_cube_id, &pw)
+            .await
+            .map_err(|_| "native_retirement_kit_blocked")?;
+        check(
+            server.id == kit.id
+                && server.cube_id == kit.cube_id
+                && server.encrypted_cube_seed == kit.encrypted_seed
+                && server.encrypted_wallet_descriptor == kit.encrypted_descriptor,
+            "native_retirement_kit_changed",
+        )?;
+        recovery_native::validate_kit(&server, &pw, identity)?;
+        remote_guard(&http, &input.access_token, &client, identity).await?;
+        let oracle = root.join(format!("oracle-{}", uuid::Uuid::new_v4()));
+        let fresh_oracle = recovery_native::descriptor_only_unfunded(
+            &oracle,
+            identity,
+            &server,
+            &pw,
+            client.clone(),
+            &input.access_token,
+            &root.join("oracle.jsonl"),
+        )
+        .await?;
+        if state.phase == "new" {
+            state.oracle = Some(fresh_oracle);
+        }
+
+        orphan_local_unchanged(old, &origin, &state)?;
+        remote_guard(&http, &input.access_token, &client, identity).await?;
+        if state.phase == "new" {
+            orphan_claim(&state, false)?;
+            state.phase = "delete_started".into();
+            orphan_save(root, &state)?;
+            orphan_claim(&state, true)?;
+        } else {
+            orphan_verify_claim(&state, false)?;
+            orphan_verify_claim(&state, true)?;
+        }
+        orphan_local_unchanged(old, &origin, &state)?;
+        client
+            .delete_cube(&identity.remote_cube_id.to_string())
+            .await
+            .map_err(|_| "native_retirement_delete_uncertain")?;
+        check(
+            raw(&http, &input.access_token, &base, true)
+                .await?
+                .is_none(),
+            "native_retirement_readback",
+        )?;
+        orphan_local_unchanged(old, &origin, &state)?;
+        state.phase = "complete".into();
+        orphan_save(root, &state)
+    }
+
     async fn action(request: Request) -> Result<()> {
         let c = request.config;
         preflight(&c)?;
@@ -1015,6 +1497,7 @@ mod native {
                 identity: None,
                 kit: None,
                 original_manifest: None,
+                original_files: None,
                 wipe_manifest: None,
                 wipe_oracle: None,
                 retirement_oracle: None,
@@ -1144,7 +1627,9 @@ mod native {
                 let factor =
                     device_secret::load(&identity.cube.id).map_err(|_| "native_original_factor")?;
                 state.original_factor = Some(hash(factor.as_ref()));
-                state.original_manifest = Some(manifest(&original)?);
+                let files = manifest_files(&original)?;
+                state.original_manifest = Some(files_digest(&files)?);
+                state.original_files = Some(files);
                 state.identity = Some(identity);
                 state.kit = Some(Kit::from_api(kit));
                 put(&c, "provenance", &binding(&state)?)?;
@@ -1152,6 +1637,16 @@ mod native {
             }
             "wipe_original" => {
                 let identity = state.identity.as_ref().ok_or("native_identity_missing")?;
+                // Future fixtures retain the exact rows, not just their digest.
+                let files = state
+                    .original_files
+                    .as_ref()
+                    .ok_or("native_inventory_rows_missing")?;
+                check(
+                    Some(files_digest(files)?) == state.original_manifest
+                        && manifest_files(&original)? == *files,
+                    "native_original_changed",
+                )?;
                 // Only this freshly minted unfunded fixture is ever touched.
                 check(
                     !restored.exists()
@@ -1169,6 +1664,7 @@ mod native {
                         &CoincubeDirectory::new(original.clone()),
                         identity,
                         oracle_client,
+                        &root.join("oracle-wipe.jsonl"),
                     )
                     .await?,
                 );
@@ -1266,12 +1762,15 @@ mod native {
                 } else {
                     "0000"
                 };
+                let (client, _) = auth(&c)?;
                 let wallet = recovery_native::cold_load(
                     &CoincubeDirectory::new(restored),
                     identity,
                     &pin,
                     wrong,
-                )?;
+                    client,
+                )
+                .await?;
                 let psbt = recovery_native::sign_unfunded(&wallet)?;
                 let bytes = psbt.serialize();
                 write(root, "unfunded-key-control.psbt", &bytes)?;
@@ -1325,6 +1824,15 @@ mod native {
             .map_err(|_| "native_input")?;
         check(input.len() <= 32768, "native_input_size")?;
         let mode = std::env::args().nth(1);
+        if mode.as_deref() == Some("--retire-orphan-215") {
+            let request: OrphanInput =
+                serde_json::from_slice(&input).map_err(|_| "native_orphan_input")?;
+            return tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| "native_runtime")?
+                .block_on(retire_orphan_215(&request));
+        }
         if mode.as_deref() == Some("--audit-capacity-abandonment") {
             let request: AbandonInput =
                 serde_json::from_slice(&input).map_err(|_| "native_abandon_input")?;
@@ -1336,7 +1844,13 @@ mod native {
         }
         if matches!(
             mode.as_deref(),
-            Some("--bind-auth" | "--admit-create" | "--observe-cleanup" | "--begin-cleanup")
+            Some(
+                "--bind-auth"
+                    | "--admit-create"
+                    | "--observe-cleanup"
+                    | "--begin-cleanup"
+                    | "--refresh-auth"
+            )
         ) {
             let request: AuthInput =
                 serde_json::from_slice(&input).map_err(|_| "native_auth_input_schema")?;
@@ -1384,6 +1898,17 @@ mod native {
                     request.config.owner_id,
                     &client,
                 ))?;
+            } else if mode.as_deref() == Some("--refresh-auth") {
+                let _ = load(&request.config, "auth")?;
+                device_secret::integration::update(
+                    &request.config.auth_account,
+                    request.access_token.as_bytes(),
+                )
+                .map_err(|_| "native_auth_refresh")?;
+                check(
+                    load(&request.config, "auth")?.as_slice() == request.access_token.as_bytes(),
+                    "native_auth_refresh",
+                )?;
             } else {
                 put(&request.config, "auth", request.access_token.as_bytes())?;
             }
@@ -1436,6 +1961,113 @@ mod native {
             };
             (config, identity, kit)
         }
+        fn legacy215_state() -> State {
+            let (mut config, identity, kit) = fixture();
+            config.source_head = ORPHAN_SOURCE.into();
+            // This is the real old ABI shape: no original_files field and no
+            // new oracle-generation fields. All contents are synthetic.
+            serde_json::from_value(serde_json::json!({"config":config,"stage":"exported","pending":"wipe_original",
+                "creator":{"pid":1,"start_id":"offline-origin"},"restorer":null,"identity":identity,"kit":kit,
+                "original_manifest":"legacy-aggregate-only","wipe_manifest":null,"wipe_oracle":null,
+                "retirement_oracle":null,"original_factor":"unit-factor-hash","canary_uuid":uuid::Uuid::new_v4(),
+                "canary":"unit-canary-hash","restored_factor":null,"proof_sha256":null,"remote_delete_started":false})).unwrap()
+        }
+        #[test]
+        fn old215_shape_preserves_exact_protected_binding_without_fabricating_rows() {
+            let mut state = legacy215_state();
+            assert!(state.original_files.is_none());
+            let old_tuple = (
+                &state.config,
+                &state.identity,
+                &state.kit,
+                &state.original_manifest,
+                &state.original_factor,
+                &state.canary_uuid,
+                &state.canary,
+            );
+            let expected = hash(&serde_json::to_vec(&old_tuple).unwrap()).into_bytes();
+            assert_eq!(binding(&state).unwrap(), expected);
+            state.original_files = Some(vec![(PathBuf::from("unit-file"), "unit-hash".into())]);
+            assert_ne!(binding(&state).unwrap(), expected);
+        }
+        fn orphan_fixture() -> OrphanState {
+            let origin = legacy215_state();
+            let (config, _, _) = fixture();
+            OrphanState {
+                config,
+                origin_uuid: origin.config.run_id,
+                remote_id: 8,
+                kit_sha256: "unit-kit".into(),
+                old_checkpoint_sha256: "unit-cp".into(),
+                old_state_sha256: "unit-state".into(),
+                old_files: vec![(PathBuf::from("unit-file"), "unit-hash".into())],
+                old_dp: vec![("original_factor".into(), "unit-digest".into())],
+                phase: "delete_started".into(),
+                oracle: None,
+            }
+        }
+        #[test]
+        fn orphan_intent_missing_or_different_consumer_never_authorizes_delete() {
+            let state = orphan_fixture();
+            let expected = orphan_claim_value(&state, true).unwrap();
+            assert!(!orphan_claim_matches(None, &expected)); // crash after state save, before DP seal
+            assert!(!orphan_claim_matches(Some(b"wrong"), &expected));
+            assert!(orphan_claim_matches(Some(expected.as_bytes()), &expected));
+            let mut other = orphan_fixture();
+            other.origin_uuid = state.origin_uuid;
+            assert_eq!(
+                orphan_claim_key(&state, false),
+                orphan_claim_key(&other, false)
+            );
+            assert_ne!(
+                orphan_claim_value(&state, false).unwrap(),
+                orphan_claim_value(&other, false).unwrap()
+            );
+            assert!(!orphan_claim_matches(
+                Some(orphan_claim_value(&state, false).unwrap().as_bytes()),
+                &orphan_claim_value(&other, false).unwrap()
+            ));
+        }
+        #[test]
+        fn changed_current_old_file_or_factor_is_not_a_retirement_authority() {
+            let directory = tempfile::tempdir().unwrap();
+            let file = directory.path().join("unit-file");
+            fs::write(&file, b"before").unwrap();
+            let mut state = orphan_fixture();
+            state.old_files = manifest_files(directory.path()).unwrap();
+            assert!(orphan_snapshot_matches(
+                &state.old_files,
+                &state.old_dp,
+                &state
+            ));
+            fs::write(file, b"changed during oracle").unwrap();
+            assert!(!orphan_snapshot_matches(
+                &manifest_files(directory.path()).unwrap(),
+                &state.old_dp,
+                &state
+            ));
+            assert!(!orphan_snapshot_matches(
+                &state.old_files,
+                &[("original_factor".into(), "different".into())],
+                &state
+            ));
+        }
+        #[test]
+        fn orphan_origin_accepts_only_exact215_prewipe_shape() {
+            let mut state = legacy215_state();
+            let root = state.config.case_root.clone();
+            let id = state.config.run_id;
+            assert!(orphan_origin_valid(&state, &root, id, state.config.owner_id).is_ok());
+            state.stage = "wiped".into();
+            assert!(orphan_origin_valid(&state, &root, id, state.config.owner_id).is_err());
+            state.stage = "exported".into();
+            state.pending = None;
+            assert!(orphan_origin_valid(&state, &root, id, state.config.owner_id).is_err());
+            state.pending = Some("wipe_original".into());
+            state.original_factor = None;
+            assert!(orphan_origin_valid(&state, &root, id, state.config.owner_id).is_err());
+        }
+
         #[test]
         fn legitimate_capacity_device_lock_is_held_without_changing_old_files() {
             let directory = tempfile::tempdir().unwrap();
@@ -1588,7 +2220,8 @@ mod native {
                 let bad: State = serde_json::from_value(bad).unwrap();
                 assert!(
                     validate_capacity_failure(&bad, &c.case_root, c.run_id, c.owner_id).is_err(),
-                    "{field}"
+                    "{}",
+                    field
                 );
             }
         }

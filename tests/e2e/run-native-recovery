@@ -47,9 +47,16 @@ parser.add_argument('--config', required=True)
 parser.add_argument('--run-dir', required=True)
 parser.add_argument('--abandon-capacity-from')
 parser.add_argument('--legacy-capacity-helper')
+parser.add_argument('--retire-orphan-215-from')
+parser.add_argument('--orphan-215-helper')
 args = parser.parse_args()
 suite = None
 try:
+    if args.retire_orphan_215_from:
+        old_scope=Path(args.retire_orphan_215_from).resolve()
+        new_scope=Path(args.run_dir).resolve()
+        if new_scope.is_relative_to(old_scope) or old_scope.is_relative_to(new_scope):
+            raise Blocked('NATIVE_RECOVERY_ORPHAN_DIRECTORY','Use a separate new operation directory; no old run may be written.')
     config = json.loads(private_read(args.config))
     if not {'version', 'native_recovery', 'account_email', 'connect_cache'} <= set(config) or set(config) - {'version', 'native_recovery', 'account_email', 'connect_cache', 'cleanup_workstation'} or config['version'] != 1:
         raise Blocked('NATIVE_RECOVERY_CONFIG', 'Use a private version1 native Recovery Kit configuration.')
@@ -67,6 +74,10 @@ try:
         raise Blocked('NATIVE_RECOVERY_ABANDON_ARGUMENTS', 'Both narrow capacity handoff paths are required together.')
     if args.abandon_capacity_from:
         suite.abandon_capacity(account, user['id'], args.abandon_capacity_from, args.legacy_capacity_helper)
+    if bool(args.retire_orphan_215_from) != bool(args.orphan_215_helper) or (args.retire_orphan_215_from and args.abandon_capacity_from):
+        raise Blocked('NATIVE_RECOVERY_ORPHAN_ARGUMENTS','Use the exact remote-only orphan operation separately from capacity abandonment.')
+    if args.retire_orphan_215_from:
+        suite.retire_orphan_215(account,user['id'],args.retire_orphan_215_from,args.orphan_215_helper,config.get('cleanup_workstation'))
     suite.execute(account, user['id'], cleanup_workstation=config.get('cleanup_workstation'))
 except Blocked as error:
     print(error.code + ': ' + str(error), file=sys.stderr)
