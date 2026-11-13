@@ -7623,11 +7623,11 @@ mod single_open_lifecycle_tests {
                 let _enter = runtime.enter();
                 let _guard = app::session::test_guard();
                 for (chain, flow) in [
-                    // Fresh fork creation creates its sole Cube master; a
-                    // Bitcoin Vault instead requires an already-open Cube.
+                    // Vault creation needs an already-open Cube on every
+                    // chain; a fork Cube restore still retires the old app.
                     (
                         ChainId::BitcoinBlake2b,
-                        crate::installer::UserFlow::CreateWallet,
+                        crate::installer::UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
                     ),
                     (ChainId::Bitcoin, crate::installer::UserFlow::AddWallet),
                     (
@@ -7690,7 +7690,15 @@ mod single_open_lifecycle_tests {
     }
 
     #[test]
-    fn unsupported_bitcoin_vault_creation_keeps_the_current_app_and_session() {
+    fn cubeless_vault_creation_keeps_the_current_app_and_session() {
+        // Home has no Cube master on any chain: Bitcoin Blake2b Cubes are
+        // created by the Cube journey, and their Vaults inside the open Cube.
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            cubeless_vault_creation_is_refused_before_teardown(chain);
+        }
+    }
+
+    fn cubeless_vault_creation_is_refused_before_teardown(chain: ChainId) {
         let _guard = app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -7713,7 +7721,7 @@ mod single_open_lifecycle_tests {
                 2,
                 tab::Message::Launch(home::Message::Install(
                     root,
-                    ChainId::Bitcoin,
+                    chain,
                     crate::installer::UserFlow::CreateWallet,
                     None,
                 )),
