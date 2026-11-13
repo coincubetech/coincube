@@ -54,6 +54,7 @@ if aggregate:
     result = subprocess.run([str(python), str(Path(__file__).resolve()), "--qa-gui-recovery", *gui_args])
     if result.returncode:
         raise SystemExit(result.returncode)  # No mobile signing/broadcast after GUI BLOCKED/FAIL.
+    args = [arg for arg in args if arg != "--qa-fresh"]
     os.execv(str(python), [str(python), str(Path(__file__).resolve()), "--qa-fresh", *args])
 if gui:
     if "--self-test" in args:
