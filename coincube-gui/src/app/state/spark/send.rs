@@ -665,6 +665,24 @@ impl SparkSend {
         )
     }
 
+    /// Take a fresh lookup of the destination, keeping the network the user
+    /// already chose for this same address when the new answer still offers
+    /// it. Two lookups can answer for one address (the debounced one and
+    /// Prepare's), and the later must not undo a choice made in between.
+    fn adopt_detection(&mut self, mut detected: cross_chain::DetectedDestination) {
+        let previous_choice = self
+            .detected
+            .as_ref()
+            .filter(|previous| previous.input == detected.input)
+            .and_then(|previous| previous.chosen.clone());
+        if let Some(chain) = previous_choice {
+            if detected.chosen.is_none() {
+                detected.choose(&chain);
+            }
+        }
+        self.detected = Some(detected);
+    }
+
     /// The destination lookup, while it still describes what is typed.
     fn current_detection(&self) -> Option<&cross_chain::DetectedDestination> {
         self.detected
@@ -1290,15 +1308,15 @@ impl State for SparkSend {
                 if seq != self.detect_seq {
                     return Task::none();
                 }
-                // A failed lookup shows nothing: Prepare asks again and
-                // reports the error there, where it can be retried.
+                // A failed lookup changes nothing: whatever is already known
+                // for this address stands, and Prepare asks again and reports
+                // the error there, where it can be retried.
                 let input = self.destination_input.trim().to_string();
-                self.detected = match (result, self.receive_target.stablecoin()) {
-                    (Ok(found), Some(asset)) => {
-                        Some(cross_chain::DetectedDestination::new(input, found, asset))
-                    }
-                    _ => None,
-                };
+                if let (Ok(found), Some(asset)) = (result, self.receive_target.stablecoin()) {
+                    self.adopt_detection(cross_chain::DetectedDestination::new(
+                        input, found, asset,
+                    ));
+                }
                 Task::none()
             }
             SparkSendMessage::AmountInputChanged(value) => {
@@ -1466,6 +1484,9 @@ impl State for SparkSend {
                     {
                         return self.quote_detected_route(cache);
                     }
+                    // Prepare's own lookup supersedes a debounced one still
+                    // in flight: its late answer must not land on top.
+                    self.detect_seq = self.detect_seq.wrapping_add(1);
                     return Task::perform(
                         async move {
                             backend
@@ -1632,15 +1653,27 @@ impl State for SparkSend {
                     cross_chain::DetectedNetwork::Chains { .. } => {}
                 }
                 let quotable = !detected.network.is_problem();
-                self.detected = Some(detected);
+                self.adopt_detection(detected);
                 if !quotable {
                     return Task::none();
                 }
                 self.quote_detected_route(cache)
             }
             SparkSendMessage::ChooseNetwork(chain) => {
+                let changed = self.detected.as_ref().is_some_and(|detected| {
+                    detected.chosen.as_deref() != Some(chain.as_str())
+                        && detected.choices().contains(&chain)
+                });
                 if let Some(detected) = &mut self.detected {
                     detected.choose(&chain);
+                }
+                // A quote already on its way is for the network chosen
+                // before: drop it rather than let Review show one network
+                // and send on another.
+                if changed && matches!(self.phase, SparkSendPhase::Preparing) {
+                    self.preparation_generation = next_preparation_generation();
+                    self.phase = SparkSendPhase::Idle;
+                    self.cross_chain = None;
                 }
                 Task::none()
             }
@@ -4653,6 +4686,94 @@ mod tests {
 
         let _ = panel.quote_detected_route(&Cache::default());
         assert_eq!(panel.cross_chain.as_ref().unwrap().routes[0].chain, "base");
+    }
+
+    /// A lookup that answers after the user chose a network — the debounced
+    /// one, or Prepare's — keeps that choice, and a failed one leaves what is
+    /// known alone. Prepare's own lookup also retires the debounced one.
+    #[test]
+    fn a_late_lookup_keeps_the_chosen_network() {
+        let evm_routes = || coincube_spark_protocol::CrossChainRoutesOk {
+            address: Some(cross_chain_address("evm")),
+            routes: vec![
+                CrossChainRoute {
+                    chain: "ethereum".into(),
+                    ..route_with_asset("USDT")
+                },
+                CrossChainRoute {
+                    chain: "base".into(),
+                    ..route_with_asset("USDT")
+                },
+            ],
+        };
+        let mut panel = SparkSend::new(None);
+        evm_lookup(&mut panel, "0xabc");
+        let _ = send(&mut panel, SparkSendMessage::ChooseNetwork("Base".into()));
+
+        let seq = panel.detect_seq;
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::DestinationNetworkDetected(seq, Ok(evm_routes())),
+        );
+        assert_eq!(
+            panel.detected.as_ref().unwrap().chosen.as_deref(),
+            Some("Base")
+        );
+
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::DestinationNetworkDetected(seq, Err("offline".into())),
+        );
+        assert_eq!(
+            panel.detected.as_ref().unwrap().chosen.as_deref(),
+            Some("Base")
+        );
+
+        // Prepare's lookup answers with the choice still standing, so the
+        // quote is for Base rather than a fresh "choose a network".
+        finish_routes(&mut panel, evm_routes());
+        assert_eq!(
+            panel.detected.as_ref().unwrap().chosen.as_deref(),
+            Some("Base")
+        );
+        assert_eq!(panel.cross_chain.as_ref().unwrap().routes[0].chain, "base");
+
+        // A different address starts over.
+        panel.adopt_detection(cross_chain::DetectedDestination::new(
+            "0xdef".into(),
+            evm_routes(),
+            "USDT",
+        ));
+        assert_eq!(panel.detected.as_ref().unwrap().chosen, None);
+    }
+
+    /// Changing the network while a quote is being fetched drops that quote:
+    /// its answer is for the network chosen before.
+    #[test]
+    fn changing_the_network_drops_a_quote_in_flight() {
+        let mut panel = SparkSend::new(None);
+        evm_lookup(&mut panel, "0xabc");
+        let _ = send(&mut panel, SparkSendMessage::ChooseNetwork("Base".into()));
+        let generation = panel.begin_preparation();
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::ChooseNetwork("Ethereum".into()),
+        );
+        assert!(matches!(panel.phase, SparkSendPhase::Idle));
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation,
+                result: Ok(PreparedSend::from(PrepareSendFromOk {
+                    prepare: plain_prepare("stale"),
+                    pay_from: WalletAsset::Bitcoin,
+                    conversion: None,
+                    token_payment: None,
+                })),
+                recipient: None,
+            },
+        );
+        assert!(matches!(panel.phase, SparkSendPhase::Idle));
     }
 
     /// Below the route's minimum (plus its buffer) is caught on Details:
