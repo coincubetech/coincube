@@ -99,11 +99,12 @@ pub struct Context {
     // In case a user entered a mnemonic,
     // we dont want to override the generated signer with it.
     pub recovered_signer: Option<Arc<Signer>>,
-    /// A new fork Cube needs its own PIN-bound master seed, even for a watch-only Vault.
+    /// Legacy standalone-fork state, never set by production constructors.
+    /// Retained persistence/exit helpers and their synthetic fixtures still
+    /// enforce its PIN-bound seed and backup checks.
     pub fresh_fork_cube: bool,
     /// A Vault for a Bitcoin Blake2b Cube that is already open: the Cube and
-    /// its master seed exist, and, like a fresh fork Cube, its Vault may run
-    /// on a local node without Connect.
+    /// its master seed exist, and its Vault may run on a local node without Connect.
     pub in_cube_fork_vault: bool,
     pub fresh_fork_seed_backed_up: bool,
     /// How the descriptor being installed was restored, if it was.

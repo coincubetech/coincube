@@ -16,11 +16,12 @@ substitute another root. Passkey Cubes require their authenticated master cache
 without a PIN; a cache miss never probes seed files even if a stale PIN exists.
 The lookup adds no asynchronous signer-cache writes at restore completion.
 
-A fresh standalone Bitcoin Blake2b Cube generates its single Cube master and
-requires its existing seed backup step. Ordinary Bitcoin Vault creation needs
-an existing unlocked Cube. The Launcher refuses an unsupported Bitcoin Vault
-creation request before closing another open Cube or its session. Claim and
-recovery flows keep their explicit source material and existing admission checks.
+Vault creation on every chain, including Bitcoin Blake2b, requires an existing
+unlocked Cube. Only Cube creation generates its master; the Vault installer
+never generates a replacement root for a new Vault. The Launcher refuses a
+Cube-less Vault creation request before closing another open Cube or its
+session. Claim and recovery flows keep their explicit source material and
+existing admission checks.
 
 ## Recovery and existing Vaults
 

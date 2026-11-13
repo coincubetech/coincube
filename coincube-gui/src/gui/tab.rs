@@ -1661,9 +1661,9 @@ impl Tab {
                 if !crate::chain::same_path(root.path(), home.datadir_path.path()) {
                     return Err("The installation belongs to another data directory.".into());
                 }
-                // Home has no Cube master to supply to Bitcoin Vault creation.
+                // Home has no Cube master to supply to Vault creation.
                 // Refuse before GUI retires the unrelated open Cube/session.
-                if !chain.is_blake2b() && matches!(flow, UserFlow::CreateWallet) {
+                if matches!(flow, UserFlow::CreateWallet) {
                     return Err("Create or unlock a Cube before creating its Vault".into());
                 }
                 home.chain_availability(*chain)
