@@ -461,6 +461,9 @@ mod native {
             "native_retirement_approval",
         )
     }
+    fn may_reconcile_absence(pending: Option<&str>, delete_started: bool) -> bool {
+        pending == Some("retire_remote") && delete_started
+    }
     async fn retire(c: &Config, state: &mut State, root: &Path, restored: &Path) -> Result<()> {
         use coincube_gui::services::connect::grpc::{
             self, interceptor::AuthInterceptor, session::GrpcSessionClient,
@@ -488,7 +491,7 @@ mod native {
         let Some(cube) = raw(&http, &jwt, &base, true).await? else {
             // A prior acknowledged intent may have lost the DELETE response.
             check(
-                state.pending.as_deref() == Some("retire_remote"),
+                may_reconcile_absence(state.pending.as_deref(), state.remote_delete_started),
                 "native_retirement_unexpected_absence",
             )?;
             return Ok(());
@@ -1143,6 +1146,13 @@ mod native {
                 &identity
             )
             .is_err());
+        }
+        #[test]
+        fn absence_requires_durable_delete_intent_not_only_pending_action() {
+            assert!(!may_reconcile_absence(Some("retire_remote"), false));
+            assert!(may_reconcile_absence(Some("retire_remote"), true));
+            assert!(!may_reconcile_absence(None, true));
+            assert!(!may_reconcile_absence(Some("restore"), true));
         }
         #[test]
         fn private_reader_refuses_symlinks_and_public_files() {

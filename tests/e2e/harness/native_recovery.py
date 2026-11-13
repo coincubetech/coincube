@@ -115,6 +115,35 @@ def build(cfg, binding):
         return executable, receipt
 
 
+def signed_identity(checkout, executable):
+    bundle = executable.parents[2]
+    release = checkout / 'contrib/release/macos'
+    try:
+        checked = subprocess.run(['codesign', '--verify', '--strict', str(bundle)], capture_output=True, timeout=30)
+        authority = subprocess.run(['codesign', '-d', '--verbose=4', str(bundle)], capture_output=True, timeout=30)
+        profile = subprocess.run([str(release / 'check-profile-authorises-cert.sh'), str(release / 'embedded.provisionprofile'),
+                                  '--signed-bundle', str(bundle)], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        raise Blocked('NATIVE_RECOVERY_HELPER_IDENTITY', 'Signed helper identity could not be verified.') from None
+    require(checked.returncode == authority.returncode == profile.returncode == 0
+            and ('Authority=' + IDENTITY).encode() in authority.stderr and b'TeamIdentifier=8UVR249AD5' in authority.stderr,
+            'HELPER_IDENTITY')
+
+
+def checked_artifact(cfg, binding, executable, receipt):
+    require(source(cfg) == binding and receipt.get('source') == binding
+            and hashlib.sha256(executable.read_bytes()).hexdigest() == receipt.get('sha256'), 'BUILD_CHANGED')
+    signed_identity(Path(cfg['checkout']), executable)
+
+
+def checked_process(cfg, binding, executable, receipt, request, directory, *, access_token=None):
+    checked_artifact(cfg, binding, executable, receipt)
+    try:
+        return process(executable, request, directory, access_token=access_token)
+    finally:
+        checked_artifact(cfg, binding, executable, receipt)
+
+
 def process(executable, request, directory, *, access_token=None):
     """Wait on fresh process; sample kernel start before providing any action."""
     argv = [str(executable)] + (['--bind-auth'] if access_token is not None else [])
@@ -160,6 +189,9 @@ class NativeRecovery:
     def execute(self, account, owner_id):
         require(type(owner_id) is int and owner_id > 0, 'ACCOUNT')
         executable, receipt = build(self.config, self.binding)
+        previous = self.journal.data['artifacts'].get('build')
+        require(previous is None or previous == receipt, 'BUILD_CHANGED')
+        checked_artifact(self.config, self.binding, executable, receipt)
         self.journal.artifact('build', receipt)
         for chain in CHAINS:
             scope = str(uuid.uuid5(uuid.NAMESPACE_URL, 'native-recovery/' + str(self.directory.resolve()) + '/' + chain))
@@ -179,7 +211,7 @@ class NativeRecovery:
                     raise Blocked('NATIVE_RECOVERY_UNCERTAIN', 'A native action has uncertain outcome; preserve the sealed fixture and reconcile it.')
                 require(source(self.config) == self.binding and hashlib.sha256(executable.read_bytes()).hexdigest() == receipt['sha256'], 'BUILD_CHANGED')
                 self.journal.artifact('pending_native_action', {'chain': chain, 'action': action, 'config_sha256': digest(config)})
-                record = process(executable, {'action': action, 'config': config}, self.directory,
+                record = checked_process(self.config, self.binding, executable, receipt, {'action': action, 'config': config}, self.directory,
                                  access_token=account['tokens']['access_token'] if action == 'bind_auth' else None)
                 records[action] = record
                 if action in ('create_export', 'restore'):
@@ -203,7 +235,7 @@ class NativeRecovery:
             self.journal.save()
             if 'retire_remote' not in records:
                 self.journal.artifact('pending_native_action', {'chain': chain, 'action': 'retire_remote', 'config_sha256': digest(config)})
-                records['retire_remote'] = process(executable, {'action': 'retire_remote', 'config': config}, self.directory)
+                records['retire_remote'] = checked_process(self.config, self.binding, executable, receipt, {'action': 'retire_remote', 'config': config}, self.directory)
                 retired = json.loads(private_read(case / 'state.json'))
                 require(retired['stage'] == 'retired_unfunded' and retired['pending'] is None and retired['proof_sha256'] == proof['psbt_sha256'], 'RETIREMENT')
                 records['state_sha256'] = hashlib.sha256(private_read(case / 'state.json')).hexdigest()
@@ -211,7 +243,9 @@ class NativeRecovery:
         acceptance = {'version': 1, 'consumer': self.consumer, 'source': self.binding, 'helper_sha256': receipt['sha256'],
                       'chains': {chain: self.journal.data['artifacts'][chain]['proof'] for chain in CHAINS},
                       'gui': False, 'funded': False, 'broadcast': False, 'remote_retirement': 'verified_native_fixture_only'}
+        checked_artifact(self.config, self.binding, executable, receipt)
         self.journal.artifact('native_recovery_acceptance', acceptance)
+        checked_artifact(self.config, self.binding, executable, receipt)
         return acceptance
 
 

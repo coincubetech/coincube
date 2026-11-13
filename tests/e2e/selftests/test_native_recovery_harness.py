@@ -137,6 +137,7 @@ def offline_protocol(config, tmp_path, monkeypatch, crash_retirement=False):
     monkeypatch.setattr(native,'preflight',lambda _:binding)
     monkeypatch.setattr(native,'source',lambda _:binding)
     monkeypatch.setattr(native,'build',lambda *args:(executable,receipt))
+    monkeypatch.setattr(native,'signed_identity',lambda *args:None)
     calls=[]; interrupted=[False]
     def worker(executable,request,directory,access_token=None):
         action=request['action'];cfg=request['config'];calls.append((cfg['chain'],action))
@@ -206,5 +207,47 @@ def test_completed_consumer_refuses_replaced_retained_state(config,tmp_path,monk
         value=json.loads(public_state_read(case/'state.json'));value['untrusted_extra']='replaced'
         atomic_write(case/'state.json',json.dumps(value).encode());before=list(calls)
         with pytest.raises(Failed,match='RETAINED_STATE_CHANGED'):suite.execute({'tokens':{'access_token':'unit-not-a-credential'}},1)
+        assert calls==before
+    finally:suite.close()
+
+
+def test_replaced_helper_during_public_verification_never_reaches_retirement(config,tmp_path,monkeypatch):
+    calls=offline_protocol(config,tmp_path,monkeypatch)
+    original=native.verify
+    def replace(raw,identity,chain):
+        result=original(raw,identity,chain)
+        (tmp_path/'test-only-binary').write_bytes(b'replaced after verified signing')
+        return result
+    monkeypatch.setattr(native,'verify',replace)
+    suite=native.NativeRecovery(config,tmp_path/'run',{'consumer':'offline-only-test'})
+    try:
+        with pytest.raises(Failed,match='BUILD_CHANGED'):suite.execute({'tokens':{'access_token':'unit-not-a-credential'}},1)
+        assert not any(action=='retire_remote' for _,action in calls)
+    finally:suite.close()
+
+
+def test_checked_process_revalidates_source_hash_and_identity_before_and_after(config,tmp_path,monkeypatch):
+    executable=tmp_path/'fixture';executable.write_bytes(b'owned binary')
+    import hashlib
+    binding={'head':'a'*40};receipt={'source':binding,'sha256':hashlib.sha256(executable.read_bytes()).hexdigest()}
+    checks=[]
+    monkeypatch.setattr(native,'source',lambda _:checks.append('source') or binding)
+    monkeypatch.setattr(native,'signed_identity',lambda *args:checks.append('identity'))
+    monkeypatch.setattr(native,'process',lambda *args,**kwargs:checks.append('process') or {})
+    native.checked_process(config,binding,executable,receipt,{},tmp_path)
+    assert checks==['source','identity','process','source','identity']
+    def changed(*args,**kwargs):executable.write_bytes(b'replaced during process');return {}
+    monkeypatch.setattr(native,'process',changed)
+    with pytest.raises(Failed,match='BUILD_CHANGED'):native.checked_process(config,binding,executable,receipt,{},tmp_path)
+
+
+def test_completed_resume_revalidates_signer_identity_instead_of_returning_cached_acceptance(config,tmp_path,monkeypatch):
+    calls=offline_protocol(config,tmp_path,monkeypatch)
+    suite=native.NativeRecovery(config,tmp_path/'run',{'consumer':'offline-only-test'})
+    try:
+        suite.execute({'tokens':{'access_token':'unit-not-a-credential'}},1);before=list(calls)
+        def rejected(*args):raise Failed('NATIVE_RECOVERY_HELPER_IDENTITY','identity changed')
+        monkeypatch.setattr(native,'signed_identity',rejected)
+        with pytest.raises(Failed,match='identity changed'):suite.execute({'tokens':{'access_token':'unit-not-a-credential'}},1)
         assert calls==before
     finally:suite.close()

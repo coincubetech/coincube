@@ -104,9 +104,8 @@ backend/TOCTOU limitation, so only this fresh private unfunded fixture is eligib
 The local full kit, profiles, credential handles, factors/quarantine and public
 proofs remain intact. Personal keys, mobile keys and QA funding sources are untouched.
 
-Actions journal intent before effects. Exact retirement intent can reconcile
-an already absent remote Cube; absence is not falsely attributed to our DELETE
-without its dedicated intent. Other interrupted actions stay BLOCKED with all
+Actions journal intent before effects. Only a previously durable DELETE-started intent can reconcile
+an already absent remote Cube; a first 404 without that intent is BLOCKED. Other interrupted actions stay BLOCKED with all
 recovery material retained. `state.next` residue is not blindly deleted and a
 failed fixture is not replaced under a new UUID automatically. This conservative
 uncertainty handling is a limitation, not an automatic crash-recovery claim.
