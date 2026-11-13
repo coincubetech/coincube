@@ -974,6 +974,30 @@ impl State for GlobalHome {
         self.view_with_recent_activity(menu, cache, None)
     }
 
+    /// The side menu is leaving Transfer (it's a page now, not a modal that
+    /// blocked the menu): lock another Cube opened for this transfer, so
+    /// coming back asks for its PIN or passkey again. Its pick starts over in
+    /// To. A send in flight is left alone; it locks the Cube when it ends.
+    fn interrupt(&mut self) {
+        self.wallet_picker = None;
+        if self.is_sending {
+            return;
+        }
+        if self.other_scope.is_none() && self.other_cube_selected.is_none() {
+            return;
+        }
+        self.reset_other_cube();
+        if self
+            .transfer_direction
+            .is_some_and(|direction| direction.is_other_cube())
+            && matches!(self.current_view.step, 1 | 2)
+        {
+            self.invalidate_transfer_destination();
+            self.current_view.step = 1;
+            self.transfer_page = TransferPage::Wallets;
+        }
+    }
+
     fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = Vec::new();
 
@@ -7215,6 +7239,35 @@ mod tests {
             );
             assert!(home.other_address.is_some());
             assert_eq!(home.wallet_picker, None);
+        }
+
+        #[test]
+        fn leaving_transfer_by_the_menu_locks_the_other_cube() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let unlocked = |home: &mut GlobalHome, step: usize| {
+                home.current_view.step = step;
+                home.transfer_from = Some(WalletKind::Vault);
+                home.transfer_to = None;
+                home.transfer_direction = Some(TransferDirection::VaultToOtherCube);
+                home.transfer_page = TransferPage::Amount;
+                home.other_cube_selected = Some("destination".into());
+                home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+                home.other_address = Some(checked_other_address());
+            };
+            for step in [1, 2] {
+                unlocked(&mut home, step);
+                home.interrupt();
+                assert!(home.other_address.is_none() && home.other_cube_selected.is_none());
+                assert_eq!(home.other_phase, UnlockPhase::default());
+                assert_eq!(home.current_view.step, 1, "from step {}", step);
+                assert_eq!(home.transfer_page, TransferPage::Wallets);
+            }
+            // A send in flight finishes first; it locks the Cube itself.
+            unlocked(&mut home, 2);
+            home.is_sending = true;
+            home.interrupt();
+            assert!(home.other_address.is_some());
+            assert_eq!(home.current_view.step, 2);
         }
 
         #[test]
