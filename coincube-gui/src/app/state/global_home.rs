@@ -6914,12 +6914,93 @@ mod tests {
                 assert_eq!(failed.transfer_page, TransferPage::Wallets);
                 assert!(!failed.is_sending, "{:?}: nothing sent again", direction);
 
-                // The broadcast was already out: it completes to Sent.
+                // The broadcast was already out: it completes to Sent, through
+                // the callback each route really uses.
                 let mut done = setup();
-                send(&mut done, &cache, HomeMessage::TransferSuccessful);
+                send(&mut done, &cache, success_callback(direction));
                 assert!(!done.is_sending);
                 assert_eq!(done.current_view.step, 3, "{:?}", direction);
                 assert!(done.other_scope.is_none() && done.other_address.is_none());
+            }
+        }
+
+        /// The message a successful Vault → another Cube broadcast delivers:
+        /// to its Spark, the deposit is reported like a Spark-bound transfer.
+        fn success_callback(direction: TransferDirection) -> HomeMessage {
+            match direction {
+                TransferDirection::VaultToOtherSpark => HomeMessage::TransferBroadcast {
+                    amount_sat: 100_000,
+                    destination_kind: WalletKind::Spark,
+                    swap_id: None,
+                },
+                _ => HomeMessage::TransferSuccessful,
+            }
+        }
+
+        /// From a real held Vault-source unlock, for another Cube's Vault and
+        /// its Spark: a valid unlock passes the review check; leaving
+        /// mid-broadcast revokes it, so a failed broadcast restarts the
+        /// unlock, while one already out completes to Sent.
+        #[test]
+        fn a_held_vault_source_unlock_through_leaving_and_broadcast() {
+            for (with_vault, direction) in [
+                (true, TransferDirection::VaultToOtherCube),
+                (false, TransferDirection::VaultToOtherSpark),
+            ] {
+                let (_directory, root) = receiving_cube_catalog(with_vault);
+                let cache = Cache {
+                    datadir_path: root,
+                    has_vault: true,
+                    ..Cache::default()
+                };
+                let at_review = || {
+                    let (mut home, _) = home_on_transfer_screen();
+                    send(&mut home, &cache, HomeMessage::BackToHome);
+                    send(&mut home, &cache, HomeMessage::NextStep);
+                    send(&mut home, &cache, HomeMessage::ContinueFromWallets);
+                    assert_eq!(home.transfer_direction, Some(direction));
+                    send(&mut home, &cache, HomeMessage::ContinueWithCube);
+                    assert!(home.other_scope.is_some(), "{:?}: a held unlock", direction);
+                    home.other_address = Some(checked_other_address());
+                    home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+                    send(&mut home, &cache, HomeMessage::ContinueFromUnlock);
+                    let task = home.update(
+                        None,
+                        &cache,
+                        Message::View(view::Message::Home(HomeMessage::NextStep)),
+                    );
+                    for message in collect(task) {
+                        drain(home.update(None, &cache, message));
+                    }
+                    assert!(home.destination_is_ready(), "{:?}", direction);
+                    // Control: the valid unlock passes the review check.
+                    assert!(
+                        home.check_other_review_address(&cache).is_ok(),
+                        "{:?}: a valid unlock signs and broadcasts",
+                        direction
+                    );
+                    home.transfer_signed = true;
+                    home.is_sending = true;
+                    home.interrupt();
+                    assert!(home.other_scope.is_none(), "{:?}", direction);
+                    assert!(home.check_other_review_address(&cache).is_err());
+                    home
+                };
+
+                let mut failed = at_review();
+                send(
+                    &mut failed,
+                    &cache,
+                    HomeMessage::Error(TransferError::PreparationExpired),
+                );
+                send(&mut failed, &cache, HomeMessage::ConfirmTransfer);
+                assert_eq!(failed.current_view.step, 1, "{:?}", direction);
+                assert!(!failed.is_sending, "{:?}: nothing sent again", direction);
+
+                let mut done = at_review();
+                send(&mut done, &cache, success_callback(direction));
+                assert_eq!(done.current_view.step, 3, "{:?}: Sent", direction);
+                assert!(done.other_locked_again, "{:?}", direction);
             }
         }
 
