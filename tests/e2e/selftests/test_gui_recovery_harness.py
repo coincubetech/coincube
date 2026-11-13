@@ -293,3 +293,34 @@ def test_valid_replacement_export_cannot_inherit_original_gui_provenance(config,
         assert 'signature_proof' not in runner.state(chain)
         assert 'acceptance' not in runner.state(chain)
     finally: runner.close()
+
+
+@pytest.mark.parametrize('field,value', [
+    ('vout', None), ('vout', False), ('vout', True), ('vout', -1), ('vout', 1),
+    ('value_sats', False), ('value_sats', True), ('value_sats', -1), ('value_sats', 0), ('value_sats', 1000001),
+    ('txid', None), ('txid', 'a' * 63), ('txid', 'A' * 64), ('txid', 'z' * 64)])
+def test_funding_schema_rejects_bool_indexes_values_and_malformed_ids(field, value):
+    psbt, manifest = signature_case(gui.CHAINS[0]); manifest['funding'][field] = value
+    with pytest.raises(Failed, match='FUNDING_SCHEMA'): gui_verify.verify_export(psbt.serialize(), manifest)
+
+
+@pytest.mark.parametrize('value', [-1, 0, 100001])
+def test_invalid_output_value_is_rejected_before_fee_or_signature(value):
+    psbt, manifest = signature_case(gui.CHAINS[0])
+    psbt.tx.vout[0].nValue = value; psbt.g.map[0] = psbt.tx.serialize()
+    with pytest.raises(Failed, match='OUTPUT_VALUE'): gui_verify.verify_export(psbt.serialize(), manifest)
+
+
+@pytest.mark.parametrize('field,value', [('vout', False), ('vout', None), ('vout', -1), ('vout', 1), ('value_sats', True), ('value_sats', -1), ('txid', 'A'*64)])
+def test_funding_stage_requires_typed_public_coin_metadata(config, tmp_path, field, value):
+    def mutate(request, reply):
+        if request['stage'] == 'funding':
+            path = Path(request['case_directory']) / 'funding-proof.json'
+            proof = json.loads(private_read(path)); proof[field] = value
+            atomic_write(path, json.dumps(proof).encode())
+    runner = gui.GuiRecovery(config, tmp_path/'run', worker=OfflineWorker(mutate), offline=True)
+    try:
+        for stage in gui.STAGES[:gui.STAGES.index('funding')]: runner.run(gui.CHAINS[0], stage)
+        with pytest.raises(Failed, match='FUNDING'): runner.run(gui.CHAINS[0], 'funding')
+        assert 'funding' not in runner.state(gui.CHAINS[0])
+    finally: runner.close()

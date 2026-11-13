@@ -6,6 +6,7 @@ OpenSSL's ECDSA verifier. Never loads a seed, PIN, hot cache or private key.
 import base64
 import hashlib
 import io
+import re
 from pathlib import Path
 import struct
 import subprocess
@@ -95,6 +96,21 @@ def openssl_verify(pubkey, signature, message):
     return result.returncode == 0
 
 
+def funding_parent(funding, transaction_type, maximum=1000000):
+    require(type(funding.get("vout")) is int and funding["vout"] >= 0
+            and type(funding.get("value_sats")) is int and 0 < funding["value_sats"] <= maximum
+            and isinstance(funding.get("txid"), str) and re.fullmatch(r"[0-9a-f]{64}", funding["txid"]), "FUNDING_SCHEMA")
+    try:
+        raw = bytes.fromhex(funding["raw_tx"])
+        stream = io.BytesIO(raw); parent = transaction_type(); parent.deserialize(stream)
+        require(stream.read() == b"" and parent.txid().hex() == funding["txid"], "PARENT")
+        require(funding["vout"] < len(parent.vout), "FUNDING_SCHEMA")
+        require(parent.vout[funding["vout"]].nValue == funding["value_sats"], "FUNDING_VALUE")
+    except (AssertionError, KeyError, ValueError, IndexError, AttributeError, TypeError):
+        raise Failed("GUI_VERIFY_FUNDING_SCHEMA", "Invalid funding parent metadata.") from None
+    return parent, raw
+
+
 def verify_export(content, manifest):
     require(manifest.get("chain") in CHAINS and manifest.get("broadcast") is False, "CHAIN")
     if not content.startswith(b"psbt\xff"):
@@ -114,9 +130,7 @@ def verify_export(content, manifest):
         receive.derive(ri); change.derive(ci)
         funding = manifest["funding"]
         require(funding["chain"] == manifest["chain"] and funding["wallet_recognized"] is True, "FUNDING_CHAIN")
-        parent_raw = bytes.fromhex(funding["raw_tx"])
-        parent_stream = io.BytesIO(parent_raw); parent = Tx(); parent.deserialize(parent_stream)
-        require(parent_stream.read() == b"" and parent.txid().hex() == funding["txid"], "PARENT")
+        parent, parent_raw = funding_parent(funding, Tx)
         txin = psbt.tx.vin[0]
         require(txin.prevout.hash == int(funding["txid"], 16) and txin.prevout.n == funding["vout"], "OUTPOINT")
         previous = parent.vout[funding["vout"]]
@@ -126,6 +140,7 @@ def verify_export(content, manifest):
         require(psbt.i[0].map.get(0) == parent_raw and psbt.i[0].map.get(5) == bytes(receive.script_sighash), "WITNESS_SCRIPT")
         require(not any(k in psbt.i[0].map for k in (7, 8, 0x13, 0x14)), "FINAL_OR_TAPROOT")
         require(psbt.tx.vout[0].scriptPubKey == bytes(change.script_pubkey), "SELF_TRANSFER")
+        require(type(psbt.tx.vout[0].nValue) is int and 0 < psbt.tx.vout[0].nValue <= witness.nValue, "OUTPUT_VALUE")
         fee = witness.nValue - psbt.tx.vout[0].nValue
         require(type(manifest["maximum_fee_sats"]) is int and 0 < fee <= manifest["maximum_fee_sats"], "FEE")
         signatures = []

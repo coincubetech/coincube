@@ -15,7 +15,7 @@ import subprocess
 import time
 import uuid
 
-from .gui_verify import CHAINS, verify_export
+from .gui_verify import CHAINS, funding_parent, references, verify_export
 from .state import Blocked, Failed, Journal, atomic_write, digest, private_read
 
 PREREQUISITE = "9e9a1f25995b4be9a6ab188240a2bf92d5f3209b"
@@ -301,9 +301,12 @@ class GuiRecovery:
                 and reply.get("chain_oracle_verified") is True and reply.get("injected_utxo") is False, "FUNDING")
         funding = json.loads(private_read(self.directory(chain) / "funding-proof.json"))
         require(funding.get("chain") == chain and funding.get("wallet_recognized") is True
+                and type(funding.get("vout")) is int and funding["vout"] >= 0
+                and isinstance(funding.get("txid"), str) and re.fullmatch(r"[0-9a-f]{64}", funding["txid"])
                 and type(funding.get("value_sats")) is int
                 and 10000 <= funding["value_sats"] <= self.config["funding"][chain]["maximum_sats"]
                 and funding.get("chain_oracle_verified") is True, "FUNDING")
+        funding_parent(funding, references()[2], self.config["funding"][chain]["maximum_sats"])
         self.save(chain, "funding", funding)
 
     def stage_sign_export(self, chain):
