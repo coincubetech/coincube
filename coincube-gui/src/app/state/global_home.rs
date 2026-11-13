@@ -240,40 +240,6 @@ pub(crate) fn effective_transfer_min_sat(
     }
 }
 
-/// Lays the transfer dialog over `content`: as its own modal, or, beneath
-/// an upper modal (QR card, signer), in the base, because Iced draws only the
-/// root widget's overlay. The upper modal already blocks the base's input.
-fn with_transfer_dialog<'a>(
-    content: Element<'a, view::Message>,
-    dialog: Option<Element<'a, view::Message>>,
-    upper_modal: bool,
-    dismiss: Option<view::Message>,
-) -> Element<'a, view::Message> {
-    match dialog {
-        Some(dialog) if upper_modal => iced::widget::Stack::new()
-            .push(content)
-            .push(
-                iced::widget::Container::new(dialog)
-                    .width(iced::Length::Fill)
-                    .height(iced::Length::Fill)
-                    .center_x(iced::Length::Fill)
-                    .center_y(iced::Length::Fill)
-                    .style(|_| iced::widget::container::Style {
-                        background: Some(iced::Background::Color(iced::Color {
-                            a: 0.80,
-                            ..iced::Color::BLACK
-                        })),
-                        ..Default::default()
-                    }),
-            )
-            .into(),
-        Some(dialog) => coincube_ui::widget::modal::Modal::new(content, dialog)
-            .on_blur(dismiss)
-            .into(),
-        None => content,
-    }
-}
-
 pub(crate) fn effective_transfer_max_sat(
     direction: TransferDirection,
     onchain_send_limit: Option<(u64, u64)>,
@@ -964,28 +930,24 @@ impl GlobalHome {
         };
         let transfer_action = view::global_home::transfer_head_action(&config);
         let (overview, transfer) = view::global_home::global_home_view(config);
-        let content = view::global_home::overview_page(
-            menu,
-            cache,
-            transfer_action,
-            overview,
-            recent_activity,
-        );
-        // A QR card or the signer can open over Review. Iced draws only the
-        // root widget's overlay, so beneath one of those the transfer dialog
-        // is laid out in the base instead (the upper modal already blocks the
-        // base's input); otherwise it is its own modal.
-        let upper_modal = match &self.modal {
-            Modal::ShowQrCode(_) => true,
-            Modal::Sign(_) => self.transfer_spend_tx.is_some(),
-            Modal::None => false,
+        // A transfer step is a page of its own, as Send is: its head has the
+        // steps and Back to Overview, which cancels the flow (it isn't
+        // offered while a send is in flight).
+        let content = match transfer {
+            Some(screen) => crate::app::view::dashboard_payment(
+                menu,
+                cache,
+                Some(view::global_home::transfer_page_head(cache, &screen)),
+                screen.body,
+            ),
+            None => view::global_home::overview_page(
+                menu,
+                cache,
+                transfer_action,
+                overview,
+                recent_activity,
+            ),
         };
-        // The transfer steps are a dialog over the Overview. Clicking outside
-        // or Escape cancels the flow, except on the review step: a signed or
-        // in-flight transfer there is left only through its own controls.
-        let dismiss =
-            (self.current_view.step != 2).then_some(view::Message::Home(HomeMessage::BackToHome));
-        let content = with_transfer_dialog(content, transfer, upper_modal, dismiss);
 
         let overlay = match &self.modal {
             Modal::ShowQrCode(m) => m.view(),
@@ -1010,6 +972,37 @@ impl GlobalHome {
 impl State for GlobalHome {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
         self.view_with_recent_activity(menu, cache, None)
+    }
+
+    /// The side menu is leaving Transfer (it's a page now, not a modal that
+    /// blocked the menu): lock another Cube opened for this transfer, so
+    /// coming back asks for its PIN or passkey again, and its pick starts
+    /// over in To.
+    fn interrupt(&mut self) {
+        self.wallet_picker = None;
+        if self.other_scope.is_none() && self.other_cube_selected.is_none() {
+            return;
+        }
+        if self.is_sending {
+            // A send or PSBT preparation in flight already has the checked
+            // address and needs the Cube no more: lock it now, whatever the
+            // outcome. If it fails, Confirm finds the Cube locked and starts
+            // its unlock over; Done still says it is locked again.
+            let was_open = self.other_scope.is_some();
+            self.lock_other_cube();
+            self.other_locked_again |= was_open;
+            return;
+        }
+        self.reset_other_cube();
+        if self
+            .transfer_direction
+            .is_some_and(|direction| direction.is_other_cube())
+            && matches!(self.current_view.step, 1 | 2)
+        {
+            self.invalidate_transfer_destination();
+            self.current_view.step = 1;
+            self.transfer_page = TransferPage::Wallets;
+        }
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -2699,7 +2692,10 @@ impl State for GlobalHome {
                                     | TransferDirection::VaultToOtherSpark
                                     | TransferDirection::VaultToOtherCube
                             ) {
-                                if transfer_direction == TransferDirection::VaultToOtherSpark {
+                                // Another Cube must still be unlocked for this
+                                // transfer (leaving the page locks it), whichever
+                                // of its wallets receives.
+                                if transfer_direction.is_other_cube() {
                                     if let Err(refusal) = self.check_other_review_address(cache) {
                                         return self.restart_other_cube_unlock(refusal);
                                     }
@@ -2965,7 +2961,10 @@ impl State for GlobalHome {
                                     | TransferDirection::VaultToOtherSpark
                                     | TransferDirection::VaultToOtherCube
                             ) {
-                                if transfer_direction == TransferDirection::VaultToOtherSpark {
+                                // Another Cube must still be unlocked for this
+                                // transfer (leaving the page locks it), whichever
+                                // of its wallets receives.
+                                if transfer_direction.is_other_cube() {
                                     if let Err(refusal) = self.check_other_review_address(cache) {
                                         return self.restart_other_cube_unlock(refusal);
                                     }
@@ -3776,6 +3775,13 @@ impl State for GlobalHome {
                         {
                             return Task::none();
                         }
+                        // Leaving the page while this PSBT was built locked the
+                        // other Cube: open no signer; its unlock starts over.
+                        if direction.is_other_cube() {
+                            if let Err(refusal) = self.check_other_review_address(cache) {
+                                return self.restart_other_cube_unlock(refusal);
+                            }
+                        }
                         match result {
                             Ok((psbt, wallet, (datadir_path, network))) => {
                                 if let Some(wallet) = wallet {
@@ -4252,7 +4258,8 @@ impl GlobalHome {
     fn finish_other_cube(&mut self) {
         let was_open = self.other_scope.is_some();
         self.lock_other_cube();
-        self.other_locked_again = was_open;
+        // Leaving mid-send may have locked it already.
+        self.other_locked_again |= was_open;
     }
 
     /// The other Cube's credential was checked. Open only its selected receiving wallet.
@@ -6781,6 +6788,467 @@ mod tests {
             assert!(home.other_scope.is_none());
         }
 
+        /// A Vault → another Cube's Vault PSBT that finished after the page
+        /// was left can't be signed: the Cube is locked, so signing starts
+        /// its unlock over instead.
+        #[test]
+        fn a_vault_to_vault_psbt_finished_after_leaving_cannot_be_signed() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let cache = transfer_cache();
+            home.transfer_from = Some(WalletKind::Vault);
+            home.transfer_to = None;
+            home.transfer_direction = Some(TransferDirection::VaultToOtherCube);
+            home.destination_ready = Some((
+                home.transfer_request_generation,
+                TransferDirection::VaultToOtherCube,
+            ));
+            home.other_cube_selected = Some("destination".into());
+            home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+            home.other_address = Some(checked_other_address());
+            home.is_sending = true;
+            // Left mid-preparation: locked now, the preparation then lands.
+            home.interrupt();
+            home.is_sending = false;
+            assert!(home.destination_is_ready(), "the address is still in place");
+            let task = home.update(
+                None,
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SignVaultToLiquidTx)),
+            );
+            drain(task);
+            assert_eq!(home.current_view.step, 1, "back to Details to unlock again");
+            assert_eq!(home.transfer_page, TransferPage::Wallets);
+            assert!(!home.transfer_signed);
+        }
+
+        /// A broadcast already in flight when the page is left still
+        /// completes: Sent, and the Cube reported locked again.
+        #[test]
+        fn a_broadcast_in_flight_when_leaving_still_completes() {
+            use crate::app::breez_spark::SparkClient;
+            use crate::chain::ChainId;
+
+            let (_directory, root) = receiving_cube_catalog(true);
+            let (client, _requests) = SparkClient::mock_transport();
+            let cache = Cache {
+                datadir_path: root.clone(),
+                ..Cache::default()
+            };
+            let mut home = GlobalHome::new_without_wallet(
+                None,
+                Some(Arc::new(SparkBackend::new(Arc::new(client)))),
+                root.clone(),
+                ChainId::Bitcoin,
+                "source".into(),
+                false,
+            );
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::SparkBalanceUpdated {
+                    btc: Amount::from_sat(200_000),
+                    usdb_balance: None,
+                    identity_pubkey: "source-spark".into(),
+                },
+            );
+            send(&mut home, &cache, HomeMessage::NextStep);
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::PickOtherCubeWallet("destination".into(), WalletKind::Vault),
+            );
+            assert!(home.other_scope.is_some());
+            home.current_view.step = 2;
+            home.is_sending = true;
+            home.interrupt();
+            assert!(home.other_scope.is_none());
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::TransferBroadcast {
+                    amount_sat: 50_000,
+                    destination_kind: WalletKind::Vault,
+                    swap_id: None,
+                },
+            );
+            assert!(!home.is_sending);
+            assert_eq!(home.current_view.step, 3, "Sent");
+            assert!(home.other_locked_again, "Sent says it's locked again");
+        }
+
+        /// Vault → another Cube (its Vault or its Spark), left mid-broadcast:
+        /// a failed broadcast can't be confirmed again without a fresh unlock,
+        /// and one already in flight still completes to Sent.
+        #[test]
+        fn a_vault_broadcast_after_leaving_fails_closed_or_completes() {
+            for direction in [
+                TransferDirection::VaultToOtherCube,
+                TransferDirection::VaultToOtherSpark,
+            ] {
+                let setup = || {
+                    let (mut home, _wallet) = home_on_transfer_screen();
+                    home.transfer_from = Some(WalletKind::Vault);
+                    home.transfer_to = None;
+                    home.transfer_direction = Some(direction);
+                    home.destination_ready = Some((home.transfer_request_generation, direction));
+                    home.transfer_signed = true;
+                    home.other_cube_selected = Some("destination".into());
+                    home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+                    home.other_address = Some(checked_other_address());
+                    home.is_sending = true;
+                    home.interrupt();
+                    home
+                };
+                let cache = transfer_cache();
+
+                // The broadcast fails: Confirm restarts the unlock, sends nothing.
+                let mut failed = setup();
+                send(
+                    &mut failed,
+                    &cache,
+                    HomeMessage::Error(TransferError::PreparationExpired),
+                );
+                assert!(!failed.is_sending);
+                send(&mut failed, &cache, HomeMessage::ConfirmTransfer);
+                assert_eq!(failed.current_view.step, 1, "{:?}", direction);
+                assert_eq!(failed.transfer_page, TransferPage::Wallets);
+                assert!(!failed.is_sending, "{:?}: nothing sent again", direction);
+
+                // The broadcast was already out: it completes to Sent, through
+                // the callback each route really uses.
+                let mut done = setup();
+                send(&mut done, &cache, success_callback(direction));
+                assert!(!done.is_sending);
+                assert_eq!(done.current_view.step, 3, "{:?}", direction);
+                assert!(done.other_scope.is_none() && done.other_address.is_none());
+            }
+        }
+
+        /// The message a successful Vault → another Cube broadcast delivers:
+        /// to its Spark, the deposit is reported like a Spark-bound transfer.
+        fn success_callback(direction: TransferDirection) -> HomeMessage {
+            match direction {
+                TransferDirection::VaultToOtherSpark => HomeMessage::TransferBroadcast {
+                    amount_sat: 100_000,
+                    destination_kind: WalletKind::Spark,
+                    swap_id: None,
+                },
+                _ => HomeMessage::TransferSuccessful,
+            }
+        }
+
+        /// From a real held Vault-source unlock, for another Cube's Vault and
+        /// its Spark: a valid unlock passes the review check; leaving
+        /// mid-broadcast revokes it, so a failed broadcast restarts the
+        /// unlock, while one already out completes to Sent.
+        #[test]
+        fn a_held_vault_source_unlock_through_leaving_and_broadcast() {
+            for (with_vault, direction) in [
+                (true, TransferDirection::VaultToOtherCube),
+                (false, TransferDirection::VaultToOtherSpark),
+            ] {
+                let (_directory, root) = receiving_cube_catalog(with_vault);
+                let cache = Cache {
+                    datadir_path: root,
+                    has_vault: true,
+                    ..Cache::default()
+                };
+                let daemon = Arc::new(RecordingDaemon::default());
+                let as_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
+                // The Sign handler with a daemon. Its task isn't run: the
+                // PSBT request it dispatches stays in flight.
+                let sign = |home: &mut GlobalHome| {
+                    let _in_flight = home.update(
+                        Some(as_daemon.clone()),
+                        &cache,
+                        Message::View(view::Message::Home(HomeMessage::SignVaultToLiquidTx)),
+                    );
+                };
+                // Review with a PSBT being built under the held unlock.
+                let building = || {
+                    let (mut home, wallet) = home_on_transfer_screen();
+                    send(&mut home, &cache, HomeMessage::BackToHome);
+                    send(&mut home, &cache, HomeMessage::NextStep);
+                    send(&mut home, &cache, HomeMessage::ContinueFromWallets);
+                    assert_eq!(home.transfer_direction, Some(direction));
+                    send(&mut home, &cache, HomeMessage::ContinueWithCube);
+                    assert!(home.other_scope.is_some(), "{:?}: a held unlock", direction);
+                    home.other_address = Some(checked_other_address());
+                    home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+                    send(&mut home, &cache, HomeMessage::ContinueFromUnlock);
+                    let task = home.update(
+                        None,
+                        &cache,
+                        Message::View(view::Message::Home(HomeMessage::NextStep)),
+                    );
+                    for message in collect(task) {
+                        drain(home.update(None, &cache, message));
+                    }
+                    assert!(home.destination_is_ready(), "{:?}", direction);
+                    // Control: the valid unlock passes the review check.
+                    assert!(
+                        home.check_other_review_address(&cache).is_ok(),
+                        "{:?}: a valid unlock signs and broadcasts",
+                        direction
+                    );
+                    // Control through the handler: with the valid unlock,
+                    // signing dispatches the PSBT request to the daemon.
+                    home.transfer_feerate = form::Value {
+                        value: "2".into(),
+                        warning: None,
+                        valid: true,
+                    };
+                    home.transfer_unit = BitcoinDisplayUnit::Sats;
+                    home.entered_amount = form::Value {
+                        value: "100000".into(),
+                        warning: None,
+                        valid: true,
+                    };
+                    sign(&mut home);
+                    assert!(
+                        home.active_psbt_request.is_some() && home.is_sending,
+                        "{:?}: a valid unlock reaches the daemon",
+                        direction
+                    );
+                    assert_eq!(home.current_view.step, 2);
+                    (home, wallet)
+                };
+                let at_review = || {
+                    let (mut home, _) = building();
+                    // The user leaves while it builds.
+                    home.interrupt();
+                    assert!(home.other_scope.is_none(), "{:?}", direction);
+                    assert!(home.check_other_review_address(&cache).is_err());
+                    home
+                };
+
+                // Control, staying on the page: with the valid unlock, a
+                // landing PSBT and Confirm both get past the unlock check
+                // (the transfer stays on Review; nothing restarts). The test
+                // PSBT is empty, so analysis then stops it with an error
+                // instead of opening the signer; Confirm has no signed
+                // transaction to send. Locked, the same handlers restart the
+                // unlock (below).
+                let (mut valid, wallet) = building();
+                let request_id = valid.active_psbt_request.expect("a PSBT request");
+                let generation = valid.transfer_request_generation;
+                let psbt =
+                    Psbt::from_unsigned_tx(coincube_core::miniscript::bitcoin::Transaction {
+                        version: coincube_core::miniscript::bitcoin::transaction::Version::TWO,
+                        lock_time: coincube_core::miniscript::bitcoin::absolute::LockTime::ZERO,
+                        input: vec![],
+                        output: vec![],
+                    })
+                    .unwrap();
+                let messages = collect(valid.update(
+                    Some(as_daemon.clone()),
+                    &cache,
+                    Message::View(view::Message::Home(HomeMessage::TransferPsbtReady {
+                        request_id,
+                        generation,
+                        direction,
+                        destination: MAINNET_ADDR.to_string(),
+                        amount_sat: 100_000,
+                        feerate_vb: 2,
+                        result: Ok((
+                            psbt,
+                            Some(wallet),
+                            (cache.datadir_path.clone(), cache.network),
+                        )),
+                    })),
+                ));
+                assert_eq!(valid.current_view.step, 2, "{:?}: no restart", direction);
+                assert!(
+                    valid.other_scope.is_some(),
+                    "{:?}: still unlocked",
+                    direction
+                );
+                assert!(
+                    messages.iter().any(|message| matches!(
+                        message,
+                        Message::View(view::Message::ShowError(error))
+                            if error.contains("signature info")
+                    )),
+                    "{:?}: past the unlock check, into PSBT analysis",
+                    direction
+                );
+                valid.transfer_psbt_ready_for =
+                    Some((valid.next_psbt_request_id, generation, direction));
+                valid.transfer_signed = true;
+                send(&mut valid, &cache, HomeMessage::ConfirmTransfer);
+                assert_eq!(
+                    valid.current_view.step, 2,
+                    "{:?}: Confirm keeps Review",
+                    direction
+                );
+                assert!(valid.other_scope.is_some(), "{:?}", direction);
+
+                let mut failed = at_review();
+                send(
+                    &mut failed,
+                    &cache,
+                    HomeMessage::Error(TransferError::PreparationExpired),
+                );
+                // Signing again can't reach the daemon: the unlock restarts.
+                failed.active_psbt_request = None;
+                sign(&mut failed);
+                assert!(failed.active_psbt_request.is_none(), "{:?}", direction);
+                assert_eq!(failed.current_view.step, 1, "{:?}", direction);
+                assert!(!failed.is_sending, "{:?}: nothing sent again", direction);
+
+                // Nor can a broadcast of an earlier signed transaction.
+                let mut signed = at_review();
+                send(
+                    &mut signed,
+                    &cache,
+                    HomeMessage::Error(TransferError::PreparationExpired),
+                );
+                signed.transfer_signed = true;
+                send(&mut signed, &cache, HomeMessage::ConfirmTransfer);
+                assert_eq!(signed.current_view.step, 1, "{:?}", direction);
+                assert!(!signed.is_sending, "{:?}: nothing broadcast", direction);
+
+                let mut done = at_review();
+                send(&mut done, &cache, success_callback(direction));
+                assert_eq!(done.current_view.step, 3, "{:?}: Sent", direction);
+                assert!(done.other_locked_again, "{:?}", direction);
+            }
+        }
+
+        /// A PSBT for another Cube's Vault or Spark that lands after the page
+        /// was left opens no signer: the Cube is locked, so its unlock starts
+        /// over on Details.
+        #[test]
+        fn a_late_other_cube_psbt_opens_no_signer() {
+            for direction in [
+                TransferDirection::VaultToOtherCube,
+                TransferDirection::VaultToOtherSpark,
+            ] {
+                let (mut home, wallet) = home_on_transfer_screen();
+                let cache = transfer_cache();
+                home.transfer_from = Some(WalletKind::Vault);
+                home.transfer_to = None;
+                home.transfer_direction = Some(direction);
+                let generation = home.transfer_request_generation;
+                home.destination_ready = Some((generation, direction));
+                home.transfer_feerate.value = "2".into();
+                home.other_cube_selected = Some("destination".into());
+                home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+                home.other_address = Some(checked_other_address());
+                // Preparing the PSBT, the user leaves by the side menu.
+                home.is_sending = true;
+                home.active_psbt_request = Some(7);
+                home.interrupt();
+                let psbt =
+                    Psbt::from_unsigned_tx(coincube_core::miniscript::bitcoin::Transaction {
+                        version: coincube_core::miniscript::bitcoin::transaction::Version::TWO,
+                        lock_time: coincube_core::miniscript::bitcoin::absolute::LockTime::ZERO,
+                        input: vec![],
+                        output: vec![],
+                    })
+                    .unwrap();
+                drain(home.update(
+                    None,
+                    &cache,
+                    Message::View(view::Message::Home(HomeMessage::TransferPsbtReady {
+                        request_id: 7,
+                        generation,
+                        direction,
+                        destination: MAINNET_ADDR.to_string(),
+                        amount_sat: 100_000,
+                        feerate_vb: 2,
+                        result: Ok((
+                            psbt,
+                            Some(wallet),
+                            (cache.datadir_path.clone(), cache.network),
+                        )),
+                    })),
+                ));
+                assert!(!home.is_sending, "{:?}", direction);
+                assert!(
+                    matches!(home.modal, Modal::None),
+                    "{:?}: no signer",
+                    direction
+                );
+                assert!(home.transfer_spend_tx.is_none());
+                assert_eq!(home.current_view.step, 1, "{:?}", direction);
+                assert_eq!(home.transfer_page, TransferPage::Wallets);
+            }
+        }
+
+        /// The side menu leaving Transfer revokes a real scoped unlock, with
+        /// or without a send or PSBT preparation in flight.
+        #[test]
+        fn leaving_transfer_revokes_a_held_unlock() {
+            use crate::app::breez_spark::SparkClient;
+            use crate::chain::ChainId;
+
+            let (_directory, root) = receiving_cube_catalog(true);
+            let (client, _requests) = SparkClient::mock_transport();
+            let cache = Cache {
+                datadir_path: root.clone(),
+                ..Cache::default()
+            };
+            for sending in [false, true] {
+                let mut home = GlobalHome::new_without_wallet(
+                    None,
+                    Some(Arc::new(SparkBackend::new(Arc::new(client.clone())))),
+                    root.clone(),
+                    ChainId::Bitcoin,
+                    "source".into(),
+                    false,
+                );
+                send(
+                    &mut home,
+                    &cache,
+                    HomeMessage::SparkBalanceUpdated {
+                        btc: Amount::from_sat(200_000),
+                        usdb_balance: None,
+                        identity_pubkey: "source-spark".into(),
+                    },
+                );
+                send(&mut home, &cache, HomeMessage::NextStep);
+                send(
+                    &mut home,
+                    &cache,
+                    HomeMessage::PickOtherCubeWallet("destination".into(), WalletKind::Vault),
+                );
+                assert!(home.other_scope.is_some(), "the pick holds a scoped unlock");
+                home.is_sending = sending;
+                home.interrupt();
+                assert!(home.other_scope.is_none(), "sending: {}", sending);
+                assert!(home.other_address.is_none());
+                if sending {
+                    assert!(home.other_locked_again, "Done says it locked again");
+                    // The in-flight work fails: still locked, and Confirm
+                    // can't send again without a fresh unlock.
+                    send(
+                        &mut home,
+                        &cache,
+                        HomeMessage::Error(TransferError::PreparationExpired),
+                    );
+                    assert!(home.other_scope.is_none());
+                    home.current_view.step = 2;
+                    home.receive_address_info = Some(ReceiveAddressInfo {
+                        address: Address::from_str(MAINNET_ADDR).unwrap().assume_checked(),
+                        index: ChildNumber::from(3),
+                        labels: HashMap::new(),
+                    });
+                    home.destination_ready = Some((
+                        home.transfer_request_generation,
+                        TransferDirection::SparkToOtherCube,
+                    ));
+                    send(&mut home, &cache, HomeMessage::ConfirmSparkSend);
+                    assert_eq!(home.current_view.step, 1, "the unlock starts over");
+                    assert_eq!(home.transfer_page, TransferPage::Wallets);
+                    assert!(!home.is_sending, "nothing was sent again");
+                } else {
+                    assert_eq!(home.transfer_page, TransferPage::Wallets);
+                    assert!(home.other_cube_selected.is_none());
+                }
+            }
+        }
+
         fn spark_only_cube_sends_to_another_cube(wallet: WalletKind) {
             use crate::app::breez_spark::SparkClient;
             use crate::chain::ChainId;
@@ -7256,6 +7724,50 @@ mod tests {
         }
 
         #[test]
+        fn leaving_transfer_by_the_menu_locks_the_other_cube() {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let unlocked = |home: &mut GlobalHome, step: usize| {
+                home.current_view.step = step;
+                home.transfer_from = Some(WalletKind::Vault);
+                home.transfer_to = None;
+                home.transfer_direction = Some(TransferDirection::VaultToOtherCube);
+                home.transfer_page = TransferPage::Amount;
+                home.other_cube_selected = Some("destination".into());
+                home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+                home.other_address = Some(checked_other_address());
+            };
+            for step in [1, 2] {
+                unlocked(&mut home, step);
+                home.interrupt();
+                assert!(home.other_address.is_none() && home.other_cube_selected.is_none());
+                assert_eq!(home.other_phase, UnlockPhase::default());
+                assert_eq!(home.current_view.step, 1, "from step {}", step);
+                assert_eq!(home.transfer_page, TransferPage::Wallets);
+            }
+            // A send or PSBT preparation in flight keeps its step, but the
+            // Cube locks now: whether it then fails or succeeds, nothing
+            // reuses the unlock.
+            unlocked(&mut home, 2);
+            home.is_sending = true;
+            home.interrupt();
+            assert!(home.other_address.is_none() && home.other_scope.is_none());
+            assert_eq!(home.other_phase, UnlockPhase::default());
+            assert_eq!(home.current_view.step, 2);
+            assert!(
+                home.check_other_review_address(&transfer_cache()).is_err(),
+                "a failed send can't confirm against the locked Cube"
+            );
+            // The send fails: the busy flag clears, the Cube stays locked.
+            send(
+                &mut home,
+                &transfer_cache(),
+                HomeMessage::Error(TransferError::PreparationExpired),
+            );
+            assert!(!home.is_sending);
+            assert!(home.other_scope.is_none() && home.other_address.is_none());
+        }
+
+        #[test]
         fn prepare_and_another_cube_belong_to_their_pages() {
             let (mut home, _wallet) = home_on_transfer_screen();
             let cache = transfer_cache();
@@ -7332,37 +7844,6 @@ mod tests {
             assert!(matches!(home.modal, Modal::None));
             assert!(home.transfer_signed, "Confirm & Broadcast stays available");
             assert!(home.transfer_psbt_ready_for.is_some());
-        }
-
-        /// Iced draws only the root overlay. Beneath the QR card or signer the
-        /// dialog must be in the base (a nested modal's overlay is never
-        /// drawn); alone it is a modal overlay. The capture probe walks the
-        /// widget tree, which a modal hides from it below its base.
-        #[test]
-        fn review_is_in_the_base_beneath_an_upper_modal() {
-            use crate::app::view::shared::landing::capture;
-            let review = || -> Element<'static, view::Message> {
-                coincube_ui::component::text::text("Review and confirm").into()
-            };
-            let base = || -> Element<'static, view::Message> {
-                coincube_ui::component::text::text("Overview").into()
-            };
-            let inspect = |element| {
-                capture::inspect(
-                    "transfer-layering",
-                    element,
-                    (1440, 900),
-                    "dark",
-                    coincube_ui::theme::Theme::dark(),
-                )
-            };
-            let under = inspect(with_transfer_dialog(base(), Some(review()), true, None));
-            assert!(under.contains("Overview") && under.contains("Review and confirm"));
-            let alone = inspect(with_transfer_dialog(base(), Some(review()), false, None));
-            assert!(
-                !alone.contains("Review and confirm"),
-                "a modal overlay alone"
-            );
         }
 
         /// Tenshu v175 hides Liquid, so a Liquid → Vault transfer persisted by
