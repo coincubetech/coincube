@@ -14216,50 +14216,59 @@ mod tests {
             CreationBackupStep::KitPassword,
             CreationBackupStep::KitUploading,
         ] {
-            for is_passkey in [false, true] {
-                for (pw, confirm, ack, err) in [
-                    (&empty, &empty, false, None),
-                    (&password, &password, true, None),
-                    (&password, &empty, false, Some("upload failed")),
-                ] {
-                    for kit_available in [false, true] {
-                        for saving in [false, true] {
-                            for (seed_confirmed, kit_saved) in
-                                [(false, false), (true, false), (false, true), (true, true)]
-                            {
-                                let hub = CreationBackupHub {
-                                    seed_confirmed,
-                                    kit_saved,
-                                };
-                                let _ = creation_backup_view(
-                                    &step,
-                                    Some(&words),
-                                    saving,
-                                    is_passkey,
-                                    pw,
-                                    confirm,
-                                    ack,
-                                    err,
-                                    kit_available,
-                                    hub,
-                                );
-                                let _ = creation_choice_footer(saving, hub);
-                            }
+            render_creation_backup_step(&step, &words, &password, &empty);
+        }
+    }
+
+    fn render_creation_backup_step(
+        step: &CreationBackupStep,
+        words: &[String],
+        password: &zeroize::Zeroizing<String>,
+        empty: &zeroize::Zeroizing<String>,
+    ) {
+        for is_passkey in [false, true] {
+            for (pw, confirm, ack, err) in [
+                (empty, empty, false, None),
+                (password, password, true, None),
+                (password, empty, false, Some("upload failed")),
+            ] {
+                for kit_available in [false, true] {
+                    for saving in [false, true] {
+                        for (seed_confirmed, kit_saved) in
+                            [(false, false), (true, false), (false, true), (true, true)]
+                        {
+                            let hub = CreationBackupHub {
+                                seed_confirmed,
+                                kit_saved,
+                            };
+                            let _ = creation_backup_view(
+                                step,
+                                Some(words),
+                                saving,
+                                is_passkey,
+                                pw,
+                                confirm,
+                                ack,
+                                err,
+                                kit_available,
+                                hub,
+                            );
+                            let _ = creation_choice_footer(saving, hub);
                         }
-                        // The seed being gone mid-render must not panic.
-                        let _ = creation_backup_view(
-                            &step,
-                            None,
-                            false,
-                            is_passkey,
-                            pw,
-                            confirm,
-                            ack,
-                            err,
-                            kit_available,
-                            CreationBackupHub::default(),
-                        );
                     }
+                    // The seed being gone mid-render must not panic.
+                    let _ = creation_backup_view(
+                        step,
+                        None,
+                        false,
+                        is_passkey,
+                        pw,
+                        confirm,
+                        ack,
+                        err,
+                        kit_available,
+                        CreationBackupHub::default(),
+                    );
                 }
             }
         }
