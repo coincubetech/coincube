@@ -439,8 +439,8 @@ mod tests {
     fn network_note_names_each_chain() {
         for chain in ChainId::ALL {
             let note = network_note(chain);
-            assert!(note.contains(chain.label()), "{note}");
-            assert!(!note.contains("{network}"), "{note}");
+            assert!(note.contains(chain.label()), "{}", note);
+            assert!(!note.contains("{network}"), "{}", note);
         }
         assert_ne!(
             network_note(ChainId::Bitcoin),
