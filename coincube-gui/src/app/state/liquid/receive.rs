@@ -1246,7 +1246,10 @@ mod receive_privacy_tests {
                 theme::Theme::dark(),
             );
             if privacy == Some(BalancePrivacy::Shown) {
-                assert!(mounted.contains(amount));
+                // The receipt sets the unit beside the figure as its own text.
+                let (figure, unit) = amount.rsplit_once(' ').unwrap_or((amount, ""));
+                assert!(mounted.contains(figure));
+                assert!(mounted.contains(unit));
             } else {
                 assert!(mounted.contains("••••••"));
                 assert!(!mounted.contains(amount));

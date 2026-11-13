@@ -75,7 +75,7 @@ pub enum SparkReceivePhase {
     /// `Generated` state. Carries the running sum of all qualifying
     /// `PaymentReceived` events that have arrived since this phase
     /// was entered, plus a `count` so the celebration label can say
-    /// "(2 deposits)" when multiple back-to-back receives stack up
+    /// "2 payments" when multiple back-to-back receives stack up
     /// before the user dismisses the screen.
     Received { amount_sat: i64, count: u32 },
     /// RPC failed — user-visible error.
@@ -808,31 +808,23 @@ impl State for SparkReceive {
                     } => (prev.saturating_add(amount_sat), count.saturating_add(1)),
                     _ => (amount_sat, 1),
                 };
+                // The receipt shows how many payments the total covers.
                 self.received_amount_display = match &token {
-                    Some(token) => {
-                        let amount = crate::app::breez_spark::assets::format_token_display_u128(
+                    Some(token) => format!(
+                        "{} {}",
+                        crate::app::breez_spark::assets::format_token_display_u128(
                             u128::from(running_total.unsigned_abs()),
                             token.decimals,
-                        );
-                        if count > 1 {
-                            coincube_ui::localized_format!(
-                                "+{} {} ({} deposits)",
-                                "+{} {} ({} depósitos)",
-                                amount,
-                                token.ticker,
-                                count
-                            )
-                        } else {
-                            format!("+{} {}", amount, token.ticker)
-                        }
-                    }
-                    None if count > 1 => coincube_ui::localized_format!(
-                        "+{} sats ({} deposits)",
-                        "+{} sats ({} depósitos)",
-                        running_total.unsigned_abs(),
-                        count
+                        ),
+                        token.ticker
                     ),
-                    None => format!("+{} sats", running_total.unsigned_abs()),
+                    None => format!(
+                        "{} sats",
+                        coincube_ui::component::amount::format_u64_as_string(
+                            running_total.unsigned_abs(),
+                            ","
+                        )
+                    ),
                 };
                 // Pick celebration image based on receive method.
                 // Only re-roll the quote on the first arrival so the
@@ -996,6 +988,12 @@ impl State for SparkReceive {
                 // the list until the next navigation.
                 fetch_payments_task(self.backend.clone()),
             ]),
+            SparkReceiveMessage::ViewActivity => Task::done(Message::View(
+                crate::app::view::Message::SparkReceive(SparkReceiveMessage::Reset),
+            ))
+            .chain(redirect(Menu::Cube(
+                crate::app::menu::CubeSubMenu::Activity,
+            ))),
             SparkReceiveMessage::Reset => {
                 self.qr_data = None;
                 self.displayed_invoice = None;
@@ -1784,7 +1782,7 @@ mod tests {
             },
         );
         assert!(matches!(panel.phase(), SparkReceivePhase::Received { .. }));
-        assert_eq!(panel.received_amount_display, "+12.50 USDB");
+        assert_eq!(panel.received_amount_display, "12.50 USDB");
 
         let mut panel = SparkReceive::new(None);
         update(
@@ -1869,7 +1867,7 @@ mod tests {
                 count: 1
             }
         ));
-        assert_eq!(panel.received_amount_display, "+321 sats");
+        assert_eq!(panel.received_amount_display, "321 sats");
         assert_eq!(panel.received_celebration_context, "lightning-receive");
         assert!(panel.qr_data.is_none());
         assert!(panel.displayed_invoice.is_none());
@@ -1908,7 +1906,7 @@ mod tests {
                 count: 2
             }
         ));
-        assert_eq!(panel.received_amount_display, "+150 sats (2 deposits)");
+        assert_eq!(panel.received_amount_display, "150 sats");
         assert_eq!(panel.received_celebration_context, "spark-receive");
     }
 
