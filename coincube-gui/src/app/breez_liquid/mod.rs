@@ -380,6 +380,142 @@ mod seed_source_tests {
         let _ = std::fs::remove_dir_all(&datadir);
     }
 
+    /// Restore completion opens a PIN-only session before loading this client.
+    /// Exercise that actual loader with a v3 seed and no cached master, rather
+    /// than testing only the lower-level unlock helper.
+    // The guard deliberately spans the client load: the global session must
+    // stay PIN-only until this async restore-completion path finishes.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "needs a code-signed binary (data-protection keychain returns -34018 unsigned)"
+    )]
+    async fn restored_v3_pin_only_session_loads_without_cached_signer() {
+        use crate::app::session;
+        use crate::services::unlock::device_secret;
+        use coincube_core::signer::SignerError;
+
+        struct Fixture {
+            root: std::path::PathBuf,
+            cube_id: String,
+            other_id: String,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                session::close();
+                device_secret::delete(&self.cube_id).expect("remove disposable device secret");
+                device_secret::delete(&self.other_id).expect("remove other disposable secret");
+                std::fs::remove_dir_all(&self.root).expect("remove disposable seed files");
+            }
+        }
+
+        let _guard = session::test_guard();
+        for network in [Network::Bitcoin, Network::Testnet4] {
+            let fixture = Fixture {
+                root: scratch_datadir("restored-v3"),
+                cube_id: format!("seed-source-restore-{}", uuid::Uuid::new_v4()),
+                other_id: format!("seed-source-other-{}", uuid::Uuid::new_v4()),
+            };
+            session::close();
+            let pin = "9753";
+            let secp = Secp256k1::signing_only();
+            let master = MasterSigner::generate(network).unwrap();
+            let fp = master.fingerprint(&secp);
+            let secret = device_secret::get_or_create(&fixture.root, &fixture.cube_id).unwrap();
+            master
+                .store_encrypted(
+                    &fixture.root,
+                    network,
+                    &secp,
+                    None,
+                    pin,
+                    &fixture.cube_id,
+                    Some(&secret),
+                )
+                .unwrap();
+            // Core cannot obtain the device secret; routing here recreates the
+            // pre-fix GUI failure, even though the Keychain item exists.
+            assert!(matches!(
+                MasterSigner::from_datadir_by_fingerprint(
+                    &fixture.root,
+                    network,
+                    fp,
+                    Some(pin),
+                    &fixture.cube_id,
+                ),
+                Err(SignerError::DeviceSecretRequired)
+            ));
+            session::open(&fixture.cube_id, zeroize::Zeroizing::new(pin.into()));
+            assert!(session::unlocked_signer(&fixture.cube_id, fp).is_none());
+            let source = SeedSource::encrypted_file(fp, pin);
+            let path = DerivationPath::from_str("m/48'/0'/0'/2'").unwrap();
+            assert_eq!(
+                source
+                    .resolve(&fixture.root, network, &fixture.cube_id)
+                    .expect("restore must load the v3 root without a restart")
+                    .xpub_at(&path, &secp),
+                master.xpub_at(&path, &secp),
+            );
+            // Testnet4 follows the same restore-completion loader without a
+            // live mainnet Liquid SDK or API credential dependency.
+            if network == Network::Testnet4 {
+                let client = load_breez_client(
+                    &fixture.root,
+                    network,
+                    source.clone(),
+                    &fixture.cube_id,
+                    false,
+                )
+                .await
+                .expect("restore completion must carry the restored v3 signer");
+                assert_eq!(
+                    client
+                        .liquid_signer()
+                        .unwrap()
+                        .lock()
+                        .unwrap()
+                        .xpub_at(&path, &secp),
+                    master.xpub_at(&path, &secp),
+                );
+            }
+            assert!(session::unlocked_signer(&fixture.cube_id, fp).is_none());
+            assert!(matches!(
+                SeedSource::encrypted_file(fp, "0000").resolve(
+                    &fixture.root,
+                    network,
+                    &fixture.cube_id
+                ),
+                Err(SignerError::InvalidPassword)
+            ));
+            device_secret::get_or_create(&fixture.root, &fixture.other_id).unwrap();
+            assert!(matches!(
+                source.resolve(&fixture.root, network, &fixture.other_id),
+                Err(SignerError::InvalidPassword)
+            ));
+            assert!(matches!(
+                SeedSource::encrypted_file(Fingerprint::default(), pin).resolve(
+                    &fixture.root,
+                    network,
+                    &fixture.cube_id
+                ),
+                Err(SignerError::SignerNotFound(_))
+            ));
+            assert!(
+                device_secret::load(&fixture.cube_id).unwrap() == secret,
+                "loading must not replace the device secret",
+            );
+            device_secret::delete(&fixture.cube_id).unwrap();
+            assert!(matches!(
+                source.resolve(&fixture.root, network, &fixture.cube_id),
+                Err(SignerError::DeviceSecretRequired)
+            ));
+            assert!(device_secret::load_optional(&fixture.cube_id)
+                .unwrap()
+                .is_none());
+        }
+    }
+
     /// The property that makes passkey unlock possible at all: the in-memory
     /// arm never touches the datadir, so a Cube with no seed file on disk still
     /// loads its wallets.

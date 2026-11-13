@@ -2156,21 +2156,6 @@ pub fn hw_list_view<'a>(
     }
 }
 
-pub fn backup_fresh_fork_mnemonic<'a>(
-    progress: (usize, usize),
-    words: String,
-    confirmed: bool,
-) -> Element<'a, Message> {
-    layout(progress, "Back Up Your Cube Master Seed",
-        Column::new()
-            .push(text(localized_copy("Write these words down in order and keep them private. They recover this Cube; the PIN only unlocks this device.")))
-            .push(text(words))
-            .push(iced::widget::checkbox(confirmed).label(localized_copy("I have written down my seed words"))
-                .on_toggle(Message::ConfirmFreshSeedBackup))
-            .push(button::secondary(None, localized_copy("Next")).on_press_maybe(confirmed.then_some(Message::Next)))
-            .spacing(30), true, Some(Message::Previous))
-}
-
 pub fn backup_mnemonic<'a>(progress: (usize, usize)) -> Element<'a, Message> {
     layout(
         progress,
