@@ -2426,9 +2426,10 @@ pub enum HomeMessage {
         usdb_balance: Option<coincube_spark_protocol::UsdbBalanceSnapshot>,
         identity_pubkey: String,
     },
-    /// Open the wallet-picker popup on the amount screen, editing the named side.
+    /// Open (or close, when it is already open) the Transfer route tile's
+    /// menu for the named side. Opening To reads the local Cube catalog.
     OpenWalletPicker(PickerSide),
-    /// Close the wallet-picker popup without changing the selected pair.
+    /// Close the route tile's menu without changing the selected pair.
     CloseWalletPicker,
     /// Commit a wallet selection from the popup; the state layer applies it to
     /// the side currently being edited and recomputes `transfer_direction`.
@@ -2444,6 +2445,9 @@ pub enum HomeMessage {
     SelectOtherCubeWallet(WalletKind),
     /// Other Cube page → Unlock.
     ContinueWithCube,
+    /// The To menu's row for a wallet in another local Cube: selects it and
+    /// starts that Cube's in-place unlock.
+    PickOtherCubeWallet(String, WalletKind),
     /// The chosen Cube's 4-digit PIN fields.
     OtherCubePin(crate::pin_input::Message),
     /// Check the entered PIN against the chosen Cube.

@@ -1165,7 +1165,13 @@ impl State for GlobalHome {
                             // from a prior transfer doesn't leak in.
                             self.transfer_feerate = default_transfer_feerate();
                             self.transfer_feerate_loading = None;
-                            self.transfer_page = TransferPage::Wallets;
+                            // One Details card: a same-Cube pair takes an
+                            // amount at once; another Cube waits for its pick.
+                            self.transfer_page = if direction.is_other_cube() {
+                                TransferPage::Wallets
+                            } else {
+                                TransferPage::Amount
+                            };
                             self.transfer_unit = cache.bitcoin_unit;
                             self.reset_other_cube();
                             self.current_view.next();
@@ -2143,7 +2149,19 @@ impl State for GlobalHome {
                         self.vault_transfer_preview_task(cache, &daemon)
                     }
                     HomeMessage::OpenWalletPicker(side) => {
+                        if self.wallet_picker == Some(side) {
+                            self.wallet_picker = None;
+                            return Task::none();
+                        }
                         self.wallet_picker = Some(side);
+                        // The To menu lists other local Cubes the source can
+                        // reach; read the catalog (names only, every Cube
+                        // locked) as it opens.
+                        if side == PickerSide::To && self.current_view.step == 1 {
+                            if let Some(source) = self.other_cube_source(cache) {
+                                self.other_cubes = other_cubes(&cache.datadir_path, &source);
+                            }
+                        }
                         Task::none()
                     }
                     HomeMessage::CloseWalletPicker => {
@@ -2179,16 +2197,21 @@ impl State for GlobalHome {
                             if side == PickerSide::To && self.transfer_from == Some(kind) {
                                 return Task::none();
                             }
+                            if side == PickerSide::From && self.transfer_from == Some(kind) {
+                                self.wallet_picker = None;
+                                return Task::none();
+                            }
                             let old_pair = (self.transfer_from, self.transfer_to);
+                            let was_other = self
+                                .transfer_direction
+                                .is_some_and(|direction| direction.is_other_cube());
                             match side {
+                                // A new source keeps a same-Cube pair: the
+                                // old source becomes the destination when it
+                                // was the destination, or when another Cube
+                                // was (that Cube was bound to the old source).
                                 PickerSide::From => {
-                                    if self.transfer_to == Some(kind)
-                                        || (self.transfer_to.is_none()
-                                            && TransferDirection::to_other_cube(
-                                                kind,
-                                                cache.chain(),
-                                            )
-                                            .is_none())
+                                    if self.transfer_to == Some(kind) || self.transfer_to.is_none()
                                     {
                                         self.transfer_to = self.transfer_from;
                                     }
@@ -2203,6 +2226,17 @@ impl State for GlobalHome {
                                 });
                             if old_pair != (self.transfer_from, self.transfer_to) {
                                 self.invalidate_transfer_destination();
+                            }
+                            // Leaving another Cube locks it again; a same-Cube
+                            // pair takes its amount on the same card.
+                            if self
+                                .transfer_direction
+                                .is_some_and(|direction| !direction.is_other_cube())
+                            {
+                                if was_other {
+                                    self.reset_other_cube();
+                                }
+                                self.transfer_page = TransferPage::Amount;
                             }
                             self.wallet_picker = None;
                             // Re-validate the entered amount against the new
@@ -2334,6 +2368,55 @@ impl State for GlobalHome {
                             Err(refusal) => self.other_error = Some(refusal.reason()),
                         }
                         Task::none()
+                    }
+                    HomeMessage::PickOtherCubeWallet(cube_id, kind) => {
+                        self.wallet_picker = None;
+                        if self.current_view.step != 1 {
+                            return Task::none();
+                        }
+                        let Some(direction) = self.transfer_from.and_then(|from| {
+                            TransferDirection::to_other_wallet(from, kind, cache.chain())
+                        }) else {
+                            return Task::none();
+                        };
+                        // The same Cube and wallet again: keep its unlock.
+                        if self.other_cube_selected.as_deref() == Some(cube_id.as_str())
+                            && self.transfer_direction == Some(direction)
+                            && self.other_scope.is_some()
+                        {
+                            return Task::none();
+                        }
+                        let Some(wallet) = self.transfer_source_wallet(direction, cache) else {
+                            return Task::none();
+                        };
+                        let source = Source {
+                            cube_id: self.cube_id.clone(),
+                            chain: cache.chain(),
+                            wallet,
+                            app: cache.app_generation,
+                        };
+                        self.reset_other_cube();
+                        self.transfer_to = None;
+                        self.transfer_direction = Some(direction);
+                        self.invalidate_transfer_destination();
+                        self.validate_entered_amount(cache);
+                        self.other_cubes = other_cubes(&cache.datadir_path, &source);
+                        if !self
+                            .other_cubes
+                            .iter()
+                            .any(|choice| choice.cube_id == cube_id && choice.can_receive(kind))
+                        {
+                            self.transfer_page = TransferPage::Wallets;
+                            return Task::none();
+                        }
+                        self.transfer_page = TransferPage::OtherCube;
+                        self.other_cube_selected = Some(cube_id);
+                        self.select_other_wallet(kind, cache);
+                        self.update(
+                            daemon.clone(),
+                            cache,
+                            Message::View(view::Message::Home(HomeMessage::ContinueWithCube)),
+                        )
                     }
                     HomeMessage::OtherCubePin(message) => {
                         if self.transfer_page != TransferPage::Unlock
@@ -2502,6 +2585,9 @@ impl State for GlobalHome {
                                 self.other_address = Some(OtherReceiveAddress::Bitcoin(address));
                                 self.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
                                 self.other_error = None;
+                                if self.transfer_page == TransferPage::Unlock {
+                                    self.transfer_page = TransferPage::Amount;
+                                }
                             }
                             Err(refusal) => self.other_error = Some(refusal.reason()),
                         }
@@ -2522,6 +2608,9 @@ impl State for GlobalHome {
                                 self.other_address = Some(address);
                                 self.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
                                 self.other_error = None;
+                                if self.transfer_page == TransferPage::Unlock {
+                                    self.transfer_page = TransferPage::Amount;
+                                }
                             }
                             Err(ScopeRefusal::Stale) => {}
                             Err(refusal) => self.other_error = Some(refusal.reason()),
@@ -4046,6 +4135,19 @@ impl GlobalHome {
     }
 
     /// Bind the destination unlock to this Cube, wallet and app session.
+    /// The source as another Cube would see it, whatever the current
+    /// destination: `None` when the source can't reach another Cube.
+    fn other_cube_source(&self, cache: &Cache) -> Option<Source> {
+        let direction = TransferDirection::to_other_cube(self.transfer_from?, cache.chain())?;
+        let wallet = self.transfer_source_wallet(direction, cache)?;
+        Some(Source {
+            cube_id: self.cube_id.clone(),
+            chain: cache.chain(),
+            wallet,
+            app: cache.app_generation,
+        })
+    }
+
     fn transfer_source(&self, cache: &Cache) -> Option<Source> {
         let wallet = self.transfer_source_wallet(self.transfer_direction?, cache)?;
         Some(Source {
@@ -6595,6 +6697,90 @@ mod tests {
             spark_only_cube_sends_to_another_cube(WalletKind::Spark);
         }
 
+        #[test]
+        fn the_to_menu_lists_other_cubes_and_a_pick_starts_their_unlock() {
+            use crate::app::breez_spark::SparkClient;
+            use crate::chain::ChainId;
+
+            let (_directory, root) = receiving_cube_catalog(true);
+            let (client, _requests) = SparkClient::mock_transport();
+            let cache = Cache {
+                datadir_path: root.clone(),
+                ..Cache::default()
+            };
+            let mut home = GlobalHome::new_without_wallet(
+                None,
+                Some(Arc::new(SparkBackend::new(Arc::new(client)))),
+                root.clone(),
+                ChainId::Bitcoin,
+                "source".into(),
+                false,
+            );
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::SparkBalanceUpdated {
+                    btc: Amount::from_sat(200_000),
+                    usdb_balance: None,
+                    identity_pubkey: "source-spark".into(),
+                },
+            );
+            send(&mut home, &cache, HomeMessage::NextStep);
+            // Spark only: another Cube is the only route, picked from To.
+            assert_eq!(home.transfer_page, TransferPage::Wallets);
+            assert!(home.other_cubes.is_empty());
+
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::OpenWalletPicker(PickerSide::To),
+            );
+            assert_eq!(home.wallet_picker, Some(PickerSide::To));
+            assert!(home
+                .other_cubes
+                .iter()
+                .any(|choice| choice.cube_id == "destination"));
+            // A second press closes it.
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::OpenWalletPicker(PickerSide::To),
+            );
+            assert_eq!(home.wallet_picker, None);
+
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::PickOtherCubeWallet("destination".into(), WalletKind::Vault),
+            );
+            assert_eq!(
+                home.transfer_direction,
+                Some(TransferDirection::SparkToOtherCube)
+            );
+            assert_eq!(home.other_cube_selected.as_deref(), Some("destination"));
+            assert_eq!(home.transfer_page, TransferPage::Unlock);
+            assert!(home.other_scope.is_some());
+
+            // The same pick again keeps the unlock in progress.
+            home.other_phase = UnlockPhase::Checks(1);
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::PickOtherCubeWallet("destination".into(), WalletKind::Vault),
+            );
+            assert_eq!(home.other_phase, UnlockPhase::Checks(1));
+            assert!(home.other_scope.is_some());
+
+            // An unknown Cube unlocks nothing.
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::PickOtherCubeWallet("missing".into(), WalletKind::Vault),
+            );
+            assert_eq!(home.transfer_page, TransferPage::Wallets);
+            assert!(home.other_scope.is_none());
+        }
+
         fn spark_only_cube_sends_to_another_cube(wallet: WalletKind) {
             use crate::app::breez_spark::SparkClient;
             use crate::chain::ChainId;
@@ -6985,6 +7171,88 @@ mod tests {
             assert_eq!(home.current_view.step, 0);
             assert_eq!(home.transfer_page, TransferPage::Wallets);
             assert!(home.other_address.is_none() && home.other_scope.is_none());
+        }
+
+        /// `home_on_transfer_screen` with a Spark wallet beside the Vault.
+        fn home_with_spark_and_vault() -> GlobalHome {
+            let (mut home, _wallet) = home_on_transfer_screen();
+            let (client, _requests) = crate::app::breez_spark::SparkClient::mock_transport();
+            home.spark_backend = Some(Arc::new(SparkBackend::new(Arc::new(client))));
+            home
+        }
+
+        #[test]
+        fn a_same_cube_pair_opens_on_its_amount() {
+            let mut home = home_with_spark_and_vault();
+            let cache = transfer_cache();
+            home.current_view.step = 0;
+            send(&mut home, &cache, HomeMessage::NextStep);
+            assert_eq!(home.current_view.step, 1);
+            assert!(home
+                .transfer_direction
+                .is_some_and(|direction| !direction.is_other_cube()));
+            assert_eq!(home.transfer_page, TransferPage::Amount);
+        }
+
+        #[test]
+        fn leaving_another_cube_from_either_menu_locks_it_and_keeps_a_pair() {
+            let mut home = home_with_spark_and_vault();
+            let cache = transfer_cache();
+            let unlocked = |home: &mut GlobalHome| {
+                home.current_view.step = 1;
+                home.transfer_from = Some(WalletKind::Vault);
+                home.transfer_to = None;
+                home.transfer_direction = Some(TransferDirection::VaultToOtherCube);
+                home.transfer_page = TransferPage::Amount;
+                home.other_cube_selected = Some("destination".into());
+                home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+                home.other_address = Some(checked_other_address());
+                home.wallet_picker = Some(PickerSide::To);
+            };
+
+            // To: one of this Cube's wallets.
+            unlocked(&mut home);
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::SelectTransferWallet(PickerSide::To, WalletKind::Spark),
+            );
+            assert_eq!(
+                home.transfer_direction,
+                Some(TransferDirection::VaultToSpark)
+            );
+            assert_eq!(home.transfer_page, TransferPage::Amount);
+            assert!(home.other_address.is_none() && home.other_cube_selected.is_none());
+            assert_eq!(home.other_phase, UnlockPhase::default());
+            assert_eq!(home.wallet_picker, None);
+
+            // From: a new source; the old one becomes the destination.
+            unlocked(&mut home);
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::SelectTransferWallet(PickerSide::From, WalletKind::Spark),
+            );
+            assert_eq!(
+                home.transfer_direction,
+                Some(TransferDirection::SparkToVault)
+            );
+            assert_eq!(home.transfer_page, TransferPage::Amount);
+            assert!(home.other_address.is_none() && home.other_cube_selected.is_none());
+
+            // The current source again changes nothing.
+            unlocked(&mut home);
+            send(
+                &mut home,
+                &cache,
+                HomeMessage::SelectTransferWallet(PickerSide::From, WalletKind::Vault),
+            );
+            assert_eq!(
+                home.transfer_direction,
+                Some(TransferDirection::VaultToOtherCube)
+            );
+            assert!(home.other_address.is_some());
+            assert_eq!(home.wallet_picker, None);
         }
 
         #[test]
