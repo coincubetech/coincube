@@ -153,6 +153,54 @@ async fn create_new_testnet4_cube(
     created.ok_or("cube_persistence_failed")
 }
 
+/// Admit normal Developer Mode only for an unused isolated QA profile.
+/// Never overwrite an existing preference or adopt incomplete wallet state.
+fn initialize_fresh_qa_preferences(root: &CoincubeDirectory) -> Result<(), &'static str> {
+    let path = GlobalSettings::path(root);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {
+            return if GlobalSettings::load_developer_mode(&path) {
+                Ok(())
+            } else {
+                Err("qa_developer_mode_disabled")
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(_) => return Err("qa_preferences_unreadable"),
+    }
+    for chain in ChainId::ALL {
+        let directory = root.network_directory(chain);
+        match std::fs::symlink_metadata(directory.path()) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => (),
+            Ok(_) => return Err("qa_profile_not_unused"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err("qa_profile_unreadable"),
+        }
+        match settings::Settings::from_file(&directory) {
+            // Fresh QA initialization does not adopt even an apparently empty
+            // existing settings file. Its schema may contain unknown state.
+            Ok(_) => return Err("qa_profile_not_unused"),
+            Err(settings::SettingsError::NotFound) => (),
+            Err(_) => return Err("qa_profile_unreadable"),
+        }
+        for entry in std::fs::read_dir(directory.path()).map_err(|_| "qa_profile_unreadable")? {
+            let entry = entry.map_err(|_| "qa_profile_unreadable")?;
+            let name = entry.file_name();
+            let allowed = chain == ChainId::Testnet4
+                && matches!(
+                    name.to_str(),
+                    Some("connect.json" | "connect_transport_key")
+                );
+            let metadata =
+                std::fs::symlink_metadata(entry.path()).map_err(|_| "qa_profile_unreadable")?;
+            if !allowed || !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err("qa_profile_not_unused");
+            }
+        }
+    }
+    GlobalSettings::update_developer_mode(&path, true).map_err(|_| "qa_preferences_write")
+}
+
 /// Persist a run-owned Cube through Home's real validation/backup/finalization.
 /// Re-entry verifies the existing sealed seed instead of replacing it.
 pub async fn create_testnet4_cube(
@@ -175,6 +223,7 @@ pub async fn create_testnet4_cube(
         }
         cube.clone()
     } else {
+        initialize_fresh_qa_preferences(&root)?;
         create_new_testnet4_cube(
             ChainId::Testnet4,
             &root,
@@ -305,6 +354,97 @@ mod tests {
             .path()
             .join(settings::SETTINGS_FILE_NAME);
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn unused_legacy_qa_profile_gets_normal_developer_preference_only() {
+        let root = temp_root("fresh-preferences");
+        assert!(!super::GlobalSettings::load_developer_mode(
+            &super::GlobalSettings::path(&root)
+        ));
+        super::initialize_fresh_qa_preferences(&root).unwrap();
+        assert!(super::GlobalSettings::load_developer_mode(
+            &super::GlobalSettings::path(&root)
+        ));
+        assert!(!super::GlobalSettings::load_bitcoin_blake2b_beta(
+            &super::GlobalSettings::path(&root)
+        ));
+        let (home, _) = super::Home::new_for_chain(root.clone(), Some(ChainId::Testnet4));
+        assert_eq!(home.network, ChainId::Testnet4);
+        assert!(home.displayed_networks.contains(&ChainId::Testnet4));
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn qa_initialization_never_overwrites_existing_off_or_unknown_profile_state() {
+        for scenario in [
+            "off",
+            "bad-preferences",
+            "cube",
+            "bad-settings",
+            "unknown-settings",
+            "unknown-wallet-file",
+            "network-symlink",
+        ] {
+            let root = temp_root(scenario);
+            let path = super::GlobalSettings::path(&root);
+            match scenario {
+                "off" => super::GlobalSettings::update_developer_mode(&path, false).unwrap(),
+                "bad-preferences" => std::fs::write(&path, b"malformed").unwrap(),
+                "cube" => {
+                    let cube = CubeSettings::new_with_id(
+                        uuid::Uuid::new_v4(),
+                        "Unrelated".into(),
+                        ChainId::Bitcoin,
+                    );
+                    let directory = root.network_directory(ChainId::Bitcoin);
+                    std::fs::create_dir_all(directory.path()).unwrap();
+                    std::fs::write(
+                        directory.path().join(settings::SETTINGS_FILE_NAME),
+                        serde_json::to_vec(&settings::Settings {
+                            cubes: vec![cube],
+                            ..Default::default()
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+                }
+                "bad-settings" | "unknown-settings" | "unknown-wallet-file" => {
+                    let directory = root.network_directory(ChainId::Bitcoin);
+                    std::fs::create_dir_all(directory.path()).unwrap();
+                    std::fs::write(
+                        directory.path().join(
+                            if matches!(scenario, "bad-settings" | "unknown-settings") {
+                                settings::SETTINGS_FILE_NAME
+                            } else {
+                                "daemon.toml"
+                            },
+                        ),
+                        if scenario == "unknown-settings" {
+                            b"{}".as_slice()
+                        } else {
+                            b"unknown"
+                        },
+                    )
+                    .unwrap();
+                }
+                _ => {
+                    std::os::unix::fs::symlink(
+                        root.path(),
+                        root.network_directory(ChainId::Bitcoin).path(),
+                    )
+                    .unwrap();
+                }
+            }
+            let before = std::fs::read(&path).ok();
+            assert!(
+                super::initialize_fresh_qa_preferences(&root).is_err(),
+                "{}",
+                scenario
+            );
+            assert_eq!(std::fs::read(&path).ok(), before);
+            std::fs::remove_dir_all(root.path()).unwrap();
+        }
     }
 
     #[tokio::test]
