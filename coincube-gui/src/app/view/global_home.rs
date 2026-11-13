@@ -1835,8 +1835,27 @@ fn details_page<'a>(
             .push(text(localized_copy("Transfer details")).size(18).bold())
             .push(transfer_route_tiles(ctx, page)),
     )];
-    if other && matches!(page, TransferPage::OtherCube | TransferPage::Unlock) {
+    if other && page == TransferPage::Unlock {
         sections.push(card_section(unlock_section(ctx)));
+    } else if other && page == TransferPage::OtherCube {
+        // The pick didn't start an unlock: no PIN or passkey control could
+        // do anything here, so say why and how to try again.
+        sections.push(card_section(
+            Column::new()
+                .spacing(8)
+                .push_maybe(ctx.other.error.map(|error| {
+                    status_line(
+                        exclamation_circle_icon(),
+                        StatusTone::Bad,
+                        error.to_string(),
+                    )
+                }))
+                .push(muted(localized_format!(
+                    "{} can't be unlocked here. Choose it again in To, or pick another wallet.",
+                    "{} no se puede desbloquear aquí. Elígelo de nuevo en Para, o elige otra billetera.",
+                    ctx.other.name()
+                ))),
+        ));
     }
     sections.push(card_section(
         Column::new()
@@ -5486,6 +5505,16 @@ mod tests {
         assert!(
             !passkey.contains("PIN"),
             "a passkey Cube shows its passkey only"
+        );
+
+        // A pick whose unlock couldn't start offers no PIN or passkey control.
+        let mut refused = other(TransferPage::OtherCube, 1);
+        refused.other_cube.error = Some("This Cube changed. Choose it again.");
+        let refused = inspect_dialog("transfer-unlock-refused", refused);
+        assert!(refused.contains("This Cube changed. Choose it again."));
+        assert!(refused.contains("Choose it again in To"));
+        assert!(
+            !refused.contains("Unlock with passkey") && !refused.contains("Enter Archive's PIN")
         );
 
         let mut checking = other(TransferPage::Unlock, 1);
