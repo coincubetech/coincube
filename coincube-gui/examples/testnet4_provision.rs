@@ -282,6 +282,7 @@ mod run {
                     | "secret_put"
                     | "bootstrap_auth"
                     | "sponsor"
+                    | "backup_check"
             ),
             "invalid_action",
         )?;
@@ -1229,6 +1230,45 @@ mod run {
         Ok(output)
     }
 
+    fn backup_check(input: &Input, store: &dyn secret_store::Backend) -> Result<Value> {
+        // Read only: no backup migration, key creation or checkpoint writes.
+        let locator = secret_store::locator(&input.profile_dir, &input.run_id, "provision_backup")?;
+        let saved: secret_store::Locator = serde_json::from_str(&private_read(
+            &input.run_dir.join("provision-secrets.keychain.json"),
+        )?)
+        .map_err(|_| "invalid_secret_locator")?;
+        check(saved == locator, "run_identity_mismatch")?;
+        let stored = secret_store::get(store, &locator)?.ok_or("backup_keychain_item_missing")?;
+        let secrets: Secrets =
+            serde_json::from_value(stored.value).map_err(|_| "invalid_run_backup")?;
+        check(
+            secrets.run_id == input.run_id && secrets.profile_dir == input.profile_dir,
+            "run_identity_mismatch",
+        )?;
+        let _ = master(&secrets)?;
+        let _ = border(&secrets)?;
+        let state: State = serde_json::from_str(&private_read(&state_path(input))?)
+            .map_err(|_| "invalid_run_checkpoint")?;
+        check(
+            state.run_id == input.run_id
+                && state.profile_dir == input.profile_dir
+                && state.cube_uuid == input.run_id,
+            "run_identity_mismatch",
+        )?;
+        let phone = state
+            .phone_descriptor_key
+            .as_deref()
+            .ok_or("target_required")?;
+        let derived = descriptor(&secrets, phone)?;
+        check(
+            state.descriptor_id.as_deref()
+                == Some(descriptor_id_fingerprint(&derived).to_string().as_str())
+                && private_read(&descriptor_path(input))?.trim() == derived.to_string(),
+            "cube_backup_mismatch",
+        )?;
+        Ok(json!({"ok":true,"network":"testnet4","backup_verified":true,"run_id":input.run_id}))
+    }
+
     async fn execute(input: Input) -> Result<Value> {
         validate_input(&input)?;
         // Sponsoring is a separate, read-only operation over completed runs.
@@ -1268,6 +1308,9 @@ mod run {
         }
         if input.action == "bootstrap_auth" {
             return bootstrap::bootstrap(&input, &bootstrap::Production).await;
+        }
+        if input.action == "backup_check" {
+            return backup_check(&input, &secret_store::Keychain);
         }
         let (secrets, mut state) = load_or_create(&input, &secret_store::Keychain)?;
         match input.action.as_str() {
@@ -1525,6 +1568,82 @@ mod run {
                 );
             }
         }
+        #[test]
+        fn cleanup_backup_check_is_read_only_and_requires_both_exact_descriptor_keys() {
+            let dir = Temp::new();
+            let mut request = input(&dir);
+            let store = secret_store::tests::Memory::default();
+            let (secrets, mut state) = load_or_create(&request, &store).unwrap();
+            let secp = secp256k1::Secp256k1::new();
+            let phone = MasterSigner::generate(NETWORK).unwrap();
+            let path = DerivationPath::from_str("m/48'/1'/0'/2'").unwrap();
+            let phone_key = format!(
+                "[{}{}]{}/<0;1>/*",
+                phone.fingerprint(&secp),
+                origin_suffix(&path),
+                phone.xpub_at(&path, &secp)
+            );
+            let derived = descriptor(&secrets, &phone_key).unwrap();
+            state.phone_descriptor_key = Some(phone_key);
+            state.descriptor_id = Some(descriptor_id_fingerprint(&derived).to_string());
+            save_state(&request, &state).unwrap();
+            write_private(&descriptor_path(&request), &derived.to_string()).unwrap();
+            request.action = "backup_check".into();
+            assert!(validate_input(&request).is_ok());
+            let files = [
+                state_path(&request),
+                descriptor_path(&request),
+                dir.0.join("provision-secrets.keychain.json"),
+            ];
+            let before: Vec<_> = files.iter().map(|p| fs::read(p).unwrap()).collect();
+            let stored = store.0.borrow().clone();
+            let reply = backup_check(&request, &store).unwrap();
+            assert_eq!(
+                reply,
+                json!({"ok":true,"network":"testnet4","backup_verified":true,"run_id":request.run_id})
+            );
+            assert_eq!(
+                before,
+                files
+                    .iter()
+                    .map(|p| fs::read(p).unwrap())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(stored, *store.0.borrow());
+            let locator =
+                secret_store::locator(&request.profile_dir, &request.run_id, "provision_backup")
+                    .unwrap();
+            let snapshot = secret_store::get(&store, &locator).unwrap().unwrap();
+            let mut other = snapshot.value.clone();
+            other["master_phrase"] =
+                json!(MasterSigner::generate(NETWORK).unwrap().words().join(" "));
+            secret_store::put(&store, &locator, &other, Some(&snapshot.sha256)).unwrap();
+            assert_eq!(backup_check(&request, &store), Err("cube_backup_mismatch"));
+            let snapshot = secret_store::get(&store, &locator).unwrap().unwrap();
+            let mut other = snapshot.value.clone();
+            other["master_phrase"] = json!(secrets.master_phrase);
+            let replacement =
+                serde_json::to_value(generate_run_secrets(&request).unwrap()).unwrap();
+            for field in ["grid_phrase", "pattern", "checksum_word"] {
+                other[field] = replacement[field].clone();
+            }
+            secret_store::put(&store, &locator, &other, Some(&snapshot.sha256)).unwrap();
+            assert_eq!(backup_check(&request, &store), Err("cube_backup_mismatch"));
+            store.0.borrow_mut().clear();
+            assert_eq!(
+                backup_check(&request, &store),
+                Err("backup_keychain_item_missing")
+            );
+            assert!(store.0.borrow().is_empty());
+            assert_eq!(
+                before,
+                files
+                    .iter()
+                    .map(|p| fs::read(p).unwrap())
+                    .collect::<Vec<_>>()
+            );
+        }
+
         #[test]
         fn missing_keychain_item_never_resets_existing_run_backup() {
             let dir = Temp::new();

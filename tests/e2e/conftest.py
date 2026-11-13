@@ -10,6 +10,7 @@ from harness.state import Blocked, Failed
 from harness.state import private_read
 from harness.provisioning import FreshRunner, validate_config
 from harness.qa_build import configure_fresh
+from harness import qa_cleanup
 
 
 def pytest_addoption(parser):
@@ -62,6 +63,7 @@ def acceptance(request):
     except Exception:
         request.config._testnet4_blocked = True
         pytest.skip("FIXTURE_CONFIG: private fixture configuration could not be loaded.")
+    request.config._testnet4_runner = runner
     try:
         yield runner
     finally:
@@ -74,8 +76,23 @@ def pytest_sessionfinish(session, exitstatus):
     # missing prerequisite must instead be non-green to unattended callers.
     if session.config._testnet4_blocked and exitstatus == 0:
         session.exitstatus = 2
+    runner = getattr(session.config, "_testnet4_runner", None)
+    if (session.exitstatus == 0 and runner is not None and not runner.stop
+            and "qa_cleanup" in runner.config and not session.config.getoption("--qa-preflight")):
+        try:
+            qa_cleanup.seal_completed(runner)
+        except Blocked as error:
+            session.config._testnet4_blocked = True
+            session.config._testnet4_cleanup_code = error.code
+            session.exitstatus = 2
+        except Exception:
+            session.config._testnet4_blocked = True
+            session.config._testnet4_cleanup_code = "QA_CLEANUP_SEAL"
+            session.exitstatus = 2
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    if getattr(config, "_testnet4_cleanup_code", None):
+        terminalreporter.write_line(config._testnet4_cleanup_code + ": completed retirement enrollment was not sealed; evidence remains private.")
     if config._testnet4_blocked:
         terminalreporter.write_line("TESTNET4 BLOCKED — checkpoint preserved; fix the reported prerequisite and repeat the same command.")

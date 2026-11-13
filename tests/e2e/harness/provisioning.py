@@ -20,7 +20,7 @@ from .runner import Runner
 from .secrets import SecretStore
 from .strict import StrictPolicy, validate_mode
 from .qa_build import validate_build_config
-from . import qa_funding
+from . import qa_funding, qa_cleanup
 from .state import Blocked, Failed, Journal, atomic_write, digest, private_read
 
 STAGES = ("environment", "authentication", "phone_setup", "cube_creation", "phone_key", "vault_creation",
@@ -35,7 +35,7 @@ def phone_state_root(config):
 
 def validate_config(config):
     required = {"version", "account_email", "profile_dir", "connect_rest", "connect_grpc", "ios", "amount_sats", "fee_sats"}
-    optional = {"native_binary", "signing_binary", "phone_state_dir", "desktop_session_namespace", "strict_acceptance", "qa_funding"}
+    optional = {"native_binary", "signing_binary", "phone_state_dir", "desktop_session_namespace", "strict_acceptance", "qa_funding", "qa_cleanup"}
     if not required <= set(config) or set(config) - required - optional or config["version"] != 2:
         raise Failed("CONFIG_SCHEMA", "Fresh-run configuration must use schema version 2 without vault or PSBT fixtures.")
     if config["connect_rest"] != REST or config["connect_grpc"] != GRPC:
@@ -56,6 +56,10 @@ def validate_config(config):
     if type(ios["minimum_build"]) is not int or ios["minimum_build"] < 35:
         raise Failed("IOS_BUILD", "A Keychain build containing #194 is required.")
     validate_mode(config)
+    if "qa_cleanup" in config:
+        qa_cleanup.options(config["qa_cleanup"])
+        if not config.get("strict_acceptance") or "qa_build" not in config.get("ios", {}):
+            raise Failed("QA_CLEANUP_MODE", "Disposable QA cleanup requires strict acceptance and a pinned QA build.")
     if "qa_funding" in config:
         funding = qa_funding.options(config["qa_funding"])
         if not config.get("strict_acceptance") or "qa_build" not in config.get("ios", {}):
@@ -230,6 +234,18 @@ class FreshRunner(Runner):
                 self.stop = True
                 self.journal.outcome(stage, "failed", "QA_FUNDING_REGISTRY")
                 raise Failed("QA_FUNDING_REGISTRY", "Completed QA source registration failed; evidence remains private.") from None
+
+        if stage == "verify" and "qa_cleanup" in self.config:
+            try:
+                qa_cleanup.register_completed(self)
+            except Blocked as error:
+                self.stop = True
+                self.journal.outcome(stage, "failed" if isinstance(error, Failed) else "blocked", error.code)
+                raise
+            except Exception:
+                self.stop = True
+                self.journal.outcome(stage, "failed", "QA_CLEANUP_REGISTRY")
+                raise Failed("QA_CLEANUP_REGISTRY", "Completed QA retirement registration failed; evidence remains private.") from None
 
     def pin_artifact(self, name, value):
         previous = self.artifacts.get(name)
@@ -752,15 +768,14 @@ class FreshRunner(Runner):
         if "qa_funding" in self.config:
             qa_funding.preflight(self)
 
-    def preflight_capacity(self):
+    def preflight_capacity(self, *, cleaned=False):
         keys = self.keys()
-        matches = [key for key in keys if key.get("name") == self.phone_key_label() and key.get("network") == "testnet4"]
-        if matches:
-            # Resume adopts only a key whose durable creation record already
-            # exists. stage_phone_key performs the full identity reconciliation.
-            if len(matches) != 1 or not self.artifacts.get("phone_key_creation_started"):
-                raise Failed("KEY_NOT_FRESH", "A matching key has no unique recorded creation attempt.")
-            return
+        if "qa_cleanup" not in self.config:
+            matches = [key for key in keys if key.get("name") == self.phone_key_label() and key.get("network") == "testnet4"]
+            if matches:
+                if len(matches) != 1 or not self.artifacts.get("phone_key_creation_started"):
+                    raise Failed("KEY_NOT_FRESH", "A matching key has no unique recorded creation attempt.")
+                return
         headers = {"Authorization": "Bearer " + self.account["tokens"]["access_token"]}
         plan = json.loads(http(REST + "/api/v1/connect/plan", headers=headers))
         keychain = json.loads(http(REST + "/api/v1/keychains/active", headers=headers))
@@ -771,7 +786,19 @@ class FreshRunner(Runner):
                 or active.get("userId") != self.account_user_id or active.get("network") != "testnet4"
                 or any(type(v) is not int or v < 0 for v in (limit, count, key_limit))):
             raise Blocked("SIGNER_CAPACITY", "Authenticated QA signer capacity or active Testnet4 Keychain could not be verified.")
+        if "qa_cleanup" in self.config and not cleaned and qa_cleanup.reconcile_capacity(self):
+            return self.preflight_capacity(cleaned=True)
+        matches = [key for key in keys if key.get("name") == self.phone_key_label() and key.get("network") == "testnet4"]
+        if matches:
+            # Resume adopts only a key whose durable creation record already
+            # exists. stage_phone_key performs the full identity reconciliation.
+            if len(matches) != 1 or not self.artifacts.get("phone_key_creation_started"):
+                raise Failed("KEY_NOT_FRESH", "A matching key has no unique recorded creation attempt.")
+            return
         if count >= key_limit or len([key for key in keys if key.get("network") == "testnet4"]) >= limit:
+            if "qa_cleanup" in self.config and not cleaned:
+                qa_cleanup.ensure_capacity(self)
+                return self.preflight_capacity(cleaned=True)
             raise Blocked("SIGNER_LIMIT", "The disposable QA account has no capacity for a fresh signer.")
 
     def stage_cube_creation(self):

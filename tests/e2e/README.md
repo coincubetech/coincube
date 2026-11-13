@@ -551,3 +551,80 @@ audit and all credentials remain intact. Exact replay does not clear a newer
 pending attempt. The helper cannot sign or broadcast and does not make the old
 strict run pass. Use a new run for new acceptance evidence. After an uncertain
 RPC/CAS response, rerun with the identical inputs and output directory.
+
+### Repeatable disposable fixture retirement
+
+The workstation template enables `qa_cleanup: {"version": 1, "preserve_runs": []}`.
+This is separate authorization from `qa_funding`; configurations that omit it
+remain read-only at the signer limit. Add **every historical QA funding source**
+not already listed in `qa_funding.sources` to `preserve_runs` by absolute run
+path. These protected paths are resolved to exact Cube/key provenance, including
+recovered signers whose labels differ from their run UUID. Personal or shared
+objects are never discovered or deleted by a `QA` name prefix.
+
+A fully passed strict run enrolls its exact owner, Cube UUID/ID, vault descriptor
+fingerprint, signer ID/fingerprint, immutable public snapshot and retained local
+recovery files in the same private host registry used for funding. Older runs
+are not auto-discovered: their one-time retirement requires a separate explicit
+audit. At authenticated Testnet4 signer capacity, the next strict run can retire
+at most one enrolled fixture. It first proves the native Master/Border backup
+is readable, checks pending signing **and recovery-decrypt** requests over gRPC,
+rechecks both explorers, and excludes explicit funding sources, usable unspent
+managed donors and uncertain funding-claim dependencies. Available-capacity runs
+and already-created signer resumes start no new retirement; an already journaled
+cleanup finishes first.
+
+Retirement deletes cloud metadata in order **Vault → Signer → Cube**, with a
+private durable intent before every DELETE and exact-ID readback afterward.
+Interrupted cleanup reconciles that same fixture and cannot select a second one
+for the same consumer run. A failure deleting the signer prevents Cube deletion.
+New shared members, key references, pending requests, unexpected funds, changed
+balance or missing recovery material stop cleanup. Screenshot protection and
+strict phone-process acceptance remain enforced.
+
+No coins are swept and no local profile, checkpoint, descriptor, encrypted native
+backup, signed transaction or sponsorship evidence is deleted. A small residual
+(for example 89,000 Testnet4 sats) is explicitly recorded as still recoverable
+with the retained Master and Border keys. A cloud tombstone excludes the retired
+managed donor from future funding selection without invalidating its local
+transaction/recovery history. Keep those local files and macOS Keychain items.
+
+Enrollment has two durable phases: the live `verify` stage records the exact
+strict proof and recovery tree, then the final pytest session callback seals it
+only after the real JUnit file contains all 15 passed stages. A lost callback
+can seal that same enrolled proof later; it never invents a new phone/process
+proof. Unfinished or failed JUnit evidence cannot authorize retirement. Cleanup
+holds the candidate's original `run.lock` through all guards, DELETEs, readbacks
+and its final tombstone, and resumes a pending retirement before considering a
+newly freed slot or an already-created current signer.
+
+The retained manifest includes the entire owned profile and run history,
+including encrypted mnemonic backups, wallet database/configuration, transport
+key/cache, public funding/signing files, phone key, final JUnit and build
+receipt/log/ExportOptions. Only known synchronization locks and the live
+checkpoint are excluded; the completed checkpoint is pinned in the immutable
+source snapshot. Reproducible `qa-build/source`, `derived`, `Runner.xcarchive`,
+`export` and `validated` trees are excluded from the recovery/history manifest.
+Nothing in those directories is deleted by cleanup. Any missing or changed
+retained file, malformed tombstone or inconsistent explorer outspend/UTXO view
+fails closed before further destructive work.
+
+A spent change output is never treated as a zero balance. Both explorers must
+agree on the exact spender transaction/input. Cleanup recognizes only already
+accepted automatic QA sponsorships with matching private intent/receipt hashes,
+source and target snapshots, native receipt, authorization roots and exact raw
+transaction bytes. It follows the existing v1 sponsorship and its one supported
+v2 hop, then checks the known remaining source change (for example 1,000 sats)
+on both explorers. Usable unspent change remains protected as a funding source.
+An unknown, conflicting, missing, deeper or unindexed spend blocks retirement;
+cleanup neither constructs a transaction nor broadens the sponsorship protocol.
+
+Shared-key protection discovers both owned Cubes and `shared-with-me` Cubes across
+all networks. Every other discovered Cube requires a fresh, typed `/keys`
+inventory and complete Cube detail before any DELETE; nullable `hasVault` and
+omitted list projections never prove that no references exist. Owned Cube vaults
+are also read independently. Shared vault membership comes from the member-visible
+Cube detail and key inventory because the separate `/vault` read is owner-only.
+Missing, failed, malformed or contradictory inventories block cleanup before it
+deletes the disposable fixture's own Vault, even if the API would later refuse
+signer deletion through its additional server-side reference guard.
