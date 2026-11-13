@@ -14,7 +14,7 @@ use iced::{Alignment, Length};
 use super::page;
 use crate::app::state::settings::general::BackupSeedState;
 use crate::app::view::message::{BackupWalletMessage, Message, SettingsMessage};
-use crate::chain::{ChainId, ChainIdExt};
+use crate::chain::{canonical_network_name, ChainId};
 use crate::pin_input::PinInput;
 
 fn wrap(msg: BackupWalletMessage) -> Message {
@@ -144,9 +144,11 @@ pub fn intro_view<M: Clone + 'static>(
 /// identical on every chain, so a paper backup that omits the network cannot
 /// say which chain to restore it to.
 pub fn network_note(chain: ChainId) -> String {
-    CopyText::WriteTheNetworkWithYourWords
-        .get()
-        .replacen("{network}", chain.label(), 1)
+    CopyText::WriteTheNetworkWithYourWords.get().replacen(
+        "{network}",
+        canonical_network_name(chain),
+        1,
+    )
 }
 
 /// Twelve numbered words, with flexible columns and theme-aware separators.
@@ -394,7 +396,7 @@ mod tests {
                 for (name, state) in &states {
                     let inspection = capture::inspect(
                         &format!("seed-flow-{name}"),
-                        // The longest chain label, so the network line is
+                        // One of the longest canonical names, so the network line is
                         // measured at its widest.
                         dispatch(state, &pin, Some(&words), ChainId::BitcoinBlake2bTestnet4)
                             .unwrap(),
@@ -424,7 +426,7 @@ mod tests {
                             );
                         }
                         assert!(
-                            inspection.contains("Bitcoin Blake2b Testnet4"),
+                            inspection.contains("Bitcoin BLAKE2b · Testnet4"),
                             "the words screen must name the Cube's network"
                         );
                     }
@@ -434,12 +436,12 @@ mod tests {
     }
 
     /// The seed words are the same on every chain, so the paper copy must
-    /// carry the network. Each chain gets its own user-facing name.
+    /// carry the network. Each chain gets its stable technical name.
     #[test]
     fn network_note_names_each_chain() {
         for chain in ChainId::ALL {
             let note = network_note(chain);
-            assert!(note.contains(chain.label()), "{}", note);
+            assert!(note.contains(canonical_network_name(chain)), "{}", note);
             assert!(!note.contains("{network}"), "{}", note);
         }
         assert_ne!(
