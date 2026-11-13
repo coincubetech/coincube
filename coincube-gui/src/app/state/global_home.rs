@@ -6775,6 +6775,64 @@ mod tests {
             assert!(home.other_scope.is_none());
         }
 
+        /// The side menu leaving Transfer revokes a real scoped unlock, with
+        /// or without a send or PSBT preparation in flight.
+        #[test]
+        fn leaving_transfer_revokes_a_held_unlock() {
+            use crate::app::breez_spark::SparkClient;
+            use crate::chain::ChainId;
+
+            let (_directory, root) = receiving_cube_catalog(true);
+            let (client, _requests) = SparkClient::mock_transport();
+            let cache = Cache {
+                datadir_path: root.clone(),
+                ..Cache::default()
+            };
+            for sending in [false, true] {
+                let mut home = GlobalHome::new_without_wallet(
+                    None,
+                    Some(Arc::new(SparkBackend::new(Arc::new(client.clone())))),
+                    root.clone(),
+                    ChainId::Bitcoin,
+                    "source".into(),
+                    false,
+                );
+                send(
+                    &mut home,
+                    &cache,
+                    HomeMessage::SparkBalanceUpdated {
+                        btc: Amount::from_sat(200_000),
+                        usdb_balance: None,
+                        identity_pubkey: "source-spark".into(),
+                    },
+                );
+                send(&mut home, &cache, HomeMessage::NextStep);
+                send(
+                    &mut home,
+                    &cache,
+                    HomeMessage::PickOtherCubeWallet("destination".into(), WalletKind::Vault),
+                );
+                assert!(home.other_scope.is_some(), "the pick holds a scoped unlock");
+                home.is_sending = sending;
+                home.interrupt();
+                assert!(home.other_scope.is_none(), "sending: {}", sending);
+                assert!(home.other_address.is_none());
+                if sending {
+                    assert!(home.other_locked_again, "Done says it locked again");
+                    // The in-flight work fails: still locked.
+                    send(
+                        &mut home,
+                        &cache,
+                        HomeMessage::Error(TransferError::PreparationExpired),
+                    );
+                    assert!(home.other_scope.is_none());
+                } else {
+                    assert_eq!(home.transfer_page, TransferPage::Wallets);
+                    assert!(home.other_cube_selected.is_none());
+                }
+            }
+        }
+
         fn spark_only_cube_sends_to_another_cube(wallet: WalletKind) {
             use crate::app::breez_spark::SparkClient;
             use crate::chain::ChainId;
