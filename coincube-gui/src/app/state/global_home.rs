@@ -3775,6 +3775,13 @@ impl State for GlobalHome {
                         {
                             return Task::none();
                         }
+                        // Leaving the page while this PSBT was built locked the
+                        // other Cube: open no signer; its unlock starts over.
+                        if direction.is_other_cube() {
+                            if let Err(refusal) = self.check_other_review_address(cache) {
+                                return self.restart_other_cube_unlock(refusal);
+                            }
+                        }
                         match result {
                             Ok((psbt, wallet, (datadir_path, network))) => {
                                 if let Some(wallet) = wallet {
@@ -6812,6 +6819,67 @@ mod tests {
             assert_eq!(home.current_view.step, 1, "back to Details to unlock again");
             assert_eq!(home.transfer_page, TransferPage::Wallets);
             assert!(!home.transfer_signed);
+        }
+
+        /// A PSBT for another Cube's Vault or Spark that lands after the page
+        /// was left opens no signer: the Cube is locked, so its unlock starts
+        /// over on Details.
+        #[test]
+        fn a_late_other_cube_psbt_opens_no_signer() {
+            for direction in [
+                TransferDirection::VaultToOtherCube,
+                TransferDirection::VaultToOtherSpark,
+            ] {
+                let (mut home, wallet) = home_on_transfer_screen();
+                let cache = transfer_cache();
+                home.transfer_from = Some(WalletKind::Vault);
+                home.transfer_to = None;
+                home.transfer_direction = Some(direction);
+                let generation = home.transfer_request_generation;
+                home.destination_ready = Some((generation, direction));
+                home.transfer_feerate.value = "2".into();
+                home.other_cube_selected = Some("destination".into());
+                home.other_phase = UnlockPhase::Checks(UNLOCK_CHECKS);
+                home.other_address = Some(checked_other_address());
+                // Preparing the PSBT, the user leaves by the side menu.
+                home.is_sending = true;
+                home.active_psbt_request = Some(7);
+                home.interrupt();
+                let psbt =
+                    Psbt::from_unsigned_tx(coincube_core::miniscript::bitcoin::Transaction {
+                        version: coincube_core::miniscript::bitcoin::transaction::Version::TWO,
+                        lock_time: coincube_core::miniscript::bitcoin::absolute::LockTime::ZERO,
+                        input: vec![],
+                        output: vec![],
+                    })
+                    .unwrap();
+                drain(home.update(
+                    None,
+                    &cache,
+                    Message::View(view::Message::Home(HomeMessage::TransferPsbtReady {
+                        request_id: 7,
+                        generation,
+                        direction,
+                        destination: MAINNET_ADDR.to_string(),
+                        amount_sat: 100_000,
+                        feerate_vb: 2,
+                        result: Ok((
+                            psbt,
+                            Some(wallet),
+                            (cache.datadir_path.clone(), cache.network),
+                        )),
+                    })),
+                ));
+                assert!(!home.is_sending, "{:?}", direction);
+                assert!(
+                    matches!(home.modal, Modal::None),
+                    "{:?}: no signer",
+                    direction
+                );
+                assert!(home.transfer_spend_tx.is_none());
+                assert_eq!(home.current_view.step, 1, "{:?}", direction);
+                assert_eq!(home.transfer_page, TransferPage::Wallets);
+            }
         }
 
         /// The side menu leaving Transfer revokes a real scoped unlock, with
