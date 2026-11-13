@@ -705,6 +705,62 @@ mod native {
         Ok(())
     }
 
+    fn owned_empty_device_lock(metadata: &fs::Metadata, uid: u32) -> bool {
+        metadata.is_file()
+            && metadata.uid() == uid
+            && metadata.permissions().mode() & 0o7777 == 0o600
+            && metadata.len() == 0
+            && metadata.nlink() == 1
+    }
+
+    fn capacity_case_entries(case: &Path) -> Result<Option<fs::File>> {
+        let mut device_lock = None;
+        for entry in fs::read_dir(case).map_err(|_| "native_abandon_case")? {
+            let entry = entry.map_err(|_| "native_abandon_case")?;
+            match entry.file_name().to_str() {
+                Some("state.json" | "run.lock") => (),
+                Some(".device-secret.lock") => {
+                    // Product get_or_create leaves this root-level empty lock
+                    // after creating the QA canary. Never create/remove it here.
+                    let path = entry.path();
+                    let before =
+                        fs::symlink_metadata(&path).map_err(|_| "native_abandon_device_lock")?;
+                    check(
+                        owned_empty_device_lock(&before, unsafe { libc::geteuid() }),
+                        "native_abandon_device_lock",
+                    )?;
+                    let file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .custom_flags(libc::O_NOFOLLOW)
+                        .open(&path)
+                        .map_err(|_| "native_abandon_device_lock")?;
+                    let opened = file.metadata().map_err(|_| "native_abandon_device_lock")?;
+                    check(
+                        owned_empty_device_lock(&opened, unsafe { libc::geteuid() })
+                            && (before.dev(), before.ino()) == (opened.dev(), opened.ino()),
+                        "native_abandon_device_lock",
+                    )?;
+                    check(
+                        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }
+                            == 0,
+                        "native_abandon_device_lock_busy",
+                    )?;
+                    let current =
+                        fs::symlink_metadata(&path).map_err(|_| "native_abandon_device_lock")?;
+                    check(
+                        owned_empty_device_lock(&current, unsafe { libc::geteuid() })
+                            && (current.dev(), current.ino()) == (opened.dev(), opened.ino()),
+                        "native_abandon_device_lock",
+                    )?;
+                    device_lock = Some(file);
+                }
+                _ => return Err("native_abandon_has_profile"),
+            }
+        }
+        Ok(device_lock)
+    }
+
     fn legacy_case_id(directory: &Path, chain: &str) -> uuid::Uuid {
         use coincube_core::miniscript::bitcoin::hashes::{sha1, Hash};
         let name = format!("native-recovery/{}/{chain}", directory.display());
@@ -829,13 +885,7 @@ mod native {
             "native_account_changed",
         )?;
         process_absent(&state.creator)?;
-        for path in fs::read_dir(&case).map_err(|_| "native_abandon_case")? {
-            let path = path.map_err(|_| "native_abandon_case")?;
-            check(
-                matches!(path.file_name().to_str(), Some("state.json" | "run.lock")),
-                "native_abandon_has_profile",
-            )?;
-        }
+        let _device_lock = capacity_case_entries(&case)?;
         check(
             device_secret::load_optional(&id.to_string())
                 .map_err(|_| "native_keychain_blocked")?
@@ -1386,6 +1436,109 @@ mod native {
             };
             (config, identity, kit)
         }
+        #[test]
+        fn legitimate_capacity_device_lock_is_held_without_changing_old_files() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(".device-secret.lock");
+            fs::write(directory.path().join("state.json"), b"public-state").unwrap();
+            fs::write(directory.path().join("run.lock"), []).unwrap();
+            fs::write(&path, []).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            let before = fs::symlink_metadata(&path).unwrap();
+            let held = capacity_case_entries(directory.path()).unwrap().unwrap();
+            let other = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            assert_ne!(
+                unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                0
+            );
+            assert_eq!(
+                fs::read(directory.path().join("state.json")).unwrap(),
+                b"public-state"
+            );
+            let after = fs::symlink_metadata(&path).unwrap();
+            assert_eq!(
+                (
+                    before.dev(),
+                    before.ino(),
+                    before.len(),
+                    before.mtime(),
+                    before.mtime_nsec()
+                ),
+                (
+                    after.dev(),
+                    after.ino(),
+                    after.len(),
+                    after.mtime(),
+                    after.mtime_nsec()
+                )
+            );
+            drop(held);
+            assert_eq!(
+                unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                0
+            );
+        }
+
+        #[test]
+        fn capacity_device_lock_refuses_unsafe_or_unexpected_entries() {
+            use std::os::unix::fs::symlink;
+            for case in ["nonempty", "symlink", "public", "busy", "unexpected"] {
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join(".device-secret.lock");
+                let mut held = None;
+                if case == "symlink" {
+                    let target = directory.path().join("target");
+                    fs::write(&target, []).unwrap();
+                    symlink(target, &path).unwrap();
+                } else {
+                    fs::write(
+                        &path,
+                        if case == "nonempty" {
+                            b"x".as_slice()
+                        } else {
+                            b""
+                        },
+                    )
+                    .unwrap();
+                    fs::set_permissions(
+                        &path,
+                        fs::Permissions::from_mode(if case == "public" { 0o644 } else { 0o600 }),
+                    )
+                    .unwrap();
+                    if case == "unexpected" {
+                        fs::write(directory.path().join("original"), b"not-a-lock").unwrap();
+                    }
+                    if case == "busy" {
+                        let file = OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(&path)
+                            .unwrap();
+                        assert_eq!(
+                            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                            0
+                        );
+                        held = Some(file);
+                    }
+                }
+                assert!(capacity_case_entries(directory.path()).is_err(), "{}", case);
+                drop(held);
+            }
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(".device-secret.lock");
+            fs::write(&path, []).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            let metadata = fs::metadata(path).unwrap();
+            assert!(!owned_empty_device_lock(
+                &metadata,
+                unsafe { libc::geteuid() }.wrapping_add(1)
+            ));
+        }
+
         #[test]
         fn legacy_public_case_ids_match_python_uuid5() {
             let root = Path::new("/private/tmp/native-v5-unit");
