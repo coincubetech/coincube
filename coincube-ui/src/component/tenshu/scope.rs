@@ -108,6 +108,21 @@ impl<M> Widget<M, Theme, Renderer> for KeyScope<'_, M> {
             ..
         }) = event
         {
+            // A sibling earlier in the tree (a focused top-bar action, say)
+            // already answered this key: it is not ours too.
+            if shell.is_event_captured() {
+                self.content.as_widget_mut().update(
+                    &mut tree.children[0],
+                    event,
+                    layout,
+                    cursor,
+                    renderer,
+                    clipboard,
+                    shell,
+                    viewport,
+                );
+                return;
+            }
             let mut focused = FocusedId::default();
             self.content.as_widget_mut().operate(
                 &mut tree.children[0],
